@@ -50,48 +50,57 @@ export default function ProviderDefaultHero({
   const { t } = useT();
 
   return (
+    /* Stacked below `sm:`, one line above it. At 390 px the vendor name and
+       the model id both truncated behind a "Change model" button that never
+       shrinks, so the card that exists to say WHICH BRAIN IS ANSWERING said
+       "Anthropic Cla…" and half a model id. */
     <div
       data-testid="provider-default-hero"
-      className="flex items-center gap-4 mb-4 p-[18px] rounded-[var(--r-2)] border border-[var(--cyan-rim)] bg-[linear-gradient(135deg,var(--cyan-mist),var(--bg-deep-veil))]"
+      className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4 mb-4 p-[18px] rounded-[var(--r-2)] border border-[var(--cyan-rim)] bg-[linear-gradient(135deg,var(--cyan-mist),var(--bg-deep-veil))]"
     >
-      <span
-        aria-hidden="true"
-        className="flex items-center justify-center w-11 h-11 rounded-[var(--r-1)] bg-[var(--fill-2)] shrink-0"
-      >
-        <AIProviderIcon provider={row.id} size={26} />
-      </span>
-
-      <div className="flex flex-col gap-[3px] flex-1 min-w-0">
-        <span className="flex items-center gap-2 text-base font-bold text-[var(--text-primary)]">
-          <span className="truncate">{row.label}</span>
-          <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-px rounded-[var(--r-1)] bg-[var(--fill-2)] text-[9px] font-bold uppercase tracking-[0.08em] leading-[1.6] text-[var(--text-primary)]">
-            <span
-              className="material-symbols-rounded"
-              style={{ fontSize: 11, fontVariationSettings: "'FILL' 1" }}
-              aria-hidden="true"
-            >
-              star
-            </span>
-            {t("settings.providers.default")}
-          </span>
+      <div className="flex items-center gap-4 min-w-0 sm:flex-1">
+        <span
+          aria-hidden="true"
+          className="flex items-center justify-center w-11 h-11 rounded-[var(--r-1)] bg-[var(--fill-2)] shrink-0"
+        >
+          <AIProviderIcon provider={row.id} size={26} />
         </span>
 
-        {(model || note) && (
-          <span className="text-xs text-[var(--text-secondary)] truncate">
-            {model ? <span className="font-mono">{model}</span> : null}
-            {model && note ? " · " : null}
-            {note}
+        <div className="flex flex-col gap-[3px] flex-1 min-w-0">
+          <span className="flex flex-wrap items-center gap-2 text-base font-bold text-[var(--text-primary)]">
+            <span className="sm:truncate" data-testid="provider-default-hero-name">{row.label}</span>
+            <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-px rounded-[var(--r-1)] bg-[var(--fill-2)] text-[9px] font-bold uppercase tracking-[0.08em] leading-[1.6] text-[var(--text-primary)]">
+              <span
+                className="material-symbols-rounded"
+                style={{ fontSize: 11, fontVariationSettings: "'FILL' 1" }}
+                aria-hidden="true"
+              >
+                star
+              </span>
+              {t("settings.providers.default")}
+            </span>
           </span>
-        )}
 
-        <ProviderConnectionLabel state={row.state} className="mt-[2px]" />
+          {(model || note) && (
+            /* `break-words` because a model id is one long hyphenated token:
+               with the ellipsis gone below `sm:` it would otherwise push the
+               card wider than the phone. */
+            <span className="text-xs text-[var(--text-secondary)] break-words sm:truncate" data-testid="provider-default-hero-model">
+              {model ? <span className="font-mono">{model}</span> : null}
+              {model && note ? " · " : null}
+              {note}
+            </span>
+          )}
+
+          <ProviderConnectionLabel state={row.state} className="mt-[2px]" />
+        </div>
       </div>
 
       {onChangeModel && (
         <button
           type="button"
           onClick={onChangeModel}
-          className="shrink-0 whitespace-nowrap bg-transparent border-none p-0 text-xs font-semibold text-[var(--coral-bright)] cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--coral-bright)] rounded-[var(--r-1)]"
+          className="shrink-0 self-start sm:self-auto whitespace-nowrap bg-transparent border-none p-0 text-xs font-semibold text-[var(--coral-bright)] cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--coral-bright)] rounded-[var(--r-1)]"
         >
           {t("settings.providers.changeModel")}
         </button>
