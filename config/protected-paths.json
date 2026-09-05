@@ -1,0 +1,73 @@
+{
+  "_readme": [
+    "THE DEFINITION of the paths the on-device agent may never delete, overwrite,",
+    "truncate or move, and of the command tokens that do those four things. No",
+    "second copy of this table exists; JSON because its three readers are three",
+    "languages:",
+    "  scripts/register-mcp.sh                     approvals.deny in ~/.hermes/config.yaml (Python)",
+    "  scripts/openclaw-plugins/clawbox-path-guard a before_tool_call hook (JavaScript)",
+    "  src/tests/unit/protected-paths.test.ts      one case table through both (TypeScript)",
+    "WHY: on 2026-09-02 a Hermes turn asked to 'delete the largest of those files'",
+    "ran rm on a 3.2 GB Gemma GGUF with no confirmation, mid-turn, while another",
+    "turn was still running (TASK-605). The owner's ruling of 2026-09-04 is",
+    "deliberately narrow - a hard deny on the local-model folder and the ClawBox",
+    "tree, no prompt anywhere else, 'narrower, but silent when it bites'."
+  ],
+
+  "_pathRoots": [
+    "Matched anywhere in a path, and only where the root ENDS a path segment (see",
+    "pathTerminators), so '~/clawbox-notes.txt' is not the ClawBox tree.",
+    "'/clawbox' is the checkout in every spelling the agent can write (~/clawbox,",
+    "$HOME/clawbox, /home/clawbox/clawbox) plus /etc/clawbox, the root-owned",
+    "edition lock. The two model stores are inside the tree on a stock box",
+    "(install.sh: step_llamacpp_model, step_embed_model) and so already covered by",
+    "'/clawbox'; they are listed separately because the file the incident",
+    "destroyed was in a SECOND checkout, ~/check-acbuild/data/llamacpp/models/, and",
+    "the ruling names the model folder wherever it is.",
+    "DELIBERATELY ABSENT: ~/.cache/huggingface/hub/, where the Kokoro and",
+    "faster-whisper weights land. That is a cache the installer re-fetches, and",
+    "denying rm on it would block the documented repair for a corrupt download."
+  ],
+  "pathRoots": ["/clawbox", "/llamacpp/models", "/embed/models"],
+
+  "_pathTerminators": [
+    "What may follow a root for it to be that directory rather than a longer name.",
+    "A root at the very end of the command line counts too - that is the",
+    "'rm -rf ~/clawbox' spelling, which no trailing-separator rule would catch."
+  ],
+  "pathTerminators": "/ ;&|'\")",
+
+  "_verbFirstTokens": [
+    "Destroy-then-path spellings. Each carries its own trailing space so 'rm '",
+    "cannot match 'rmdir' - which is absent anyway, because it removes only EMPTY",
+    "directories and cannot cost anyone a model file. 'dd' is absent because 'dd '",
+    "also matches 'git add ', and 'cp' because it reads as often as it writes",
+    "('cp ~/clawbox/config/x /tmp/' copies OUT of the tree)."
+  ],
+  "verbFirstTokens": ["rm ", "unlink ", "shred ", "truncate ", "mv ", "tee "],
+
+  "_pathFirstTokens": [
+    "Path-then-destroy spellings: 'cd <protected> && rm <file>', and find's own",
+    "'-delete'. Shorter than the list above because this direction is the loose",
+    "one - it also matches 'cat ~/clawbox/notes && rm /tmp/scratch'. Worth paying",
+    "for the tokens that actually destroy a file after a cd, not for 'tee' or",
+    "'truncate', which nobody reaches for that way."
+  ],
+  "pathFirstTokens": ["rm ", "mv ", "-delete"],
+
+  "_redirectionPrefixes": [
+    "A redirection into a protected path truncates or creates a file there.",
+    "Anchored tightly - the prefix is immediately followed by the root - rather",
+    "than the loose 'a > anywhere before the root' this started as: that form also",
+    "denied 'df -h > /tmp/d && du -sh ~/clawbox/data/llamacpp/models/', the",
+    "harmless exploration the incident turn did before it deleted anything.",
+    "Only the '~' forms are listed because Hermes folds the resolved home into",
+    "'~/' before matching, so '> /home/clawbox/clawbox/x' arrives as '> ~/clawbox/x';",
+    "a bare '>' would only fire for a filesystem root literally named /clawbox.",
+    "'>>' and '2>' are covered because these are substring matches. A quoted or",
+    "variable target ('> \"$HOME/clawbox/x\"') is NOT covered on the Hermes side,",
+    "which matches command text; the OpenClaw hook is handed the working directory",
+    "and the parameters structurally and has no such hole."
+  ],
+  "redirectionPrefixes": [">~", "> ~"]
+}
