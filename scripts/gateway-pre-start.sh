@@ -3273,18 +3273,28 @@ CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # section on the source side, and read as the section already being present on
 # the destination side.
 #
-# But a fence hides only what it CLOSES, and that is the whole reason these read
-# the file twice instead of toggling as they go. An odd number of column-0
-# delimiters is ordinary damage — an indented closing fence is valid CommonMark
-# and does not match at column 0 — and a naive toggle makes it catastrophic in
-# BOTH directions: on the destination every heading after the stray delimiter is
-# "missing", the copy this block appends lands in the fenced region too, and the
-# file grows by those sections on EVERY boot; on the template the headings
-# simply stop being enumerated, and the box is told nothing while section after
-# section fails to arrive — this card's own defect, on the source side, with the
-# "no '## ' headings at all" warning firing only if the count reaches zero.
-# Unbalanced fences are therefore read as prose, which is what this script did
-# before fences were considered at all.
+# A delimiter is a ``` or ~~~ line indented by AT MOST THREE spaces, which is
+# how CommonMark defines one — an opener and a closer alike. Matching only at
+# column 0 is not a stricter rule, it is a WRONG one: an indented closing fence
+# then goes unseen, the next opener is paired with the previous opener, and the
+# prose between two examples is marked as fenced. Measured on this template with
+# two two-space-indented closers — which render correctly on GitHub and are
+# invisible in review — `## Browser (real Chromium on the device)` and
+# `## Apps and UI` were enumerated by nothing and delivered to no box, exit 0,
+# not one word on stderr. The interval form `{0,3}` is not available: mawk 1.3.4
+# does not merely reject it, it aborts with `REcompile() - panic`.
+#
+# And a fence hides only what it CLOSES, which is the whole reason these read
+# the file twice instead of toggling as they go. An odd delimiter count is
+# ordinary damage in a file the owner and the agent both edit, and a naive
+# toggle makes it catastrophic in BOTH directions: on the destination every
+# heading after the stray delimiter is "missing", the copy this block appends
+# lands in the fenced region too, and the file grows by those sections on EVERY
+# boot; on the template the headings simply stop being enumerated. Unbalanced
+# fences are therefore read as prose, which is what this script did before
+# fences were considered at all — and the two blocks below SAY SO rather than
+# leaving it silent, because "read as prose" on the destination means a heading
+# quoted inside a fence counts as present and its section is withheld.
 CLAWBOX_FENCE_AWK='
   function clawbox_fences(   i, j) {
     if (fences % 2) return
@@ -3294,9 +3304,20 @@ CLAWBOX_FENCE_AWK='
   {
     raw[NR] = $0
     line = $0; sub(/[ \t\r]+$/, "", line); text[NR] = line
-    if (line ~ /^(```|~~~)/) fence[++fences] = NR
+    if (line ~ /^ *(```|~~~)/ && match(line, /^ */) && RLENGTH < 4) fence[++fences] = NR
   }
 '
+
+# Do this file'"'"'s fences balance? 0 yes, 1 no, 2 could not be read.
+#
+# Asked once per file rather than folded into the helpers, because the answer is
+# a fact about the FILE and the helpers are called once per heading.
+clawbox_fences_balanced() {
+  [ -r "$1" ] || return 2
+  awk "$CLAWBOX_FENCE_AWK"'
+    END { exit(fences % 2 ? 1 : 0) }
+  ' "$1"
+}
 
 # Every `## ` heading in a markdown file, in order.
 clawbox_guide_headings() {
@@ -3493,9 +3514,13 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     # `-f` alone says "seed it" about a DIRECTORY, and `install SRC DIR` copies
     # INTO it: two boots, two "Seeded CLAWBOX.md" success lines, a
     # CLAWBOX.md/clawbox-workspace-guide.md nobody reads, and no guide on the
-    # box ever — a success printed on every boot, forever. A socket or a
-    # dangling symlink is the same shape. Nothing here can fix that path, so it
-    # says so instead of reporting work it did not do.
+    # box ever — a success printed on every boot, forever. A socket and a FIFO
+    # are the same shape (verified: the FIFO does not hang here either).
+    # NOT a dangling symlink: `-e` follows the link and is false, so that case
+    # goes to the seed below, where `install` replaces the link with the guide —
+    # which is the right outcome and is why this is `-e` rather than `-h`.
+    # Nothing here can fix a directory, so it says so instead of reporting work
+    # it did not do.
     echo "  WARNING: $CLAWBOX_GUIDE_DST exists and is not a regular file; leaving it as it is" >&2
   elif [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
     if install -m 644 "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"; then
@@ -3524,7 +3549,31 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   else
     CLAWBOX_GUIDE_ADDED=""
     CLAWBOX_GUIDE_HEADINGS=""
-    if ! CLAWBOX_GUIDE_HEADINGS="$(clawbox_guide_headings "$CLAWBOX_GUIDE_SRC")"; then
+    # A file whose fences do not balance is read as prose (see the fence rule
+    # above), and on each side that costs something different, so each side says
+    # so in its own words.
+    #
+    # The TEMPLATE is ours and a template we cannot parse must not be merged
+    # from: every `## ` line quoted inside its examples would be enumerated as a
+    # section, extracted from inside the fence to the next such line — so the
+    # real section above it is truncated AND a phantom one is appended, to every
+    # box, permanently. Refusing is the same call the "no headings at all" arm
+    # below already makes about the same kind of half-deployed file.
+    CLAWBOX_GUIDE_FENCES=0
+    clawbox_fences_balanced "$CLAWBOX_GUIDE_SRC" || CLAWBOX_GUIDE_FENCES=$?
+    # The DESTINATION is the owner's and the agent's, so it is not refused —
+    # only reported. Reading its fences as prose means a heading quoted inside
+    # one counts as present and that section is withheld, which is this card's
+    # own defect; there is no second guard that would catch it, so the operator
+    # gets the sentence instead of silence.
+    CLAWBOX_DST_FENCES=0
+    clawbox_fences_balanced "$CLAWBOX_GUIDE_DST" || CLAWBOX_DST_FENCES=$?
+    if [ "$CLAWBOX_DST_FENCES" = 1 ]; then
+      echo "  WARNING: the \`\`\` fences in $CLAWBOX_GUIDE_DST do not balance; a heading quoted inside one will be read as present and its section withheld" >&2
+    fi
+    if [ "$CLAWBOX_GUIDE_FENCES" = 1 ]; then
+      echo "  WARNING: the \`\`\` fences in $CLAWBOX_GUIDE_SRC do not balance; CLAWBOX.md not topped up (a quoted heading would be appended as a section)" >&2
+    elif ! CLAWBOX_GUIDE_HEADINGS="$(clawbox_guide_headings "$CLAWBOX_GUIDE_SRC")"; then
       # An I/O fault on the template, not a renamed heading: the two send an
       # operator to different files, so they are reported apart.
       echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC to top up CLAWBOX.md" >&2
@@ -3630,7 +3679,9 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # CLAWBOX.md loop above already does. AGENTS.md is the file the harness
   # injects into every session, under a bootstrap character budget.
   clawbox_agents_append() {
-    CLAWBOX_AGENTS_SEEN=0
+    # `local`, or the boot-time value leaks into the second marker's call and a
+    # `case` that never ran reads the first one's answer.
+    local CLAWBOX_AGENTS_SEEN=0
     clawbox_file_has_heading "$CLAWBOX_AGENTS_MD" "$1" || CLAWBOX_AGENTS_SEEN=$?
     case "$CLAWBOX_AGENTS_SEEN" in
       0) return 0 ;;

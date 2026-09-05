@@ -100,6 +100,26 @@ function runRaw(
   return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
+/**
+ * Call ONE function out of the shipped block and return its stdout lines.
+ *
+ * The block is sourced, not re-implemented: these cases are about what the real
+ * `.sh` does, and a copy of an awk program in TypeScript can only ever agree
+ * with itself.
+ */
+function runHelper(fn: string, file: string): string[] {
+  const script = [
+    "set -euo pipefail",
+    `CLAWBOX_ROOT=${JSON.stringify(dir)}`,
+    `CLAWBOX_WORKSPACE=${JSON.stringify(path.join(dir, "no-such-workspace"))}`,
+    seedingBlock(),
+    `${fn} ${JSON.stringify(file)}`,
+  ].join("\n");
+  const res = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+  if (res.status !== 0) throw new Error(`${fn} exited ${res.status}\n${res.stderr}`);
+  return res.stdout.split("\n").filter((l) => l !== "");
+}
+
 /** The same run, asserting the exit code the systemd unit demands. */
 function run(template = TEMPLATE, opts: { prelude?: string[] } = {}): { stdout: string; stderr: string } {
   const res = runRaw(template, opts);
@@ -262,6 +282,17 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     expect(writes.join("\n")).toMatch(/truncate -s/);
     expect(writes.join("\n")).toMatch(/os\.truncate/);
     expect(unguarded).toEqual([]);
+
+    // The AGENTS.md wrapper is called BARE, twice, at the top level of a block
+    // running under `set -euo pipefail` — so its contract is "never fatal", and
+    // the only thing holding that is what it returns. Mutation-proved: a
+    // `return 7` inside it takes pre-start down with exit 7, over an advisory
+    // sentence, and nothing else in this file would notice.
+    const helper = seedingBlock().slice(seedingBlock().indexOf("clawbox_agents_append() {"));
+    const body = helper.slice(0, helper.indexOf("\n  }\n"));
+    const returns = [...body.matchAll(/^\s*return\b.*$/gm)].map((m) => m[0].trim());
+    expect(returns.length).toBeGreaterThan(0);
+    expect(returns.filter((r) => r !== "return 0")).toEqual([]);
   });
 
   it("appends the system-actions section to a guide written before it existed", () => {
@@ -527,19 +558,34 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
   // that section landed is in the same state, silently. So the top-up appends
   // EVERY `## ` section the file is missing, not one named one.
   describe("tops a guide up to every section the template has", () => {
-    // Fenced lines excluded, exactly as the script excludes them: the template
-    // documents markdown, so a ``` block containing a `## ` line would make
-    // these cases demand a section the script correctly refuses to enumerate.
-    const headings = () => {
-      const out: string[] = [];
-      let fenced = false;
-      for (const raw of readFileSync(TEMPLATE, "utf-8").split("\n")) {
-        const line = raw.replace(/[ \t\r]+$/, "");
-        if (/^(```|~~~)/.test(line)) { fenced = !fenced; continue; }
-        if (!fenced && /^## +[^ ]/.test(line)) out.push(line);
-      }
-      return out;
-    };
+    /**
+     * Every `## ` line in the shipped template, INDEPENDENTLY of the script.
+     *
+     * Deliberately no fence logic: a helper that re-implemented the script's
+     * rule would agree with it whatever it did, which is how a fence bug on the
+     * source side stayed invisible through a whole review round. The case below
+     * asserts that the shipped enumerator answers exactly this, so the two
+     * derivations have to agree — and if the template ever does quote a `## `
+     * line inside a fence, that case fails and is the place to decide about it.
+     */
+    const headings = () => readFileSync(TEMPLATE, "utf-8")
+      .split("\n")
+      .map((raw) => raw.replace(/[ \t\r]+$/, ""))
+      .filter((line) => /^## +[^ ]/.test(line));
+
+    it("enumerates exactly the sections the shipped template declares", () => {
+      // The assertion the fence rule has to survive. A closing fence indented
+      // by up to three spaces is valid CommonMark and renders correctly on
+      // GitHub; matched only at column 0 it goes unseen, the next opener pairs
+      // with the previous one, and the prose between two examples — headings
+      // and all — is treated as fenced and enumerated by nothing. Measured on
+      // this template with two such closers: two real sections were delivered
+      // to no box, exit 0, nothing on stderr.
+      const enumerated = runHelper("clawbox_guide_headings", TEMPLATE);
+
+      expect(enumerated).toEqual(headings());
+      expect(enumerated.length).toBeGreaterThanOrEqual(7);
+    });
 
     it("gives an old guide every heading the shipped template carries", () => {
       // A real pre-TASK-612 guide: the sections that box was seeded with, and
@@ -719,32 +765,69 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
       expect(readFileSync(guide, "utf-8").match(/^## Skills *$/gm)).toHaveLength(2);
     });
 
-    it("still delivers every section when the template's fences do not balance", () => {
-      // An indented closing fence is valid CommonMark — it is what a fence
-      // inside a list item looks like — and it does not match at column 0. A
-      // fence rule that toggled as it went would leave the rest of the template
-      // "fenced": section after section would fail to arrive, exit 0, and not
-      // one word about it, which is this card's own defect on the SOURCE side.
-      // The "no '## ' headings at all" warning cannot catch it either; it fires
-      // only when the count reaches zero.
-      const odd = path.join(dir, "odd-fence-template.md");
+    it("pairs an indented closing fence instead of swallowing the sections after it", () => {
+      // CommonMark lets a closing fence be indented up to three spaces, and it
+      // renders correctly on GitHub — so it is invisible in review. Matched at
+      // column 0 only, the closer goes unseen, the NEXT opener pairs with the
+      // previous opener, and everything between two examples is treated as
+      // fenced. The headings in that region are then enumerated by nothing and
+      // delivered to no box, with exit 0 and nothing on stderr: this card's own
+      // defect, on the source side, arriving through the rule written to
+      // prevent it.
+      const odd = path.join(dir, "indented-fence-template.md");
       writeFileSync(
         odd,
         [
-          "# Guide", "", "## First", "", "Body.", "",
-          "```text", "example", "  ```", "",
+          "# Guide", "",
+          "## First", "", "Body.", "",
+          "```text", "example one", "  ```", "",
           "## Second", "", "Body two.", "",
+          "```text", "example two", "  ```", "",
+          "## Third", "", "Body three.", "",
         ].join("\n"),
       );
       writeFileSync(guide, "# Guide\n");
 
       const { stdout, stderr } = run(odd);
 
-      expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*First.*Second/);
+      expect(stdout).toMatch(/Appended to CLAWBOX\.md:.*First.*Second.*Third/);
       expect(stderr).not.toMatch(/WARNING/);
-      const after = readFileSync(guide, "utf-8");
-      expect(after).toContain("Body two.");
-      expect(after.match(/^## (First|Second)$/gm)).toHaveLength(2);
+      expect(readFileSync(guide, "utf-8").match(/^## (First|Second|Third)$/gm)).toHaveLength(3);
+    });
+
+    it("refuses to top up from a template whose fences do not balance", () => {
+      // A template we cannot parse must not be merged from: every `## ` line
+      // quoted inside its examples would be enumerated as a section and
+      // extracted from inside the fence to the next such line, so the real
+      // section above it is truncated AND a phantom one is appended — to every
+      // box, permanently. Refusing is the same call the "no headings at all"
+      // arm makes about the same kind of half-deployed file.
+      const broken = path.join(dir, "unbalanced-template.md");
+      writeFileSync(
+        broken,
+        ["# Guide", "", "## First", "", "```text", "## Not a heading", "", "## Second", "", "Body.", ""].join("\n"),
+      );
+      writeFileSync(guide, "# Guide\n");
+
+      const { stdout, stderr } = run(broken);
+
+      expect(stdout).not.toMatch(/Appended/);
+      expect(stderr).toMatch(/fences in .* do not balance/);
+      expect(readFileSync(guide, "utf-8")).toBe("# Guide\n");
+    });
+
+    it("says so when the guide's own fences do not balance", () => {
+      // Read as prose, which on the DESTINATION means a heading quoted inside
+      // one counts as present and that section is withheld — silently, with no
+      // other guard that would catch it. The operator gets the sentence.
+      const current = readFileSync(TEMPLATE, "utf-8");
+      const cut = current.indexOf("\n## Coding agent");
+      writeFileSync(guide, `${current.slice(0, cut)}\n\n\`\`\`\n`);
+
+      const { stderr } = run();
+
+      expect(stderr).toMatch(/fences in .*CLAWBOX\.md do not balance/);
+      expect(stderr).toMatch(/read as present and its section withheld/);
     });
 
     it("says so when CLAWBOX.md is a directory, instead of seeding into it", () => {
