@@ -193,6 +193,45 @@ describe("/setup-api/system/timezone", () => {
     expect(mockStartRootStep).not.toHaveBeenCalled();
   });
 
+  it("answers 400 — not 500 — for a JSON body that is not an object", async () => {
+    // `request.json()` resolves just as happily for `null`, a string, a number
+    // and an array as for an object. Reading `.timezone` off `null` throws, and
+    // Next.js turns that into a bare 500, so the one body shape most likely to
+    // arrive from a broken client got the one answer the route never documents.
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    for (const bad of [null, "Europe/Sofia", 5, [], true]) {
+      const res = await mod.POST(post(bad));
+      expect(res.status, `${JSON.stringify(bad)} was not refused with 400`).toBe(400);
+    }
+    expect(mockStartRootStep).not.toHaveBeenCalled();
+    expect(setMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a failed write of timezone.env in its own error shape", async () => {
+    // A real filesystem refusal, not a mock: `data/timezone.env` is a directory
+    // here, so `fs.writeFile` rejects with EISDIR exactly as a read-only or
+    // full `data/` would. Nothing has been recorded and no root step has run at
+    // that point, so the caller must be told the zone was NOT saved.
+    await fs.rm(TZ_ENV_PATH, { force: true });
+    await fs.mkdir(TZ_ENV_PATH, { recursive: true });
+    try {
+      const mod = await import("@/app/setup-api/system/timezone/route");
+
+      const res = await mod.POST(post({ timezone: "Europe/Sofia" }));
+      const body = await res.json();
+
+      expect(res.status).toBe(500);
+      expect(String(body.error)).toMatch(/could not be saved/i);
+      expect(body.success).toBeUndefined();
+      expect(mockStartRootStep).not.toHaveBeenCalled();
+      expect(mockConfigSet).not.toHaveBeenCalled();
+      expect(setMock).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(TZ_ENV_PATH, { recursive: true, force: true });
+    }
+  });
+
   it("does adopt when the box has never been told a zone", async () => {
     const mod = await import("@/app/setup-api/system/timezone/route");
 

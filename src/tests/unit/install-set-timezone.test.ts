@@ -166,6 +166,34 @@ d("read_configured_timezone", () => {
     }
   });
 
+  it("REJECTS a symlinked timezone.env instead of calling it silence", () => {
+    // `data/` is clawbox-writable and this reader runs as ROOT. A link planted
+    // where the route writes a plain file is tampering, and answering 1
+    // ("nothing recorded") made step_set_timezone exit 0 over it — the
+    // false-success shape the three-outcome contract exists to remove. The
+    // symlink is refused BEFORE the file is read either way; what changes is
+    // that the refusal is now loud.
+    const target = path.join(tmp, "elsewhere.env");
+    fs.writeFileSync(target, "TIMEZONE=Europe/Sofia\n");
+    fs.symlinkSync(target, tzEnv);
+
+    const r = readConfigured(null);
+
+    expect(r.code).toBe(2);
+    expect(r.value).toBe("[]");
+  });
+
+  it("REJECTS a dangling symlink rather than reading it as an untold box", () => {
+    // The dangling shape reached the missing-file check first and returned 1,
+    // so it was indistinguishable from a box whose owner never answered.
+    fs.symlinkSync(path.join(tmp, "never-created.env"), tzEnv);
+
+    const r = readConfigured(null);
+
+    expect(r.code).toBe(2);
+    expect(r.value).toBe("[]");
+  });
+
   it("answers 'nothing recorded' — not a rejection — when the box was never told", () => {
     const r = readConfigured(null);
     expect(r.code).toBe(1);
@@ -265,6 +293,21 @@ d("step_set_timezone", () => {
     // A step that discards its input must not exit 0. This is what let the
     // route answer `{success:true}` over a box still on Etc/UTC.
     const r = runStep("TIMEZONE=Mars/Olympus\n");
+
+    expect(r.status).not.toBe(0);
+    expect(r.out).toMatch(/not one this device carries/i);
+    expect(r.calls.some((c) => c.startsWith("set-timezone"))).toBe(false);
+  });
+
+  it("FAILS on a symlinked timezone.env instead of reporting a quiet no-op", () => {
+    // The step's own half of the same defect: outcome 2 must reach the `*)`
+    // branch, not the `1)` no-op, or the unit exits 0 and the route reports
+    // the OS zone as changed over a box still on Etc/UTC.
+    const target = path.join(tmp, "elsewhere.env");
+    fs.writeFileSync(target, "TIMEZONE=Europe/Sofia\n");
+    fs.symlinkSync(target, tzEnv);
+
+    const r = runStep(null);
 
     expect(r.status).not.toBe(0);
     expect(r.out).toMatch(/not one this device carries/i);
