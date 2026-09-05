@@ -46,10 +46,31 @@ const ctx = (edition: "openclaw" | "hermes", install: Install = edition): McpCon
   canGenerateImages: true,
 });
 
-/** The shape `getVersionInfo()` really returns, per SKU. */
-const payload = (edition: Install) => ({
+/**
+ * The shape `getVersionInfo()` really returns, per SKU — including the detail
+ * this card is about: `openclaw.target` is the ClawBox pin even where
+ * `openclaw.current` is null, because the producer only nulls the target when a
+ * current version exists and already contains it.
+ */
+const payload = (edition: Install) =>
+  edition === "hermes"
+    ? {
+        clawbox: { current: "v4.0.0", target: null, updateAvailable: false },
+        openclaw: { current: null, target: "2026.8.1", updateAvailable: false },
+        hermes: { current: "0.20.5", target: null, updateAvailable: false },
+        edition,
+      }
+    : {
+        clawbox: { current: "v4.0.0", target: null, updateAvailable: false },
+        openclaw: { current: "2026.8.1", target: null, updateAvailable: false },
+        ...(edition === "dual" ? { hermes: { current: "0.20.5", target: null, updateAvailable: false } } : {}),
+        edition,
+      };
+
+/** A box where only the OpenClaw pin moved — ClawBox itself is current. */
+const openclawDeltaOnly = (edition: Install) => ({
   clawbox: { current: "v4.0.0", target: null, updateAvailable: false },
-  openclaw: { current: edition === "hermes" ? null : "2026.8.1", target: "2026.8.1", updateAvailable: false },
+  openclaw: { current: "2026.7.1", target: "2026.8.1", updateAvailable: true },
   ...(edition === "openclaw" ? {} : { hermes: { current: "0.20.5", target: null, updateAvailable: false } }),
   edition,
 });
@@ -98,7 +119,7 @@ describe("update_check — no OpenClaw block on a device that ships no OpenClaw"
 
     const body = await updateCheck("openclaw");
 
-    expect(body.openclaw).toEqual({ current: "2026.8.1", target: "2026.8.1", updateAvailable: false });
+    expect(body.openclaw).toEqual({ current: "2026.8.1", target: null, updateAvailable: false });
   });
 
   it("keeps it on the dual SKU, where OpenClaw is installed even while Hermes answers", async () => {
@@ -132,7 +153,12 @@ describe("update_check and device_status agree about the OpenClaw block", () => 
     versionsOnly("hermes");
 
     expect(await updateCheck("hermes")).not.toHaveProperty("openclaw");
-    expect((await deviceStatus("hermes")).update).not.toHaveProperty("openclaw");
+    const { update } = await deviceStatus("hermes");
+    // Positively, first: when the versions leg returns null `update` degrades to
+    // the string "unknown", and every `not.toHaveProperty` below would pass over
+    // a mock that answered nothing at all.
+    expect(update).toHaveProperty("clawbox");
+    expect(update).not.toHaveProperty("openclaw");
   });
 
   it("both carry it on dual, where the device really has an OpenClaw to update", async () => {
@@ -141,5 +167,46 @@ describe("update_check and device_status agree about the OpenClaw block", () => 
 
     expect(await updateCheck("hermes", "dual")).toHaveProperty("openclaw");
     expect((await deviceStatus("hermes", "dual")).update).toHaveProperty("openclaw");
+  });
+});
+
+describe("device_status — an OpenClaw pin delta is an update waiting on the SKUs that have one", () => {
+  const versions = (edition: Install) =>
+    apiTry.mockImplementation(async (route: unknown) =>
+      route === "/setup-api/update/versions" ? openclawDeltaOnly(edition) : null,
+    );
+
+  async function waiting(edition: "openclaw" | "hermes", install: Install) {
+    versions(install);
+    const { update } = await deviceStatus(edition, install);
+    if (typeof update === "string") throw new Error("versions leg returned nothing");
+    return update.waiting;
+  }
+
+  it("reports it on dual, where Hermes may be the harness answering but OpenClaw is installed", async () => {
+    expect(await waiting("hermes", "dual")).toBe(true);
+  });
+
+  it("still reports it on the OpenClaw SKU", async () => {
+    expect(await waiting("openclaw", "openclaw")).toBe(true);
+  });
+
+  it("does not report it on Hermes, where there is no OpenClaw to install", async () => {
+    expect(await waiting("hermes", "hermes")).toBe(false);
+  });
+});
+
+describe("shipsOpenclaw fails closed when the edition lock cannot be read", () => {
+  it("keeps the block off on a Hermes box whose lock resolved to the openclaw default", async () => {
+    // `mcp/lib/edition.ts` resolves an unreadable /etc/clawbox/edition.env to
+    // the SMALLER hermes tool set while `readEdition()` — behind both
+    // `payload.edition` and `ctx.install` — defaults to "openclaw". Trusting
+    // either of those alone would hand the block back on exactly the box this
+    // card is about.
+    apiGet.mockResolvedValue(payload("openclaw"));
+
+    const body = await updateCheck("hermes", "openclaw");
+
+    expect(body).not.toHaveProperty("openclaw");
   });
 });

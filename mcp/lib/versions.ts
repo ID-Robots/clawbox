@@ -7,7 +7,10 @@
  * answering differently: `getVersionInfo()` fills `openclaw.target` from the
  * ClawBox pin even where `openclaw.current` is null, so the raw payload offers
  * a Hermes box an OpenClaw version to converge on for a harness it does not
- * ship. One predicate here, imported by both, so they cannot diverge again.
+ * ship. One predicate here, imported by both, so those two cannot diverge
+ * again. The same rule is written out once more for the browser in
+ * `SettingsApp.tsx`'s About panel (a client component, which cannot import the
+ * fs-backed edition modules) — that is the prior art this matches.
  */
 
 import type { McpContext } from "./context";
@@ -21,22 +24,37 @@ interface ComponentVersion {
 export interface VersionsPayload {
   clawbox?: ComponentVersion;
   openclaw?: ComponentVersion;
-  /** Present only on the SKUs that ship Hermes — its presence is the signal. */
+  /** Present only on the SKUs that ship Hermes; carried through untouched. */
   hermes?: ComponentVersion;
-  /** The install edition, read from the root-owned edition lock per call. */
+  /**
+   * The install edition, from the root-owned edition lock. Absent on a device
+   * whose software predates the field.
+   */
   edition?: string;
 }
 
 /**
  * Whether an OpenClaw version block means anything on this device.
  *
- * The payload's own `edition` decides, ahead of the context: `ctx.install` is a
- * snapshot taken once when the MCP child spawned, while the route answers from
- * `readEdition()` on every call. Only the `hermes` SKU ships no OpenClaw —
- * `dual` has one to update even while Hermes is the harness answering.
+ * `dual` settles it outright: that SKU has an OpenClaw to update even while
+ * Hermes is the harness answering, which is why `ctx.edition` — the resolved
+ * TOOL SET — cannot be the gate on its own.
+ *
+ * Otherwise every source has to agree the device is not Hermes, and that is
+ * deliberate rather than belt-and-braces. `readEdition()` — behind both
+ * `payload.edition` and `ctx.install` — collapses an unreadable lock into its
+ * "openclaw" default, while `ctx.edition` is the one input that fails CLOSED
+ * there (`mcp/lib/edition.ts` resolves an unreadable lock to "hermes" and says
+ * why). Requiring both keeps a truncated `/etc/clawbox/edition.env` on a Hermes
+ * box from putting the block back.
+ *
+ * The payload is preferred over `ctx.install` for the positive answer because
+ * the context is a snapshot taken once when the MCP child spawned, while the
+ * payload is read per request (cached for 60 s in `getVersionInfo()`).
  */
 export function shipsOpenclaw(payload: VersionsPayload | null | undefined, ctx: McpContext): boolean {
-  return (payload?.edition ?? ctx.install) !== "hermes";
+  if (payload?.edition === "dual" || ctx.install === "dual") return true;
+  return (payload?.edition ?? ctx.install) !== "hermes" && ctx.edition !== "hermes";
 }
 
 /** The versions payload as the agent on this device should see it. */
