@@ -225,6 +225,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (typeof window === 'undefined') return false
     return kv.get('clawbox-mascot-hidden') === '1'
   })
+  // Mirrors `hidden` so the show/hide event handlers can read it without a
+  // dependency and without an updater. Seeded from the same initializer, and
+  // advanced by every writer on the line before its state write.
+  const hiddenRef = useRef(hidden)
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const ctxOpenedAt = useRef(0)
 
@@ -1482,8 +1486,24 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   // Listen for show/hide mascot events from desktop context menu
   useEffect(() => {
-    const showHandler = () => { setHidden(prev => { if (!prev) return prev; kv.remove('clawbox-mascot-hidden'); return false }) }
-    const hideHandler = () => { setHidden(prev => { if (prev) return prev; kv.set('clawbox-mascot-hidden', '1'); return true }) }
+    // Outside the updater, guarded on the ref. These wrote `kv` from INSIDE the
+    // `setHidden` updater, so React running it twice wrote the cache twice and
+    // queued a second debounced POST to /setup-api/kv. The same file already
+    // writes it correctly from the context menu below; these two were the
+    // instances the rule could not name, because `kv.set` has no capital after
+    // `set`.
+    const showHandler = () => {
+      if (!hiddenRef.current) return
+      hiddenRef.current = false
+      setHidden(false)
+      kv.remove('clawbox-mascot-hidden')
+    }
+    const hideHandler = () => {
+      if (hiddenRef.current) return
+      hiddenRef.current = true
+      setHidden(true)
+      kv.set('clawbox-mascot-hidden', '1')
+    }
     window.addEventListener('clawbox-show-mascot', showHandler)
     window.addEventListener('clawbox-hide-mascot', hideHandler)
     return () => { window.removeEventListener('clawbox-show-mascot', showHandler); window.removeEventListener('clawbox-hide-mascot', hideHandler) }
@@ -1838,7 +1858,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             </button>
           )}
           <button
-            onClick={() => { setHidden(true); kv.set('clawbox-mascot-hidden', '1'); setCtxMenu(null); window.dispatchEvent(new Event('clawbox-hide-mascot')) }}
+            onClick={() => { hiddenRef.current = true; setHidden(true); kv.set('clawbox-mascot-hidden', '1'); setCtxMenu(null); window.dispatchEvent(new Event('clawbox-hide-mascot')) }}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400"
           >
             <span className="text-base">👁️‍🗨️</span> Hide mascot

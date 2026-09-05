@@ -1492,6 +1492,12 @@ function ChromeDesktopInner() {
     clawbox: { current: string | null; target: string | null; updateAvailable?: boolean };
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
   } | null>(null);
+  // Mirrors `updateAvailable` so the dismiss handler can read the notice it is
+  // dismissing WITHOUT an updater. Every writer advances it on the line before
+  // its own state write — the same rule the custom wallpapers follow in this
+  // file, and the reason there is no mirroring effect: an effect leaves a
+  // window in which the ref is behind the state.
+  const updateAvailableRef = useRef<typeof updateAvailable>(null);
   const lastVersionFingerprintRef = useRef<string | null>(null);
   // Gone for THIS session once its clock runs out — never recorded as a
   // dismissal, so the card is back after a reload and in the next session,
@@ -1515,6 +1521,7 @@ function ChromeDesktopInner() {
         lastVersionFingerprintRef.current = fingerprint;
 
         if (!clawboxNeedsUpdate && !openclawNeedsUpdate) {
+          updateAvailableRef.current = null;
           setUpdateAvailable(null);
           return;
         }
@@ -1525,7 +1532,9 @@ function ChromeDesktopInner() {
           try { dismissed = (await dismissalRes.json()).fingerprint ?? null; } catch {}
         }
         const dismissalFingerprint = `${data.clawbox?.target ?? ""}|${data.openclaw?.target ?? ""}`;
-        setUpdateAvailable(dismissed === dismissalFingerprint ? null : data);
+        const next = dismissed === dismissalFingerprint ? null : data;
+        updateAvailableRef.current = next;
+        setUpdateAvailable(next);
         // A different pair of versions is a different notice.
         setUpdateNoticeHidden(false);
       } catch { /* network blip — try again next interval */ }
@@ -1540,17 +1549,21 @@ function ChromeDesktopInner() {
   useAutoHide(updateNoticeKeys, hideUpdateNotice);
 
   const dismissUpdateNotification = useCallback(() => {
-    setUpdateAvailable((current) => {
-      if (current) {
-        const fingerprint = `${current.clawbox?.target ?? ""}|${current.openclaw?.target ?? ""}`;
-        fetch("/setup-api/update/dismissal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fingerprint }),
-        }).catch(() => { /* will retry next dismiss */ });
-      }
-      return null;
-    });
+    // The POST is OUTSIDE the updater. React is entitled to run an updater
+    // twice, so this dismissal was recorded once per render attempt rather than
+    // once per click — two POSTs to /setup-api/update/dismissal, two
+    // `sqliteSet`s. Idempotent, which is exactly why nobody had seen it.
+    const current = updateAvailableRef.current;
+    if (current) {
+      const fingerprint = `${current.clawbox?.target ?? ""}|${current.openclaw?.target ?? ""}`;
+      fetch("/setup-api/update/dismissal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fingerprint }),
+      }).catch(() => { /* will retry next dismiss */ });
+    }
+    updateAvailableRef.current = null;
+    setUpdateAvailable(null);
   }, []);
 
   const openSettingsSection = useCallback((section: "ai" | "localAi" | "system" | "update") => {
