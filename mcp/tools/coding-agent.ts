@@ -390,6 +390,11 @@ interface TeamTaskPayload {
 }
 
 interface TeamPayload {
+  /** The team's branch in the project and what it forked from; null when the team works in place. */
+  branch?: string | null;
+  base?: string | null;
+  /** Who worked, counted by the server: planner, workers, reviewers. */
+  agents?: { planner: number; workers: number; reviewers: number; total: number };
   id: string;
   goal: string;
   projectId: string | null;
@@ -425,6 +430,10 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
   parts.push(`Goal: ${redact(firstLine(team.goal, 200))}`);
   parts.push(`Folder: ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}`);
   if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
+  if (team.branch) parts.push(`Branch: ${team.branch} (from ${team.base ?? "the checkout's branch"}); the project page's Create PR compares it.`);
+  if (team.agents && team.agents.total > 0) {
+    parts.push(`Agents: ${team.agents.total} — ${team.agents.planner} planner, ${team.agents.workers} worker(s), ${team.agents.reviewers} reviewer(s).`);
+  }
   if (team.tasks.length === 0) {
     parts.push(team.status === "planning" ? "The planner is still reading the folder and writing the plan." : "No tasks were posted.");
   } else {
@@ -460,7 +469,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
 
   reg.tool(
     "coding_team_run",
-    "Hand a LARGER goal to a coding team on this ClawBox: a planner splits it into a few tasks, workers do them one after another in separate Claude Code sessions, and a reviewer checks each result — all on a shared board with an audit log. Use it for a goal that spans several parts or files; for one focused change use coding_agent_run instead. The team works in the background inside ONE folder and takes a while; call coding_team_status to follow it.",
+    "Hand a LARGER goal to a coding team on this ClawBox: a planner splits it into a few tasks, workers do them side by side in separate Claude Code sessions (each in its own git worktree, merged back as it finishes), and a reviewer checks each result — all on a shared board with an audit log. Use it for a goal that spans several parts or files; for one focused change use coding_agent_run instead. The team works in the background inside ONE folder and takes a while; call coding_team_status to follow it.",
     {
       goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole. The planner reads the folder and writes the tasks; give the outcome and any constraints, not a task list."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),

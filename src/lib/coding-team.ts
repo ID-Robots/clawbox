@@ -434,8 +434,12 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
   return parsed.verdict;
 }
 
+/** A pause that never keeps the process alive on its own: the loop's timer beside a race it may lose. */
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
 }
 
 /** Wait for a run to settle, in slices, honouring a stop and the budget. */
