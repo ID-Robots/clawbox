@@ -10,6 +10,53 @@ const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Remember one async answer for `ttlMs`, and let concurrent callers share the
+ * read that is already in flight.
+ *
+ * Two surfaces poll this route every 3 s while their panel is open — Settings >
+ * System (`SettingsApp.tsx`) and the System app (`SystemApp.tsx`) — and each
+ * request spawned `df`, `ps aux --sort=-%cpu` and `uname -r`. That is six
+ * processes every three seconds on a Jetson for two answers that barely move
+ * and one that cannot change without a reboot.
+ *
+ * A REJECTION is never remembered: the caller sees it, and the next call tries
+ * again. Caching the failure would turn one lost `uname` into a box that
+ * reports the fallback for the rest of the process's life — the probe-once
+ * shape this repository keeps producing. The in-flight promise is dropped on
+ * rejection for the same reason.
+ */
+function memoAsync<T>(read: () => Promise<T>, ttlMs: number): () => Promise<T> {
+  let cached: { value: T; at: number } | null = null;
+  let inFlight: Promise<T> | null = null;
+
+  return () => {
+    // `age >= 0` because Date.now() is wall-clock: an RTC corrected BACKWARDS
+    // by NTP would otherwise pin the entry until the clock caught up.
+    const age = cached ? Date.now() - cached.at : Infinity;
+    if (cached && age >= 0 && age < ttlMs) return Promise.resolve(cached.value);
+    if (inFlight) return inFlight;
+
+    const promise = read().then(
+      (value) => {
+        cached = { value, at: Date.now() };
+        inFlight = null;
+        return value;
+      },
+      (err) => {
+        inFlight = null;
+        throw err;
+      },
+    );
+    inFlight = promise;
+    return promise;
+  };
+}
+
+/** How long each answer stays good. The kernel release is a constant. */
+const DISK_TTL_MS = 30_000;
+const PROCESSES_TTL_MS = 5_000;
+
 interface DiskMount {
   filesystem: string;
   size: string;
@@ -34,25 +81,31 @@ interface ProcessEntry {
   command: string;
 }
 
+async function readDiskUsage(): Promise<DiskMount[]> {
+  const { stdout: output } = await execFileAsync(
+    "df",
+    ["-h", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"],
+    { encoding: "utf-8", timeout: 5000 },
+  );
+  const lines = output.trim().split("\n").slice(1); // skip header
+  const result: DiskMount[] = [];
+  for (const line of lines) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 6) continue;
+    const [filesystem, size, used, avail, usePercentStr, mountpoint] = parts;
+    const usePercent = parseInt(usePercentStr.replace("%", ""), 10) || 0;
+    // Filter out uninteresting mounts
+    if (mountpoint.startsWith("/sys") || mountpoint.startsWith("/proc") || mountpoint.startsWith("/dev/")) continue;
+    result.push({ filesystem, size, used, avail, usePercent, mountpoint });
+  }
+  return result.slice(0, 8); // max 8 mounts
+}
+
+const diskUsage = memoAsync(readDiskUsage, DISK_TTL_MS);
+
 async function getDiskUsage(): Promise<DiskMount[]> {
   try {
-    const { stdout: output } = await execFileAsync(
-      "df",
-      ["-h", "-x", "tmpfs", "-x", "devtmpfs", "-x", "squashfs"],
-      { encoding: "utf-8", timeout: 5000 },
-    );
-    const lines = output.trim().split("\n").slice(1); // skip header
-    const result: DiskMount[] = [];
-    for (const line of lines) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length < 6) continue;
-      const [filesystem, size, used, avail, usePercentStr, mountpoint] = parts;
-      const usePercent = parseInt(usePercentStr.replace("%", ""), 10) || 0;
-      // Filter out uninteresting mounts
-      if (mountpoint.startsWith("/sys") || mountpoint.startsWith("/proc") || mountpoint.startsWith("/dev/")) continue;
-      result.push({ filesystem, size, used, avail, usePercent, mountpoint });
-    }
-    return result.slice(0, 8); // max 8 mounts
+    return await diskUsage();
   } catch {
     return [];
   }
@@ -100,25 +153,31 @@ function getNetworkInterfaces(): NetworkInterface[] {
   return result;
 }
 
+async function readTopProcesses(): Promise<ProcessEntry[]> {
+  const { stdout: output } = await execFileAsync("ps", ["aux", "--sort=-%cpu"], {
+    encoding: "utf-8",
+    timeout: 5000,
+  });
+  // Skip the header, keep the top 10 by CPU (the old `| head -11` limit).
+  const lines = output.trim().split("\n").slice(1, 11);
+  return lines.map((line) => {
+    const parts = line.trim().split(/\s+/);
+    const [user, pid, cpu, mem, , , , , , , ...cmdParts] = parts;
+    return {
+      pid: pid || "",
+      user: user || "",
+      cpu: parseFloat(cpu) || 0,
+      mem: parseFloat(mem) || 0,
+      command: cmdParts.join(" ").slice(0, 60) || parts[10] || "?",
+    };
+  }).filter((p) => p.pid);
+}
+
+const topProcesses = memoAsync(readTopProcesses, PROCESSES_TTL_MS);
+
 async function getTopProcesses(): Promise<ProcessEntry[]> {
   try {
-    const { stdout: output } = await execFileAsync("ps", ["aux", "--sort=-%cpu"], {
-      encoding: "utf-8",
-      timeout: 5000,
-    });
-    // Skip the header, keep the top 10 by CPU (the old `| head -11` limit).
-    const lines = output.trim().split("\n").slice(1, 11);
-    return lines.map((line) => {
-      const parts = line.trim().split(/\s+/);
-      const [user, pid, cpu, mem, , , , , , , ...cmdParts] = parts;
-      return {
-        pid: pid || "",
-        user: user || "",
-        cpu: parseFloat(cpu) || 0,
-        mem: parseFloat(mem) || 0,
-        command: cmdParts.join(" ").slice(0, 60) || parts[10] || "?",
-      };
-    }).filter((p) => p.pid);
+    return await topProcesses();
   } catch {
     return [];
   }
@@ -149,10 +208,22 @@ function getUptime(): string {
   }
 }
 
+async function readKernelRelease(): Promise<string> {
+  const { stdout } = await execFileAsync("uname", ["-r"], { encoding: "utf-8", timeout: 3000 });
+  return stdout.trim();
+}
+
+/**
+ * The running kernel cannot change without a reboot, and a reboot restarts this
+ * process — so the answer is good for the life of the process. The FALLBACK is
+ * deliberately outside the memo: a `uname` that lost one race must not pin
+ * `os.release()` until the next restart.
+ */
+const kernelRelease = memoAsync(readKernelRelease, Infinity);
+
 async function getKernelRelease(): Promise<string> {
   try {
-    const { stdout } = await execFileAsync("uname", ["-r"], { encoding: "utf-8", timeout: 3000 });
-    return stdout.trim();
+    return await kernelRelease();
   } catch {
     return os.release();
   }
