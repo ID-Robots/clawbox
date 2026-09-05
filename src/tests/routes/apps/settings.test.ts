@@ -11,6 +11,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   setSkillEnabled: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("@/lib/openclaw-skill-info", () => ({
+  refreshSkillsCache: vi.fn(),
+}));
+
 describe("/setup-api/apps/settings", () => {
   let POST: (req: Request) => Promise<Response>;
 
@@ -71,6 +75,23 @@ describe("/setup-api/apps/settings", () => {
     expect(body.enabled).toBe(false);
     const { setSkillEnabled } = await import("@/lib/openclaw-config");
     expect(setSkillEnabled).toHaveBeenCalledWith("test-app", false);
+    // The switch changes what `openclaw skills list --json` reports for this
+    // skill, and that list is cached for ten minutes.
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    expect(refreshSkillsCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invalidate the skill list when the write failed", async () => {
+    const { setSkillEnabled } = await import("@/lib/openclaw-config");
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    vi.mocked(setSkillEnabled).mockRejectedValueOnce(new Error("EACCES"));
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId: "test-app", settings: { _setEnabled: false } }),
+    }));
+    expect(res.status).toBe(500);
+    // Nothing changed, so spending a CLI boot on a rescan would be waste.
+    expect(refreshSkillsCache).not.toHaveBeenCalled();
   });
 
   it("refuses a non-boolean _setEnabled — the string \"false\" must not enable", async () => {

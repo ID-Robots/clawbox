@@ -10,13 +10,22 @@ import { findOpenclawBin, getSkillsDir, openclawIsAbsent } from "@/lib/openclaw-
  * `openclaw skills list --json` is the one source for `eligible` and
  * `missing.*`: those are EVALUATED by OpenClaw (is the bin on PATH, is the env
  * var set), not declared, so reading SKILL.md ourselves would change what the
- * "Ready / Needs setup" badge means. But the scan costs 7–8 s on the Jetson,
- * and a 30 s cache meant nearly every open of an installed app's window paid
- * it. So the list is served stale-while-revalidate: whatever is cached is
- * answered at once and a refresh runs behind it once the copy is older than
+ * "Ready / Needs setup" badge means. But the scan is a full CLI boot — 4.2–5.3 s
+ * measured on an Orin Nano, and the call carries a 30 s timeout for the times it
+ * is worse — and `InstalledAppSettings` fetches this on every mount, so a 30 s
+ * cache meant nearly every open of an installed app's window paid for one. So
+ * the list is served stale-while-revalidate: whatever is cached is answered at
+ * once and a refresh runs behind it once the copy is older than
  * {@link STALE_AFTER_MS}; only the first call after a web-server boot waits.
- * The install and uninstall routes call {@link refreshSkillsCache} so the
- * window opened right after an install already lists the new skill.
+ *
+ * The window is long because nothing in it changes on its own — a skill appears,
+ * disappears or changes state only when something on this box acts — so the
+ * freshness comes from INVALIDATION, not from the clock: the install, uninstall
+ * and enable/disable routes all call {@link refreshSkillsCache}. A toggle
+ * matters as much as an install here: OpenClaw never reports a disabled skill as
+ * `eligible` (measured on a box: 31 of 59 skills disabled, none of them
+ * eligible), so the switch changes the field the "Ready / Needs setup" badge is
+ * drawn from.
  *
  * Lives outside the route file because a route module may export only its
  * handlers, and the install/uninstall routes need the refresh hook.
@@ -43,11 +52,21 @@ export class SkillListUnavailableError extends Error {
 }
 
 const execFileAsync = promisify(execFile);
-const STALE_AFTER_MS = 30_000;
+const STALE_AFTER_MS = 10 * 60_000;
 
 let cachedSkills: SkillInfo[] | null = null;
 let cacheTime = 0;
 let inFlightLoad: Promise<SkillInfo[]> | null = null;
+/**
+ * Invalidation count. A scan that STARTED before the last invalidation is
+ * describing the state that invalidation was called because it changed, so its
+ * result may not be stored — clearing `cacheTime` alone would let a scan
+ * already in flight land a moment later and stamp the pre-change list as fresh
+ * for the whole window. Harmless while that window was 30 s; ten minutes of a
+ * badge that contradicts the switch beside it is not. Same guard as the gateway
+ * status memo in `hermes-telegram.ts`.
+ */
+let scanEpoch = 0;
 
 async function scanSkills(): Promise<SkillInfo[]> {
   const bin = findOpenclawBin();
@@ -73,10 +92,13 @@ async function scanSkills(): Promise<SkillInfo[]> {
 /** One scan at a time; concurrent callers share it. Rejects only when nothing is cached. */
 function load(): Promise<SkillInfo[]> {
   if (inFlightLoad) return inFlightLoad;
+  const epoch = scanEpoch;
   inFlightLoad = scanSkills()
     .then((skills) => {
-      cachedSkills = skills;
-      cacheTime = Date.now();
+      if (epoch === scanEpoch) {
+        cachedSkills = skills;
+        cacheTime = Date.now();
+      }
       return skills;
     })
     .catch((err) => {
@@ -150,12 +172,19 @@ export async function findSkill(appId: string): Promise<SkillInfo | null> {
 }
 
 /**
- * Rescan in the background after an install or uninstall. The current copy
+ * Rescan in the background after anything that changes what the list says: an
+ * install, an uninstall, or a flip of a skill's enable switch. The current copy
  * keeps serving until the new one lands, so nobody waits on it. A no-op on a
  * device without the openclaw binary (the uninstall route runs on Hermes too).
+ *
+ * A scan already in flight when this is called was started BEFORE the change
+ * and is dropped rather than stored (see {@link scanEpoch}); `cacheTime` stays
+ * 0, so the next reader is served the old list at once and starts a scan that
+ * can see the change.
  */
 export function refreshSkillsCache(): void {
   if (openclawIsAbsent()) return;
   cacheTime = 0;
+  scanEpoch += 1;
   void load().catch(() => {});
 }

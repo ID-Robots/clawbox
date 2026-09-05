@@ -3,6 +3,7 @@ import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import fs from "fs/promises";
 import path from "path";
 import { setSkillEnabled } from "@/lib/openclaw-config";
+import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
 
 export const dynamic = "force-dynamic";
 
@@ -60,6 +61,12 @@ export async function POST(req: Request) {
         console.error(`[apps/settings] Failed to toggle ${appId}:`, err instanceof Error ? err.message : err);
         return NextResponse.json({ error: "Failed to toggle skill" }, { status: 500 });
       }
+      // The switch just changed what `openclaw skills list --json` will say
+      // about this skill — a disabled skill is never `eligible`, which is the
+      // field the "Ready / Needs setup" badge is drawn from — so the cached
+      // list is invalidated the way install and uninstall invalidate it.
+      // Behind the answer: the rescan is a CLI boot and the write has landed.
+      refreshSkillsCache();
       return NextResponse.json({ ok: true, enabled });
     }
 
