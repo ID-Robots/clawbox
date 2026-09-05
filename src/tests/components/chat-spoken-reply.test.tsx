@@ -8,7 +8,23 @@ import { resetHarnessCache } from "@/lib/client-harness";
 // a slice of the Jetson's six cores and the 5 s default started expiring on
 // whichever test mounted while the box was busiest (a different one each
 // run — solo runs never failed). The work is real, not hung: give it room.
-vi.setConfig({ testTimeout: 15000 });
+//
+// 30 s, the standard value here — what almost every file that declares a
+// ceiling uses. Two sets of files do not: src/tests/unit/sudoers-coverage.test.ts
+// sits at 60 s, and a handful of settings component suites at 20 s. This one
+// stood at 15 000 — exactly MIN_TIMEOUT_MS in
+// src/tests/unit/test-timeout-hygiene.test.ts, so it passed that guard with no
+// margin at all and would go red the day the floor moved by a millisecond.
+// Taking the standard value is also one fewer number to reason about.
+//
+// The other ceiling on this file is Testing Library's `asyncUtilTimeout`
+// (src/tests/setup.ts), which bounds a SINGLE `findBy*` wait at 5 s and is not
+// what this raises. Deliberate: the failures recorded here were vitest's own
+// "Test timed out in 5000ms", i.e. several sub-5 s waits in series, and raising
+// asyncUtilTimeout to 15 s was tried on this branch and reverted — the same
+// cases still failed, one at 15.5 s and one on an outright assertion at 387 ms.
+// Whatever that is, it is not a wait that needed longer.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 /**
  * A spoken reply has to be something the user can play.

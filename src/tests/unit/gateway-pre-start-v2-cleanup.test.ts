@@ -1,7 +1,15 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+//
+// It covers the tests and their hooks, not the `spawnSync` on the module line
+// below: that one runs during COLLECTION, which neither ceiling governs.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;

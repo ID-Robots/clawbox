@@ -20,6 +20,11 @@ import path from "path";
  * 4 and 5 are the same incident from both ends, so they are tested together.
  */
 
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const UPDATER_TS = fs.readFileSync(path.join(REPO_ROOT, "src/lib/updater.ts"), "utf-8");
 const INSTALL_SH = fs.readFileSync(path.join(REPO_ROOT, "install.sh"), "utf-8");

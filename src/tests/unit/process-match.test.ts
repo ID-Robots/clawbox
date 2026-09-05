@@ -15,7 +15,7 @@
  * match. The rest keep the matcher honest about real browsers.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { spawn } from "child_process";
 import {
   isBrowserExecutable,
@@ -24,6 +24,11 @@ import {
   findClawboxBrowserPids,
   parseProcCmdline,
 } from "@/lib/process-match";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const PROFILE_DIR = "/home/clawbox/.config/clawbox-browser";
 const CDP_PORT = 18800;

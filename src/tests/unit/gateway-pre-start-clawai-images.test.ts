@@ -4,6 +4,11 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 // `CLAWBOX_AI_IMAGE_MODEL_ID` resolves `process.env.CLAWBOX_AI_IMAGE_MODEL_ID`
 // at module load, and the .sh hardcodes the default because a shell migration
 // cannot import a TS constant. Read the constants through a plain `import` and

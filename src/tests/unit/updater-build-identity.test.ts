@@ -4,6 +4,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 // The updater's step list is built from the running edition, and the module
 // probes the device at import time. Nothing below starts an update or touches
 // systemd: these tests exercise the three units of the WARN + AUTO-REPIN path

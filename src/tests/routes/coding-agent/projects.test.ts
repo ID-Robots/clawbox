@@ -18,6 +18,11 @@ import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { HARNESS_TEST_PROJECT_ID } from "@/lib/coding-agent";
 
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 let GET: () => Promise<Response>;
 let base: string;
 let home: string;

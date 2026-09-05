@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import { spawn, spawnSync } from "child_process";
 import http from "http";
 import type { AddressInfo } from "net";
@@ -26,6 +26,11 @@ import { builtInApps, openedAppNotice } from "../../../mcp/lib/context";
  * The whole CLI had no test before this one; these run it as the agent does,
  * against a stub device.
  */
+
+// Starts real processes (bun running the CLI, and the `have()` probe): vitest's
+// 5 s test and 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const REPO = path.resolve(__dirname, "../../..");
 const CLI = path.join(REPO, "mcp", "clawbox-cli.ts");

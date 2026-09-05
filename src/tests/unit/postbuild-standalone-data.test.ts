@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
@@ -30,6 +30,11 @@ import path from "path";
  * These tests run the REAL postbuild script out of package.json against a
  * temp tree, so they cannot drift from what ships.
  */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const REPO = path.resolve(__dirname, "../../..");
 const POSTBUILD: string = JSON.parse(

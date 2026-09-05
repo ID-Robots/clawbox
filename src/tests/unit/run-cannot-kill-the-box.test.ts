@@ -9,12 +9,17 @@
  * the box's server takes a title of its own so a stray one cannot match it
  * anyway, checked here at runtime in a child process.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { execFileSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { BASH_ALLOWLIST, BASH_KILL_DENYLIST } from "@/lib/coding-agent";
 import { WEBAPP_STORAGE_GUIDE } from "../../../mcp/tools/orientation";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 describe("the run's Bash rules", () => {
   it("deny every killer that matches by name, and a kill of every process", () => {

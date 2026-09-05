@@ -1,10 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
 
 import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { stripEmailDirectives } from "../../../scripts/openclaw-plugins/clawbox-email-directives/email-directives.mjs";
 import { EMAIL_DIRECTIVE_CASES } from "@/tests/fixtures/email-directive-cases";
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 // THE PIN. `EMAIL:<uid>` is understood in three places by three languages:
 //

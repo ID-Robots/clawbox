@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
 import os from "node:os";
@@ -18,6 +18,12 @@ import path from "node:path";
  * plus a 34 s clone on this Orin Nano (measured 2026-09-04, CTranslate2 4.8.2,
  * linking libcudnn.so.9 / libcublas.so.12, `cuobjdump` reporting sm_87 only).
  */
+
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const REPO = process.cwd();
 const VOICE_SH_PATH = path.join(REPO, "scripts/install-voice.sh");
 const VOICE_SH = readFileSync(VOICE_SH_PATH, "utf-8");

@@ -14,6 +14,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * The contract these tests pin: the key goes in, and it never comes back out.
  */
 
+// Starts a real process (bash / python3 / node / git): vitest's 5 s test and
+// 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn(async () => "hermes"),
   HERMES_BIN: "/home/clawbox/.local/bin/hermes",

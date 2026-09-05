@@ -3,8 +3,9 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vite
 // Every test here spawns the real checker over the real src/ and mcp/ trees,
 // which takes ~5 s on a Jetson Orin Nano — right on the default 5 s test
 // timeout, so the suite failed on the device it protects while passing in CI.
-// The budget is per test; the checker's own OK line is still the assertion.
-vi.setConfig({ testTimeout: 60_000 });
+// The budget is per test AND per hook; the checker's own OK line is still the
+// assertion.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 import { execFile, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
