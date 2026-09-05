@@ -333,9 +333,12 @@ export async function teamSpawnSlot(team: RunTeam): Promise<{ ok: true } | { ok:
   const stranger = active.find((r) => r.team?.id !== team.id);
   if (stranger) return { ok: false, wait: false, reason: `A coding run is already in progress (${stranger.id}). Wait for it or stop it first.` };
   if (active.length >= MAX_TEAM_WORKERS) return { ok: false, wait: true, reason: `The team already has ${active.length} runs going.` };
-  if (active.length >= 1) {
+  if (active.length >= 1 && TEAM_SPAWN_MIN_AVAILABLE_MB > 0) {
     const mb = await memAvailableMb();
-    if (mb !== null && mb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
+    // No reading is no evidence of room: a box that cannot say how much
+    // memory it has left is not one to start a second run on.
+    if (mb === null) return { ok: false, wait: true, reason: `Cannot read the box's free memory, so no second run starts beside the ${active.length} going.` };
+    if (mb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
       return { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${active.length} going (${mb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).` };
     }
   }

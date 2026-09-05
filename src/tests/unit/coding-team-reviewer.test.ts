@@ -3,7 +3,8 @@
  * that is not what the reviewer said is never repaired into one.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_NOTES_CHARS, parseVerdict, reviewerTask, REVIEWER_BRIEF } from "@/lib/coding-team-reviewer";
+import { MAX_TASK_CHARS } from "@/lib/coding-agent";
+import { MAX_NOTES_CHARS, MAX_REVIEW_FILES, parseVerdict, reviewerTask, REVIEWER_BRIEF } from "@/lib/coding-team-reviewer";
 
 describe("parseVerdict", () => {
   it("reads a bare object, a fenced one, and one buried in prose", () => {
@@ -46,5 +47,16 @@ describe("the reviewer's brief and task", () => {
     expect(text).toContain("- app.js\n- index.html");
     expect(text).toContain("The worker's report:\nWired it.");
     expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "", goal: "g" })).toContain("changed no files");
+  });
+
+  it("names only so many changed files and counts the rest, and never exceeds the run route's cap", () => {
+    const files = Array.from({ length: MAX_REVIEW_FILES + 15 }, (_, i) => `src/file-${i}.ts`);
+    const text = reviewerTask({ taskId: "t3", description: "d", files, report: "r", goal: "g" });
+    expect(text).toContain(`- src/file-${MAX_REVIEW_FILES - 1}.ts`);
+    expect(text).not.toContain(`- src/file-${MAX_REVIEW_FILES}.ts`);
+    expect(text).toContain("… and 15 more");
+    const long = reviewerTask({ taskId: "t4", description: "d", files: [], report: "x".repeat(MAX_TASK_CHARS * 2), goal: "g" });
+    expect(long.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    expect(long.endsWith("…")).toBe(true);
   });
 });

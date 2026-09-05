@@ -379,6 +379,8 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 // registered beside the run tools for the same reasons.
 
 interface TeamTaskPayload {
+  /** The reviewer run that ruled on the current attempt, once there is one. */
+  reviewRunId?: string | null;
   task_id: string;
   task_description: string;
   assigned_to: string | null;
@@ -441,6 +443,7 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     for (const t of team.tasks) {
       const bits = [`${t.task_id} [${t.status}${t.review ? `, ${t.review.verdict}` : ""}]`, redact(firstLine(t.task_description, 120))];
       if (t.assigned_to) bits.push(`worker ${t.assigned_to}`);
+      if (t.reviewRunId) bits.push(`reviewer ${t.reviewRunId}`);
       if (t.depends_on.length) bits.push(`after ${t.depends_on.join(", ")}`);
       if (t.result) bits.push(`result: ${redact(firstLine(t.result, 200))}`);
       parts.push(`- ${bits.join(" — ")}`);
@@ -469,7 +472,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
 
   reg.tool(
     "coding_team_run",
-    "Hand a LARGER goal to a coding team on this ClawBox: a planner splits it into a few tasks, workers do them side by side in separate Claude Code sessions (each in its own git worktree, merged back as it finishes), and a reviewer checks each result — all on a shared board with an audit log. Use it for a goal that spans several parts or files; for one focused change use coding_agent_run instead. The team works in the background inside ONE folder and takes a while; call coding_team_status to follow it.",
+    "Hand a LARGER goal to a coding team on this ClawBox: a planner splits it into a few tasks, workers do them in separate Claude Code sessions — side by side in a folder project, each in its own git worktree and merged back as it finishes; one at a time in a code project — and a reviewer checks each result — all on a shared board with an audit log. Use it for a goal that spans several parts or files; for one focused change use coding_agent_run instead. The team works in the background inside ONE folder and takes a while; call coding_team_status to follow it.",
     {
       goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole. The planner reads the folder and writes the tasks; give the outcome and any constraints, not a task list."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
@@ -495,7 +498,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       }
       return text(
         `Started coding team "${team.id}" in ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}. `
-        + "The planner is reading the folder; workers follow one at a time. This takes a while. "
+        + "The planner is reading the folder; workers follow — side by side in a folder project, one at a time in a code project. This takes a while. "
         + "Tell the user it is running and stop — check on it later with coding_team_status.",
       );
     },

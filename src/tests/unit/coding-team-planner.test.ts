@@ -6,7 +6,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { MAX_TEAM_TASKS } from "@/lib/coding-team-board";
-import { parsePlan, PLANNER_BRIEF } from "@/lib/coding-team-planner";
+import { MAX_TASK_CHARS } from "@/lib/coding-agent";
+import { parsePlan, PLANNER_BRIEF, replanTask } from "@/lib/coding-team-planner";
 
 describe("parsePlan", () => {
   it("reads a bare array, and one fenced in prose", () => {
@@ -64,5 +65,19 @@ describe("parsePlan", () => {
     expect(PLANNER_BRIEF).toContain("files_hint");
     expect(PLANNER_BRIEF).toMatch(/change NOTHING/);
     expect(PLANNER_BRIEF).toContain(String(MAX_TEAM_TASKS));
+  });
+});
+
+describe("replanTask", () => {
+  it("quotes the answer that was not a plan, bounded, and stays inside the run route's cap", () => {
+    const text = replanTask("Build it", "Sure! Here is my thinking…", "no JSON array");
+    expect(text).toContain("Goal: Build it");
+    expect(text).toContain("no JSON array");
+    expect(text).toContain("Sure! Here is my thinking…");
+    expect(text).toContain("ONLY the JSON array");
+    expect(replanTask("Build it", null, "empty")).toContain("You answered nothing.");
+    const long = replanTask("g".repeat(MAX_TASK_CHARS * 2), "y".repeat(MAX_TASK_CHARS), "r");
+    expect(long.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    expect(long.endsWith("…")).toBe(true);
   });
 });

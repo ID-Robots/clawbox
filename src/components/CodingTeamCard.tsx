@@ -262,12 +262,12 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                       <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.team.after", { ids: task.depends_on.join(", ") })}</span>
                     )}
                     {task.assigned_to && (
-                      <button type="button" onClick={() => onOpenRun(task.assigned_to!)} data-testid={`coding-team-worker-${task.task_id}`} title={t("codingAgent.team.roleWorker", { task: task.task_id })} className="ml-auto text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
+                      <button type="button" onClick={() => onOpenRun(task.assigned_to!)} data-testid={`coding-team-worker-${task.task_id}`} title={t("codingAgent.team.roleWorker", { task: task.task_id })} aria-label={`${t("codingAgent.team.roleWorker", { task: task.task_id })} · ${task.assigned_to}`} className="ml-auto text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
                         {task.assigned_to}
                       </button>
                     )}
                     {task.reviewRunId && (
-                      <button type="button" onClick={() => onOpenRun(task.reviewRunId!)} data-testid={`coding-team-reviewer-${task.task_id}`} title={t("codingAgent.team.roleReviewer", { task: task.task_id })} className="text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
+                      <button type="button" onClick={() => onOpenRun(task.reviewRunId!)} data-testid={`coding-team-reviewer-${task.task_id}`} title={t("codingAgent.team.roleReviewer", { task: task.task_id })} aria-label={`${t("codingAgent.team.roleReviewer", { task: task.task_id })} · ${task.reviewRunId}`} className="text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
                         <span className="material-symbols-rounded align-[-2px] mr-0.5" style={{ fontSize: 12 }} aria-hidden="true">rate_review</span>{task.reviewRunId}
                       </button>
                     )}

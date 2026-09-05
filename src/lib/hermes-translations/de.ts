@@ -681,7 +681,7 @@ export const de: Record<string, string> = {
   "codingAgent.team.rolePlanner": "Team-Planer",
   "codingAgent.team.roleWorker": "Team-Arbeiter · {task}",
   "codingAgent.team.roleReviewer": "Team-Reviewer · {task}",
-  "codingAgent.team.agents": "{total} Agenten haben hier gearbeitet: {planner} Planer · {workers} Worker · {reviewers} Reviewer",
+  "codingAgent.team.agents": "{total} Agenten haben hier gearbeitet — Planer {planner} · Worker {workers} · Reviewer {reviewers}",
   "codingAgent.team.branch": "auf Branch {branch}, von {base}",
   "codingAgent.createNewProject": "App erstellen",
   "codingAgent.projectRuns": "Läufe",

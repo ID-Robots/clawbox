@@ -212,7 +212,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.rolePlanner": "Team planner",
   "codingAgent.team.roleWorker": "Team worker · {task}",
   "codingAgent.team.roleReviewer": "Team reviewer · {task}",
-  "codingAgent.team.agents": "{total} agents worked here: {planner} planner · {workers} workers · {reviewers} reviewers",
+  "codingAgent.team.agents": "{total} agents worked here — planner {planner} · workers {workers} · reviewers {reviewers}",
   "codingAgent.team.branch": "on branch {branch}, from {base}",
   "codingAgent.createNewProject": "Create app",
   "codingAgent.projectRuns": "Runs",

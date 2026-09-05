@@ -669,7 +669,7 @@ export const bg: Record<string, string> = {
   "codingAgent.team.rolePlanner": "Планировчик на екипа",
   "codingAgent.team.roleWorker": "Работник на екипа · {task}",
   "codingAgent.team.roleReviewer": "Рецензент на екипа · {task}",
-  "codingAgent.team.agents": "{total} агента работиха тук: {planner} планиращ · {workers} работници · {reviewers} рецензенти",
+  "codingAgent.team.agents": "{total} агента работиха тук — планиращ {planner} · работници {workers} · рецензенти {reviewers}",
   "codingAgent.team.branch": "в клон {branch}, от {base}",
   "codingAgent.createNewProject": "Създай приложение",
   "codingAgent.projectRuns": "Изпълнения",

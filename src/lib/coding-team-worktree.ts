@@ -43,6 +43,30 @@ function git(dir: string, args: string[]): Promise<ChildResult> {
 const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
 
+/**
+ * One lock per repository: workers settle in any order, and two merges (or a
+ * merge and a worktree add) on the same checkout share ONE git index — the
+ * second would trip over `.git/index.lock`, or its `merge --abort` would undo
+ * the first's conflict. Every operation below that touches the main
+ * checkout runs under the folder's lock, in the order it was asked.
+ */
+const dirLocks = new Map<string, Promise<void>>();
+async function withDirLock<T>(dir: string, fn: () => Promise<T>): Promise<T> {
+  const key = path.resolve(dir);
+  const previous = dirLocks.get(key) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const mine = new Promise<void>((resolve) => { release = resolve; });
+  const chained = previous.then(() => mine);
+  dirLocks.set(key, chained);
+  await previous;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (dirLocks.get(key) === chained) dirLocks.delete(key);
+  }
+}
+
 export function teamBranchName(teamId: string): string {
   return `clawbox/${teamId}`;
 }
@@ -59,7 +83,11 @@ export function workerBranchName(teamId: string, taskId: string, attempt: number
  * commits gets an empty first one, for the same reason startRunBranch does:
  * `checkout -b` on an unborn HEAD renames it rather than forking.
  */
-export async function ensureTeamBranch(dir: string, teamId: string): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
+export function ensureTeamBranch(dir: string, teamId: string): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
+  return withDirLock(dir, () => ensureTeamBranchNow(dir, teamId));
+}
+
+async function ensureTeamBranchNow(dir: string, teamId: string): Promise<{ ok: true; branch: string; base: string } | { ok: false; detail: string }> {
   const inside = await git(dir, ["rev-parse", "--is-inside-work-tree"]);
   if (!ok(inside)) return { ok: false, detail: failureDetail(inside, "Reading the git repository", "Make the folder a git repository first.") };
   const head = await git(dir, ["rev-parse", "--verify", "HEAD"]);
@@ -82,7 +110,14 @@ async function excludeWorktrees(dir: string): Promise<void> {
   if (!ok(gitDir)) return;
   const exclude = path.resolve(dir, out(gitDir), "info", "exclude");
   try {
-    const current = fs.existsSync(exclude) ? fs.readFileSync(exclude, "utf8") : "";
+    // Read, never exists-then-read: a file that appears in between is read
+    // as it is, and one that is not there reads as empty.
+    let current = "";
+    try {
+      current = fs.readFileSync(exclude, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
     if (!/^\/\.clawbox\/$/m.test(current)) {
       fs.mkdirSync(path.dirname(exclude), { recursive: true });
       fs.appendFileSync(exclude, `${current.endsWith("\n") || current === "" ? "" : "\n"}/.clawbox/\n`);
@@ -93,7 +128,11 @@ async function excludeWorktrees(dir: string): Promise<void> {
 }
 
 /** A worker's own worktree and branch, forked from the team branch as it stands now. */
-export async function addWorkerWorktree(dir: string, teamId: string, taskId: string, attempt: number): Promise<{ ok: true; path: string; branch: string } | { ok: false; detail: string }> {
+export function addWorkerWorktree(dir: string, teamId: string, taskId: string, attempt: number): Promise<{ ok: true; path: string; branch: string } | { ok: false; detail: string }> {
+  return withDirLock(dir, () => addWorkerWorktreeNow(dir, teamId, taskId, attempt));
+}
+
+async function addWorkerWorktreeNow(dir: string, teamId: string, taskId: string, attempt: number): Promise<{ ok: true; path: string; branch: string } | { ok: false; detail: string }> {
   const branch = workerBranchName(teamId, taskId, attempt);
   const target = path.join(dir, WORKTREES_DIR, `${taskId}-${attempt}`);
   fs.mkdirSync(path.join(dir, WORKTREES_DIR), { recursive: true });
@@ -107,24 +146,30 @@ export async function addWorkerWorktree(dir: string, teamId: string, taskId: str
  * it). `merged: false` when the branch added nothing. A conflict is
  * aborted, never resolved by guess, and reported with git's own words.
  */
-export async function mergeWorkerBranch(dir: string, branch: string, message: string): Promise<{ ok: true; merged: boolean } | { ok: false; conflict: boolean; detail: string }> {
-  const ahead = await git(dir, ["rev-list", "--count", `HEAD..${branch}`]);
-  if (ok(ahead) && out(ahead) === "0") return { ok: true, merged: false };
-  const merged = await git(dir, ["merge", "--no-ff", "--no-edit", "-m", message, branch]);
-  if (ok(merged)) return { ok: true, merged: true };
-  const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
-  await git(dir, ["merge", "--abort"]);
-  return { ok: false, conflict, detail: failureDetail(merged, `Merging ${branch} into the team branch`) };
+export function mergeWorkerBranch(dir: string, branch: string, message: string): Promise<{ ok: true; merged: boolean } | { ok: false; conflict: boolean; detail: string }> {
+  return withDirLock(dir, async () => {
+    const ahead = await git(dir, ["rev-list", "--count", `HEAD..${branch}`]);
+    if (ok(ahead) && out(ahead) === "0") return { ok: true, merged: false };
+    const merged = await git(dir, ["merge", "--no-ff", "--no-edit", "-m", message, branch]);
+    if (ok(merged)) return { ok: true, merged: true };
+    const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
+    await git(dir, ["merge", "--abort"]);
+    return { ok: false, conflict, detail: failureDetail(merged, `Merging ${branch} into the team branch`) };
+  });
 }
 
 /** The worktree's files go; its branch stays as history. */
-export async function removeWorktree(dir: string, worktreePath: string): Promise<void> {
-  await git(dir, ["worktree", "remove", "--force", worktreePath]);
-  await git(dir, ["worktree", "prune"]);
+export function removeWorktree(dir: string, worktreePath: string): Promise<void> {
+  return withDirLock(dir, async () => {
+    await git(dir, ["worktree", "remove", "--force", worktreePath]);
+    await git(dir, ["worktree", "prune"]);
+  });
 }
 
 /** The files a worker's branch changed against the team branch, for the reviewer's brief. */
-export async function changedFiles(dir: string, branch: string): Promise<string[]> {
-  const r = await git(dir, ["diff", "--name-only", `HEAD...${branch}`]);
-  return ok(r) ? out(r).split("\n").map((x) => x.trim()).filter(Boolean) : [];
+export function changedFiles(dir: string, branch: string): Promise<string[]> {
+  return withDirLock(dir, async () => {
+    const r = await git(dir, ["diff", "--name-only", `HEAD...${branch}`]);
+    return ok(r) ? out(r).split("\n").map((x) => x.trim()).filter(Boolean) : [];
+  });
 }

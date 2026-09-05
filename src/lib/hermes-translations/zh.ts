@@ -693,7 +693,7 @@ export const zh: Record<string, string> = {
   "codingAgent.team.rolePlanner": "团队规划者",
   "codingAgent.team.roleWorker": "团队工作者 · {task}",
   "codingAgent.team.roleReviewer": "团队审核者 · {task}",
-  "codingAgent.team.agents": "{total} 个代理在此工作：规划者 {planner} · 工作者 {workers} · 审核者 {reviewers}",
+  "codingAgent.team.agents": "{total} 个代理在此工作 — 规划者 {planner} · 工作者 {workers} · 审核者 {reviewers}",
   "codingAgent.team.branch": "在分支 {branch} 上，源自 {base}",
   "codingAgent.createNewProject": "创建应用",
   "codingAgent.projectRuns": "运行记录",

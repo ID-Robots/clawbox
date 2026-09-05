@@ -11,6 +11,7 @@
  * shell.
  */
 
+import { MAX_TASK_CHARS } from "@/lib/coding-agent";
 import { MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS } from "@/lib/coding-team-board";
 
 export interface PlannedTask {
@@ -38,12 +39,13 @@ const REPLAN_QUOTE_CHARS = 1_500;
  */
 export function replanTask(goal: string, previous: string | null | undefined, reason: string): string {
   const quoted = (previous ?? "").trim();
-  return [
+  const text = [
     `Goal: ${goal}`,
     `Your previous answer to this goal was not a plan the team can read (${reason}).`,
     quoted ? `This is what you answered:\n${quoted.length > REPLAN_QUOTE_CHARS ? `${quoted.slice(0, REPLAN_QUOTE_CHARS - 1)}…` : quoted}` : "You answered nothing.",
     "Answer again with ONLY the JSON array of tasks described in your brief — no prose before or after it. Read the folder again only if you must.",
   ].join("\n\n");
+  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
 }
 
 export interface PlanParse {

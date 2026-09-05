@@ -682,7 +682,7 @@ export const nl: Record<string, string> = {
   "codingAgent.team.rolePlanner": "Planner van het team",
   "codingAgent.team.roleWorker": "Werker van het team · {task}",
   "codingAgent.team.roleReviewer": "Teamreviewer · {task}",
-  "codingAgent.team.agents": "{total} agents werkten hier: {planner} planner · {workers} workers · {reviewers} reviewers",
+  "codingAgent.team.agents": "{total} agents werkten hier — planner {planner} · workers {workers} · reviewers {reviewers}",
   "codingAgent.team.branch": "op branch {branch}, vanaf {base}",
   "codingAgent.createNewProject": "App maken",
   "codingAgent.projectRuns": "Runs van dit project",

@@ -684,7 +684,7 @@ export const ja: Record<string, string> = {
   "codingAgent.team.rolePlanner": "チームのプランナー",
   "codingAgent.team.roleWorker": "チームのワーカー · {task}",
   "codingAgent.team.roleReviewer": "チームのレビュアー · {task}",
-  "codingAgent.team.agents": "{total} 体のエージェントが作業しました：プランナー {planner} · ワーカー {workers} · レビュアー {reviewers}",
+  "codingAgent.team.agents": "{total} 体のエージェントが作業しました — プランナー {planner} · ワーカー {workers} · レビュアー {reviewers}",
   "codingAgent.team.branch": "ブランチ {branch}（{base} から）",
   "codingAgent.createNewProject": "アプリを作成",
   "codingAgent.projectRuns": "実行",

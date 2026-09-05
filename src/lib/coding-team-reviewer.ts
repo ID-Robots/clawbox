@@ -12,6 +12,8 @@
  * is not an acceptance.
  */
 
+import { MAX_TASK_CHARS } from "@/lib/coding-agent";
+
 export interface Verdict {
   verdict: "accepted" | "rejected";
   notes: string;
@@ -24,15 +26,20 @@ export const REVIEWER_BRIEF = [
 ].join(" ");
 
 export const MAX_NOTES_CHARS = 2_000;
+/** How many changed files the reviewer is told about by name; the rest are counted. */
+export const MAX_REVIEW_FILES = 40;
 
-/** The reviewer's task text: the task, what changed, what the worker said. */
+/** The reviewer's task text: the task, what changed, what the worker said — inside the run route's cap. */
 export function reviewerTask(input: { taskId: string; description: string; files: string[]; report: string; goal: string }): string {
-  return [
+  const named = input.files.slice(0, MAX_REVIEW_FILES);
+  const more = input.files.length - named.length;
+  const text = [
     `Review task ${input.taskId}: ${input.description}`,
     `Team goal, for context: ${input.goal}`,
-    input.files.length ? `Files the worker changed:\n${input.files.map((f) => `- ${f}`).join("\n")}` : "The worker's branch changed no files.",
+    input.files.length ? `Files the worker changed:\n${named.map((f) => `- ${f}`).join("\n")}${more > 0 ? `\n- … and ${more} more` : ""}` : "The worker's branch changed no files.",
     `The worker's report:\n${input.report.trim() || "(none)"}`,
   ].join("\n\n");
+  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
 }
 
 export function parseVerdict(text: string | null | undefined): { ok: true; verdict: Verdict } | { ok: false; reason: string } {

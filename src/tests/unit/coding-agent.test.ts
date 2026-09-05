@@ -22,6 +22,9 @@ import { saveEnv } from "@/tests/helpers/env";
 
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
+// A roomy box unless a test says otherwise: the team's spawn slot reads it.
+const memAvailable = vi.hoisted(() => vi.fn(async (): Promise<number | null> => 8000));
+vi.mock("@/lib/mem-available", () => ({ memAvailableMb: memAvailable }));
 
 type Lib = typeof import("@/lib/coding-agent");
 
@@ -2078,5 +2081,39 @@ describe("the run's plan", () => {
     expect(fresh.getRun(id)?.todos).toEqual([{ content: "Wire it", status: "in_progress", activeForm: "Wiring it" }]);
     // A record from before the field existed reads as "never planned".
     expect(fresh.parseTodosForTests(undefined)).toBeNull();
+  });
+});
+
+describe("the team's spawn slot", () => {
+  const liveWorker = (teamId: string) => ({
+    id: "run-teamwork", task: "a task", directory: home, projectId: null, source: "agent", status: "running",
+    startedAt: Date.now() - 60_000, completedAt: null, sessionId: null, model: null, summary: null, error: null,
+    progress: [], filesChanged: [], commands: [], permissionDenials: [], numTurns: 0, tokensUsed: 0,
+    team: { id: teamId, role: "worker", taskId: "t1" },
+  });
+
+  it("admits a second worker of the same team only while the box has room, and treats no reading as no room", async () => {
+    fs.writeFileSync(runsFile(), JSON.stringify([liveWorker("team-1")]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    memAvailable.mockResolvedValueOnce(8000);
+    expect(await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" })).toEqual({ ok: true });
+    memAvailable.mockResolvedValueOnce(300);
+    const tight = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" });
+    expect(tight).toMatchObject({ ok: false, wait: true });
+    expect((tight as { reason: string }).reason).toContain("300 MB free");
+    memAvailable.mockResolvedValueOnce(null);
+    const unknown = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" });
+    expect(unknown).toMatchObject({ ok: false, wait: true });
+    expect((unknown as { reason: string }).reason).toContain("Cannot read");
+  });
+
+  it("refuses outright, not as a wait, while a stranger's run holds the box", async () => {
+    fs.writeFileSync(runsFile(), JSON.stringify([liveWorker("team-other")]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    const slot = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" });
+    expect(slot).toMatchObject({ ok: false, wait: false });
+    expect(memAvailable).not.toHaveBeenCalled();
   });
 });

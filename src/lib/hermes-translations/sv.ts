@@ -678,7 +678,7 @@ export const sv: Record<string, string> = {
   "codingAgent.team.rolePlanner": "Teamets planerare",
   "codingAgent.team.roleWorker": "Teamets arbetare · {task}",
   "codingAgent.team.roleReviewer": "Teamets granskare · {task}",
-  "codingAgent.team.agents": "{total} agenter arbetade här: {planner} planerare · {workers} arbetare · {reviewers} granskare",
+  "codingAgent.team.agents": "{total} agenter arbetade här — planerare {planner} · arbetare {workers} · granskare {reviewers}",
   "codingAgent.team.branch": "på grenen {branch}, från {base}",
   "codingAgent.createNewProject": "Skapa app",
   "codingAgent.projectRuns": "Körningar",

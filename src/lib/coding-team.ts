@@ -290,7 +290,13 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       if (inFlight.size >= slots) break;
       if (inFlight.size >= 1) {
         const slot = await teamSpawnSlot({ id: board.id, role: "worker", taskId: task.task_id });
-        if (!slot.ok) { waitingForRoom = slot.wait; break; }
+        if (!slot.ok) {
+          waitingForRoom = slot.wait;
+          // A refusal that is not "wait" — a stranger's run holds the box —
+          // goes on the board, or the team ends with "never ran" and no why.
+          if (!slot.wait) bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `No worker for ${task.task_id}: ${slot.reason}` });
+          break;
+        }
       }
       const work = workTask(team, task, source)
         .catch((err) => {
