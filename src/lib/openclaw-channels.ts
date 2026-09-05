@@ -574,6 +574,18 @@ async function readChannelStatusPayload(
  * Prefer the per-ACCOUNT row: it is the only one that carries `connected` and
  * `tokenStatus`. The channel-level row — which has neither — is the fallback
  * for a payload that has no accounts yet.
+ *
+ * The un-filtered read does NOT change what this means. Captured on the
+ * OpenClaw box, gateway up, WhatsApp never linked and Discord never
+ * configured: `channels status --json` and `channels status --channel whatsapp
+ * --json` carry the SAME `channelAccounts.whatsapp[0]` and the SAME
+ * `channels.whatsapp` object, field for field. Only the SET of channels
+ * listed differs — the un-filtered form lists every channel the gateway knows,
+ * the filtered form lists the one it was asked about. So a channel absent from
+ * an un-filtered payload is one that would have been absent from its own
+ * filtered read too, and every memoised caller reads exactly the row it read
+ * before. Pinned from those captures in
+ * `src/tests/routes/channels/status-payload-shapes.test.ts`.
  */
 function rowFromPayload(
   payload: ChannelStatusPayload,
