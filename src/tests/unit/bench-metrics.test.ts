@@ -6,6 +6,10 @@
  */
 import { describe, expect, it } from "vitest";
 import { costOfUsage, formatUsd, loadPricing, ratesFor } from "../../../bench/lib/cost.mjs";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { appendFigure, readFigures } from "../../../bench/lib/figures-file.mjs";
 import { deltaByTask, figureKey, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "../../../bench/lib/metrics.mjs";
 
 const PRICING = { currency: "USD", models: { "deepseek-v4-pro[1m]": { input: 1, output: 2, cacheRead: 0.1 }, "deepseek-v4-flash": { input: 0.1, output: 0.2 } } };
@@ -134,5 +138,24 @@ describe("a cycle's figures", () => {
     expect(formatMs(4_000)).toBe("4s");
     expect(formatTokens(1_234_567)).toBe("1.23M");
     expect(formatTokens(45_600)).toBe("46k");
+  });
+});
+
+describe("the cycle's figures on disk", () => {
+  it("keeps a run that never started beside the ones that did, and reads the cycle back as it was", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bench-figures-"));
+    const file = path.join(dir, "v1", "loop-c1.jsonl");
+    try {
+      expect(readFigures(file)).toBeNull();
+      const started = taskFigures({ line: { task: "a", tier: "S", runId: "run-1", outcome: "completed", score: 90, wallMs: 1000, subagentsByType: {}, modelsUsed: [] }, cost: costOfUsage({ "deepseek-v4-flash": { input: 1_000_000, output: 0 } }, PRICING), parallel: parallelism([], 0), cycle: "c1" });
+      const refused = taskFigures({ line: { task: "b", tier: "S", runId: null, outcome: "not-started", wallMs: null, subagentsByType: {}, modelsUsed: [] }, cost: costOfUsage(null, PRICING), parallel: parallelism([], 0), cycle: "c1" });
+      appendFigure(file, started);
+      appendFigure(file, refused);
+      const back = readFigures(file);
+      expect(back).toEqual([started, refused]);
+      expect(summarizeCycle(back!)).toMatchObject({ runs: 2, completed: 1, costUsd: 0.1 });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -20,6 +20,7 @@ import { captureRun } from "./lib/capture.mjs";
 import { costOfUsage, formatUsd, loadPricing } from "./lib/cost.mjs";
 import crypto from "node:crypto";
 import { deltaByTask, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "./lib/metrics.mjs";
+import { appendFigure, readFigures as readFiguresFile } from "./lib/figures-file.mjs";
 
 const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const TASKS_DIR = path.join(BENCH_DIR, "tasks");
@@ -115,10 +116,12 @@ async function sampleUntilSettled(runId, deadline, samples) {
   }
 }
 
+function figuresFile(suiteVersion, label) {
+  return path.join(RESULTS_DIR, suiteVersion, `loop-${label}.jsonl`);
+}
+
 function readFigures(suiteVersion, label) {
-  const file = path.join(RESULTS_DIR, suiteVersion, `loop-${label}.jsonl`);
-  if (!fs.existsSync(file)) return null;
-  return fs.readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  return readFiguresFile(figuresFile(suiteVersion, label));
 }
 
 /** A stamp no two runs share: the second, and 128 random bits after it. */
@@ -162,6 +165,12 @@ function writeReport({ suiteVersion, label, figures, summary, deltas, baseline, 
 
 async function runCycle({ args, suite, tasks, label, projectsRoot, pricing }) {
   const figures = [];
+  // Every figure — a run that never started too — goes to the cycle's JSONL
+  // as it lands, so a later baseline reload sees the cycle the report saw.
+  const record = (fig) => {
+    figures.push(fig);
+    appendFigure(figuresFile(suite.suiteVersion, label), fig);
+  };
   const plan = tasks.flatMap((t) => Array.from({ length: args.repeat }, (_, i) => ({ task: t, rep: i + 1 })));
   for (const { task, rep } of plan) {
     const workdir = seedProject(task, projectsRoot, stamp());
@@ -171,7 +180,7 @@ async function runCycle({ args, suite, tasks, label, projectsRoot, pricing }) {
       console.error(`  run refused: ${started.status} ${started.text.slice(0, 300)}`);
       // A run that never started spent nothing: zero usage priced as zero,
       // so the cycle's cost stays a number rather than "n/a".
-      figures.push(taskFigures({ line: { task: task.id, tier: task.tier, runId: null, outcome: "not-started", wallMs: null, subagentsByType: {}, modelsUsed: [] }, cost: costOfUsage(null, pricing), parallel: parallelism([], 0), cycle: label, rep }));
+      record(taskFigures({ line: { task: task.id, tier: task.tier, runId: null, outcome: "not-started", wallMs: null, subagentsByType: {}, modelsUsed: [] }, cost: costOfUsage(null, pricing), parallel: parallelism([], 0), cycle: label, rep }));
       if (started.status === 409 && started.json?.kind === "busy") { console.error("  a run is already in progress — one at a time; stopping this cycle."); break; }
       continue;
     }
@@ -203,8 +212,7 @@ async function runCycle({ args, suite, tasks, label, projectsRoot, pricing }) {
     const cost = costOfUsage(line.usageByModel, pricing);
     const parallel = parallelism(samples, wallMs);
     const fig = taskFigures({ line, cost, parallel, cycle: label, rep });
-    figures.push(fig);
-    fs.appendFileSync(path.join(RESULTS_DIR, suite.suiteVersion, `loop-${label}.jsonl`), JSON.stringify(fig) + "\n");
+    record(fig);
     console.log(`  ${outcome} in ${formatMs(fig.endToEndMs)} (${formatMs(wallMs)} to settle) — score ${score ? `${score.score}/100` : "n/a"}, ${formatTokens(line.tokensUsed)} tok, ${cost.totalUsd === null ? `cost n/a (${formatUsd(cost.pricedUsd)} priced)` : formatUsd(cost.totalUsd)}, peak ${parallel.peakActive} helper(s), agent-s/wall-s ${parallel.agentSecondsPerWallSecond}`);
     if (cost.unpriced.length) console.log(`  unpriced: ${cost.unpriced.join(", ")} — set bench/pricing.json`);
   }
