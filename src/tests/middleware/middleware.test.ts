@@ -69,6 +69,52 @@ describe("middleware", () => {
     return `${payload}.${signatureHex}`;
   }
 
+  describe("trailing-slash redirect (step 0)", () => {
+    /**
+     * The redirect has to land on the SLASHLESS path. It did not: `NextURL`
+     * captures `trailingSlash` when it parses the URL, its `pathname` setter
+     * leaves that flag alone, and `href`/`toString()` — which is what
+     * `NextResponse.redirect` serialises — re-adds the slash from it. So every
+     * page path typed with a trailing slash 308'd to itself, forever.
+     */
+    it.each(["/setup/", "/login/", "/portal/", "/updating/", "/app/", "/apps/", "/chat/"])(
+      "sends %s to the same path without the slash, not back to itself",
+      async (pathname) => {
+        const response = await middleware(createRequest(pathname));
+
+        expect(response.status).toBe(308);
+        const target = new URL(response.headers.get("location")!, "http://localhost");
+        expect(target.pathname).toBe(pathname.replace(/\/+$/, ""));
+      },
+    );
+
+    it("collapses repeated trailing slashes in one hop", async () => {
+      const response = await middleware(createRequest("/setup///"));
+
+      expect(response.status).toBe(308);
+      expect(new URL(response.headers.get("location")!, "http://localhost").pathname).toBe("/setup");
+    });
+
+    it("is not cacheable, so a browser cannot replay a stale one", async () => {
+      // A 308 is cacheable by default (RFC 7538 §3) and browsers treat a
+      // permanent redirect as durable. Both shipped boxes served the
+      // self-referencing loop AS a permanent redirect, so without this a
+      // browser that cached it stays broken after the box is updated.
+      const response = await middleware(createRequest("/setup/"));
+
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    });
+
+    it("keeps the query string", async () => {
+      const response = await middleware(createRequest("/login/?next=%2Fportal"));
+
+      expect(response.status).toBe(308);
+      const target = new URL(response.headers.get("location")!, "http://localhost");
+      expect(target.pathname).toBe("/login");
+      expect(target.searchParams.get("next")).toBe("/portal");
+    });
+  });
+
   describe("Android captive portal", () => {
     it("redirects /generate_204 to portal", async () => {
       const request = createRequest("/generate_204");

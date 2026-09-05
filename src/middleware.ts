@@ -388,9 +388,25 @@ export async function middleware(request: NextRequest) {
   {
     const raw = request.nextUrl.pathname;
     if (raw.length > 1 && raw.endsWith("/") && !isAppProxyPath(raw) && !raw.startsWith("/setup-api/") && !raw.startsWith("/api/") && !raw.startsWith("/_next/")) {
-      const url = request.nextUrl.clone();
-      url.pathname = raw.replace(/\/+$/, "") || "/";
-      return NextResponse.redirect(url, 308);
+      // A PLAIN `URL`, never `request.nextUrl.clone()`: `NextURL` records the
+      // trailing slash in a `trailingSlash` flag when it parses the URL, its
+      // `pathname` setter writes the pathname and leaves that flag set, and
+      // `href`/`toString()` — what `NextResponse.redirect` serialises — re-add
+      // the slash from the flag. The Location therefore came back as the path
+      // being redirected AWAY from, i.e. an infinite 308 loop on every page
+      // path typed with a slash. A plain `URL` carries no such flag.
+      const url = new URL(request.url);
+      url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+      // `no-store`, because a 308 is cacheable by default (RFC 7538 §3) and
+      // browsers treat a permanent redirect as durable. Both shipped boxes
+      // served `/setup/ → /setup/` as a PERMANENT redirect, so a browser that
+      // cached it replays the loop without asking the box and the fix reads as
+      // "did not work". An uncacheable canonical redirect costs one request and
+      // takes the whole class away.
+      return NextResponse.redirect(url, {
+        status: 308,
+        headers: { "cache-control": "no-store" },
+      });
     }
   }
 
