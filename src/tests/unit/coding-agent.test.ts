@@ -391,6 +391,10 @@ describe("a run", () => {
     expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
     for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
+    // The one command list that IS shipped: killing by name, and killing
+    // everything, are denied even though every command is otherwise allowed.
+    const denied = argv.slice(argv.indexOf("--disallowedTools") + 1);
+    for (const rule of lib.BASH_KILL_DENYLIST) expect(denied).toContain(rule);
     // A run may read what it put in /tmp; the rule is the last of the allowed list.
     expect(argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools"))).toContain(lib.TMP_READ_RULE);
     expect(argv).toContain("--agents");

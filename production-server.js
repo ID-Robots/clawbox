@@ -526,15 +526,7 @@ http.Server.prototype.listen = function (...args) {
 
 require("./.next/standalone/server.js");
 
-// Next names this process `next-server (v…)` as it starts — which is also
-// what a coding run's `pkill -f next-server`, meant for the dev server the
-// run started, matches. It matched on 2026-09-05 and took the box's web
-// server down with the run. So the title is ours again as soon as Next has
-// set it (the assignment happens inside its async start, hence the retries),
-// and nothing looking for "next" by name finds this process.
-const CLAWBOX_PROCESS_TITLE = "clawbox-web";
-function reclaimProcessTitle() {
-  if (process.title !== CLAWBOX_PROCESS_TITLE) process.title = CLAWBOX_PROCESS_TITLE;
-}
-reclaimProcessTitle();
-for (const delay of [250, 1000, 3000, 10000]) setTimeout(reclaimProcessTitle, delay).unref();
+// After Next has started: the title Next gave this process is ours again
+// (scripts/process-title.js says why — a run's `pkill -f next-server` took
+// the box down on 2026-09-05).
+require("./scripts/process-title.js").guardProcessTitle();

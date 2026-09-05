@@ -557,14 +557,23 @@ export const BASH_ALLOWLIST: readonly string[] = [
 export const BASH_DENYLIST: readonly string[] = [
   "Bash(sudo:*)", "Bash(su:*)", "Bash(rm:*)", "Bash(curl:*)", "Bash(wget:*)", "Bash(ssh:*)", "Bash(scp:*)",
   "Bash(systemctl:*)", "Bash(nmcli:*)", "Bash(reboot:*)", "Bash(shutdown:*)",
-  // Killing by NAME. The box's own web server is a Next server — its process
-  // title is `next-server (v…)` — and on 2026-09-05 a run's `pkill -f
-  // next-server`, meant for the dev server it had started, took ClawBox
-  // down with it: systemd restarted the box's server, which marked the
-  // run lost fourteen minutes in. A run ends what it started by PID.
-  "Bash(pkill:*)", "Bash(killall:*)", "Bash(fuser:*)", "Bash(kill -1:*)", "Bash(kill -9 -1:*)", "Bash(kill -15 -1:*)", "Bash(kill -TERM -1:*)", "Bash(kill -KILL -1:*)",
   "Bash(git push:*)", "Bash(git reset:*)", "Bash(git clean:*)", "Bash(git checkout:*)",
   "Bash(openclaw:*)", "Bash(hermes:*)", "Bash(claude:*)", "Bash(claude-ds:*)", "Bash(clawbox:*)",
+];
+
+/**
+ * The ONE command deny-list a run is actually started with. Every command is
+ * allowed (`Bash(*)`, see buildRunArgs) except killing by NAME and killing
+ * every process: the box's own web server is a Next server, and on
+ * 2026-09-05 a run's `pkill -f next-server`, meant for the dev server it had
+ * started, took ClawBox down with it — systemd restarted the box's server,
+ * which marked the run lost fourteen minutes in. A run ends what it started
+ * by PID. A deny rule outranks any allow rule in Claude Code, so `Bash(*)`
+ * cannot reach these.
+ */
+export const BASH_KILL_DENYLIST: readonly string[] = [
+  "Bash(pkill:*)", "Bash(killall:*)", "Bash(fuser:*)",
+  "Bash(kill -1:*)", "Bash(kill -9 -1:*)", "Bash(kill -15 -1:*)", "Bash(kill -TERM -1:*)", "Bash(kill -KILL -1:*)", "Bash(kill -s:*)",
 ];
 
 /**
@@ -2635,7 +2644,9 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // the deny rules below still win for anything secret, and a write
     // outside the folder is still refused.
     args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE);
-    args.push("--disallowedTools", ...fileDenyRules());
+    // The file rules, and the one command list that is enforced: nothing a
+    // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
+    args.push("--disallowedTools", ...fileDenyRules(), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST));
   }
   return args;
 }
