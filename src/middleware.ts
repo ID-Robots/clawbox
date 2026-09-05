@@ -395,9 +395,18 @@ export async function middleware(request: NextRequest) {
       // the slash from the flag. The Location therefore came back as the path
       // being redirected AWAY from, i.e. an infinite 308 loop on every page
       // path typed with a slash. A plain `URL` carries no such flag.
-      const url = new URL(request.nextUrl.href);
+      const url = new URL(request.url);
       url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-      return NextResponse.redirect(url, 308);
+      // `no-store`, because a 308 is cacheable by default (RFC 7538 §3) and
+      // browsers treat a permanent redirect as durable. Both shipped boxes
+      // served `/setup/ → /setup/` as a PERMANENT redirect, so a browser that
+      // cached it replays the loop without asking the box and the fix reads as
+      // "did not work". An uncacheable canonical redirect costs one request and
+      // takes the whole class away.
+      return NextResponse.redirect(url, {
+        status: 308,
+        headers: { "cache-control": "no-store" },
+      });
     }
   }
 

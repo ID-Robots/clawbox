@@ -95,6 +95,16 @@ describe("middleware", () => {
       expect(new URL(response.headers.get("location")!, "http://localhost").pathname).toBe("/setup");
     });
 
+    it("is not cacheable, so a browser cannot replay a stale one", async () => {
+      // A 308 is cacheable by default (RFC 7538 §3) and browsers treat a
+      // permanent redirect as durable. Both shipped boxes served the
+      // self-referencing loop AS a permanent redirect, so without this a
+      // browser that cached it stays broken after the box is updated.
+      const response = await middleware(createRequest("/setup/"));
+
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    });
+
     it("keeps the query string", async () => {
       const response = await middleware(createRequest("/login/?next=%2Fportal"));
 
