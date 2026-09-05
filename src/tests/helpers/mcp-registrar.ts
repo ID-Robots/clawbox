@@ -11,6 +11,7 @@
 
 import type { ToolErrorEnvelope } from "../../../mcp/lib/errors";
 import { toolErrorResult } from "../../../mcp/lib/errors";
+import { capResult, DEFAULT_MAX_CHARS } from "../../../mcp/lib/register";
 import type { Registrar, ToolHandler, ToolOpts, ToolResult } from "../../../mcp/lib/register";
 import type { Shape } from "../../../mcp/lib/schema";
 
@@ -76,7 +77,12 @@ export function captureRegistrar(edition: "openclaw" | "hermes" = "hermes"): Cap
     get,
     async call(name, args = {}) {
       try {
-        const result = await get(name).handler(args);
+        const tool = get(name);
+        // Through the SAME output cap the dispatcher applies. Without it a
+        // result that outgrew its maxChars looked whole here and was
+        // hard-sliced on the device, which is how two list tools came to sit
+        // over their cap with a green suite.
+        const result = capResult(await tool.handler(args), tool.opts.maxChars ?? DEFAULT_MAX_CHARS);
         const text = result.content
           .map((part) => (part.type === "text" ? part.text : `[image ${part.mimeType}]`))
           .join("\n");
