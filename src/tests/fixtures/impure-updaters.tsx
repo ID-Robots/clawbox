@@ -31,6 +31,7 @@ export function shapes(
   setWithFetch: Setter<string>,
   setWithKvWrite: Setter<string>,
   setWithDeferredWrite: Setter<string>,
+  applyWithOptions: (next: string | ((prev: string) => string), opts: { merge: boolean }) => void,
   catalog: { setSort: (next: string) => void },
   kv: { set: (key: string, value: string) => void },
   streamingRef: { current: string },
@@ -110,6 +111,17 @@ export function shapes(
     kv.set("clawbox:fixture", "1");
     return prev;
   });
+
+  // An `apply*` wrapper carrying an OPTIONS OBJECT. The opener used to require
+  // EXACTLY one argument, so a project wrapper that grew a second parameter
+  // opened nothing and its updater went unread — while the docblock puts these
+  // wrappers in scope precisely because they are the project's own and are the
+  // kind that grows options. React's own setters take one argument, so nothing
+  // else widened.
+  applyWithOptions((prev) => {
+    kv.set("clawbox:fixture", "2");
+    return prev;
+  }, { merge: true });
 
   // A timer INSIDE an updater, which is the half of the NOT_UPDATERS rule the
   // comment used to get wrong. The timer CALL is not reported — React never

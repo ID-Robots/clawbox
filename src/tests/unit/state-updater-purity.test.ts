@@ -243,12 +243,19 @@ function impureUpdaters(relativePath: string): string[] {
   };
 
   const visit = (node: ts.Node) => {
-    if (ts.isCallExpression(node) && node.arguments.length === 1) {
+    if (ts.isCallExpression(node) && node.arguments.length >= 1) {
       const name = calleeName(node);
       const arg = node.arguments[0];
-      // A function passed as the ONLY argument to a state writer is an updater:
-      // an arrow, and `function (prev) { … }` too — the shape a regex opener
-      // missed and the shape a refactor reaches for when the body grows.
+      // A function passed as the FIRST argument to a state writer is an
+      // updater: an arrow, and `function (prev) { … }` too — the shape a regex
+      // opener missed and the shape a refactor reaches for when the body grows.
+      //
+      // FIRST rather than ONLY, because the docblock above puts the project's
+      // own `apply*` wrappers in scope and a project wrapper is exactly the kind
+      // that grows an options object: `applyThing(prev => …, { merge: true })`
+      // opened nothing under an exact-arity test. React's own setters take one
+      // argument, so this only widens the wrapper case, and `setTimeout` and
+      // friends are excluded by NOT_UPDATERS rather than by arity.
       if (name && isStateWriter(name) && (ts.isArrowFunction(arg) || ts.isFunctionExpression(arg))) {
         const hits = impurities(arg.body);
         if (hits.length > 0) {
@@ -274,10 +281,24 @@ describe("no state write inside a state updater", () => {
     //
     // Two anchors, and a floor under each layer: the surface the defect was on,
     // and the shared state both surfaces consume.
+    //
+    // ROOTS itself is PINNED rather than floored, because it is the one layer
+    // where a narrowing removes a CASE instead of failing one: the sweep below
+    // is `it.each(ROOTS)`, so dropping `src/app` — 200 of the 643 files, and
+    // where three of the ten offenders this branch fixes lived, `page.tsx`
+    // among them — left five green ticks over a third of the tree that had
+    // stopped being read, under the 300 floor and both anchors alike
+    // (measured). The pin bites in the other direction too: a root ADDED
+    // without the floor beneath it.
+    expect(ROOTS).toEqual(["src/components", "src/hooks", "src/app", "src/lib"]);
     const files = ROOTS.flatMap((root) => sourceFiles(root));
     expect(files.length).toBeGreaterThan(300);
     expect(files).toContain("src/components/ChatApp.tsx");
     expect(files).toContain("src/lib/chat-tool-events.tsx");
+    // Per ROOT as well as over the total, because the anchors sit in two of the
+    // four and `src/hooks` is 10 of 643 files: an exclude in `sourceFiles` that
+    // emptied a root would clear the 300 floor and both anchors untouched.
+    for (const root of ROOTS) expect(sourceFiles(root).length).toBeGreaterThan(0);
     expect(files.filter((f) => mayHoldStateWrite(readSource(f))).length).toBeGreaterThan(200);
   });
 
@@ -318,10 +339,19 @@ describe("no state write inside a state updater", () => {
     // the answer is to name its receiver in SIDE_EFFECT_RECEIVERS, which is why
     // that set is keyed on the receiver rather than on method names.
     //
-    // In the other direction it is deliberately over-eager: any single-argument
-    // call to a `set*`/`apply*` identifier taking a function is treated as an
-    // updater, whether or not the callee is a React setter. That is the safe
-    // side of the trade — the alternative is a rule that has to know which
+    // And the receiver is matched by its SOURCE TEXT, not resolved: `kv.set` is
+    // named, `window.localStorage.setItem` is named because that whole spelling
+    // is in the set, but `storage.kv.set`, `kv!.set`, `(kv).set`, `kv["set"]`
+    // and `window.fetch` are all invisible — the first three because the text
+    // differs, the last because `fetch` is matched only as a bare identifier.
+    // None is written in this tree today (grep), and the live style
+    // `window.localStorage?.setItem(…)` IS covered; the answer when one arrives
+    // is another entry in the set, not a resolver.
+    //
+    // In the other direction it is deliberately over-eager: any call to a
+    // `set*`/`apply*` identifier whose FIRST argument is a function is treated
+    // as an updater, whether or not the callee is a React setter. That is the
+    // safe side of the trade — the alternative is a rule that has to know which
     // names are setters — but it means a legitimate `setX(fn)` helper of one's
     // own can turn this red. The answer is to rename the helper, to hoist the
     // callback out of the call, or — for a built-in mutator in the nested
@@ -349,6 +379,7 @@ describe("no state write inside a state updater", () => {
       expect.stringContaining("setThroughProperty(updater) -> catalog.setSort()"),
       expect.stringContaining("setWithFetch(updater) -> fetch()"),
       expect.stringContaining("setWithKvWrite(updater) -> kv.set()"),
+      expect.stringContaining("applyWithOptions(updater) -> kv.set()"),
       expect.stringContaining("setWithDeferredWrite(updater) -> setMessages()"),
     ]);
   });
