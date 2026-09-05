@@ -305,13 +305,17 @@ export type ImportOutcome =
  * it owns, and removes only that on failure.
  */
 async function claimTarget(projectsRoot: string, folder: string): Promise<{ ok: true; directory: string } | { ok: false; reason: ImportReason; detail: string }> {
-  const directory = path.resolve(projectsRoot, folder);
+  const root = path.resolve(projectsRoot);
+  const directory = path.resolve(root, folder);
   // Directly inside the project folder and nothing else — the name was made
-  // by importFolderName, and this is the check that stands on its own.
-  if (!directory.startsWith(projectsRoot + path.sep) || path.dirname(directory) !== projectsRoot) {
+  // by importFolderName, and this is the check that stands on its own. Said
+  // with path.relative, so a root of "/" (which the setting's own validator
+  // refuses, but an older stored value could carry) is not tripped by "//".
+  const rel = path.relative(root, directory);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel) || rel.includes(path.sep)) {
     return { ok: false, reason: "invalid", detail: "The project's name is not one the project folder can hold." };
   }
-  await fs.promises.mkdir(projectsRoot, { recursive: true }).catch(() => undefined);
+  await fs.promises.mkdir(root, { recursive: true }).catch(() => undefined);
   try {
     await fs.promises.mkdir(directory);
   } catch (err) {

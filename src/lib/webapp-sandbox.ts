@@ -81,11 +81,13 @@ export const WEBAPP_KV_CLIENT_SNIPPET = `<script>
  * frame's navigation sends no cookie, and that document needs the owner's.
  * Same origin only — a foreign /apps/ path is somebody else's page.
  */
-export function isProxiedAppUrl(src: string): boolean {
+export function isProxiedAppUrl(src: string, origin?: string): boolean {
+  // `globalThis`, not `window`: the MCP server imports this module for the
+  // KV snippet and is typechecked without the DOM.
+  const base = origin ?? (globalThis as { location?: { origin?: string } }).location?.origin ?? "http://localhost";
   try {
-    const u = new URL(src, typeof window === "undefined" ? "http://localhost" : window.location.origin);
-    const origin = typeof window === "undefined" ? "http://localhost" : window.location.origin;
-    return u.origin === origin && /^\/apps\/[a-zA-Z0-9_-]{1,64}(?:\/|$)/.test(u.pathname);
+    const u = new URL(src, base);
+    return u.origin === base && /^\/apps\/[a-zA-Z0-9_-]{1,64}(?:\/|$)/.test(u.pathname);
   } catch {
     return false;
   }
