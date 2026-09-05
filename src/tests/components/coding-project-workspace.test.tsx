@@ -119,6 +119,9 @@ describe("the Files tab", () => {
     // The row's button is the treeitem: its state travels with the focus.
     expect(within(tree).getByTestId("coding-agent-tree-src")).toHaveAttribute("role", "treeitem");
     expect(within(tree).getByTestId("coding-agent-tree-src")).toHaveAttribute("aria-expanded", "true");
+    // The DOM is flat; the level says how deep the row sits.
+    expect(within(tree).getByTestId("coding-agent-tree-src")).toHaveAttribute("aria-level", "1");
+    expect(within(tree).getByTestId("coding-agent-tree-src/app.js")).toHaveAttribute("aria-level", "2");
   });
 
   it("opens a file read-only beside the tree, numbered, and says so for a binary one", async () => {
