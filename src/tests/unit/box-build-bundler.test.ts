@@ -20,6 +20,16 @@ describe("the box's build", () => {
     expect(pkg.scripts.build).toBe("next build --webpack");
     // The dev server may keep Turbopack: it never runs on the box.
     expect(pkg.scripts.postbuild).toContain("write-build-info.mjs");
+    // The webpack standalone build's traced copy of `next` misses
+    // lib/metadata/get-metadata-route (the server dies on it at start —
+    // both e2e suites did, 2026-09-05); postbuild points the standalone
+    // tree at the real package instead, as the box's stopgap builds had.
+    expect(pkg.scripts.postbuild).toContain('ln -s "$(pwd)/node_modules/next" "$SDIR/node_modules/next"');
+    // …and ONLY when the standalone tree's node_modules is a directory of
+    // its own: in a worktree whose node_modules is a symlink, the traced
+    // tree links to the real node_modules, and an rm through it deleted the
+    // real `next` package (2026-09-05).
+    expect(pkg.scripts.postbuild).toContain('[ ! -L "$SDIR/node_modules" ]');
   });
 
   it("is run by the updater with two webpack workers, so its peak stays where it was measured", () => {
