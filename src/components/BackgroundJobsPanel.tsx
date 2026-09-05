@@ -67,8 +67,13 @@ export default function BackgroundJobsPanel() {
       try {
         const r = await fetch("/setup-api/background-jobs", { cache: "no-store" });
         if (!r.ok || !alive) return;
-        const body = (await r.json()) as BackgroundJobsStatus;
-        if (alive) setStatus(body);
+        const body = (await r.json()) as Partial<BackgroundJobsStatus>;
+        // SHAPE-CHECKED, not cast. This panel is mounted inside Settings, so a
+        // body without `jobs` — an older server, a proxy's error page, a mock
+        // that answers `{}` — turned `status.jobs.find(...)` into a throw that
+        // took the whole Settings WINDOW down, not just this card. Three e2e
+        // specs caught exactly that.
+        if (alive && Array.isArray(body?.jobs)) setStatus(body as BackgroundJobsStatus);
       } catch {
         // Nothing to say and nothing to draw: the panel stays hidden.
       }
@@ -85,12 +90,12 @@ export default function BackgroundJobsPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, enabled }),
       });
-      const body = (await r.json().catch(() => null)) as (BackgroundJobsStatus & { ok?: boolean }) | null;
+      const body = (await r.json().catch(() => null)) as (Partial<BackgroundJobsStatus> & { ok?: boolean }) | null;
       // Only a device-verified change moves the switch. The route reads its own
       // write back off the config before it answers, so an `ok` here is the box
       // saying it changed — not this component assuming it did.
-      if (r.ok && body?.ok === true) {
-        setStatus(body);
+      if (r.ok && body?.ok === true && Array.isArray(body.jobs)) {
+        setStatus(body as BackgroundJobsStatus);
         setPending((body as { restarted?: boolean }).restarted === false ? id : null);
       } else setFailed(id);
     } catch {

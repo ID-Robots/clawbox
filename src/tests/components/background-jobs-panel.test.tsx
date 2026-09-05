@@ -48,6 +48,16 @@ describe("BackgroundJobsPanel", () => {
     expect(screen.queryByTestId("bg-job-switch-checkIns")).toBeNull();
   });
 
+  it("draws nothing, and throws nothing, for a body with no jobs in it", async () => {
+    // The e2e mock answers `{}` for any unknown /setup-api path, and an older
+    // server answers 404. `status.jobs.find(...)` on that threw and took the
+    // whole Settings WINDOW down with it — three specs stopped being able to
+    // open Settings at all.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
+    const { container } = render(<BackgroundJobsPanel />);
+    await waitFor(() => expect(container.querySelector("[data-testid='settings-background-jobs']")).toBeNull());
+  });
+
   it("draws nothing at all — and throws nothing — when the box does not answer", async () => {
     // Settings → System mounts this: a throw here takes the whole window with
     // it, which is what three e2e specs caught.
