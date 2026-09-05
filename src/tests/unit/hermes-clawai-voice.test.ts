@@ -20,7 +20,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const cliMock = vi.hoisted(() => vi.fn());
 const readVoiceMock = vi.hoisted(() => vi.fn());
-const selectEngineMock = vi.hoisted(() => vi.fn());
+const selectProviderMock = vi.hoisted(() => vi.fn());
 const hasEngineMock = vi.hoisted(() => vi.fn());
 const runnableMock = vi.hoisted(() => vi.fn());
 const pendingMock = vi.hoisted(() => vi.fn());
@@ -44,7 +44,7 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
 vi.mock("@/lib/hermes-tts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-tts")>()),
   readHermesVoice: readVoiceMock,
-  selectHermesEngine: selectEngineMock,
+  selectHermesProvider: selectProviderMock,
   writeHermesCloudTarget: writeCloudMock,
   hermesVoiceReadPending: pendingMock,
 }));
@@ -53,12 +53,22 @@ vi.mock("@/lib/local-models", async (importOriginal) => ({
   hasLocalTtsEngine: hasEngineMock,
   localTtsCommandRunnable: runnableMock,
 }));
+// Every case here reaches `applyClawaiToHermes`, which resolves the vision
+// model before it ever gets to the voice — and that resolver PROBES the
+// ClawBox AI proxy. Unmocked, 24 unit tests each do network I/O whose failure
+// mode is a delay. Stubbed to "unset", the state that writes no vision keys
+// at all and leaves this suite about the voice.
+vi.mock("@/lib/clawbox-ai-vision", () => ({
+  resolveVisionModelId: vi.fn(async () => ({ id: null, reason: "unset" })),
+  isClawboxAiVisionId: () => false,
+}));
 
 import { applyClawaiToHermes, CLAWBOX_AI_PROXY_URL } from "@/lib/hermes-clawai";
 import {
   HERMES_LOCAL_TTS_PROVIDER,
   HERMES_FACTORY_TTS_PROVIDER,
   CLAWBOX_AI_SPEECH_TIER,
+  HermesTtsWriteError,
 } from "@/lib/hermes-tts";
 
 const TOKEN = "claw_test_token";
@@ -86,10 +96,10 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
   beforeEach(() => {
     cliMock.mockReset();
     readVoiceMock.mockReset();
-    selectEngineMock.mockReset();
+    selectProviderMock.mockReset();
     hasEngineMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-    selectEngineMock.mockResolvedValue(undefined);
+    selectProviderMock.mockResolvedValue(undefined);
     writeCloudMock.mockReset();
     writeCloudMock.mockResolvedValue(undefined);
     hasEngineMock.mockResolvedValue(false);
@@ -102,7 +112,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).toHaveBeenCalledWith("cloud", TOKEN);
+    expect(selectProviderMock).toHaveBeenCalledWith("cloud");
   });
 
   it("replaces Hermes' factory cloud rather than speaking through Microsoft", async () => {
@@ -112,7 +122,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).toHaveBeenCalledWith("cloud", TOKEN);
+    expect(selectProviderMock).toHaveBeenCalledWith("cloud");
   });
 
   it("replaces an on-device selection that has no engine behind it", async () => {
@@ -122,7 +132,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).toHaveBeenCalledWith("cloud", TOKEN);
+    expect(selectProviderMock).toHaveBeenCalledWith("cloud");
   });
 
   it("leaves the on-device voice alone when the box really can speak for itself", async () => {
@@ -133,7 +143,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
   });
 
   it("selects the on-device engine on a box that has one and never chose", async () => {
@@ -147,7 +157,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).toHaveBeenCalledWith("local", null);
+    expect(selectProviderMock).toHaveBeenCalledWith("local");
   });
 
   it("does not select the on-device engine that Hermes has no definition for", async () => {
@@ -159,11 +169,11 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).toHaveBeenCalledWith("cloud", TOKEN);
+    expect(selectProviderMock).toHaveBeenCalledWith("cloud");
   });
 
   it("refreshes the cloud credential on a box already speaking through it", async () => {
-    // `selectHermesEngine` is the ONLY writer of `tts.openai.*` on this
+    // `writeHermesCloudTarget` is the ONLY writer of `tts.openai.*` on this
     // edition, so returning early over an already-chosen cloud left
     // `tts.openai.api_key` holding the token the portal has just rotated:
     // every utterance 401s while `hermesSpeaksReplies` — which asks only that
@@ -175,7 +185,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     expect(writeCloudMock).toHaveBeenCalledWith(TOKEN);
     // ...and the SELECTION is still left where the owner's box had it.
-    expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
   });
 
   it("does not take over a speech route the owner pointed somewhere else", async () => {
@@ -193,7 +203,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
     expect(writeCloudMock).not.toHaveBeenCalled();
-    expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
   });
 
   it("does not select a cloud voice it was not allowed to point", async () => {
@@ -207,7 +217,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
     expect(writeCloudMock).not.toHaveBeenCalled();
-    expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
   });
 
   it("still refreshes our own route, trailing slash and all", async () => {
@@ -230,7 +240,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).toHaveBeenCalledWith("cloud", TOKEN);
+    expect(selectProviderMock).toHaveBeenCalledWith("cloud");
   });
 
   it("writes nothing at all to the voice config on an unentitled box", async () => {
@@ -239,7 +249,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     await applyClawaiToHermes(TOKEN, "flash");
 
     expect(writeCloudMock).not.toHaveBeenCalled();
-    expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
   });
 
   it("does not point an unentitled box at a route it may not call", async () => {
@@ -254,7 +264,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, "flash");
 
-    expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
   });
 
   it("leaves the selection alone when the read did not get an answer", async () => {
@@ -269,7 +279,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
     expect(writeCloudMock).not.toHaveBeenCalled();
   });
 
@@ -278,27 +288,43 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
   });
 
   it("does not fail the link when the voice cannot be pointed", async () => {
     // A link that worked must not report failure because the voice write did
     // not — the Voice panel is still there to set it by hand.
     readVoiceMock.mockResolvedValue(voice(null));
-    selectEngineMock.mockRejectedValue(new Error("hermes: timed out"));
+    selectProviderMock.mockRejectedValue(new Error("hermes: timed out"));
 
     await expect(applyClawaiToHermes(TOKEN, ENTITLED)).resolves.toBeDefined();
   });
 
   it("does not ask the box to speak with a credential it was not given", async () => {
-    // The token that reaches `selectHermesEngine` is the one just linked, not
-    // a stale read: a cloud voice authenticated with the wrong key 401s on
-    // every utterance under a panel that says it is configured.
+    // The token written to `tts.openai.api_key` is the one just linked, not a
+    // stale read: a cloud voice authenticated with the wrong key 401s on every
+    // utterance under a panel that says it is configured. And ONCE — the
+    // selection no longer carries a credential of its own, so it cannot write
+    // this block a second time.
     readVoiceMock.mockResolvedValue(voice(null));
 
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
-    const [, token] = selectEngineMock.mock.calls[0] ?? [];
-    expect(token).toBe(TOKEN);
+    expect(writeCloudMock.mock.calls).toEqual([[TOKEN]]);
+  });
+
+  it("does not select a cloud voice whose endpoint write did not land", async () => {
+    // The invariant `selectHermesCloudVoiceIfUnvoiced` states in as many words
+    // — "a failure there leaves `tts.provider` untouched rather than selecting
+    // a provider that cannot answer". `writeHermesCloudTarget` really does
+    // throw `HermesTtsWriteError` (its `set` throws on the first non-zero
+    // exit), and until this case every test in the suite resolved it, so a
+    // change that moved the write after the selection would have stayed green.
+    readVoiceMock.mockResolvedValue(voice(null));
+    writeCloudMock.mockRejectedValue(new HermesTtsWriteError("Could not write tts.openai.base_url."));
+
+    await expect(applyClawaiToHermes(TOKEN, ENTITLED)).resolves.toBeDefined();
+
+    expect(selectProviderMock).not.toHaveBeenCalled();
   });
 });

@@ -1552,8 +1552,8 @@ async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
  * alone.
  *
  * The cloud ENDPOINT AND CREDENTIAL are refreshed whenever the box is
- * entitled, whatever is selected. `selectHermesEngine` is the only writer of
- * `tts.openai.*` on this edition, so returning early on a box already speaking
+ * entitled, whatever is selected. `writeHermesCloudTarget` is the only writer
+ * of `tts.openai.*` on this edition, so returning early on a box already speaking
  * through the cloud left `tts.openai.api_key` holding the token the portal
  * has just rotated: every utterance 401s while `hermesSpeaksReplies`, which
  * asks only that the two keys are non-empty, calls the voice configured. The
@@ -1568,7 +1568,7 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
     const [
       {
         readHermesVoice,
-        selectHermesEngine,
+        selectHermesProvider,
         writeHermesCloudTarget,
         hermesVoiceReadPending,
         HERMES_LOCAL_TTS_PROVIDER,
@@ -1655,7 +1655,7 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
       && await hasLocalTtsEngine()
       && await localTtsCommandRunnable(voice.localCommand)) {
       if (current === HERMES_LOCAL_TTS_PROVIDER) return;
-      await selectHermesEngine("local", null);
+      await selectHermesProvider("local");
       console.log("[hermes-clawai] this box has its own voice — selecting the on-device engine");
       return;
     }
@@ -1666,7 +1666,12 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
       console.log("[hermes-clawai] no on-device voice, and tts.openai is the owner's — leaving the selection alone");
       return;
     }
-    await selectHermesEngine("cloud", token);
+    // The SELECTION only: `writeHermesCloudTarget` above is this path's
+    // definition write, and it has already landed. `selectHermesEngine` would
+    // repeat all three keys — the endpoint, the rotated credential and the
+    // model — for nothing, and a throw on the repeat would discard a selection
+    // the first write had already made safe.
+    await selectHermesProvider("cloud");
     console.log("[hermes-clawai] no on-device voice on this box — speaking through ClawBox AI");
   } catch (err) {
     console.warn(

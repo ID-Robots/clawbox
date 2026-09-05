@@ -280,6 +280,25 @@ export async function selectHermesEngine(engine: "local" | "cloud", token: strin
     if (!token) throw new HermesTtsWriteError("This box has no ClawBox AI credential to speak with.");
     await writeHermesCloudTarget(token);
   }
+  await selectHermesProvider(engine);
+}
+
+/**
+ * Point `tts.provider` at an engine whose definition is ALREADY on the box.
+ *
+ * The selection half of `selectHermesEngine`, on its own, for the one caller
+ * that has already written the definition itself: the ClawBox AI link path
+ * refreshes `tts.openai.*` on every entitled link — the portal rotates the
+ * token — and then selects. Going back through `selectHermesEngine` there
+ * wrote the same three keys a second time: three more `hermes config set`
+ * spawns (15 s timeout each) inside a request the customer is watching, and a
+ * second chance to throw away a selection the first write had already made
+ * safe.
+ *
+ * So: one writer of `tts.provider`, and the ordering rule above is the
+ * caller's to keep — this writes nothing else, and never a credential.
+ */
+export async function selectHermesProvider(engine: "local" | "cloud"): Promise<void> {
   await set(KEYS.provider, hermesProviderFor(engine));
 }
 
@@ -456,7 +475,19 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
       const [type, command, installed] = await Promise.all([
         hermesConfigGet(KEYS.localType),
         hermesConfigGet(KEYS.localCommand),
-        localTtsEngineInstalled(),
+        // THE rule, in the one place it lives — `hasLocalTtsEngine` (the
+        // Kokoro stamp AND the unit), which `kokoroEntry` and the ClawBox AI
+        // link path apply to the same box. Asking it any other way here is
+        // how the chat turn and the Voice tab came to give one box two
+        // answers; a second derivation under the same name also built the
+        // whole inventory — a `processMemoryBytes` scan and a second
+        // `systemctl --user` pair — to fill in this boolean, on every reply.
+        //
+        // Imported lazily: `local-models` reaches systemd and the filesystem,
+        // and this module is pulled in by the chat turn, which has no other
+        // reason to load it. It fails closed itself, and the catch below
+        // covers the import.
+        import("@/lib/local-models").then((m) => m.hasLocalTtsEngine()),
       ]);
       const script = trimmed(command);
       if (trimmed(type) !== "command" || script === null || !installed) return false;
@@ -553,33 +584,13 @@ export async function speechEntitledTier(): Promise<boolean> {
 }
 
 /**
- * Is an on-device TTS engine actually installed on this box?
- *
- * The same fact the Voice tab's local engine is judged by — `buildTtsInventory()`
- * stats Kokoro's own artefacts — so the chat's promise of a player and the
- * panel's verdict cannot disagree about one box. Imported lazily: `local-models`
- * reaches systemd and the filesystem, and this module is pulled in by the chat
- * turn, which has no other reason to load it.
- *
- * Fails CLOSED, like every other fact behind a capability.
- */
-async function localTtsEngineInstalled(): Promise<boolean> {
-  try {
-    const { buildTtsInventory } = await import("@/lib/local-models");
-    return (await buildTtsInventory()).some((m) => m.kind === "tts" && m.installed);
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Is the command the provider names one this box can actually RUN?
  *
  * Asked through the same helper the Voice tab's `commandPresent` asks it
  * through, so neither surface can decide on its own what "the command is
- * there" means — the divergence the conjunct above this one exists to close.
- * Imported lazily for the reason `localTtsEngineInstalled` gives; it fails
- * closed itself, and this catch covers the import.
+ * there" means — the divergence the engine conjunct beside it exists to
+ * close. Imported lazily for the same reason that one is; it fails closed
+ * itself, and this catch covers the import.
  */
 async function commandRunnable(command: string): Promise<boolean> {
   try {
