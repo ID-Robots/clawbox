@@ -1523,21 +1523,40 @@ async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
  * otherwise replace an owner's ElevenLabs with the cloud, silently, on a
  * re-link. The shell half of this same change refuses to make that mistake at
  * length (install.sh, "AN UNSET KEY IS NOT A FAILED READ"), so this half asks
- * `hermesVoiceProbePending()` — the module's own accessor for exactly this —
+ * `hermesVoiceReadPending()` — the module's own accessor for exactly this —
  * and leaves the selection alone when the question did not get an answer.
  *
  * Then it writes only in the three states that are not an owner's choice:
  *
- *   unset            — install.sh left it alone because there is no engine.
- *   `edge`           — Hermes' factory Microsoft cloud, which a ClawBox must
+ *   unset            — which to Hermes means its factory Edge cloud, not
+ *                      silence: measured read-only on the pinned 0.20.5
+ *                      package, `tools/tts_tool.py:211` `DEFAULT_PROVIDER =
+ *                      "edge"` and `:661` `(tts_config.get("provider") or
+ *                      DEFAULT_PROVIDER)`.
+ *   `edge`           — the same cloud said out loud, which a ClawBox must
  *                      never speak through by default (hermes-tts.ts).
- *   `clawbox-local`  — selected, with no Kokoro behind it. The measured state
- *                      on the Hermes box: the Voice panel said the box was
- *                      configured and every utterance failed.
+ *   `clawbox-local`  — selected, with no Kokoro behind it.
+ *
+ * ...and in each of them it asks THIS BOX what it has before it reaches for
+ * the cloud. An unset key is not evidence of a missing engine — install.sh
+ * leaves it unset when a `hermes config set` hiccups, and a box provisioned
+ * before the Hermes arm existed has never had one written — so a working
+ * Kokoro is selected instead, and only a box that really cannot speak for
+ * itself is sent off-device. Getting that backwards is permanent: the next
+ * `step_openclaw_tts` sees `openai`, falls into its "already set" arm and
+ * preserves it as the owner's choice for good.
  *
  * Anything else — elevenlabs, piper, one an owner added by hand — is left
- * alone. So is a `clawbox-local` that HAS its engine: an owner on the
- * on-device voice does not get moved to the cloud by linking a box.
+ * alone.
+ *
+ * The cloud ENDPOINT AND CREDENTIAL are refreshed whenever the box is
+ * entitled, whatever is selected. `selectHermesEngine` is the only writer of
+ * `tts.openai.*` on this edition, so returning early on a box already speaking
+ * through the cloud left `tts.openai.api_key` holding the token the portal
+ * has just rotated: every utterance 401s while `hermesSpeaksReplies`, which
+ * asks only that the two keys are non-empty, calls the voice configured. The
+ * OpenClaw sibling does not have that hole — `gateway-pre-start.sh` rewrites
+ * the speech apiKey on every gateway start.
  *
  * Never throws: a link that worked must not report failure because the voice
  * could not be pointed. The Voice panel remains the place to set it by hand.
@@ -1548,7 +1567,8 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
       {
         readHermesVoice,
         selectHermesEngine,
-        hermesVoiceProbePending,
+        writeHermesCloudTarget,
+        hermesVoiceReadPending,
         HERMES_LOCAL_TTS_PROVIDER,
         HERMES_FACTORY_TTS_PROVIDER,
         CLAWBOX_AI_SPEECH_TIER,
@@ -1556,7 +1576,7 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
       { hasLocalTtsEngine },
     ] = await Promise.all([
       import("@/lib/hermes-tts"),
-      import("@/lib/local-tts-engine"),
+      import("@/lib/local-models"),
     ]);
     // The tier just linked, not a re-read: `setMany` wrote `clawai_tier` a
     // moment ago, but the argument is the same fact without a second round trip
@@ -1570,21 +1590,40 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
       return;
     }
     const voice = await readHermesVoice();
-    if (hermesVoiceProbePending()) {
+    // The SELECTION's own read, not the page-shaped aggregate. Everything below
+    // rests on `voice.provider` alone, and `hermesVoiceProbePending()`
+    // deliberately over-reports — its docstring says so — across five keys that
+    // are read by five concurrent `hermes config get` spawns. One of the other
+    // four timing out on a loaded Jetson would abandon the box, and nothing
+    // re-runs the link.
+    if (hermesVoiceReadPending()) {
       console.warn(
         "[hermes-clawai] could not read this box's voice selection — leaving it alone rather than"
         + " replacing a choice we could not read",
       );
       return;
     }
+    // DEFINITION BEFORE SELECTION, and unconditionally: an entitled box's
+    // endpoint and credential are refreshed even when the cloud is already
+    // chosen, because this is the only writer of them and the portal rotates
+    // the token on a re-link.
+    await writeHermesCloudTarget(token);
     const current = voice.provider;
     const unchosen = current === null
       || current === HERMES_FACTORY_TTS_PROVIDER
       || current === HERMES_LOCAL_TTS_PROVIDER;
     if (!unchosen) return;
-    // A selected on-device provider that CAN speak is a working box, whoever
-    // selected it.
-    if (current === HERMES_LOCAL_TTS_PROVIDER && await hasLocalTtsEngine()) return;
+    // What this box HAS, asked in every unchosen state rather than only over a
+    // `clawbox-local` selection. A working on-device engine is the answer
+    // wherever there is one — an owner on it is not moved off it by linking a
+    // box, and an unset key on a box that can speak for itself is not a reason
+    // to send its owner's words off the device.
+    if (voice.localRegistered && await hasLocalTtsEngine()) {
+      if (current === HERMES_LOCAL_TTS_PROVIDER) return;
+      await selectHermesEngine("local", null);
+      console.log("[hermes-clawai] this box has its own voice — selecting the on-device engine");
+      return;
+    }
     await selectHermesEngine("cloud", token);
     console.log("[hermes-clawai] no on-device voice on this box — speaking through ClawBox AI");
   } catch (err) {

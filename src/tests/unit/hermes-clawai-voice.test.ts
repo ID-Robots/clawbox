@@ -23,6 +23,7 @@ const readVoiceMock = vi.hoisted(() => vi.fn());
 const selectEngineMock = vi.hoisted(() => vi.fn());
 const hasEngineMock = vi.hoisted(() => vi.fn());
 const pendingMock = vi.hoisted(() => vi.fn());
+const writeCloudMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: vi.fn(async () => false) }));
@@ -43,9 +44,13 @@ vi.mock("@/lib/hermes-tts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-tts")>()),
   readHermesVoice: readVoiceMock,
   selectHermesEngine: selectEngineMock,
-  hermesVoiceProbePending: pendingMock,
+  writeHermesCloudTarget: writeCloudMock,
+  hermesVoiceReadPending: pendingMock,
 }));
-vi.mock("@/lib/local-tts-engine", () => ({ hasLocalTtsEngine: hasEngineMock }));
+vi.mock("@/lib/local-models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/local-models")>()),
+  hasLocalTtsEngine: hasEngineMock,
+}));
 
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import {
@@ -60,9 +65,9 @@ const TOKEN = "claw_test_token";
  * typed here: the OpenClaw edition gates on the same value, and a copy would be
  * the drift the constant exists to prevent.
  */
-const ENTITLED = CLAWBOX_AI_SPEECH_TIER as "pro";
+const ENTITLED = CLAWBOX_AI_SPEECH_TIER;
 
-/** What `readHermesVoice()` answers; only `provider` decides anything here. */
+/** What `readHermesVoice()` answers; `provider` and `localRegistered` decide. */
 function voice(provider: string | null) {
   return {
     provider,
@@ -83,6 +88,8 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     hasEngineMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
     selectEngineMock.mockResolvedValue(undefined);
+    writeCloudMock.mockReset();
+    writeCloudMock.mockResolvedValue(undefined);
     hasEngineMock.mockResolvedValue(false);
     pendingMock.mockReturnValue(false);
   });
@@ -126,6 +133,57 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     expect(selectEngineMock).not.toHaveBeenCalled();
   });
 
+  it("selects the on-device engine on a box that has one and never chose", async () => {
+    // An UNSET key is not evidence of a missing engine: install.sh leaves it
+    // unset when a `hermes config set` hiccups, and a box provisioned before
+    // the Hermes arm existed never had one written. Sending such an owner's
+    // words off the device would be permanent — the next step_openclaw_tts
+    // sees `openai` and preserves it as the owner's choice for good.
+    readVoiceMock.mockResolvedValue(voice(null));
+    hasEngineMock.mockResolvedValue(true);
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(selectEngineMock).toHaveBeenCalledWith("local", null);
+  });
+
+  it("does not select the on-device engine that Hermes has no definition for", async () => {
+    // The engine is on the box, but `tts.providers.clawbox-local.type` is not
+    // `command`, so Hermes would refuse the provider outright. Registering it
+    // is install.sh's job; the cloud is the working answer until it has run.
+    readVoiceMock.mockResolvedValue({ ...voice(null), localRegistered: false });
+    hasEngineMock.mockResolvedValue(true);
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(selectEngineMock).toHaveBeenCalledWith("cloud", TOKEN);
+  });
+
+  it("refreshes the cloud credential on a box already speaking through it", async () => {
+    // `selectHermesEngine` is the ONLY writer of `tts.openai.*` on this
+    // edition, so returning early over an already-chosen cloud left
+    // `tts.openai.api_key` holding the token the portal has just rotated:
+    // every utterance 401s while `hermesSpeaksReplies` — which asks only that
+    // the two keys are non-empty — calls the voice configured. The OpenClaw
+    // sibling rewrites its speech apiKey on every gateway start.
+    readVoiceMock.mockResolvedValue(voice("openai"));
+
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+
+    expect(writeCloudMock).toHaveBeenCalledWith(TOKEN);
+    // ...and the SELECTION is still left where the owner's box had it.
+    expect(selectEngineMock).not.toHaveBeenCalled();
+  });
+
+  it("writes nothing at all to the voice config on an unentitled box", async () => {
+    readVoiceMock.mockResolvedValue(voice("openai"));
+
+    await applyClawaiToHermes(TOKEN, "flash");
+
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectEngineMock).not.toHaveBeenCalled();
+  });
+
   it("does not point an unentitled box at a route it may not call", async () => {
     // Cloud speech is served only to the device tier the proxy answers; below
     // it every utterance is a 403. The Voice route refuses the pick on such a
@@ -154,6 +212,7 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     await applyClawaiToHermes(TOKEN, ENTITLED);
 
     expect(selectEngineMock).not.toHaveBeenCalled();
+    expect(writeCloudMock).not.toHaveBeenCalled();
   });
 
   it("leaves an owner's own provider alone", async () => {

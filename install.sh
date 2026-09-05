@@ -3805,23 +3805,38 @@ step_openclaw_tts() {
         else
         case "$CURRENT_HERMES_TTS" in
           ""|null|edge|"$HERMES_TTS_PROVIDER")
-            # ── Only an engine this box HAS may be selected ──────────────────
-            #
-            # The definition above is safe to write whatever happened — it is
-            # what makes the engine selectable the moment it arrives. Selecting
-            # it is not. A box whose board declines Kokoro was left with
-            # `tts.provider: clawbox-local` pointing at nothing, so every spoken
-            # reply failed while the Voice panel called the box configured:
-            # exactly the "pointing the harness at a provider that does not
-            # exist is strictly worse than leaving tts.provider alone" rule this
-            # same block already applies to a definition that did not land.
+            # ── What this box speaks with, when nothing has chosen yet ───────
             #
             # The CLOUD voice is deliberately not chosen here. It needs the
             # box's `claw_` token, and the ClawBox AI link happens AFTER
             # install — so that choice belongs to the link path
             # (src/lib/hermes-clawai.ts), which owns the credential and makes
             # it the moment there is one. TASK-699.
-            if [ "$KOKORO_HAVE" != true ]; then
+            #
+            # AND THE SELECTION IS MADE WHATEVER THE ENGINE ANSWERED, which is
+            # the opposite of what this card first asked for, because to Hermes
+            # an unset `tts.provider` is not "no voice": measured read-only on
+            # the pinned 0.20.5 package on the Hermes box —
+            # `tools/tts_tool.py:211` `DEFAULT_PROVIDER = "edge"` and `:661`
+            # `provider = (tts_config.get("provider") or DEFAULT_PROVIDER)` —
+            # an ABSENT key resolves to Microsoft's Edge cloud, and the harness
+            # offers no "off" value at all. So withholding or clearing the
+            # selection on an engineless box would move it from honestly mute
+            # to speaking through a third party the customer never chose, which
+            # is the one outcome `HERMES_FACTORY_TTS_PROVIDER` exists to
+            # prevent. A command provider whose engine is missing simply fails,
+            # which leaks nothing, and no panel is fooled by it:
+            # `hermesSpeaksReplies` asks for the stamp, the unit AND a runnable
+            # script before it will say this box speaks.
+            #
+            # What was missing was never the selection — it was SAYING SO, and
+            # the cloud voice the box is entitled to. Both are below.
+            if hermes_tts_cli config set tts.provider "$HERMES_TTS_PROVIDER"; then
+              if [ "$CURRENT_HERMES_TTS" = "edge" ]; then
+                echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER (replacing Hermes' factory 'edge' cloud default)"
+              else
+                echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER"
+              fi
               # KOKORO_HAVE, never KOKORO_READY. The first is the reconciled
               # fact — the verdict the run PUBLISHED, with the exit code as its
               # fallback; the second is the inference from the exit code alone,
@@ -3829,35 +3844,8 @@ step_openclaw_tts() {
               # around. VOICE_RC=1 with `KOKORO=ready` on file is a working
               # engine (the OpenClaw arm below says so too), and VOICE_RC=0 with
               # any other verdict is not one.
-              #
-              # A box already POINTED at the engine it does not have is the
-              # state the measurement found, and it is in this same `case` arm.
-              # Leaving it alone would preserve the defect for every shipped
-              # box: an update is the only thing that reaches them, and the
-              # link path is not re-run once a box is linked. The definition
-              # stays; only the selection goes, so the Voice panel and
-              # hermesSpeaksReplies start telling the truth and the owner can
-              # pick the cloud voice.
-              if [ "$CURRENT_HERMES_TTS" = "$HERMES_TTS_PROVIDER" ]; then
-                if hermes_tts_cli config unset tts.provider; then
-                  echo "  Hermes TTS provider cleared — it named $HERMES_TTS_PROVIDER and this box has no on-device engine ($KOKORO_REASON)" >&2
-                else
-                  # RECORDED, not merely warned. A clear that did not land
-                  # leaves the box pointing at an engine it does not have, which
-                  # is the state this whole branch exists to end — and the link
-                  # path does not re-run for an already-linked box, so nothing
-                  # else will reach it. The step's own verdict has to carry it.
-                  HERMES_TTS_FAIL="could not clear tts.provider, which names $HERMES_TTS_PROVIDER on a box with no on-device engine"
-                  echo "  Warning: $HERMES_TTS_FAIL ($KOKORO_REASON)" >&2
-                fi
-              else
-                echo "  Hermes TTS provider left unset — this box has no on-device engine ($KOKORO_REASON). The $HERMES_TTS_PROVIDER definition is in place, and ClawBox AI cloud speech is selected when an entitled box is linked." >&2
-              fi
-            elif hermes_tts_cli config set tts.provider "$HERMES_TTS_PROVIDER"; then
-              if [ "$CURRENT_HERMES_TTS" = "edge" ]; then
-                echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER (replacing Hermes' factory 'edge' cloud default)"
-              else
-                echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER"
+              if [ "$KOKORO_HAVE" != true ]; then
+                echo "  Note: this box has no on-device engine ($KOKORO_REASON), so it stays SILENT until ClawBox AI is linked on an entitled plan and the cloud voice is selected. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
               fi
             else
               HERMES_TTS_FAIL="could not select the $HERMES_TTS_PROVIDER provider"

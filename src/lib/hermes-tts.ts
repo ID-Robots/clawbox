@@ -491,6 +491,19 @@ export async function hermesSpeaksReplies(): Promise<boolean> {
 }
 
 /**
+ * Did the read of the SELECTION alone fail to answer?
+ *
+ * The narrow sibling of `hermesVoiceProbePending`, for a caller whose whole
+ * decision rests on `tts.provider`. The aggregate above deliberately
+ * over-reports across five keys because a PAGE re-fetches; a writer that runs
+ * once — the ClawBox AI link path — would abandon the box over a key it never
+ * consults, and nothing re-runs it.
+ */
+export function hermesVoiceReadPending(): boolean {
+  return hermesConfigReadPending(KEYS.provider);
+}
+
+/**
  * Did the voice probe FAIL rather than answer "no"?
  *
  * `hermesSpeaksReplies` fails closed, so "this box has no voice" and "the box

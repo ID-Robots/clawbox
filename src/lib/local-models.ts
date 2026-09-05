@@ -380,16 +380,43 @@ export function friendlyModelName(raw: string | null | undefined): string | null
   return version ? `${family} ${version}` : family;
 }
 
+/**
+ * Does this box have an on-device speech engine?
+ *
+ * BOTH the stamp and the unit. The weights alone are not an installation: on
+ * the loop's own test box the 82M Kokoro weights sit in the HuggingFace cache
+ * from a run that failed afterwards, with no unit and no stamp. Reporting that
+ * as installed is precisely the lie this tab removes.
+ *
+ * Lives HERE, beside `kokoroEntry`, and `kokoroEntry` calls it — the rule is
+ * written once, so the answer the Voice panel gives and the answer the ClawBox
+ * AI link path acts on cannot drift. A module of its own would have been a
+ * second copy of the rule, which is the thing being prevented.
+ *
+ * Never throws: a probe that cannot run answers "no engine", which points the
+ * box at the cloud voice it has a credential for rather than leaving it mute.
+ */
+export async function hasLocalTtsEngine(): Promise<boolean> {
+  try {
+    const [stamped, unit] = await Promise.all([
+      exists(KOKORO_STAMP),
+      readUnitState(KOKORO_UNIT, "user"),
+    ]);
+    return stamped && unit.present;
+  } catch {
+    return false;
+  }
+}
+
 async function kokoroEntry(): Promise<LocalModelEntry> {
-  const [stamped, unit] = await Promise.all([
+  // `installed` comes from the one rule above; `stamped` is a different
+  // question — are the WEIGHTS there — and only the wording below needs it,
+  // to tell "its service is missing" from "nothing was ever installed".
+  const [installed, stamped, unit] = await Promise.all([
+    hasLocalTtsEngine(),
     exists(KOKORO_STAMP),
     readUnitState(KOKORO_UNIT, "user"),
   ]);
-  // BOTH have to be true. The weights alone are not an installation: on the
-  // loop's own test box the 82M Kokoro weights sit in the HuggingFace cache
-  // from a run that failed afterwards, with no unit and no stamp. Reporting
-  // that as installed is precisely the lie this tab removes.
-  const installed = stamped && unit.present;
   const memoryBytes = unit.active ? await processMemoryBytes("kokoro-server.py") : null;
   return {
     id: "kokoro",
