@@ -1480,7 +1480,12 @@ do_rebuild() {
     set_previous_build_aside "$build_dir" "$kept_dir"
     echo "Running bun build..."
     built=1
-    as_clawbox_login "cd $PROJECT_DIR && $BUN run build" || rc=$?
+    # `bun run build` is `next build --webpack` (package.json): Next 16's
+    # default bundler, Turbopack, was OOM-killed on this board on 2026-09-05
+    # at 4.6 GB resident with 5.7 GB free — the kernel's global OOM, not a
+    # cgroup — while a webpack build of the same commit fits in ~3.7 GB. Two
+    # webpack workers rather than one per core keeps its peak there.
+    as_clawbox_login "cd $PROJECT_DIR && NEXT_WEBPACK_PARALLELISM=2 $BUN run build" || rc=$?
     if [ "$rc" -eq 0 ] && ! verify_build_present "$PROJECT_DIR"; then
       rc=1
     fi
