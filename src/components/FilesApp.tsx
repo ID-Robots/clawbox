@@ -3,6 +3,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
 import { fileExtension, fileIcon, formatSize, Icon } from "./file-icons";
+import CodeEditor from "./CodeEditor";
+import { languageForFile } from "@/lib/code-language";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -117,7 +119,12 @@ function looksBinary(text: string): boolean {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-export default function FilesApp() {
+/**
+ * `initialPath` is the browse-relative folder the window opens in — the
+ * Coding Agent's "Open in Files" hands a project's folder through the
+ * window's record; a plain Files window starts at home.
+ */
+export default function FilesApp({ initialPath = "" }: { initialPath?: string } = {}) {
   const { t } = useT();
   const [currentPath, setCurrentPath] = useState("");
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -191,7 +198,7 @@ export default function FilesApp() {
     }
   }, []);
 
-  useEffect(() => { load(""); }, [load]);
+  useEffect(() => { load(initialPath); }, [load, initialPath]);
 
   // POSIX hidden files start with a dot. We filter client-side because the
   // server returns the full directory; this lets the toggle flip instantly
@@ -1199,13 +1206,15 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
         ) : error ? (
           <ViewerMessage icon="error" text={error} url={url} name={entry.name} color="#f87171" />
         ) : kind === "text" ? (
-          <textarea
-            autoFocus
+          <CodeEditor
             value={content}
-            onChange={(e) => setContent(e.target.value)}
-            spellCheck={false}
-            className="w-full h-full resize-none bg-[var(--bg-deep)] text-[var(--text-primary)] font-mono text-[13px] leading-relaxed p-4 outline-none"
-            style={{ tabSize: 2 }}
+            onChange={setContent}
+            language={languageForFile(entry.name)}
+            onSave={() => { if (dirty) void save(); }}
+            autoFocus
+            ariaLabel={entry.name}
+            className="[--cb-code-ground:var(--bg-deep)]"
+            testId="files-editor"
           />
         ) : kind === "image" ? (
           <div className="flex items-center justify-center h-full p-4">

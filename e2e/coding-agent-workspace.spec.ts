@@ -37,6 +37,9 @@ const RUN = {
   transcriptPath: "/home/clawbox/.claude-ds/projects/x/s.jsonl",
 };
 
+/** Every save the editor sent, as the route's PUT received it. */
+const saves: unknown[] = [];
+
 test.beforeEach(async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
@@ -66,6 +69,11 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/setup-api/coding-agent/runs*", (route) => route.fulfill({ json: { runs: [RUN] } }));
   await page.route("**/setup-api/coding-agent/tree*", (route) => {
     const url = new URL(route.request().url());
+    if (route.request().method() === "PUT") {
+      const body = route.request().postDataJSON() as { file: string; content: string };
+      saves.push(body);
+      return route.fulfill({ json: { file: { path: body.file, size: body.content.length } } });
+    }
     const file = url.searchParams.get("file");
     if (file !== null) {
       return route.fulfill({ json: { file: { path: file, content: "<h1>Hi</h1>\n<p>there</p>\n", size: 24, truncated: false, binary: false } } });
@@ -92,6 +100,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("a project's page carries its files and changes, and a run's page its breadcrumb, browser preview and live view", async ({ page }) => {
+  const saves: unknown[] = [];
   await page.goto("/");
   await expect(page.getByTestId("desktop-root")).toBeVisible();
   await page.getByTestId("shelf-app-coding").click();
@@ -118,6 +127,16 @@ test("a project's page carries its files and changes, and a run's page its bread
   await expect(tree.getByTestId("coding-agent-tree-src/app.js")).toBeVisible();
   await tree.getByTestId("coding-agent-tree-index.html").click();
   await expect(win.getByTestId("coding-agent-file-view")).toContainText("<p>there</p>");
+  // The file opens in the editor, coloured as HTML; an edit is saved through the route's PUT.
+  const editor = win.getByTestId("coding-agent-file-editor");
+  await expect(editor).toHaveAttribute("data-language", "markup");
+  await expect(editor.locator(".tok-tag").first()).toBeVisible();
+  const input = win.getByTestId("coding-agent-file-editor-input");
+  await input.fill("<h1>Hi</h1>\n<p>edited</p>\n");
+  await expect(win.getByTestId("coding-agent-file-view")).toHaveAttribute("data-dirty", "true");
+  await win.getByTestId("coding-agent-file-save").click();
+  await expect(win.getByTestId("coding-agent-file-saved")).toBeVisible();
+  expect(saves).toEqual([{ projectId: null, directory: PROJECT.directory, file: "index.html", content: "<h1>Hi</h1>\n<p>edited</p>\n" }]);
 
   await win.getByTestId("coding-agent-workspace-changes").click();
   await expect(win.getByTestId("coding-agent-change-totals")).toContainText("Files changed: 1");

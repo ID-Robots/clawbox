@@ -1,7 +1,7 @@
 /**
  * The project page's workspace (src/components/CodingProjectWorkspace.tsx):
- * the folder as a tree read through the tree route, one file read-only
- * beside it, and what changed — the working tree or one commit — with a
+ * the folder as a tree read through the tree route, one file beside it in
+ * the shared editor — saved back through the route's PUT — and what changed — the working tree or one commit — with a
  * unified diff per file. Against a stubbed device, with the real English
  * strings so a missing key fails here rather than on screen.
  */
@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingProjectWorkspace, { DiffView } from "@/components/CodingProjectWorkspace";
+import { OPEN_APP_EVENT, type OpenAppDetail } from "@/lib/ui-events";
 
 const t = (key: string, params?: Record<string, string | number>) => {
   let str = translations.en[key] ?? key;
@@ -64,16 +65,31 @@ const A_DIFF = [
 ].join("\n");
 
 let calls: string[];
+/** Every PUT's parsed body, in order. */
+let saves: unknown[];
 
-function stubDevice(opts: { changes?: unknown; log?: unknown[]; tree?: unknown; noGit?: boolean } = {}) {
+function stubDevice(opts: { changes?: unknown; log?: unknown[]; tree?: unknown; noGit?: boolean; saveFails?: boolean; filesOutside?: boolean } = {}) {
   calls = [];
-  vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+  saves = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     calls.push(url);
     const q = new URL(url, "http://box").searchParams;
+    if (url === "/setup-api/coding-agent/tree" && init?.method === "PUT") {
+      const body = JSON.parse(String(init.body));
+      saves.push(body);
+      if (opts.saveFails) return json({ error: "No such file in the project", kind: "not_found" }, 404);
+      return json({ file: { path: body.file, size: body.content.length } });
+    }
+    if (url.startsWith("/setup-api/files?") && init?.method === "POST") {
+      if (opts.filesOutside) return json({ error: "Invalid path" }, 400);
+      return json({ absPath: "/home/clawbox/Projects/site", relPath: "Projects/site" });
+    }
     if (url.startsWith("/setup-api/coding-agent/tree?")) {
       const file = q.get("file");
       if (file === "src/app.js") return json({ file: { path: file, content: "console.log(1)\nconsole.log(2)\n", size: 30, truncated: false, binary: false } });
+      if (file === "README.md") return json({ file: { path: file, content: "# hi\n", size: 5, truncated: false, binary: false } });
+      if (file === "big.log") return json({ file: { path: file, content: "first part", size: 900_000, truncated: true, binary: false } });
       if (file === "logo.png") return json({ file: { path: file, content: "", size: 8, truncated: false, binary: true } });
       if (file !== null) return json({ error: "No such file in the project", kind: "not_found" }, 404);
       const p = q.get("path") ?? "";
@@ -124,7 +140,7 @@ describe("the Files tab", () => {
     expect(within(tree).getByTestId("coding-agent-tree-src/app.js")).toHaveAttribute("aria-level", "2");
   });
 
-  it("opens a file read-only beside the tree, numbered, and says so for a binary one", async () => {
+  it("opens a file in the editor beside the tree, numbered and coloured by its name, and says so for a binary one", async () => {
     stubDevice();
     render(<CodingProjectWorkspace query="projectId=site" live={false} />);
     const tree = await screen.findByTestId("coding-agent-file-tree");
@@ -135,13 +151,121 @@ describe("the Files tab", () => {
     const view = screen.getByTestId("coding-agent-file-view");
     await waitFor(() => expect(view.textContent).toContain("console.log(2)"));
     expect(view.textContent).toContain("src/app.js");
-    // Line numbers, and no editor: the text is in a <pre>, not a textarea.
-    expect(view.querySelector("pre")).not.toBeNull();
-    expect(view.querySelector("textarea")).toBeNull();
-    expect(view.textContent).toMatch(/1\s*console\.log\(1\)/);
+    // The shared editor: a numbered gutter, the text, and a textarea that mirrors it.
+    const editor = within(view).getByTestId("coding-agent-file-editor");
+    expect(editor).toHaveAttribute("data-language", "javascript");
+    expect(editor.querySelectorAll(".cb-code-gutter-line").length).toBeGreaterThanOrEqual(2);
+    expect(within(view).getByTestId("coding-agent-file-editor-input")).toHaveValue("console.log(1)\nconsole.log(2)\n");
+    expect(within(view).getByTestId("coding-agent-file-save")).toBeDisabled();
 
     fireEvent.click(within(tree).getByTestId("coding-agent-tree-logo.png"));
     await waitFor(() => expect(view.textContent).toContain(t("codingAgent.binaryFile")));
+    expect(view.querySelector("textarea")).toBeNull();
+  });
+
+  it("saves an edit through the route's PUT with the project named the way the page names it, and shows the outcome", async () => {
+    stubDevice();
+    render(<CodingProjectWorkspace query="directory=%2Fhome%2Fclawbox%2FProjects%2Fsite" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
+    const input = await screen.findByTestId("coding-agent-file-editor-input");
+    const view = screen.getByTestId("coding-agent-file-view");
+    fireEvent.change(input, { target: { value: "# hi\n\nedited\n" } });
+    expect(view).toHaveAttribute("data-dirty", "true");
+    expect(within(view).getByTestId("coding-agent-file-dirty")).toBeInTheDocument();
+    const save = within(view).getByTestId("coding-agent-file-save");
+    expect(save).toBeEnabled();
+    fireEvent.click(save);
+    await within(view).findByTestId("coding-agent-file-saved");
+    expect(saves).toEqual([{ projectId: null, directory: "/home/clawbox/Projects/site", file: "README.md", content: "# hi\n\nedited\n" }]);
+    expect(view).not.toHaveAttribute("data-dirty");
+    expect(save).toBeDisabled();
+  });
+
+  it("saves on Ctrl+S too, and says when the save was refused, keeping the edit", async () => {
+    stubDevice({ saveFails: true });
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
+    const input = await screen.findByTestId("coding-agent-file-editor-input");
+    fireEvent.change(input, { target: { value: "# changed" } });
+    fireEvent.keyDown(input, { key: "s", ctrlKey: true });
+    const view = screen.getByTestId("coding-agent-file-view");
+    await within(view).findByTestId("coding-agent-file-save-error");
+    expect(saves).toHaveLength(1);
+    expect(input).toHaveValue("# changed");
+    expect(view).toHaveAttribute("data-dirty", "true");
+  });
+
+  it("asks before another file replaces unsaved changes, and keeps them until told to discard", async () => {
+    stubDevice();
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
+    const input = await screen.findByTestId("coding-agent-file-editor-input");
+    fireEvent.change(input, { target: { value: "# changed" } });
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-src"));
+    fireEvent.click(await within(tree).findByTestId("coding-agent-tree-src/app.js"));
+    const view = screen.getByTestId("coding-agent-file-view");
+    const bar = await within(view).findByTestId("coding-agent-file-discard-bar");
+    expect(bar.textContent).toContain(t("codingAgent.fileDiscardAsk", { file: "README.md" }));
+    // Nothing was read for the other file yet, and the edit is still there.
+    expect(calls.some((u) => u.includes("file=src%2Fapp.js"))).toBe(false);
+    fireEvent.click(within(view).getByTestId("coding-agent-file-keep"));
+    expect(within(view).queryByTestId("coding-agent-file-discard-bar")).toBeNull();
+    expect(input).toHaveValue("# changed");
+
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-src/app.js"));
+    fireEvent.click(await within(view).findByTestId("coding-agent-file-discard"));
+    await waitFor(() => expect(within(view).getByTestId("coding-agent-file-editor-input")).toHaveValue("console.log(1)\nconsole.log(2)\n"));
+    expect(saves).toEqual([]);
+  });
+
+  it("shows a cut file read-only — a save would lose its tail — and warns while a run works in the folder", async () => {
+    stubDevice({ tree: { ...ROOT_LISTING, entries: [...ROOT_LISTING.entries, { name: "big.log", type: "file", size: 900_000, modified: null }] } });
+    render(<CodingProjectWorkspace query="projectId=site" live />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-big.log"));
+    const view = screen.getByTestId("coding-agent-file-view");
+    await waitFor(() => expect(view.textContent).toContain("first part"));
+    expect(view.textContent).toContain(t("codingAgent.fileTruncated"));
+    expect(view.querySelector("textarea")).toBeNull();
+    expect(within(view).queryByTestId("coding-agent-file-save")).toBeNull();
+
+    fireEvent.click(within(tree).getByTestId("coding-agent-tree-README.md"));
+    await screen.findByTestId("coding-agent-file-editor-input");
+    expect(within(view).getByTestId("coding-agent-file-live-note").textContent).toBe(t("codingAgent.fileLiveEdit"));
+  });
+
+  it("opens the project's folder in the Files app — a window of its own, at the path the Files route names", async () => {
+    stubDevice();
+    const seen: OpenAppDetail[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent<OpenAppDetail>).detail);
+    window.addEventListener(OPEN_APP_EVENT, handler);
+    try {
+      render(<CodingProjectWorkspace query="directory=%2Fhome%2Fclawbox%2FProjects%2Fsite" live={false} filesDirectory="/home/clawbox/Projects/site" />);
+      const tree = await screen.findByTestId("coding-agent-file-tree");
+      fireEvent.click(within(tree).getByTestId("coding-agent-open-in-files"));
+      await waitFor(() => expect(seen).toHaveLength(1));
+      expect(seen[0]).toEqual({ appId: "files", forceNew: true, meta: { path: "Projects/site" } });
+      const [, init] = (fetch as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls.find(([u]) => u.startsWith("/setup-api/files?"))!;
+      expect(JSON.parse(String(init.body))).toEqual({ action: "resolve", filePath: "/home/clawbox/Projects/site" });
+    } finally {
+      window.removeEventListener(OPEN_APP_EVENT, handler);
+    }
+  });
+
+  it("says so when the Files app cannot reach the folder, and offers no button without a folder", async () => {
+    stubDevice({ filesOutside: true });
+    const { unmount } = render(<CodingProjectWorkspace query="projectId=site" live={false} filesDirectory="/srv/elsewhere" />);
+    const tree = await screen.findByTestId("coding-agent-file-tree");
+    fireEvent.click(within(tree).getByTestId("coding-agent-open-in-files"));
+    expect(await screen.findByText(t("codingAgent.openInFilesFailed"))).toBeInTheDocument();
+    unmount();
+    stubDevice();
+    render(<CodingProjectWorkspace query="projectId=site" live={false} />);
+    await screen.findByTestId("coding-agent-file-tree");
+    expect(screen.queryByTestId("coding-agent-open-in-files")).toBeNull();
   });
 
   it("says when the folder is empty", async () => {

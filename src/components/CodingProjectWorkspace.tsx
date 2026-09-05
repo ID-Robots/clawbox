@@ -24,6 +24,9 @@ import { useT } from "@/lib/i18n";
 import type { ChangedFile, ChangeStatus, CommitSummary, FileDiff, GitChanges } from "@/lib/coding-git";
 import type { TreeEntry, TreeFile, TreeListing } from "@/lib/coding-project-tree";
 import { fileIcon, formatSize, Icon } from "./file-icons";
+import CodeEditor from "./CodeEditor";
+import { languageForFile } from "@/lib/code-language";
+import { dispatchOpenApp } from "@/lib/ui-events";
 import { CARD_SURFACE, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { timeAgo } from "./clawkeep-ui";
 
@@ -40,6 +43,8 @@ interface Props {
   initialTab?: WorkspaceTab;
   /** Take the height of the column this sits in instead of a fixed cap. */
   fill?: boolean;
+  /** The project's folder as the Files app can be pointed at it; absent, no "Open in Files". */
+  filesDirectory?: string;
   /** The project's runs, as a tab of their own — the page hands the list in
    *  so the rows stay the one list home also draws. Absent: no tab. */
   runs?: ReactNode;
@@ -62,7 +67,7 @@ const STATUS_GLYPH: Record<ChangeStatus, { letter: string; className: string }> 
   conflict: { letter: "!", className: "text-red-400" },
 };
 
-export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab, fill = false, runs, runsCount = 0, runsLive = false, team }: Props) {
+export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab, fill = false, filesDirectory, runs, runsCount = 0, runsLive = false, team }: Props) {
   const { t } = useT();
   // The project page opens on its RUNS — what the owner comes to a project
   // for — and the files and the changes are one tab away; a host that hands
@@ -143,7 +148,7 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
       {/* Both panes stay mounted: a tree that was opened three folders deep
           would otherwise fold every time the owner glanced at the diff. */}
       <div role="tabpanel" id="coding-agent-workspace-pane-files" aria-labelledby="coding-agent-workspace-tab-files" hidden={tab !== "files"} className={panelClass}>
-        <FilesPane query={query} paneClass={paneClass} fill={fill} />
+        <FilesPane query={query} live={live} directory={filesDirectory} paneClass={paneClass} fill={fill} />
       </div>
       <div role="tabpanel" id="coding-agent-workspace-pane-changes" aria-labelledby="coding-agent-workspace-tab-changes" hidden={tab !== "changes"} className={panelClass}>
         <ChangesPane query={query} live={live} initialRef={initialRef} active={tab === "changes"} paneClass={paneClass} fill={fill} />
@@ -166,13 +171,22 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
 
 type Node = { path: string; entry: TreeEntry; depth: number };
 
-function FilesPane({ query, paneClass, fill }: { query: string; paneClass: string; fill: boolean }) {
+function FilesPane({ query, live, directory, paneClass, fill }: { query: string; live: boolean; directory?: string; paneClass: string; fill: boolean }) {
   const { t } = useT();
   const [listings, setListings] = useState<Record<string, TreeListing>>({});
   const [open, setOpen] = useState<Set<string>>(() => new Set([""]));
   const [failed, setFailed] = useState<string | null>(null);
   const [file, setFile] = useState<TreeFile | null>(null);
   const [fileBusy, setFileBusy] = useState<string | null>(null);
+  // The text as the owner has it; null while nothing editable is open.
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  // A file tapped while the open one carries unsaved changes: asked about
+  // before it replaces them, never opened over them.
+  const [pendingOpen, setPendingOpen] = useState<string | null>(null);
+  const [filesBusy, setFilesBusy] = useState(false);
 
   const load = useCallback(async (rel: string) => {
     try {
@@ -201,18 +215,80 @@ function FilesPane({ query, paneClass, fill }: { query: string; paneClass: strin
     if (opening && !listings[rel]) void load(rel);
   };
 
-  const openFile = async (rel: string) => {
+  // A binary file has nothing to edit; a cut one must not be saved back cut.
+  const editable = !!file && !file.binary && !file.truncated;
+  const dirty = editable && draft !== null && draft !== file!.content;
+
+  const readFile = async (rel: string) => {
     setFileBusy(rel);
     try {
       const res = await fetch(`/setup-api/coding-agent/tree?${query}&file=${encodeURIComponent(rel)}`, { cache: "no-store" });
       const data = await res.json().catch(() => null) as { file?: TreeFile; error?: string } | null;
       if (!res.ok || !data?.file) throw new Error(data?.error ?? t("codingAgent.workspaceError"));
       setFile(data.file);
+      setDraft(data.file.binary || data.file.truncated ? null : data.file.content);
+      setSaved(false);
+      setSaveError(null);
       setFailed(null);
     } catch (err) {
       setFailed(err instanceof Error ? err.message : t("codingAgent.workspaceError"));
     } finally {
       setFileBusy(null);
+    }
+  };
+
+  const openFile = (rel: string) => {
+    if (dirty) { setPendingOpen(rel); return; }
+    void readFile(rel);
+  };
+
+  const save = useCallback(async () => {
+    if (!file || !dirty || draft === null || saving) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const params = new URLSearchParams(query);
+      const res = await fetch("/setup-api/coding-agent/tree", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId: params.get("projectId"), directory: params.get("directory"), file: file.path, content: draft }),
+      });
+      const data = await res.json().catch(() => null) as { file?: { path: string; size: number }; error?: string } | null;
+      if (!res.ok || !data?.file) throw new Error(data?.error ?? t("codingAgent.fileSaveFailed"));
+      setFile({ ...file, content: draft, size: data.file.size });
+      setSaved(true);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : t("codingAgent.fileSaveFailed"));
+    } finally {
+      setSaving(false);
+    }
+  }, [file, dirty, draft, saving, query, t]);
+
+  useEffect(() => {
+    if (!saved) return;
+    const id = setTimeout(() => setSaved(false), 2000);
+    return () => clearTimeout(id);
+  }, [saved]);
+
+  // The Files app browses from the owner's home; the project folder is
+  // named to it as the Files route knows it, then a Files window of its
+  // own opens there (a plain `openApp` would only raise the one already up).
+  const openInFiles = async () => {
+    if (!directory || filesBusy) return;
+    setFilesBusy(true);
+    try {
+      const res = await fetch("/setup-api/files?dir=", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "resolve", filePath: directory }),
+      });
+      const data = await res.json().catch(() => null) as { relPath?: string; error?: string } | null;
+      if (!res.ok || typeof data?.relPath !== "string") throw new Error(t("codingAgent.openInFilesFailed"));
+      dispatchOpenApp("files", { forceNew: true, meta: { path: data.relPath } });
+    } catch (err) {
+      setFailed(err instanceof Error ? err.message : t("codingAgent.openInFilesFailed"));
+    } finally {
+      setFilesBusy(false);
     }
   };
 
@@ -237,6 +313,21 @@ function FilesPane({ query, paneClass, fill }: { query: string; paneClass: strin
   return (
     <div className={`mt-2 ${CARD_SURFACE} overflow-hidden @3xl:grid @3xl:grid-cols-[minmax(16rem,22rem)_minmax(0,1fr)] ${fill ? "flex-1 min-h-0" : ""}`}>
       <div className={`${paneClass} overflow-y-auto border-b @3xl:border-b-0 @3xl:border-r border-white/[0.06]`} data-testid="coding-agent-file-tree">
+        {directory && (
+          <div className="flex items-center justify-end px-2 py-1 border-b border-white/[0.06]">
+            <button
+              type="button"
+              onClick={() => void openInFiles()}
+              disabled={filesBusy}
+              data-testid="coding-agent-open-in-files"
+              className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-white hover:bg-white/[0.06] disabled:opacity-50"
+              title={t("codingAgent.openInFiles")}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">folder_open</span>
+              {t("codingAgent.openInFiles")}
+            </button>
+          </div>
+        )}
         {failed && !root && <p className="px-3 py-2 text-[11px] text-red-300">{failed}</p>}
         {root && root.entries.length === 0 && <p className="px-3 py-2 text-[11px] text-[var(--text-muted)]">{t("codingAgent.emptyFolder")}</p>}
         <ul role="tree" className="py-1">
@@ -253,7 +344,7 @@ function FilesPane({ query, paneClass, fill }: { query: string; paneClass: strin
                   aria-level={depth + 1}
                   aria-expanded={isDir ? expanded : undefined}
                   aria-selected={current || undefined}
-                  onClick={() => (isDir ? toggle(path) : void openFile(path))}
+                  onClick={() => (isDir ? toggle(path) : openFile(path))}
                   data-testid={`coding-agent-tree-${path}`}
                   title={path}
                   className={`w-full flex items-center gap-1.5 py-1 pr-2 text-left text-[12px] hover:bg-white/[0.05] ${current ? "bg-white/[0.08] text-[var(--text-primary)]" : "text-[var(--text-secondary)]"}`}
@@ -276,42 +367,55 @@ function FilesPane({ query, paneClass, fill }: { query: string; paneClass: strin
         </ul>
         {root?.truncated && <p className="px-3 py-1.5 text-[11px] text-[var(--text-muted)]">{t("codingAgent.listTruncated")}</p>}
       </div>
-      <div className={`min-w-0 min-h-[8rem] ${paneClass} overflow-auto`} data-testid="coding-agent-file-view">
+      <div className={`min-w-0 min-h-[8rem] ${paneClass} overflow-auto flex flex-col`} data-testid="coding-agent-file-view" data-dirty={dirty || undefined}>
         {failed && root && <p className="px-3 py-2 text-[11px] text-red-300">{failed}</p>}
         {!file ? (
           <p className="px-3 py-3 text-[11px] text-[var(--text-muted)]">{t("codingAgent.pickFile")}</p>
         ) : (
           <>
-            <div className="sticky top-0 flex items-center gap-2 px-3 py-1.5 border-b border-white/[0.06] bg-[var(--win-ground)] text-[11px]">
+            <div className="sticky top-0 left-0 z-10 flex items-center gap-2 px-3 py-1.5 border-b border-white/[0.06] bg-[var(--win-ground)] text-[11px]">
               <span className="font-mono text-[var(--text-primary)] truncate">{file.path}</span>
               <span className="text-[var(--text-muted)] shrink-0">{formatSize(file.size)}</span>
-              {file.truncated && <span className="text-amber-300 shrink-0">{t("codingAgent.fileTruncated")}</span>}
+              {file.truncated && <span className="text-amber-300 shrink-0" title={t("codingAgent.fileReadOnlyLarge")}>{t("codingAgent.fileTruncated")}</span>}
+              {editable && (
+                <span className="ml-auto flex items-center gap-2 shrink-0">
+                  {dirty && <span className="text-[var(--text-muted)]" title={t("codingAgent.fileUnsaved")} data-testid="coding-agent-file-dirty">●</span>}
+                  {!dirty && saved && <span className="text-emerald-300" data-testid="coding-agent-file-saved">{t("codingAgent.fileSaved")}</span>}
+                  <button
+                    type="button"
+                    onClick={() => void save()}
+                    disabled={!dirty || saving}
+                    data-testid="coding-agent-file-save"
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 border border-white/[0.08] bg-white/[0.06] text-[var(--text-primary)] hover:bg-white/[0.12] disabled:opacity-40"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">save</span>
+                    {saving ? t("codingAgent.fileSaving") : t("codingAgent.fileSave")}
+                  </button>
+                </span>
+              )}
             </div>
+            {editable && live && (
+              <p className="sticky left-0 px-3 py-1 text-[11px] text-amber-300/90 border-b border-white/[0.06]" data-testid="coding-agent-file-live-note">{t("codingAgent.fileLiveEdit")}</p>
+            )}
+            {saveError && <p className="sticky left-0 px-3 py-1 text-[11px] text-red-300" data-testid="coding-agent-file-save-error">{saveError}</p>}
+            {pendingOpen !== null && (
+              <div className="sticky left-0 flex flex-wrap items-center gap-2 px-3 py-1.5 text-[11px] text-amber-200 bg-amber-500/10 border-b border-amber-400/20" data-testid="coding-agent-file-discard-bar">
+                <span>{t("codingAgent.fileDiscardAsk", { file: file.path })}</span>
+                <button type="button" onClick={() => setPendingOpen(null)} data-testid="coding-agent-file-keep" className="rounded-md px-2 py-0.5 border border-white/[0.08] bg-white/[0.06] hover:bg-white/[0.12] text-[var(--text-primary)]">{t("codingAgent.fileKeepEditing")}</button>
+                <button type="button" onClick={() => { const rel = pendingOpen; setPendingOpen(null); void readFile(rel); }} data-testid="coding-agent-file-discard" className="rounded-md px-2 py-0.5 border border-red-400/30 bg-red-500/15 hover:bg-red-500/25 text-red-200">{t("codingAgent.fileDiscard")}</button>
+              </div>
+            )}
             {file.binary ? (
               <p className="px-3 py-3 text-[11px] text-[var(--text-muted)]">{t("codingAgent.binaryFile")}</p>
+            ) : editable ? (
+              <CodeEditor value={draft ?? file.content} onChange={setDraft} language={languageForFile(file.path)} onSave={() => void save()} ariaLabel={file.path} testId="coding-agent-file-editor" className="flex-1" />
             ) : (
-              <NumberedText text={file.content} />
+              <CodeEditor value={file.content} language={languageForFile(file.path)} testId="coding-agent-file-editor" className="flex-1" />
             )}
           </>
         )}
       </div>
     </div>
-  );
-}
-
-/** Plain text with a line-number gutter; never markup — a run wrote it. */
-function NumberedText({ text }: { text: string }) {
-  const lines = text.split("\n");
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
-  return (
-    <pre className="text-[11.5px] leading-[1.45] font-mono text-[var(--text-secondary)] px-0 py-1">
-      {lines.map((line, i) => (
-        <div key={i} className="flex">
-          <span className="w-10 shrink-0 select-none text-right pr-2 text-[var(--text-muted)] opacity-50">{i + 1}</span>
-          <span className="whitespace-pre-wrap break-all">{line}</span>
-        </div>
-      ))}
-    </pre>
   );
 }
 

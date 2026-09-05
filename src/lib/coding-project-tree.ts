@@ -13,7 +13,9 @@
  * it), then the secret-store guard, since a project may sit inside the
  * checkout and `data/` is where the tokens live.
  *
- * Read-only. A run edits files; the owner reads them.
+ * Reading, and ONE write: the owner's edit of a file that is already there,
+ * through the same walk. The editor never creates or removes a file — a run
+ * does that, and the Files app can.
  */
 
 import fs from "fs";
@@ -46,6 +48,8 @@ export interface TreeFile {
 }
 
 export type TreeRefusal = { ok: false; status: 403 | 404 };
+/** A save refused: the same 403/404 as a read, or 413 for a text past the cap. */
+export type WriteRefusal = { ok: false; status: 403 | 404 | 413 };
 
 /** Folders a project explorer has no business opening. */
 const SKIPPED_DIRS = new Set([".git"]);
@@ -53,6 +57,8 @@ const SKIPPED_DIRS = new Set([".git"]);
 export const MAX_TREE_ENTRIES = 1000;
 /** A file is read up to here; the rest is cut and said so. */
 export const MAX_TREE_FILE_BYTES = 512 * 1024;
+/** A save may be this large at most — the read cap, so what was opened whole can be saved whole. */
+export const MAX_TREE_WRITE_BYTES = MAX_TREE_FILE_BYTES;
 
 /**
  * `rel` (as the page names it; "" or "." is the project itself) resolved to a
@@ -103,14 +109,16 @@ export async function resolveInsideProject(
  *
  * Returns the descriptor of the target; the caller closes it.
  */
-function openThroughDescriptors(root: string, rel: string, target: "directory" | "file"): number {
+function openThroughDescriptors(root: string, rel: string, target: "directory" | "file", access: "read" | "write" = "read"): number {
   const parts = rel === "" ? [] : rel.split("/");
   let fd = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
   try {
     for (let i = 0; i < parts.length; i++) {
       const last = i === parts.length - 1;
+      // Writing opens the file itself for writing and nothing else: every
+      // folder on the way is still opened read-only, and never created.
       const flags = last && target === "file"
-        ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+        ? (access === "write" ? fs.constants.O_WRONLY : fs.constants.O_RDONLY) | fs.constants.O_NOFOLLOW
         : fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
       const next = fs.openSync(path.join(`/proc/self/fd/${fd}`, parts[i]), flags);
       fs.closeSync(fd);
@@ -209,6 +217,40 @@ export async function readProjectFile(projectDir: string, rel: string): Promise<
       truncated: stat.size > want,
       binary,
     };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+/**
+ * The owner's edit, saved over a file that is already in the project. The
+ * same walk as the read — component by component, no link followed, the
+ * descriptor checked to be a plain file before a byte moves — then truncate
+ * and write through that descriptor: the file written is the file checked.
+ * No file is created (O_CREAT is never set), so a typo in the name is a 404,
+ * not a new file; a folder, a link and the project root are refused alike.
+ */
+export async function writeProjectFile(projectDir: string, rel: string, content: string): Promise<{ ok: true; path: string; size: number } | WriteRefusal> {
+  const bytes = Buffer.from(content, "utf8");
+  if (bytes.length > MAX_TREE_WRITE_BYTES) return { ok: false, status: 413 };
+  const resolved = await resolveInsideProject(projectDir, rel);
+  if (!resolved.ok) return resolved;
+  if (!resolved.rel) return { ok: false, status: 404 };
+  let fd: number | null = null;
+  try {
+    fd = openThroughDescriptors(resolved.root, resolved.rel, "file", "write");
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return { ok: false, status: 404 };
+    fs.ftruncateSync(fd, 0);
+    let written = 0;
+    while (written < bytes.length) {
+      written += fs.writeSync(fd, bytes, written, bytes.length - written, written);
+    }
+    fs.fsyncSync(fd);
+    return { ok: true, path: resolved.rel, size: bytes.length };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };

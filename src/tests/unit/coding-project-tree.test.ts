@@ -14,7 +14,7 @@ vi.mock("@/lib/file-guard", () => ({
   isProtectedFilePath: (abs: string) => abs.split(path.sep).includes("secrets"),
 }));
 
-import { listProjectDir, MAX_TREE_FILE_BYTES, readProjectFile, resolveInsideProject } from "@/lib/coding-project-tree";
+import { listProjectDir, MAX_TREE_FILE_BYTES, MAX_TREE_WRITE_BYTES, readProjectFile, resolveInsideProject, writeProjectFile } from "@/lib/coding-project-tree";
 
 let root: string;
 let project: string;
@@ -154,5 +154,42 @@ describe("resolving", () => {
 
   it("refuses a project folder that is not there", async () => {
     expect(await resolveInsideProject(path.join(root, "missing"), "")).toEqual({ ok: false, status: 404 });
+  });
+});
+
+describe("writing a file", () => {
+  it("saves the owner's text over a file that is there, whole, and reads it back", async () => {
+    const out = await writeProjectFile(project, "src/app.js", "console.log(2)\n// edited\n");
+    expect(out).toEqual({ ok: true, path: "src/app.js", size: 25 });
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("console.log(2)\n// edited\n");
+    const back = await readProjectFile(project, "src/app.js");
+    expect(back).toMatchObject({ ok: true, content: "console.log(2)\n// edited\n", size: 25 });
+    // Shorter than before: truncated, not overwritten in place.
+    expect(await writeProjectFile(project, "src/app.js", "x")).toEqual({ ok: true, path: "src/app.js", size: 1 });
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("x");
+  });
+
+  it("creates nothing: a name that is not there is a 404, not a new file", async () => {
+    expect(await writeProjectFile(project, "src/new.js", "x")).toEqual({ ok: false, status: 404 });
+    expect(fs.existsSync(path.join(project, "src", "new.js"))).toBe(false);
+  });
+
+  it("refuses the root, a folder, a link out, a link in, a protected file, .git and a climb — and writes through none of them", async () => {
+    const before = fs.readFileSync(path.join(root, "outside.txt"), "utf8");
+    for (const rel of ["", ".", "src", "escape.txt", "readme-link.md", "secrets/token", ".git/config", "../outside.txt", "/etc/passwd"]) {
+      const out = await writeProjectFile(project, rel, "owned");
+      expect(out.ok, rel).toBe(false);
+      expect((out as { status: number }).status, rel).toBe(404);
+    }
+    expect(fs.readFileSync(path.join(root, "outside.txt"), "utf8")).toBe(before);
+    expect(fs.readFileSync(path.join(project, "README.md"), "utf8")).toBe("# hi\n");
+    expect(fs.readFileSync(path.join(project, "secrets", "token"), "utf8")).toBe("t\n");
+  });
+
+  it("refuses a text past the cap before touching the file", async () => {
+    expect(MAX_TREE_WRITE_BYTES).toBe(MAX_TREE_FILE_BYTES);
+    const out = await writeProjectFile(project, "README.md", "x".repeat(MAX_TREE_WRITE_BYTES + 1));
+    expect(out).toEqual({ ok: false, status: 413 });
+    expect(fs.readFileSync(path.join(project, "README.md"), "utf8")).toBe("# hi\n");
   });
 });

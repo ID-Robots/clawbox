@@ -10,12 +10,14 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  type OpenAppDetail,
   buildFixErrorPrompt,
   buildNewAppPrompt,
   CHAT_MESSAGE_EVENT,
   CODING_AGENT_CHANGED_EVENT,
   dispatchChatMessage,
   dispatchFixError,
+  dispatchOpenApp,
   FIX_ERROR_EVENT,
   handoffSettingsSection,
   MEMORY_SHARD_CHANGED_EVENT,
@@ -190,5 +192,25 @@ describe("buildTeamProjectPrompt", () => {
     const text = buildTeamProjectPrompt({ ...base, instructions: "..." });
     expect(text).toContain(": ....");
     expect(text).not.toContain(": .\n");
+  });
+});
+
+describe("dispatchOpenApp", () => {
+  it("carries only what was asked: the app, a maximize, a window of its own, and strings for its record", () => {
+    const seen: OpenAppDetail[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent<OpenAppDetail>).detail);
+    window.addEventListener(OPEN_APP_EVENT, handler);
+    try {
+      dispatchOpenApp("files");
+      dispatchOpenApp("files", { forceNew: true, meta: { path: "Projects/site" } });
+      dispatchOpenApp("coding", { maximize: true });
+    } finally {
+      window.removeEventListener(OPEN_APP_EVENT, handler);
+    }
+    expect(seen).toEqual([
+      { appId: "files" },
+      { appId: "files", forceNew: true, meta: { path: "Projects/site" } },
+      { appId: "coding", maximize: true },
+    ]);
   });
 });
