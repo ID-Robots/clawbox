@@ -210,6 +210,26 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     ]);
   });
 
+  it("settles a key the owner had already set, so removing it later is not re-seeded", () => {
+    // He had a cadence of his own on the first boot. That key is recorded as
+    // settled without being written — and when he later switches check-ins ON,
+    // which REMOVES the key, the next boot leaves it alone.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ agents: { defaults: { heartbeat: { every: "30m" } } } }, null, 2),
+    );
+    run();
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded)
+      .toContain("agents.defaults.heartbeat.every");
+
+    writeFileSync(configPath, JSON.stringify({}, null, 2));
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(calls()).toBe("");
+  });
+
   it("offers them again after a factory reset has emptied data/", () => {
     run();
     // `setup/reset` empties DATA_DIR and wipes ~/.openclaw; the record goes with

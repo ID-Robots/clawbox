@@ -240,6 +240,13 @@ export async function setBackgroundJob(
   enabled: boolean,
 ): Promise<BackgroundJobsStatus> {
   const before = await readBackgroundJobs();
+  // A DEGRADED read before the write, not only after it. The fallback rows a
+  // degraded status carries are shaped like a working box — every job ON, every
+  // one supported — so `row.supported` would wave through a write for a job
+  // this edition may not even have, against a config nobody could read.
+  if (before.degraded) {
+    throw new BackgroundJobError("write_failed", "The device could not be read.");
+  }
   const row = before.jobs.find((job) => job.id === id);
   if (!row?.supported) {
     throw new BackgroundJobError("unsupported", "This edition has no such background job.");

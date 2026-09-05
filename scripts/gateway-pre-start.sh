@@ -2583,20 +2583,35 @@ def present(path):
         node = node[part]
     return node is not None
 
-batch = [
-    {"path": ".".join(path), "value": value}
-    for path, value in WANTED
-    if ".".join(path) not in seeded and not present(path)
-]
-print(json.dumps(batch) if batch else "")
+batch = []
+# Everything not already recorded is DONE with after this boot, whether it was
+# written or was already the owner's. A path he had set on the first boot used
+# to be skipped and never recorded, so removing it later — which is what
+# turning check-ins back on does — offered the seed all over again. Recording
+# it is the same statement the batch makes: ClawBox has had its say about this
+# key.
+settled = []
+for path, value in WANTED:
+    key = ".".join(path)
+    if key in seeded:
+        continue
+    settled.append(key)
+    if not present(path):
+        batch.append({"path": key, "value": value})
+print(json.dumps({"batch": batch, "settled": settled}) if settled else "")
 SEEDPY
 )"
   if [ -n "$CLAWBOX_OPTOUT_BATCH" ]; then
     # Non-fatal like every other CLI call here: this is a blocking ExecStartPre,
     # and a box that keeps its noisy defaults is far better than one with no
     # gateway. The next boot tries again, because the keys are still absent.
-    if timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_OPTOUT_BATCH" >/dev/null 2>&1; then
-      echo "  Seeded the OpenClaw 2 background-job opt-outs (heartbeat, memory dreaming, self-learning) — Settings can switch any of them back on"
+    CLAWBOX_OPTOUT_WRITES="$(printf %s "$CLAWBOX_OPTOUT_BATCH" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["batch"]))')"
+    # Nothing to write — every key was already the owner's — so record and move
+    # on without paying a CLI start for it.
+    if [ "$CLAWBOX_OPTOUT_WRITES" = "[]" ] \
+      || timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_OPTOUT_WRITES" >/dev/null 2>&1; then
+      [ "$CLAWBOX_OPTOUT_WRITES" = "[]" ] \
+        || echo "  Seeded the OpenClaw 2 background-job opt-outs (heartbeat, memory dreaming, self-learning) — Settings can switch any of them back on"
       # RECORDED ONLY AFTER THE WRITE LANDED, and merged with what is there: a
       # seed that failed must be offered again next boot, and a box seeded key
       # by key over several boots must not lose the earlier ones.
@@ -2610,7 +2625,7 @@ try:
         seeded = set(json.load(fh).get("seeded") or [])
 except (OSError, json.JSONDecodeError):
     seeded = set()
-seeded.update(entry["path"] for entry in json.loads(os.environ["CLAWBOX_OPTOUT_BATCH"]))
+seeded.update(json.loads(os.environ["CLAWBOX_OPTOUT_BATCH"])["settled"])
 
 directory = os.path.dirname(path) or "."
 os.makedirs(directory, exist_ok=True)

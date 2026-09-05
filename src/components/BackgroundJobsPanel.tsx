@@ -113,9 +113,11 @@ export default function BackgroundJobsPanel() {
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">
           bedtime
         </span>
-        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+        {/* A heading, not a `label`: there is no control for it to name, and a
+            `label` without one is read out as a form label for whatever follows. */}
+        <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
           {t("settings.bgTitle")}
-        </label>
+        </h3>
       </div>
       <p className="text-[11px] text-[var(--text-muted)] mb-3 leading-relaxed">{t("settings.bgHelper")}</p>
 
