@@ -371,17 +371,16 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     // in the journal. Same silent-drop shape as reading a failed systemctl
     // probe as "this edition has no gateway".
     makeBox({ connectivity: ["full"] });
-    const runDir = path.join(root, "run");
-    chmodSync(runDir, 0o555);
-    try {
-      runWaiter("Ethernet 'eth0' up");
+    // A DIRECTORY at the lock path, not a read-only parent: root bypasses DAC
+    // write checks, so a 0555 directory stops nobody in a root CI container,
+    // while no uid at all can open a directory for writing.
+    mkdirSync(path.join(root, "run", "gateway-online-restart.lock"), { recursive: true });
 
-      expect(journal()).toContain("no single-waiter guard");
-      // ...and the wait still happens: dropping the event is the worse failure.
-      expect(restarts()).toBe(1);
-    } finally {
-      chmodSync(runDir, 0o755);
-    }
+    runWaiter("Ethernet 'eth0' up");
+
+    expect(journal()).toContain("no single-waiter guard");
+    // ...and the wait still happens: dropping the event is the worse failure.
+    expect(restarts()).toBe(1);
   });
 
   it("takes a request that arrived while it was waiting rather than losing it", () => {
@@ -633,20 +632,13 @@ describe("the installer reports what it actually installed", () => {
     return INSTALL_SH.slice(start, end + 2);
   }
 
-  function runStep(opts: { waiterInstallFails?: boolean; dispatcherDirReadOnly?: boolean; shape: "update" | "fresh" }) {
+  function runStep(opts: { waiterInstallFails?: boolean; dispatcherInstallFails?: boolean; shape: "update" | "fresh" }) {
     const project = path.join(root, "project");
     const dispatcherDir = path.join(root, "dispatcher.d");
     const libexec = path.join(root, "root-libexec");
     mkdirSync(path.join(project, "scripts"), { recursive: true });
     copyFileSync(DISPATCHER, path.join(project, "scripts", "nm-dispatcher-failover.sh"));
     copyFileSync(WAITER, path.join(project, "scripts", "gateway-restart-when-online.sh"));
-
-    if (opts.dispatcherDirReadOnly) {
-      // A full or read-only /etc is the likelier failure of the two, and it is
-      // the half `install_root_file` does not cover.
-      mkdirSync(dispatcherDir, { recursive: true });
-      chmodSync(dispatcherDir, 0o555);
-    }
 
     const body = shellFunction("step_nm_dispatcher")
       .replace("/etc/NetworkManager/dispatcher.d", dispatcherDir);
@@ -662,10 +654,15 @@ describe("the installer reports what it actually installed", () => {
       // so the test exercises the atomicity the dispatcher now depends on. Not
       // root in a test, so ownership is dropped rather than faked.
       'install_root_file() { cp "$1" "$2.new" && mv -f "$2.new" "$2"; }',
-      // The dispatcher goes through install_root_file too, so a blanket failure
-      // would fire on the wrong half — fail only the waiter's destination.
+      // Both halves go through install_root_file, so a blanket failure would
+      // fire on the wrong one — each case fails only its own destination.
+      // Keyed on the path rather than on directory permissions, because root
+      // bypasses DAC write checks and CI may well run as root.
       ...(opts.waiterInstallFails
         ? ['install_root_file() { case "$2" in *gateway-restart-when-online.sh) return 1 ;; esac; cp "$1" "$2.new" && mv -f "$2.new" "$2"; }']
+        : []),
+      ...(opts.dispatcherInstallFails
+        ? ['install_root_file() { case "$2" in *90-clawbox-failover) return 1 ;; esac; cp "$1" "$2.new" && mv -f "$2.new" "$2"; }']
         : []),
       // The real one stamps $PROVISION_STATUS_FILE, which the dashboard and the
       // flash host read. A step that only warns leaves the update's own verdict
@@ -710,12 +707,12 @@ describe("the installer reports what it actually installed", () => {
 
   it("does not claim the dispatcher is installed when the copy failed", () => {
     // The other half of the same function, and the one that fires on a full or
-    // read-only /etc: `cp`, `chown` and `chmod` were unchecked too, so the
-    // update path printed "NetworkManager failover dispatcher installed" over
-    // a dispatcher that never landed.
+    // read-only /etc: the copy was unchecked too, so the update path printed
+    // "NetworkManager failover dispatcher installed" over a dispatcher that
+    // never landed.
     makeBox();
 
-    const r = runStep({ dispatcherDirReadOnly: true, shape: "update" });
+    const r = runStep({ dispatcherInstallFails: true, shape: "update" });
 
     expect(r.out).not.toContain("NetworkManager failover dispatcher installed");
     expect(r.out).toContain("could not install the NetworkManager failover dispatcher");
