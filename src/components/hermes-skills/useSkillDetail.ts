@@ -40,7 +40,11 @@ export type DetailPhase = 'idle' | 'meta' | 'docs' | 'done';
  */
 export interface DetailFailure {
   part: 'meta' | 'docs';
-  code: CliFailureCode | null;
+  /**
+   * `not_found` is the one refusal that is not a CLI failure: Hermes answered,
+   * and what it said is that the skill does not exist.
+   */
+  code: CliFailureCode | 'not_found' | null;
 }
 
 interface DetailDelta extends Partial<HermesSkillDetail> {
@@ -190,6 +194,20 @@ export function useSkillDetail(inspectId: string | null, fromInstalled = false):
           return;
         }
         if (!res.ok) {
+          // A 404 `not_found` is HERMES refusing the id — it is the authority on
+          // what exists, and phase 1's catalogue is a snapshot that can be stale
+          // or keyed differently (a related-skill chip carries a bare NAME). Over
+          // a phase-1 record nothing backed, that refusal settles the question:
+          // what is on screen behind this note is the id echoed back as a name,
+          // not a skill, so the record goes with the note.
+          if (res.status === 404 && data?.code === 'not_found' && base.catalogMiss) {
+            console.error('[skills detail] no such skill', inspectId);
+            cache.current.delete(cacheKey);
+            setHeld(null);
+            setPhase('done');
+            setErrorState({ key: cacheKey, run, part: 'meta', code: 'not_found' });
+            return;
+          }
           // The metadata is already on screen; a failed docs fetch only costs
           // the body, so it degrades to a note rather than an error page.
           console.error('[skills detail] documentation', data?.code ?? 'no code', data?.error ?? res.status);

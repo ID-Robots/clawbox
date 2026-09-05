@@ -497,6 +497,7 @@ export const ja: Record<string, string> = {
   "skills.installUnknownOutcome": "デバイスの応答が長すぎて読み取れなかったため、「{name}」がインストールされたかどうかは不明です。もう一度試す前に「インストール済み」タブをご確認ください。",
   "skills.uninstallUnknownOutcome": "デバイスの応答が長すぎて読み取れなかったため、「{name}」が削除されたかどうかは不明です。もう一度試す前に「インストール済み」タブをご確認ください。",
   "skills.detailFailed": "このスキルの詳細を読み込めませんでした。もう一度お試しください。",
+  "skills.detailNotFound": "このスキルは本体にも スキルストアにも見つからないため、表示できる情報がありません。",
   "skills.detailUnavailable": "この本体には Hermes がインストールされていないため、このスキルの詳細を読み込めません。",
   "skills.detailDocsFailed": "このスキルの完全なドキュメントを読み込めませんでした。上に表示されている内容は本体から取得したものです。",
   "skills.skillDisabled": "無効",
