@@ -300,8 +300,10 @@ describe("the pull request across the owner's gestures", () => {
     lib = await import("@/lib/coding-agent");
   });
 
-  afterEach(() => {
-    lib._resetCodingAgentStateForTests();
+  afterEach(async () => {
+    // Awaited: the settle path a finished run starts outlives the test that
+    // made it, and the removal below raced the work it was still doing.
+    await lib._resetCodingAgentStateForTests();
     restore();
     fs.rmSync(base, { recursive: true, force: true });
   });

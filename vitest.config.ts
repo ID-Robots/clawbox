@@ -78,6 +78,9 @@ export default defineConfig({
           environment: "node",
           include: ["src/tests/unit/**/*.test.ts", "src/tests/routes/**/*.test.ts", "src/tests/middleware/**/*.test.ts", "src/tests/*.test.ts"],
           exclude: ["**/node_modules/**", "**/.next/**"],
+          // A handful of files in this project opt into jsdom to render a
+          // hook, and nothing was unmounting them — see the setup file.
+          setupFiles: ["src/tests/setup-unit.ts"],
         },
       },
       {

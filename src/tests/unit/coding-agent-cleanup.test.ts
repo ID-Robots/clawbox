@@ -133,8 +133,10 @@ beforeEach(async () => {
   lib = await import("@/lib/coding-agent");
 });
 
-afterEach(() => {
-  lib._resetCodingAgentStateForTests();
+afterEach(async () => {
+  // Awaited: the settle path a finished run starts outlives the test that
+  // made it, and the removal below raced the `git` it was still spawning.
+  await lib._resetCodingAgentStateForTests();
   restore();
   fs.rmSync(base, { recursive: true, force: true });
 });

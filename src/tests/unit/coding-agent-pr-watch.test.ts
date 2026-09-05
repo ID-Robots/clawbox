@@ -88,9 +88,11 @@ beforeEach(async () => {
   lib = await import("@/lib/coding-agent");
 });
 
-afterEach(() => {
-  lib._resetCodingAgentStateForTests();
+afterEach(async () => {
+  // Real timers first: the reset now waits for the settle path, and a frozen
+  // clock would never let it finish.
   vi.useRealTimers();
+  await lib._resetCodingAgentStateForTests();
   restore();
   fs.rmSync(base, { recursive: true, force: true });
 });

@@ -31,6 +31,15 @@ vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
 // A roomy box unless a test says otherwise: the team's spawn slot reads it.
 const memAvailable = vi.hoisted(() => vi.fn(async (): Promise<number | null> => 8000));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: memAvailable }));
+// Every run draws its project an icon, through an upstream ClawBox AI call.
+// Nothing here asserts it, and left real each run reached for the network on
+// its way to the "could not generate an icon (continuing)" line CI logs. The
+// same stub the code-projects and webapp-registry suites use, for the same
+// reason: a unit test must not depend on what the network answers.
+vi.mock("@/lib/project-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/project-icon")>()),
+  ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })),
+}));
 
 type Lib = typeof import("@/lib/coding-agent");
 
@@ -140,6 +149,11 @@ function makeProject(id: string): string {
   return dir;
 }
 
+/** Every path under `dir`, sorted: a folder still being written to changes. */
+function entriesUnder(dir: string): string[] {
+  return fs.readdirSync(dir, { recursive: true, encoding: "utf-8" }).sort();
+}
+
 function readyDevice(): void {
   installFakeClaude();
   installFakeWrapper(HAPPY_BODY);
@@ -170,18 +184,18 @@ beforeEach(async () => {
   lib = await import("@/lib/coding-agent");
 });
 
-afterEach(() => {
-  lib._resetCodingAgentStateForTests();
+afterEach(async () => {
+  // Awaited, because the settle path a finished run starts — the commit, the
+  // review decision, the pull request — outlives the test that made it and
+  // was still spawning `git init` inside the tree removed below. Retrying the
+  // removal (maxRetries, added for PRs #643 and #648) did not fix it: CI
+  // failed the same way again on #639 with
+  // `ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'`.
+  await lib._resetCodingAgentStateForTests();
   restore();
-  // maxRetries, because this suite has twice failed CI with
-  // `ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'`
-  // (PRs #643 and #648, both on changes that touch none of this code).
-  //
-  // The test never creates that .git — the code under test does, through a
-  // spawned `git init` — so the directory can still be gaining files at the
-  // moment this line runs. Node's rm retries precisely this set of errors
-  // (EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM) with a linear backoff, and defaults
-  // to not retrying at all.
+  // The retries stay as a backstop for the one piece of work that is
+  // deliberately NOT waited for: a slow project-icon generation is left
+  // running by commitProjectAssets rather than holding a finished run.
   fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
@@ -474,7 +488,36 @@ describe("a run", () => {
     vi.resetModules();
     const again = await import("@/lib/coding-agent");
     expect(again.getRun(first.id)?.summary).toMatch(/Changed/);
-    again._resetCodingAgentStateForTests();
+    await again._resetCodingAgentStateForTests();
+  });
+
+  it("has stopped writing in the project folder once its state is reset", async () => {
+    // The settle path — the commit, then the review decision and the pull
+    // request — is fired and forgotten from finishRun, so a run reporting
+    // itself finished said nothing about it and nothing could wait for it.
+    // CI failed three times on that (PRs #639, #643 and #648, none of which
+    // touch this code) with
+    //   ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'
+    // — a `git init` from that path still creating .git inside the tree the
+    // teardown below was removing around it.
+    //
+    // Pictures off: the icon draw has a budget of its own and is deliberately
+    // left running (see commitProjectAssets), so it is not what this asserts.
+    writeConfig({
+      clawai_token: "claw_test_token",
+      clawai_tier: "flash",
+      coding_agent_enabled: true,
+      coding_agent_generate_images: false,
+    });
+    const project = makeProject("site");
+    const run = await lib.startRun({ task: "one", projectId: "site", source: "agent" });
+    await finished(run.id);
+
+    await lib._resetCodingAgentStateForTests();
+
+    const settled = entriesUnder(project);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(entriesUnder(project)).toEqual(settled);
   });
 
   it("reads a corrupt runs file as empty rather than failing", async () => {

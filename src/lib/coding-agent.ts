@@ -380,6 +380,9 @@ const FLUSH_INTERVAL_MS = 1_000;
  */
 const SETTLE_ICON_BUDGET_MS = 20_000;
 
+/** How long a teardown waits for the settle path — see `settleWork`. */
+const SETTLE_DRAIN_BUDGET_MS = 15_000;
+
 /**
  * The run is spawned through this, not directly, so it starts with an empty
  * ambient and inheritable capability set. See the header: the web server holds
@@ -4057,6 +4060,56 @@ function stderrTail(stderr: string): string {
   return lines.slice(-4).join(" ").slice(0, MAX_ERROR_CHARS);
 }
 
+/**
+ * What a settled run is still doing after it has been reported finished: the
+ * commit, the review decision, the pull request. finishRun cannot await any of
+ * it — it is called from the child's `close` handler — so the work is started
+ * and forgotten, and nothing could wait for it or even see that it was still
+ * going.
+ *
+ * On the box that is right: the web server outlives every run. In a suite it
+ * is not: the temp tree a test built is removed the moment the test returns,
+ * and CI failed three times (PRs #639, #643 and #648, none of them touching
+ * this code) with `ENOTEMPTY: directory not empty, rmdir '.../site/.git'` —
+ * a `git init` from this path still creating .git inside the tree the teardown
+ * was removing. Holding the promises costs nothing in production and gives the
+ * suites something to wait on.
+ */
+const settling = new Set<Promise<void>>();
+
+function trackSettleWork(work: Promise<unknown>): void {
+  // Neutralised first: the tracked promise must never be the one that rejects,
+  // or a caller that does not wait for it turns into an unhandled rejection.
+  const done = work.then(() => undefined, () => undefined);
+  settling.add(done);
+  void done.finally(() => settling.delete(done));
+}
+
+/**
+ * Wait until the settle path above is finished with the disk.
+ *
+ * Bounded, because this is called from a teardown: a wedged child must cost a
+ * suite one budget, not the whole run. Two quiet turns rather than one empty
+ * set — a killed child settles on its own `close` event, and only then does it
+ * register its share of the work.
+ */
+async function settleWork(timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let quiet = 0;
+  while (quiet < 2 && Date.now() < deadline) {
+    if (settling.size > 0) {
+      quiet = 0;
+      await Promise.race([
+        Promise.allSettled([...settling]),
+        new Promise((resolve) => { setTimeout(resolve, Math.max(0, deadline - Date.now())).unref?.(); }),
+      ]);
+    } else {
+      quiet += 1;
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 0).unref?.(); });
+  }
+}
+
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
   // The run's process tree is gone, so nothing it spawned is still working —
   // whatever the stream did or did not say about each sub-agent.
@@ -4181,8 +4234,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // record is committed first; "Finished" is said and the waiters woken only
   // once the work is recoverable; the assets, the review pass and the pull
   // request follow on their own, as before.
+  // Held, not fired and forgotten: this whole chain outlives the run it
+  // settles, and until it was tracked nothing — not even the module's own
+  // reset — could wait for it. See `trackSettleWork`.
   const settled = run.status;
-  void (async () => {
+  trackSettleWork((async () => {
     await recordRunWork(run);
     pushProgress(run, settled === "paused" ? "Paused — resume to continue" : `Finished: ${settled}`);
     persist(true);
@@ -4195,7 +4251,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // that is gone. The planner works in the project itself and keeps them.
     if (run.team && run.team.role !== "planner") return;
     await reviewAndShip(run, state.endRequested);
-  })();
+  })());
   // A pause is the owner's own gesture — no finish notice for it.
   if (run.status !== "paused") void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
@@ -4873,8 +4929,16 @@ function spawnOrSettle(
   }
 }
 
-/** Test hook: forget in-memory state so the next call re-reads the file. */
-export function _resetCodingAgentStateForTests(): void {
+/**
+ * Test hook: forget in-memory state so the next call re-reads the file, and
+ * answer once the settle path has stopped touching the disk.
+ *
+ * Every clear stays synchronous — callers that reset mid-test and read the
+ * module in the next line depend on that. The promise is the added half: a
+ * teardown that removes the suite's temp tree must await it, or it races the
+ * `git` a just-finished run is still spawning inside that tree.
+ */
+export function _resetCodingAgentStateForTests(): Promise<void> {
   for (const state of live.values()) {
     clearTimeout(state.timeout);
     if (state.killTimer) clearTimeout(state.killTimer);
@@ -4889,4 +4953,5 @@ export function _resetCodingAgentStateForTests(): void {
   }
   dirty = false;
   runs = null;
+  return settleWork(SETTLE_DRAIN_BUDGET_MS);
 }
