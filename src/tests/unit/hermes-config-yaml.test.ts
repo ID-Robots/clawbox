@@ -262,6 +262,42 @@ describe("resolveHermesConfigValue over the shapes a removal leaves behind", () 
     ).toEqual({ state: "unreadable" });
   });
 
+  /**
+   * A block this reader cannot INDEX must never answer "the key is not there".
+   *
+   * The walk descends two columns per level and skips every line deeper than
+   * the level it is scanning, so a block written at any other indent yields no
+   * entries at all — and "I found no lines I could classify" was being returned
+   * as the positive fact "the key is absent". That is the worst possible
+   * direction here, because it is the SAME blind spot that makes the writer a
+   * silent no-op on that file: `unsetYamlPath` changes nothing, `patchText`'s
+   * own verification passes, no CLI fallback is entered, and the read-back then
+   * confirms the write it cannot see. The removal answers 200 with
+   * `providers.clawlocal` intact.
+   *
+   * config.yaml is hand-edited by design — the comment-preserving writer exists
+   * because owners edit it — so this is a shape the file really takes.
+   */
+  it.each([
+    ["four-space children", "providers:\n    clawlocal:\n        base_url: http://127.0.0.1/v1\n"],
+    ["three-space children", "providers:\n   clawlocal:\n      base_url: http://127.0.0.1/v1\n"],
+    ["a deeper grandchild", "providers:\n  clawlocal:\n      base_url: http://127.0.0.1/v1\n"],
+    ["an indented root", "  providers:\n    clawlocal:\n      base_url: http://127.0.0.1/v1\n"],
+  ])("says unreadable, never absent, for %s", async (_name, text) => {
+    expect(await readBack(text, "providers.clawlocal.base_url")).toEqual({ state: "unreadable" });
+  });
+
+  it("still calls a genuinely empty block absent", async () => {
+    // The other side of the same test: a parent that opens NO block at all, and
+    // one holding only a comment, are both real answers and must stay `absent`
+    // or every removal on a normal box would go to the CLI for nothing.
+    expect(await readBack("providers:\nmodel:\n  provider: openrouter\n", "providers.clawlocal"))
+      .toEqual({ state: "absent" });
+    expect(await readBack("providers:\n  # nothing yet\nmodel:\n  provider: openrouter\n", "providers.clawlocal"))
+      .toEqual({ state: "absent" });
+    expect(await readBack("", "providers.clawlocal.base_url")).toEqual({ state: "absent" });
+  });
+
   it("keeps readHermesConfigValue's two-state contract", async () => {
     await fs.writeFile(configPath, "providers:\n  clawlocal:\n    models:\n      - gemma4\n", { mode: 0o600 });
     const { readHermesConfigValue } = await loadModule();

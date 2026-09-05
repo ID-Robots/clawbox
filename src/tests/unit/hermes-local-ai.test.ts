@@ -350,6 +350,24 @@ describe("registering the local model with Hermes", () => {
     await expect(removeLocalAiFromHermes()).resolves.toMatchObject({ wasDefault: false });
   });
 
+  it("refuses a write that changed nothing rather than confirming it", async () => {
+    // The shape that makes the proof worth having: a config.yaml the line
+    // editor cannot INDEX makes `unsetYamlPath` a no-op, `patchText`'s own
+    // verification pass, and no CLI fallback run — so `patchHermesConfig`
+    // returns `{mode:"merge"}` over a file it never touched. If the read-back
+    // uses the same reader and reads its blind spot as "absent", it can only
+    // ever confirm that no-op. Here the file cannot answer and Hermes says the
+    // keys are still there.
+    deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+    });
+    patchMock.mockResolvedValue({ mode: "merge", backupPath: null });
+    resolveMock.mockResolvedValue({ state: "unreadable" });
+    cliMock.mockResolvedValue({ code: 0, stdout: "http://127.0.0.1/v1", stderr: "" });
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
+  });
+
   it("refuses when Hermes' own reader cannot answer either", async () => {
     // Both readers silent is the only genuinely unknowable state, and it is the
     // one this sentence is for: a `hermes` shim mid-`step_hermes_install`
