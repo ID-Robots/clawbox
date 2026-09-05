@@ -60,7 +60,7 @@ vi.mock("@/lib/hermes-skill-index", async (importOriginal) => {
   return { ...actual, getCatalogRecord: vi.fn(async () => undefined) };
 });
 
-import { ApiError } from "../../../mcp/lib/errors";
+import { ApiError, ToolError } from "../../../mcp/lib/errors";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { captureRegistrar } from "../helpers/mcp-registrar";
 
@@ -265,5 +265,77 @@ describe("skill_info — an id Hermes could not narrow down", () => {
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.code).not.toBe("NOT_FOUND");
+  });
+});
+
+/**
+ * The docs phase failing must not take a proven record down with it.
+ *
+ * `api()` raises its OWN ToolErrors — `TIMEOUT` for any aborted fetch,
+ * `ENDPOINT_DOWN` for a transport failure — not only the ones an ErrorRule
+ * matched. Re-throwing every ToolError therefore turns a slow documentation
+ * lookup into a failed `skill_info` over a skill the catalogue proved exists,
+ * discarding phase 1's metadata.
+ *
+ * And it is the ORDINARY case: this tool caps phase 2 at 30 s while the route
+ * caps the CLI at 45 s, and the route's own comment says a browse.sh/github row
+ * measures ~60 s on a loaded box — so the tool's own fetch is what gives up,
+ * every time, and the route's 504 can essentially never reach it.
+ */
+describe("skill_info — a docs lookup that failed is not a verdict on the skill", () => {
+  const BACKED = {
+    skill: {
+      id: "browse-sh/example.com/thing",
+      name: "Thing",
+      description: "Does a thing.",
+      source: "browse-sh",
+      trust: "community",
+      bodySource: "none",
+      bodyTruncated: false,
+      needsRemoteDocs: true,
+    },
+  };
+
+  it("still describes the skill when the docs fetch timed out", async () => {
+    twoPhases(
+      BACKED,
+      new ToolError(
+        "TIMEOUT",
+        "The ClawBox service did not answer in time.",
+        "Retry once. If it times out again, call clawbox_health and tell the user.",
+      ),
+    );
+
+    const out = await skills().call("skill_info", { id: "browse-sh/example.com/thing" });
+
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("browse-sh/example.com/thing");
+  });
+
+  it("says the documentation is missing rather than letting it read as absent", async () => {
+    // A silent empty `documentation` lets an agent report "this skill has no
+    // documentation" over a lookup that never completed.
+    twoPhases(
+      BACKED,
+      new ToolError("ENDPOINT_DOWN", "The ClawBox service is not answering.", "Call clawbox_health."),
+    );
+
+    const out = await skills().call("skill_info", { id: "browse-sh/example.com/thing" });
+
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).documentation_unavailable).toBe(true);
+  });
+
+  it("still refuses an unbacked record whose docs fetch timed out, without claiming it is imaginary", async () => {
+    twoPhases(UNBACKED, new ToolError("TIMEOUT", "…", "…"));
+
+    const out = await skills().call("skill_info", { id: UNKNOWN_ID });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).not.toBe("NOT_FOUND");
+    expect(out.error.next).toMatch(/do not tell them the skill does not exist/i);
   });
 });

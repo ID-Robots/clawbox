@@ -95,6 +95,14 @@ describe("a skill Hermes says does not exist", () => {
     await waitFor(() => expect(result.current.error?.code).toBe("not_found"));
     expect(result.current.error?.part).toBe("meta");
     expect(result.current.detail).toBeNull();
+    // …and it is a TERMINAL state, not a reload. The derived phase is
+    // `stale ? 'meta' : phase` and `stale` is `!held`, so DROPPING the record
+    // sent the phase back to 'meta' for as long as the panel stayed open —
+    // which is what `SkillDetail` reads as `docsPending`, painting a
+    // documentation skeleton underneath "there's nothing to show". A spinner
+    // that never resolves next to "this does not exist" is the contradiction
+    // this card exists to remove.
+    expect(result.current.phase).toBe("done");
   });
 
   it("keeps a real skill on screen when only its documentation was refused", async () => {

@@ -52,8 +52,10 @@ vi.mock("@/lib/hermes-skills-server", async (importOriginal) => {
 });
 
 import { getCatalogRecord, type CatalogRecord } from "@/lib/hermes-skill-index";
+import { runSkillsCli } from "@/lib/hermes-skills-cli";
 
 const mockRecord = vi.mocked(getCatalogRecord);
+const mockCli = vi.mocked(runSkillsCli);
 
 const KNOWN: CatalogRecord = {
   id: "clawhub/expense-report",
@@ -72,6 +74,9 @@ async function inspect(query: string) {
     status: res.status,
     body: (await res.json()) as {
       skill?: { id?: string; name?: string; needsRemoteDocs?: boolean; catalogMiss?: boolean };
+      code?: string;
+      ambiguous?: boolean;
+      candidates?: { id: string }[];
     },
   };
 }
@@ -123,5 +128,77 @@ describe("GET /setup-api/hermes/skills/inspect — a record nothing on the devic
     expect(body.skill?.id).toBe("vault");
     expect(body.skill?.catalogMiss).toBe(true);
     expect(body.skill?.needsRemoteDocs).toBe(true);
+  });
+});
+
+/**
+ * "Exit 0 and no skill panel" is a CLASS of outcomes, not one.
+ *
+ * This repo's own `parseInstallOutcome` already names them: a disambiguation
+ * table, a "did you mean" list, "No skill named 'x' found in any source", "no
+ * source adapter for 'x'", "Could not fetch 'x' from any source" and the rate
+ * limit behind it — and the module header states the rule plainly: it fails to
+ * download and exits 0. Only ONE of those means the skill does not exist.
+ *
+ * Answering the whole class `404 not_found` is what lets both consumers say so
+ * out loud: the agent is told "Hermes does not have it. Do not guess ids." and
+ * the owner is told the skill "isn't on this device or in the skill store".
+ * Over a real `github/*` row opened while the unauthenticated GitHub API is
+ * rate-limited — a state this codebase models explicitly — both are false, and
+ * the second is a claim about the store the device never asked about.
+ */
+describe("GET …/inspect?docs=1 — what the CLI actually said", () => {
+  function cliSaid(stdout: string) {
+    mockCli.mockResolvedValue({ code: 0, stdout, stderr: "" } as Awaited<ReturnType<typeof runSkillsCli>>);
+  }
+
+  it("does not call a skill nonexistent because its source could not be reached", async () => {
+    mockRecord.mockResolvedValue(undefined);
+    cliSaid("Resolving 'github/acme/thing'...\nCould not fetch 'github/acme/thing' from any source.\n");
+
+    const { status, body } = await inspect("id=github%2Facme%2Fthing&docs=1");
+
+    expect(status).not.toBe(404);
+    expect(body.code).not.toBe("not_found");
+  });
+
+  it("does not call a skill nonexistent when the registry rate limit is exhausted", async () => {
+    mockRecord.mockResolvedValue(undefined);
+    cliSaid("Resolving 'github/acme/thing'...\nCould not fetch 'github/acme/thing' from any source. GitHub API rate limit exhausted.\n");
+
+    const { status, body } = await inspect("id=github%2Facme%2Fthing&docs=1");
+
+    expect(status).not.toBe(404);
+    expect(body.code).not.toBe("not_found");
+  });
+
+  it("still answers not_found for the one sentence that means it", async () => {
+    // Measured on the Hermes box: an invented id exits 0 with exactly this.
+    mockRecord.mockResolvedValue(undefined);
+    cliSaid("Resolving 'definitely-not-a-real-skill-xyz-42'...\nError: No skill named 'definitely-not-a-real-skill-xyz-42' found in any source.\n");
+
+    const { status, body } = await inspect("id=definitely-not-a-real-skill-xyz-42&docs=1");
+
+    expect(status).toBe(404);
+    expect(body.code).toBe("not_found");
+  });
+
+  it("offers the candidates of a \"did you mean\" list instead of dead-ending", async () => {
+    // Measured on the box for `hermes skills inspect pdf` — and `pdf` is the
+    // id `skill_info`'s own schema gives as an example, so a model that
+    // shortens `official/pdf` lands here. The suggestions are printed on
+    // stdout; refusing with "do not guess ids" throws them away.
+    mockRecord.mockResolvedValue(undefined);
+    cliSaid(
+      "Resolving 'pdf'...\nNo exact match for 'pdf'. Did you mean one of these?\n"
+      + "  Extract Document Data — browse-sh/reducto.ai/extract-document-data\n"
+      + "  Search Patents — browse-sh/uspto.gov/search-patents-nwh84a\n",
+    );
+
+    const { status, body } = await inspect("id=pdf&docs=1");
+
+    expect(status).toBe(200);
+    expect(body.ambiguous).toBe(true);
+    expect((body.candidates ?? []).map((c) => c.id)).toContain("browse-sh/reducto.ai/extract-document-data");
   });
 });
