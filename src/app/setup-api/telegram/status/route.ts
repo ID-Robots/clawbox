@@ -193,8 +193,15 @@ export async function GET() {
     // `null` is "the gateway could not be asked", NEVER "not receiving": a
     // panel that read a failed probe as a definite no would accuse a healthy
     // bot every time a save restarted the gateway.
-    const channel = await readCachedChannelStatus(TELEGRAM_CHANNEL_ID);
-    const info = await fetchBotInfo(token);
+    //
+    // Paired with the bot lookup because the two are independent — one asks the
+    // gateway, the other asks Telegram, and both need only the token. In series
+    // a cold status probe delayed the lookup by its whole duration; the Hermes
+    // branch above pairs its own two for the same reason (`probeHermes`).
+    const [channel, info] = await Promise.all([
+      readCachedChannelStatus(TELEGRAM_CHANNEL_ID),
+      fetchBotInfo(token),
+    ]);
     return NextResponse.json({
       configured: true,
       // The same field, with the same meaning, as the Hermes branch above.
