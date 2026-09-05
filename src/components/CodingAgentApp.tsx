@@ -12,7 +12,7 @@ import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
@@ -334,10 +334,9 @@ export default function CodingAgentApp() {
   // opening another run lands on its normal page and a run that settles
   // simply falls out of the view (the toggle exists only while it is live).
   // The browser preview above a live run's terminal, shown or folded.
-  // The browser the run drives, folded by default: the terminal is what the
-  // page is for, and the picture was a half-page strip of Chromium's chrome
-  // most of the time. One tap unfolds it above the terminal.
-  const [browserPreview, setBrowserPreview] = useState(false);
+  // The live card's tab — Timeline, Terminal or Browser, one at a time —
+  // remembered per run, so another run's page opens on its timeline.
+  const [liveTabFor, setLiveTabFor] = useState<{ id: string; tab: "timeline" | "terminal" | "browser" } | null>(null);
   /** The markdown artifact open in the preview dialog, if any. */
   const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
   // The run whose whole evidence list is unfolded. A run that screenshots
@@ -1679,66 +1678,94 @@ export default function CodingAgentApp() {
                   Claude Code web layout, in short. Narrow: one column. */}
               <div className="@3xl:grid @3xl:grid-cols-[minmax(0,1fr)_296px] @3xl:gap-4 @3xl:items-start">
                 <div className="min-w-0">
-              {/* While the run works: the browser it drives, on the device's
-                  own screen — a picture only, so a click here cannot steer a
-                  page the run is on — folded by default and unfolded with one
-                  tap ABOVE its terminal, the transcript tailed live where the
-                  activity log otherwise sits. Once the run has settled, the
-                  timeline below is the record. */}
-              {isLive(run.status) && (
-                <div className="mt-3 rounded-xl border border-white/10 overflow-hidden flex flex-col bg-black" data-testid="coding-agent-browser-preview" data-open={browserPreview || undefined}>
-                  <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
-                    <span className="material-symbols-rounded text-sky-300" style={{ fontSize: 16 }} aria-hidden="true">web</span>
-                    <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.browserPreviewTitle")}</p>
-                    <span className="ml-auto" />
-                    <button
-                      type="button"
-                      onClick={() => setBrowserPreview((v) => !v)}
-                      aria-expanded={browserPreview}
-                      data-testid="coding-agent-browser-preview-toggle"
-                      className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
-                    >
-                      {browserPreview ? t("codingAgent.browserPreviewHide") : t("codingAgent.browserPreviewShow")}
-                    </button>
-                  </div>
-                  {browserPreview && (
-                    <div className="h-[360px]">
-                      <VNCApp viewOnly pasteButton="hidden" />
-                    </div>
-                  )}
-                </div>
-              )}
-              {isLive(run.status) && run.transcriptPath && (() => {
-                const command = livePreviewCommand({ transcriptPath: run.transcriptPath ?? null, sessionId: run.sessionId ?? null, directory: run.directory, live: true });
-                if (!command) return null;
+              {/* While the run works: ONE card with three tabs — the timeline
+                  (first, and the default), the terminal tailing the transcript,
+                  and the browser the run drives (a picture only, with a way to
+                  the VNC app for the real thing). One at a time: the three
+                  stacked were three screens tall. Once the run has settled,
+                  the timeline alone is the record. */}
+              {isLive(run.status) && (() => {
+                const command = run.transcriptPath
+                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
+                  : null;
+                const tab = liveTabFor?.id === run.id ? liveTabFor.tab : "timeline";
+                const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next });
+                const tabButton = (id: "timeline" | "terminal" | "browser", icon: string, label: string, disabled = false) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === id}
+                    aria-controls={`coding-agent-live-pane-${id}`}
+                    disabled={disabled}
+                    onClick={() => pick(id)}
+                    data-testid={`coding-agent-live-tab-${id}`}
+                    className={tab === id ? SEGMENT_ON : SEGMENT_OFF}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{icon}</span>
+                    {label}
+                  </button>
+                );
                 return (
-                  <div className="mt-3 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
-                    <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
-                      <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
-                      <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.livePreviewTitle")}</p>
+                  <div className={`mt-3 ${CARD_SURFACE} overflow-hidden flex flex-col`} data-testid="coding-agent-live-card" data-tab={tab}>
+                    <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
+                      <div className={`${SEGMENTED_TRACK} max-w-md`} role="tablist" aria-label={t("codingAgent.timelineTitle")}>
+                        {tabButton("timeline", "timeline", t("codingAgent.timelineTitle"))}
+                        {tabButton("terminal", "terminal", t("codingAgent.livePreviewTitle"), !command)}
+                        {tabButton("browser", "web", t("codingAgent.browserPreviewTitle"))}
+                      </div>
                       <span className="ml-auto" />
-                      <button
-                        type="button"
-                        onClick={() => openInTerminal(run)}
-                        data-testid="coding-agent-run-terminal-open"
-                        className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
-                      >
-                        {t("codingAgent.livePreviewOpenApp")}
-                      </button>
+                      {tab === "terminal" && command && (
+                        <button
+                          type="button"
+                          onClick={() => openInTerminal(run)}
+                          data-testid="coding-agent-run-terminal-open"
+                          className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
+                        >
+                          {t("codingAgent.livePreviewOpenApp")}
+                        </button>
+                      )}
+                      {tab === "browser" && (
+                        <button
+                          type="button"
+                          onClick={() => dispatchOpenApp("vnc")}
+                          data-testid="coding-agent-open-vnc"
+                          className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
+                        >
+                          {t("codingAgent.openVnc")}
+                        </button>
+                      )}
                     </div>
-                    <div className="flex-1 min-h-0">
-                      {/* Keyed by the run: a terminal types its command once,
-                          on its first output, so a reused one would keep
-                          tailing the previous run. */}
-                      <TerminalApp key={run.id} initialCommand={command} />
+                    <div id="coding-agent-live-pane-timeline" role="tabpanel" hidden={tab !== "timeline"} className="px-4 py-3">
+                      <CodingRunTimeline
+                        lines={activity}
+                        times={activityAt}
+                        startedAt={run.startedAt}
+                        live
+                        embedded
+                        working={{
+                          label: t("codingAgent.chatWorking"),
+                          busy: t("codingAgent.chatBusy"),
+                          tokens: (run.tokensUsed ?? 0) > 0 ? `${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}` : undefined,
+                          duration: started ? duration(run) : undefined,
+                        }}
+                      />
                     </div>
+                    {command && (
+                      // Mounted whatever the tab, hidden otherwise: the terminal
+                      // types its command once, and a remount would tail from the top.
+                      <div id="coding-agent-live-pane-terminal" role="tabpanel" hidden={tab !== "terminal"} style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
+                        <TerminalApp key={run.id} initialCommand={command} />
+                      </div>
+                    )}
+                    {tab === "browser" && (
+                      <div id="coding-agent-live-pane-browser" role="tabpanel" className="h-[420px] bg-black" data-testid="coding-agent-browser-preview" data-open="true">
+                        <VNCApp viewOnly pasteButton="hidden" />
+                      </div>
+                    )}
                   </div>
                 );
               })()}
-
-              {/* The timeline: every step the runner recorded, drawn the way
-                  the chat's card draws its live work, live or settled. */}
-              <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={isLive(run.status)} />
+              {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} />}
 
               {/* The summary is the run's closing message, and that is
                   markdown. Drawn through the chat's renderer, which builds

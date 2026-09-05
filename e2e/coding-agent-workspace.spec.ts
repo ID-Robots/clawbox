@@ -132,14 +132,15 @@ test("a project's page carries its files and changes, and a run's page its bread
   const runPage = win.getByTestId("coding-agent-run-page");
   await expect(runPage).toBeVisible();
   await expect(win.getByTestId("coding-agent-crumb-project")).toHaveText("My Site");
-  // The browser preview, folded above the terminal; the timeline above the summary.
-  const preview = win.getByTestId("coding-agent-browser-preview");
-  await expect(preview).toBeVisible();
-  await expect(preview).not.toHaveAttribute("data-open", "true");
-  await win.getByTestId("coding-agent-browser-preview-toggle").click();
-  await expect(preview).toHaveAttribute("data-open", "true");
-  await expect(win.getByTestId("coding-agent-run-terminal")).toBeVisible();
+  // The live card: the timeline first, the terminal and the browser one tab away.
+  const liveCard = win.getByTestId("coding-agent-live-card");
+  await expect(liveCard).toHaveAttribute("data-tab", "timeline");
   await expect(win.getByTestId("coding-agent-run-activity")).toBeVisible();
+  await win.getByTestId("coding-agent-live-tab-terminal").click();
+  await expect(win.getByTestId("coding-agent-run-terminal")).toBeVisible();
+  await win.getByTestId("coding-agent-live-tab-browser").click();
+  await expect(win.getByTestId("coding-agent-browser-preview")).toBeVisible();
+  await expect(win.getByTestId("coding-agent-open-vnc")).toBeVisible();
   await expect(win.getByTestId("coding-agent-run-rail")).toBeVisible();
   await expect(win.getByTestId("coding-agent-run-live-view")).toHaveCount(0);
 

@@ -13,6 +13,7 @@
  * styles for a floating panel, this is a card in the app's own vocabulary.
  */
 
+import { useEffect, useRef } from "react";
 import { describeProgressLine, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 import { useT } from "@/lib/i18n";
 import { CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
@@ -47,6 +48,10 @@ interface Props {
   startedAt?: number;
   /** The run is still going: the newest step is the one happening now. */
   live: boolean;
+  /** While live: the chat card's "Coding agent working" line — the dots, the tokens, the clock. */
+  working?: { label: string; busy: string; tokens?: string; duration?: string };
+  /** Inside another card (the live card's Timeline tab): no card of its own. */
+  embedded?: boolean;
   testId?: string;
 }
 
@@ -58,9 +63,14 @@ function sinceStart(at: number, startedAt: number): string {
   return `+${m}m ${sec - m * 60}s`;
 }
 
-export default function CodingRunTimeline({ lines, times = [], startedAt, live, testId = "coding-agent-run-activity" }: Props) {
+export default function CodingRunTimeline({ lines, times = [], startedAt, live, working, embedded = false, testId = "coding-agent-run-activity" }: Props) {
   const { t } = useT();
-  if (lines.length === 0) return null;
+  const list = useRef<HTMLOListElement>(null);
+  // A live run adds to the bottom: keep the newest step on screen.
+  useEffect(() => {
+    if (live && list.current) list.current.scrollTop = list.current.scrollHeight;
+  }, [live, lines.length]);
+  if (lines.length === 0 && !working) return null;
   const timed = times.length === lines.length;
   // The clock time and how far into the run: on hover, and as the row's
   // accessible name, so a line's "when" is one hover away and never in the
@@ -75,16 +85,31 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
   const detail = (step: ProgressDescription) =>
     step.counts ? `${step.counts.done}/${step.counts.total} ${t("codingAgent.chatDone")}` : step.detail;
   return (
-    <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid={testId} data-live={live || undefined}>
+    <div className={embedded ? "" : `mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid={testId} data-live={live || undefined}>
       <p className={SECTION_LABEL}>
         {t("codingAgent.timelineTitle")}
         <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{lines.length}</span>
-        {live && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />}
+        {live && working && (
+          // The chat card's own sign of life, with the same figures beside it.
+          <span className="ml-auto normal-case tracking-normal font-normal text-[11px] text-amber-300 inline-flex items-center gap-2" data-testid="coding-agent-run-working">
+            <span className="inline-flex items-center gap-1.5">
+              {working.label}
+              <span className="coding-agent-working" role="img" aria-label={working.busy} title={working.busy}>
+                <span className="coding-agent-working-dot" />
+                <span className="coding-agent-working-dot" style={{ animationDelay: "0.15s" }} />
+                <span className="coding-agent-working-dot" style={{ animationDelay: "0.3s" }} />
+              </span>
+            </span>
+            {working.tokens && <span className="text-[var(--text-muted)]">· {working.tokens}</span>}
+            {working.duration && <span className="text-[var(--text-muted)]">· {working.duration}</span>}
+          </span>
+        )}
+        {live && !working && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />}
       </p>
       {/* Oldest first, the newest at the bottom where a live run adds to it;
           capped in height so a long run stays a card, and scrolled to its end
           so the step happening now is the one on screen. */}
-      <ol className="mt-2 flex flex-col gap-1 max-h-80 overflow-y-auto" data-testid={`${testId}-steps`}>
+      <ol ref={list} className="mt-2 flex flex-col gap-1 max-h-80 overflow-y-auto" data-testid={`${testId}-steps`}>
         {lines.map((line, i) => {
           const step = describeProgressLine(line);
           const current = live && i === lines.length - 1;
@@ -97,13 +122,15 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
               aria-current={current ? "step" : undefined}
               title={when(i) ?? undefined}
             >
+              {/* The step happening now is drawn in full — its whole line,
+                  wrapped — where every earlier one is a chip on one line. */}
               <span
                 title={[when(i), step.kind === "text" ? line : null].filter(Boolean).join(" — ") || undefined}
-                className={`inline-flex items-center gap-1 max-w-full rounded-md px-1.5 py-px text-[11px] leading-4 ${TONE[step.kind]} ${current ? "ring-1 ring-amber-400/40" : ""}`}
+                className={`inline-flex ${current ? "items-start" : "items-center"} gap-1 max-w-full rounded-md px-1.5 py-px text-[11px] leading-4 ${TONE[step.kind]} ${current ? "ring-1 ring-amber-400/40" : ""}`}
               >
                 <span className="material-symbols-rounded shrink-0" style={{ fontSize: 13 }} aria-hidden="true">{step.icon}</span>
-                <span className="truncate">{label(step)}</span>
-                {detail(step) && <span className="opacity-75 truncate">{detail(step)}</span>}
+                <span className={current ? "whitespace-normal break-words" : "truncate"}>{current && step.kind === "text" ? line : label(step)}</span>
+                {detail(step) && <span className={`opacity-75 ${current ? "whitespace-normal break-all" : "truncate"}`}>{detail(step)}</span>}
               </span>
               {timed && startedAt && (
                 <time

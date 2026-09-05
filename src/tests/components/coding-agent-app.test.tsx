@@ -1579,30 +1579,45 @@ describe("the workspace, the breadcrumb and the live view", () => {
     expect(within(card).getByText("notes.txt")).toBeInTheDocument();
   });
 
-  it("offers the browser the run drives folded above its terminal — a picture only, unfolded on request — and not once it settled", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [LIVE], { projects: [SITE_PROJECT] });
+  it("shows a live run as three tabs — the timeline first with the working line, then the terminal, then the browser with Open VNC — and none of it once settled", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [{ ...LIVE, tokensUsed: 332_000 }], { projects: [SITE_PROJECT] });
+    const apps: string[] = [];
+    const onApp = (e: Event) => apps.push((e as CustomEvent<{ appId: string }>).detail.appId);
+    window.addEventListener("clawbox:open-app", onApp);
     const { unmount } = render(<CodingAgentApp />);
     await openRuns();
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
-    const preview = await screen.findByTestId("coding-agent-browser-preview");
-    const terminal = screen.getByTestId("coding-agent-run-terminal");
-    // Above the terminal, one under the other — never side by side.
-    expect(preview.compareDocumentPosition(terminal) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const card = await screen.findByTestId("coding-agent-live-card");
+    // The timeline, first and selected, with the chat's working line and the figures.
+    expect(card).toHaveAttribute("data-tab", "timeline");
+    expect(screen.getByTestId("coding-agent-live-tab-timeline")).toHaveAttribute("aria-selected", "true");
+    const working = within(card).getByTestId("coding-agent-run-working");
+    expect(working.textContent).toContain(t("codingAgent.chatWorking"));
+    expect(working.textContent).toContain(`332k ${t("codingAgent.tokensWord")}`);
+    expect(within(working).getByRole("img", { name: t("codingAgent.chatBusy") })).toBeInTheDocument();
+    // Only one pane shows: the terminal is mounted but hidden, the browser not mounted.
+    expect(screen.getByTestId("coding-agent-run-terminal").closest("[role=tabpanel]")).toHaveAttribute("hidden");
+    expect(screen.queryByTestId("coding-agent-browser-preview")).toBeNull();
     expect(screen.queryByTestId("coding-agent-live-row")).toBeNull();
-    // Folded by default: the screen is mounted only once asked for.
-    expect(within(preview).queryByTestId("vnc-mock")).toBeNull();
-    fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
+    // The terminal tab: the transcript, and Open in Terminal beside the tabs.
+    fireEvent.click(screen.getByTestId("coding-agent-live-tab-terminal"));
+    expect(card).toHaveAttribute("data-tab", "terminal");
+    expect(screen.getByTestId("coding-agent-run-terminal")).not.toHaveAttribute("hidden");
+    expect(within(screen.getByTestId("coding-agent-run-terminal")).getByTestId("terminal-mock")).toHaveAttribute("data-command", expect.stringContaining("coding-run-preview"));
+    expect(screen.getByTestId("coding-agent-run-terminal-open")).toBeInTheDocument();
+    // The browser tab: a view-only picture, and Open VNC opens the VNC app.
+    fireEvent.click(screen.getByTestId("coding-agent-live-tab-browser"));
+    const preview = screen.getByTestId("coding-agent-browser-preview");
     const screenMock = within(preview).getByTestId("vnc-mock");
     expect(screenMock).toHaveAttribute("data-view-only", "true");
     expect(screenMock).toHaveAttribute("data-paste", "hidden");
-    fireEvent.click(screen.getByTestId("coding-agent-browser-preview-toggle"));
-    expect(within(preview).queryByTestId("vnc-mock")).toBeNull();
-    // No Watch live on the page: the terminal card has Open in Terminal,
-    // and the separate Live view is gone with it.
+    fireEvent.click(screen.getByTestId("coding-agent-open-vnc"));
+    expect(apps).toEqual(["vnc"]);
+    // No Watch live on the page, no separate Live view.
     expect(screen.queryByTestId("coding-agent-terminal-run-k3x9q2ab")).toBeNull();
-    expect(screen.getByTestId("coding-agent-run-terminal-open")).toBeInTheDocument();
     expect(screen.queryByTestId("coding-agent-run-live-view")).toBeNull();
+    window.removeEventListener("clawbox:open-app", onApp);
     unmount();
 
     stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
@@ -1610,6 +1625,7 @@ describe("the workspace, the breadcrumb and the live view", () => {
     await openRuns();
     fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
     await screen.findByTestId("coding-agent-run-page");
+    expect(screen.queryByTestId("coding-agent-live-card")).toBeNull();
     expect(screen.queryByTestId("coding-agent-browser-preview")).toBeNull();
     expect(screen.queryByTestId("coding-agent-run-live-view")).toBeNull();
   });
