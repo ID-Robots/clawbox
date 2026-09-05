@@ -66,7 +66,7 @@ import {
 /** The board as the routes and the app read it: with who worked, counted. */
 export type TeamView = TeamBoard & { agents: TeamAgents };
 import { TeamBus } from "@/lib/coding-team-bus";
-import { parsePlan, PLANNER_BRIEF } from "@/lib/coding-team-planner";
+import { parsePlan, PLANNER_BRIEF, replanTask } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -224,11 +224,33 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     saveBoard(board);
     return;
   }
-  const plan = parsePlan(planned.summary);
+  let plan = parsePlan(planned.summary);
   if (!plan.ok) {
-    setTeamStatus(board, SYSTEM, "failed", plan.reason);
+    // Once more, and for the array alone: a planner that wrote its plan as
+    // prose is asked to say it as the JSON the team reads. On the record as
+    // an alert, so a team that needed the second ask says so.
+    bus.send(SYSTEM, { type: "alert", reason: `The planner's answer was not a plan (${plan.reason}); asking once more for the JSON array.` });
+    const again = await startRun({
+      task: replanTask(board.goal, planned.summary, plan.reason),
+      projectId: board.projectId,
+      directory: board.directory,
+      source,
+      team: { id: board.id, role: "planner", taskId: null },
+      readOnly: true,
+      extraBrief: PLANNER_BRIEF,
+    });
+    board.runs.push({ id: again.id, role: "planner", taskId: null });
     saveBoard(board);
-    return;
+    const replanned = await settle(team, again.id);
+    if (team.stopRequested) return;
+    plan = replanned?.status === "completed"
+      ? parsePlan(replanned.summary)
+      : { ok: false, reason: `The planner did not finish its second answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` };
+    if (!plan.ok) {
+      setTeamStatus(board, SYSTEM, "failed", plan.reason);
+      saveBoard(board);
+      return;
+    }
   }
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
 

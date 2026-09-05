@@ -27,6 +27,25 @@ export const PLANNER_BRIEF = [
   "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
 ].join(" ");
 
+/** How much of a planner's wrong answer is quoted back to it. */
+const REPLAN_QUOTE_CHARS = 1_500;
+
+/**
+ * The second ask, when the planner's final message held no plan — a page of
+ * prose about the tasks, a fenced list, a question. Seen on the box: a
+ * 43-turn planner that wrote its plan as headings and never the array. The
+ * folder is already read, so this run is asked for ONE thing: the array.
+ */
+export function replanTask(goal: string, previous: string | null | undefined, reason: string): string {
+  const quoted = (previous ?? "").trim();
+  return [
+    `Goal: ${goal}`,
+    `Your previous answer to this goal was not a plan the team can read (${reason}).`,
+    quoted ? `This is what you answered:\n${quoted.length > REPLAN_QUOTE_CHARS ? `${quoted.slice(0, REPLAN_QUOTE_CHARS - 1)}…` : quoted}` : "You answered nothing.",
+    "Answer again with ONLY the JSON array of tasks described in your brief — no prose before or after it. Read the folder again only if you must.",
+  ].join("\n\n");
+}
+
 export interface PlanParse {
   ok: true;
   tasks: PlannedTask[];

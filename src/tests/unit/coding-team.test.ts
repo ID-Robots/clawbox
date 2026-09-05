@@ -153,6 +153,40 @@ const PARALLEL_PLAN = JSON.stringify([
   { task_description: "Wire app.js", depends_on: ["t1", "t2"], files_hint: ["app.js"] },
 ]);
 
+describe("a planner that wrote prose", () => {
+  it("is asked once more for the JSON array, with its first answer quoted, and the team goes on from the second", async () => {
+    outcomes = [
+      { summary: "## Plan\n1. Scaffold index.html\n2. Wire app.js — no array here" },
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const planners = starts.filter((s) => (s.team as { role: string }).role === "planner");
+    expect(planners).toHaveLength(2);
+    expect(planners[1]).toMatchObject({ readOnly: true });
+    expect(String(planners[1].task)).toContain("was not a plan the team can read");
+    expect(String(planners[1].task)).toContain("no array here");
+    expect(String(planners[1].task)).toContain("ONLY the JSON array");
+    // On the record: one alert, two planner runs in the cast, the first still named.
+    expect(done.alerts).toBe(1);
+    expect(done.plannerRunId).toBe("run-00000001");
+    expect(done.agents.planner).toBe(2);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)[0]).toMatch(/asking once more/);
+  });
+
+  it("fails the team when the second answer is no plan either, saying why", async () => {
+    outcomes = [{ summary: "prose" }, { summary: "still prose" }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toMatch(/no JSON array/);
+    expect(starts).toHaveLength(2);
+  });
+});
+
 describe("many agents at once", () => {
   it("starts every task whose dependencies are done side by side, each in its own worktree, and merges each home", async () => {
     // A worker settles on its third wait, so two of them overlap.
