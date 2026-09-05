@@ -12,9 +12,10 @@ import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, CARD_SURFACE, RAIL_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
+import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
@@ -347,6 +348,8 @@ export default function CodingAgentApp() {
   const [projectsDir, setProjectsDir] = useState<string | null>(null);
   /** Which folder name was just copied, for the two-second "Copied". */
   const [copiedFolder, setCopiedFolder] = useState<string | null>(null);
+  // Pull requests opened from a project's page this session, by folder.
+  const [projectPrs, setProjectPrs] = useState<Record<string, { number: number; url: string }>>({});
   // The New app wizard: an inline card, closed by Cancel, by Create, and
   // never by a poll. `handed` is the line left behind once the message is
   // in the chat — the card is gone by then, and the chat is where to look.
@@ -597,6 +600,29 @@ export default function CodingAgentApp() {
   }, []);
 
   /** Push a run's folder to GitHub, private, creating the repo if needed. */
+  /** The project page's Create PR: the branch the project is on, against the remote's default. */
+  const createPr = async (target: { projectId: string | null; directory: string }, key: string) => {
+    setBusy(`pr-${key}`);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/git", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...(target.projectId ? { projectId: target.projectId } : { directory: target.directory }), action: "pr" }),
+      });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.prFailed")));
+      const out = await res.json() as { number: number; url: string; existing?: boolean };
+      setProjectPrs((m) => ({ ...m, [target.directory]: { number: out.number, url: out.url } }));
+      window.dispatchEvent(new CustomEvent("clawbox:toast", {
+        detail: { message: t(out.existing ? "codingAgent.prExists" : "codingAgent.prOpened", { n: out.number }) },
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.prFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const backup = async (target: { projectId: string | null; directory: string }, key: string) => {
     setBusy(`backup-${key}`);
     setError(null);
@@ -911,35 +937,18 @@ export default function CodingAgentApp() {
    * filed under no project — those used to be computed and never drawn, so a
    * run in a folder the projects list does not know was invisible.
    */
-  const runsSection = (
-    <div className="mt-4">
-      <button
-        type="button"
-        onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
-        aria-expanded={showRuns}
-        data-testid="coding-agent-runs-toggle"
-        className={`w-full flex items-center justify-between gap-2 ${CARD_SURFACE} px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors`}
-      >
-        <span className="flex items-center gap-2">
-          <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
-          {t("codingAgent.projectRuns")}
-          {visibleRuns.length > 0 && <span className="text-[var(--text-muted)]">({visibleRuns.length})</span>}
-          {anyRunning && (
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
-              {t("codingAgent.statusRunning")}
-            </span>
-          )}
-        </span>
-        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
-          {showRuns ? "expand_less" : "expand_more"}
-        </span>
-      </button>
-
-      {showRuns && (
+  /**
+   * The rows and the More button — the list itself. Home draws it under a
+   * toggle (the runs filed under no project); a project's page draws it
+   * inside its Runs tab, where it has the whole width.
+   */
+  const runsList = (
+    <>
+      {
         visibleRuns.length === 0 ? (
           <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
         ) : (
-          <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
+          <ul className="mt-2 grid gap-2 @3xl:grid-cols-2 items-start" data-testid="coding-agent-runs">
             {visibleRuns.slice(0, runsShown).map((run) => {
               const tone = RUN_TONE[run.status];
               // A draft has not run: its startedAt is when it was drafted
@@ -1066,8 +1075,8 @@ export default function CodingAgentApp() {
             })}
           </ul>
         )
-      )}
-      {showRuns && visibleRuns.length > runsShown && (
+      }
+      {visibleRuns.length > runsShown && (
         <button
           type="button"
           onClick={() => setRunsShown((n) => n + RUNS_PAGE)}
@@ -1077,6 +1086,34 @@ export default function CodingAgentApp() {
           {t("codingAgent.more")} ({visibleRuns.length - runsShown})
         </button>
       )}
+    </>
+  );
+
+  const runsSection = (
+    <div className="mt-4">
+      <button
+        type="button"
+        onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
+        aria-expanded={showRuns}
+        data-testid="coding-agent-runs-toggle"
+        className={`w-full flex items-center justify-between gap-2 ${CARD_SURFACE} px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors`}
+      >
+        <span className="flex items-center gap-2">
+          <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
+          {t("codingAgent.projectRuns")}
+          {visibleRuns.length > 0 && <span className="text-[var(--text-muted)]">({visibleRuns.length})</span>}
+          {anyRunning && (
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
+              {t("codingAgent.statusRunning")}
+            </span>
+          )}
+        </span>
+        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+          {showRuns ? "expand_less" : "expand_more"}
+        </span>
+      </button>
+
+      {showRuns && runsList}
     </div>
   );
 
@@ -1975,6 +2012,10 @@ export default function CodingAgentApp() {
             ? `projectId=${encodeURIComponent(p.folder)}`
             : `directory=${encodeURIComponent(p.directory)}`;
           const projectLive = runs.some((r) => runBelongsTo(r, p) && isLive(r.status));
+          // The pull request for the branch the project is on: one opened from
+          // this page, or one a run opened for that same branch.
+          const runPr = git?.branch ? runs.find((r) => runBelongsTo(r, p) && r.pr?.url && r.pr.number && r.pr.branch === git.branch)?.pr : undefined;
+          const projectPr = projectPrs[p.directory] ?? (runPr?.url && runPr.number ? { number: runPr.number, url: runPr.url } : null);
           const lastSubject = git?.lastCommit?.subject ?? p.lastCommit?.subject ?? null;
           const lastDate = git?.lastCommit?.date ?? p.lastCommit?.date ?? null;
           return (<>
@@ -2036,57 +2077,97 @@ export default function CodingAgentApp() {
               {/* The git state on ONE line: branch, commits, the newest
                   commit, and whether the folder has reached GitHub — the
                   store road starts there. */}
-              <div className="mt-2 flex items-center gap-x-2 gap-y-1 flex-wrap text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-git-info">
+              <div className={`mt-3 ${INSET_SURFACE} px-3 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-[11px] text-[var(--text-muted)]`} data-testid="coding-agent-git-info">
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
                 {git?.branch && <span className="font-mono text-[var(--text-primary)]">{git.branch}</span>}
                 {git && <span>{t("codingAgent.gitCommits", { n: git.commits })}</span>}
                 <span className="break-all">
                   {lastSubject && lastDate ? <>{firstLine(lastSubject, 70)} · {timeAgo(lastDate, t)}</> : t("codingAgent.noCommits")}
                 </span>
-                <span className="ml-auto break-all">
-                  {git?.remote
-                    ? <span className="font-mono text-emerald-400/90">{git.remote}</span>
-                    : <span>{t("codingAgent.gitNoRemote")}</span>}
+                <span className="ml-auto flex items-center gap-2 flex-wrap justify-end">
+                  {/* On GitHub: the repository's page, and the way to a pull
+                      request for the branch the project is on (or the one
+                      already open for it). Not yet: a quiet Back up, the one
+                      road there — the green button it used to be shouted over
+                      the whole page. */}
+                  {githubWebUrl(git?.remote) ? (
+                    <>
+                      <a
+                        href={githubWebUrl(git?.remote) ?? undefined}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={t("codingAgent.openOnGithub")}
+                        data-testid="coding-agent-project-github"
+                        className="inline-flex items-center gap-1 font-mono text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
+                        {githubRepoName(git?.remote)}
+                      </a>
+                      {projectPr ? (
+                        <a href={projectPr.url} target="_blank" rel="noreferrer" data-testid="coding-agent-project-pr" className={BTN_SECONDARY}>
+                          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">merge</span>
+                          {t("codingAgent.viewPr", { n: projectPr.number })}
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void createPr({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
+                          disabled={busy === `pr-project-${p.folder}`}
+                          data-testid="coding-agent-project-create-pr"
+                          className={BTN_SECONDARY}
+                        >
+                          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">merge</span>
+                          {busy === `pr-project-${p.folder}` ? t("codingAgent.createPrBusy") : t("codingAgent.createPr")}
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {git?.remote
+                        ? <span className="font-mono break-all">{git.remote}</span>
+                        : <span>{t("codingAgent.gitNoRemote")}</span>}
+                      {!git?.remote && github?.connected && (git?.lastCommit || p.lastCommit) && (
+                        <button
+                          type="button"
+                          onClick={() => void backup({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
+                          disabled={busy === `backup-project-${p.folder}`}
+                          data-testid="coding-agent-project-backup"
+                          className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20 disabled:opacity-50"
+                        >
+                          {busy === `backup-project-${p.folder}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+                        </button>
+                      )}
+                    </>
+                  )}
                 </span>
-                {github?.connected && (git?.lastCommit || p.lastCommit) && (
-                  <button
-                    type="button"
-                    onClick={() => void backup({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
-                    disabled={busy === `backup-project-${p.folder}`}
-                    data-testid="coding-agent-project-backup"
-                    className={`${BTN_BASE} border border-emerald-400/40 bg-emerald-400/[0.07] text-emerald-400 hover:bg-emerald-400/[0.14]`}
-                  >
-                    {busy === `backup-project-${p.folder}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
-                  </button>
+              </div>
+              {/* Four tabs, each with the whole width: the folder, what changed,
+                  the runs, the team. The runs sat in a 22rem rail before and
+                  their rows wrapped three deep. */}
+              <CodingProjectWorkspace
+                key={projectQuery}
+                query={projectQuery}
+                live={projectLive}
+                fill
+                runsCount={visibleRuns.length}
+                runsLive={projectLive}
+                runs={<div className="pt-1" data-testid="coding-agent-project-runs">{runsList}</div>}
+                team={(
+                  /* Keyed by the WHOLE scope the card reads by — the folder
+                     and the code-project id — so a project that changes kind
+                     under the same folder is a fresh card, never one holding
+                     the previous team. */
+                  <div className="pt-1">
+                    <CodingTeamCard
+                      key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
+                      directory={p.directory}
+                      projectId={p.kind === "codeProject" ? p.folder : null}
+                      onOpenRun={(id) => showRun(id)}
+                      onPlan={standalone ? undefined : () => openNewAppCard({ project: p.directory, team: true })}
+                    />
+                  </div>
                 )}
-              </div>
-              {/* Wide: the folder takes the page's height on the left and the
-                  team and the runs sit in a rail on the right — the shape the
-                  run page already has. Narrow: one column, the folder first.
-                  The page used to stack everything in a 42rem column, which
-                  on a maximized window left two thirds of it empty and the
-                  runs three screens down. */}
-              <div className="mt-3 flex-1 min-h-0 flex flex-col @3xl:grid @3xl:grid-cols-[minmax(0,1fr)_22rem] @3xl:gap-4 @3xl:items-stretch" data-testid="coding-agent-project-layout">
-                <div className="min-w-0 min-h-0 flex flex-col">
-                  {/* The folder itself, and what changed in it. */}
-                  <CodingProjectWorkspace key={projectQuery} query={projectQuery} live={projectLive} fill />
-                </div>
-                <aside className="min-w-0 min-h-0 @3xl:overflow-y-auto" data-testid="coding-agent-project-rail">
-                  {/* A coding team on this folder: the board, the log, and the
-                      way to ask for one. Keyed by the WHOLE scope the card
-                      reads by — the folder and the code-project id — so a
-                      project that changes kind under the same folder is a
-                      fresh card, never one holding the previous team. */}
-                  <CodingTeamCard
-                    key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                    directory={p.directory}
-                    projectId={p.kind === "codeProject" ? p.folder : null}
-                    onOpenRun={(id) => showRun(id)}
-                    onPlan={standalone ? undefined : () => openNewAppCard({ project: p.directory, team: true })}
-                  />
-                  {runsSection}
-                </aside>
-              </div>
+              />
             </div>
           </>);
         })()}

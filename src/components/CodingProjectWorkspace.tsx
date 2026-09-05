@@ -19,7 +19,7 @@
  * file in the list opens its unified diff, coloured line by line.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import type { ChangedFile, ChangeStatus, CommitSummary, FileDiff, GitChanges } from "@/lib/coding-git";
 import type { TreeEntry, TreeFile, TreeListing } from "@/lib/coding-project-tree";
@@ -27,7 +27,7 @@ import { fileIcon, formatSize, Icon } from "./file-icons";
 import { CARD_SURFACE, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { timeAgo } from "./clawkeep-ui";
 
-export type WorkspaceTab = "files" | "changes";
+export type WorkspaceTab = "files" | "changes" | "runs" | "team";
 
 interface Props {
   /** `projectId=<id>` for a code project, `directory=<abs>` for a folder —
@@ -40,6 +40,15 @@ interface Props {
   initialTab?: WorkspaceTab;
   /** Take the height of the column this sits in instead of a fixed cap. */
   fill?: boolean;
+  /** The project's runs, as a tab of their own — the page hands the list in
+   *  so the rows stay the one list home also draws. Absent: no tab. */
+  runs?: ReactNode;
+  /** How many runs the Runs tab holds, for its label. */
+  runsCount?: number;
+  /** One of them is working: the tab carries a live dot. */
+  runsLive?: boolean;
+  /** The coding team's card, as a tab. Absent: no tab. */
+  team?: ReactNode;
 }
 
 /** How often the change list is re-read while a run is writing. */
@@ -53,16 +62,18 @@ const STATUS_GLYPH: Record<ChangeStatus, { letter: string; className: string }> 
   conflict: { letter: "!", className: "text-red-400" },
 };
 
-export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab = "files", fill = false }: Props) {
+export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab = "files", fill = false, runs, runsCount = 0, runsLive = false, team }: Props) {
   const { t } = useT();
   const [tab, setTab] = useState<WorkspaceTab>(initialTab);
+  const tabClass = (id: WorkspaceTab) => (tab === id ? SEGMENT_ON : SEGMENT_OFF);
+  const panelClass = fill ? "flex-1 min-h-0 flex flex-col" : undefined;
   // The pane's height: a fixed cap inside a scrolling page, or the column's
   // own height when the page hands it one — the files are what the page is
   // for, and a 28rem strip under a 60rem window was the complaint.
   const paneClass = fill ? "flex-1 min-h-[22rem] @3xl:min-h-0" : "max-h-[28rem]";
   return (
     <div className={`mt-3 ${fill ? "flex-1 min-h-0 flex flex-col" : ""}`} data-testid="coding-agent-workspace" data-fill={fill || undefined}>
-      <div className={`${SEGMENTED_TRACK} max-w-xs`} role="tablist" aria-label={t("codingAgent.workspaceTitle")}>
+      <div className={`${SEGMENTED_TRACK} ${runs || team ? "max-w-xl" : "max-w-xs"}`} role="tablist" aria-label={t("codingAgent.workspaceTitle")}>
         <button
           type="button"
           role="tab"
@@ -71,7 +82,7 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
           aria-controls="coding-agent-workspace-pane-files"
           onClick={() => setTab("files")}
           data-testid="coding-agent-workspace-files"
-          className={tab === "files" ? SEGMENT_ON : SEGMENT_OFF}
+          className={tabClass("files")}
         >
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">folder_open</span>
           {t("codingAgent.filesTab")}
@@ -84,20 +95,65 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
           aria-controls="coding-agent-workspace-pane-changes"
           onClick={() => setTab("changes")}
           data-testid="coding-agent-workspace-changes"
-          className={tab === "changes" ? SEGMENT_ON : SEGMENT_OFF}
+          className={tabClass("changes")}
         >
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">difference</span>
           {t("codingAgent.changesTab")}
         </button>
+        {/* The runs and the team are tabs too, not a rail: the rail was
+            22rem wide, and a run's row in it wrapped its title three deep
+            and its figures six. Every tab has the whole width now. */}
+        {runs && (
+          <button
+            type="button"
+            role="tab"
+            id="coding-agent-workspace-tab-runs"
+            aria-selected={tab === "runs"}
+            aria-controls="coding-agent-workspace-pane-runs"
+            onClick={() => setTab("runs")}
+            data-testid="coding-agent-workspace-runs"
+            className={tabClass("runs")}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">history</span>
+            {t("codingAgent.runsTab")}
+            <span className="text-[var(--text-muted)] font-normal">({runsCount})</span>
+            {runsLive && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" data-testid="coding-agent-workspace-runs-live" />}
+          </button>
+        )}
+        {team && (
+          <button
+            type="button"
+            role="tab"
+            id="coding-agent-workspace-tab-team"
+            aria-selected={tab === "team"}
+            aria-controls="coding-agent-workspace-pane-team"
+            onClick={() => setTab("team")}
+            data-testid="coding-agent-workspace-team"
+            className={tabClass("team")}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">groups</span>
+            {t("codingAgent.teamTab")}
+          </button>
+        )}
       </div>
       {/* Both panes stay mounted: a tree that was opened three folders deep
           would otherwise fold every time the owner glanced at the diff. */}
-      <div role="tabpanel" id="coding-agent-workspace-pane-files" aria-labelledby="coding-agent-workspace-tab-files" hidden={tab !== "files"} className={fill ? "flex-1 min-h-0 flex flex-col" : undefined}>
+      <div role="tabpanel" id="coding-agent-workspace-pane-files" aria-labelledby="coding-agent-workspace-tab-files" hidden={tab !== "files"} className={panelClass}>
         <FilesPane query={query} paneClass={paneClass} fill={fill} />
       </div>
-      <div role="tabpanel" id="coding-agent-workspace-pane-changes" aria-labelledby="coding-agent-workspace-tab-changes" hidden={tab !== "changes"} className={fill ? "flex-1 min-h-0 flex flex-col" : undefined}>
+      <div role="tabpanel" id="coding-agent-workspace-pane-changes" aria-labelledby="coding-agent-workspace-tab-changes" hidden={tab !== "changes"} className={panelClass}>
         <ChangesPane query={query} live={live} initialRef={initialRef} active={tab === "changes"} paneClass={paneClass} fill={fill} />
       </div>
+      {runs && (
+        <div role="tabpanel" id="coding-agent-workspace-pane-runs" aria-labelledby="coding-agent-workspace-tab-runs" hidden={tab !== "runs"} className={fill ? "flex-1 min-h-0 overflow-y-auto" : undefined}>
+          {runs}
+        </div>
+      )}
+      {team && (
+        <div role="tabpanel" id="coding-agent-workspace-pane-team" aria-labelledby="coding-agent-workspace-tab-team" hidden={tab !== "team"} className={fill ? "flex-1 min-h-0 overflow-y-auto" : undefined}>
+          {team}
+        </div>
+      )}
     </div>
   );
 }

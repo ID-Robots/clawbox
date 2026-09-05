@@ -158,8 +158,11 @@ function stubFetch(
       return json({ git: opts.git ?? { branch: null, commits: 0, remote: null, lastCommit: null } });
     }
     if (url === "/setup-api/coding-agent/git" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as { action?: string };
+      posts.push({ url, body });
+      // Create PR: the branch's pull request, opened on GitHub.
+      if (body.action === "pr") return json({ number: 12, url: "https://github.com/yalexx/site/pull/12", existing: false, branch: "clawbox/run-1", base: "master" });
       // A backup: the folder is pushed, private, to a repo named after it.
-      posts.push({ url, body: JSON.parse(String(init.body)) });
       return json({ repo: "owner/site", created: true });
     }
     if (url === "/setup-api/coding-agent/git") {
@@ -232,12 +235,14 @@ afterEach(() => {
 const SITE_PROJECT = { ...PROJECT, kind: "codeProject" };
 
 async function openRuns() {
-  // Runs moved off home onto the project's page: enter it first (once).
+  // Runs moved off home onto the project's page, into its Runs tab: enter
+  // the page (once) and open the tab.
   if (!screen.queryByTestId("coding-agent-project-page")) {
     fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
     await screen.findByTestId("coding-agent-project-page");
   }
-  await screen.findByTestId("coding-agent-runs-toggle");
+  fireEvent.click(await screen.findByTestId("coding-agent-workspace-runs"));
+  await screen.findByTestId("coding-agent-project-runs");
 }
 
 describe("CodingAgentApp", () => {
@@ -415,10 +420,20 @@ describe("CodingAgentApp", () => {
     const gitInfo = screen.getByTestId("coding-agent-git-info");
     await waitFor(() => expect(gitInfo.textContent).toContain("main"));
     expect(gitInfo.textContent).toContain(t("codingAgent.gitCommits", { n: 7 }));
-    expect(gitInfo.textContent).toContain("git@github.com:owner/site.git");
+    // The remote is drawn as the repository's PAGE, not the push URL, and
+    // beside it the way to a pull request for the branch the project is on.
+    const github = within(gitInfo).getByTestId("coding-agent-project-github");
+    expect(github).toHaveAttribute("href", "https://github.com/owner/site");
+    expect(github.textContent).toContain("owner/site");
+    expect(gitInfo.textContent).not.toContain("git@github.com");
     expect(gitInfo.textContent).not.toContain(translations.en["codingAgent.gitNoRemote"]);
+    expect(within(gitInfo).getByTestId("coding-agent-project-create-pr")).toBeInTheDocument();
+    expect(within(gitInfo).queryByTestId("coding-agent-project-backup")).toBeNull();
     expect(gitReads).toEqual(["/setup-api/coding-agent/git?projectId=site"]);
-    // The project page lists the project's runs and not the stranger.
+    // The project page lists the project's runs — in its Runs tab, with the
+    // count on the tab — and not the stranger.
+    expect(screen.getByTestId("coding-agent-workspace-runs").textContent).toContain("(1)");
+    fireEvent.click(screen.getByTestId("coding-agent-workspace-runs"));
     expect(await screen.findByText("inside the project")).toBeInTheDocument();
     expect(screen.queryByText("somewhere else")).toBeNull();
 
@@ -497,19 +512,18 @@ describe("CodingAgentApp", () => {
   });
 
   describe("recent runs", () => {
-    it("shows the runs straight away, and can still be collapsed", async () => {
-      // Reversed deliberately: the history is why the window gets opened once
-      // the switch is already on.
+    it("lists the runs in the project's Runs tab, with the count on the tab, and never a toggle", async () => {
       stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       await openRuns();
-      const toggle = await screen.findByTestId("coding-agent-runs-toggle");
-      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      const tab = screen.getByTestId("coding-agent-workspace-runs");
+      expect(tab).toHaveAttribute("aria-selected", "true");
+      expect(tab.textContent).toContain("(1)");
       expect(await screen.findByText("Add a dark mode toggle")).toBeInTheDocument();
-      expect(toggle.textContent).toContain("(1)");
-
-      fireEvent.click(toggle);
-      expect(screen.queryByText("Add a dark mode toggle")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
+      // The other tabs keep the list mounted but hidden.
+      fireEvent.click(screen.getByTestId("coding-agent-workspace-files"));
+      expect(screen.getByTestId("coding-agent-project-runs").closest("[role=tabpanel]")).toHaveAttribute("hidden");
     });
 
     it("pages the list rather than showing an unbounded history", async () => {
@@ -541,12 +555,12 @@ describe("CodingAgentApp", () => {
       expect(await screen.findByText(/Added the toggle/)).toBeInTheDocument();
     });
 
-    it("says a run is in flight on the button itself, without being opened", async () => {
+    it("says a run is in flight on the Runs tab itself, without it being opened", async () => {
       stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null, summary: null }], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
-      await openRuns();
-      const toggle = await screen.findByTestId("coding-agent-runs-toggle");
-      await waitFor(() => expect(toggle.textContent).toContain(translations.en["codingAgent.statusRunning"]));
+      fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+      await screen.findByTestId("coding-agent-project-page");
+      expect(await screen.findByTestId("coding-agent-workspace-runs-live")).toBeInTheDocument();
     });
 
     it("offers Stop only for a running run and posts its id", async () => {
@@ -748,9 +762,10 @@ describe("CodingAgentApp", () => {
         // A project entry opens the project's page…
         fireEvent.click(within(await within(sidebar).findByTestId("coding-agent-sidebar-projects")).getByText(SITE_PROJECT.name));
         await screen.findByTestId("coding-agent-project-page");
-        // …whose folder fills the column and whose team and runs sit in a rail.
+        // …whose folder fills the column, with the runs and the team as tabs.
         expect(screen.getByTestId("coding-agent-workspace")).toHaveAttribute("data-fill", "true");
-        expect(within(screen.getByTestId("coding-agent-project-rail")).getByTestId("coding-agent-runs-toggle")).toBeInTheDocument();
+        expect(screen.getByTestId("coding-agent-workspace-runs")).toBeInTheDocument();
+        expect(screen.getByTestId("coding-agent-workspace-team")).toBeInTheDocument();
         // …and a run entry the run's page.
         fireEvent.click(within(within(sidebar).getByTestId("coding-agent-sidebar-runs")).getByRole("button"));
         expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", RUN.id);
@@ -1283,7 +1298,37 @@ describe("projects", () => {
     fireEvent.click(backup);
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/git", body: { directory: PROJECT.directory } }));
     await waitFor(() => expect(gitReads).toHaveLength(2));
-    await waitFor(() => expect(screen.getByTestId("coding-agent-git-info").textContent).toContain("git@github.com:yalexx/site.git"));
+    // The remote is drawn as the repository's page, and the quiet Back up
+    // gives way to the GitHub link and Create PR.
+    await waitFor(() => expect(within(screen.getByTestId("coding-agent-git-info")).getByTestId("coding-agent-project-github")).toHaveAttribute("href", "https://github.com/yalexx/site"));
+    expect(screen.queryByTestId("coding-agent-project-backup")).toBeNull();
+    expect(screen.getByTestId("coding-agent-project-create-pr")).toBeInTheDocument();
+  });
+
+  it("opens a pull request from the project page for the branch it is on, and links it afterwards", async () => {
+    const git = { branch: "clawbox/run-1", commits: 3, remote: "https://github.com/yalexx/site.git", lastCommit: { subject: "Add the toggle", date: Date.now() - 60_000 } };
+    stubFetch({ enabled: true, readiness: READY }, [], {
+      projects: [PROJECT], git,
+      github: { installed: true, connected: true, login: "yalexx", loginCommand: "gh auth login" },
+    });
+    const toasts: string[] = [];
+    const onToast = (e: Event) => toasts.push(String((e as CustomEvent<{ message?: string }>).detail?.message ?? ""));
+    window.addEventListener("clawbox:toast", onToast);
+    try {
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+      const create = await screen.findByTestId("coding-agent-project-create-pr");
+      expect(screen.queryByTestId("coding-agent-project-backup")).toBeNull();
+      fireEvent.click(create);
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/git", body: { directory: PROJECT.directory, action: "pr" } }));
+      const link = await screen.findByTestId("coding-agent-project-pr");
+      expect(link).toHaveAttribute("href", "https://github.com/yalexx/site/pull/12");
+      expect(link.textContent).toContain(t("codingAgent.viewPr", { n: 12 }));
+      expect(screen.queryByTestId("coding-agent-project-create-pr")).toBeNull();
+      expect(toasts).toEqual([t("codingAgent.prOpened", { n: 12 })]);
+    } finally {
+      window.removeEventListener("clawbox:toast", onToast);
+    }
   });
 
   it("says in words when there are none, naming the folder it looked in", async () => {
