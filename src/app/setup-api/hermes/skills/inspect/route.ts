@@ -434,9 +434,10 @@ async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse
   // dozen cards must not leave a dozen Python processes resident on a Jetson.
   //
   // `hermes skills inspect` on a browse.sh/github row goes over the
-  // unauthenticated GitHub API and measures ~60 s on a loaded box, so anything
-  // shorter than SKILL_DOCS_CLI_TIMEOUT_MS SIGKILLs a fetch that was about to
-  // land and throws "hermes timed out". That is the same jargon Report B
+  // unauthenticated GitHub API, which is why this has a cap at all; the cap
+  // itself is SKILL_DOCS_CLI_TIMEOUT_MS, which carries the measurements. Below
+  // it, runHermesCli SIGKILLs a fetch that was about to land and throws
+  // "hermes timed out". That is the same jargon Report B
   // flagged on the install surface; here it is only the docs BODY that failed
   // (the metadata is already painted from the catalog), so a timeout is not an
   // error page, it is the identical non-alarming note a non-zero exit already

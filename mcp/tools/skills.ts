@@ -10,6 +10,7 @@
 // the model has to decode.
 
 import {
+  CLI_FAILURE_SENTENCES,
   HERMES_SKILL_SOURCES,
   SORT_OPTIONS,
   checkInstallIdentifier,
@@ -25,7 +26,7 @@ import {
   type InstalledHermesSkill,
 } from "../../src/lib/hermes-skills";
 import { type ApiOptions, apiGet, apiPost } from "../lib/api";
-import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
+import { ApiError, ToolError, type ErrorRule, type ToolErrorCode } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
 
@@ -39,6 +40,13 @@ interface BrowseSkill {
   source?: string;
   trust?: string;
   installed?: boolean;
+}
+
+/** Phase 2 of the inspect route: the documentation delta, or an ambiguity. */
+interface InspectDocs {
+  delta?: { description?: string; body?: string };
+  ambiguous?: boolean;
+  candidates?: BrowseSkill[];
 }
 
 interface BrowseBody {
@@ -799,7 +807,27 @@ export function registerSkillTools(reg: Registrar): void {
   );
 
   /**
-   * Why the phase-2 documentation fetch failed, in one line the agent repeats.
+   * The route's ambiguity answer, which is a 200 and not an error.
+   *
+   * It is emitted from the DOCS phase only (inspect/route.ts, `remoteDocs`),
+   * so checking it on phase 1 alone — as this tool did — was dead code, and
+   * the answer reached the agent as `documentation: ""` with nothing saying
+   * why. Checked on both phases now: one rule, wherever the route decides to
+   * raise it.
+   */
+  const throwIfAmbiguous = (body: { ambiguous?: boolean; candidates?: BrowseSkill[] }): void => {
+    if (body.ambiguous !== true) return;
+    const candidates = (body.candidates ?? []).slice(0, 8).map((c) => c.id);
+    throw new ToolError(
+      "BAD_ARGUMENT",
+      "That id matches more than one skill.",
+      `Pick one exact id and call skill_info again: ${candidates.join(", ")}`,
+    );
+  };
+
+  /**
+   * A phase-2 documentation fetch that did not deliver a README: what to tell
+   * the agent, and what to raise if the metadata turned out to be empty too.
    *
    * What this replaced was `.catch(() => null)`: the fetch failed,
    * `documentation` stayed "", and nothing in the answer said so — so the agent
@@ -811,12 +839,22 @@ export function registerSkillTools(reg: Registrar): void {
    * is English composed on the device and a `cli_failed` body is the CLI's, so
    * every sentence below is written locally.
    */
-  const docsFailureNote = (err: unknown): string => {
-    const tail =
-      " Everything else in this record was read on the device and is accurate. Do not tell the user the skill"
-      + " has no documentation — say the device could not fetch it, and offer to try again.";
+  interface DocsFailure {
+    /** The line appended to a record whose metadata is still worth having. */
+    note: string;
+    /** What to raise when there is no metadata either — see the guard below. */
+    code: ToolErrorCode;
+  }
+
+  const describeDocsFailure = (err: unknown): DocsFailure => {
+    const closing = " Everything else in this record was read on the device and is accurate."
+      + " Do not tell the user the skill has no documentation — say the device could not fetch it";
+    const retry = `${closing}, and offer to try again.`;
+    const final = `${closing}. Retrying will not change it.`;
     let code: CliFailureCode | null = null;
+    let status = 0;
     if (err instanceof ApiError) {
+      status = err.status;
       try {
         const body = JSON.parse(err.body) as { code?: unknown };
         if (isCliFailureCode(body.code)) code = body.code;
@@ -824,22 +862,51 @@ export function registerSkillTools(reg: Registrar): void {
         // A body that is not JSON, or a device build older than the codes.
       }
       // A 504 from this route is the documentation deadline by construction.
-      if (!code && err.status === 504) code = "cli_timeout";
+      if (!code && status === 504) code = "cli_timeout";
     }
-    // The request ran out of its own budget before the route could answer —
-    // the same event, seen from the other end.
-    if (err instanceof ToolError && err.code === "TIMEOUT") code = "cli_timeout";
     if (code === "cli_timeout") {
+      // The ROUTE's own deadline: the number is real, and it is the source
+      // that ran out of it.
       const seconds = Math.round(SKILL_DOCS_CLI_TIMEOUT_MS / 1_000);
-      return `The documentation could not be fetched: its source did not answer within ${seconds} seconds.${tail}`;
+      return {
+        note: `The documentation could not be fetched: its source did not answer within ${seconds} seconds.${retry}`,
+        code: "TIMEOUT",
+      };
+    }
+    if (err instanceof ToolError && err.code === "TIMEOUT") {
+      // OUR budget ran out first — which can happen even with the margin
+      // below, because the route queues its CLI calls two at a time and the
+      // wait is not part of the cap. Naming a source deadline here would
+      // attribute a wait to a fetch that may never have started.
+      return {
+        note: `The documentation could not be fetched: the device did not answer in time.${retry}`,
+        code: "TIMEOUT",
+      };
     }
     if (code === "cli_missing") {
-      return `The documentation could not be fetched: this device's Hermes install is missing.${tail}`;
+      return {
+        note: `The documentation could not be fetched: ${CLI_FAILURE_SENTENCES.cli_missing}${final}`,
+        code: "NOT_SUPPORTED_HERE",
+      };
     }
     if (code === "too_large") {
-      return `The documentation could not be fetched: it was too large for the device to read.${tail}`;
+      return {
+        note: `The documentation could not be fetched: it was too large for the device to read.${final}`,
+        code: "TOO_LARGE",
+      };
     }
-    return `The documentation could not be fetched: the device could not load it.${tail}`;
+    if (status === 404) {
+      // The CLI's own verdict: it does not know that id. Not a fetch that
+      // failed — a lookup that answered.
+      return {
+        note: `There is no documentation to fetch: the device's skill browser does not recognise that id.${final}`,
+        code: "NOT_FOUND",
+      };
+    }
+    return {
+      note: `The documentation could not be fetched: the device could not load it.${retry}`,
+      code: "INTERNAL",
+    };
   };
 
   reg.tool(
@@ -877,14 +944,7 @@ export function registerSkillTools(reg: Registrar): void {
           ],
         },
       );
-      if (phase1.ambiguous === true) {
-        const candidates = (phase1.candidates ?? []).slice(0, 8).map((c) => c.id);
-        throw new ToolError(
-          "BAD_ARGUMENT",
-          "That id matches more than one skill.",
-          `Pick one exact id and call skill_info again: ${candidates.join(", ")}`,
-        );
-      }
+      throwIfAmbiguous(phase1);
       const detail = phase1.skill;
       if (!detail) {
         throw new ToolError(
@@ -896,24 +956,35 @@ export function registerSkillTools(reg: Registrar): void {
 
       let description = typeof detail.description === "string" ? detail.description : "";
       let documentation = typeof detail.body === "string" ? detail.body : "";
-      let documentationNote = "";
+      let docsFailure: DocsFailure | null = null;
       if (detail.needsRemoteDocs === true) {
         // The budget is the route's own CLI cap plus its overhead — see
         // SKILL_DOCS_CLIENT_TIMEOUT_MS. A shorter one aborts before the route
         // can answer, which is exactly what a 30 s budget against a 45 s cap
         // did: the 504 that names the documentation never arrived.
-        const phase2 = await skillsGet<{ delta?: { description?: string; body?: string } }>(
-          "/setup-api/hermes/skills/inspect",
-          { query: { id, docs: 1 }, timeoutMs: SKILL_DOCS_CLIENT_TIMEOUT_MS },
-        ).catch((err: unknown) => {
-          documentationNote = docsFailureNote(err);
-          return null;
-        });
+        let phase2: InspectDocs | null = null;
+        try {
+          phase2 = await skillsGet<InspectDocs>(
+            "/setup-api/hermes/skills/inspect",
+            { query: { id, docs: 1 }, timeoutMs: SKILL_DOCS_CLIENT_TIMEOUT_MS },
+          );
+        } catch (err) {
+          // Not every failure here is ABOUT the documentation. An off-Hermes
+          // device and a rejected token are the whole tool failing, and a note
+          // saying "the rest of this record is accurate, offer to try again"
+          // over one of those would be a second false story on top of the
+          // first.
+          if (err instanceof ToolError && (err.code === "NOT_SUPPORTED_HERE" || err.code === "AUTH_FAILED")) {
+            throw err;
+          }
+          docsFailure = describeDocsFailure(err);
+        }
+        if (phase2) throwIfAmbiguous(phase2);
         if (phase2?.delta?.body) documentation = phase2.delta.body;
         if (!description && phase2?.delta?.description) description = phase2.delta.description;
-        // Phase 1 had no body, so a failure here is the whole README. If one
+        // Phase 1 had no body, so a failure here costs the whole README. If one
         // arrived anyway, there is nothing to warn about.
-        if (documentation) documentationNote = "";
+        if (documentation) docsFailure = null;
       }
 
       // The README is third-party markdown from a community registry, and it is
@@ -936,6 +1007,21 @@ export function registerSkillTools(reg: Registrar): void {
       const source = typeof detail.source === "string" ? detail.source : "";
       const trust = typeof detail.trust === "string" ? detail.trust : "";
       if (!description && !documentation && !source && !trust) {
+        // The guard's premise, stated above, is that phase 2 HAS run: only a
+        // lookup that ANSWERED and added nothing proves the skill is not
+        // there. A phase 2 that never answered proves nothing, and "do not
+        // guess ids" over a fetch that timed out is a harder version of the
+        // lie this tool exists to stop telling. `NOT_FOUND` is the one failure
+        // that IS the CLI's verdict, so it keeps the sentence below.
+        if (docsFailure && docsFailure.code !== "NOT_FOUND") {
+          throw new ToolError(
+            docsFailure.code,
+            "The device could not look that skill up: it holds no catalogue record for it, and reading the store failed.",
+            docsFailure.code === "TIMEOUT"
+              ? "Retry skill_info once. Do NOT tell the user the skill does not exist — the device could not check."
+              : "Do not retry. Tell the user the device could not reach its skill store — not that the skill is missing.",
+          );
+        }
         throw new ToolError(
           "NOT_FOUND",
           "No skill with that id — the device knows nothing about it.",
@@ -964,7 +1050,7 @@ export function registerSkillTools(reg: Registrar): void {
         needs_commands: (requirements?.commands ?? []).map((c) => c.name),
         needs_secrets: (requirements?.secrets ?? []).map((sec) => sec.label),
         documentation: framed(documentation.length > 4_000 ? `${documentation.slice(0, 4_000)}…` : documentation),
-        ...(documentationNote ? { documentation_note: documentationNote } : {}),
+        ...(docsFailure ? { documentation_note: docsFailure.note } : {}),
       });
     },
   );
