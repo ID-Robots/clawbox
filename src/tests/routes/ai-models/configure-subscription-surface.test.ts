@@ -825,7 +825,11 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
     // The sentence has to be followable literally: it names the slot and the
     // native verb that clears it.
     expect(body.error).toContain(profileId);
-    expect(body.error).toContain("openclaw models auth logout");
+    // Followable literally, against the SAME store the guard read: without the
+    // selector the CLI takes the configured default agent, so on a
+    // multi-agent box the owner clears a different store and the refusal
+    // never goes away.
+    expect(body.error).toContain(`openclaw models auth logout --agent main ${profileId}`);
     // A refusal is not a failure: nothing may have been written on the way to it.
     expect(pasteWasSpawned()).toBe(false);
     expectNoSideEffects();

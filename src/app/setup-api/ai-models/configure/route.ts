@@ -3137,7 +3137,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           error: "This box is signed in to that provider, and the sign-in is stored in the same "
             + `credential slot (${err.profileId}). Saving an API key here would delete it. `
             + "Remove the sign-in first — in the Terminal: "
-            + `openclaw models auth logout ${err.profileId} — then paste the key.`,
+            // The same `--agent` the guard read with and the paste writes to.
+            // Without it the CLI takes the configured default agent, so on a
+            // multi-agent box the owner's command clears a different store and
+            // the refusal never goes away. Argument order is the command's own
+            // (`models auth logout [options] <profileId>`, read from its
+            // --help on 2026.8.1).
+            + `openclaw models auth logout --agent ${CLAWBOX_AGENT_ID} ${err.profileId}`
+            + " — then paste the key.",
           code: "sign_in_would_be_lost",
           profileId: err.profileId,
         },
