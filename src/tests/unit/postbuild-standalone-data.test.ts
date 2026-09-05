@@ -27,6 +27,17 @@ import path from "path";
  * So the postbuild step removes it, and asserts that it is gone — the removal
  * failing silently would put the duplicate straight back.
  *
+ * TASK-692 gave the checkout's own `.env` (0600 on a box — the file systemd
+ * hands to clawbox-setup, holding GOOGLE_OAUTH_CLIENT_SECRET and, where
+ * install.sh was given one, CLAWBOX_AI_API_KEY), every `.env.*` beside it and
+ * `.git` the same treatment. Neither can be excluded through Next's own
+ * mechanism: `writeStandaloneDirectory()` copies `.env`/`.env.production`
+ * outside the trace with no switch, and `.git` arrives on the instrumentation
+ * trace, which `outputFileTracingExcludes` does not reach. Removing them costs
+ * the box nothing — @next/env never overwrites a variable systemd has already
+ * set — and the sweep is depth-unbounded because that trace copies whole
+ * project subdirectories, `.env` files and all.
+ *
  * These tests run the REAL postbuild script out of package.json against a
  * temp tree, so they cannot drift from what ships.
  */
@@ -97,6 +108,32 @@ function buildFixture() {
   for (const secret of [".session-secret", ".mcp-token", ".local-ai-token", "internal-token.env"]) {
     fs.writeFileSync(path.join(data, secret), "redacted\n", { mode: 0o600 });
   }
+
+  // The two routes TASK-692 closes. `.env`/`.env.production` are copied by
+  // Next itself beside the entry; `.git` and the rest of the project root
+  // arrive on the instrumentation trace, which is why one of these sits two
+  // levels down: `e2e-install/.env.test` is gitignored and its tracked
+  // `.example` documents seven provider keys.
+  fs.writeFileSync(path.join(standalone, ".env"), "GOOGLE_OAUTH_CLIENT_SECRET=redacted\n", {
+    mode: 0o600,
+  });
+  fs.writeFileSync(path.join(standalone, ".env.production"), "LLAMACPP_REASONING=off\n", {
+    mode: 0o600,
+  });
+  fs.writeFileSync(path.join(standalone, ".env.example"), "ALLOW_INSECURE_CONTROL_UI=\n");
+  fs.mkdirSync(path.join(standalone, "e2e-install"), { recursive: true });
+  fs.writeFileSync(path.join(standalone, "e2e-install", ".env.test"), "OPENAI_API_KEY=redacted\n", {
+    mode: 0o600,
+  });
+  fs.mkdirSync(path.join(standalone, ".git", "objects"), { recursive: true });
+  fs.writeFileSync(path.join(standalone, ".git", "config"), "[core]\n");
+  fs.writeFileSync(path.join(standalone, ".git", "objects", "blob"), "object\n");
+
+  // …and one that must SURVIVE. Packages ship their own `.env` fixtures, and
+  // a sweep that failed the build over somebody else's test data would be a
+  // false failure on a healthy build.
+  fs.mkdirSync(path.join(standalone, "node_modules", "dotenv", "tests"), { recursive: true });
+  fs.writeFileSync(path.join(standalone, "node_modules", "dotenv", "tests", ".env"), "FIXTURE=1\n");
 }
 
 function runPostbuild() {
@@ -129,6 +166,31 @@ d("postbuild step", () => {
     const res = runPostbuild();
     expect(res.status, res.stderr).toBe(0);
     expect(fs.existsSync(path.join(standalone, "data"))).toBe(false);
+  });
+
+  it("removes every copy of the checkout's .env, wherever the trace put it", () => {
+    const res = runPostbuild();
+    expect(res.status, res.stderr).toBe(0);
+    expect(fs.existsSync(path.join(standalone, ".env"))).toBe(false);
+    expect(fs.existsSync(path.join(standalone, ".env.production"))).toBe(false);
+    expect(fs.existsSync(path.join(standalone, ".env.example"))).toBe(false);
+    // Depth 2: the trace copies whole project subdirectories, so a top-level
+    // sweep would have shipped this one and reported the build clean.
+    expect(fs.existsSync(path.join(standalone, "e2e-install", ".env.test"))).toBe(false);
+  });
+
+  it("removes the copied .git", () => {
+    const res = runPostbuild();
+    expect(res.status, res.stderr).toBe(0);
+    expect(fs.existsSync(path.join(standalone, ".git"))).toBe(false);
+  });
+
+  it("leaves a package's own .env fixture under node_modules alone", () => {
+    const res = runPostbuild();
+    expect(res.status, res.stderr).toBe(0);
+    expect(
+      fs.existsSync(path.join(standalone, "node_modules", "dotenv", "tests", ".env")),
+    ).toBe(true);
   });
 
   it("still assembles the standalone tree it is there to assemble", () => {
@@ -165,6 +227,29 @@ d("postbuild step", () => {
     },
   );
 
+  // The same post-condition for the secrets half. data/ is checked first and
+  // would be the path named, so this fixture removes data/ — and every other
+  // top-level match — before making the tree read-only, leaving .env as the
+  // one thing that can survive. The assertion is on the GUARD's own line, not
+  // merely on the path: `rm` writes its own "Permission denied" naming the
+  // same path onto the same stream, so a message-free guard would pass.
+  it.skipIf(isRoot)(
+    "fails the build, naming the path, when the .env copy survives the removal (non-root uid only)",
+    () => {
+      for (const gone of ["data", ".git", ".env.production", ".env.example"]) {
+        fs.rmSync(path.join(standalone, gone), { recursive: true, force: true });
+      }
+      // Deeper matches stay removable — only the top level is frozen.
+      fs.chmodSync(standalone, 0o555);
+      const res = runPostbuild();
+      expect(fs.existsSync(path.join(standalone, ".env"))).toBe(true);
+      expect(res.status).not.toBe(0);
+      expect(res.stderr).toContain(
+        `postbuild: ${path.join(".next", "standalone", ".env")} survived removal`,
+      );
+    },
+  );
+
   // The nested layout is the one where $SDIR is not .next/standalone: Next
   // writes server.js AND the traced data/ under
   // <standalone>/<path from the tracing root to the app>, and the postbuild
@@ -179,10 +264,17 @@ d("postbuild step", () => {
     fs.writeFileSync(path.join(nested, "server.js"), "// standalone server\n");
     fs.mkdirSync(path.join(nested, "data", "llamacpp"), { recursive: true });
     fs.writeFileSync(path.join(nested, "data", "config.json"), "{}\n");
+    // Next writes .env beside the entry it writes, so in this layout that is
+    // the nested directory rather than the top of the standalone tree.
+    fs.writeFileSync(path.join(nested, ".env"), "GOOGLE_OAUTH_CLIENT_SECRET=redacted\n", {
+      mode: 0o600,
+    });
 
     const res = runPostbuild();
     expect(res.status, res.stderr).toBe(0);
     expect(fs.existsSync(path.join(nested, "data"))).toBe(false);
+    expect(fs.existsSync(path.join(nested, ".env"))).toBe(false);
+    expect(fs.existsSync(path.join(standalone, ".git"))).toBe(false);
     expect(fs.lstatSync(path.join(standalone, "server.js")).isSymbolicLink()).toBe(true);
     expect(fs.realpathSync(path.join(standalone, "server.js")))
       .toBe(fs.realpathSync(path.join(nested, "server.js")));
