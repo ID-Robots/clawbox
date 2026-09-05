@@ -25,7 +25,10 @@ startup from the device's edition lock.
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own |
 | Coordinate browser control (`browser_click`/`type`/`keypress`/`scroll`) | yes | **no** — Hermes ships a richer browser toolset |
+| Field guide (`clawbox_context`) | the OpenClaw sections of `Clawbox.md` | the Hermes sections — identity, its own skills and model, its dashboard |
 | Everything else | yes | yes |
+
+`Clawbox.md` is one file with two kinds of fenced block. `<!-- edition:… -->` follows the **active harness**, so it selects the tool sections above. `<!-- ships:… -->` follows the **install**, so a `dual` device is served the OpenClaw *and* the Hermes device facts — the gateway it really has and the Hermes dashboard it really has — while still getting only the active harness's toolbelt.
 
 ## Tool catalog
 
@@ -34,7 +37,7 @@ startup from the device's edition lock.
 |---|---|
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default`, with `ai.current_chat` saying how that relates to the chat asking), configured context/output limits, free disk, update waiting — in one call |
 | `clawbox_health` | Is the device API reachable, and is our token accepted — separates auth from connectivity |
-| `clawbox_context` | The on-device field guide plus the webapp storage/styling rules |
+| `clawbox_context` | The on-device field guide plus the webapp storage/styling rules. The guide is filtered per box before it is served — see "What differs by edition" |
 
 ### System & device
 | Tool | Purpose |
