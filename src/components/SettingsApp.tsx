@@ -39,6 +39,8 @@ import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
+import { canonicalPluginId } from "@/lib/plugin-repair";
+import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
 
 /* ── Types ── */
 
@@ -1249,6 +1251,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * which is the control whose accessible name carries the channel's state, so
    * focus follows the answer rather than falling out of the page.
    */
+  // TASK-606: what the boot script could not install or consent, so a
+  // channel row can say why it is off and offer the harness's own repair.
+  // Read once per Channels visit rather than polled: it changes at boot and
+  // when the owner presses Retry, and both of those re-read it explicitly.
+  const [pluginRepairs, setPluginRepairs] = useState<PluginRepairInfo[]>([]);
+  const loadPluginRepairs = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/plugins/repair", { cache: "no-store" });
+      if (!r.ok) return;
+      const body = (await r.json()) as { repairs?: PluginRepairInfo[] };
+      setPluginRepairs(Array.isArray(body.repairs) ? body.repairs : []);
+    } catch {
+      // A box that cannot answer keeps the rows exactly as they were.
+    }
+  }, []);
+
   const channelRowRefs = useRef<Partial<Record<ChannelSection, HTMLButtonElement | null>>>({});
   /** The WhatsApp pane's own root, for the same reason. */
   const whatsappPaneRef = useRef<HTMLDivElement | null>(null);
@@ -2798,6 +2816,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
+
+  // Read when the Channels list or a channel pane is on screen — the two
+  // places the badge can appear — and not on every section, since it costs a
+  // request that answers nothing anywhere else.
+  useEffect(() => {
+    if (activeSection !== "channels" && !isChannelSection(activeSection)) return;
+    void loadPluginRepairs();
+  }, [activeSection, loadPluginRepairs]);
+
   // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
   // row of its own to highlight, and an unlit sidebar reads as "nowhere".
   const navSection: Section = isChannelSection(activeSection)
@@ -3708,9 +3735,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     whatsapp: refreshWhatsapp,
                     discord: refreshDiscordStatus,
                   }[item.id];
+                  // TASK-606: the boot script could not install or consent
+                  // this channel's plugin and switched it off, which is why the
+                  // row says "Offline" with nothing the owner can act on.
+                  const repair = pluginRepairs.find(
+                    (row) => canonicalPluginId(row.pluginId) === item.id,
+                  );
                   return (
+                    <div key={item.id} className="w-full">
                     <div
-                      key={item.id}
                       className="w-full flex items-center hover:bg-white/[0.04] transition-colors"
                     >
                       {/* The row navigates; Retry is its SIBLING, not a control
@@ -3804,6 +3837,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                           {t("settings.retry")}
                         </button>
                       )}
+                    </div>
+                    {repair && (
+                      <PluginRepairNotice
+                        repair={repair}
+                        onRepaired={() => { void loadPluginRepairs(); void refreshChannel(); }}
+                        className="px-3 pb-3"
+                      />
+                    )}
                     </div>
                   );
                 })}
