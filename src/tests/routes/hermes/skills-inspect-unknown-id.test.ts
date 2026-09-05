@@ -172,15 +172,33 @@ describe("GET …/inspect?docs=1 — what the CLI actually said", () => {
     expect(body.code).not.toBe("not_found");
   });
 
-  it("still answers not_found for the one sentence that means it", async () => {
-    // Measured on the Hermes box: an invented id exits 0 with exactly this.
+  it("still answers not_found for the sentences that mean it", async () => {
+    // Both measured on the Hermes box, and both in the CLI's own source
+    // (`hermes_cli/skills_hub.py`): a BARE NAME the short-name resolver could
+    // not match (:94), and a PREFIXED id whose source returned no metadata
+    // (:864). One word — find versus fetch — separates the second from the
+    // download failure above, which means the opposite.
     mockRecord.mockResolvedValue(undefined);
+
     cliSaid("Resolving 'definitely-not-a-real-skill-xyz-42'...\nError: No skill named 'definitely-not-a-real-skill-xyz-42' found in any source.\n");
+    const bare = await inspect("id=definitely-not-a-real-skill-xyz-42&docs=1");
+    expect(bare.status).toBe(404);
+    expect(bare.body.code).toBe("not_found");
 
-    const { status, body } = await inspect("id=definitely-not-a-real-skill-xyz-42&docs=1");
+    cliSaid("Resolving 'github/nonexistent-owner-xyz/nope'...\nError: Could not find 'github/nonexistent-owner-xyz/nope' in any source.\n");
+    const prefixed = await inspect("id=github%2Fnonexistent-owner-xyz%2Fnope&docs=1");
+    expect(prefixed.status).toBe(404);
+    expect(prefixed.body.code).toBe("not_found");
+  });
 
-    expect(status).toBe(404);
-    expect(body.code).toBe("not_found");
+  it("does not call a skill nonexistent when the source prefix has no adapter", async () => {
+    mockRecord.mockResolvedValue(undefined);
+    cliSaid("Resolving 'weird/thing'...\nError: no source adapter for 'weird'.\n");
+
+    const { status, body } = await inspect("id=weird%2Fthing&docs=1");
+
+    expect(status).not.toBe(404);
+    expect(body.code).not.toBe("not_found");
   });
 
   it("offers the candidates of a \"did you mean\" list instead of dead-ending", async () => {

@@ -349,8 +349,9 @@ export function parseUninstallOutcome(stdout: string, stderr = ''): UninstallOut
  *                   this name, and the ids are on stdout.
  *   "suggestions" — "No exact match for 'x'. Did you mean one of these?", the
  *                   other candidate-bearing shape, with its ids on stdout.
- *   "not-found"   — "No skill named 'x' found in any source." The ONE sentence
- *                   that means the skill does not exist.
+ *   "not-found"   — the CLI resolved the id to nothing: "No skill named 'x'
+ *                   found in any source" for a bare name, "Could not find 'x'
+ *                   in any source" for a prefixed one.
  *   "unavailable" — everything else: a source that could not be fetched, a rate
  *                   limit, a shape this parser does not know. The CLI exits 0
  *                   for all of them (see this module's header: "it fails to
@@ -366,10 +367,26 @@ export function parseUninstallOutcome(stdout: string, stderr = ''): UninstallOut
  */
 export type InspectNoPanelKind = 'ambiguous' | 'suggestions' | 'not-found' | 'unavailable';
 
-/** `No skill named 'x' found in any source` — the device's own words for it. */
-const INSPECT_NOT_FOUND_RE = /No skill named '[^']*' found in any source/i;
-/** `No exact match for 'x'. Did you mean one of these?` */
+/**
+ * The TWO sentences `skills inspect` prints for an id it resolved to nothing,
+ * read off the CLI's own source (`hermes_cli/skills_hub.py` on the pinned
+ * 0.20.5): a BARE NAME that the short-name resolver could not match
+ * (`No skill named 'x' found in any source.`, :94) and a PREFIXED id whose
+ * source returned no metadata (`Could not find 'x' in any source.`, :864).
+ */
+const INSPECT_NOT_FOUND_RE =
+  /(?:No skill named '[^']*' found in any source|Could not find '[^']*' in any source)/i;
+/** `No exact match for 'x'. Did you mean one of these?` (skills_hub.py:88) */
 const INSPECT_SUGGESTIONS_RE = /No exact match for '[^']*'/i;
+/**
+ * Sentences about the DOWNLOAD, never about existence, and matched FIRST so no
+ * broader rule can swallow them: `Could not fetch 'x' from any source.` with
+ * its rate-limit hint (:600-604) and `no source adapter for 'x'` (:577), which
+ * is a malformed source prefix rather than a missing skill. One word — find
+ * versus fetch — separates the second of these from the first of those above.
+ */
+const INSPECT_UNAVAILABLE_RE =
+  /(?:Could not fetch '[^']*' from any source|no source adapter for '[^']*'|rate limit exhausted)/i;
 
 export function parseInspectNoPanel(
   stdout: string,
@@ -391,6 +408,7 @@ export function parseInspectNoPanel(
     return { kind: 'unavailable', candidates: [] };
   }
 
+  if (INSPECT_UNAVAILABLE_RE.test(flat)) return { kind: 'unavailable', candidates: [] };
   if (INSPECT_NOT_FOUND_RE.test(flat)) return { kind: 'not-found', candidates: [] };
   return { kind: 'unavailable', candidates: [] };
 }
