@@ -9,9 +9,10 @@
  * remove (TASK-693).
  *
  * The answer comes from the harness, not from an inference: `openclaw channels
- * status --channel telegram --json` through `readCachedChannelStatus`, the one
- * shared memo the Discord route already uses (15 s success / 3 s failure,
- * in-flight coalesced, invalidated by every channel write).
+ * status --json` through `readCachedChannelStatus`, the one shared memo the
+ * Discord route already uses (15 s success / 3 s failure, in-flight coalesced,
+ * invalidated by every channel write and by a gateway restart). The read is
+ * un-filtered and fills every channel's entry in one CLI start (TASK-671).
  *
  * And it is TRI-STATE. `null` means the gateway could not be asked — every
  * Telegram save restarts it, so the read right after one lands in that window —
