@@ -30,13 +30,21 @@ vi.mock("@/lib/harness", () => ({
 
 vi.mock("@/lib/hermes-local-ai", () => ({
   removeLocalAiFromHermes: vi.fn(),
+  // Listed because the ROUTE narrows on it: an export the factory omits is
+  // `undefined`, and `err instanceof undefined` is a TypeError inside the very
+  // catch that is meant to keep the failure readable.
+  HermesLocalRemovalError: class HermesLocalRemovalError extends Error {
+    constructor(message: string, readonly wasDefault: boolean) {
+      super(message);
+    }
+  },
 }));
 
 import { get, setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { inferConfiguredLocalModel, openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
-import { removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
+import { HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 
 const mockSetMany = vi.mocked(setMany);
 const mockGet = vi.mocked(get);
@@ -189,6 +197,22 @@ describe("POST /setup-api/local-ai", () => {
       });
       // Nothing was spawned at OpenClaw on a box that has no OpenClaw.
       expect(mockRunOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("still records that the local model WAS the selection when the removal failed", async () => {
+      // A partial unset can clear `model.provider` and leave a providers key,
+      // and this answer is the last time the fact exists: the retry reads a
+      // `model.provider` that is already gone, so `wasDefault` is false for
+      // ever and re-enabling Local AI puts the device on nothing rather than
+      // back on the model it was on.
+      mockRemoveLocalAiFromHermes.mockRejectedValue(
+        new HermesLocalRemovalError("The local model is still registered with Hermes.", true),
+      );
+
+      const res = await localAiPost(jsonRequest({ action: "disable" }));
+
+      expect(res.status).toBe(502);
+      expect(mockSetMany).toHaveBeenCalledWith({ local_ai_was_default: true });
     });
 
     it("answers 200 when the Hermes unregister landed", async () => {

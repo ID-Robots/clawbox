@@ -192,3 +192,78 @@ describe("patchHermesConfig on the real 3175-byte Hermes config", () => {
     expect(commentLines(after)).toBe(36);
   });
 });
+
+/**
+ * What a removal that SUCCEEDED actually leaves in the file.
+ *
+ * `patchHermesConfig`'s CLI fallback runs `hermes config unset`, which
+ * re-serialises config.yaml through PyYAML — and PyYAML writes a mapping it has
+ * just emptied as the inline `{}`. Emptying `providers.clawlocal` is what
+ * removing the local model does, and on a box whose only provider it was,
+ * emptying `providers` itself is the normal outcome. So `{}` is the shape of
+ * success on the one path the read-back proof exists for, and a reader that
+ * refuses over it answers "could not be confirmed" to a removal that fully
+ * landed — for ever, because the retry reads the same file.
+ *
+ * The same reader was blind in the other direction: a `models:` catalogue
+ * written as a block or a list — the shape Hermes' own discovery produces — is
+ * a `providers.clawlocal` entry Hermes still renders as a picker row, and it
+ * read as "not there".
+ */
+describe("resolveHermesConfigValue over the shapes a removal leaves behind", () => {
+  async function readBack(text: string, key: string) {
+    await fs.writeFile(configPath, text, { mode: 0o600 });
+    const { resolveHermesConfigValue } = await loadModule();
+    return await resolveHermesConfigValue(key);
+  }
+
+  it("reads a provider PyYAML emptied to {} as gone, not as unreadable", async () => {
+    expect(
+      await readBack("providers:\n  clawlocal: {}\nmodel:\n  provider: openrouter\n",
+        "providers.clawlocal.base_url"),
+    ).toEqual({ state: "absent" });
+  });
+
+  it("reads an emptied providers block as gone", async () => {
+    expect(await readBack("providers: {}\n", "providers.clawlocal.models")).toEqual({ state: "absent" });
+  });
+
+  it("does not read a block-form models catalogue as removed", async () => {
+    expect(
+      await readBack("providers:\n  clawlocal:\n    models:\n      gemma4:\n        ctx: 4096\n",
+        "providers.clawlocal.models"),
+    ).toEqual({ state: "present" });
+  });
+
+  it("does not read a list-form models catalogue as removed", async () => {
+    expect(
+      await readBack("providers:\n  clawlocal:\n    models:\n      - gemma4\n",
+        "providers.clawlocal.models"),
+    ).toEqual({ state: "present" });
+  });
+
+  it("still answers a scalar with its value and a missing key with absent", async () => {
+    const text = "providers:\n  clawlocal:\n    base_url: http://127.0.0.1/v1\n";
+    expect(await readBack(text, "providers.clawlocal.base_url")).toEqual({
+      state: "value",
+      value: "http://127.0.0.1/v1",
+    });
+    expect(await readBack(text, "providers.clawlocal.models")).toEqual({ state: "absent" });
+  });
+
+  it("still says unreadable for an inline value it cannot descend into", async () => {
+    // Not an empty collection: `clawlocal` may well hold the key, and this
+    // reader cannot say. "We could not look" is the honest answer.
+    expect(
+      await readBack("providers:\n  clawlocal: {base_url: http://x/v1}\n", "providers.clawlocal.base_url"),
+    ).toEqual({ state: "unreadable" });
+  });
+
+  it("keeps readHermesConfigValue's two-state contract", async () => {
+    await fs.writeFile(configPath, "providers:\n  clawlocal:\n    models:\n      - gemma4\n", { mode: 0o600 });
+    const { readHermesConfigValue } = await loadModule();
+    // A block is not a scalar, so the scalar reader still answers null — the
+    // signature every other caller reads.
+    expect(await readHermesConfigValue("providers.clawlocal.models")).toBeNull();
+  });
+});
