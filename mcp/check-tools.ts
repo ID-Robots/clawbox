@@ -4,8 +4,9 @@
  *
  *   bun run mcp/check-tools.ts
  *
- * It builds the server over FOUR POSTURES per edition, without connecting a
- * transport — what this host can actually probe, every capability on, every
+ * It builds the server over FIVE POSTURES per edition, without connecting a
+ * transport — what this host can actually probe, every capability on, the same
+ * again as the DUAL install (whose device_status description differs), every
  * capability off, and the profile a delegated coding run gets — and:
  *   1. asserts the tool contract (name regex, description length and banned
  *      phrases, parameter-name regex, readOnly/destructive coherence) over
@@ -46,9 +47,10 @@ import { runMedia } from "./lib/run-context";
 // with it — `bun run typecheck:mcp`, which this workflow now runs, fails until
 // both postures name it.
 import type { Capabilities, McpContext } from "./lib/context";
-// Where the device API probes are aimed, for the note at the end: three of the
-// seven answer over HTTP rather than by spawning, and saying they failed
-// "because of the cwd" sends the reader to the wrong place.
+// Where the device API probes are aimed, for the note at the end: four of the
+// probes (seven on OpenClaw, eight on Hermes) answer over HTTP rather than by
+// spawning, and saying they failed "because of the cwd" sends the reader to the
+// wrong place.
 import { API_BASE } from "./lib/api";
 import type { Ed } from "./lib/register";
 
@@ -122,9 +124,11 @@ function schemaShapeViolations(tool: RegisteredToolInfo, emitted: string): strin
  * logs_tail or screen_capture appeared in this checker's own matrix. That is a
  * false success, and the reason CI could not run this job as it stood.
  *
- * So the contract is checked over BOTH postures — what this host can actually
- * probe, and the full surface a real box registers — exactly as the unit guard
- * in src/tests/unit/mcp-tool-honesty.test.ts does.
+ * So the contract is checked over the DECLARED postures rather than over the
+ * probed one alone — the full surface a real box registers, that surface as the
+ * dual install, the surface with every capability off, and a delegated run's
+ * profile — exactly as the unit guard in src/tests/unit/mcp-tool-honesty.test.ts
+ * does.
  */
 const ALL_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: "scrot", imageConvert: true, journal: true, du: true },
@@ -205,8 +209,8 @@ const RUN_ONLY_TOOLS = ["browser_view_local", "generate_audio", "generate_image"
 /**
  * Which probes SPAWN a binary and which ask the device's own HTTP API.
  *
- * The note at the end used to blame the spawn cwd for all seven, including the
- * three that never spawn anything.
+ * The note at the end used to blame the spawn cwd for every probe, including
+ * the four that never spawn anything.
  */
 const SPAWN_PROBES = ["du", "journal", "screen", "imageConvert"];
 const API_PROBES = ["email", "codingAgent", "images", "providers"];

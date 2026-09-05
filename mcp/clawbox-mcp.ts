@@ -220,7 +220,7 @@ async function main(): Promise<void> {
   );
 }
 
-// mcp/check-tools.ts imports buildServer to build four postures per edition and diff the tool lists;
+// mcp/check-tools.ts imports buildServer to build five postures per edition and diff the tool lists;
 // it sets this first so importing this module does not claim stdio.
 if (process.env.CLAWBOX_MCP_NO_AUTOSTART !== "1") {
   main().catch((err) => {
