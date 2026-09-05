@@ -148,6 +148,18 @@ describe("provider-verified", () => {
       .toEqual({ anthropic: "2026-09-03T09:00:00.000Z" });
   });
 
+  it("drops a mark whose instant TIES the credential write, rather than guessing", async () => {
+    // A tie says nothing about which came first, and the two guesses are not
+    // equally safe: "verified" over a rotated key is the claim this field must
+    // never make, while "not checked" is the answer the next turn corrects for
+    // free. Reachable whenever the store's mtime lands on a whole millisecond —
+    // a file restored from a backup or unpacked from an archive does.
+    await lib.recordProviderVerified("anthropic", new Date("2026-09-03T08:00:00.000Z"));
+    writeAuthStore(new Date("2026-09-03T08:00:00.000Z"));
+
+    expect(await lib.readProviderVerified()).toEqual({});
+  });
+
   it("keeps every mark when the credential store cannot be asked", async () => {
     // A box with no pooled credentials yet has nothing to invalidate, and "we
     // could not look" must not read as "everything is stale".

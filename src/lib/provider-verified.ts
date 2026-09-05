@@ -159,7 +159,16 @@ export async function readProviderVerified(): Promise<ProviderVerifiedMarks> {
   if (credentialsAt === null) return marks;
   const fresh: Record<string, string> = {};
   for (const [id, at] of Object.entries(marks)) {
-    if (Date.parse(at) >= credentialsAt) fresh[id] = at;
+    // Strictly newer. A mark whose instant is EQUAL to the store's write time
+    // cannot say which came first, and the two are not equally safe to guess:
+    // keeping it reports a rotated credential as verified, dropping it reports
+    // "not checked" — the answer this module is allowed to be wrong with,
+    // because the next turn earns the mark straight back. The tie is rare
+    // rather than impossible (`mtimeMs` carries a sub-millisecond fraction on
+    // ext4, but a store restored from a backup or unpacked from an archive
+    // lands on a whole second), and the strict comparison costs one re-earned
+    // mark.
+    if (Date.parse(at) > credentialsAt) fresh[id] = at;
   }
   return fresh;
 }
