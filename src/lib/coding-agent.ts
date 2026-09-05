@@ -2360,6 +2360,18 @@ export const HEADLESS_BRIEF = [
   // the project's own, and a 96-point site scored 54.
   "The folder named in CLAWBOX_RUN_ARTIFACTS_DIR is this run's evidence folder, shown to the owner with the run's details. Screenshots land there automatically; save test output there too, and MOVE any verification script you wrote there (mv, never a copy): a checker left behind in the project folder ships as part of the project.",
   "A short task is not a small task: deliver the complete, polished result the task implies — real styling, sensible edge handling, a finished feel — never a minimal stub.",
+  // Bench run run-nmtf8v2o (2026-09-05): an eight-file site was written and
+  // working inside six minutes, then fourteen more went on a screenshot of
+  // every page and a review workflow over work already verified, and the
+  // run was cut off before its report — the work was there, the account of
+  // it never came, and two points went with it. One pass of verification is
+  // the finish line, not the start of another.
+  "Finish decisively: once the work is done and ONE verification pass — the tests you have, one visual pass of the states that matter, one review — has passed, write your report and stop. Do not review verified work a second time, re-screenshot pages already described, or start a workflow whose only job is to look again: a run that runs out of time before its report loses the report, and the report is what the owner reads.",
+  // The same run added a hero picture and left a checker script beside an
+  // "exactly these files" brief, and lost three points to files nobody asked
+  // for; s-02's run (2026-09-05) spent five minutes searching the disk for a
+  // file that was not where the task said it would be.
+  "Deliver what the task names and nothing beside it: when it lists the files to produce, produce exactly those — no extra assets, pictures, notes or scripts, however nice; anything you make only to check your work goes to the evidence folder. When a file or folder the task relies on is not where the task says, look once where it points, then treat that step as undoable and report it — never search the disk for it.",
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
 ].join(" ");
 
@@ -2393,7 +2405,7 @@ export const READ_ONLY_BRIEF = [
 export const ULTRACODE_BRIEF = [
   "Ultracode is on and the Workflow tool is approved for this run: it is the one-step way to run many READ-ONLY helpers at once — map many files, verify many pages, review many changes — with agent(), parallel() and pipeline().",
   "Every agent() must pass agentType \"explorer\", \"tester\" or \"reviewer\" (never general-purpose, never a workflow inside a workflow, never isolation: \"worktree\" — this folder is not a git repository of its own), and the writing stays with you: shared code first, then the parts, then a workflow to check them all.",
-  "The owner's step and token ceilings apply to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task.",
+  "The owner's step and token ceilings apply to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task: a task of one to three files needs no workflow at all (the explorer, tester and reviewer helpers are enough), a larger one at most ONE, launched when there are many things to check at once, never to review work you have already verified.",
   "A script's meta must be a plain object literal. If a workflow fails or returns nothing useful, send a narrower script inline — never scriptPath or resumeFromRunId, and never Read the script file, transcript or journal its result names: that folder is closed to you and each attempt costs a step.",
 ].join(" ");
 
@@ -2415,7 +2427,7 @@ export const ULTRACODE_BRIEF = [
 export const MEDIA_BRIEF_IMAGES = [
   "generate_image draws a real picture with this box's ClawBox AI plan and writes a PNG into your working folder — hero art, sprites, backgrounds, textures, a logo.",
   "Spend it on the handful of pictures that carry the project, never one per element: each costs the owner's daily allowance, and a refusal that names the allowance or the credential means carry on without pictures rather than retry.",
-  "Do not fake one with an SVG-to-PNG script or a Python imaging library, and do not draw the project's own icon: this box draws favicon.png, favicon.ico and the desktop icon for you shortly after the run starts, so link <link rel=\"icon\" href=\"favicon.png\"> from every page and ship the two files with the project.",
+  "Do not fake one with an SVG-to-PNG script or a Python imaging library, and do not draw the project's own icon: this box draws favicon.png, favicon.ico and the desktop icon for you shortly after the run starts. Before you finish, check with Glob that favicon.png is there and link <link rel=\"icon\" href=\"favicon.png\"> from every page only then — when the allowance was spent or the drawing failed, the files never arrive, and a link to a file that is not there is a broken link in every page you ship.",
 ].join(" ");
 
 /**

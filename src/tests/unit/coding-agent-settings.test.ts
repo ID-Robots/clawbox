@@ -176,6 +176,14 @@ describe("what a run is told about the shell", () => {
   it("tells the run a denial is a decision, not a puzzle for Bash", async () => {
     const lib = await import("@/lib/coding-agent");
     expect(lib.HEADLESS_BRIEF).toMatch(/denied file action is a DECISION/);
+    // Bench cycle 1 (2026-09-05): finish after ONE verification pass, ship
+    // exactly the files named, never search the disk for a missing one.
+    expect(lib.HEADLESS_BRIEF).toMatch(/Finish decisively: once the work is done and ONE verification pass/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/Do not review verified work a second time/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/produce exactly those — no extra assets, pictures, notes or scripts/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/never search the disk for it/);
+    expect(lib.ULTRACODE_BRIEF).toMatch(/a task of one to three files needs no workflow at all/);
+    expect(lib.ULTRACODE_BRIEF).toMatch(/at most ONE/);
     expect(lib.HEADLESS_BRIEF).toMatch(/no sed, tee, redirection or scripts through Bash/);
     expect(lib.HEADLESS_BRIEF).toMatch(/report plainly which part was refused/);
   });
