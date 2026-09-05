@@ -4149,12 +4149,14 @@ async function within(work: Promise<unknown>, ms: number): Promise<void> {
 async function settleWork(killed: ChildProcess[], timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const left = () => Math.max(0, deadline - Date.now());
-  // `!= null` on purpose, both clauses: on a real ChildProcess these are
-  // `number | null` and the test is exact, while the hand-rolled EventEmitter
-  // children of the spawn-failure suite have NEITHER field. Counting those as
-  // reaped at once is the right answer — there is no process to wait for — and
-  // this says it is a decision rather than what `!== null` did by accident.
-  const reaped = () => killed.every((child) => child.exitCode != null || child.signalCode != null);
+  // `!== null` on purpose, both clauses. On a real ChildProcess the fields are
+  // `number | null` and `string | null`, so the test is exact. A hand-rolled
+  // stand-in — the spawn-failure suite's EventEmitter child — has NEITHER
+  // field, and `undefined !== null` counts it as reaped at once, which is the
+  // right answer: there is no process to wait for. `!= null` would say the
+  // opposite (`undefined != null` is false) and hold every such teardown to
+  // the full budget before reporting a give-up over nothing.
+  const reaped = () => killed.every((child) => child.exitCode !== null || child.signalCode !== null);
   let grace = killed.length > 0;
   while (left() > 0) {
     if (settling.size > 0) {
@@ -5008,12 +5010,15 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   for (const state of live.values()) {
     clearTimeout(state.timeout);
     if (state.killTimer) clearTimeout(state.killTimer);
-    // Said BEFORE the signal, like every other path that ends a run (the
-    // owner's Stop, a Pause, the token limit, the idle timeout). Without it
-    // finishRun reads the kill as the provider blinking — transient stderr,
-    // no file touched, `endRequested === null` — and starts a REPLACEMENT
-    // child that this drain neither killed nor waits for.
-    state.endRequested = "stop";
+    // Said BEFORE the signal, like every other path that ends a run: the
+    // owner's Stop and Pause and the token limit set `endRequested`, and the
+    // idle timeout says the same thing with `timedOut`. Without it finishRun
+    // reads the kill as the provider blinking — transient stderr, no file
+    // touched, `endRequested === null` — and starts a REPLACEMENT child that
+    // this drain neither killed nor waits for. `??=`, because the retry guard
+    // is exactly `=== null`: a Stop or Pause already in flight is the owner's
+    // gesture and must still settle as itself.
+    state.endRequested ??= "stop";
     killTree(state.child, "SIGKILL");
     killed.push(state.child);
   }

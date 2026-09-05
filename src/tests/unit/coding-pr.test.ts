@@ -32,9 +32,9 @@ import {
 // The awaited reset in this file's teardown can now legitimately spend the
 // drain's own budget (SETTLE_DRAIN_BUDGET_MS, 5 s) and then up to ~2.75 s in
 // the removal's linear retry backoff — ~7.8 s of vitest's 10 s DEFAULT hook
-// ceiling, and nothing would say so before it bit. The file imports no
-// child_process of its own, so test-timeout-hygiene.test.ts does not require
-// the declaration; its three siblings carry it and so does this one.
+// ceiling, and nothing would say so before it bit. This file starts real
+// processes through @/lib/coding-agent rather than importing child_process,
+// which is why test-timeout-hygiene.test.ts names it in ALSO_REQUIRED.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));

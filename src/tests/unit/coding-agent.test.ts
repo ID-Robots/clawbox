@@ -1216,10 +1216,15 @@ describe("retrying a transient upstream failure", () => {
     // running inside the tree the teardown is about to remove — the ENOTEMPTY
     // shape this hook exists to stop, arriving through the one path it did
     // not model.
+    // The 503 goes out BEFORE the spawn marker: the marker is what the test
+    // waits on, and a child descheduled between the two would be killed with
+    // a stderr holding only the wrapper's own banner — which stderrTail
+    // filters out — so the RED would pass on unfixed code for the wrong
+    // reason.
     installFakeWrapper([
+      "echo 'API Error: 503 Service Unavailable' >&2",
       `echo spawned >> "${spawnsFile()}"`,
       `echo '${INIT}'`,
-      "echo 'API Error: 503 Service Unavailable' >&2",
       "sleep 30",
     ].join("\n"));
     makeProject("site");

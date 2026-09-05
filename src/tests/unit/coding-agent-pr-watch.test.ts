@@ -19,12 +19,13 @@ import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { isPrPending, MAX_WAIT_MS, POLL_INTERVAL_MS } from "@/lib/coding-pr-state";
 
-// The awaited reset in this file's teardown can now legitimately spend the
-// drain's own budget (SETTLE_DRAIN_BUDGET_MS, 5 s) and then up to ~2.75 s in
-// the removal's linear retry backoff — ~7.8 s of vitest's 10 s DEFAULT hook
-// ceiling, and nothing would say so before it bit. The file imports no
-// child_process of its own, so test-timeout-hygiene.test.ts does not require
-// the declaration; its three siblings carry it and so does this one.
+// The same ceiling the other four coding-agent suites carry, for symmetry
+// rather than for a cost this file pays today: it starts no run, so its
+// awaited reset kills nothing and the drain returns on its first iteration.
+// The declaration is here so a run added to this file later cannot quietly
+// put an awaited drain (SETTLE_DRAIN_BUDGET_MS, 5 s) plus the removal's retry
+// backoff inside vitest's 10 s DEFAULT hook budget — and it imports no
+// child_process, so test-timeout-hygiene.test.ts would not say so.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const readPullRequest = vi.hoisted(() => vi.fn());
