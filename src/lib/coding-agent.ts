@@ -309,11 +309,12 @@ export const MAX_CONCURRENT_RUNS = 1;
  * A coding TEAM may have several of its runs going at once — its workers in
  * their own git worktrees — up to this many, and only while the box has
  * `TEAM_SPAWN_MIN_AVAILABLE_MB` of MemAvailable to spare for each one after
- * the first. Measured on this Orin Nano: a `claude -p` run with its MCP
- * server is ~600 MB resident, and three beside the web server, the gateway
- * and the desktop's Chromium leave ~1.5 GB of a 7.6 GB board. A run that is
- * not the team's still waits for the team, and the team waits for it: the
- * one-run-at-a-time rule is between STRANGERS.
+ * the first. Measured on this Orin Nano (2026-09-05): a `claude -p` run is
+ * ~210 MB resident two minutes in with its MCP server at ~60 MB, and grows
+ * with its context; the guard is set for three of them beside the web
+ * server, the gateway and the desktop's Chromium on a 7.6 GB board. A run
+ * that is not the team's still waits for the team, and the team waits for
+ * it: the one-run-at-a-time rule is between STRANGERS.
  */
 export const MAX_TEAM_WORKERS = 3;
 export const TEAM_SPAWN_MIN_AVAILABLE_MB = (() => {
