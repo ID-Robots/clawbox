@@ -49,7 +49,17 @@ function applyStatusData(
     else window.location.href = "/";
     return;
   }
-  if (data.telegram_configured) {
+  // `telegram_configured` used to mean "the owner finished the wizard's Telegram
+  // step" — the flag came from a value only that step's route writes. It now
+  // means "some harness on this box holds a bot", which a restore with the
+  // harness's home intact answers `true` before the wizard has been through a
+  // single screen. Ending the wizard on it alone therefore skipped the AI-model
+  // step and marked setup complete on a box whose agent cannot answer, so the
+  // short-circuit is gated on every step that has to come first (`resumeStep`
+  // reaches 5 only with `ai_model_configured`, or with the wizard's own
+  // persisted progress). That was always true of the boxes beta could produce,
+  // so no working flow changes.
+  if (data.telegram_configured && resumeStep >= 5) {
     setCurrentStep(6);
     beginCompletion();
     return;

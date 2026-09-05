@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
-import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesGatewayStatus, hermesTelegramRegistered } from "@/lib/hermes-telegram";
+import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 
 export const dynamic = "force-dynamic";
 
@@ -123,15 +123,30 @@ async function probeHermes(token: string): Promise<HermesTelegramProbe> {
 
 export async function GET() {
   try {
-    const token = await get("telegram_bot_token");
-    if (!token || typeof token !== "string") {
-      return NextResponse.json({ configured: false });
-    }
+    // WHICH EDITION FIRST. Reading ClawBox's own `telegram_bot_token` up here
+    // made the Hermes branch below unreachable on exactly the boxes it was
+    // written for: on Hermes the credential is the harness's, and ClawBox's
+    // copy is written only as a side effect of /setup-api/telegram/configure,
+    // so a box paired with `hermes config set` — or restored with ~/.hermes
+    // intact but no ClawBox config.json — answered `configured: false` and the
+    // owner was invited to set up the bot he was already chatting with.
+    const harness = await getActiveHarness();
 
-    if ((await getActiveHarness()) === "hermes") {
+    if (harness === "hermes") {
+      const { token, known } = await readActiveTelegramBot(harness);
+      // `unknown` carries the third state out instead of collapsing it: a store
+      // this box could not read must not render as a box with no bot, which is
+      // the false failure the whole module exists to remove. Nothing draws it
+      // yet — that needs a UI state and ten locales — but the fact belongs in
+      // the response rather than only in the journal.
+      if (!token) return NextResponse.json({ configured: false, unknown: !known });
+
       const { registered, gateway } = await probeHermes(token);
-      // `null` = Hermes couldn't be asked; fall back to the stored token rather
-      // than reporting a working bot as gone.
+      // `null` = Hermes couldn't be asked; fall back to the token we found
+      // rather than reporting a working bot as gone. `true` is correct here
+      // only because the early return above has already established that a bot
+      // token exists — before that guard was hoisted, this line could have
+      // turned "could not ask" into "a bot is configured" on a box with none.
       const configured = registered ?? true;
       const info = configured ? await fetchBotInfo(token) : null;
       return NextResponse.json({
@@ -145,6 +160,14 @@ export async function GET() {
       });
     }
 
+    // Same reader, same reason: on OpenClaw the credential is
+    // `channels.telegram.botToken` in openclaw.json — what `setTelegramToken()`
+    // writes and what the gateway long-polls from — and ClawBox's copy is again
+    // only a side effect of the configure route. A box paired with `openclaw
+    // config set`, or restored with ~/.openclaw intact and a fresh
+    // data/config.json, was told to set up the bot it already answers on.
+    const { token, known } = await readActiveTelegramBot(harness);
+    if (!token) return NextResponse.json({ configured: false, unknown: !known });
     const info = await fetchBotInfo(token);
     return NextResponse.json({ configured: true, ...info });
   } catch (err) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { StoreApp } from "./AppStore";
 import * as kv from "@/lib/client-kv";
 import { useT } from "@/lib/i18n";
@@ -86,7 +86,16 @@ interface InstalledAppSettingsProps {
 export default function InstalledAppSettings({ appId, storeApp, icon, onUninstall }: InstalledAppSettingsProps) {
   const { t } = useT();
   const SETTINGS_KEY = `clawbox-app-settings-${appId}`;
-  const [settings, setSettings] = useState<Record<string, string | boolean>>({});
+  const [settings, setSettingsState] = useState<Record<string, string | boolean>>({});
+  // Mirror + its ONLY writer. The raw setter is renamed out of reach so the ref
+  // cannot be left behind by a writer that forgets to advance it — an invisible
+  // lost write, and one the purity rule cannot see, since it reports side
+  // effects INSIDE an updater rather than a missing ref advance outside one.
+  const settingsRef = useRef(settings);
+  const applySettings = useCallback((next: Record<string, string | boolean>) => {
+    settingsRef.current = next;
+    setSettingsState(next);
+  }, []);
   const [saving, setSaving] = useState(false);
   // "connected" = backend actually wrote the skill's config (the button then
   // says "Saved to skill config" — that is a file write, never a probed
@@ -156,9 +165,9 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   useEffect(() => {
     kv.init().then(() => {
       const stored = kv.getJSON<Record<string, string | boolean>>(SETTINGS_KEY);
-      if (stored) setSettings(stored);
+      if (stored) applySettings(stored);
     });
-  }, [SETTINGS_KEY]);
+  }, [SETTINGS_KEY, applySettings]);
 
   const appSettings = buildSettings(appId, skillInfo);
   // The publisher namespace is what makes a ClawHub URL real; when the store
@@ -170,14 +179,18 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
     || storeApp.url;
   const hubIsClawhub = !!hubUrl && hubUrl.startsWith("https://clawhub.ai/");
 
+  // Persisted OUTSIDE the updater. A React state updater is a pure function of
+  // the previous state and React may run it twice, so `kv.setJSON` was called
+  // once per render attempt rather than once per edit. The ref is advanced
+  // before every write — including the load above — so the next edit still
+  // builds on the newest settings without the callback taking a dependency on
+  // them. See src/tests/unit/state-updater-purity.test.ts.
   const updateSetting = useCallback((key: string, value: string | boolean) => {
-    setSettings(prev => {
-      const next = { ...prev, [key]: value };
-      kv.setJSON(SETTINGS_KEY, next);
-      return next;
-    });
+    const next = { ...settingsRef.current, [key]: value };
+    applySettings(next);
+    kv.setJSON(SETTINGS_KEY, next);
     setSaveResult("idle");
-  }, [SETTINGS_KEY]);
+  }, [SETTINGS_KEY, applySettings]);
 
   const [toggleError, setToggleError] = useState(false);
 

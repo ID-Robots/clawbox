@@ -3307,13 +3307,55 @@ try {
 }
 if (!cfg.channels) cfg.channels = {};
 const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
-cfg.channels.telegram = { ...rest, enabled: true, botToken };
+// OpenClaw's OWN value wins. This block exists to re-register the channel on a
+// fresh ~/.openclaw (a factory reset, a new image) out of the only copy that
+// survived it. ClawBox's data/config.json is a MIRROR its configure route
+// happens to write, and channels.telegram.botToken is what the gateway polls
+// and what every ClawBox panel now reads (src/lib/telegram-bot-identity.ts) —
+// so copying the mirror over a bot the owner re-pointed with `openclaw config
+// set` silently restored an older one at the next update. The
+// dmPolicy/allowFrom strip above still runs either way.
+// A channel may carry its credential as an env REFERENCE under `token`
+// ({source:"env",…}) instead of a literal botToken — the shape
+// src/lib/telegram-bot-identity.ts recognises and refuses to guess at. Writing
+// the mirror as a botToken BESIDE that reference restores an older bot under a
+// re-pointed one exactly as overwriting botToken did.
+const existingToken = typeof rest.botToken === "string" ? rest.botToken.trim() : "";
+// `token: null` and `token: ""` are an UNSET reference, not a credential: the
+// control UI and `openclaw config set --json` both write null for a cleared
+// value. Counting them as a bot made the installer skip the restore on the one
+// path this block exists for - a factory reset, where ClawBox's mirror is the
+// only surviving copy - and print that it kept a bot, leaving the channel
+// enabled with nothing behind it for the gateway to poll.
+const openclawHasBot =
+  existingToken !== "" || (rest.token !== undefined && rest.token !== null && rest.token !== "");
+cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+// `rename` replaces the INODE, so the temp file's mode is the one that
+// survives. openclaw.json holds channels.telegram.botToken and the gateway's
+// auth token and is 0600 on a box; the service user's umask is 0002, so a plain
+// writeFileSync left it 0664 — world-readable, silently, on every install and
+// every update. 0600 unconditionally rather than the mode it happens to have,
+// so a box already sitting at that 0664 is repaired instead of preserved; this
+// is also what OpenClaw's own CLI created the file with, and what
+// src/lib/openclaw-config.ts writeConfig now forces on the same file. The stale
+// temp is removed first and chmod'ed after, because `mode` is ignored for a
+// file that already exists (a .tmp from a crashed run).
 const tmp = `${cfgPath}.tmp`;
-fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+fs.rmSync(tmp, { force: true });
+fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+try {
+  fs.chmodSync(tmp, 0o600);
+} catch {
+  // best-effort; a failed chmod must not fail the install
+}
 fs.renameSync(tmp, cfgPath);
+process.stderr.write(
+  openclawHasBot
+    ? "  Telegram channel registered (kept the bot OpenClaw already holds)\n"
+    : "  Telegram channel registered from ClawBox's saved token\n",
+);
 NODE
-      echo "  Telegram channel registered"
     fi
   fi
 
@@ -3551,7 +3593,8 @@ step_openclaw_tts() {
         echo "  # This box has NO working on-device TTS engine." >&2
         echo "  # Kokoro (GPU), the only on-device engine, is absent: ${KOKORO_VERDICT:-no verdict published}" >&2
         echo "  # The cloud voice speaks for this box once it is linked to" >&2
-        echo "  # ClawBox AI; until then spoken requests go unanswered." >&2
+        echo "  # ClawBox AI on a plan that includes cloud speech; until then" >&2
+        echo "  # spoken requests go unanswered." >&2
         echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         echo "  ############################################################" >&2
         # The e2e-install container has no GPU by construction (it says so
@@ -3802,14 +3845,82 @@ step_openclaw_tts() {
           # is safe to repeat. What is refused here is CHOOSING for an owner
           # whose current choice could not be read.
           echo "  Warning: could not read tts.provider from Hermes — leaving the selection alone rather than overwriting a choice we could not read" >&2
+          # ...and say what "alone" can mean here. This is the one arm of this
+          # step that can leave `tts.provider` UNSET on a first install, and an
+          # unset key is not silence: `tools/tts_tool.py` resolves
+          # `(tts_config.get("provider") or DEFAULT_PROVIDER)` with
+          # DEFAULT_PROVIDER = "edge", so it is Microsoft's cloud voice.
+          #
+          # Said whatever the ENGINE did, because the Edge risk does not depend
+          # on it: a box with a perfectly good Kokoro whose selection could not
+          # be read is equally on Edge, and equally fixed by re-running this
+          # step. Only the engine clause below is conditional.
+          echo "           If that selection is in fact unset, Hermes falls back to its factory Edge cloud rather than staying silent. Re-run once the CLI answers:" >&2
+          echo "           sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+          if [ "$KOKORO_HAVE" != true ]; then
+            echo "           This box also has no on-device engine ($KOKORO_REASON)." >&2
+          fi
         else
         case "$CURRENT_HERMES_TTS" in
           ""|null|edge|"$HERMES_TTS_PROVIDER")
+            # ── What this box speaks with, when nothing has chosen yet ───────
+            #
+            # The CLOUD voice is deliberately not chosen here. It needs the
+            # box's `claw_` token, and the ClawBox AI link happens AFTER
+            # install — so that choice belongs to the link path
+            # (src/lib/hermes-clawai.ts), which owns the credential and makes
+            # it the moment there is one. TASK-699.
+            #
+            # AND THE SELECTION IS MADE WHATEVER THE ENGINE ANSWERED, which is
+            # the opposite of what this card first asked for, because to Hermes
+            # an unset `tts.provider` is not "no voice": measured read-only on
+            # the pinned 0.20.5 package on the Hermes box —
+            # `tools/tts_tool.py:211` `DEFAULT_PROVIDER = "edge"` and `:661`
+            # `provider = (tts_config.get("provider") or DEFAULT_PROVIDER)` —
+            # an ABSENT key resolves to Microsoft's Edge cloud, and the harness
+            # offers no "off" value at all. So withholding or clearing the
+            # selection on an engineless box would move it from honestly mute
+            # to speaking through a third party the customer never chose, which
+            # is the one outcome `HERMES_FACTORY_TTS_PROVIDER` exists to
+            # prevent. A command provider whose engine is missing FAILS, and
+            # measured on the same package: the command-provider branch resolves
+            # BEFORE the built-in dispatch (`tts_tool.py:3184`) and a non-zero
+            # exit is turned into `RuntimeError("TTS provider '<name>' exited
+            # with code …")` (`:1376-1386`) — there is no fall-through to another
+            # provider, so nothing leaves the box. And no panel is fooled by it:
+            # `hermesSpeaksReplies` asks for the stamp, the unit AND a runnable
+            # script before it will say this box speaks.
+            #
+            # What was missing was never the selection — it was SAYING SO, and
+            # the cloud voice the box is entitled to. Both are below.
             if hermes_tts_cli config set tts.provider "$HERMES_TTS_PROVIDER"; then
               if [ "$CURRENT_HERMES_TTS" = "edge" ]; then
                 echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER (replacing Hermes' factory 'edge' cloud default)"
               else
                 echo "  Hermes TTS provider set to $HERMES_TTS_PROVIDER"
+              fi
+              # KOKORO_HAVE, never KOKORO_READY. The first is the reconciled
+              # fact — the verdict the run PUBLISHED, with the exit code as its
+              # fallback; the second is the inference from the exit code alone,
+              # and reading one off the other is the defect this step was built
+              # around. VOICE_RC=1 with `KOKORO=ready` on file is a working
+              # engine (the OpenClaw arm below says so too), and VOICE_RC=0 with
+              # any other verdict is not one.
+              if [ "$KOKORO_HAVE" != true ]; then
+                # Qualified by SKU. `applyClawaiToHermes` — the only writer of
+                # the Hermes cloud voice — runs where `getActiveHarness()`
+                # answers "hermes". On a hermes box that is always; on a dual
+                # box it is whichever harness the owner has switched to (a
+                # LICENSED dual box unlocks the switcher, so `getActiveHarness`
+                # answers the stored value, and an unlicensed one degrades to
+                # openclaw), so the link wires the Hermes voice there only while
+                # Hermes is the one running. Promising it unconditionally would
+                # be a false success in an install log.
+                if is_hermes_edition; then
+                  echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT until ClawBox AI is linked on a plan that includes cloud speech. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
+                else
+                  echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT. On a dual box it is wired when ClawBox AI is linked while Hermes is the active harness, and can always be set from Settings -> Voice. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
+                fi
               fi
             else
               HERMES_TTS_FAIL="could not select the $HERMES_TTS_PROVIDER provider"
@@ -3964,7 +4075,12 @@ step_openclaw_tts() {
         fi
         ;;
       13)
-        echo "  On-device TTS configured, but this box has NO working on-device TTS engine ($KOKORO_REASON) — the cloud voice speaks for it once the box is linked to ClawBox AI"
+        # "on a plan that includes cloud speech", because gateway-pre-start.sh
+        # gates the OpenClaw cloud voice on exactly that device tier
+        # (CLAWBOX_SPEECH_DEVICE_TIER) and refuses to write it below one — the
+        # same tier the Hermes Note above names. Promising it on the link alone
+        # had the two harnesses answering differently about one box.
+        echo "  On-device TTS configured, but this box has NO working on-device TTS engine ($KOKORO_REASON) — the cloud voice speaks for it once the box is linked to ClawBox AI on a plan that includes cloud speech"
         ;;
       *)
         echo "  On-device TTS configured, but NO engine is confirmed installed ($KOKORO_REASON)"
@@ -6533,7 +6649,7 @@ step_validate_services() {
           if harness_has_no_gpu; then
             echo "  CLAWBOX_TEST_NO_GPU=1, on-device TTS declined ($tts_state) — expected without a GPU, not a failed probe"
           else
-            failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI. $tts_fix")
+            failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI on a plan that includes cloud speech. $tts_fix")
           fi
           ;;
         failed:?*)

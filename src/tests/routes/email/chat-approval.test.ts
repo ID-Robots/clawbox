@@ -16,15 +16,37 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/config-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: vi.fn(),
+  // The tri-state read the approvals-token reader uses: `known: false` says the
+  // store could not be read, which is what makes a save gate refuse rather than
+  // skip itself. Driven off the same fixture as `get`.
+  getKnown: vi.fn(),
   set: vi.fn(),
 }));
 vi.mock("@/lib/email-approval-telegram", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/email-approval-telegram")>()),
   fetchApprovalBotInfo: vi.fn(),
 }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "openclaw") }));
-vi.mock("@/lib/openclaw-config", () => ({ readTelegramAllowFrom: vi.fn(async () => ["6001"]) }));
-vi.mock("@/lib/hermes-telegram", () => ({ readHermesApprovedUsers: vi.fn(async () => []) }));
+// The edition lock decides which harness stores count as evidence; with none
+// installed but OpenClaw, a stray ~/.hermes/.env is not this box's business.
+vi.mock("@/lib/harness", () => ({
+  getActiveHarness: vi.fn(async () => "openclaw"),
+  getEdition: vi.fn(() => "openclaw"),
+  // `defaulted: false` — this fixture IS the edition lock speaking. Left
+  // defaulted, the guard would read both stores as possible and this suite
+  // would be asserting the missing-lock path instead of the OpenClaw one.
+  getEditionSource: vi.fn(() => ({ edition: "openclaw", defaulted: false })),
+}));
+vi.mock("@/lib/openclaw-config", () => ({
+  readTelegramAllowFrom: vi.fn(async () => ["6001"]),
+  // The same-bot guard asks the HARNESS which bot it polls. Empty here, so this
+  // suite keeps testing exactly what it tested before: the guard answering from
+  // ClawBox's own stored copy.
+  readConfigStrict: vi.fn(async () => ({})),
+}));
+vi.mock("@/lib/hermes-telegram", () => ({
+  readHermesApprovedUsers: vi.fn(async () => []),
+  readHermesTelegramToken: vi.fn(async () => ({ token: null, known: true })),
+}));
 
 const SESSION_SECRET = "a".repeat(64);
 const APPROVAL_TOKEN = "777777:ZZaabbCCddEEffgg_hh-ii";
@@ -36,6 +58,7 @@ let POST: typeof import("@/app/setup-api/email/chat-approval/route").POST;
 let DELETE: typeof import("@/app/setup-api/email/chat-approval/route").DELETE;
 let configStore: typeof import("@/lib/config-store");
 let telegram: typeof import("@/lib/email-approval-telegram");
+let openclawConfig: typeof import("@/lib/openclaw-config");
 let auth: typeof import("@/lib/auth");
 
 let stored: Record<string, unknown>;
@@ -67,9 +90,14 @@ beforeEach(async () => {
   auth = await import("@/lib/auth");
   configStore = await import("@/lib/config-store");
   telegram = await import("@/lib/email-approval-telegram");
+  openclawConfig = await import("@/lib/openclaw-config");
 
   stored = {};
   vi.mocked(configStore.get).mockImplementation(async (key: string) => stored[key]);
+  vi.mocked(configStore.getKnown).mockImplementation(async (key: string) => ({
+    value: stored[key],
+    known: true,
+  }));
   vi.mocked(configStore.set).mockImplementation(async (key: string, value: unknown) => {
     if (value === undefined) delete stored[key];
     else stored[key] = value;
@@ -119,7 +147,20 @@ describe("only the owner may change how email is approved", () => {
   it("lets a signed-in browser read the state", async () => {
     const res = await GET(request({ cookie: ownerCookie() }));
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ enabled: false, botConfigured: false, ownerChats: 1 });
+    expect(await res.json()).toMatchObject({ enabled: false, botConfigured: false, unknown: false, ownerChats: 1 });
+  });
+
+  // An unreadable store is not "there is no approvals bot". It is the fault
+  // this route's own POST answers 503 `bot_unknown` on, and telling the panel
+  // `botConfigured: false` over it invites the owner to connect a bot that may
+  // already be there.
+  it("says the state is unknown when the store could not be read", async () => {
+    vi.mocked(configStore.getKnown).mockResolvedValue({ value: undefined, known: false });
+
+    const res = await GET(request({ cookie: ownerCookie() }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ botConfigured: false, unknown: true });
   });
 });
 
@@ -147,6 +188,70 @@ describe("connecting the approvals bot", () => {
 
     expect(res.status).toBe(400);
     expect(telegram.fetchApprovalBotInfo).not.toHaveBeenCalled();
+  });
+
+  // OpenClaw keeps its OWN copy of the credential — `setTelegramToken()` writes
+  // `channels.telegram.botToken` into openclaw.json, and the gateway polls from
+  // there. ClawBox's `telegram_bot_token` is a mirror its configure route
+  // happens to write, so a box set up through the `openclaw` CLI or restored
+  // with ~/.openclaw intact and a fresh data/config.json has the bot and no
+  // mirror — and the guard, asking only the mirror, waved it straight through.
+  it("REFUSES a bot only OpenClaw's own config knows about", async () => {
+    vi.mocked(openclawConfig.readConfigStrict).mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: MAIN_BOT_TOKEN } },
+    });
+
+    const res = await POST(request({ cookie: ownerCookie(), body: { botToken: MAIN_BOT_TOKEN } }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ kind: "same_bot" });
+    expect(stored.email_approval_bot_token).toBeUndefined();
+  });
+
+  // Telegram's /revoke issues a new secret for the SAME bot. Both tokens drive
+  // the same getUpdates stream, so whole-token equality is not identity.
+  it("REFUSES a rotated secret for the bot the harness polls", async () => {
+    stored.telegram_bot_token = MAIN_BOT_TOKEN;
+
+    const rotated = "111111:MainBotSecretValue_11";
+    const res = await POST(request({ cookie: ownerCookie(), body: { botToken: rotated } }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ kind: "same_bot" });
+    expect(stored.email_approval_bot_token).toBeUndefined();
+  });
+
+  // The case above still seeds ClawBox's mirror, so it proves the rotation rule
+  // and not the native store. This one has NO mirror at all — the state of a box
+  // paired with `openclaw config set` — so both halves have to hold at once.
+  it("REFUSES a rotated secret against OpenClaw's own store, with no mirror", async () => {
+    vi.mocked(openclawConfig.readConfigStrict).mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: MAIN_BOT_TOKEN } },
+    });
+
+    const rotated = "111111:MainBotSecretValue_11";
+    const res = await POST(request({ cookie: ownerCookie(), body: { botToken: rotated } }));
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ kind: "same_bot" });
+    expect(stored.telegram_bot_token).toBeUndefined();
+    expect(telegram.fetchApprovalBotInfo).not.toHaveBeenCalled();
+    expect(stored.email_approval_bot_token).toBeUndefined();
+  });
+
+  // FAIL CLOSED. An openclaw.json that exists but cannot be read is not
+  // evidence that this is a second bot.
+  it("refuses the save when the harness config cannot be read", async () => {
+    vi.mocked(openclawConfig.readConfigStrict).mockRejectedValue(
+      Object.assign(new Error("EACCES"), { code: "EACCES" }),
+    );
+
+    const res = await POST(request({ cookie: ownerCookie(), body: { botToken: APPROVAL_TOKEN } }));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ kind: "bot_unknown" });
+    expect(telegram.fetchApprovalBotInfo).not.toHaveBeenCalled();
+    expect(stored.email_approval_bot_token).toBeUndefined();
   });
 
   it("REFUSES the bot the harness is already long-polling", async () => {

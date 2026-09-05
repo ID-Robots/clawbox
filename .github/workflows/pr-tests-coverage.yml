@@ -22,6 +22,14 @@ jobs:
     # day" true without weakening the 5 s default everywhere else. TASK-702.
     timeout-minutes: 30
     outputs:
+      # Whether the SUITE itself reported, as distinct from whether the JOB
+      # passed. Those are two different claims and the comment below makes both,
+      # so it needs both: a blocking step ahead of vitest failing means the suite
+      # never ran, and a step AFTER it failing means the job went red over a
+      # green suite. Read as success / failure / anything else, where anything
+      # else (skipped, cancelled, or an outcome the runner could not evaluate)
+      # is "did not run" rather than a verdict invented here.
+      suite: ${{ steps.suite.outcome }}
       found: ${{ steps.coverage.outputs.found }}
       statements: ${{ steps.coverage.outputs.statements }}
       branches: ${{ steps.coverage.outputs.branches }}
@@ -46,6 +54,24 @@ jobs:
       - name: Sudoers allow-list coverage
         run: bun run check:sudoers
 
+      # The MCP server's tree is EXCLUDED from the root tsconfig (see its
+      # `exclude`), so `tsc --noEmit` — wherever it runs — has never covered
+      # mcp/**, and no workflow ran this project. Three errors sat on beta
+      # unseen as a result, in src/lib files the MCP tree pulls in
+      # transitively. Fast (one tsc over a small project) and blocking: this is
+      # the only thing that typechecks the stdio process the agent talks to.
+      - name: MCP typecheck
+        run: bun run typecheck:mcp
+
+      # The tool CONTRACT — name and description limits, flat schemas, and which
+      # tools each edition may register. It builds the surface over five
+      # postures, so it covers the families a CI runner cannot PROBE and the
+      # three tools it is not inside a coding RUN for (see mcp/check-tools.ts);
+      # before that it examined a third of the tools and printed OK over the
+      # rest, which is why it could not be a CI job.
+      - name: MCP tool contract
+        run: bun run check:mcp-tools
+
       # CI's variant of `bun run test:coverage`: the same suite, the same
       # thresholds, only the reporters differ. The full set (text, html, clover,
       # json-summary) is for a person looking at a checkout; here nothing reads
@@ -54,7 +80,55 @@ jobs:
       # Writing the other ~590 files and printing the table bought nothing but a
       # few seconds and 600 lines of job log nobody scrolls through.
       - name: Test
+        id: suite
         run: bun run test:coverage:ci
+
+      # ADVISORY, deliberately, and this is the decision the card asked for:
+      # eslint reports 18 errors and 123 warnings on beta today, so a blocking
+      # step would fail every PR on day one and be switched off again — the same
+      # trap the coverage thresholds below describe. Sixteen of the eighteen are
+      # `no-require-imports` in code that uses `require()` on purpose (keeping
+      # Node APIs out of the Edge bundle); the other two are one `no-explicit-any`
+      # and one react-hooks rule. Making the numbers VISIBLE on every PR is the
+      # first step; ratcheting this to blocking, one rule at a time, is the
+      # second, and it needs those eighteen dealt with first.
+      #
+      # The counts go to the RUN SUMMARY, not only into a collapsed step log:
+      # `continue-on-error` alone makes the job green and the PR comment say
+      # "Tests passed", so without this the errors exist nowhere anyone looks
+      # and the ratchet has no baseline. THREE outcomes, not two — eslint prints
+      # no summary line when it has nothing to report, so a clean run and a
+      # crashed one would otherwise write the same "no summary line" sentence,
+      # and the day the ratchet succeeds every PR would read like a broken step.
+      #
+      # AFTER the suite, for the step LOG rather than for the verdict: the
+      # `comment` job `needs: test` and so waits for this step either way
+      # (measured at 1m56s for `bun run lint`), which is why moving it does not
+      # deliver the PR comment any sooner. What it buys is that the suite's own
+      # output and annotations land first, instead of a reader scrolling past
+      # 141 advisory lint problems to reach the failure they came for.
+      # `!cancelled()`, not `always()`: `always()` runs during a cancellation too,
+      # so a hung suite hitting `timeout-minutes: 30` would burn another ~2 min
+      # on advisory lint nobody will read. Same idiom as e2e-tests.yml.
+      - name: Lint (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          rc=0
+          bun run lint > lint.out 2>&1 || rc=$?
+          cat lint.out
+          {
+            echo "### Lint (advisory — not blocking)"
+            echo
+            if summary=$(grep -E '[0-9]+ problems? \([0-9]+ errors?, [0-9]+ warnings?\)' lint.out); then
+              echo "$summary"
+            elif [ "$rc" -eq 0 ]; then
+              echo "Lint clean — 0 problems."
+            else
+              echo "eslint produced no summary line and exited $rc — it crashed; see the step log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
 
       # Always parse coverage so the PR comment can show numbers even on failure.
       - name: Parse coverage
@@ -81,7 +155,16 @@ jobs:
     # Skip for fork PRs: GITHUB_TOKEN is always read-only on fork PRs regardless
     # of repo/workflow permissions, so the comment would 403. Native PR checks
     # UI already shows the same status.
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    #
+    # `always()` is load-bearing, not decoration. A job whose `if:` contains no
+    # status-check function gets the implicit `success()`, so this one was
+    # SKIPPED on every run where `test` failed — verified on runs 33967347945,
+    # 33968019417 and 33939067430, all `test -> failure, comment -> skipped`.
+    # The comment is edited in place under one marker, so the Tests section then
+    # kept whatever it last said: PR #645 was showing "✅ Tests — Result: passed"
+    # over a red run for a day. The only sentence this job had ever been able to
+    # render was "passed". e2e-install.yml already writes it this way.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && always() }}
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -93,6 +176,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           TEST_RESULT: ${{ needs.test.result }}
+          SUITE_OUTCOME: ${{ needs.test.outputs.suite }}
           COVERAGE_FOUND: ${{ needs.test.outputs.found }}
           COVERAGE_STATEMENTS: ${{ needs.test.outputs.statements }}
           COVERAGE_BRANCHES: ${{ needs.test.outputs.branches }}
@@ -105,10 +189,45 @@ jobs:
             const testsEnd = '<!-- clawbox-ci-tests:end -->';
             const e2eStart = '<!-- clawbox-ci-e2e:start -->';
             const e2eEnd = '<!-- clawbox-ci-e2e:end -->';
-            const ok = process.env.TEST_RESULT === 'success';
-            const icon = ok ? '✅' : '❌';
+            // TWO claims, two sources, kept apart. "Tests passed/failed" is
+            // about the SUITE and may only come from the suite's own step
+            // outcome; the JOB's result is a different fact and gets its own
+            // line. Mixing them reports a suite that never started as "failed"
+            // (a blocking step ahead of it went red) and a suite that passed as
+            // "failed" (a step after it, such as Parse coverage, went red) —
+            // false failures in both directions, over the one sentence a
+            // reviewer actually reads.
+            const suite = process.env.SUITE_OUTCOME;
+            const passed = suite === 'success';
+            const failed = suite === 'failure';
+            const icon = passed ? '✅' : failed ? '❌' : '⚠️';
+            const verdict = passed ? 'passed' : failed ? 'failed' : 'did not run';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            let section = `## ${icon} Tests\n- Result: **${ok ? 'passed' : 'failed'}**\n- [View run](${runUrl})`;
+            let section = `## ${icon} Tests\n- Result: **${verdict}**\n- [View run](${runUrl})`;
+            if (!passed && !failed) {
+              // Deliberately not a list of step names: the steps ahead of the
+              // suite include checkout, setup-bun and `bun install`, and naming
+              // three of the six sends a reader with a lockfile mismatch to the
+              // MCP typecheck log to find it never ran.
+              section += `\n- The suite did not report: a step before it failed, or the job was cancelled. See the run.`;
+            } else if (process.env.TEST_RESULT === 'cancelled') {
+              // The same false failure the E2E verdicts carried, one line
+              // further in: `always()` reaches this job during a cancellation
+              // too, and a suite that reported before the run was stopped would
+              // otherwise be told as "a later step in it failed".
+              //
+              // It names the verdict rather than assuming "passed": the suite
+              // going red is the most likely reason anyone cancels this
+              // workflow — Lint (advisory) and Parse coverage still run for
+              // about two minutes after it — so failure × cancelled is the
+              // square this sentence is most often read in.
+              section += `\n- The suite ${verdict}, then the run was cancelled. See the run.`;
+            } else if (passed && process.env.TEST_RESULT !== 'success') {
+              // Only when the SUITE passed. Over a failed suite the job's own
+              // failure is not news, and "even though the suite did" would be
+              // a second, contradictory claim beside "Result: failed".
+              section += `\n- The job did not pass even though the suite did — a later step in it failed. See the run.`;
+            }
             if (process.env.COVERAGE_FOUND === 'true') {
               section += `\n- Coverage: statements **${process.env.COVERAGE_STATEMENTS}%**, branches **${process.env.COVERAGE_BRANCHES}%**, functions **${process.env.COVERAGE_FUNCTIONS}%**, lines **${process.env.COVERAGE_LINES}%**`;
             }

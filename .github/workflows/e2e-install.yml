@@ -227,7 +227,14 @@ jobs:
             const sectionStart = '<!-- clawbox-ci-e2e-install:start -->';
             const sectionEnd = '<!-- clawbox-ci-e2e-install:end -->';
             const result = process.env.E2E_INSTALL_RESULT;
-            const icon = result === 'success' ? '✅' : result === 'skipped' ? '⏭️' : '❌';
+            // The verdict already prints `result` verbatim, so a cancelled run
+            // reads "cancelled" — but the ICON said ❌, which is the same false
+            // failure e2e-tests.yml carried in words: `always()` runs this job
+            // during a cancellation too. Failure is now the only thing that
+            // gets ❌.
+            const icon = result === 'success' ? '✅'
+              : result === 'skipped' ? '⏭️'
+              : result === 'failure' ? '❌' : '⏹️';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const section = `${sectionStart}\n## ${icon} E2E Install\n- Result: **${result}**\n- [View run](${runUrl})\n${sectionEnd}`;
 

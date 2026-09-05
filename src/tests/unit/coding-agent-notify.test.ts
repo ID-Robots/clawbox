@@ -19,14 +19,18 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 }));
 
 const getActiveHarness = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/harness", () => ({ getActiveHarness }));
+const getEdition = vi.hoisted(() => vi.fn(() => "openclaw"));
+vi.mock("@/lib/harness", () => ({ getActiveHarness, getEdition }));
 
 const readHermesApprovedUsers = vi.hoisted(() => vi.fn());
 const notifyHermesTelegramUser = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-telegram", () => ({ readHermesApprovedUsers, notifyHermesTelegramUser }));
 
 const readTelegramAllowFrom = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/openclaw-config", () => ({ readTelegramAllowFrom }));
+// OpenClaw's OWN credential store — channels.telegram.botToken in openclaw.json
+// is what the gateway long-polls from, and what `openclaw config set` writes.
+const readConfigStrict = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/openclaw-config", () => ({ readTelegramAllowFrom, readConfigStrict }));
 
 import { announceCodingAgent, buildAnnouncement } from "@/lib/coding-agent-notify";
 
@@ -102,6 +106,7 @@ beforeEach(() => {
   readHermesApprovedUsers.mockReset().mockResolvedValue([]);
   notifyHermesTelegramUser.mockReset().mockResolvedValue(true);
   readTelegramAllowFrom.mockReset().mockResolvedValue([]);
+  readConfigStrict.mockReset().mockResolvedValue({});
 });
 
 afterEach(() => {
@@ -238,6 +243,26 @@ describe("the Telegram leg", () => {
     expect(body.text).toBe(buildAnnouncement(run()));
     expect(body.parse_mode).toBeUndefined();
     expect(body.text).not.toContain("DO-NOT-LEAK");
+  });
+
+  // The OpenClaw twin of the Hermes case below: the credential is the harness's
+  // on BOTH editions, and a box paired with `openclaw config set` (or restored
+  // with ~/.openclaw intact and a fresh data/config.json) has no ClawBox mirror.
+  // Gating the notice on the mirror silences it on a box with a working bot and
+  // approved senders — and logs it at info, so nothing ever tells the owner.
+  it("on OpenClaw sends with no ClawBox mirror — the harness owns the credential", async () => {
+    readConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: "654321:NativeOpenClawBot" } },
+    });
+    readTelegramAllowFrom.mockResolvedValue(["1001"]);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toBe("https://api.telegram.org/bot654321:NativeOpenClawBot/sendMessage");
   });
 
   it("on Hermes sends even with no ClawBox-side bot token — the harness owns the credential", async () => {

@@ -72,7 +72,7 @@ import {
   type TelegramCallbackQuery,
   type TelegramUpdate,
 } from "@/lib/email-approval-telegram";
-import { get as configGet } from "@/lib/config-store";
+import { get as configGet, getKnown as configGetKnown } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
@@ -136,8 +136,22 @@ export type PromptOutcome =
 
 // ── Is this device using chat approval at all? ───────────────────────────────
 
+/**
+ * The approvals bot's own token, and whether ClawBox's store could be read.
+ *
+ * Tri-state for the same reason the harness readers are: `data/config.json` is
+ * a file that can be mid-write, root-owned or on a full disk, and the plain
+ * read answers `{}` to all of that. A caller checking whether two bots collide
+ * has to tell "there is no approvals bot" from "we could not look" — see
+ * /setup-api/telegram/configure, which refuses rather than skipping its guard.
+ */
+export async function readApprovalBotToken(): Promise<{ token: string | null; known: boolean }> {
+  const { value, known } = await configGetKnown(CHAT_APPROVAL_TOKEN_KEY);
+  return { token: safeBotToken(value), known };
+}
+
 export async function approvalBotToken(): Promise<string | null> {
-  return safeBotToken(await configGet(CHAT_APPROVAL_TOKEN_KEY));
+  return (await readApprovalBotToken()).token;
 }
 
 /**

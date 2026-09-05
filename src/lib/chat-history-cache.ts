@@ -69,8 +69,17 @@ const LEGACY_KEYS = [
 ];
 
 export function purgeLegacyChatCaches(): void {
-  if (typeof window === "undefined") return;
+  // Reached through `globalThis`, not `window`: this module is in the import
+  // graph of the MCP server, which typechecks under `lib: ["esnext"]` +
+  // `types: ["node"]` (mcp/tsconfig.json keeps the DOM out of a stdio process
+  // deliberately), so the bare `window` was three of the errors nothing in CI
+  // was running the check that would have caught. In a browser `globalThis` IS
+  // the window; off one there is simply no localStorage and this is a no-op,
+  // which is what the old `typeof window === "undefined"` guard did.
+  const globals = globalThis as { localStorage?: { removeItem(key: string): void } };
   for (const key of LEGACY_KEYS) {
-    try { window.localStorage.removeItem(key); } catch { /* private mode / quota — silent */ }
+    // The ACCESS stays inside the try as well as the call: a browser in private
+    // mode can throw on reading `localStorage` itself, not only on using it.
+    try { globals.localStorage?.removeItem(key); } catch { /* private mode / quota — silent */ }
   }
 }

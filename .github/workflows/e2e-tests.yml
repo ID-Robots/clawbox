@@ -95,7 +95,11 @@ jobs:
     # Skip for fork PRs: GITHUB_TOKEN is always read-only on fork PRs regardless
     # of repo/workflow permissions, so the comment would 403. Native PR checks
     # UI already shows the same status.
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+    # `always()`: without a status-check function in the `if:` GitHub applies the
+    # implicit `success()`, so this job was skipped on every run where `e2e`
+    # failed (verified on runs 33957268407, 33954600403, 33950564484) and the
+    # in-place comment kept its last "✅ E2E — passed" over a red run.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && always() }}
     needs: e2e
     runs-on: ubuntu-latest
     permissions:
@@ -114,10 +118,19 @@ jobs:
             const testsEnd = '<!-- clawbox-ci-tests:end -->';
             const e2eStart = '<!-- clawbox-ci-e2e:start -->';
             const e2eEnd = '<!-- clawbox-ci-e2e:end -->';
-            const ok = process.env.E2E_RESULT === 'success';
-            const icon = ok ? '✅' : '❌';
+            // THREE states, not two. `always()` above also runs this job while
+            // the workflow is being CANCELLED, and `needs.e2e.result` is then
+            // `cancelled` (or `skipped` when e2e never ran) — neither of which
+            // is a failure. A two-way verdict overwrote the section with
+            // "❌ E2E — failed", claiming the suite broke over a run that was
+            // stopped. Same shape as pr-tests-coverage.yml's verdict.
+            const result = process.env.E2E_RESULT;
+            const passed = result === 'success';
+            const failed = result === 'failure';
+            const icon = passed ? '✅' : failed ? '❌' : result === 'skipped' ? '⏭️' : '⏹️';
+            const verdict = passed ? 'passed' : failed ? 'failed' : (result || 'unknown');
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const wrappedSection = `${e2eStart}\n## ${icon} E2E\n- Result: **${ok ? 'passed' : 'failed'}**\n- [View run](${runUrl})\n${e2eEnd}`;
+            const wrappedSection = `${e2eStart}\n## ${icon} E2E\n- Result: **${verdict}**\n- [View run](${runUrl})\n${e2eEnd}`;
             const defaultBody = `${marker}\n# CI Summary\n\n${testsStart}\n## ⏳ Tests\n- Waiting for test workflow to finish.\n${testsEnd}\n\n${wrappedSection}`;
             const { owner, repo } = context.repo;
             const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: context.issue.number, per_page: 100 });

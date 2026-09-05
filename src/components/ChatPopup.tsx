@@ -766,7 +766,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // agent.reasoning_effort, or picked by the user) rather than the placeholder.
   const hermesReasoningKnownRef = useRef(false)
   const [input, setInput] = useState('')
-  const [streaming, setStreaming] = useState('')
+  const [streaming, setStreamingState] = useState('')
+  // The streaming buffer, mirrored in a ref, and the ONLY way it is written.
+  //
+  // A state updater is a pure function of the previous state and React is
+  // entitled to call it twice — Strict Mode does, and so does any render it has
+  // to redo. The interrupted-turn append used to happen INSIDE
+  // `setStreaming(prev => …)`, so the owner's half-finished answer could land in
+  // the transcript twice. The ref lets the abort path READ the buffer without an
+  // updater at all, and the string-only signature makes putting an updater back
+  // impossible rather than merely discouraged — and the raw setter is renamed
+  // out of the way so a bare `setStreaming('')` added elsewhere in the file
+  // cannot bypass the ref and leave it holding a dead run's text. TASK-703.
+  const streamingRef = useRef('')
+  const applyStreaming = useCallback((next: string) => {
+    streamingRef.current = next
+    setStreamingState(next)
+  }, [])
   const [sending, setSending] = useState(false)
   // Queued while a run is in flight; drained one at a time on `final`.
   const [queuedSends, setQueuedSends] = useState<QueuedSend[]>([])
@@ -921,7 +937,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // chatModelState resolves. Starting at `off` means that if the socket
   // connects before the catalog does, the first wire push can't offer a
   // reasoning level a local (off-only) model would reject.
-  const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(SAFE_THINKING_LEVEL)
+  const [thinkingLevel, setThinkingLevelState] = useState<ThinkingLevel>(SAFE_THINKING_LEVEL)
+  // Mirrored and written through one helper, for the reason `applyStreaming`
+  // is: the "Switched effort to …" confirmation was appended from INSIDE the
+  // `setThinkingLevel` updater, so one click could add two lines to the
+  // transcript. The ref is what lets the "did it actually change?" question be
+  // answered without one. TASK-703.
+  const thinkingLevelRef = useRef<ThinkingLevel>(SAFE_THINKING_LEVEL)
+  const applyThinkingLevel = useCallback((next: ThinkingLevel) => {
+    thinkingLevelRef.current = next
+    setThinkingLevelState(next)
+  }, [])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   // Bumped whenever the composer's attachments are abandoned (currently: on
@@ -1650,7 +1676,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (headerProvider) {
           try { window.localStorage?.setItem(`${PERSIST_KEY_PREFIX}:${headerProvider}`, suggested) } catch { /* localStorage unavailable */ }
         }
-        setThinkingLevel(prev => (prev === suggested ? prev : suggested))
+        if (thinkingLevelRef.current !== suggested) applyThinkingLevel(suggested)
         setMessages(msgs => [...msgs, {
           role: 'system',
           text: `Reasoning effort isn't available for this model — using ${THINKING_LEVEL_LABELS[suggested] ?? suggested}.`,
@@ -1667,7 +1693,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }])
     })
   // `sessionEpoch` is bumped by switchSession so a new tab's session gets the level too.
-  }, [status, headerProvider, headerModel, thinkingLevel, adapter, caps, sessionEpoch])
+  }, [status, headerProvider, headerModel, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -1684,16 +1710,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!headerProvider) return
     const cfg = getProviderReasoningConfig(headerProvider, headerModel)
     const persisted = readPersistedThinkingLevel(headerProvider, cfg)
-    setThinkingLevel(prev => (prev === persisted ? prev : persisted))
-  }, [headerProvider, headerModel])
+    if (thinkingLevelRef.current !== persisted) applyThinkingLevel(persisted)
+  }, [headerProvider, headerModel, applyThinkingLevel])
 
   const handleThinkingLevelChange = useCallback((next: string) => {
     const cfg = getProviderReasoningConfig(headerProvider, headerModel)
     const normalized: ThinkingLevel = cfg.levels.includes(next as ThinkingLevel)
       ? (next as ThinkingLevel)
       : cfg.default
-    setThinkingLevel(prev => {
-      if (prev === normalized) return prev
+    if (thinkingLevelRef.current !== normalized) {
+      applyThinkingLevel(normalized)
       const label = THINKING_LEVEL_LABELS[normalized] ?? normalized
       setMessages(msgs => [...msgs, {
         role: 'system',
@@ -1701,12 +1727,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         timestamp: Date.now(),
         variant: 'success',
       }])
-      return normalized
-    })
+    }
     if (headerProvider) {
       try { window.localStorage?.setItem(`${PERSIST_KEY_PREFIX}:${headerProvider}`, normalized) } catch { /* localStorage unavailable */ }
     }
-  }, [headerProvider, headerModel])
+  }, [headerProvider, headerModel, applyThinkingLevel])
 
   // Connect to gateway
   const retryCountRef = useRef(0)
@@ -2121,7 +2146,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // bubble. The buffer is still what gets STORED, so an interrupt
             // keeps the directives and their cards.
             if (text && !isSentinel(streamingEmailRefsText(text)) && !isInterSessionEnvelope(text, msg)) {
-              setStreaming(text); setReloadingSkill(false)
+              applyStreaming(text); setReloadingSkill(false)
             }
           } else if (state === 'final') {
             // A generated picture arrives as a MEDIA: line inside the reply
@@ -2189,7 +2214,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // The run this final closes, for the ack-only branch below (the
             // ref is cleared two lines down).
             const finishedRun = runIdRef.current
-            setStreaming('')
+            applyStreaming('')
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
@@ -2226,18 +2251,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }, 3_000)
             }
           } else if (state === 'aborted' || state === 'error') {
-            setStreaming(prev => {
-              // Same as the full-screen chat: a Stop between `EMAIL` and its
-              // digits would store the half-written line, which the render
-              // keeps as text, leaving a bare `EMAIL:` in the transcript for
-              // good. It can never become a card and the bubble was already
-              // hiding it, so the stored turn is what the owner last saw.
-              const kept = dropUnfinishedDirective(prev)
-              if (kept.trim() && !isSentinel(kept)) {
-                setMessages(msgs => [...msgs, { role: 'assistant', text: kept, timestamp: Date.now() }])
-              }
-              return ''
-            })
+            // Read, clear, THEN append — all three outside any updater, for the
+            // same reason as the full-screen chat: React may run an updater
+            // twice, and this one appended a message.
+            //
+            // A Stop between `EMAIL` and its digits would store the half-written
+            // line, which the render keeps as text, leaving a bare `EMAIL:` in
+            // the transcript for good. It can never become a card and the bubble
+            // was already hiding it, so the stored turn is what the owner last
+            // saw.
+            const kept = dropUnfinishedDirective(streamingRef.current)
+            applyStreaming('')
+            if (kept.trim() && !isSentinel(kept)) {
+              setMessages(msgs => [...msgs, { role: 'assistant', text: kept, timestamp: Date.now() }])
+            }
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
@@ -2373,7 +2400,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const mightAutoGreet = !greetedRef.current
     if (mightAutoGreet) {
       setIsBootstrappingHistory(true)
-      setStreaming('')
+      applyStreaming('')
     }
     try {
       // The whole projection — sentinels, routing messages, inter-session
@@ -2436,7 +2463,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       console.error('Failed to load history:', err)
       if (mightAutoGreet) setIsBootstrappingHistory(false)
     }
-  }, [adapter, caps])
+  }, [adapter, caps, applyStreaming])
 
   useEffect(() => { messagesRef.current = messages }, [messages])
 
@@ -2470,7 +2497,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // differs, and that difference is the adapter's business, not this one's.
   const clearTranscript = useCallback(() => {
     setMessages([])
-    setStreaming('')
+    applyStreaming('')
     // The bubbles holding spoken replies are gone for good (a returned-to tab
     // repaints from the box's history, which cannot carry a browser-local
     // blob URL), so the blobs go with them. This panel never unmounts while
@@ -2494,7 +2521,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
-  }, [clearToolCalls, clearClarifies])
+  }, [clearToolCalls, clearClarifies, applyStreaming])
 
   const resetSession = useCallback(async () => {
     await adapter.resetSession()
@@ -3793,7 +3820,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // A run that has already ended (Stop, or a late frame after the final)
         // must not reopen the caret, so a delta is only painted while this run
         // is still the live one.
-        if (event.kind === 'delta' && runIdRef.current === idempotencyKey) setStreaming(event.text)
+        if (event.kind === 'delta' && runIdRef.current === idempotencyKey) applyStreaming(event.text)
         // Live tool steps, through the SAME pills the gateway harness already
         // feeds. A hermes turn used to reach this callback with nothing but
         // text, so a turn that spent its time in `web_search` — measured at up
@@ -3848,7 +3875,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Nothing is coming on either path, so the run ends here.
       sendingRef.current = false
       setSending(false)
-      setStreaming('')
+      applyStreaming('')
       clearToolCalls()
       // The agent is no longer parked on anything, so neither is the customer.
       // A card outliving its turn is a control with nowhere to post to.
@@ -3896,7 +3923,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // the queue permanently parked (TASK-517).
     sendingRef.current = false
     setSending(false)
-    setStreaming('')
+    applyStreaming('')
     // The live pills have done their job. The finished message carries the
     // agent's OWN record of the steps (`result.toolCalls`) and renders it as
     // summary chips, so leaving the running ones up would show the same turn's
@@ -3909,7 +3936,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // where the batch card appears.
     void settleEmailDrafts()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts, settleRun, applyStreaming])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[], voice = false) => {
@@ -3934,7 +3961,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey, images }])
     sendingRef.current = true
     setSending(true)
-    setStreaming('')
+    applyStreaming('')
     runIdRef.current = idempotencyKey
     // A spoken question is answered aloud: remember which run it is, so the
     // reply that closes THIS run is the one spoken (see maybeSpeakReply).
@@ -3947,7 +3974,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       return
     }
     void dispatchTurn(text, sendAttachments, idempotencyKey)
-  }, [caps, status, dispatchTurn])
+  }, [caps, status, dispatchTurn, applyStreaming])
 
   // Send a line the UI composed itself — a voice transcript, or the question
   // that follows a skill change. Both can arrive while the agent is already

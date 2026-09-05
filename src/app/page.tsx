@@ -538,15 +538,38 @@ function ChromeDesktopInner() {
     ? { backgroundSize: "contain", backgroundPosition: "center", backgroundRepeat: "no-repeat" }
     : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" };
   const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
-  const [customWallpapers, setCustomWallpapers] = useState<string[]>([]);
+  const [customWallpapers, setCustomWallpapersState] = useState<string[]>([]);
+  // Mirrored so the writers below can compute the next list without a
+  // functional updater. The upload and the delete used to do their localStorage
+  // write and their sibling `setWallpaperId` from INSIDE one, which React may
+  // run twice.
+  //
+  // EVERY writer advances the ref itself, before its state update — including
+  // the loader below, which is why there is no mirroring effect. An effect
+  // would have left a window one paint wide between the load committing and the
+  // ref catching up, and a delete dispatched inside it would compute
+  // `[].filter(…)` and write an empty list over every saved wallpaper.
+  //
+  // The raw setter is renamed out of reach and all three writers go through
+  // `applyCustomWallpapers`, so a fourth cannot advance the state while leaving
+  // the mirror behind. A mirror kept in step by convention is an invisible LOST
+  // write, and the purity rule cannot see one: it reports side effects INSIDE
+  // an updater, never a missing ref advance outside one.
+  const customWallpapersRef = useRef<string[]>([]);
+  const applyCustomWallpapers = useCallback((next: string[]) => {
+    customWallpapersRef.current = next;
+    setCustomWallpapersState(next);
+  }, []);
   // Wallpapers are large base64 blobs — keep in localStorage to avoid
   // bloating the KV JSON file that gets read/written on every state save.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(CUSTOM_WPS_KEY);
-      if (saved) setCustomWallpapers(JSON.parse(saved));
+      if (!saved) return;
+      const parsed: string[] = JSON.parse(saved);
+      applyCustomWallpapers(parsed);
     } catch {}
-  }, []);
+  }, [applyCustomWallpapers]);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -554,17 +577,25 @@ function ChromeDesktopInner() {
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result as string;
-      setCustomWallpapers(prev => {
-        const next = [...prev, dataUrl];
-        try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
-        setWallpaperId(`custom-${next.length - 1}`);
-        setWpOpacity(100);
-        return next;
-      });
+      // Computed from the ref, not from inside a `setCustomWallpapers` updater.
+      // React may run an updater twice, and this one wrote localStorage and
+      // called two other setters from inside it — the side-effect-in-an-updater
+      // shape TASK-703 removes from the chat surfaces. Idempotent today, which
+      // is exactly why it would go unnoticed.
+      const next = [...customWallpapersRef.current, dataUrl];
+      // `applyCustomWallpapers` advances the ref synchronously with the write,
+      // rather than a mirroring effect doing it after the commit: two uploads
+      // (or an upload and a delete) can both run before React commits, and both
+      // would otherwise read the same list and the second would discard the
+      // first — from the state AND from localStorage.
+      applyCustomWallpapers(next);
+      try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
+      setWallpaperId(`custom-${next.length - 1}`);
+      setWpOpacity(100);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
-  }, []);
+  }, [applyCustomWallpapers]);
 
   // ─── Chat (mascot click toggles chat popup) ───
   const [chatOpen, setChatOpen] = useState(false);
@@ -1466,10 +1497,23 @@ function ChromeDesktopInner() {
   // Surfaces a corner card when ClawBox or OpenClaw has a newer release.
   // Dismissals persist per exact target-version pair via SQLite so the user
   // isn't pestered across browsers or after a cache wipe.
-  const [updateAvailable, setUpdateAvailable] = useState<{
+  const [updateAvailable, setUpdateAvailableState] = useState<{
     clawbox: { current: string | null; target: string | null; updateAvailable?: boolean };
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
   } | null>(null);
+  // Mirrors `updateAvailable` so the dismiss handler can read the notice it is
+  // dismissing WITHOUT an updater. Every writer advances it on the line before
+  // its own state write — the same rule the custom wallpapers follow in this
+  // file, and the reason there is no mirroring effect: an effect leaves a
+  // window in which the ref is behind the state.
+  //
+  // As with the custom wallpapers above, the raw setter is renamed out of reach
+  // so no writer can advance the state without the mirror.
+  const updateAvailableRef = useRef<typeof updateAvailable>(null);
+  const applyUpdateAvailable = useCallback((next: typeof updateAvailable) => {
+    updateAvailableRef.current = next;
+    setUpdateAvailableState(next);
+  }, []);
   const lastVersionFingerprintRef = useRef<string | null>(null);
   // Gone for THIS session once its clock runs out — never recorded as a
   // dismissal, so the card is back after a reload and in the next session,
@@ -1493,7 +1537,7 @@ function ChromeDesktopInner() {
         lastVersionFingerprintRef.current = fingerprint;
 
         if (!clawboxNeedsUpdate && !openclawNeedsUpdate) {
-          setUpdateAvailable(null);
+          applyUpdateAvailable(null);
           return;
         }
         // Only hit the dismissal store when we actually have something to suppress.
@@ -1503,7 +1547,7 @@ function ChromeDesktopInner() {
           try { dismissed = (await dismissalRes.json()).fingerprint ?? null; } catch {}
         }
         const dismissalFingerprint = `${data.clawbox?.target ?? ""}|${data.openclaw?.target ?? ""}`;
-        setUpdateAvailable(dismissed === dismissalFingerprint ? null : data);
+        applyUpdateAvailable(dismissed === dismissalFingerprint ? null : data);
         // A different pair of versions is a different notice.
         setUpdateNoticeHidden(false);
       } catch { /* network blip — try again next interval */ }
@@ -1511,25 +1555,28 @@ function ChromeDesktopInner() {
     checkVersions();
     const id = setInterval(checkVersions, 30 * 60 * 1000);
     return () => { active = false; clearInterval(id); };
-  }, []);
+  }, [applyUpdateAvailable]);
 
   const updateNoticeKeys = useMemo(() => (updateAvailable && !updateNoticeHidden ? ["update"] : []), [updateAvailable, updateNoticeHidden]);
   const hideUpdateNotice = useCallback(() => setUpdateNoticeHidden(true), []);
   useAutoHide(updateNoticeKeys, hideUpdateNotice);
 
   const dismissUpdateNotification = useCallback(() => {
-    setUpdateAvailable((current) => {
-      if (current) {
-        const fingerprint = `${current.clawbox?.target ?? ""}|${current.openclaw?.target ?? ""}`;
-        fetch("/setup-api/update/dismissal", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fingerprint }),
-        }).catch(() => { /* will retry next dismiss */ });
-      }
-      return null;
-    });
-  }, []);
+    // The POST is OUTSIDE the updater. React is entitled to run an updater
+    // twice, so this dismissal was recorded once per render attempt rather than
+    // once per click — two POSTs to /setup-api/update/dismissal, two
+    // `sqliteSet`s. Idempotent, which is exactly why nobody had seen it.
+    const current = updateAvailableRef.current;
+    if (current) {
+      const fingerprint = `${current.clawbox?.target ?? ""}|${current.openclaw?.target ?? ""}`;
+      fetch("/setup-api/update/dismissal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fingerprint }),
+      }).catch(() => { /* will retry next dismiss */ });
+    }
+    applyUpdateAvailable(null);
+  }, [applyUpdateAvailable]);
 
   const openSettingsSection = useCallback((section: "ai" | "localAi" | "system" | "update") => {
     (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
@@ -1593,7 +1640,11 @@ function ChromeDesktopInner() {
         const res = await fetch("/setup-api/telegram/pairing?poll=1", { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
-          if (data.configured && Array.isArray(data.pending)) {
+          // `unknown` is not "no bot": the route could not read this device's
+          // Telegram credential, and it still answers with the pairing store,
+          // which is a different file. Reading that third state as an empty
+          // list is what cleared a waiting access request off every screen.
+          if ((data.configured || data.unknown) && Array.isArray(data.pending)) {
             const dismissed = loadDismissedPairCodes();
             const expired = expiredPairCodesRef.current;
             setPairingRequests(
@@ -1753,12 +1804,12 @@ function ChromeDesktopInner() {
               onMascotToggle: setMascotHidden,
               onWallpaperUpload: () => wallpaperInputRef.current?.click(),
               onCustomWallpaperDelete: (idx: number) => {
-                setCustomWallpapers(prev => {
-                  const next = prev.filter((_, i) => i !== idx);
-                  try { localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(next)); } catch {}
-                  if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
-                  return next;
-                });
+                // Same as the upload above: outside the updater, and off the
+                // ref rather than off `prev`.
+                const next = customWallpapersRef.current.filter((_, i) => i !== idx);
+                applyCustomWallpapers(next);
+                try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
+                if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
               },
             }} />
           </div>

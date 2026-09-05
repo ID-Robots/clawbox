@@ -19,11 +19,25 @@ vi.mock("@/lib/openclaw-config", () => ({
   setTelegramToken: vi.fn(),
   restartGateway: vi.fn(),
   clearTelegramPairingState: vi.fn(),
+  // The Telegram bot the OpenClaw gateway actually polls lives in the harness's
+  // own config, and the route now reads it through the STRICT reader so an
+  // unreadable openclaw.json cannot pass for "no bot configured".
+  readConfigStrict: vi.fn(async () => ({})),
+}));
+
+// The route now also refuses the approvals bot's own token (the reverse of the
+// guard in /setup-api/email/chat-approval). Mocked at the reader so this suite
+// does not drag the whole email-approval module's config-store surface in.
+vi.mock("@/lib/email-approval", () => ({
+  readApprovalBotToken: vi.fn(async () => ({ token: null, known: true })),
 }));
 
 import { get, set } from "@/lib/config-store";
-import { GatewayNotReadyError, setTelegramToken, restartGateway, clearTelegramPairingState } from "@/lib/openclaw-config";
+import { readApprovalBotToken } from "@/lib/email-approval";
+import { GatewayNotReadyError, setTelegramToken, restartGateway, clearTelegramPairingState, readConfigStrict } from "@/lib/openclaw-config";
 
+const mockReadConfigStrict = vi.mocked(readConfigStrict);
+const mockApprovalBotToken = vi.mocked(readApprovalBotToken);
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
 const mockSetTelegramToken = vi.mocked(setTelegramToken);
@@ -50,6 +64,8 @@ describe("POST /setup-api/telegram/configure", () => {
     mockSetTelegramToken.mockResolvedValue();
     mockRestartGateway.mockResolvedValue();
     mockClearPairing.mockResolvedValue();
+    mockReadConfigStrict.mockResolvedValue({});
+    mockApprovalBotToken.mockResolvedValue({ token: null, known: true });
 
     const mod = await import("@/app/setup-api/telegram/configure/route");
     telegramConfigurePost = mod.POST;
@@ -122,6 +138,111 @@ describe("POST /setup-api/telegram/configure", () => {
     expect(mockSet).not.toHaveBeenCalledWith("telegram_approved_names", undefined);
     expect(mockSetTelegramToken).not.toHaveBeenCalled();
     expect(mockRestartGateway).not.toHaveBeenCalled();
+  });
+
+  // The mirror is not the store the gateway polls. `channels.telegram.botToken`
+  // is, so on a box whose bot was rotated with `openclaw config set` re-saving
+  // ClawBox's older copy IS a bot change — and the reset has to run, in front of
+  // both writes, or senders approved for the previous bot carry over.
+  it("compares against OpenClaw's own store, not the mirror, and resets first", async () => {
+    mockGet.mockResolvedValue("111:MIRROR_token_val");
+    mockReadConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: "333:NATIVE_token_val" } },
+    });
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "111:MIRROR_token_val" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reset).toBe(true);
+    expect(mockClearPairing).toHaveBeenCalledTimes(1);
+    const tokenSave = mockSet.mock.calls.findIndex(([key]) => key === "telegram_bot_token");
+    expect(mockClearPairing.mock.invocationCallOrder[0])
+      .toBeLessThan(mockSet.mock.invocationCallOrder[tokenSave]);
+    expect(mockClearPairing.mock.invocationCallOrder[0])
+      .toBeLessThan(mockSetTelegramToken.mock.invocationCallOrder[0]);
+  });
+
+  it("keeps the approvals when the native store already holds this exact token", async () => {
+    const token = "333:NATIVE_token_val";
+    mockReadConfigStrict.mockResolvedValue({
+      channels: { telegram: { enabled: true, botToken: token } },
+    });
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: token }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reset).toBe(false);
+    expect(mockClearPairing).not.toHaveBeenCalled();
+  });
+
+  // An unreadable harness store must NOT refuse the save. This route is the only
+  // path on the device to a Telegram bot, so a refusal is a permanent lockout of
+  // the feature on a fault the owner cannot reach — including on a box that has
+  // never had Telegram at all, where there is nothing for the reset to protect.
+  // It is decided on the evidence that survives an unknown instead: the mirror,
+  // which is the last value this route itself wrote.
+  it("saves through an unreadable harness store, resetting because nothing proves the bot is the same", async () => {
+    mockGet.mockResolvedValue("111:OLD_token_value");
+    mockReadConfigStrict.mockRejectedValue(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "222:new_token_value" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reset).toBe(true);
+    expect(mockClearPairing).toHaveBeenCalledTimes(1);
+    expect(mockSet).toHaveBeenCalledWith("telegram_bot_token", "222:new_token_value");
+  });
+
+  // ...and the case the reset must not fire on: the ordinary "it stopped
+  // working, let me paste it again" save. Wiping the household's pairings there
+  // would be an irreversible action taken on a transient read failure.
+  it("keeps the approvals through an unreadable store when the mirror names this exact token", async () => {
+    const token = "111:OLD_token_value";
+    mockGet.mockResolvedValue(token);
+    mockReadConfigStrict.mockRejectedValue(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: token }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reset).toBe(false);
+    expect(mockClearPairing).not.toHaveBeenCalled();
+  });
+
+  // The mirror image of the guard in /setup-api/email/chat-approval, which
+  // refuses an approvals bot the harness already polls. Nothing refused the
+  // reverse, so the main bot could be pointed at the approvals bot and both
+  // pollers would fight over one getUpdates stream.
+  it("refuses the approvals bot's own token, by bot id", async () => {
+    mockApprovalBotToken.mockResolvedValue({ token: "777777:ApprovalsBotSecret_0", known: true });
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "777777:ApprovalsBotSecret_1" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.kind).toBe("same_bot");
+    expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
+    expect(mockSetTelegramToken).not.toHaveBeenCalled();
+    expect(mockClearPairing).not.toHaveBeenCalled();
+  });
+
+  // The guard above rests on ClawBox's own store, whose plain reader answers
+  // `{}` to an EACCES, an EIO or a config.json caught mid-restore — so the
+  // guard was skipped in silence exactly when it could not prove anything.
+  it("refuses the save when the approvals bot's token cannot be read", async () => {
+    mockApprovalBotToken.mockResolvedValue({ token: null, known: false });
+
+    const res = await telegramConfigurePost(jsonRequest({ botToken: "777777:ApprovalsBotSecret_1" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    expect(body.kind).toBe("bot_unknown");
+    expect(mockSet).not.toHaveBeenCalledWith("telegram_bot_token", expect.anything());
+    expect(mockSetTelegramToken).not.toHaveBeenCalled();
+    expect(mockClearPairing).not.toHaveBeenCalled();
   });
 
   it("returns 400 for invalid JSON", async () => {
