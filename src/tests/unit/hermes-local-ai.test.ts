@@ -10,10 +10,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const cliMock = vi.hoisted(() => vi.fn());
 const patchMock = vi.hoisted(() => vi.fn());
 const readMock = vi.hoisted(() => vi.fn());
+// Defaults survive `mockReset` because they are the implementation `vi.fn()` was
+// created with — the resolved form answers "absent" unless a test says otherwise.
+const resolveMock = vi.hoisted(() =>
+  vi.fn<(key: string) => Promise<{ state: string; value?: string }>>(async () => ({ state: "absent" })),
+);
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: patchMock,
   readHermesConfigValue: readMock,
+  resolveHermesConfigValue: resolveMock,
   // Listed because the module UNDER TEST throws it: a factory that omits an
   // export makes it `undefined`, and `new undefined()` is a TypeError, not the
   // failure the caller is meant to see.
@@ -212,6 +218,9 @@ describe("registering the local model with Hermes", () => {
   function deviceConfig(initial: Record<string, string>) {
     const file: Record<string, string | null> = { ...initial };
     readMock.mockImplementation(async (key: string) => file[key] ?? null);
+    resolveMock.mockImplementation(async (key: string) =>
+      typeof file[key] === "string" ? { state: "value", value: file[key] as string } : { state: "absent" },
+    );
     patchMock.mockImplementation(async (patch: { unset?: string[] }) => {
       for (const key of patch.unset ?? []) delete file[key];
       return { mode: "merge", backupPath: null };
@@ -276,6 +285,20 @@ describe("registering the local model with Hermes", () => {
     });
 
     await expect(removeLocalAiFromHermes()).rejects.toThrow(/still registered/i);
+  });
+
+  it("refuses when the config could not be read back at all", async () => {
+    // The CLI fallback is entered BECAUSE the line editor could not work with
+    // this file, so a read-back that cannot resolve the path is the likely
+    // companion of the write that failed. Reading that as "removed" would put
+    // the false success back one layer down.
+    deviceConfig({
+      [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
+    });
+    patchMock.mockResolvedValue({ mode: "cli", backupPath: null });
+    resolveMock.mockResolvedValue({ state: "unreadable" });
+
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/could not be read back/i);
   });
 
   it("refuses when the selection still points at a provider that is gone", async () => {

@@ -221,7 +221,7 @@ describe("POST /setup-api/local-ai", () => {
     expect(body.code).toBe("hermes_unregister_failed");
     // The panel paints `error` red on a non-2xx and never reads `warning`
     // there, so the fallback sentence has to ride in `error` or be lost.
-    expect(body.error).toMatch(/Hermes still lists it as a provider/);
+    expect(body.error).toMatch(/removing it from Hermes could not be confirmed/);
     expect(body.error).toMatch(/fallback model list/i);
     expect(mockRestartGateway).toHaveBeenCalled();
   });
