@@ -189,9 +189,12 @@ describe("SetupWizard", () => {
 
     render(<SetupWizard />);
 
-    await waitFor(() => {
-      expect(screen.queryByText("telegram-next")).not.toBeInTheDocument();
-    });
+    // The COMPLETION overlay, not the absence of the Telegram step: `currentStep`
+    // starts at 1 and `TelegramStep` renders only at 5, so `telegram-next` is
+    // already absent at mount and a `waitFor` on it passes on its first tick,
+    // before /setup-api/setup/status has been handled at all — asserting nothing
+    // about the gate this test exists for.
+    expect(await screen.findByTestId("setup-completion-overlay")).toBeInTheDocument();
   });
 
   it("persists setup progress when advancing to the next step", async () => {
