@@ -206,6 +206,35 @@ describe("GET /[...gateway] (catch-all route)", () => {
     ["http://localhost/updating/nope", "page"],
     ["http://localhost/app", "page"],
     ["http://localhost/app/x/y", "page"],
+    // Percent-encoded separators. Measured anonymously on BOTH boxes:
+    // `GET /setup-api/nope` answers 401 application/json from the middleware's
+    // own /setup-api gate and `GET /setup-api%2Fnope` answers 307 to /login,
+    // so that gate did not recognise it — the platform does not decode `%2F`.
+    // These stay one segment, match no route, and reached the catch-all, which
+    // answered a navigation with the shell and the injected gateway token.
+    ["http://localhost/setup-api%2Fnope", "api"],
+    ["http://localhost/setup-api%2fnope", "api"],
+    ["http://localhost/Setup-Api%2Fnope", "api"],
+    ["http://localhost/login-api%2Fnope", "api"],
+    ["http://localhost/portal%2Fnope", "page"],
+    ["http://localhost/app%2fx", "page"],
+    // Double-encoded: one decode leaves `%2F` behind, so the match has to go
+    // to a fixpoint.
+    ["http://localhost/setup%252Fnope", "page"],
+    // FIVE nestings, the exact spellings the review raised. A four-pass cap
+    // that gave up with `%` still in the string handed these to the gateway:
+    // `/portal%252525252Fnope` is four passes from `/portal%2Fnope`, which is
+    // denied one nesting down — so the check was not idempotent under its own
+    // decode and two more `25`s walked around it.
+    ["http://localhost/portal%252525252Fnope", "page"],
+    ["http://localhost/setup-api%252525252Fnope", "api"],
+    // A junk escape appended to a spelling that IS denied. All-or-nothing
+    // decoding threw on the `%zz`, yielded nothing, matched nothing and handed
+    // these to the gateway — a cheaper walk-around than the nesting above it.
+    // Decoding per escape RUN leaves the `%zz` alone and still reads the `%2F`.
+    ["http://localhost/portal%2Fnope%zz", "page"],
+    ["http://localhost/setup-api%2Fnope%zz", "api"],
+    ["http://localhost/setup%252Fnope%25zz", "page"],
   ];
 
   it.each(CLAWBOX_OWNED_UNMATCHED)(
@@ -234,6 +263,35 @@ describe("GET /[...gateway] (catch-all route)", () => {
     },
   );
 
+  it("answers 404 for a path nested past the decode cap, whoever's root it is", async () => {
+    // Past the cap the box cannot read the path AT ALL, and an unreadable path
+    // is not handed to the gateway either — the give-up fails CLOSED, which is
+    // what stops "append two more `25`s" from being a bypass whatever the cap
+    // is set to. Deep enough that no value of MAX_DECODE_PASSES worth having
+    // could reach the end of it.
+    //
+    // `/nope` is here to say what the branch really does: at this depth the
+    // LITERAL spelling is under nobody's root, so this case does not reach the
+    // claimed-root path at all and the 404 comes from the give-up alone. It is
+    // one branch, deliberately shown from the side where nothing else could
+    // produce the answer.
+    const separator = `%${"25".repeat(199)}2F`;
+    for (const root of ["/portal", "/nope"]) {
+      mockGetAll.mockResolvedValue({ setup_complete: true });
+
+      const res = await gatewayGet(
+        createRequest(`http://localhost${root}${separator}nope`, {
+          "sec-fetch-mode": "navigate",
+          accept: "text/html",
+        }),
+      );
+
+      expect(res.status, root).toBe(404);
+      expect(mockServeGatewayHTML, root).not.toHaveBeenCalled();
+      expect(mockProxyGatewayRequest, root).not.toHaveBeenCalled();
+    }
+  });
+
   it("still serves the shell for the gateway's OWN namespaces", async () => {
     // The other half of the boundary: a prefix test that swallowed /api or
     // /assets would break the Control UI this route exists to serve.
@@ -242,6 +300,46 @@ describe("GET /[...gateway] (catch-all route)", () => {
     await gatewayGet(
       createRequest("http://localhost/chat/main", { "sec-fetch-mode": "navigate" }),
     );
+
+    expect(mockServeGatewayHTML).toHaveBeenCalled();
+  });
+
+  /**
+   * The other side of the probe, recorded because each of these is a RESULT
+   * and not an oversight: nothing here belongs to ClawBox, decoded or not, so
+   * the catch-all must go on serving it.
+   */
+  it.each([
+    // `/apps` is the Control UI's OWN page — the pinned 2026.8.1 bundle
+    // registers `apps:{path:`/apps`}` and ships apps-page-*.js/.css — so the
+    // shell is the RIGHT answer here and a 404 would break a working page.
+    // Everything BELOW it is ClawBox's and is matched by a real route
+    // (`[[...path]]` is an optional catch-all), so it never arrives here.
+    "http://localhost/apps",
+    "http://localhost/apps/",
+    "http://localhost/apps%2Fzzz",
+    // `%2e%2e` decodes to `..` inside the SAME segment: `/apps%2e%2e` is
+    // `/apps..`, no more ClawBox's than `/appsomething`. A real `/apps/..` is
+    // normalised to `/` by the platform before anything here sees it.
+    "http://localhost/setup%2e%2e",
+    "http://localhost/setup%2E%2E",
+    "http://localhost/setupsomething%2Fx",
+    // A MALFORMED escape is a settled fact about the path, not a decode budget
+    // running out: `decodeURIComponent` is all-or-nothing, so the literal
+    // spelling stands and `/setup-api%zz` is one segment of that name — as
+    // little ClawBox's as `/setupsomething`. This is why the give-up branch
+    // that DOES fail closed keys on the pass count and never on "contains
+    // `%`": a gateway path carrying one stray `%` must go on being answered.
+    "http://localhost/setup-api%zz",
+    // The OTHER side of MAX_DECODE_PASSES. Without this the cap could be
+    // lowered to 4 "for performance" and every gateway path with five
+    // nestings would start 404ing with the whole suite still green — failing
+    // closed harder never trips a claimed-side assertion.
+    "http://localhost/chat%252525252Fnope",
+  ])("leaves %s with the gateway, decoded or not", async (url) => {
+    mockGetAll.mockResolvedValue({ setup_complete: true });
+
+    await gatewayGet(createRequest(url, { "sec-fetch-mode": "navigate" }));
 
     expect(mockServeGatewayHTML).toHaveBeenCalled();
   });
