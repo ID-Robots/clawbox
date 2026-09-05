@@ -125,9 +125,19 @@ the two keys* (one skill's identifier being another's card name), and a tie is
 refused: both lock ids are named and the user is asked which they meant. This
 tool deletes things, and picking one is not the tool's decision to make.
 
-When `/installed` cannot be read the tool sends the raw argument and the route
-resolves it; the 200 comes back carrying the lock key it acted on and the string
-it was asked for, and every message the tool prints is about **that** skill.
+The route's 200 carries the lock key it acted on and the string it was asked
+for, and **that** key is what every message the tool prints is about — not the
+one the pre-condition read a moment earlier. The two are usually the same and
+need not be: the route resolves the argument again at its own moment, so a lock
+that moved in between (a parallel install, the owner removing it from Settings)
+leaves the tool judging its post-condition against a skill nobody touched.
+
+That post-condition is a second read of `/installed`, and it is what makes a
+removal a fact rather than the route's word: the CLI prints its refusal and
+exits 0, so the 200 proves nothing on its own. When the read-back FAILS the tool
+says so — "the device reported it removed, but its installed list could not be
+read back" — instead of the flat "Removed the skill" it used to print over a
+removal nothing had checked.
 
 The second trap is **which** installed skills can be removed. A device has three
 origins — `builtin` (shipped with it), `hub` (installed from the store) and
@@ -655,10 +665,15 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
 4. **Timeouts and output caps everywhere.** Default 8 s per API call and 4 000
    characters per result; images over 1 MB are dropped rather than truncated.
    A tool whose answer is a LIST bounds its own rows against its cap and says
-   how many it left out (`skill_list`, `ui_list_apps`, `fitRows` in
-   `mcp/lib/guard.ts`), because the cap's own enforcement is a hard slice: it
-   cuts a JSON answer mid-object and an id mid-word, and its "narrow the query"
-   is advice a tool with no arguments cannot take.
+   how many it left out — `skill_list` drops built-in skills (never a removable
+   one, since those are the ids `skill_uninstall` resolves) and `ui_list_apps`
+   drops skills before apps and never a built-in app, each stating the count —
+   because the cap's own enforcement is a hard slice: it cuts a JSON answer
+   mid-object and an id mid-word, and its "narrow the query" is advice a tool
+   with no arguments cannot take. `ui_list_apps` MEASURES its finished JSON
+   rather than modelling the serializer, because a row carries third-party text
+   whose escaping costs more than its characters (`fitRows` in
+   `mcp/lib/guard.ts` is the seed, not the guarantee).
 5. **Errors are instructions, not stack traces.** Every failure is
    `{ error, code, message, next }` — including schema rejections, which the SDK
    would otherwise render as a raw zod issue array (`reg.finalize()` owns

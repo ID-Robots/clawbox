@@ -116,14 +116,14 @@ const WEBAPP_RULES: ErrorRule[] = [
 ];
 
 /**
- * What one `agent_skills` row costs beyond its own characters once
- * JSON.stringify(…, null, 2) has wrapped it: two quotes, four spaces of indent,
- * a comma and a newline.
+ * What one `agent_skills` row costs once `JSON.stringify(…, null, 2)` has
+ * wrapped it: the quoted-and-escaped string, four spaces of indent, a comma and
+ * a newline. `JSON.stringify` on the row itself rather than `row.length + 8`,
+ * because a card name comes from a third party's SKILL.md and every `"` or `\`
+ * in it costs an extra character, every control character up to five — an
+ * estimate is a guess about exactly the input somebody else writes.
  */
-const SKILLS_ROW_OVERHEAD = 8;
-
-/** Reserved for the `agent_skills_not_listed` field an omission adds. */
-const OMISSION_FIELD_BUDGET = 60;
+const skillRowCost = (row: string): number => JSON.stringify(row).length + 6;
 
 export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
   // The APP harness, not the tool-set edition: an unreadable edition lock
@@ -219,47 +219,71 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       // from ~/.openclaw/skills (which does not exist there — listing it was
       // why installed skills always showed up empty on a Hermes device).
       let skills: string[] = [];
+      // Whether the list was READ, as opposed to being empty. `[]` for a failed
+      // read is the false-success shape this file warns about three lines down.
+      let skillsRead = true;
       if (ctx.edition === "hermes") {
         const body = await apiGet<InstalledSkillsBody>("/setup-api/hermes/skills/installed", {
           timeoutMs: 10_000,
         }).catch(() => null);
+        skillsRead = body !== null;
         // BOTH names, in skill_list's own shape: the lock id leads, because it
         // is the one string skill_uninstall resolves, and the display name is
         // added only when it differs. Printing the display name alone put the
         // two agent-facing lists on different strings for one skill; printing a
-        // pretty-printed {id, name} pair for each of ~77 rows overran this
+        // pretty-printed {id, name} pair for each of ~82 rows overran this
         // tool's output cap and truncated the JSON mid-object.
         skills = (body?.skills ?? []).map((s) => (s.name === s.id ? s.id : `${s.id} (${s.name})`));
       }
+      // Fit the answer by MEASURING it, never by modelling the serializer.
+      //
       // The apps are what this tool is FOR — ui_open_app takes their ids — so
-      // the skills give way when the answer will not fit, never the other way
-      // round. Measured against the rest of the payload rather than guessed at,
-      // because a built-in list differs per harness and an installed app's row
-      // is as long as its id.
-      const envelope = json({
-        built_in: builtIn,
-        installed_apps: installed,
-        ...(ctx.edition === "hermes" ? { agent_skills: [] } : {}),
-        ...(ctx.appHarness === null ? { note: UNKNOWN_HARNESS_NOTE } : {}),
-      }).content[0];
-      const spent = envelope.type === "text" ? envelope.text.length : 0;
-      const fitted = fitRows(
-        skills,
-        LIST_MAX_CHARS - spent - OMISSION_FIELD_BUDGET,
-        SKILLS_ROW_OVERHEAD,
-      );
-      return json({
-        built_in: builtIn,
-        installed_apps: installed,
-        ...(ctx.edition === "hermes" ? { agent_skills: fitted.kept } : {}),
-        ...(ctx.edition === "hermes" && fitted.omitted
-          ? { agent_skills_not_listed: fitted.omitted }
-          : {}),
-        // Said out loud rather than five apps quietly missing from the list:
-        // the agent cannot tell "this box has no dashboard" from "nobody could
-        // say" unless one of them is written down.
-        ...(ctx.appHarness === null ? { note: UNKNOWN_HARNESS_NOTE } : {}),
-      });
+      // the skills give way first and the apps only after them; `built_in` is
+      // never dropped, since an id this build advertises has to be openable.
+      // And `installed_apps` is bounded too: it is the one list here that grows
+      // without bound over a device's life (every webapp_create, every
+      // app_install), so leaving it to capText left the JSON sliced mid-object
+      // on exactly the input that gets long — and on the OpenClaw edition,
+      // which has no agent_skills at all, that was every input.
+      const render = (
+        keptSkills: string[],
+        keptApps: typeof installed,
+      ): ReturnType<typeof json> => {
+        const skillsMissing = skills.length - keptSkills.length;
+        const appsMissing = installed.length - keptApps.length;
+        return json({
+          built_in: builtIn,
+          installed_apps: keptApps,
+          ...(appsMissing ? { installed_apps_not_listed: appsMissing } : {}),
+          ...(ctx.edition === "hermes" && skillsRead ? { agent_skills: keptSkills } : {}),
+          ...(ctx.edition === "hermes" && skillsRead && skillsMissing
+            ? { agent_skills_not_listed: skillsMissing }
+            : {}),
+          // An unreadable skills list is not a device with no skills, and the
+          // two used to be the same bytes. The key is left OUT rather than sent
+          // empty, so an older reader cannot mistake one for the other either.
+          ...(ctx.edition === "hermes" && !skillsRead ? { agent_skills_unavailable: true } : {}),
+          // Said out loud rather than five apps quietly missing from the list:
+          // the agent cannot tell "this box has no dashboard" from "nobody could
+          // say" unless one of them is written down.
+          ...(ctx.appHarness === null ? { note: UNKNOWN_HARNESS_NOTE } : {}),
+        });
+      };
+      const size = (result: ReturnType<typeof json>): number => {
+        const part = result.content[0];
+        return part.type === "text" ? part.text.length : 0;
+      };
+      // Seed from an estimate so the exact loop below only has to nudge, then
+      // shrink against the real string until it fits.
+      let keptSkills = fitRows(skills, LIST_MAX_CHARS - size(render([], installed)), skillRowCost).kept;
+      let keptApps = installed;
+      let out = render(keptSkills, keptApps);
+      while (size(out) > LIST_MAX_CHARS && (keptSkills.length || keptApps.length)) {
+        if (keptSkills.length) keptSkills = keptSkills.slice(0, -1);
+        else keptApps = keptApps.slice(0, -1);
+        out = render(keptSkills, keptApps);
+      }
+      return out;
     },
   );
 

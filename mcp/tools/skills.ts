@@ -28,9 +28,6 @@ import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
 
 const BROWSABLE_SOURCES = HERMES_SKILL_SOURCES.filter((s) => isBrowsableSource(s));
 
-/** Characters reserved for the "and N more" line, so it always fits. */
-const OMISSION_BUDGET = 200;
-
 interface BrowseSkill {
   id: string;
   name: string;
@@ -758,7 +755,8 @@ export function registerSkillTools(reg: Registrar): void {
     { editions: ["hermes"], readOnly: true, profile: "core", maxChars: LIST_MAX_CHARS },
     async () => {
       const body = await skillsGet<InstalledBody>("/setup-api/hermes/skills/installed", { timeoutMs: 15_000 });
-      // A device ships ~77 built-in skills. One terse line each — pretty-printed
+      // A device ships ~82 built-in skills (counted on a Hermes box,
+      // 2026-09-05). One terse line each — pretty-printed
       // JSON of the full records is four times the size and no clearer, and this
       // list has to fit a 4-8B model's context alongside everything else.
       // Only the EXCEPTIONS are annotated. Repeating "built in" on all 77 rows
@@ -773,7 +771,7 @@ export function registerSkillTools(reg: Registrar): void {
       // it. skill_uninstall's `removing?.id ?? wanted` below is NOT the same
       // guard — it covers "no row matched at all", not a row missing its id.
       const rows = [...(body.skills ?? [])].sort((a, b) => a.id.localeCompare(b.id));
-      const lines = rows.map((s) => {
+      const lineOf = (s: InstalledSkill) => {
         const marks: string[] = [];
         // "from the store" is the mark this tool's own description, the header
         // below and skill_uninstall's builtin refusal all use to mean REMOVABLE,
@@ -789,9 +787,9 @@ export function registerSkillTools(reg: Registrar): void {
         // still match what the user sees on the card.
         const shows = s.name !== s.id ? `, shows as "${s.name}"` : "";
         return `${s.id} (${s.category || "other"}${shows})${marks.length ? ` — ${marks.join(", ")}` : ""}`;
-      });
+      };
       const c = body.counts ?? {};
-      const header = `${c.total ?? lines.length} skills installed. `
+      const header = `${c.total ?? rows.length} skills installed. `
         + "Only the ones marked \"from the store\" can be removed with skill_uninstall; "
         + "the rest came with the device or were made on it.";
       // Bound the list HERE rather than leave it to capText(), which slices the
@@ -799,12 +797,44 @@ export function registerSkillTools(reg: Registrar): void {
       // skill_uninstall takes, and half of one is not an id. #582 made every
       // row a third longer (the lock id leads, a differing card name is spelled
       // out) without moving the cap, which halved how many store installs fit.
-      const fitted = fitRows(lines, LIST_MAX_CHARS - header.length - OMISSION_BUDGET);
-      const omitted = fitted.omitted
-        ? [`(${fitted.omitted} more installed skills are not listed — the full list was too long to send. `
-          + "Do not conclude a skill is absent because it is missing here; ask about it by name.)"]
+      //
+      // WHICH rows go is decided by what the tool is FOR, not by where the sort
+      // put them. The removable rows go LAST — those are the ids
+      // skill_uninstall resolves and the names a duplicate install would
+      // collide with — and the BUILT-IN rows give way first, because no
+      // argument to any tool can act on one. Fitting the sorted list
+      // front-to-back instead kept all 82 builtins and dropped the store
+      // skills, which is the list backwards.
+      const removable = rows.filter((s) => isRemovableOrigin(s.origin) || s.origin === "local");
+      const builtins = rows.filter((s) => !removable.includes(s));
+      const omissionLine = (store: number, builtIn: number) => {
+        const parts = [
+          store ? `${store} more skills from the store or made here` : "",
+          builtIn ? `${builtIn} built-in skills` : "",
+        ].filter(Boolean);
+        return `(${parts.join(" and ")} are not listed — the full list was too long to send. `
+          + "To check whether a store skill is already installed, call skill_search: its results carry "
+          + "\"installed\". skill_uninstall also takes the name shown on a card, not only the id here.)";
+      };
+      // Reserved from the longest line this could produce, so the sentence can
+      // never be the thing that pushes the answer over the cap — the number in
+      // it is not known until the fit below has run.
+      const budget = LIST_MAX_CHARS - header.length - 1 - omissionLine(rows.length, rows.length).length - 1;
+      const fittedRemovable = fitRows(removable.map(lineOf), budget);
+      const fittedBuiltins = fitRows(
+        builtins.map(lineOf),
+        budget - fittedRemovable.kept.reduce((n, line) => n + line.length + 1, 0),
+      );
+      // Emitted in the SORTED order the agent scans, whichever rows survived.
+      const keptIds = new Set([
+        ...removable.slice(0, fittedRemovable.kept.length).map((s) => s.id),
+        ...builtins.slice(0, fittedBuiltins.kept.length).map((s) => s.id),
+      ]);
+      const lines = rows.filter((s) => keptIds.has(s.id)).map(lineOf);
+      const omitted = fittedRemovable.omitted || fittedBuiltins.omitted
+        ? [omissionLine(fittedRemovable.omitted, fittedBuiltins.omitted)]
         : [];
-      return text([header, ...fitted.kept, ...omitted].join("\n"));
+      return text([header, ...lines, ...omitted].join("\n"));
     },
   );
 
@@ -1058,7 +1088,11 @@ export function registerSkillTools(reg: Registrar): void {
       const id = (typeof done?.id === "string" ? done.id : undefined) ?? removing?.id ?? wanted;
       // The pre-read's row only names a CARD for the skill the route actually
       // removed; when the two disagree, the route's `requested` is all that is
-      // true about what the agent asked for.
+      // true about what the agent asked for. stillInstalled() below loses its
+      // identifier comparison on that branch, deliberately: the identifier
+      // belongs to the row this tool read, and once the route has acted on a
+      // DIFFERENT lock key that identifier is a fact about another skill. The
+      // lock id alone is then the only thing both ends agree on.
       const removed = removing && removing.id === id ? removing : undefined;
       // Name the card as well as the lock id: the agent and the user only ever
       // saw the card. From the pre-read when we have it, otherwise from what the

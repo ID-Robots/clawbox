@@ -249,20 +249,23 @@ export async function hasBinary(bin: string): Promise<boolean> {
  * knows its own budget can drop WHOLE rows and say how many, which is a
  * partial answer instead of a broken one.
  *
- * `perRow` is what a row costs BESIDES its own characters — one newline for a
- * list of lines, and for a JSON array the quotes, the indent and the comma
- * `JSON.stringify` puts around each element. Counting it wrong is the whole
- * point of the helper: an underestimate hands the slicer a string that is over
- * the cap after all.
+ * `cost` is what a row spends, INCLUDING whatever the caller's format puts
+ * around it: one newline for a list of lines (the default), and for a JSON
+ * array the escaped string plus the indent and the comma. Passing the row's
+ * bare length there is the mistake this parameter exists to prevent — a `"` or
+ * a `\\` in a third party's text costs an extra character each, a control
+ * character up to five, and an underestimate hands the slicer a string that is
+ * over the cap after all. A caller whose exact size it cannot predict should
+ * measure the finished string and shrink, using this only as the seed.
  */
 export function fitRows(
   rows: readonly string[],
   budget: number,
-  perRow = 1,
+  cost: (row: string) => number = (row) => row.length + 1,
 ): { kept: string[]; omitted: number } {
   let used = 0;
   for (let i = 0; i < rows.length; i += 1) {
-    used += rows[i].length + perRow;
+    used += cost(rows[i]);
     if (used > budget) return { kept: rows.slice(0, i), omitted: rows.length - i };
   }
   return { kept: [...rows], omitted: 0 };

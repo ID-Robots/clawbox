@@ -78,17 +78,22 @@ export const DEFAULT_MAX_CHARS = 4_000;
 /**
  * The cap for a tool whose answer is a LIST of what is on the device.
  *
- * 12,000 rather than the 6,000 `skill_list` and `ui_list_apps` carried since
+ * 8,000 rather than the 6,000 `skill_list` and `ui_list_apps` carried since
  * they were written: measured against a real Hermes box (90 installed rows —
  * 82 bundled, 3 from the store, 5 made on the device — emitting 3,165
- * characters), the old cap left room for only 46 further store installs,
- * because #582 grew every store row by a third (the lock id leads and a
- * differing card name is spelled out). This covers a device with well over a
- * hundred, and matches the budget coding_agent_status already takes for a
- * comparable list. Both tools still bound their own rows against it (fitRows)
- * rather than letting capText slice the answer.
+ * characters), 6,000 left room for only 46 further store installs, because
+ * #582 grew every store row by a third (the lock id leads and a differing card
+ * name is spelled out).
+ *
+ * Not larger, and this is the trade: both tools are `profile: "core"`, the
+ * trimmed surface a 4-8B on-device model gets, so every character here is
+ * context that model does not spend on the question. Past a certain length a
+ * list of near-identical rows is worse for it than a shorter list plus an
+ * honest count — which is what both tools now emit, so the cap is no longer
+ * what stops the answer breaking, only what it costs. 8,000 is `skill_info`'s
+ * budget, the other core tool that returns something long.
  */
-export const LIST_MAX_CHARS = 12_000;
+export const LIST_MAX_CHARS = 8_000;
 // An image bigger than this eats a small model's whole context window.
 const MAX_IMAGE_BASE64 = 1024 * 1024;
 
