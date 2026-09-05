@@ -21,9 +21,10 @@ const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
 const OPENCLAW_CURRENT_CHAT_NOTE =
   "the device default above: on this edition the chat header writes it to the box and repoints every session, so it is what this chat runs.";
 
-// …but only where the edition is CERTAIN. `resolveEdition` asks
-// /setup-api/harness/active with a 3 s timeout and answers "openclaw" on any
-// failure, and this server is spawned at harness start — exactly when the web
+// …but only where the edition is CERTAIN. `resolveAppHarness` asks
+// /setup-api/harness/active with a 3 s timeout and hands the answer to
+// `resolveEdition`, which takes "openclaw" for a `dual` box that did not
+// answer — and this server is spawned at harness start, exactly when the web
 // app may not be up yet. On a locked SKU that fallback cannot be wrong; on
 // DUAL it can, and an affirmative "the default is what this chat runs" handed
 // to a Hermes chat reinstates the whole defect this note exists to remove

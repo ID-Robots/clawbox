@@ -35,6 +35,7 @@ const ETH_DOWN = { connected: false, cable: false, iface: null };
 const CTX = {
   edition: "openclaw",
   install: "openclaw",
+  appHarness: "openclaw",
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: true },
   providers: [],

@@ -46,28 +46,30 @@ describe("resolveEdition — the lock file is the authority", () => {
     writeLock("CLAWBOX_EDITION=hermes\n");
     process.env.CLAWBOX_EDITION = "openclaw";
     const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("hermes");
+    expect(resolveEdition(null)).toBe("hermes");
   });
 
   it("reports openclaw from the lock even when the environment says hermes", async () => {
     writeLock("CLAWBOX_EDITION=openclaw\n");
     process.env.CLAWBOX_EDITION = "hermes";
     const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("openclaw");
+    expect(resolveEdition(null)).toBe("openclaw");
   });
 
   it("reads the lock through comments and surrounding quotes", async () => {
     writeLock("# ClawBox edition lock\n\nexport CLAWBOX_EDITION=\"hermes\"\n");
     const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("hermes");
+    expect(resolveEdition(null)).toBe("hermes");
   });
 
   it("never asks the API when the edition is locked", async () => {
+    // `resolveAppHarness` is the one that may ask; a locked edition settles it
+    // from the file and the device is left alone.
     writeLock("CLAWBOX_EDITION=hermes\n");
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
-    const { resolveEdition } = await loadEdition();
-    await resolveEdition("http://127.0.0.1:80", null);
+    const { resolveAppHarness } = await loadEdition();
+    await expect(resolveAppHarness("http://127.0.0.1:80", null)).resolves.toBe("hermes");
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
@@ -76,12 +78,12 @@ describe("resolveEdition — no lock file", () => {
   it("falls back to the environment, for dev machines and CI", async () => {
     process.env.CLAWBOX_EDITION = "hermes";
     const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("hermes");
+    expect(resolveEdition(null)).toBe("hermes");
   });
 
   it("defaults to openclaw when there is neither a lock nor an environment value", async () => {
     const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("openclaw");
+    expect(resolveEdition(null)).toBe("openclaw");
   });
 });
 
@@ -89,49 +91,120 @@ describe("resolveEdition — an unreadable lock fails closed", () => {
   it("registers the smaller Hermes set when the lock carries no edition", async () => {
     writeLock("# nothing useful in here\n");
     const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("hermes");
+    expect(resolveEdition(null)).toBe("hermes");
   });
 
   it("ignores the environment when the lock exists but cannot be parsed", async () => {
     writeLock("GARBAGE\n");
     process.env.CLAWBOX_EDITION = "openclaw";
     const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("hermes");
+    expect(resolveEdition(null)).toBe("hermes");
   });
 
   it("does not treat an empty lock file as openclaw", async () => {
     writeLock("");
     const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("hermes");
+    expect(resolveEdition(null)).toBe("hermes");
   });
 });
 
-describe("resolveEdition — the unlocked dual SKU", () => {
-  it("asks the device which harness is active", async () => {
+describe("the unlocked dual SKU — one probe, two answers", () => {
+  it("asks the device which harness is active, and the tool set follows it", async () => {
     writeLock("CLAWBOX_EDITION=dual\n");
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    const fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ active: "hermes" }),
-    }));
-    const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("hermes");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const { resolveAppHarness, resolveEdition } = await loadEdition();
+    const appHarness = await resolveAppHarness("http://127.0.0.1:80", null);
+    expect(appHarness).toBe("hermes");
+    expect(resolveEdition(appHarness)).toBe("hermes");
+    // ONE request for both facts — the whole point of handing the answer on.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("uses the default harness when the device cannot answer", async () => {
     writeLock("CLAWBOX_EDITION=dual\n");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connection refused")));
-    const { resolveEdition } = await loadEdition();
-    await expect(resolveEdition("http://127.0.0.1:80", null)).resolves.toBe("openclaw");
+    const { resolveAppHarness, resolveEdition } = await loadEdition();
+    const appHarness = await resolveAppHarness("http://127.0.0.1:80", null);
+    // The app list makes no claim; the tool set still needs one, and takes the
+    // default. Two different right answers to a silence, from one probe.
+    expect(appHarness).toBeNull();
+    expect(resolveEdition(appHarness)).toBe("openclaw");
   });
 
   it("sends the bearer so a session-gated device can answer", async () => {
     writeLock("CLAWBOX_EDITION=dual\n");
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ active: "openclaw" }) });
     vi.stubGlobal("fetch", fetchSpy);
-    const { resolveEdition } = await loadEdition();
-    await resolveEdition("http://127.0.0.1:80", "Bearer secret");
+    const { resolveAppHarness } = await loadEdition();
+    await resolveAppHarness("http://127.0.0.1:80", "Bearer secret");
     const init = fetchSpy.mock.calls[0][1] as { headers: Record<string, string> };
     expect(init.headers.authorization).toBe("Bearer secret");
+  });
+});
+
+describe("resolveEdition — it never asks the device itself", () => {
+  it("makes no request even on the unlocked dual SKU", async () => {
+    // ONE PROBE PER STARTUP. `main()` resolves the APP harness (which does ask)
+    // and hands the answer here, so the tool set and the app list cannot come
+    // from two different replies: a dual box whose first probe said `hermes`
+    // and whose second timed out registered the Hermes tool set beside an app
+    // list that hid both dashboards, for the life of that stdio child.
+    writeLock("CLAWBOX_EDITION=dual\n");
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const { resolveEdition } = await loadEdition();
+    expect(resolveEdition("hermes")).toBe("hermes");
+    expect(resolveEdition(null)).toBe("openclaw");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("still fails CLOSED on an unreadable lock, whatever the device said", async () => {
+    // The two questions differ HERE, which is why they are two functions: the
+    // app list may take the device's word for an unreadable lock (the desktop
+    // does), but the TOOL SET must not — OpenClaw is the larger surface and
+    // carries the shell and file tools.
+    writeLock("GARBAGE\n");
+    const { resolveEdition } = await loadEdition();
+    expect(resolveEdition("openclaw")).toBe("hermes");
+  });
+});
+
+describe("resolveAppHarness — an unreadable lock does NOT ask the device", () => {
+  it("answers null without a request, because the route would only echo the default", async () => {
+    // /setup-api/harness/active always answers, but on an unreadable lock it is
+    // the SAME FILE this process just failed to read: getActiveHarness() ->
+    // lockedHarness() -> getEdition() -> readEdition() -> "openclaw", its own
+    // default. Taking that as the answer would register the Hermes TOOL SET
+    // (resolveEdition fails closed) beside an OpenClaw APP list — denying a
+    // Hermes box its own `hermes-skills` with "there is no such app", which is
+    // TASK-541's original symptom, and ticking off `openclaw` and `store` on a
+    // box that has neither.
+    writeLock("GARBAGE\n");
+    const fetchSpy = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ active: "openclaw" }),
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const { resolveAppHarness } = await loadEdition();
+    await expect(resolveAppHarness("http://127.0.0.1:80", null)).resolves.toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("still asks on the unlocked dual SKU, where the device knows something we do not", async () => {
+    // The contrast that makes the rule above a rule and not a refusal to ask:
+    // on `dual` the route resolves a real runtime choice from the config store,
+    // which no file this process reads can answer.
+    writeLock("CLAWBOX_EDITION=dual\n");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ active: "hermes" }),
+    }));
+    const { resolveAppHarness } = await loadEdition();
+    await expect(resolveAppHarness("http://127.0.0.1:80", null)).resolves.toBe("hermes");
   });
 });
 

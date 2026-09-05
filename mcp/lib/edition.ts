@@ -58,12 +58,25 @@ function lockUnreadable(): boolean {
  *
  * A locked edition ("openclaw" / "hermes") wins outright — that install only
  * has one harness on disk. Only the unlocked premium "dual" edition has a
- * runtime choice, and there the device's own /setup-api/harness/active is the
- * single source of truth; a failure there falls back to "openclaw", the default
- * harness src/lib/harness.ts also degrades to.
+ * runtime choice, and there `appHarness` — what the device itself said — is the
+ * single source of truth; a null falls back to "openclaw", the default harness
+ * src/lib/harness.ts also degrades to.
+ *
+ * ASKS THE DEVICE NOTHING. It takes the answer `resolveAppHarness` already got,
+ * so a startup makes ONE probe and the tool set and the app list cannot be
+ * built from two different replies — a dual box whose first probe said `hermes`
+ * and whose second timed out registered the Hermes tool set beside an app list
+ * that hid both dashboards, for the life of that stdio child. Synchronous now,
+ * which is what makes a second probe impossible rather than merely unlikely.
  */
-export async function resolveEdition(apiBase: string, authHeader: string | null): Promise<Ed> {
+export function resolveEdition(appHarness: Ed | null): Ed {
   if (lockUnreadable()) {
+    // FAIL CLOSED, whatever the device answered. This is where the two
+    // questions differ in DIRECTION: the tool sets are nested, so the smaller
+    // one is the safe answer to a doubt — OpenClaw is the larger surface and
+    // the only one carrying the shell and file tools, and an unreadable lock
+    // must not hand them out. The APP sets are not nested, so the same doubt
+    // there answers `null` and hides both (see `resolveAppHarness`).
     console.error(
       "[clawbox-mcp] /etc/clawbox/edition.env exists but no edition could be read from it. "
       + "Registering the SMALLER Hermes tool set: the shell and file tools stay off until the lock is readable.",
@@ -72,7 +85,66 @@ export async function resolveEdition(apiBase: string, authHeader: string | null)
   }
   const installed = readEdition();
   if (installed === "openclaw" || installed === "hermes") return installed;
+  // Dual box whose API was not up — register the default harness's tools rather
+  // than an empty or half-wrong set.
+  return appHarness ?? "openclaw";
+}
 
+/**
+ * Which harness's built-in APPS this device shows, or null when that cannot be
+ * determined.
+ *
+ * A SEPARATE QUESTION from `resolveEdition`, and the difference is the whole
+ * reason this exists. That one picks a TOOL SET, where the two answers are
+ * nested — hermes is openclaw minus the shell and file tools — so an
+ * undetermined edition can fail closed onto the smaller one. The app sets are
+ * not nested: `openclaw`/`store`/`memory-shard` against `hermes`/
+ * `hermes-skills`. Answering "hermes" for an unreadable lock would refuse
+ * three apps the box has AND tick off two it may not, which is the same false
+ * success the gate exists to stop.
+ *
+ * So this returns null instead, and every caller hides BOTH harness-only sets
+ * — the answer `hiddenAppIdsForHarness(null)` already gives the desktop while
+ * its own fetch is in flight.
+ *
+ * AN UNREADABLE LOCK IS NOT ASKED ABOUT, because on that box the route has no
+ * independent answer to give. `/setup-api/harness/active` always answers, but
+ * traced out it is the SAME FILE this process just failed to read:
+ * `getActiveHarness()` -> `lockedHarness()` -> `isDualUnlocked()` is false
+ * because `readEdition()` fell back -> `getEdition()` -> `readEdition()` ->
+ * `"openclaw"`, its own default (src/lib/harness.ts:82-127,
+ * src/lib/edition-source.ts:65-77). So on an unreadable lock that route can
+ * only ever say "openclaw", on a Hermes box as readily as on an OpenClaw one —
+ * and taking it as the answer would register the Hermes TOOL SET beside an
+ * OpenClaw app list, deny the box its own `hermes-skills` with "there is no
+ * such app" (TASK-541's original symptom, verbatim) and tick off `openclaw` and
+ * `store` on a box that has neither.
+ *
+ * Asking is right for `dual`, where the route resolves a real runtime choice
+ * from the config store. It is not right here, and the difference is exactly
+ * whether the device knows something this process does not.
+ *
+ * No console line: this is asked by the CLI as well as the MCP, and one
+ * invocation of `clawbox app list` registers no tools.
+ */
+export async function resolveAppHarness(
+  apiBase: string,
+  authHeader: string | null,
+): Promise<Ed | null> {
+  if (lockUnreadable()) return null;
+  const installed = readEdition();
+  if (installed === "openclaw" || installed === "hermes") return installed;
+  return askActiveHarness(apiBase, authHeader);
+}
+
+/**
+ * The harness the DEVICE says is active, or null when it did not say.
+ *
+ * Null rather than a default, because the two callers want opposite things
+ * from a silence: registration needs some tool set, an app gate must not claim
+ * a harness it never resolved.
+ */
+async function askActiveHarness(apiBase: string, authHeader: string | null): Promise<Ed | null> {
   try {
     const res = await fetch(`${apiBase}/setup-api/harness/active`, {
       headers: {
@@ -85,12 +157,13 @@ export async function resolveEdition(apiBase: string, authHeader: string | null)
     if (res.ok) {
       const body = (await res.json()) as { active?: unknown };
       if (body?.active === "hermes") return "hermes";
+      if (body?.active === "openclaw") return "openclaw";
     }
   } catch {
-    // Dual box whose API is not up yet — register the default harness's tools
-    // rather than an empty or half-wrong set.
+    // The device could not be reached, or answered something this build does
+    // not know. Either way nothing was resolved.
   }
-  return "openclaw";
+  return null;
 }
 
 /** The raw install edition, for reporting (can be "dual"). */

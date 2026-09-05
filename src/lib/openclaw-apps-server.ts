@@ -3,8 +3,8 @@
 // The store installs OPENCLAW desktop apps: /setup-api/apps/install and
 // /apps/settings and /apps/skill-info all shell out to the openclaw binary and
 // reload the OpenClaw gateway. On a Hermes device neither exists, so the store
-// is hidden from every UI surface (see OPENCLAW_ONLY_APP_IDS in src/app/page.tsx
-// and the harness gate in src/app/app/[id]/page.tsx). This is the HTTP mirror of
+// is hidden from every UI surface (see OPENCLAW_ONLY_APP_IDS in
+// src/lib/desktop-app-editions.ts, which every surface reads). This is the HTTP mirror of
 // that decision — the same reasoning as hermesSkillsGuard, which refuses the
 // skills routes when the active harness isn't Hermes.
 //

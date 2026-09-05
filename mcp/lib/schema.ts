@@ -53,6 +53,58 @@ export function zOptText(max: number, description: string) {
 }
 
 /** A lowercase id: app ids, project ids, webapp ids. */
+/**
+ * An `installed-<id>` the caller invented, gated on SHAPE only — membership is
+ * checked separately against what the device reports.
+ *
+ * The alphabet is the PRODUCERS', not this file's: `APP_ID_RE`
+ * (src/lib/code-projects.ts, the webapp routes) and the store's `SLUG`
+ * (setup-api/apps/install) both accept upper case and underscores, so a webapp
+ * legitimately called `Foo_Bar` exists on boxes today. Gating on `zSlug`'s
+ * narrower lowercase-and-hyphen rule refused to open it — a tool saying "that
+ * is not a valid app id" about an id the device created. Kept in step by
+ * src/tests/unit/mcp-desktop-apps.test.ts.
+ *
+ * Deliberately still a closed alphabet: no dots, no slashes, no whitespace, so
+ * the value cannot become a path or a second field on its way to the desktop.
+ * The FIRST character carries the same alphabet bar the hyphen, because both
+ * producers accept a leading `_` (`_drafts`) and only the store's SLUG refuses
+ * a leading `-`.
+ *
+ * One shape the producers allow and this still refuses: an id longer than 64
+ * characters, which `SLUG` does not bound. That cap is the guard doing its job
+ * — an unbounded id in an injection check is not a guard — and no such app has
+ * ever been installed, so the trade is a 65-character webapp nobody can open
+ * from a tool against a rule that cannot be walked past.
+ *
+ * ONE ALPHABET, TWO SPELLINGS, built from the same source below: the surfaces
+ * that OPEN an app take the prefixed form, and the one that REMOVES it takes
+ * the bare id (`ui_list_apps` reports it without the prefix). Widening the one
+ * without the other left the agent able to create, list and open an app it
+ * could not delete.
+ */
+const INSTALLED_APP_ID_BODY = "[A-Za-z0-9_][A-Za-z0-9_-]{0,63}";
+
+export const INSTALLED_APP_ID_RE = new RegExp(`^installed-${INSTALLED_APP_ID_BODY}$`);
+
+/** The same id WITHOUT the `installed-` prefix, as `ui_list_apps` reports it. */
+export const RAW_INSTALLED_APP_ID_RE = new RegExp(`^${INSTALLED_APP_ID_BODY}$`);
+
+/** An installed-app id as a tool argument, in the producers' own alphabet. */
+export function zInstalledAppId(description: string) {
+  // `.max(64)` alongside the pattern, which already bounds it: the emitted JSON
+  // Schema is what a 4-8B local model reads, and it reads `maxLength` far more
+  // reliably than a regex quantifier.
+  return z
+    .string()
+    .max(64)
+    .regex(
+      RAW_INSTALLED_APP_ID_RE,
+      "letters, digits, underscores and hyphens, not starting with a hyphen, at most 64 characters",
+    )
+    .describe(description);
+}
+
 export function zSlug(description: string) {
   return z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, "lowercase letters, digits and hyphens only").describe(description);
 }

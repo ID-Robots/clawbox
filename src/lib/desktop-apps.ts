@@ -32,8 +32,8 @@ export const apps: AppDef[] = [
   // Hermes dashboard — only shown on the Hermes edition. Opened via the
   // auth-gated dashboard proxy (url computed at click time from the host).
   { id: "hermes", name: "Hermes", color: "#1a1230", type: "external", url: "hermes-dashboard", pinned: true },
-  // Hermes Skills Store — only shown on the Hermes edition (gated below via
-  // HERMES_ONLY_APP_IDS / harnessHiddenAppIds, same mechanism as `hermes`).
+  // Hermes Skills Store — only shown on the Hermes edition (gated via
+  // HERMES_ONLY_APP_IDS in desktop-app-editions.ts, same mechanism as `hermes`).
   { id: "hermes-skills", name: "app.skills", color: "#1a1230", type: "hermes_skills", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
   // The coding agent: the owner's switch for letting the assistant delegate a

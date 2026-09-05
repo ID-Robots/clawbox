@@ -50,6 +50,7 @@ import { registerOrientationTools } from "../../../mcp/tools/orientation";
 const ctx = (edition: "openclaw" | "hermes", install: McpContext["install"] = edition): McpContext => ({
   edition,
   install,
+  appHarness: edition,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers: ["clawai", "openai"],
@@ -268,9 +269,10 @@ describe("device_status — the same honesty on the orientation tool", () => {
   });
 
   it("does not claim the default is this chat's model on a DUAL box, where the edition may be a fallback", async () => {
-    // `resolveEdition` asks /setup-api/harness/active with a 3 s timeout and
-    // answers "openclaw" on any failure — and this server starts with the
-    // harness, exactly when the web app may not be up. On a locked SKU that
+    // `resolveAppHarness` asks /setup-api/harness/active with a 3 s timeout and
+    // hands the answer to `resolveEdition`, which takes "openclaw" for a `dual`
+    // box that did not answer — and this server starts with the harness,
+    // exactly when the web app may not be up. On a locked SKU that
     // cannot be wrong; on dual it can, and the affirmative note would tell a
     // HERMES chat to answer "which model are you" from the device default,
     // which is the whole defect TASK-648 opened for.

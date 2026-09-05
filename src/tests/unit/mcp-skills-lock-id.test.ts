@@ -92,6 +92,7 @@ const BUILTIN: Row = { id: "pdf", name: "pdf", origin: "builtin", category: "doc
 const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
   edition,
   install: edition,
+  appHarness: edition,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers: [],

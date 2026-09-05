@@ -9,8 +9,9 @@
 import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
-import { zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
-import { builtInApps, type McpContext } from "../lib/context";
+import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInstalledAppId, zInt, zOptText, zSlug, zText } from "../lib/schema";
+import { builtInApps, openedAppNotice, UNKNOWN_HARNESS_NOTE, type McpContext } from "../lib/context";
+import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
 import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
 const UI_PICKUP_DELAY_MS = 2_500;
@@ -42,14 +43,28 @@ interface PrefsBody {
   installed_meta?: unknown;
 }
 
-/** Webapps and store apps the user has installed, by id. */
-async function installedAppIds(): Promise<string[]> {
+/**
+ * Webapps and store apps the user has installed AND the desktop would open, by
+ * id.
+ *
+ * `installed_apps` alone is not that list. A store-installed OpenClaw skill is
+ * unusable on Hermes — its window shells out to the openclaw binary — so the
+ * desktop drops it from `getAllApps()` through `isInstalledAppVisible`, and a
+ * gate that checked only membership answered "Opened <name>" over a window
+ * that never appeared. Both facts come out of one preferences read.
+ *
+ * `harness: null` asks for the list UNFILTERED, which is what a REMOVAL wants:
+ * an app this harness cannot open is still the owner's to delete.
+ */
+async function installedAppIds(harness: string | null): Promise<string[]> {
   const prefs = await apiGet<PrefsBody>("/setup-api/preferences", {
-    query: { keys: "installed_apps" },
+    query: { keys: "installed_apps,installed_meta" },
     timeoutMs: 10_000,
   }).catch(() => null);
   const raw = prefs?.installed_apps;
-  return Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+  const meta = (prefs?.installed_meta ?? {}) as Record<string, { webappUrl?: unknown } | undefined>;
+  const ids = Array.isArray(raw) ? raw.filter((v): v is string => typeof v === "string") : [];
+  return ids.filter((id) => isInstalledAppVisible(meta[id], harness));
 }
 
 /**
@@ -100,7 +115,14 @@ const WEBAPP_RULES: ErrorRule[] = [
 ];
 
 export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
-  const apps = builtInApps(ctx.edition);
+  // The APP harness, not the tool-set edition: an unreadable edition lock
+  // resolves the tool set to hermes (the smaller, nested one) and must not
+  // therefore hide `store`/`openclaw`/`memory-shard` from a box that has them
+  // or advertise `hermes` on a box that may not. `null` shows what both
+  // harnesses have, the answer the desktop uses while its own fetch is in
+  // flight. A startup snapshot, like the registration itself — on the dual SKU
+  // a harness switched after this child spawned is seen at the next restart.
+  const apps = builtInApps(ctx.appHarness);
   const builtInIds = apps.map((a) => a.id);
   const appLine = apps.map((a) => a.id).join(", ");
 
@@ -112,40 +134,59 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     },
     { editions: ["openclaw", "hermes"], readOnly: false, profile: "core" },
     async ({ app_id }: { app_id: string }) => {
-      if (!/^(installed-)?[a-z0-9][a-z0-9-]{0,63}$/.test(app_id)) {
-        throw new ToolError(
-          "BAD_ARGUMENT",
-          "That is not a valid app id.",
-          `Call ui_list_apps and pass an id from its list. Built-in ids: ${appLine}.`,
-        );
-      }
       // Order matters: check the app EXISTS on this edition before writing the
       // pending action. The previous version wrote first and then answered
       // "Opening X" for apps that are not installed on this harness at all.
+      //
+      // A built-in is gated on MEMBERSHIP, never on a slug shape. It used to be
+      // matched against a hyphen-only regex first, which rejected
+      // `system_update` — an id this tool's own description advertises — as
+      // "not a valid app id", and then told the agent to pass an id from that
+      // same list. The shape check survives only where it is the injection
+      // guard: an `installed-<id>` the caller invented.
       const isInstalled = app_id.startsWith("installed-");
-      if (!isInstalled && !builtInIds.includes(app_id)) {
-        throw new ToolError(
-          "NOT_FOUND",
-          "There is no such app on this ClawBox.",
-          `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
-        );
-      }
       if (isInstalled) {
-        const ids = await installedAppIds();
+        if (!INSTALLED_APP_ID_RE.test(app_id)) {
+          throw new ToolError(
+            "BAD_ARGUMENT",
+            "That is not a valid installed-app id.",
+            "Call ui_list_apps and pass an id from its installed_apps list, unchanged.",
+          );
+        }
+        const ids = await installedAppIds(ctx.appHarness);
         if (!ids.includes(app_id.slice("installed-".length))) {
           throw new ToolError(
             "NOT_FOUND",
-            "That installed app is not on this device.",
+            "That installed app is not on this device, or this harness cannot open it.",
             "Call ui_list_apps to see which installed apps exist, and use one of those ids.",
           );
         }
+      } else if (!builtInIds.includes(app_id)) {
+        // AN UNDETERMINED HARNESS IS NOT "NO SUCH APP". The box may well have
+        // this one — the harness simply could not be resolved — and saying it
+        // does not exist tells the agent as a durable fact that a dual box has
+        // no dashboard, which is how it stops asking. The CLI has drawn this
+        // distinction since the gate existed; the tool now says the same
+        // sentence, from the same constant.
+        throw ctx.appHarness === null && HARNESS_ONLY_APP_IDS.includes(app_id)
+          ? new ToolError(
+            "NOT_FOUND",
+            `Cannot open "${app_id}" right now. ${UNKNOWN_HARNESS_NOTE}`,
+            "Do not conclude the device lacks this app. Report the reason to the user and try again once the device can name its harness.",
+          )
+          : new ToolError(
+            "NOT_FOUND",
+            "There is no such app on this ClawBox.",
+            `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
+          );
       }
       await pushUiAction({ type: "open_app", appId: app_id });
       if (app_id === "browser") {
         return text("Opened the Browser Setup panel. That is the settings panel — to actually browse the web, use browser_open.");
       }
-      const known = apps.find((a) => a.id === app_id);
-      return text(`Opened ${known?.name ?? app_id} on the desktop.`);
+      // The same sentence `clawbox app open` prints, from one place — an
+      // `external` app is hedged about on both surfaces or on neither.
+      return text(openedAppNotice(apps.find((a) => a.id === app_id), app_id));
     },
   );
 
@@ -161,7 +202,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
     async () => {
       const builtIn = apps.map((a) => ({ id: a.id, name: a.name, what: a.description }));
-      const installed = (await installedAppIds()).map((id) => ({ id: `installed-${id}`, name: id }));
+      const installed = (await installedAppIds(ctx.appHarness)).map((id) => ({ id: `installed-${id}`, name: id }));
       // On Hermes the agent's own capabilities come from the skills store, not
       // from ~/.openclaw/skills (which does not exist there — listing it was
       // why installed skills always showed up empty on a Hermes device).
@@ -182,6 +223,10 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
         built_in: builtIn,
         installed_apps: installed,
         ...(ctx.edition === "hermes" ? { agent_skills: skills } : {}),
+        // Said out loud rather than five apps quietly missing from the list:
+        // the agent cannot tell "this box has no dashboard" from "nobody could
+        // say" unless one of them is written down.
+        ...(ctx.appHarness === null ? { note: UNKNOWN_HARNESS_NOTE } : {}),
       });
     },
   );
@@ -273,10 +318,16 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     ctx.edition === "hermes"
       ? "Remove an app icon from the ClawBox desktop: a web app you built, or something the user installed. It does NOT remove one of your own skills — use skill_uninstall for those. Call ui_list_apps first to get the id, and ask the user to confirm."
       : "Remove an app the user installed from the ClawBox app store, or a web app you built, from the desktop. Call ui_list_apps first to get the id, and ask the user to confirm.",
-    { app_id: zSlug("App id, as ui_list_apps reports it without the installed- prefix") },
+    // The producers' alphabet, not zSlug's: `ui_open_app` and `clawbox app
+    // open` accept `Foo_Bar` and `_drafts`, so removal must too — an app the
+    // agent can create and open and cannot delete is the worse half of the
+    // defect this file's widening fixed. The membership check below is
+    // deliberately unfiltered for the same reason.
+    { app_id: zInstalledAppId("App id, as ui_list_apps reports it without the installed- prefix") },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true },
     async ({ app_id }: { app_id: string }) => {
-      const installed = await installedAppIds();
+      // Unfiltered: removing an app this harness cannot open is legitimate.
+      const installed = await installedAppIds(null);
       if (!installed.includes(app_id)) {
         throw new ToolError(
           "NOT_FOUND",
@@ -331,7 +382,12 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "webapp_update",
     "Replace the HTML of a web app you created earlier with webapp_create. The whole document is replaced, so send the complete HTML, not just the changed part.",
     {
-      app_id: zSlug("The id you passed to webapp_create"),
+      // Widened for the same reason `app_uninstall` was: `APP_ID_RE` is what
+      // /setup-api/webapps enforces, and it mints ids with upper case and
+      // underscores. An app this family LISTS and OPENS must be one it can
+      // also act on. (`webapp_create` stays narrow — constraining what the
+      // agent MINTS is a choice; refusing what the device made is a defect.)
+      app_id: zInstalledAppId("The id you passed to webapp_create"),
       html: zText(400_000, "The complete replacement HTML"),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
@@ -412,7 +468,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "code_project_build",
     "Bundle a code project into a single page and install it on the ClawBox desktop. Call this after every set of edits — the desktop shows the last build, not the source files. The source files are the ones under the absolute path code_project_init and code_project_list report; edits written anywhere else are not part of the build.",
     {
-      project_id: zSlug("The project id from code_project_list"),
+      // From `code_project_list`, so it carries whatever alphabet
+      // /setup-api/code minted it with (`APP_ID_RE`: upper case and
+      // underscores included). Refusing it here made the tool reject an id
+      // its own sibling had just reported.
+      project_id: zInstalledAppId("The project id from code_project_list"),
       open_after_build: zBool(true, "Open it on the desktop after building."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
@@ -444,7 +504,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "code_project_delete",
     "Delete a code project and all of its source files from the ClawBox. This cannot be undone. Ask the user to confirm before calling it.",
     {
-      project_id: zSlug("The project id from code_project_list"),
+      // From `code_project_list`, so it carries whatever alphabet
+      // /setup-api/code minted it with (`APP_ID_RE`: upper case and
+      // underscores included). Refusing it here made the tool reject an id
+      // its own sibling had just reported.
+      project_id: zInstalledAppId("The project id from code_project_list"),
       confirm: zConfirm("Must be true. Set it only when the user asked for this project to be deleted."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true },

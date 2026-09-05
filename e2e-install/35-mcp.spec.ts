@@ -53,10 +53,29 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
       timeoutMs: 30_000,
     });
 
-    // Header carries the edition, so a reader knows which app set this is.
+    // Header carries the edition, so a reader knows which app set this is —
+    // and, when the two differ, the harness the apps belong to: on the premium
+    // `dual` SKU the list follows the ACTIVE harness, so the line reads
+    // "(dual edition, running hermes)".
     expect(out).toMatch(
-      new RegExp(`^Built-in apps \\(${edition} edition\\):`, "im"),
+      new RegExp(`^Built-in apps \\(${edition} edition[,)]`, "im"),
     );
+    // The harness the header NAMED, or null when it named none. Not `?? edition`:
+    // on the `dual` SKU the edition is not a harness, so that fallback ran the
+    // OpenClaw assertions below over a header that had just said "harness
+    // undetermined" — asserting `openclaw —` and `store —` are listed on a box
+    // that could not say which harness it was running.
+    const harness = /^Built-in apps \([^,)]+(?:, running (\w+))?\)/im.exec(out)?.[1]
+      ?? (edition === "dual" ? null : edition);
+    // A dual box that cannot name its harness is a FAULT on an installed image,
+    // not a shape to branch on: /setup-api/harness/active is served by the same
+    // web server this CLI just reached, so a silence here means the box came up
+    // wrong. Fail with the header rather than picking an arm.
+    expect(
+      harness,
+      `a ${edition} box must name the harness its app list follows; header was: `
+      + `${/^Built-in apps \(.*\):/im.exec(out)?.[0] ?? "(no header)"}`,
+    ).not.toBeNull();
 
     // Common apps — listed on every edition.
     for (const id of ["settings", "terminal", "files", "browser", "vnc"]) {
@@ -67,9 +86,10 @@ test.describe("clawbox-cli (MCP user-space wrapper)", () => {
 
     // Harness-specific apps. A Hermes box has the skills app and neither the
     // OpenClaw chat app nor the store; listing an app whose backend isn't
-    // installed would point the agent at a window that cannot open. The
-    // premium `dual` edition resolves to the OpenClaw set.
-    if (edition === "hermes") {
+    // installed would point the agent at a window that cannot open. Branch on
+    // the HARNESS the header reports rather than on the edition: a `dual` box
+    // follows whichever harness is running.
+    if (harness === "hermes") {
       expect(out).toMatch(/^\s+hermes-skills — /m);
       expect(out).not.toMatch(/^\s+openclaw — /m);
       expect(out).not.toMatch(/^\s+store — /m);

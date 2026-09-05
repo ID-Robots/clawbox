@@ -51,8 +51,8 @@ The Chromium window is visible on the ClawBox desktop (accessible via the VNC vi
 
 | Tool | Purpose |
 |---|---|
-| `ui_open_app` | Open a built-in ClawBox desktop app. Known app IDs: `chat`, `files`, `settings`, `store`, `vnc`, `terminal`, `coding` (the Coding Agent app — see below), and `browser` (the Browser *Setup* panel — not for real web browsing; use `browser_*` tools instead, see Browser section above) |
-| `ui_list_apps` | Enumerate installed desktop apps |
+| `ui_open_app` | Open a built-in ClawBox desktop app. Call `ui_list_apps` for the ids that exist on THIS device — the set differs by harness, and the chat window is `clawbox`, not `chat`. Two to know: `coding` is the Coding Agent app (see below), and `browser` is the Browser *Setup* panel — not for real web browsing, use the `browser_*` tools instead (see Browser section above) |
+| `ui_list_apps` | What is on THIS desktop: the built-in apps for this harness, the apps the user installed or you built (`installed-<id>`), and on Hermes the agent skills too |
 | `ui_notify` | Show a toast notification on the ClawBox desktop |
 | `app_search` | Search the ClawBox App Store |
 | `app_install` | Install a skill or webapp from the Store (see Skills section above) |

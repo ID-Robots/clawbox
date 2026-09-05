@@ -6,6 +6,7 @@
 // registered at all, rather than registered and failing.
 
 import { capabilitiesFor, type HarnessFacts } from "../../src/lib/harness/capabilities";
+import { appExistsOnEdition } from "../../src/lib/desktop-app-editions";
 import type { HarnessId } from "../../src/lib/harness/transport";
 import { hasBinary, spawnArgv } from "./guard";
 import { apiTry } from "./api";
@@ -15,31 +16,102 @@ export interface DesktopApp {
   id: string;
   name: string;
   description: string;
+  /**
+   * The desktop opens this one in a NEW BROWSER TAB (`window.open`), not in a
+   * desktop window — so the browser's popup blocker can drop it, and
+   * `ui_open_app` must not claim it appeared. Mirrors `type: "external"` in
+   * src/lib/desktop-apps.ts; the drift test holds the two together.
+   */
+  external?: boolean;
 }
 
-// Apps that exist on only one harness. Advertising the other harness's apps
-// would have the agent open a window onto a backend that isn't installed.
-const OPENCLAW_ONLY_APPS: DesktopApp[] = [
-  { id: "openclaw", name: "OpenClaw", description: "AI chat" },
-  { id: "store", name: "Store", description: "App store" },
-  // OpenClaw's memory index. Listed here and not in COMMON_APPS for the same
-  // reason the desktop hides it on Hermes: there is no index to show there.
-  { id: "memory-shard", name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
-];
-const HERMES_ONLY_APPS: DesktopApp[] = [
-  { id: "hermes-skills", name: "Hermes Skills", description: "Install skills for the agent" },
-];
-const COMMON_APPS: DesktopApp[] = [
-  { id: "settings", name: "Settings", description: "Device settings, AI provider, backup" },
-  { id: "terminal", name: "Terminal", description: "Shell" },
-  { id: "files", name: "Files", description: "File manager" },
-  { id: "browser", name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
-  { id: "vnc", name: "Remote Desktop", description: "VNC viewer" },
-  { id: "coding", name: "Coding Agent", description: "The owner's switch for delegated coding runs, what a run needs, and recent runs" },
-];
+// Every built-in desktop app, in the order src/lib/desktop-apps.ts declares
+// them, with the sentence the agent needs to pick the right window. The
+// registry cannot be imported here — it reaches React through the `@/` alias,
+// which mcp/tsconfig.json exists to keep out of this stdio process — so
+// src/tests/unit/mcp-desktop-apps.test.ts holds this table against it: adding
+// an app to the desktop without a line here fails CI (TASK-541, where four
+// apps the desktop shows had gone missing from this list and `ui_open_app`
+// answered "there is no such app" for the box's own Hermes dashboard).
+//
+// The EDITION gate is not repeated here: src/lib/desktop-app-editions.ts is
+// the one copy, shared with the desktop grid and the standalone window.
+const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
+  settings: { name: "Settings", description: "Device settings, AI provider, backup" },
+  clawbox: { name: "Chat", description: "The ClawBox chat window on the desktop — the device's MAIN conversation, which is not necessarily this one" },
+  openclaw: { name: "OpenClaw", description: "OpenClaw's own Control UI chat, in a browser tab", external: true },
+  hermes: { name: "Hermes", description: "The Hermes dashboard, in a browser tab", external: true },
+  "hermes-skills": { name: "Hermes Skills", description: "Install skills for the agent" },
+  terminal: { name: "Terminal", description: "Shell" },
+  coding: { name: "Coding Agent", description: "The owner's switch for delegated coding runs, what a run needs, and recent runs" },
+  files: { name: "Files", description: "File manager" },
+  clawkeep: { name: "ClawKeep", description: "Backups: what is protected, run one now, restore" },
+  "memory-shard": { name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
+  system_update: { name: "System Update", description: "The installed ClawBox version and the update button" },
+  store: { name: "Store", description: "App store" },
+  browser: { name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
+  vnc: { name: "Remote Desktop", description: "VNC viewer" },
+};
 
-export function builtInApps(edition: Ed): DesktopApp[] {
-  return [...COMMON_APPS, ...(edition === "hermes" ? HERMES_ONLY_APPS : OPENCLAW_ONLY_APPS)];
+/**
+ * The built-in apps this harness has. `null` — the harness could not be
+ * determined — answers the apps that exist on BOTH, never one harness's guess.
+ */
+export function builtInApps(edition: Ed | null): DesktopApp[] {
+  return Object.entries(APP_DESCRIPTIONS)
+    .filter(([id]) => appExistsOnEdition(id, edition))
+    .map(([id, def]) => ({ id, ...def }));
+}
+
+/**
+ * Why an app that exists on ONE harness cannot be offered right now.
+ *
+ * The wording matters, and the CLI has said it since this gate existed: an app
+ * the OTHER harness owns is "not here", while the SAME app on a box whose
+ * harness could not be determined is "could not be placed". Saying the first
+ * over the second tells the agent as a durable fact that the box has no
+ * dashboard, which is how it stops asking — so the MCP tool and the CLI say the
+ * same sentence, from here.
+ */
+export const UNKNOWN_HARNESS_NOTE =
+  "This ClawBox could not say which harness it is running, so apps that belong to only one of them"
+  + " are not offered. Check /etc/clawbox/edition.env and that the device's web server is up.";
+
+/**
+ * What may honestly be said after the open action has been posted.
+ *
+ * ONE sentence for both surfaces. `ui_open_app` and `clawbox app open` push the
+ * same action into the same fire-and-forget ring (`ui:pending-actions`), which
+ * the desktop POLLS — so neither of them learns what became of it, and an
+ * `external` app is opened with `window.open()` from that poll rather than from
+ * a click, where a popup blocker can drop it silently. Claiming it appeared is
+ * a false success on the one path the agent cannot see; saying so is what lets
+ * the agent ask the owner to look. Kept here, beside the `external` flag, so
+ * the CLI and the tool cannot answer the same question two ways — which is the
+ * defect TASK-541 is about.
+ *
+ * @param app the built-in app, or undefined for an installed one (never
+ *            external: an installed app is FRAMED in the desktop).
+ * @param fallbackId what to call it when the registry has no row.
+ */
+export function openedAppNotice(app: DesktopApp | undefined, fallbackId: string): string {
+  return app?.external
+    ? `Asked the desktop to open ${app.name}. It opens in a new browser tab, so ask the user to`
+      + " look at the screen — and to allow the popup if their browser blocked it."
+    : `Opened ${app?.name ?? fallbackId} on the desktop.`;
+}
+
+/**
+ * The same notice for a human reading a shell, with the CLI's tick.
+ *
+ * The tick and the wording are separated deliberately: the SENTENCE is the
+ * claim, and it has to be the tool's, or a future change to one surface's
+ * hedging silently un-aligns them again — which is the drift `openedAppNotice`
+ * was added to prevent and, on its first outing, only half prevented. The glyph
+ * is presentation, and only where a person is reading.
+ */
+export function openedAppLine(app: DesktopApp | undefined, fallbackId: string): string {
+  return `${app?.external ? "" : "✅ "}${openedAppNotice(app, fallbackId)}`;
 }
 
 export interface Capabilities {
@@ -58,6 +130,17 @@ export interface McpContext {
   edition: Ed;
   /** The raw install edition — can be "dual", which `edition` resolves. */
   install: "openclaw" | "hermes" | "dual";
+  /**
+   * Whose built-in DESKTOP APPS this device shows, or null when that could not
+   * be determined — a different question from `edition`, which is a tool set
+   * and fails closed onto the smaller of two nested answers. See
+   * `resolveAppHarness`.
+   *
+   * A STARTUP SNAPSHOT, like everything else here: on the `dual` SKU a harness
+   * switch made after this child spawned is not seen until it restarts, which
+   * `mcp/tools/desktop.ts` says out loud where it matters.
+   */
+  appHarness: Ed | null;
   profile: Profile;
   capabilities: Capabilities;
   /**
@@ -179,6 +262,13 @@ export async function buildContext(
   edition: Ed,
   install: "openclaw" | "hermes" | "dual",
   profile: Profile,
+  // REQUIRED, with no default. `= edition` looked harmless because both
+  // production callers pass it, but it is the wrong answer by this module's own
+  // argument: with an unreadable lock `edition` is "hermes", and answering that
+  // for the APP question refuses three apps the box has and ticks off two it
+  // may not. A caller who omitted it would get exactly that, silently and
+  // without a type error — the conflation this pair of questions exists to end.
+  appHarness: Ed | null,
 ): Promise<McpContext> {
   let screenGrabber: string | null = null;
   for (const bin of SCREEN_GRABBERS) {
@@ -219,6 +309,7 @@ export async function buildContext(
   return {
     edition,
     install,
+    appHarness,
     profile,
     capabilities: { screenGrabber, imageConvert, journal, du },
     providers,

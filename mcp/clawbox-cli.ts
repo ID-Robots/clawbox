@@ -18,11 +18,16 @@
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
-import { installEdition } from "./lib/edition";
-import { builtInApps } from "./lib/context";
+import { installEdition, resolveAppHarness, type Ed } from "./lib/edition";
+import { builtInApps, openedAppLine, UNKNOWN_HARNESS_NOTE } from "./lib/context";
+import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../src/lib/desktop-app-editions";
+import { INSTALLED_APP_ID_RE } from "./lib/schema";
 
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up KV actions
+// The ceiling on one /setup-api call. Generous — a cold Jetson answers some of
+// these in seconds — and finite, which is the whole point.
+const API_TIMEOUT_MS = 30_000;
 
 // MCP bearer token. /setup-api/* is session-gated by src/middleware.ts once
 // setup completes, but it also accepts this per-install bearer (see
@@ -34,7 +39,7 @@ const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up 
 // gateway pre-start script wrote. Loaded lazily so token-free commands like
 // `app list` still work without it.
 let cachedToken: string | null = null;
-function getApiToken(): string {
+function findApiToken(): string | null {
   if (cachedToken) return cachedToken;
   const fromEnv = process.env.CLAWBOX_MCP_TOKEN;
   if (fromEnv && fromEnv.length >= 16) {
@@ -52,10 +57,42 @@ function getApiToken(): string {
       return raw;
     }
   } catch {
-    // fall through to the missing-token error
+    // No token file — the caller decides whether that is fatal.
   }
+  return null;
+}
+
+function getApiToken(): string {
+  const token = findApiToken();
+  if (token) return token;
   console.error("MCP token not found: set CLAWBOX_MCP_TOKEN or ensure data/.mcp-token exists (is the gateway pre-start script running?).");
   process.exit(1);
+}
+
+/**
+ * Which harness's built-in apps this box has — or null, when that could not be
+ * determined.
+ *
+ * NOT `installEdition() === "hermes" ? … : "openclaw"`. That answer has THREE
+ * values — the premium `dual` SKU carries both harnesses — and folding `dual`
+ * into `openclaw` refused `clawbox app open hermes` on a dual box that is
+ * running Hermes, while the desktop opened that dashboard from the ACTIVE
+ * harness and `ui_open_app` allowed it. One question, three surfaces, and the
+ * CLI was the one giving a different answer.
+ *
+ * `resolveAppHarness` is that same resolution: a locked edition decides on its
+ * own, and `dual` — or a lock that cannot be read — asks the device which
+ * harness is active, because /setup-api/harness/active is the very route the
+ * desktop grid is built from and it always answers. Only a device that does
+ * NOT answer is NULL rather than a guess — see the note there on why an app
+ * gate cannot fail closed onto one harness. The bearer is OPTIONAL — `app
+ * list` has always worked without a token, and the cost is only that a
+ * session-gated device leaves the question unresolved rather than answering
+ * it.
+ */
+function openHarness(): Promise<Ed | null> {
+  const token = findApiToken();
+  return resolveAppHarness(API_BASE, token ? `Bearer ${token}` : null);
 }
 
 async function api(path: string, options?: RequestInit) {
@@ -63,7 +100,22 @@ async function api(path: string, options?: RequestInit) {
   if (!headers.has("authorization")) {
     headers.set("authorization", `Bearer ${getApiToken()}`);
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, redirect: "manual" });
+  // A DEVICE THAT NEVER ANSWERS IS NOT A DEVICE THAT IS THINKING. Without a
+  // signal a wedged web server left `clawbox app open` hanging in the agent's
+  // shell forever with no output — `mcp/lib/api.ts` and `askActiveHarness` have
+  // always carried one, and this was the last client that did not.
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+      redirect: "manual",
+      signal: options?.signal ?? AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+  } catch {
+    console.error(`The device did not answer within ${API_TIMEOUT_MS / 1000}s. Is its web server up?`);
+    process.exit(1);
+  }
   if (res.status >= 300 && res.status < 400) {
     console.error("The device rejected this request's token. Check data/.mcp-token, or restart the device.");
     process.exit(1);
@@ -189,20 +241,88 @@ async function main() {
       console.error("Usage: clawbox app open <appId>");
       process.exit(1);
     }
+    // Same gate ui_open_app applies. Without it this printed "Opening x" for a
+    // typo, for an installed id missing its `installed-` prefix, and for the
+    // other harness's apps — a false success on the CLI sibling of the list
+    // `app list` below prints from.
+    const harness = await openHarness();
+    const builtIn = builtInApps(harness);
+    const openable = builtIn.map((a) => a.id);
+    const isInstalled = appId.startsWith("installed-");
+    if (isInstalled) {
+      // The shape check, exactly where ui_open_app applies it: an installed id
+      // is caller-supplied, and `installed-../etc` would otherwise be posted as
+      // a pending action with a tick printed over it.
+      if (!INSTALLED_APP_ID_RE.test(appId)) {
+        console.error(`"${appId}" is not a valid installed-app id.`);
+        process.exit(1);
+      }
+      // …and then MEMBERSHIP, also where ui_open_app applies it. A well-formed
+      // id the device does not have is still a window that never opens, and
+      // printing a tick over it is the same false success the built-in branch
+      // below exists to stop.
+      //
+      // …and MEMBERSHIP IN WHAT THE DESKTOP WOULD OPEN, not merely in
+      // `installed_apps`: a store-installed OpenClaw skill is unusable on
+      // Hermes (its window shells out to the openclaw binary), so the desktop
+      // drops it and a tick here would be printed over a window that never
+      // appears. One predicate, shared with the desktop and with ui_open_app.
+      const prefs = await api("/setup-api/preferences?keys=installed_apps,installed_meta") as {
+        installed_apps?: unknown;
+        installed_meta?: unknown;
+      };
+      const meta = (prefs?.installed_meta ?? {}) as Record<string, { webappUrl?: unknown } | undefined>;
+      const installed = (Array.isArray(prefs?.installed_apps)
+        ? prefs.installed_apps.filter((v): v is string => typeof v === "string")
+        : []
+      ).filter((id) => isInstalledAppVisible(meta[id], harness));
+      if (!installed.includes(appId.slice("installed-".length))) {
+        console.error(
+          `No installed app "${appId.slice("installed-".length)}" this ClawBox can open.`
+          + (installed.length ? ` Installed: ${installed.join(", ")}` : " Nothing is installed."),
+        );
+        process.exit(1);
+      }
+    } else if (!openable.includes(appId)) {
+      // An app the OTHER harness owns is "not here"; the same app while the
+      // harness is unknown is "could not be placed". Saying the first over the
+      // second tells the agent as a durable fact that a dual box has no
+      // dashboard, which is how it stops asking.
+      console.error(
+        harness === null && HARNESS_ONLY_APP_IDS.includes(appId)
+          ? `Cannot open "${appId}": ${UNKNOWN_HARNESS_NOTE}`
+          : `No built-in app "${appId}" on this ClawBox. Try: ${openable.join(", ")}`,
+      );
+      process.exit(1);
+    }
     await apiPost("/setup-api/kv", {
       key: "ui:pending-action",
       value: JSON.stringify({ type: "open_app", appId, ts: Date.now() }),
     });
-    console.log(`✅ Opening ${appId} on desktop.`);
+    // The tick is a CLAIM, and for an `external` app it is not true: the
+    // desktop window.open()s that one from its poll, where a popup blocker
+    // drops it silently. `ui_open_app` hedges; this posts the same action to
+    // the same ring, so it says the same sentence — from the same function, on
+    // BOTH branches, or the two surfaces drift again the next time one of them
+    // gains a reason to hedge.
+    console.log(openedAppLine(builtIn.find((a) => a.id === appId), appId));
 
   } else if (cmd === "app" && sub === "list") {
-    // The list is EDITION-dependent: a Hermes device has no OpenClaw chat app
+    // The list is HARNESS-dependent: a Hermes device has no OpenClaw chat app
     // and no app store, and printing them sends the user to a window that
-    // cannot open. Resolved from the root-owned edition lock, same as the app.
+    // cannot open. Same resolution as `app open` above, so the list and the
+    // gate can never name different apps.
     const edition = installEdition();
-    const harness = edition === "hermes" ? "hermes" : "openclaw";
-    console.log(`Built-in apps (${edition} edition):`);
+    const harness = await openHarness();
+    console.log(
+      harness === null
+        ? `Built-in apps (${edition} edition, harness undetermined):`
+        : edition === harness
+          ? `Built-in apps (${edition} edition):`
+          : `Built-in apps (${edition} edition, running ${harness}):`,
+    );
     for (const app of builtInApps(harness)) console.log(`  ${app.id} — ${app.name}`);
+    if (harness === null) console.log(`  (${UNKNOWN_HARNESS_NOTE})`);
 
   } else if (cmd === "edition") {
     console.log(installEdition());

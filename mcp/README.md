@@ -47,13 +47,27 @@ To check a device: `hermes mcp list` (or `openclaw mcp status`) should name
 A ClawBox ships as an **OpenClaw** device or a **Hermes** device. They have
 different agents, different capability stores, and different backing routes.
 The edition is resolved **once at startup** from `readEdition()`
-(`src/lib/edition-source.ts` → the root-owned `/etc/clawbox/edition.env`);
-only the unlocked `dual` edition falls through to one
-`GET /setup-api/harness/active`. If the lock file **exists but cannot be read**,
-the MCP registers the *smaller* Hermes set and logs it: `readEdition()` defaults
-to `openclaw`, which is conservative for the app (the non-premium SKU) and the
-opposite here — `openclaw` is the only edition carrying `bash`, `write_file` and
-`grep`. An **absent** lock file is a different case (dev boxes, CI) and keeps the
+(`src/lib/edition-source.ts` → the root-owned `/etc/clawbox/edition.env`).
+`main()` makes **one** `GET /setup-api/harness/active` — for the unlocked `dual`
+edition, the only case where the device knows something the lock does not — and
+hands that answer to both questions it settles: `resolveAppHarness()` returns it
+as the APP harness, and `resolveEdition(appHarness)` is synchronous and cannot
+ask again. Two probes could disagree, and did.
+
+If the lock file **exists but cannot be read** the two questions part company,
+because their answers are shaped differently:
+
+* the **tool set** registers the *smaller* Hermes set and logs it. `readEdition()`
+  defaults to `openclaw`, which is conservative for the app (the non-premium SKU)
+  and the opposite here — `openclaw` is the only edition carrying `bash`,
+  `write_file` and `grep`. The two sets are nested, so a doubt has a safe side.
+* the **app harness** answers `null` and both harness-only sets are hidden, with
+  the reason said out loud (`UNKNOWN_HARNESS_NOTE`). The app sets are *not*
+  nested, so there is no safe side to fail onto. The device is not asked in this
+  state: `/setup-api/harness/active` resolves through `readEdition()` too, so it
+  can only echo the default this process already failed to read.
+
+An **absent** lock file is a different case (dev boxes, CI) and keeps the
 documented `CLAWBOX_EDITION` fallback.
 
 A tool that cannot work on the running edition **is not registered**. It is not
@@ -652,7 +666,7 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
 ## Layout
 
 ```
-mcp/clawbox-mcp.ts     entry: resolve edition → probe capabilities → register → connect
+mcp/clawbox-mcp.ts     entry: resolve app harness (one probe) → resolve edition → probe capabilities → register → connect
 mcp/check-tools.ts     surface check; run after any change here
 mcp/clawbox-cli.ts     shell-callable wrapper (clawbox webapp/app/notify/system/code/edition)
 mcp/lib/edition.ts     edition resolution (imports readEdition, never re-implements it)
@@ -672,7 +686,8 @@ mcp/tools/coding-agent.ts
 **Import rule for `mcp/**`:** a `src/lib` module may be imported only if its
 *entire transitive* import graph is relative paths + node builtins. Verified
 safe: `edition-source`, `file-guard` (→ `config-store`), `hermes-skills`,
-`hermes-reasoning`, `hermes-providers`. Anything using the `@/` alias is
+`hermes-reasoning`, `hermes-providers`, `local-model-profile`,
+`desktop-app-editions`. Anything using the `@/` alias is
 forbidden — bun resolves it inconsistently for files outside the root tsconfig,
 and it drags server-only Next.js code into this stdio process.
 `mcp/tsconfig.json` encodes exactly this list.

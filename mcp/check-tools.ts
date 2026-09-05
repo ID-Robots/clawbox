@@ -58,7 +58,10 @@ async function main(): Promise<void> {
   const byEdition: Record<string, RegisteredToolInfo[]> = {};
 
   for (const edition of ["openclaw", "hermes"] as const) {
-    const { reg } = await buildServer(edition, "full");
+    // The app harness is the edition being simulated: this walks each
+    // edition's tool list, so an app gate resolving to anything else would
+    // describe a box that does not exist.
+    const { reg } = await buildServer(edition, "full", edition);
     const tools = reg.list();
     byEdition[edition] = tools;
     for (const tool of tools) problems.push(...contractViolations(tool), ...schemaShapeViolations(tool));
