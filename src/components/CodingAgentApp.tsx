@@ -858,6 +858,9 @@ export default function CodingAgentApp() {
    *  the way out of it, the terminal, the backup. */
   /** The Live view switch: only while the run runs, since the view is the
    *  browser it drives and the terminal it writes. */
+  /** A row's glyph buttons — terminal, back up, details — one size, one row. */
+  const ROW_ICON_BUTTON = "h-7 w-7 inline-flex items-center justify-center rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 hover:text-white disabled:opacity-50";
+
   const runControls = (run: Run, where: "row" | "page") => {
     const action = RUN_ACTION[run.status];
     // Resume in a terminal is for a run that has STOPPED; a live run's
@@ -909,7 +912,7 @@ export default function CodingAgentApp() {
             data-testid={`coding-agent-terminal-${run.id}`}
             title={terminalLabel}
             aria-label={terminalLabel}
-            className="h-7 w-7 inline-flex items-center justify-center rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 hover:text-white"
+            className={ROW_ICON_BUTTON}
           >
             <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
           </button>
@@ -924,7 +927,19 @@ export default function CodingAgentApp() {
             {terminalLabel}
           </button>
         ))}
-        {github?.connected && run.commit && (
+        {github?.connected && run.commit && (where === "row" ? (
+          <button
+            type="button"
+            onClick={() => void backup({ projectId: run.projectId, directory: run.directory }, run.id)}
+            disabled={busy === `backup-${run.id}`}
+            data-testid={`coding-agent-backup-${run.id}`}
+            title={busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+            aria-label={busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+            className={ROW_ICON_BUTTON}
+          >
+            <span className={`material-symbols-rounded ${busy === `backup-${run.id}` ? "animate-spin" : ""}`} style={{ fontSize: 16 }} aria-hidden="true">{busy === `backup-${run.id}` ? "progress_activity" : "cloud_upload"}</span>
+          </button>
+        ) : (
           <button
             type="button"
             onClick={() => void backup({ projectId: run.projectId, directory: run.directory }, run.id)}
@@ -934,7 +949,7 @@ export default function CodingAgentApp() {
           >
             {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
           </button>
-        )}
+        ))}
       </>
     );
   };
@@ -1058,22 +1073,22 @@ export default function CodingAgentApp() {
                         </p>
                       )}
                     </div>
-                    <div className="flex flex-col items-end gap-1 shrink-0">
-                      {RUN_ACTION[run.status] ? (
-                        <div className="flex gap-1">{runControls(run, "row")}</div>
-                      ) : (
-                        runControls(run, "row")
-                      )}
+                    {/* One row of controls: a live run's Pause/Stop as words,
+                        then the glyphs — terminal, back up, details — the
+                        same size, side by side. */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {runControls(run, "row")}
                       {/* The run's own page: its figures, its summary, its
-                          evidence. A row used to unfold in place instead. */}
+                          evidence. The row itself opens it too. */}
                       <button
                         type="button"
                         onClick={() => showRun(run.id)}
                         data-testid={`coding-agent-details-${run.id}`}
-                        className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20 inline-flex items-center gap-0.5"
+                        title={t("codingAgent.showDetails")}
+                        aria-label={t("codingAgent.showDetails")}
+                        className={ROW_ICON_BUTTON}
                       >
-                        {t("codingAgent.showDetails")}
-                        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">chevron_right</span>
+                        <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
                       </button>
                     </div>
                   </div>

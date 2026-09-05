@@ -853,7 +853,7 @@ describe("CodingAgentApp", () => {
       expect(within(bare).queryByTestId("coding-agent-run-activity-time")).toBeNull();
     });
 
-    it("opens the run from anywhere on its row, but not from a control on it; the terminal control is a glyph and Show details a link", async () => {
+    it("opens the run from anywhere on its row, but not from a control on it; terminal, back up and details are three glyphs in one row", async () => {
       const paused = { ...RUN, id: "run-rowpause", status: "paused", sessionId: "sess-1" };
       stubFetch({ enabled: true, readiness: READY }, [paused], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
@@ -863,16 +863,33 @@ describe("CodingAgentApp", () => {
       const terminal = within(row).getByTestId("coding-agent-terminal-run-rowpause");
       expect(terminal).toHaveAttribute("aria-label", translations.en["codingAgent.openResume"]);
       expect(terminal.textContent).toBe("terminal");
-      // Show details: a link, not a button chrome.
+      // Show details: a glyph the same size as the terminal's, named in full.
       const details = within(row).getByTestId("coding-agent-details-run-rowpause");
-      expect(details.className).toContain("underline");
-      expect(details.className).not.toContain("border");
+      expect(details).toHaveAttribute("aria-label", translations.en["codingAgent.showDetails"]);
+      expect(details.textContent).toBe("chevron_right");
+      expect(details.className).toBe(terminal.className);
+      // The two sit in one row of controls.
+      expect(details.parentElement).toBe(terminal.parentElement);
       // A click on a control does not open the run…
       fireEvent.click(within(row).getByTestId("coding-agent-resume-run-rowpause"));
       expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
       // …a click on the row itself does.
       fireEvent.click(within(row).getByText(RUN.task.slice(0, 20), { exact: false }));
       expect(await screen.findByTestId("coding-agent-run-page")).toBeInTheDocument();
+    });
+
+    it("backs up from a glyph in the same row once GitHub is connected and the run has a commit", async () => {
+      const done = { ...RUN, id: "run-rowdone", commit: "caea00d" };
+      stubFetch({ enabled: true, readiness: READY }, [done], { projects: [SITE_PROJECT], github: { installed: true, connected: true, login: "yalexx", loginCommand: "gh auth login" } });
+      render(<CodingAgentApp />);
+      await openRuns();
+      const row = await screen.findByTestId("coding-agent-run-row-run-rowdone");
+      const backup = await within(row).findByTestId("coding-agent-backup-run-rowdone");
+      expect(backup).toHaveAttribute("aria-label", translations.en["codingAgent.backup"]);
+      expect(backup.textContent).toBe("cloud_upload");
+      const details = within(row).getByTestId("coding-agent-details-run-rowdone");
+      expect(backup.className).toBe(details.className);
+      expect(backup.parentElement).toBe(details.parentElement);
     });
 
     it("breathes on a running badge and counts the tokens up rather than jumping", async () => {
