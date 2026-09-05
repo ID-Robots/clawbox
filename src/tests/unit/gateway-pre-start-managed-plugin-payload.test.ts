@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testEnv } from "@/tests/helpers/env";
+import { OFFICIAL_CHANNEL_PLUGINS } from "@/lib/openclaw-channels";
 
 // Starts a real process (bash / python3): vitest's 5 s test and 10 s hook
 // defaults are not enough on a loaded CI runner. See
@@ -162,6 +163,23 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       enableFails: ["deepseek"],
     });
     expect(argv).toEqual(["plugins enable deepseek --accept-capabilities"]);
+  });
+
+  it("repairs exactly the channel plugins the Settings panel installs", () => {
+    // The shell `case` and OFFICIAL_CHANNEL_PLUGINS are one list in two
+    // languages: a channel added to the panel and forgotten here is a box that
+    // loses that channel — and its gateway — on the next core bump, with no
+    // reboot that heals it.
+    const src = readFileSync(SCRIPT, "utf-8");
+    const shellCase = /\n\s+([a-z|-]+)\)\n\s+\[ -n "\$OPENCLAW_TARGET" \]/.exec(src);
+    expect(shellCase, "the payload-repair case arm was not found").not.toBeNull();
+    expect(shellCase?.[1].split("|").sort())
+      .toEqual(Object.keys(OFFICIAL_CHANNEL_PLUGINS).sort());
+    for (const [id, npmPackage] of Object.entries(OFFICIAL_CHANNEL_PLUGINS)) {
+      // The shell builds the spec as `@openclaw/<id>`, so a package that is not
+      // named after its plugin id would be silently mis-installed.
+      expect(npmPackage).toBe(`@openclaw/${id}`);
+    }
   });
 
   it("does not guess a spec when the core target is unknown", () => {

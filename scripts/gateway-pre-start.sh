@@ -2656,6 +2656,43 @@ MANAGEDPY
   for MANAGED_PLUGIN in $MANAGED_ENABLED_PLUGINS; do
     if timeout 60 "$OPENCLAW_BIN" plugins enable "$MANAGED_PLUGIN" --accept-capabilities </dev/null >/dev/null 2>&1; then
       echo "  $MANAGED_PLUGIN plugin capabilities accepted/current"
+      continue
+    fi
+    # `enable` could not answer, so the package is very likely not on disk to be
+    # consented to (TASK-602). Plugin payloads live in npm project directories
+    # keyed to the core GENERATION, so a core upgrade strands everything
+    # installed under the old one; `enable` then says "Plugin not found" and
+    # this loop used to warn and let the gateway try again with nothing
+    # changed. The codex block above already reinstalls its own payload pinned
+    # to the core target for exactly this state — this is the same repair for
+    # the channel plugins the Settings panel installs, and the reason a REBOOT
+    # now heals a box the 2026-09-01 outage left dead (src/lib/updater.ts does
+    # it during an update; an owner reboots long before he updates).
+    #
+    # Only where ClawBox knows the npm package AND the core pin: an unpinned
+    # `@openclaw/<id>` resolves @latest, which is how the codex plugin drifted
+    # ahead of the pinned core and crashed every chat. deepseek comes from
+    # ClawHub and clawbox-email-directives is copied out of the checkout — both
+    # have their own block in this script, and an `@openclaw/<id>` guess would
+    # fetch a package that is not the plugin. Same list as
+    # OFFICIAL_CHANNEL_PLUGINS in src/lib/openclaw-channels.ts, which
+    # gateway-pre-start-managed-plugin-payload.test.ts holds it to.
+    #
+    # Time-boxed at the codex install's own 120 s, and reachable for at most
+    # the two ids below, so this adds at most 4 minutes to a BLOCKING
+    # ExecStartPre and only on a box whose gateway would not come up at all.
+    MANAGED_PLUGIN_KEY="${MANAGED_PLUGIN#@openclaw/}"
+    MANAGED_PLUGIN_KEY="${MANAGED_PLUGIN_KEY#openclaw-}"
+    MANAGED_PLUGIN_SPEC=""
+    case "$MANAGED_PLUGIN_KEY" in
+      discord|whatsapp)
+        [ -n "$OPENCLAW_TARGET" ] \
+          && MANAGED_PLUGIN_SPEC="@openclaw/$MANAGED_PLUGIN_KEY@$OPENCLAW_TARGET"
+        ;;
+    esac
+    if [ -n "$MANAGED_PLUGIN_SPEC" ] \
+      && timeout 120 "$OPENCLAW_BIN" plugins install "$MANAGED_PLUGIN_SPEC" --force --accept-capabilities </dev/null >/dev/null 2>&1; then
+      echo "  $MANAGED_PLUGIN plugin payload reinstalled ($MANAGED_PLUGIN_SPEC)"
     else
       echo "  WARN: could not confirm $MANAGED_PLUGIN plugin capabilities; gateway readiness may remain blocked"
     fi
