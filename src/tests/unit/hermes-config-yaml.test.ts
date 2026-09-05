@@ -194,16 +194,19 @@ describe("patchHermesConfig on the real 3175-byte Hermes config", () => {
 });
 
 /**
- * What a removal that SUCCEEDED actually leaves in the file.
+ * The two shapes the read-back proof has to answer for, and got wrong.
  *
- * `patchHermesConfig`'s CLI fallback runs `hermes config unset`, which
- * re-serialises config.yaml through PyYAML — and PyYAML writes a mapping it has
- * just emptied as the inline `{}`. Emptying `providers.clawlocal` is what
- * removing the local model does, and on a box whose only provider it was,
- * emptying `providers` itself is the normal outcome. So `{}` is the shape of
- * success on the one path the read-back proof exists for, and a reader that
- * refuses over it answers "could not be confirmed" to a removal that fully
- * landed — for ever, because the retry reads the same file.
+ * An EMPTY MAPPING is written `{}` by PyYAML — the loader `hermes config`
+ * re-serialises this file with (measured on a Hermes box, PyYAML 5.4.1:
+ * `safe_dump({"providers": {}})` → `providers: {}\n`) — and Hermes' own shipped
+ * `cli-config.yaml.example` carries two of them. Our reader THREW on one
+ * anywhere along the path, so `providers: {}` made `providers.clawlocal.base_url`
+ * "we could not look" instead of the plain "not there" the file was stating,
+ * and a removal that had landed was answered "could not be confirmed" — for
+ * ever, because the retry reads the same file. (The pinned 0.20.5 `unset` does
+ * prune a container it empties, `hermes_cli/config.py:1157-1174`, so this is
+ * not what a COMPLETE unset leaves — it is what any other writer of an empty
+ * mapping leaves.)
  *
  * The same reader was blind in the other direction: a `models:` catalogue
  * written as a block or a list — the shape Hermes' own discovery produces — is
@@ -217,14 +220,14 @@ describe("resolveHermesConfigValue over the shapes a removal leaves behind", () 
     return await resolveHermesConfigValue(key);
   }
 
-  it("reads a provider PyYAML emptied to {} as gone, not as unreadable", async () => {
+  it("reads a key under an empty {} mapping as gone, not as unreadable", async () => {
     expect(
       await readBack("providers:\n  clawlocal: {}\nmodel:\n  provider: openrouter\n",
         "providers.clawlocal.base_url"),
     ).toEqual({ state: "absent" });
   });
 
-  it("reads an emptied providers block as gone", async () => {
+  it("reads a key under an empty providers block as gone", async () => {
     expect(await readBack("providers: {}\n", "providers.clawlocal.models")).toEqual({ state: "absent" });
   });
 

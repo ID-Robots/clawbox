@@ -317,8 +317,8 @@ export async function readHermesConfigTopLevelScalar(
  *                  discovery writes into `providers.<slug>.models`), or a key
  *                  with no value at all. Still a key in the file.
  *   "absent"     — the file parsed and the key is not there — including under a
- *                  parent PyYAML has emptied to the inline `{}`, which is what
- *                  a successful `hermes config unset` leaves behind.
+ *                  parent written as the inline `{}`, since a mapping with no
+ *                  members cannot hold a member by that name.
  *   "unreadable" — the file could not be read (EACCES), or the path could not
  *                  be resolved in it (a non-empty flow mapping, a duplicate
  *                  key). Not an answer, and never to be treated as one.

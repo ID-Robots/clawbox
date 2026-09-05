@@ -417,10 +417,12 @@ const EMPTY_FLOW_RE = /^(?:\{\s*\}|\[\s*\])$/;
  * `providers.clawlocal.models:` catalogue (the shape Hermes' own model
  * discovery writes) reads as "not there". And it THROWS as soon as any segment
  * on the way down carries an inline value — the empty flow mapping `{}`
- * included, which is what PyYAML emits for a mapping it has just emptied. As
- * `hermes config unset` is what empties one, `{}` is the ordinary shape of a
- * removal that fully SUCCEEDED, and refusing over it turns that success into
- * "we could not look".
+ * included, which is what PyYAML writes for ANY mapping with no members, and
+ * which Hermes' own shipped `cli-config.yaml.example` carries twice
+ * (`agent.reasoning_overrides`, `agent.personalities`). A `providers: {}` on
+ * the way to `providers.clawlocal.base_url` is a POSITIVE answer — the key
+ * cannot be there — and refusing over it reports "we could not look" about a
+ * file that just said so plainly.
  *
  * So an empty flow collection on the way down is an ANSWER here: a mapping
  * with no members cannot hold a member by that name. Anything else inline is
