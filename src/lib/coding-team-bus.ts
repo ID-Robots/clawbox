@@ -48,7 +48,7 @@ export interface Delivered {
 
 export type Subscriber = (delivered: Delivered, board: TeamBoard) => void;
 
-const TASK_ID = /^t[0-9]{1,3}$/;
+const TASK_ID = /^t[1-9][0-9]{0,2}$/;
 const RUN_ID = /^run-[a-z0-9]{8}$/;
 
 /** The shape check: a plain-English reason, or null when the message is well formed. */
@@ -122,7 +122,11 @@ export class TeamBus {
         case "alert": raiseAlert(this.board, actor, message.reason, message.task_id); break;
       }
     } catch (err) {
-      if (err instanceof BoardAccessError) return this.refuse(actor, message, err.message);
+      // A role refusal and a rule refusal ("t1 cannot go from complete to
+      // failed", "no such task") are both messages the board would not
+      // take: each is logged as an alert and refused the same way, so no
+      // caller learns of one only from a thrown Error the log never saw.
+      if (err instanceof Error) return this.refuse(actor, message, err.message);
       throw err;
     }
     saveBoard(this.board);

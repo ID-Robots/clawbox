@@ -88,14 +88,17 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
-  const gone = useRef(false);
+  // One token per read: a response that started for the previous project
+  // (or before an unmount) must not paint over the current one.
+  const request = useRef(0);
 
   const load = useCallback(async () => {
+    const mine = ++request.current;
     try {
       const res = await fetch("/setup-api/coding-agent/team", { cache: "no-store" });
       const data = await res.json().catch(() => null) as { teams?: TeamView[] } | null;
       if (!res.ok || !data?.teams) return;
-      if (gone.current) return;
+      if (mine !== request.current) return;
       setTeams(data.teams.filter((x) => (projectId ? x.projectId === projectId : x.directory === directory)));
     } catch {
       /* the card simply shows what it last read */
@@ -103,9 +106,11 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
   }, [directory, projectId]);
 
   useEffect(() => {
-    gone.current = false;
+    // The first read of the board happens here: the card has no other
+    // moment to ask, and the answer is one render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
-    return () => { gone.current = true; };
+    return () => { request.current++; };
   }, [load]);
 
   const team = teams[0] ?? null;

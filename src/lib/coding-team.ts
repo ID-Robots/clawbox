@@ -120,7 +120,9 @@ export async function startTeam(input: StartTeamInput): Promise<TeamBoard> {
   if (busy) throw new CodingAgentError("busy", `Team ${busy} is still working; wait for it to finish or stop it first.`);
   const { directory, projectId } = await resolveWorkingDirectory({ projectId: input.projectId ?? null, directory: input.directory ?? null });
 
-  const board = createBoard({ goal, projectId, directory }, OWNER);
+  // The owner's team is created in the owner's name; the assistant's by the
+  // system on its behalf — the audit says which, and the routes gate on it.
+  const board = createBoard({ goal, projectId, directory, source: input.source }, input.source === "owner" ? OWNER : SYSTEM);
   saveBoard(board);
   const bus = new TeamBus(board);
   const team: LiveTeam = { board, bus, stopRequested: false, currentRunId: null, done: Promise.resolve() };

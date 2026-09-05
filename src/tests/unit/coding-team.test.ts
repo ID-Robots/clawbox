@@ -96,8 +96,10 @@ const PLAN = JSON.stringify([
 async function finished(id: string) {
   const live = team.getTeam(id);
   // The loop runs on its own; the board on disk settles when it is done.
-  for (let i = 0; i < 200 && !["done", "failed", "stopped"].includes(team.getTeam(id)?.status ?? ""); i++) {
-    await new Promise((r) => setTimeout(r, 5));
+  // Up to twenty seconds, ten milliseconds at a time: a loaded CI runner
+  // must not turn a slow settle into a wrong verdict.
+  for (let i = 0; i < 2000 && !["done", "failed", "stopped"].includes(team.getTeam(id)?.status ?? ""); i++) {
+    await new Promise((r) => setTimeout(r, 10));
   }
   return team.getTeam(id) ?? live!;
 }
@@ -134,8 +136,10 @@ describe("a team that works", () => {
     ]);
     // The audit trail names who said what.
     const who = done.log.map((e) => `${e.actor.kind === "worker" ? `worker:${e.actor.id}` : e.actor.kind}/${e.type}`);
+    // Started by the assistant (source "agent"): created by the system on
+    // its behalf; an owner's team would read "owner/team_created".
     expect(who).toEqual([
-      "owner/team_created",
+      "system/team_created",
       "planner/task", "planner/task", "system/team_status",
       "system/task", "worker:run-00000002/status_update", "worker:run-00000002/result", "worker:run-00000002/status_update", "reviewer/review",
       "system/task", "worker:run-00000003/status_update", "worker:run-00000003/result", "worker:run-00000003/status_update", "reviewer/review",
@@ -233,10 +237,10 @@ describe("the gates", () => {
 
   it("settles a team the web server restarted under as failed, on the next read", async () => {
     const { createBoard, saveBoard } = await import("@/lib/coding-team-board");
-    const orphan = createBoard({ goal: "g", projectId: null, directory: "/p" }, { kind: "owner" });
+    const orphan = createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
     orphan.status = "working";
     saveBoard(orphan);
-    expect(team.getTeam(orphan.id)).toMatchObject({ status: "failed", error: /restarted/ });
+    expect(team.getTeam(orphan.id)).toEqual(expect.objectContaining({ status: "failed", error: expect.stringMatching(/restarted/) }));
     expect(team.listTeams().map((b) => b.id)).toEqual([orphan.id]);
     expect(team.getTeam("team-nope")).toBeNull();
     expect(team.getTeam("../x")).toBeNull();

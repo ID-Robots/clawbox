@@ -63,8 +63,11 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
     if (!Array.isArray(depends) || !depends.every((d) => typeof d === "string")) return { ok: false, reason: `Task ${id}'s depends_on is not a list of task ids.` };
     const depends_on = [...new Set(depends as string[])];
     for (const d of depends_on) {
-      const n = /^t([0-9]{1,3})$/.exec(d);
-      if (!n || Number(n[1]) < 1 || Number(n[1]) >= i + 1) return { ok: false, reason: `Task ${id} depends on ${d}, which is not an earlier task.` };
+      // Canonical ids only — t1, not t01: the board numbers tasks t1…t999 and
+      // knows no other spelling, so a plan that said `t01` would post and
+      // then never find its dependency.
+      const n = /^t([1-9][0-9]{0,2})$/.exec(d);
+      if (!n || Number(n[1]) >= i + 1) return { ok: false, reason: `Task ${id} depends on ${d}, which is not an earlier task.` };
     }
     const hint = item.files_hint === undefined ? [] : item.files_hint;
     if (!Array.isArray(hint) || !hint.every((f) => typeof f === "string")) return { ok: false, reason: `Task ${id}'s files_hint is not a list of paths.` };
@@ -73,11 +76,48 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   return { ok: true, tasks };
 }
 
+/**
+ * The first JSON array in the text that parses. A fenced block is tried
+ * first; otherwise every `[` is a candidate and its matching `]` is found
+ * by depth, string-aware — so prose like "Plan [draft]:" or a "[note]"
+ * after the array does not swallow the real one the way first-`[` to
+ * last-`]` did.
+ */
 function extractArray(text: string): string | null {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
-  const body = fenced ? fenced[1] : text;
-  const start = body.indexOf("[");
-  const end = body.lastIndexOf("]");
-  if (start === -1 || end === -1 || end < start) return null;
-  return body.slice(start, end + 1);
+  const bodies = fenced ? [fenced[1], text] : [text];
+  for (const body of bodies) {
+    for (let start = body.indexOf("["); start !== -1; start = body.indexOf("[", start + 1)) {
+      const end = matchingBracket(body, start);
+      if (end === -1) continue;
+      const candidate = body.slice(start, end + 1);
+      try {
+        if (Array.isArray(JSON.parse(candidate))) return candidate;
+      } catch {
+        // Not this one; the next `[` may be the array.
+      }
+    }
+  }
+  return null;
+}
+
+/** The index of the `]` that closes the `[` at `start`, skipping strings; -1 when unbalanced. */
+function matchingBracket(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") depth++;
+    else if (ch === "]" || ch === "}") {
+      depth--;
+      if (depth === 0) return ch === "]" ? i : -1;
+    }
+  }
+  return -1;
 }

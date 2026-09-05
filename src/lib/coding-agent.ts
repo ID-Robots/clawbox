@@ -2268,6 +2268,19 @@ export const HEADLESS_BRIEF = [
  * this says what a workflow IS for on this box — many read-only helpers in
  * one step — and names the three traps by name.
  */
+/**
+ * The brief for a run that may only READ — a team's planner. The headless
+ * brief describes Bash, the browser tools, the evidence folder and the
+ * workflow fan-out, none of which such a run has; a model told about them
+ * spends its steps on calls that are refused.
+ */
+export const READ_ONLY_BRIEF = [
+  "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
+  "Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob and the read-only helper agents, no shell, no browser and no way to write — do not try to edit, create or run anything; your ANSWER is your final message.",
+  "Delegate reading to the explorer helper when a question spans many files, and keep your own context small. You have a limited number of steps and every tool call spends one.",
+  "The task text may carry copy-paste artifacts; read past them. Your final message is delivered to the party that started you and is read by a program as well as a person: answer in exactly the form the task asks for, with nothing before or after it.",
+].join(" ");
+
 export const ULTRACODE_BRIEF = [
   "Ultracode is on and the Workflow tool is approved for this run: it is the one-step way to run many READ-ONLY helpers at once — map many files, verify many pages, review many changes — with agent(), parallel() and pipeline().",
   "Every agent() must pass agentType \"explorer\", \"tester\" or \"reviewer\" (never general-purpose, never a workflow inside a workflow, never isolation: \"worktree\" — this folder is not a git repository of its own), and the writing stays with you: shared code first, then the parts, then a workflow to check them all.",
@@ -2460,11 +2473,17 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 /** The argv handed to the wrapper. Exported for the contract test. */
 export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
   const brief = [
-    opts.effort === ULTRACODE_EFFORT ? `${HEADLESS_BRIEF} ${ULTRACODE_BRIEF}` : HEADLESS_BRIEF,
+    // A read-only run has no Bash, no browser and no Write: the brief that
+    // describes them would spend its steps on calls that are refused.
+    opts.readOnly
+      ? READ_ONLY_BRIEF
+      : (opts.effort === ULTRACODE_EFFORT ? `${HEADLESS_BRIEF} ${ULTRACODE_BRIEF}` : HEADLESS_BRIEF),
     // Only for the run that HAS the tool: a brief that described a picture
     // tool to a run without one would spend steps on a call that is not there.
-    ...(opts.run?.media?.images ? [MEDIA_BRIEF_IMAGES] : []),
-    ...(opts.run?.media?.audio ? [MEDIA_BRIEF_AUDIO] : []),
+    // A read-only run holds no media tool either (runMcpTools is skipped for
+    // it below), so it hears nothing about drawing or speaking.
+    ...(opts.run?.media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
+    ...(opts.run?.media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
     // A team's role for this run — the planner's "answer with a JSON array",
     // a worker's "this is your task among these" — after the device's own
     // words, never instead of them.

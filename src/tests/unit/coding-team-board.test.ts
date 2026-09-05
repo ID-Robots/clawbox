@@ -36,13 +36,13 @@ afterEach(() => {
 });
 
 function board() {
-  return lib.createBoard({ goal: "Build the invoice app", projectId: null, directory: "/home/clawbox/Projects/inv" }, OWNER);
+  return lib.createBoard({ goal: "Build the invoice app", projectId: null, directory: "/home/clawbox/Projects/inv", source: "owner" }, OWNER);
 }
 
 describe("who may do what", () => {
   it("only the owner (or the orchestrator) creates a team", () => {
-    expect(() => lib.createBoard({ goal: "x", projectId: null, directory: "/p" }, PLANNER)).toThrow(lib.BoardAccessError);
-    expect(lib.createBoard({ goal: "x", projectId: null, directory: "/p" }, SYSTEM).status).toBe("planning");
+    expect(() => lib.createBoard({ goal: "x", projectId: null, directory: "/p", source: "owner" }, PLANNER)).toThrow(lib.BoardAccessError);
+    expect(lib.createBoard({ goal: "x", projectId: null, directory: "/p", source: "agent" }, SYSTEM).status).toBe("planning");
   });
 
   it("only the planner posts tasks, numbered in order, with dependencies that exist", () => {
@@ -134,6 +134,29 @@ describe("the audit log and the file", () => {
     expect(lib.listBoards().map((x) => x.id)).toEqual([b.id]);
     expect(lib.loadBoard("team-nope")).toBeNull();
     expect(lib.loadBoard("../etc/passwd")).toBeNull();
+  });
+
+  it("refuses a file that parses but is not a board — a task without depends_on, a status outside the machine", () => {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "do it" });
+    lib.saveBoard(b);
+    const file = path.join(root, "data", "coding-team", `${b.id}.json`);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    delete raw.tasks[0].depends_on;
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)).toBeNull();
+    raw.tasks[0].depends_on = [];
+    raw.status = "dancing";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)).toBeNull();
+    raw.status = "working";
+    raw.tasks[0].task_id = "t01";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)).toBeNull();
+    // Put right, it reads back — with the source it was saved with.
+    raw.tasks[0].task_id = "t1";
+    fs.writeFileSync(file, JSON.stringify(raw));
+    expect(lib.loadBoard(b.id)).toMatchObject({ status: "working", source: "owner", tasks: [{ task_id: "t1", depends_on: [] }] });
   });
 
   it("caps the log, keeping the newest", () => {

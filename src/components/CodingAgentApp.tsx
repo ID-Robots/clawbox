@@ -2023,7 +2023,7 @@ export default function CodingAgentApp() {
               {/* The folder itself, and what changed in it. */}
               <CodingProjectWorkspace key={projectQuery} query={projectQuery} live={projectLive} />
               {/* A coding team on this folder: the goal, the board, the log. */}
-              <CodingTeamCard directory={p.directory} projectId={p.kind === "codeProject" ? p.folder : null} onOpenRun={(id) => showRun(id)} />
+              <CodingTeamCard key={p.directory} directory={p.directory} projectId={p.kind === "codeProject" ? p.folder : null} onOpenRun={(id) => showRun(id)} />
             </div>
             {runsSection}
           </>);

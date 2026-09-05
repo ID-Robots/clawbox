@@ -39,6 +39,11 @@ export const MAX_RESULT_CHARS = 6_000;
 
 export type TeamStatus = "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
 export type TaskStatus = "pending" | "in_progress" | "complete" | "failed" | "rejected";
+/** Who asked for the team: the person (a session cookie) or the assistant (the MCP bearer). */
+export type TeamSource = "owner" | "agent";
+
+const TEAM_STATUSES: readonly TeamStatus[] = ["planning", "working", "reviewing", "done", "failed", "stopped"];
+const TASK_STATUSES: readonly TaskStatus[] = ["pending", "in_progress", "complete", "failed", "rejected"];
 
 /** Who is making a change. The kind is what the board checks; a worker's id is the run it is. */
 export type Actor =
@@ -81,6 +86,13 @@ export interface TeamBoard {
   goal: string;
   projectId: string | null;
   directory: string;
+  /**
+   * Who started it. An owner's team is the owner's to read and stop: the
+   * MCP bearer — the assistant, and so anything that prompt-injected it —
+   * may only see and stop the teams it started itself, the way an
+   * owner-sourced run answers 403 to the bearer.
+   */
+  source: TeamSource;
   status: TeamStatus;
   /** The planner's run, once it started. */
   plannerRunId: string | null;
@@ -111,7 +123,8 @@ export function newTeamId(): string {
 }
 
 export const TEAM_ID_RE = /^team-[a-z0-9]{8}$/;
-export const TASK_ID_RE = /^t[0-9]{1,3}$/;
+/** t1 … t999, the way the board numbers them — never `t01`, which is not a task on any board. */
+export const TASK_ID_RE = /^t[1-9][0-9]{0,2}$/;
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
@@ -140,7 +153,7 @@ export function loadBoard(id: string): TeamBoard | null {
   if (!TEAM_ID_RE.test(id)) return null;
   try {
     const raw = JSON.parse(fs.readFileSync(boardPath(id), "utf8")) as unknown;
-    return isBoard(raw) ? raw : null;
+    return normalizeBoard(raw);
   } catch {
     return null;
   }
@@ -162,16 +175,80 @@ export function listBoards(): TeamBoard[] {
   return out.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-function isBoard(raw: unknown): raw is TeamBoard {
-  if (!raw || typeof raw !== "object") return false;
+/**
+ * A board read back from disk, field by field — a file that parses is not
+ * yet a board: a task without `depends_on` would throw in readyTasks, a
+ * status outside the machine would never settle. Anything malformed is
+ * null, never repaired into a team that runs.
+ */
+function normalizeBoard(raw: unknown): TeamBoard | null {
+  if (!raw || typeof raw !== "object") return null;
   const b = raw as Record<string, unknown>;
-  return typeof b.id === "string" && TEAM_ID_RE.test(b.id) && typeof b.goal === "string"
-    && typeof b.directory === "string" && Array.isArray(b.tasks) && Array.isArray(b.log) && typeof b.status === "string";
+  if (typeof b.id !== "string" || !TEAM_ID_RE.test(b.id)) return null;
+  if (typeof b.goal !== "string" || typeof b.directory !== "string") return null;
+  if (typeof b.status !== "string" || !(TEAM_STATUSES as readonly string[]).includes(b.status)) return null;
+  if (!Array.isArray(b.tasks) || !Array.isArray(b.log)) return null;
+  const tasks: TeamTask[] = [];
+  for (const t of b.tasks as unknown[]) {
+    const task = normalizeTask(t);
+    if (!task) return null;
+    tasks.push(task);
+  }
+  const log: LogEntry[] = [];
+  for (const e of b.log as unknown[]) {
+    if (!e || typeof e !== "object") return null;
+    const entry = e as Record<string, unknown>;
+    const actor = entry.actor as Record<string, unknown> | undefined;
+    if (typeof entry.ts !== "number" || typeof entry.type !== "string" || typeof entry.message !== "string") return null;
+    if (!actor || typeof actor.kind !== "string") return null;
+    log.push(entry as unknown as LogEntry);
+  }
+  return {
+    id: b.id,
+    goal: b.goal,
+    projectId: typeof b.projectId === "string" ? b.projectId : null,
+    directory: b.directory,
+    source: b.source === "agent" ? "agent" : "owner",
+    status: b.status as TeamStatus,
+    plannerRunId: typeof b.plannerRunId === "string" ? b.plannerRunId : null,
+    tasks,
+    log,
+    alerts: typeof b.alerts === "number" ? b.alerts : 0,
+    error: typeof b.error === "string" ? b.error : null,
+    createdAt: typeof b.createdAt === "number" ? b.createdAt : 0,
+    updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
+  };
+}
+
+function normalizeTask(raw: unknown): TeamTask | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = raw as Record<string, unknown>;
+  if (typeof t.task_id !== "string" || !TASK_ID_RE.test(t.task_id)) return null;
+  if (typeof t.task_description !== "string") return null;
+  if (typeof t.status !== "string" || !(TASK_STATUSES as readonly string[]).includes(t.status)) return null;
+  if (!Array.isArray(t.depends_on) || !t.depends_on.every((d) => typeof d === "string" && TASK_ID_RE.test(d))) return null;
+  const review = t.review as Record<string, unknown> | null | undefined;
+  if (review !== null && review !== undefined) {
+    if (typeof review !== "object" || (review.verdict !== "accepted" && review.verdict !== "rejected") || typeof review.notes !== "string") return null;
+  }
+  return {
+    task_id: t.task_id,
+    task_description: t.task_description,
+    assigned_to: typeof t.assigned_to === "string" ? t.assigned_to : null,
+    status: t.status as TaskStatus,
+    result: typeof t.result === "string" ? t.result : null,
+    depends_on: t.depends_on as string[],
+    files_hint: Array.isArray(t.files_hint) ? (t.files_hint as unknown[]).filter((f): f is string => typeof f === "string") : [],
+    review: review ? { verdict: review.verdict as "accepted" | "rejected", notes: review.notes as string, at: typeof review.at === "number" ? review.at : 0 } : null,
+    attempts: typeof t.attempts === "number" ? t.attempts : 0,
+    created_at: typeof t.created_at === "number" ? t.created_at : 0,
+    updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
+  };
 }
 
 // ─── Mutations (every one role-checked and logged) ───────────────────────────
 
-export function createBoard(input: { goal: string; projectId: string | null; directory: string }, actor: Actor): TeamBoard {
+export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource }, actor: Actor): TeamBoard {
   if (actor.kind !== "owner" && actor.kind !== "system") {
     throw new BoardAccessError(actor, "create", `Only the owner starts a team; ${describeActor(actor)} may not.`);
   }
@@ -184,6 +261,7 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     goal,
     projectId: input.projectId,
     directory: input.directory,
+    source: input.source,
     status: "planning",
     plannerRunId: null,
     tasks: [],

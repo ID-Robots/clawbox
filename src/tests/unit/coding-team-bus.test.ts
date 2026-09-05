@@ -50,7 +50,7 @@ describe("the protocol", () => {
 
 describe("sending", () => {
   it("applies an accepted message, persists the board and delivers it to subscribers", () => {
-    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p" }, { kind: "owner" });
+    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
     const bus = new busLib.TeamBus(board);
     const seen: string[] = [];
     bus.subscribe((d) => seen.push(`${d.actor.kind}:${d.message.type}`));
@@ -70,7 +70,7 @@ describe("sending", () => {
   });
 
   it("refuses a malformed message, a role that may not send it, and a worker speaking for another — each logged as an alert", () => {
-    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p" }, { kind: "owner" });
+    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
     const bus = new busLib.TeamBus(board);
     const delivered: string[] = [];
     bus.subscribe((d) => delivered.push(d.message.type));
@@ -95,8 +95,22 @@ describe("sending", () => {
     expect(boardLib.loadBoard(board.id)?.alerts).toBe(4);
   });
 
+  it("logs a rule refusal — a status that cannot follow, a task that is not there — as an alert too", () => {
+    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
+    const bus = new busLib.TeamBus(board);
+    bus.send({ kind: "planner" }, { type: "task", task_description: "real" });
+    bus.send({ kind: "system" }, { type: "assign", task_id: "t1", worker_id: W.id });
+    expect(() => bus.send(W, { type: "status_update", task_id: "t1", status: "complete", worker_id: W.id })).toThrow(/cannot go from pending to complete/);
+    expect(() => bus.send({ kind: "system" }, { type: "assign", task_id: "t7", worker_id: W.id })).toThrow(/no task t7/);
+    const alerts = board.log.filter((e) => e.type === "alert").map((e) => e.message);
+    expect(alerts).toEqual([
+      expect.stringMatching(/Refused status_update from worker run-aaaaaaaa: Task t1 cannot go from pending to complete/),
+      expect.stringMatching(/Refused assign from system: There is no task t7/),
+    ]);
+  });
+
   it("a subscriber that throws does not stop the others or the send", () => {
-    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p" }, { kind: "owner" });
+    const board = boardLib.createBoard({ goal: "g", projectId: null, directory: "/p", source: "owner" }, { kind: "owner" });
     const bus = new busLib.TeamBus(board);
     const seen: string[] = [];
     bus.subscribe(() => { throw new Error("boom"); });

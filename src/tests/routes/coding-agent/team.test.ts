@@ -25,7 +25,8 @@ let GET: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let STOP: (req: Request) => Promise<Response>;
 
-const BOARD = { id: "team-abcd1234", goal: "g", status: "planning", tasks: [], log: [], alerts: 0, error: null };
+const BOARD = { id: "team-abcd1234", goal: "g", source: "agent", status: "planning", tasks: [], log: [], alerts: 0, error: null };
+const OWNERS = { ...BOARD, id: "team-owner001", source: "owner" };
 
 function req(path: string, body?: unknown): Request {
   return new Request(`http://localhost/setup-api/coding-agent/${path}`, body === undefined
@@ -64,6 +65,21 @@ describe("GET", () => {
     requireSession.mockResolvedValueOnce(new Response("{}", { status: 401 }));
     expect((await GET(req("team"))).status).toBe(401);
     expect(team.listTeams).not.toHaveBeenCalled();
+  });
+
+  it("shows the bearer only the teams it started, and refuses an owner's team with 403", async () => {
+    team.listTeams.mockReturnValue([BOARD, OWNERS]);
+    team.getTeam.mockImplementation((id: string) => (id === OWNERS.id ? OWNERS : BOARD));
+    // The bearer: the owner's team is neither listed nor readable.
+    expect((await (await GET(req("team"))).json()).teams.map((t: { id: string }) => t.id)).toEqual([BOARD.id]);
+    const refused = await GET(req(`team?id=${OWNERS.id}`));
+    expect(refused.status).toBe(403);
+    expect((await refused.json()).kind).toBe("owner_only");
+    expect((await GET(req(`team?id=${BOARD.id}`))).status).toBe(200);
+    // The owner: everything.
+    hasOwnerSession.mockResolvedValue(true);
+    expect((await (await GET(req("team"))).json()).teams).toHaveLength(2);
+    expect((await GET(req(`team?id=${OWNERS.id}`))).status).toBe(200);
   });
 });
 
@@ -107,10 +123,21 @@ describe("POST stop", () => {
     expect(team.stopTeam).toHaveBeenCalledWith("team-abcd1234");
   });
 
-  it("needs an id, and passes not_found through", async () => {
+  it("needs an id, and answers 404 for a team that is not there", async () => {
     expect((await STOP(req("team/stop", {}))).status).toBe(400);
-    const { CodingAgentError } = await import("@/lib/coding-agent");
-    team.stopTeam.mockImplementationOnce(() => { throw new CodingAgentError("not_found", "no such team"); });
+    team.getTeam.mockReturnValueOnce(null);
     expect((await STOP(req("team/stop", { teamId: "team-zzzz0000" }))).status).toBe(404);
+    expect(team.stopTeam).not.toHaveBeenCalled();
+  });
+
+  it("refuses the bearer stopping an owner's team, and lets the owner", async () => {
+    team.getTeam.mockReturnValue(OWNERS);
+    const refused = await STOP(req("team/stop", { id: OWNERS.id }));
+    expect(refused.status).toBe(403);
+    expect((await refused.json()).kind).toBe("owner_only");
+    expect(team.stopTeam).not.toHaveBeenCalled();
+    hasOwnerSession.mockResolvedValueOnce(true);
+    expect((await STOP(req("team/stop", { id: OWNERS.id }))).status).toBe(200);
+    expect(team.stopTeam).toHaveBeenCalledWith(OWNERS.id);
   });
 });
