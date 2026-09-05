@@ -323,9 +323,12 @@ export function workerTask(board: TeamBoard, task: TeamTask): string {
   const done = board.tasks
     .filter((t) => t.task_id !== task.task_id && t.status === "complete" && t.result)
     .map((t) => `- ${t.task_id}: ${firstLine(t.result ?? "", RESULT_QUOTE_CHARS)}`);
+  // The task line comes FIRST: a run's commit subject and its row in the
+  // app are the task text's first line, and "Team goal: …" four times over
+  // told the owner nothing about which worker did what.
   const parts = [
-    `Team goal: ${board.goal}`,
     `Your task (${task.task_id} of ${board.tasks.length}): ${task.task_description}`,
+    `Team goal: ${board.goal}`,
   ];
   if (task.files_hint.length) parts.push(`Files this task is expected to touch: ${task.files_hint.join(", ")}`);
   if (done.length) parts.push(`Already done by teammates:\n${done.join("\n")}`);
