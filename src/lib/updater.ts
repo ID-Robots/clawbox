@@ -20,6 +20,7 @@ import { startRootStep } from "./root-step-runner";
 import { setUpdateLock, clearUpdateLock } from "./update-lock";
 import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
+import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -815,6 +816,21 @@ const LEGACY_GATEWAY_BLOCKER_RE =
 // for. Not global: `.match()` and `.test()` share this object.
 const PLUGIN_CAPABILITY_CONSENT_RE =
   /Plugin\s+["']?([A-Za-z0-9@._/-]+?)["']?\s+requires capability consent/i;
+// The OTHER refusal, and the one a core upgrade produces (TASK-602). Plugin
+// payloads live under `~/.openclaw/npm/projects/openclaw-<id>-<hash>__
+// openclaw-generation__g-<generation>`, keyed to the core that installed them,
+// so a core bump leaves them unreachable. The core's startup verification then
+// refuses readiness with its own sentence — `formatStartupPluginSmokeFailure`
+// in the installed 2026.8.1 bundle prints
+//
+//     - Plugin "discord": configured plugin payload verification failed
+//       (<reason>): <detail>. Run `openclaw update repair` to retry plugin repair.
+//
+// — and consent is not what is missing: the package is not on disk to consent
+// to. Matched on the core's own words rather than on the reason code, which is
+// an internal enum. Not global, for the same reason as the pattern above.
+const PLUGIN_PAYLOAD_VERIFICATION_RE =
+  /Plugin\s+["']?([A-Za-z0-9@._/-]+?)["']?\s*:\s*configured plugin payload verification failed/i;
 const CURRENT_GATEWAY_PRE_START = path.join(PROJECT_DIR, "scripts", "gateway-pre-start.sh");
 const GATEWAY_QUIESCED_ROOT_STEPS = new Set(["openclaw_install", "post_update"]);
 
@@ -1040,6 +1056,30 @@ const CLAWBOX_MANAGED_PLUGIN_IDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The npm package behind each managed plugin whose payload this file may
+ * reinstall, keyed by the normalised plugin id.
+ *
+ * Only the plugins that come from npm AND are pinned to the core, because a
+ * payload repair is `plugins install <pkg>@<core target>`: the core generation
+ * is what orphaned the payload, so the replacement has to be built for the
+ * core now on the box. `OFFICIAL_CHANNEL_PLUGINS` is the same map the Settings
+ * panel installs from, imported rather than copied — a second list here would
+ * be one more place to forget when a channel is added.
+ *
+ * The two managed plugins deliberately absent both have a repair that runs
+ * BEFORE this one, in the pre-start `runCurrentGatewayPreStart()` has just
+ * finished: `scripts/gateway-pre-start.sh` reinstalls `@openclaw/codex` when
+ * its package directory is missing, installs the pinned DeepSeek provider from
+ * ClawHub (not npm, and not a `<pkg>@<version>` spec), and copies
+ * `clawbox-email-directives` out of the checkout. Codex is still listed here
+ * because its repair below is the one this file already owns.
+ */
+const MANAGED_PLUGIN_NPM_PACKAGES: ReadonlyMap<string, string> = new Map([
+  ["codex", "@openclaw/codex"],
+  ...Object.entries(OFFICIAL_CHANNEL_PLUGINS),
+]);
+
+/**
  * `@openclaw/discord` and `openclaw-discord` are the same plugin as `discord`.
  *
  * The core names its own normalised plugin id in the refusal, which on a
@@ -1052,8 +1092,11 @@ function normalizeManagedPluginId(id: string): string {
   return id.replace(/^@openclaw\//, "").replace(/^openclaw-/, "");
 }
 
-/** Every plugin a consent refusal in this journal names, split by who owns it. */
-function pluginsNeedingConsent(journal: string): { managed: string[]; unmanaged: string[] } {
+/** Every plugin a refusal of one shape in this journal names, split by who owns it. */
+function pluginsNamedInRefusals(
+  journal: string,
+  pattern: RegExp,
+): { managed: string[]; unmanaged: string[] } {
   // A GLOBAL copy of the shared pattern, built here so the shared one keeps a
   // stable `lastIndex` for its `.test()` callers. Reading only the FIRST match
   // was a live dead end: the journal tail spans the whole boot (`-b`) and the
@@ -1061,7 +1104,7 @@ function pluginsNeedingConsent(journal: string): { managed: string[]; unmanaged:
   // ahead of a live `discord` one had the repair fix codex while
   // `getGatewayFailureDetail` — which scans in REVERSE — handed the owner the
   // discord sentence.
-  const namesRe = new RegExp(PLUGIN_CAPABILITY_CONSENT_RE.source, "gi");
+  const namesRe = new RegExp(pattern.source, "gi");
   // KEYED by the normalised id, VALUED by the first raw id seen for it. One
   // boot's journal can name the same plugin twice under different spellings —
   // `codex` from one start, `@openclaw/codex` from another — and a set of raw
@@ -1115,7 +1158,7 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
 }
 
 /**
- * Accept every ClawBox-managed plugin a concrete gateway error names.
+ * Repair every ClawBox-managed plugin a concrete gateway refusal names.
  *
  * WHY THIS IS NOT CODEX-ONLY ANY MORE (TASK-603). The gateway refuses readiness
  * for ANY enabled plugin whose declared capability surface has not been
@@ -1126,18 +1169,49 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
  * owner the core's own sentence: "rerun with --accept-capabilities". That is
  * advice about a CLI he never ran, over a box that will not come back until
  * somebody runs it for him. This is the tool doing the thing itself.
+ *
+ * WHY THERE ARE TWO REFUSALS (TASK-602). Consent is the refusal a plugin gets
+ * when its package is on disk and its reviewed surface is stale. A CORE UPGRADE
+ * produces the other one: plugin payloads live in npm project directories keyed
+ * to the core generation, so a bump strands the packages installed under the
+ * old one and the core's startup verification refuses over a payload that is
+ * not there. `plugins enable` cannot answer that, which is why the outage of
+ * 2026-09-01 survived a repair that only knew the consent sentence — the
+ * gateway then failed 21 times, systemd gave up, and the owner was left on
+ * "Connecting to gateway…" with no route back short of a hand-run CLI.
+ *
+ * WHY NOT `openclaw update repair --accept-capabilities`, which IS the harness's
+ * own post-core convergence and DOES take that flag on the pinned 2026.8.1: it
+ * consents for everything blocked, the owner's own plugins included. The
+ * whitelist is the point, so ClawBox drives the same underlying verbs per
+ * plugin instead. The core runs that convergence itself at startup
+ * (`runStartupUpgradeConvergence`), and it is exactly the capability-consent
+ * callback it has no way to answer there; the installed bundle exposes no
+ * config key and no environment variable for it, only the CLI flag.
  */
-async function repairPluginCapabilityConsent(journal: string): Promise<void> {
-  const { managed, unmanaged } = pluginsNeedingConsent(journal);
-  for (const pluginId of unmanaged) {
+async function repairPluginsBlockingReadiness(journal: string): Promise<void> {
+  const payload = pluginsNamedInRefusals(journal, PLUGIN_PAYLOAD_VERIFICATION_RE);
+  const consent = pluginsNamedInRefusals(journal, PLUGIN_CAPABILITY_CONSENT_RE);
+  for (const pluginId of [...payload.unmanaged, ...consent.unmanaged]) {
     // Said out loud rather than skipped in silence: this is the one case where
     // the owner still has to run the CLI himself, and the update log is where
     // he or a support session will look for why nothing happened.
     console.info(
-      `[Updater] "${pluginId}" needs capability consent and is not a ClawBox-managed plugin — leaving it to its owner`,
+      `[Updater] "${pluginId}" is blocking gateway readiness and is not a ClawBox-managed plugin — leaving it to its owner`,
     );
   }
-  for (const pluginId of managed) {
+  // Payloads FIRST, and the plugins they repaired are then skipped by the
+  // consent pass below: `plugins install --accept-capabilities` puts the
+  // package back AND records the reviewed surface, so a following `enable`
+  // would be a second ~12 s CLI cold start for a question already answered.
+  const repaired = new Set<string>();
+  for (const pluginId of payload.managed) {
+    if (await repairManagedPluginPayload(pluginId)) {
+      repaired.add(normalizeManagedPluginId(pluginId));
+    }
+  }
+  for (const pluginId of consent.managed) {
+    if (repaired.has(normalizeManagedPluginId(pluginId))) continue;
     if (normalizeManagedPluginId(pluginId) === "codex") {
       if (await codexCapabilityRepairIsAllowed()) await repairCodexCapabilityConsent();
       continue;
@@ -1147,8 +1221,54 @@ async function repairPluginCapabilityConsent(journal: string): Promise<void> {
   }
 }
 
+/**
+ * Put a managed plugin's payload back, pinned to the core now on the box.
+ *
+ * Returns whether the reinstall was ATTEMPTED, not whether it worked — the
+ * clean restart and the port probe decide that, as everywhere else in this
+ * recovery. False means nothing was tried: the owner switched the plugin off,
+ * Codex is not in use, or the payload is not this file's to replace.
+ */
+async function repairManagedPluginPayload(pluginId: string): Promise<boolean> {
+  const key = normalizeManagedPluginId(pluginId);
+  if (key === "codex") {
+    if (!(await codexCapabilityRepairIsAllowed())) return false;
+    await repairCodexCapabilityConsent();
+    return true;
+  }
+  const npmPackage = MANAGED_PLUGIN_NPM_PACKAGES.get(key);
+  if (!npmPackage) {
+    // The pre-start owns this one, and `runCurrentGatewayPreStart()` has just
+    // run it. Saying so beats a silent skip: if the refusal survived that, the
+    // update log is where the reason will be looked for.
+    console.info(
+      `[Updater] "${pluginId}" failed payload verification; its install is the gateway pre-start's, which has already run`,
+    );
+    return false;
+  }
+  if (!(await pluginConsentRepairIsAllowed(pluginId))) return false;
+  await reinstallManagedPluginPayload(npmPackage);
+  return true;
+}
+
 /** The pinned force-install that repairs a partial Codex project AND consents it. */
 async function repairCodexCapabilityConsent(): Promise<void> {
+  await reinstallManagedPluginPayload("@openclaw/codex");
+}
+
+/**
+ * `plugins install <pkg>@<core target> --force --accept-capabilities`.
+ *
+ * Pinned to the core the box is on, because both states this repairs are about
+ * the core: a migrated v1 install can leave only the managed-project
+ * declaration without node_modules, and a core BUMP re-keys the npm project
+ * directories so the payloads built for the old generation are unreachable
+ * (TASK-602). `enable` answers neither — it says "Plugin not found" — while a
+ * pinned force-install rebuilds the project and records consent in one
+ * idempotent operation. OpenClaw state leases live for five minutes after a
+ * killed startup, so this budget must outlast that bounded stale lease.
+ */
+async function reinstallManagedPluginPayload(npmPackage: string): Promise<void> {
   let target = OPENCLAW_VERSION_FALLBACK;
   try {
     target = (await readFile(OPENCLAW_TARGET_FILE, "utf-8")).trim().split(/\s+/)[0] || target;
@@ -1156,17 +1276,12 @@ async function repairCodexCapabilityConsent(): Promise<void> {
     // The compiled fallback is the same pin used by the installer.
   }
   try {
-    // A migrated v1 install can leave only the managed-project declaration,
-    // without node_modules. `enable` then says "Plugin not found"; a pinned
-    // force-install repairs that partial project and records consent in one
-    // idempotent operation. OpenClaw state leases live for five minutes after
-    // a killed startup, so this budget must outlast that bounded stale lease.
     await execFile(
       OPENCLAW_BIN,
       [
         "plugins",
         "install",
-        `@openclaw/codex@${target}`,
+        `${npmPackage}@${target}`,
         "--force",
         "--accept-capabilities",
       ],
@@ -1176,7 +1291,7 @@ async function repairCodexCapabilityConsent(): Promise<void> {
     // Best effort: the clean restart and positive port probe below decide the
     // result. This must not replace a preceding pre-start failure either.
     console.warn(
-      "[Updater] Codex capability repair did not complete:",
+      `[Updater] payload repair for "${npmPackage}" did not complete:`,
       err instanceof Error ? err.message : err,
     );
   }
@@ -1321,7 +1436,16 @@ function getGatewayFailureDetail(logText: string): string | null {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  for (const pattern of [PLUGIN_CAPABILITY_CONSENT_RE, /SQLite transaction lock wait failed/i]) {
+  // Order is priority, not chronology: the FIRST pattern with a match wins.
+  // A payload that is not on disk outranks a consent question about it, and
+  // both outrank systemd's own "Start request repeated too quickly", which is
+  // what `lines.at(-1)` hands back once the unit has hit its start limit —
+  // true, and nothing the owner can act on (TASK-602).
+  for (const pattern of [
+    PLUGIN_PAYLOAD_VERIFICATION_RE,
+    PLUGIN_CAPABILITY_CONSENT_RE,
+    /SQLite transaction lock wait failed/i,
+  ]) {
     const match = [...lines].reverse().find((line) => pattern.test(line));
     if (match) return match;
   }
@@ -1363,10 +1487,10 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
       // If an earlier pre-start migration fails, still record the narrowly
       // scoped consent named by the existing journal. Do not restart after a
       // partial pre-start; propagate its failure once the repair is recorded.
-      await repairPluginCapabilityConsent(journal);
+      await repairPluginsBlockingReadiness(journal);
       throw err;
     }
-    await repairPluginCapabilityConsent(journal);
+    await repairPluginsBlockingReadiness(journal);
     await runOpenclawDoctorFix();
   });
   // `awaitReady: false` on both restarts in this function, and only here: the

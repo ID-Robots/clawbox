@@ -1136,7 +1136,7 @@ describe("updater", () => {
         `${cmd} ${(args as string[]).join(" ")}`,
       );
       expect(warnSpy).toHaveBeenCalledWith(
-        "[Updater] Codex capability repair did not complete:",
+        "[Updater] payload repair for \"@openclaw/codex\" did not complete:",
         "Codex repair timed out",
       );
       expect(calls.some((call) => call.includes("openclaw doctor --fix --yes --non-interactive")))
