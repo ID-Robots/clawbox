@@ -33,6 +33,7 @@
 
 import fsp from "fs/promises";
 import path from "path";
+import { taskTitle } from "@/lib/task-title";
 import {
   type ChildResult,
   failureDetail,
@@ -176,8 +177,7 @@ export function buildCommitMessage(input: { runId: string; task: string; summary
 }
 
 function firstLine(text: string, max: number): string {
-  const line = (text || "work").split("\n")[0].trim() || "work";
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  return taskTitle(text, max) || "work";
 }
 
 /**

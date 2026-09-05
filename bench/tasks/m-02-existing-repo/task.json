@@ -1,5 +1,6 @@
 {
   "id": "m-02-existing-repo",
+  "projectName": "ledgerline",
   "tier": "M",
   "title": "Change to an existing codebase: read before writing",
   "timeoutMinutes": 20,

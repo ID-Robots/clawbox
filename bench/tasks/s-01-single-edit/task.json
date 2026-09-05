@@ -1,5 +1,6 @@
 {
   "id": "s-01-single-edit",
+  "projectName": "watchtower",
   "tier": "S",
   "title": "One-file edit, no build",
   "timeoutMinutes": 5,

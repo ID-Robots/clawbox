@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { artifactUrl, type CodingAgentActivity, type CodingTodo } from "@/lib/use-coding-agent-activity";
 import type { CodingRunStatus } from "@/lib/coding-agent-status";
 import { describeProgressLine, estimateRunProgress, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
+import { taskTitle } from "@/lib/task-title";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 
 /**
@@ -143,8 +144,7 @@ function tokens(n: number): string {
 }
 
 function firstLine(text: string, max = 64): string {
-  const line = (text ?? "").split("\n")[0].trim();
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  return taskTitle(text ?? "", max);
 }
 
 /**

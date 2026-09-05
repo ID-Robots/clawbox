@@ -41,6 +41,7 @@ import CodingProjectWorkspace from "./CodingProjectWorkspace";
 import CodingTeamCard from "./CodingTeamCard";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
+import { taskTitle } from "@/lib/task-title";
 import type { AgentStatus, Effort, GitHubState } from "./CodingAgentSettingsPanel";
 
 /**
@@ -201,8 +202,7 @@ function tokens(n: number): string {
 }
 
 function firstLine(text: string, max = 100): string {
-  const line = text.split("\n")[0].trim();
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  return taskTitle(text, max);
 }
 
 /** Single-quote a value for the terminal command line. */

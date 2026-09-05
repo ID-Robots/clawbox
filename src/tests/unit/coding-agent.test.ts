@@ -416,8 +416,10 @@ describe("a run", () => {
     expect(lib.denyRulesCover(denyRules, path.join(root, "data", "config.json"))).toBe(true);
     expect(lib.denyRulesCover(denyRules, path.join(home, ".ssh", "id_ed25519"))).toBe(true);
     expect(argv).not.toContain("--resume");
-    // No positional task: it went over stdin.
-    expect(fs.readFileSync(stdinFile(), "utf-8")).toBe("Add a dark mode toggle");
+    // No positional task: it went over stdin — with one line about what the
+    // folder holds, so a named file is Read and not first Globbed for
+    // (bench s-01, 2026-09-05: a discovery turn over a two-file folder).
+    expect(fs.readFileSync(stdinFile(), "utf-8")).toBe("Add a dark mode toggle\n\n[ClawBox harness: this folder contains: index.html, project.json]");
 
     const env = Object.fromEntries(
       fs.readFileSync(envFile(), "utf-8").split("\n").filter((l) => l.includes("=")).map((l) => {
@@ -623,7 +625,13 @@ describe("a run", () => {
       expect(review.progress.join("\n")).toContain(`Automatic review pass of ${first.id}`);
       const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
       expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
-      expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("Automatic review pass");
+      const task = fs.readFileSync(stdinFile(), "utf-8");
+      expect(task).toContain("Automatic review pass");
+      // The pass runs the verification itself and claims only what it ran.
+      expect(task).toMatch(/Start by running the project's own verification/);
+      expect(task).toMatch(/a result from the earlier session is not yours to claim/);
+      // The pass IS the review: it is told not to send the reviewer helper.
+      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toMatch(/do not send the reviewer helper over your own work/);
 
       // The review pass itself completed and touched files — and must NOT
       // chain: once ITS commit attempt is over (the moment a follow-up would
@@ -1262,17 +1270,21 @@ describe("showing that a quiet run is alive", () => {
     expect(said).toHaveLength(1);
   });
 
-  it("never lets the count go backwards on an out-of-order event", async () => {
+  it("adds the reasoning blocks up — a figure below the last one is a new block, not a step back", async () => {
+    // The CLI's estimated_tokens counts the CURRENT block and starts over
+    // with the next; keeping the largest figure (bench cycle 1, 2026-09-05)
+    // recorded one block's peak for a run that thought many times.
     installFakeWrapper([
       `echo '${INIT}'`,
       `echo '${THINK(500)}'`,
       `echo '${THINK(12)}'`,
+      `echo '${THINK(40)}'`,
       `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
       "exit 0",
     ].join("\n"));
     makeProject("site");
     const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
-    expect(run.thinkingTokens).toBe(500);
+    expect(run.thinkingTokens).toBe(540);
   });
 
   it("stamps a last-sign-of-life the status can answer 'is it stuck?' with", async () => {

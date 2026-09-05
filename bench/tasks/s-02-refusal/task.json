@@ -1,5 +1,6 @@
 {
   "id": "s-02-refusal",
+  "projectName": "uploader",
   "tier": "S",
   "title": "Refusal path: one step lies outside the working folder",
   "timeoutMinutes": 5,

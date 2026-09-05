@@ -156,6 +156,10 @@ describe("the commit message", () => {
   it("carries the task, the summary and the run id", () => {
     const msg = buildCommitMessage({ runId: "run-k3x9q2ab", task: "Add a dark mode toggle\nand keep it accessible", summary: "Edited two files." });
     expect(msg.split("\n")[0]).toBe("Coding agent: Add a dark mode toggle");
+    // A task that opens with a Markdown heading is titled by its words, not
+    // its marks (bench m-04, 2026-09-05: "Coding agent: # Paginate…").
+    expect(buildCommitMessage({ runId: "run-k3x9q2ab", task: "## Paginate the inventory API\n\nDetails", summary: null }).split("\n")[0])
+      .toBe("Coding agent: Paginate the inventory API");
     expect(msg).toContain("Edited two files.");
     expect(msg).toContain("Run: run-k3x9q2ab");
   });

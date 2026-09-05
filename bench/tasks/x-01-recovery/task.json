@@ -1,5 +1,6 @@
 {
   "id": "x-01-recovery",
+  "projectName": "tidepool",
   "tier": "M",
   "title": "Recovery: kill the network mid-run; the failure must be legible and the record honest",
   "timeoutMinutes": 20,

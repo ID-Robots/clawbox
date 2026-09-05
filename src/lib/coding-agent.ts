@@ -74,6 +74,7 @@ import { type CodingRunStatus, isCodingRunStatus, isHeld, isLive } from "@/lib/c
 import { memAvailableMb } from "@/lib/mem-available";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
+import { taskTitle } from "@/lib/task-title";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, WEBAPPS_DIR } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
@@ -457,8 +458,9 @@ export const SUBAGENT_DEFINITIONS = {
   },
   reviewer: {
     description:
-      "Reads finished changes and reports real defects — bugs, unsafe handling, "
-      + "obvious omissions. Use proactively before reporting a task complete.",
+      "Reads named files and reports real defects — bugs, unsafe handling, "
+      + "obvious omissions. Use proactively over changes nothing else will "
+      + "review; it never edits.",
     prompt:
       "You review changes already made. Read only — never edit. Report only "
       + "defects you can point at in the code, each with a file, a line and "
@@ -486,6 +488,38 @@ export const SUBAGENT_DEFINITIONS = {
       "You are one agent of a workflow. Read the files and run the checks you "
       + "were asked to, then report findings with file paths and line numbers, "
       + "or say plainly that you found nothing. Never edit a file.",
+    tools: ["Read", "Grep", "Glob", "Bash"],
+    model: "deepseek-v4-flash",
+  },
+  /**
+   * The Agent tool's own text says an omitted or unknown subagent_type lands
+   * on `general-purpose`, and Claude Code offers `claude` beside it — both
+   * full writers on the session's model, under acceptEdits and Bash(*), whose
+   * edits never reach filesTouched (a helper's events are dropped) and are
+   * still swept into the settle commit. The same shadowing as
+   * workflow-subagent, for the two names the brief cannot stop a model from
+   * typing.
+   */
+  "general-purpose": {
+    description:
+      "A reader for any question the typed helpers do not fit: reads, runs "
+      + "checks, reports with file paths and line numbers. Use proactively "
+      + "for one-off questions; it never edits.",
+    prompt:
+      "You read and report. Read the files and run the checks you were asked "
+      + "to, then answer with file paths, line numbers and the shortest "
+      + "excerpt that proves the point. Never edit a file.",
+    tools: ["Read", "Grep", "Glob", "Bash"],
+    model: "deepseek-v4-flash",
+  },
+  claude: {
+    description:
+      "The same reader under the name the CLI offers by default: reads, runs "
+      + "checks, reports. Use proactively as a plain reader; it never edits.",
+    prompt:
+      "You read and report. Read the files and run the checks you were asked "
+      + "to, then answer with file paths, line numbers and the shortest "
+      + "excerpt that proves the point. Never edit a file.",
     tools: ["Read", "Grep", "Glob", "Bash"],
     model: "deepseek-v4-flash",
   },
@@ -1850,6 +1884,9 @@ interface LiveRun {
   sawInit: boolean;
   /** Whether "Thinking…" has already been said once. */
   sawThinking: boolean;
+  /** The last thinking_tokens figure seen, to tell "more of this block"
+   *  (add the difference) from "a new block began" (add it all). */
+  thinkingSeen: number;
   stderr: string;
   /**
    * Files a Write/Edit has ASKED for, by tool_use id, not yet confirmed.
@@ -1900,7 +1937,7 @@ interface LiveRun {
   /** Resolved once at start, so a retry does not need an async lookup. */
   setprivPath: string;
   /** What this run was spawned with — a retry must match, not re-read. */
-  settings: { effort: CodingEffort; maxTurns: number };
+  settings: { effort: CodingEffort; maxTurns: number; reviewPass?: boolean };
   /** A shell command ran whose effects can be proven neither read-only nor safe to repeat. */
   commandMayHaveSideEffects: boolean;
   /**
@@ -2327,7 +2364,25 @@ async function projectFolder(dir: string, projectsRoot: string, id: string): Pro
  * nobody can answer a question, and the final message IS the deliverable the
  * assistant relays to the person.
  */
-export const HEADLESS_BRIEF = [
+/**
+ * The place in the brief where the run is told what to do about review. A
+ * run whose changes get a separate review — the owner's automatic review
+ * pass, a team's reviewer, or the review pass itself — must not ALSO send
+ * the flash reviewer over the same diff: on bench cycle 1 (2026-09-05) that
+ * helper cost m-02 45% of its wall time and m-04 a 200-second idle wait,
+ * for a diff the pass then reviewed again with Bash in hand. The rest of
+ * the delegation sentence stays as it is — see the comment above it.
+ */
+const REVIEWER_CLAUSE_SLOT = "{{REVIEWER_CLAUSE}}";
+const REVIEWER_CLAUSE_HELPER = "before your final report, send the reviewer over your changes (name the files) and fix what it finds.";
+const REVIEWER_CLAUSE_SEPARATE = "your changes get a separate, automatic adversarial review on this device — do not send the reviewer helper over your own work; spend that time on the tester.";
+
+/** The brief for a run whose changes are (or are not) reviewed separately. */
+export function headlessBrief(opts: { reviewedSeparately: boolean }): string {
+  return HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
+}
+
+const HEADLESS_BRIEF_TEMPLATE = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
   "Nobody can answer questions, so make sensible assumptions and keep going. Stay inside this folder; do not install system packages or change device settings.",
   // Learned from bench run run-g6vwqr9y (2026-08-27): the run's Edit on a
@@ -2335,16 +2390,27 @@ export const HEADLESS_BRIEF = [
   // `sed -i` through Bash and reported success. A denial the tools enforce
   // must not be a puzzle Bash solves.
   "A denied file action is a DECISION by this device, not a flaky prompt: if Read, Write or Edit is refused for a path, do not touch that path by any other route — no sed, tee, redirection or scripts through Bash. Do the parts of the task that stay inside this folder, and report plainly which part was refused and why you left it undone.",
+  // The same s-02 run decided its in-folder edit at +13 s, then spent the
+  // rest of its time on the doubtful step and timed out with nothing on disk.
+  "Do the parts you are sure of and that are inside this folder FIRST — make those edits before you investigate anything doubtful, so a run stopped part-way has still delivered them. If the task names a file outside this folder, try that step once with Edit or Write — never through Bash — so the device's refusal is on the record, then carry on.",
   "The task text may carry copy-paste artifacts. If a detail is plainly garbled — a nonsense number, a broken word — ship the sensible correction and note it in your final report; do not reproduce an obvious error verbatim.",
   "Verify efficiently: use browser_fill to set a form field by selector and browser_click on controls; never navigate a page one Tab or arrow key at a time — a whole step budget was once spent that way.",
-  "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your own run record and any session files are not yours to inspect: reads there are refused, and every attempt costs a step. Work inside your project folder and your evidence folder only.",
-  "Unless you have been given full access, run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
+  "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your own run record and any session files are not yours to inspect: reads there are refused, and every attempt costs a step. The one exception is your own evidence folder (CLAWBOX_RUN_ARTIFACTS_DIR), which lives under data/ and is yours to read and write. Work inside your project folder and your evidence folder only.",
+  // Bench task s-02 (2026-09-05): the run listed two sibling projects and
+  // walked their .git internals looking for a file the task had misplaced.
+  "The folders beside yours under the project root are the owner's other projects: never list, search or read them.",
+  // The old sentence here said one command per call and that chaining was
+  // refused — true under the retired allow-list, false since runs got
+  // `Bash(*)` (see buildRunArgs), and every bench run of cycle 1 (2026-09-05)
+  // split its commands anyway. The one command rule that IS enforced is the
+  // kill-by-name list (BASH_KILL_DENYLIST).
+  "You may chain commands with && or ;, pipe, redirect, use a heredoc and start a server in the background inside one Bash call — keep each call to one purpose. End anything you started by its PID: pkill, killall and fuser are refused.",
   // Measured on bench runs run-y3i3y1lk and run-35aq5yh2 (2026-09-03): with
   // the softer "when sub-agents are available, use them" the tier model read,
   // tested and reviewed everything in its own thread and reported
   // subagentsTotal 0 every time — the helpers existed and were never named
   // as a step. So the protocol is spelled out as steps, with the reason.
-  "Delegate instead of doing everything in one thread — the sub-agents are how a run stays fast and keeps its own context small: before you edit code that already exists here and you have not read, send the explorer to map it (an empty or freshly scaffolded folder has nothing to map — skip that); after each batch of changes, send the tester to run whatever check exists — the build, the tests, or a script you wrote; and before your final report, send the reviewer over your changes (name the files) and fix what it finds. Do the writing yourself: the explorer, tester and reviewer read, run and review, they never edit.",
+  "Delegate instead of doing everything in one thread — the sub-agents are how a run stays fast and keeps its own context small: before you edit code that already exists here and you have not read, send the explorer to map it (an empty or freshly scaffolded folder has nothing to map — skip that); after each batch of changes, send the tester to run whatever check exists — the build, the tests, or a script you wrote; and " + REVIEWER_CLAUSE_SLOT + " Do the writing yourself: the explorer, tester and reviewer read, run and review, they never edit.",
   // The -p mechanics, measured on this box (2026-09-03): a helper is launched
   // in the background, the model's turn ends, and the CLI restarts the same
   // session with each result. Left unsaid, the model spent its steps asking
@@ -2372,8 +2438,11 @@ export const HEADLESS_BRIEF = [
   // for; s-02's run (2026-09-05) spent five minutes searching the disk for a
   // file that was not where the task said it would be.
   "Deliver what the task names and nothing beside it: when it lists the files to produce, produce exactly those — no extra assets, pictures, notes or scripts, however nice; anything you make only to check your work goes to the evidence folder. When a file or folder the task relies on is not where the task says, look once where it points, then treat that step as undoable and report it — never search the disk for it.",
-  "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
+  "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, anything you could not finish, and every assumption you made where the task left a choice open — name the convention or default you picked and why.",
 ].join(" ");
+
+/** The brief of a run with no separate review — the reviewer helper is its review. */
+export const HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false });
 
 /**
  * Added to the brief under ultracode only: what the Workflow tool is for on
@@ -2407,6 +2476,10 @@ export const ULTRACODE_BRIEF = [
   "Every agent() must pass agentType \"explorer\", \"tester\" or \"reviewer\" (never general-purpose, never a workflow inside a workflow, never isolation: \"worktree\" — this folder is not a git repository of its own), and the writing stays with you: shared code first, then the parts, then a workflow to check them all.",
   "The owner's step and token ceilings apply to this run and every token a workflow's agents spend is billed to it, whatever the reminder says about cost — size a workflow to the task: a task of one to three files needs no workflow at all (the explorer, tester and reviewer helpers are enough), a larger one at most ONE, launched when there are many things to check at once, never to review work you have already verified.",
   "A script's meta must be a plain object literal. If a workflow fails or returns nothing useful, send a narrower script inline — never scriptPath or resumeFromRunId, and never Read the script file, transcript or journal its result names: that folder is closed to you and each attempt costs a step.",
+  // Every ultracode run of bench cycle 1 (2026-09-05) re-argued the CLI's
+  // "use it on every substantive task" reminder against the brief, and m-04
+  // wrote a 90-line script to run two helpers.
+  "Decide the shape once and do not re-argue whether the ultracode reminder applies: a folder you have already read in full needs no explorer and no workflow, and a change of a few files that the project's own tests prove is finished once those tests pass. For one or two helpers call the Agent tool directly (several Agent calls in one message run together); a Workflow is for a fan-out of many, never for a folder of two files.",
 ].join(" ");
 
 /**
@@ -2592,13 +2665,16 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+  // A run whose diff a separate review will read is told not to review it
+  // twice — see REVIEWER_CLAUSE_SLOT.
+  const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
   const brief = [
     // A read-only run has no Bash, no browser and no Write: the brief that
     // describes them would spend its steps on calls that are refused.
     opts.readOnly
       ? READ_ONLY_BRIEF
-      : (opts.effort === ULTRACODE_EFFORT ? `${HEADLESS_BRIEF} ${ULTRACODE_BRIEF}` : HEADLESS_BRIEF),
+      : (opts.effort === ULTRACODE_EFFORT ? `${headless} ${ULTRACODE_BRIEF}` : headless),
     // Only for the run that HAS the tool: a brief that described a picture
     // tool to a run without one would spend steps on a call that is not there.
     // A read-only run holds no media tool either (runMcpTools is skipped for
@@ -2980,7 +3056,9 @@ export function isRetrySafeSetupCommand(command: unknown): boolean {
 interface StreamEvent {
   type?: string;
   subtype?: string;
-  /** system/thinking_tokens: reasoning tokens so far. */
+  /** system/thinking_tokens: reasoning tokens so far IN THE CURRENT BLOCK —
+   *  the count starts over with each new reasoning block, so a run's total
+   *  is the sum of the blocks, never the largest figure seen. */
   estimated_tokens?: number;
   /** `user` events carry tool_result blocks; that is how a sub-agent reports back. */
   session_id?: string;
@@ -3168,6 +3246,30 @@ function closeSubagent(run: CodingRun, state: LiveRun, id: string, refused = fal
   return done;
 }
 
+/** How many top-level entries the task's folder line names before it gives a count instead. */
+const FOLDER_LISTING_MAX = 30;
+
+/**
+ * One line about what the working folder holds, sent with the task: a
+ * fresh run otherwise spends its first step on a Glob for a file the task
+ * named (bench s-01, 2026-09-05: 2.7 s and a 15k-token cache read to learn
+ * that a two-file folder contains config.js). Top level only, `.git` left
+ * out, folders marked with a slash; a folder past the cap gets its count,
+ * and a folder that cannot be read is simply not described.
+ */
+export function folderListing(directory: string): string {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true }).filter((e) => e.name !== ".git");
+  } catch {
+    return "the working folder could not be listed.";
+  }
+  if (entries.length === 0) return "this folder is empty.";
+  if (entries.length > FOLDER_LISTING_MAX) return `this folder has ${entries.length} top-level entries.`;
+  const names = entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)).sort((a, b) => a.localeCompare(b));
+  return `this folder contains: ${names.join(", ")}`;
+}
+
 /** One line of `--output-format stream-json`. */
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   if (typeof event.session_id === "string" && event.session_id && !run.sessionId) run.sessionId = event.session_id;
@@ -3179,8 +3281,14 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   // is the only signal that separates "thinking hard" from "hung", and a run
   // on `effort: max` can sit here for minutes on the first turn.
   if (event.type === "system" && event.subtype === "thinking_tokens") {
-    const total = typeof event.estimated_tokens === "number" ? event.estimated_tokens : 0;
-    if (total > run.thinkingTokens) run.thinkingTokens = total;
+    // `estimated_tokens` counts the CURRENT reasoning block: it climbs while
+    // the block runs and starts again from a small number with the next one.
+    // Cycle 1 of the bench (2026-09-05) kept the largest figure, i.e. one
+    // block's peak; the record now adds every block up. A figure below the
+    // last one seen is a new block, and all of it is new.
+    const total = typeof event.estimated_tokens === "number" && event.estimated_tokens > 0 ? event.estimated_tokens : 0;
+    run.thinkingTokens += total >= state.thinkingSeen ? total - state.thinkingSeen : total;
+    state.thinkingSeen = total;
     // One line, not one per event: these arrive continuously and would drown
     // the progress feed. The live count is on the record for anyone watching.
     if (!state.sawThinking) {
@@ -3722,8 +3830,7 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
 
 /** First line of the task, trimmed to something a PR title can hold. */
 function firstLineOf(task: string): string {
-  const line = task.split("\n")[0].trim();
-  return line.length > 72 ? `${line.slice(0, 69)}...` : line || "ClawBox coding agent";
+  return taskTitle(task, 72) || "ClawBox coding agent";
 }
 
 function prBody(origin: CodingRun, last: CodingRun): string {
@@ -3854,11 +3961,16 @@ export function resumePullRequestWatches(): void {
  * the task is the same every time, and what varies — the work — is already in
  * the resumed session and the folder.
  */
+// Bench cycle 1 (2026-09-05): two review passes reported "tests pass" for a
+// suite they had not run in the pass — the claim was the earlier session's.
+// So the pass runs the verification itself, first, and reports only its own.
 const REVIEW_PASS_TASK =
-  "Automatic review pass. Adversarially review the work you just delivered in this folder: read the diff of your"
-  + " last commit (git show HEAD; if there is no commit, review the working tree), and hunt for real defects —"
-  + " logic errors, broken edge cases, unsafe handling, anything your verification did not actually prove."
-  + " For each defect you CONFIRM: fix it, re-run the relevant verification, and note it in your report."
+  "Automatic review pass. Start by running the project's own verification — its tests or build — in THIS pass"
+  + " and quote the result. Then adversarially review the work you just delivered in this folder: read the diff"
+  + " of your last commit (git show HEAD; if there is no commit, review the working tree), and hunt for real"
+  + " defects — logic errors, broken edge cases, unsafe handling, anything that verification did not actually prove."
+  + " For each defect you CONFIRM: fix it, re-run that verification, and note it in your report."
+  + " Report only what you ran in this pass: a result from the earlier session is not yours to claim."
   + " Do not restyle or refactor working code, and do not invent work: if nothing real is found, say so in one"
   + " line and finish. Update report.md in your evidence folder with what you checked, found, and fixed.";
 
@@ -4089,10 +4201,14 @@ function spawnRun(
   run: CodingRun,
   resumeSessionId: string | null,
   setprivPath: string,
-  settings: { effort: CodingEffort; maxTurns: number },
+  settings: { effort: CodingEffort; maxTurns: number; reviewPass?: boolean },
   stdinText?: string,
 ): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, run: { id: run.id, directory: run.directory, media: run.media } }));
+  // Whose review is this run's diff getting? The owner's automatic pass, a
+  // team's reviewer (every task gets one — coding-team-reviewer.ts), or the
+  // run IS the pass: in each case the flash reviewer would be a second look.
+  const reviewedSeparately = settings.reviewPass === true || run.reviewOf !== null || run.team !== null;
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, run: { id: run.id, directory: run.directory, media: run.media } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -4121,6 +4237,7 @@ function spawnRun(
     pendingFiles: new Map<string, string>(),
     sawWriteAttempt: false,
     sawThinking: false,
+    thinkingSeen: 0,
     setprivPath,
     settings,
     commandMayHaveSideEffects: false,
@@ -4204,7 +4321,7 @@ function spawnRun(
     // name the new folder; the session's memory needs telling too.
     child.stdin?.end(stdinText ?? (resumeSessionId
       ? `${run.task}\n\n[ClawBox harness: this continuation is a NEW run. Its evidence folder is ${artifactsDir(run.id)} — save screenshots and report.md there, not in any previous run's folder.]`
-      : run.task));
+      : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)}]`));
   } catch {
     // reported through the exit path
   }
@@ -4289,7 +4406,15 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // never branch — see startRunBranch.
       protectedRoot: path.dirname(DATA_DIR),
     });
-    if (branched.ok) {
+    if (!branched.ok && branched.reason === "no_repository") {
+      // Not a failure of the flow — there is no repository for a branch to
+      // live in yet. The settle makes one and commits into it
+      // (commitRunWork); a pull request needs a remote the owner adds later
+      // through Back up. Stamping this "failed" with git's raw fatal put a
+      // red line at the top of every fresh-folder run in bench cycle 1.
+      run.pr = null;
+      pushProgress(run, "Not a git repository yet: the work is committed into a new one when the run settles, and there is no pull request to open.");
+    } else if (branched.ok) {
       run.pr = {
         phase: "opening",
         number: null,
@@ -4339,13 +4464,16 @@ interface RunSettings {
   tokenLimit: number | null;
   generateImages: boolean;
   generateAudio: boolean;
+  /** The owner's review-pass switch, read with the rest so the brief can
+   *  say whether a separate review follows (see REVIEWER_CLAUSE_SLOT). */
+  reviewPass: boolean;
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [effort, maxTurns, tokenLimit, generateImages, generateAudio] = await Promise.all([
-    getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(),
+  const [effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass] = await Promise.all([
+    getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
   ]);
-  return { effort, maxTurns, tokenLimit, generateImages, generateAudio };
+  return { effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass };
 }
 
 /** A fresh run record: every counter at zero, nothing seen yet. */
@@ -4574,7 +4702,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   const continuation = run.sessionId
     ? `You were paused by the owner and are now resumed in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`
     : undefined;
-  spawnOrSettle(run, run.sessionId, setprivPath, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
+  spawnOrSettle(run, run.sessionId, setprivPath, { effort: run.effort, maxTurns: run.maxTurns, reviewPass: await getReviewPass() }, continuation);
   return cloneRun(run);
 }
 
@@ -4696,7 +4824,7 @@ function spawnOrSettle(
   run: CodingRun,
   resumeSessionId: string | null,
   setprivPath: string,
-  settings: { effort: CodingEffort; maxTurns: number },
+  settings: { effort: CodingEffort; maxTurns: number; reviewPass?: boolean },
   stdinText?: string,
 ): void {
   try {

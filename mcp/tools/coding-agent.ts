@@ -28,6 +28,7 @@ import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
 // derives from, so this payload cannot fall behind the server's record.
 import type { CodingRunStatus } from "../../src/lib/coding-agent-status";
+import { taskTitle } from "../../src/lib/task-title";
 
 const MAX_TASK_CHARS = 4_000;
 const MAX_WAIT_SECONDS = 120;
@@ -150,8 +151,7 @@ function elapsed(run: RunPayload): string {
 }
 
 function firstLine(s: string, max = 120): string {
-  const line = s.split("\n")[0].trim();
-  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+  return taskTitle(s, max);
 }
 
 /** Everything a model needs to relay a run, redacted like logs_tail's output. */

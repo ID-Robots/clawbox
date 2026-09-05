@@ -11,6 +11,7 @@ import os from "os";
 import path from "path";
 import { appendFigure, readFigures } from "../../../bench/lib/figures-file.mjs";
 import { outsidePath } from "../../../bench/lib/outside.mjs";
+import { parseTranscript } from "../../../bench/lib/transcript.mjs";
 import { deltaByTask, figureKey, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "../../../bench/lib/metrics.mjs";
 
 const PRICING = { currency: "USD", models: { "deepseek-v4-pro[1m]": { input: 1, output: 2, cacheRead: 0.1 }, "deepseek-v4-flash": { input: 0.1, output: 0.2 } } };
@@ -166,5 +167,31 @@ describe("a task's outside files", () => {
     expect(outsidePath("/home/clawbox/Projects/bench-s-02", "shared-config/limits.json")).toBe("/home/clawbox/Projects/shared-config/limits.json");
     expect(outsidePath("/home/clawbox/Projects/bench-s-02", "../shared-config/limits.json")).toBe("/home/clawbox/Projects/shared-config/limits.json");
     expect(() => outsidePath("/home/clawbox/Projects/bench-s-02", "bench-s-02/inside.json")).toThrow(/inside the project/);
+  });
+});
+
+describe("parseTranscript — the per-model bill", () => {
+  it("bills each message once, with the largest usage its lines carry", () => {
+    // One API message is several transcript lines, each with the message's
+    // usage — and a helper's FIRST line (the thinking block) says
+    // output_tokens 0, the real count landing on a later line. Cycle 1
+    // (2026-09-05) took the first line and billed every flash helper's
+    // output as nothing.
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "bench-transcript-")), "t.jsonl");
+    fs.writeFileSync(file, [
+      JSON.stringify({ message: { id: "m1", model: "deepseek-v4-flash", usage: { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: 500 } } }),
+      JSON.stringify({ message: { id: "m1", model: "deepseek-v4-flash", usage: { input_tokens: 10, output_tokens: 640, cache_read_input_tokens: 500 } } }),
+      JSON.stringify({ message: { id: "m1", model: "deepseek-v4-flash", usage: { input_tokens: 10, output_tokens: 640, cache_read_input_tokens: 500 } } }),
+      JSON.stringify({ message: { id: "m2", model: "deepseek-v4-pro", usage: { input_tokens: 3, output_tokens: 7, cache_creation_input_tokens: 2 } } }),
+      // A line with no message id is billed on its own.
+      JSON.stringify({ message: { model: "deepseek-v4-pro", usage: { input_tokens: 1, output_tokens: 1 } } }),
+      "not json at all",
+    ].join("\n"));
+    const parsed = parseTranscript(file);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.byModel["deepseek-v4-flash"]).toEqual({ input: 10, output: 640, cacheRead: 500, cacheWrite: 0, messages: 1 });
+    expect(parsed!.byModel["deepseek-v4-pro"]).toEqual({ input: 4, output: 8, cacheRead: 0, cacheWrite: 2, messages: 2 });
+    expect(parsed!.lines).toBe(5);
+    expect(parseTranscript(path.join(path.dirname(file), "missing.jsonl"))).toBeNull();
   });
 });

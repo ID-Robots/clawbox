@@ -30,7 +30,7 @@ failures lock the whole box out for five minutes).
 
 The runner drives one suite in a folder of its own. The **loop** is the
 version the harness is tuned by: it runs the suite's demo tasks as coding
-PROJECTS — `bench-<task>-<stamp>` directly under the owner's project folder,
+PROJECTS — `<projectName>-<stamp>` (the task's neutral name, never its id — the folder name must not tell the run which task it is) directly under the owner's project folder,
 so every run shows up in the Coding Agent app like any other project —
 samples each run every 5 s while it works, and writes one report per cycle
 with the four figures the owner asked to optimise by, and the change against
