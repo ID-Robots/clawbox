@@ -875,7 +875,7 @@ describe("ai_set_provider is not a one-way door", () => {
       providers: [{ id: "zai", authenticated: true }, { id: "openai", authenticated: false }],
     });
 
-    const built = await buildContext("hermes", "hermes", "full");
+    const built = await buildContext("hermes", "hermes", "full", "hermes");
     expect(built.providers).toContain("auto");
     expect(built.providers).toContain("zai");
     expect(built.providers).not.toContain("openai");
@@ -889,7 +889,7 @@ describe("ai_set_provider is not a one-way door", () => {
       providers: [{ id: "clawlocal", authenticated: true }],
     });
 
-    const built = await buildContext("hermes", "hermes", "full");
+    const built = await buildContext("hermes", "hermes", "full", "hermes");
     expect(built.providers).toEqual(["clawlocal"]);
   });
 });

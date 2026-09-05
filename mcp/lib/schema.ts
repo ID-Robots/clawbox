@@ -92,8 +92,12 @@ export const RAW_INSTALLED_APP_ID_RE = new RegExp(`^${INSTALLED_APP_ID_BODY}$`);
 
 /** An installed-app id as a tool argument, in the producers' own alphabet. */
 export function zInstalledAppId(description: string) {
+  // `.max(64)` alongside the pattern, which already bounds it: the emitted JSON
+  // Schema is what a 4-8B local model reads, and it reads `maxLength` far more
+  // reliably than a regex quantifier.
   return z
     .string()
+    .max(64)
     .regex(
       RAW_INSTALLED_APP_ID_RE,
       "letters, digits, underscores and hyphens, not starting with a hyphen, at most 64 characters",

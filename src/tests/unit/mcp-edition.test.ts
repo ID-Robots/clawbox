@@ -173,27 +173,38 @@ describe("resolveEdition — it never asks the device itself", () => {
   });
 });
 
-describe("resolveAppHarness — an unreadable lock still asks the device", () => {
-  it("takes the device's answer rather than hiding apps the box has", async () => {
-    // /setup-api/harness/active ALWAYS answers: getActiveHarness() falls back
-    // through readEdition(), whose default for an unreadable lock is
-    // "openclaw". So the desktop grid shows twelve apps while this returned
-    // null and the agent was told three of them could not be placed — the two
-    // surfaces disagreeing in exactly the state this PR is about.
+describe("resolveAppHarness — an unreadable lock does NOT ask the device", () => {
+  it("answers null without a request, because the route would only echo the default", async () => {
+    // /setup-api/harness/active always answers, but on an unreadable lock it is
+    // the SAME FILE this process just failed to read: getActiveHarness() ->
+    // lockedHarness() -> getEdition() -> readEdition() -> "openclaw", its own
+    // default. Taking that as the answer would register the Hermes TOOL SET
+    // (resolveEdition fails closed) beside an OpenClaw APP list — denying a
+    // Hermes box its own `hermes-skills` with "there is no such app", which is
+    // TASK-541's original symptom, and ticking off `openclaw` and `store` on a
+    // box that has neither.
     writeLock("GARBAGE\n");
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+    const fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ active: "openclaw" }),
-    }));
-    const { resolveAppHarness } = await loadEdition();
-    await expect(resolveAppHarness("http://127.0.0.1:80", null)).resolves.toBe("openclaw");
-  });
-
-  it("is null only when the device does not answer either", async () => {
-    writeLock("GARBAGE\n");
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connection refused")));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
     const { resolveAppHarness } = await loadEdition();
     await expect(resolveAppHarness("http://127.0.0.1:80", null)).resolves.toBeNull();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("still asks on the unlocked dual SKU, where the device knows something we do not", async () => {
+    // The contrast that makes the rule above a rule and not a refusal to ask:
+    // on `dual` the route resolves a real runtime choice from the config store,
+    // which no file this process reads can answer.
+    writeLock("CLAWBOX_EDITION=dual\n");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ active: "hermes" }),
+    }));
+    const { resolveAppHarness } = await loadEdition();
+    await expect(resolveAppHarness("http://127.0.0.1:80", null)).resolves.toBe("hermes");
   });
 });
 

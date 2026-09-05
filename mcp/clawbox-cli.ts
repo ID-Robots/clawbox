@@ -19,12 +19,15 @@ import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { installEdition, resolveAppHarness, type Ed } from "./lib/edition";
-import { builtInApps, openedAppNotice } from "./lib/context";
+import { builtInApps, openedAppLine, UNKNOWN_HARNESS_NOTE } from "./lib/context";
 import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../src/lib/desktop-app-editions";
 import { INSTALLED_APP_ID_RE } from "./lib/schema";
 
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up KV actions
+// The ceiling on one /setup-api call. Generous — a cold Jetson answers some of
+// these in seconds — and finite, which is the whole point.
+const API_TIMEOUT_MS = 30_000;
 
 // MCP bearer token. /setup-api/* is session-gated by src/middleware.ts once
 // setup completes, but it also accepts this per-install bearer (see
@@ -92,17 +95,27 @@ function openHarness(): Promise<Ed | null> {
   return resolveAppHarness(API_BASE, token ? `Bearer ${token}` : null);
 }
 
-/** Why an app that exists on ONE harness cannot be opened right now. */
-const UNKNOWN_HARNESS_NOTE =
-  "This ClawBox could not say which harness it is running, so apps that belong to only one of them"
-  + " are not offered. Check /etc/clawbox/edition.env and that the device's web server is up.";
-
 async function api(path: string, options?: RequestInit) {
   const headers = new Headers(options?.headers);
   if (!headers.has("authorization")) {
     headers.set("authorization", `Bearer ${getApiToken()}`);
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers, redirect: "manual" });
+  // A DEVICE THAT NEVER ANSWERS IS NOT A DEVICE THAT IS THINKING. Without a
+  // signal a wedged web server left `clawbox app open` hanging in the agent's
+  // shell forever with no output — `mcp/lib/api.ts` and `askActiveHarness` have
+  // always carried one, and this was the last client that did not.
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      headers,
+      redirect: "manual",
+      signal: options?.signal ?? AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+  } catch {
+    console.error(`The device did not answer within ${API_TIMEOUT_MS / 1000}s. Is its web server up?`);
+    process.exit(1);
+  }
   if (res.status >= 300 && res.status < 400) {
     console.error("The device rejected this request's token. Check data/.mcp-token, or restart the device.");
     process.exit(1);
@@ -289,9 +302,10 @@ async function main() {
     // The tick is a CLAIM, and for an `external` app it is not true: the
     // desktop window.open()s that one from its poll, where a popup blocker
     // drops it silently. `ui_open_app` hedges; this posts the same action to
-    // the same ring, so it says the same thing — from the same function.
-    const known = builtIn.find((a) => a.id === appId);
-    console.log(known?.external ? openedAppNotice(known, appId) : `✅ Opening ${appId} on desktop.`);
+    // the same ring, so it says the same sentence — from the same function, on
+    // BOTH branches, or the two surfaces drift again the next time one of them
+    // gains a reason to hedge.
+    console.log(openedAppLine(builtIn.find((a) => a.id === appId), appId));
 
   } else if (cmd === "app" && sub === "list") {
     // The list is HARNESS-dependent: a Hermes device has no OpenClaw chat app

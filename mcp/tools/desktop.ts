@@ -10,8 +10,8 @@ import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInstalledAppId, zInt, zOptText, zSlug, zText } from "../lib/schema";
-import { builtInApps, openedAppNotice, type McpContext } from "../lib/context";
-import { isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
+import { builtInApps, openedAppNotice, UNKNOWN_HARNESS_NOTE, type McpContext } from "../lib/context";
+import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
 import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
 const UI_PICKUP_DELAY_MS = 2_500;
@@ -162,11 +162,23 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
           );
         }
       } else if (!builtInIds.includes(app_id)) {
-        throw new ToolError(
-          "NOT_FOUND",
-          "There is no such app on this ClawBox.",
-          `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
-        );
+        // AN UNDETERMINED HARNESS IS NOT "NO SUCH APP". The box may well have
+        // this one — the harness simply could not be resolved — and saying it
+        // does not exist tells the agent as a durable fact that a dual box has
+        // no dashboard, which is how it stops asking. The CLI has drawn this
+        // distinction since the gate existed; the tool now says the same
+        // sentence, from the same constant.
+        throw ctx.appHarness === null && HARNESS_ONLY_APP_IDS.includes(app_id)
+          ? new ToolError(
+            "NOT_FOUND",
+            `Cannot open "${app_id}" right now. ${UNKNOWN_HARNESS_NOTE}`,
+            "Do not conclude the device lacks this app. Report the reason to the user and try again once the device can name its harness.",
+          )
+          : new ToolError(
+            "NOT_FOUND",
+            "There is no such app on this ClawBox.",
+            `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
+          );
       }
       await pushUiAction({ type: "open_app", appId: app_id });
       if (app_id === "browser") {
@@ -211,6 +223,10 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
         built_in: builtIn,
         installed_apps: installed,
         ...(ctx.edition === "hermes" ? { agent_skills: skills } : {}),
+        // Said out loud rather than five apps quietly missing from the list:
+        // the agent cannot tell "this box has no dashboard" from "nobody could
+        // say" unless one of them is written down.
+        ...(ctx.appHarness === null ? { note: UNKNOWN_HARNESS_NOTE } : {}),
       });
     },
   );
@@ -366,7 +382,12 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "webapp_update",
     "Replace the HTML of a web app you created earlier with webapp_create. The whole document is replaced, so send the complete HTML, not just the changed part.",
     {
-      app_id: zSlug("The id you passed to webapp_create"),
+      // Widened for the same reason `app_uninstall` was: `APP_ID_RE` is what
+      // /setup-api/webapps enforces, and it mints ids with upper case and
+      // underscores. An app this family LISTS and OPENS must be one it can
+      // also act on. (`webapp_create` stays narrow — constraining what the
+      // agent MINTS is a choice; refusing what the device made is a defect.)
+      app_id: zInstalledAppId("The id you passed to webapp_create"),
       html: zText(400_000, "The complete replacement HTML"),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
@@ -447,7 +468,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "code_project_build",
     "Bundle a code project into a single page and install it on the ClawBox desktop. Call this after every set of edits — the desktop shows the last build, not the source files. The source files are the ones under the absolute path code_project_init and code_project_list report; edits written anywhere else are not part of the build.",
     {
-      project_id: zSlug("The project id from code_project_list"),
+      // From `code_project_list`, so it carries whatever alphabet
+      // /setup-api/code minted it with (`APP_ID_RE`: upper case and
+      // underscores included). Refusing it here made the tool reject an id
+      // its own sibling had just reported.
+      project_id: zInstalledAppId("The project id from code_project_list"),
       open_after_build: zBool(true, "Open it on the desktop after building."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
@@ -479,7 +504,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     "code_project_delete",
     "Delete a code project and all of its source files from the ClawBox. This cannot be undone. Ask the user to confirm before calling it.",
     {
-      project_id: zSlug("The project id from code_project_list"),
+      // From `code_project_list`, so it carries whatever alphabet
+      // /setup-api/code minted it with (`APP_ID_RE`: upper case and
+      // underscores included). Refusing it here made the tool reject an id
+      // its own sibling had just reported.
+      project_id: zInstalledAppId("The project id from code_project_list"),
       confirm: zConfirm("Must be true. Set it only when the user asked for this project to be deleted."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true },

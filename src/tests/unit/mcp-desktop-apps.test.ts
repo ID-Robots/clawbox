@@ -17,6 +17,7 @@ import { INSTALLED_APP_ID_RE } from "../../../mcp/lib/schema";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { captureRegistrar } from "../helpers/mcp-registrar";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
+import { UNKNOWN_HARNESS_NOTE } from "../../../mcp/lib/context";
 import {
   HARNESS_ONLY_APP_IDS,
   hiddenAppIdsForHarness,
@@ -184,6 +185,33 @@ describe("ui_open_app accepts every id it advertises", () => {
       expect(appId.safeParse(id).success, `${id} must be refused`).toBe(false);
     }
   });
+
+  it("lets an id it can LIST also be UPDATED, BUILT and DELETED", async () => {
+    // The same rule one family over. `APP_ID_RE` (src/lib/code-projects.ts) is
+    // what /setup-api/code and /setup-api/webapps enforce, and it takes upper
+    // case and underscores — so `clawbox code init Weather_App` succeeds and
+    // `code_project_list` reports that id "with the id each one is built and
+    // deleted by", while a narrower schema refused the build and the delete
+    // before the handler ran. An id the device mints and the tools list must be
+    // an id the tools can act on.
+    const h = captureRegistrar("openclaw");
+    registerDesktopTools(h.reg, ctx("openclaw"));
+    const actOn: Array<[string, string]> = [
+      ["webapp_update", "app_id"],
+      ["code_project_build", "project_id"],
+      ["code_project_delete", "project_id"],
+    ];
+    for (const [tool, field] of actOn) {
+      const schema = h.get(tool).shape[field];
+      for (const id of ["Weather_App", "Foo_Bar", "weather", "_drafts"]) {
+        expect(APP_ID_RE.test(id), `${id} must be creatable`).toBe(true);
+        expect(schema.safeParse(id).success, `${tool} must accept ${id}`).toBe(true);
+      }
+      for (const id of ["../etc", "a/b", "a b", "a.b", "", "-lead", "x".repeat(65)]) {
+        expect(schema.safeParse(id).success, `${tool} must refuse ${id}`).toBe(false);
+      }
+    }
+  });
 });
 
 describe("an installed app the desktop would not open", () => {
@@ -229,6 +257,38 @@ describe("when the harness could not be determined", () => {
     }
     const shared = await h.call("ui_open_app", { app_id: "settings" });
     expect(shared.isError).toBe(false);
+  });
+
+  it("says the harness is UNDETERMINED, not that the app does not exist", async () => {
+    // The CLI has always drawn this distinction, and its own comment says why:
+    // "an app the OTHER harness owns is 'not here'; the same app while the
+    // harness is unknown is 'could not be placed'. Saying the first over the
+    // second tells the agent as a durable fact that a dual box has no
+    // dashboard, which is how it stops asking." The tool said the first.
+    const h = captureRegistrar("hermes");
+    registerDesktopTools(h.reg, unknown);
+    for (const id of HARNESS_ONLY_APP_IDS) {
+      const outcome = await h.call("ui_open_app", { app_id: id });
+      expect(outcome.isError).toBe(true);
+      if (!outcome.isError) continue;
+      const said = `${outcome.error.message} ${outcome.error.next ?? ""}`;
+      expect(said, `${id} must not be reported as non-existent`)
+        .not.toMatch(/no such app/i);
+      expect(said, `${id} must name the undetermined harness`).toContain(UNKNOWN_HARNESS_NOTE);
+    }
+    // An id that exists on NEITHER harness is still an honest "no such app".
+    const nonsense = await h.call("ui_open_app", { app_id: "nope" });
+    expect(nonsense.isError).toBe(true);
+    if (nonsense.isError) expect(nonsense.error.message).toMatch(/no such app/i);
+  });
+
+  it("says so in ui_list_apps too, rather than silently dropping five apps", async () => {
+    const h = captureRegistrar("hermes");
+    registerDesktopTools(h.reg, unknown);
+    const outcome = await h.call("ui_list_apps");
+    expect(outcome.isError).toBe(false);
+    if (outcome.isError) return;
+    expect(outcome.text).toContain(UNKNOWN_HARNESS_NOTE);
   });
 
   it("does not name an app in its own description that it would refuse", async () => {

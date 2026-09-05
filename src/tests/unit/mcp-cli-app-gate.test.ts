@@ -7,6 +7,7 @@ import os from "os";
 import path from "path";
 
 import { testEnv } from "@/tests/helpers/env";
+import { builtInApps, openedAppNotice } from "../../../mcp/lib/context";
 
 /**
  * `clawbox app open` / `app list` on the DUAL SKU.
@@ -118,6 +119,20 @@ beforeEach(() => {
 const CLI_TIMEOUT_MS = 4_000;
 
 /**
+ * A test budget derived from what the test SPAWNS.
+ *
+ * vitest's 5 s default covers one `bun` start, not five: a multi-spawn test
+ * would hit the framework's timeout first, and per the note on `cli()` that
+ * neither cancels the promise nor kills the child — exactly the failure this
+ * file's timer exists to remove. So every test that spawns more than once says
+ * how many, and `CLI_TIMEOUT_MS` stays the thing that fires first on ONE hung
+ * child.
+ */
+function budget(spawns: number): { timeout: number } {
+  return { timeout: spawns * CLI_TIMEOUT_MS + 10_000 };
+}
+
+/**
  * Run the CLI against the stub device.
  *
  * ASYNC, never `spawnSync`: the stub server lives in THIS process, so blocking
@@ -187,20 +202,20 @@ d("clawbox app open — the edition gate", () => {
     expect(posted).toContainEqual(expect.objectContaining({ type: "open_app", appId: "store" }));
   });
 
-  it("still refuses the other harness's app on a single-harness box", async () => {
+  it("still refuses the other harness's app on a single-harness box", budget(3), async () => {
     const r = await cli(["app", "open", "hermes"], "openclaw");
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("No built-in app");
     expect(posted).toEqual([]);
   });
 
-  it("still refuses an id no app claims", async () => {
+  it("still refuses an id no app claims", budget(3), async () => {
     const r = await cli(["app", "open", "not-an-app"], "hermes");
     expect(r.status).toBe(1);
     expect(posted).toEqual([]);
   });
 
-  it("opens an app the device really installed, and refuses one it did not", async () => {
+  it("opens an app the device really installed, and refuses one it did not", budget(2), async () => {
     installedApps = ["notes"];
     expect((await cli(["app", "open", "installed-notes"], "openclaw")).status).toBe(0);
     expect(posted).toContainEqual(
@@ -211,7 +226,7 @@ d("clawbox app open — the edition gate", () => {
     expect(missing.stderr).toContain("No installed app");
   });
 
-  it("refuses a store-installed skill on Hermes, and opens a web app", async () => {
+  it("refuses a store-installed skill on Hermes, and opens a web app", budget(2), async () => {
     // An installed STORE app is an OpenClaw skill: its window shells out to the
     // openclaw binary, so the Hermes desktop drops it from `getAllApps()` and a
     // tick here would be printed over a window that never appears. A ClawBox
@@ -237,13 +252,16 @@ d("clawbox app open — when the harness cannot be determined", () => {
   // A lock file that EXISTS and carries no edition: a truncated write, a
   // permission change, a partial reflash. The MCP resolves that to the smaller
   // TOOL SET on purpose — an unreadable lock must not hand a device the shell
-  // and file tools. The APP question is a different one, and it has an oracle:
-  // /setup-api/harness/active always answers (getActiveHarness() falls through
-  // readEdition(), whose default is "openclaw"), and it is the same route the
-  // desktop grid and /app/<id> are built from. So the lock's state is not what
-  // decides here — the DEVICE'S SILENCE is, and only then are both harness-only
-  // sets hidden, the way the desktop hides them while its own fetch is in
-  // flight.
+  // and file tools. The APP sets are not nested, so the same doubt cannot fail
+  // closed onto one harness: answering "hermes" hides `store`, `openclaw` and
+  // `memory-shard` from a box that has them, and answering "openclaw" ticks off
+  // apps a Hermes box does not have. Both sets are hidden and the reason said.
+  //
+  // The device is NOT asked here, and that is deliberate:
+  // /setup-api/harness/active resolves through `readEdition()` — the same file
+  // this process just failed to read — so on an unreadable lock it can only
+  // echo "openclaw", on a Hermes box as readily as on an OpenClaw one. See
+  // mcp/lib/edition.ts.
   const NO_EDITION = "# ClawBox edition lock\n# (truncated)\n";
 
   it("keeps offering the apps that exist on either harness", async () => {
@@ -252,35 +270,14 @@ d("clawbox app open — when the harness cannot be determined", () => {
     expect(posted).toContainEqual(expect.objectContaining({ appId: "settings" }));
   });
 
-  it("asks the device rather than hiding apps the box is showing", async () => {
-    // The unreadable lock alone is NOT "undetermined". The desktop renders
-    // twelve apps in this state, and telling the agent that three of them
-    // cannot be placed — while the owner is looking at them — is the two
-    // surfaces disagreeing, which is the defect this whole change is about.
+  it("refuses BOTH harnesses' own apps rather than guessing one", budget(5), async () => {
+    // The stub device WOULD answer "openclaw" here — that is the point. Taking
+    // it would tick off `store` and `openclaw` on a box whose lock nobody could
+    // read, and deny a Hermes box its own dashboard.
     activeHarness = "openclaw";
-    for (const appId of ["store", "openclaw", "memory-shard"]) {
-      posted = [];
-      const r = await cli(["app", "open", appId], "openclaw", { lockBody: NO_EDITION });
-      expect(r.status, `${appId} must open: ${r.stderr}`).toBe(0);
-      expect(posted).toContainEqual(expect.objectContaining({ appId }));
-    }
-    // …and the other harness's are still refused, because the device named one.
-    const other = await cli(["app", "open", "hermes"], "openclaw", { lockBody: NO_EDITION });
-    expect(other.status).toBe(1);
-
-    const list = await cli(["app", "list"], "openclaw", { lockBody: NO_EDITION });
-    expect(list.stdout).toContain("store —");
-    expect(list.stdout).not.toContain("hermes —");
-  });
-
-  it("refuses BOTH harnesses' own apps when the device cannot answer", async () => {
-    // A dual box mid-update: the web server is restarting, so
-    // /setup-api/harness/active does not answer. Defaulting to one harness
-    // would tell the agent as a durable fact that the box has no dashboard.
-    const dead = "http://127.0.0.1:9";
     for (const appId of ["hermes", "hermes-skills", "store", "openclaw", "memory-shard"]) {
       posted = [];
-      const r = await cli(["app", "open", appId], "dual", { apiBase: dead });
+      const r = await cli(["app", "open", appId], "openclaw", { lockBody: NO_EDITION });
       expect(r.status, `${appId} must be refused`).toBe(1);
       // Not "there is no such app": the device may well have it. Ticking off an
       // open the desktop then drops is the false success this gate exists for.
@@ -289,14 +286,31 @@ d("clawbox app open — when the harness cannot be determined", () => {
     }
   });
 
-  it("lists neither harness's own apps when the device cannot answer, and says why", async () => {
-    const list = await cli(["app", "list"], "dual", { apiBase: "http://127.0.0.1:9" });
-    expect(list.status, list.stderr).toBe(0);
-    expect(list.stdout).toContain("settings —");
+  it("lists neither harness's own apps, and says why", async () => {
+    const r = await cli(["app", "list"], "openclaw", { lockBody: NO_EDITION });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("settings —");
     for (const appId of ["hermes —", "store —", "openclaw —", "memory-shard —"]) {
-      expect(list.stdout).not.toContain(appId);
+      expect(r.stdout).not.toContain(appId);
     }
-    expect(list.stdout).toMatch(/harness/i);
+    expect(r.stdout).toMatch(/harness/i);
+  });
+
+  it("refuses them on a dual box the device cannot answer for either", budget(3), async () => {
+    // A dual box mid-update: the web server is restarting, so
+    // /setup-api/harness/active does not answer. Defaulting to one harness
+    // would tell the agent as a durable fact that the box has no dashboard.
+    const dead = "http://127.0.0.1:9";
+    for (const appId of ["hermes", "store"]) {
+      posted = [];
+      const r = await cli(["app", "open", appId], "dual", { apiBase: dead });
+      expect(r.status, `${appId} must be refused`).toBe(1);
+      expect(r.stderr).toMatch(/which harness/i);
+      expect(posted).toEqual([]);
+    }
+    const list = await cli(["app", "list"], "dual", { apiBase: dead });
+    expect(list.stdout).not.toContain("hermes —");
+    expect(list.stdout).not.toContain("store —");
   });
 
   it("prints nothing about registering a tool set", async () => {
@@ -330,8 +344,21 @@ d("clawbox app open — what it may claim happened", () => {
     // over every app would make the honest note meaningless.
     const r = await cli(["app", "open", "terminal"], "openclaw");
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toMatch(/✅ Opening terminal/);
     expect(r.stdout).not.toMatch(/popup/i);
+    expect(r.stdout).toContain("✅ ");
+  });
+
+  it("says the SAME SENTENCE ui_open_app says, on both branches", budget(2), async () => {
+    // The invariant `openedAppNotice` exists for. Consulted only on the
+    // external branch it was half dead, and the ordinary wording was free to
+    // drift from the tool's — which is the defect, one surface over.
+    for (const [appId, edition] of [["terminal", "openclaw"], ["hermes", "hermes"]] as const) {
+      const r = await cli(["app", "open", appId], edition);
+      expect(r.status, r.stderr).toBe(0);
+      const app = builtInApps(edition).find((a) => a.id === appId);
+      expect(app, `${appId} must exist on ${edition}`).toBeTruthy();
+      expect(r.stdout).toContain(openedAppNotice(app, appId));
+    }
   });
 
   it("reports an installed web app as opened", async () => {
@@ -341,7 +368,8 @@ d("clawbox app open — what it may claim happened", () => {
     installedMeta = { notes: { webappUrl: "/setup-api/webapps?app=notes" } };
     const r = await cli(["app", "open", "installed-notes"], "openclaw");
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toMatch(/✅ Opening installed-notes/);
+    expect(r.stdout).toContain("✅ ");
+    expect(r.stdout).toContain("installed-notes");
   });
 });
 
@@ -366,7 +394,7 @@ d("clawbox app list — the same answer as the gate", () => {
   // paying bun's own start. That is well past vitest's 5 s default, and a
   // ceiling derived from the work (rather than inherited) is what keeps the
   // failure honest: `CLI_TIMEOUT_MS` still fails a single hung child first.
-  it("names every app it would open, and no app it would refuse", { timeout: 60_000 }, async () => {
+  it("names every app it would open, and no app it would refuse", budget(12), async () => {
     // The two commands are one gate: a list that offers what `open` refuses is
     // the false success this pair exists to prevent.
     activeHarness = "hermes";

@@ -64,6 +64,20 @@ export function builtInApps(edition: Ed | null): DesktopApp[] {
 }
 
 /**
+ * Why an app that exists on ONE harness cannot be offered right now.
+ *
+ * The wording matters, and the CLI has said it since this gate existed: an app
+ * the OTHER harness owns is "not here", while the SAME app on a box whose
+ * harness could not be determined is "could not be placed". Saying the first
+ * over the second tells the agent as a durable fact that the box has no
+ * dashboard, which is how it stops asking — so the MCP tool and the CLI say the
+ * same sentence, from here.
+ */
+export const UNKNOWN_HARNESS_NOTE =
+  "This ClawBox could not say which harness it is running, so apps that belong to only one of them"
+  + " are not offered. Check /etc/clawbox/edition.env and that the device's web server is up.";
+
+/**
  * What may honestly be said after the open action has been posted.
  *
  * ONE sentence for both surfaces. `ui_open_app` and `clawbox app open` push the
@@ -85,6 +99,19 @@ export function openedAppNotice(app: DesktopApp | undefined, fallbackId: string)
     ? `Asked the desktop to open ${app.name}. It opens in a new browser tab, so ask the user to`
       + " look at the screen — and to allow the popup if their browser blocked it."
     : `Opened ${app?.name ?? fallbackId} on the desktop.`;
+}
+
+/**
+ * The same notice for a human reading a shell, with the CLI's tick.
+ *
+ * The tick and the wording are separated deliberately: the SENTENCE is the
+ * claim, and it has to be the tool's, or a future change to one surface's
+ * hedging silently un-aligns them again — which is the drift `openedAppNotice`
+ * was added to prevent and, on its first outing, only half prevented. The glyph
+ * is presentation, and only where a person is reading.
+ */
+export function openedAppLine(app: DesktopApp | undefined, fallbackId: string): string {
+  return `${app?.external ? "" : "✅ "}${openedAppNotice(app, fallbackId)}`;
 }
 
 export interface Capabilities {
@@ -235,7 +262,13 @@ export async function buildContext(
   edition: Ed,
   install: "openclaw" | "hermes" | "dual",
   profile: Profile,
-  appHarness: Ed | null = edition,
+  // REQUIRED, with no default. `= edition` looked harmless because both
+  // production callers pass it, but it is the wrong answer by this module's own
+  // argument: with an unreadable lock `edition` is "hermes", and answering that
+  // for the APP question refuses three apps the box has and ticks off two it
+  // may not. A caller who omitted it would get exactly that, silently and
+  // without a type error — the conflation this pair of questions exists to end.
+  appHarness: Ed | null,
 ): Promise<McpContext> {
   let screenGrabber: string | null = null;
   for (const bin of SCREEN_GRABBERS) {
