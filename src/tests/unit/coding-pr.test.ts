@@ -28,6 +28,15 @@ import {
 // "opened", nothing touches git or gh. What is under test is the runner's
 // bookkeeping of the pull request across the owner's gestures, which the pure
 // helpers above cannot see.
+
+// The awaited reset in this file's teardown can now legitimately spend the
+// drain's own budget (SETTLE_DRAIN_BUDGET_MS, 5 s) and then up to ~2.75 s in
+// the removal's linear retry backoff — ~7.8 s of vitest's 10 s DEFAULT hook
+// ceiling, and nothing would say so before it bit. This file starts real
+// processes through @/lib/coding-agent rather than importing child_process,
+// which is why test-timeout-hygiene.test.ts names it in ALSO_REQUIRED.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const announce = vi.hoisted(() => vi.fn<(run: unknown) => Promise<undefined>>(async () => undefined));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
 const github = vi.hoisted(() => ({
@@ -300,10 +309,16 @@ describe("the pull request across the owner's gestures", () => {
     lib = await import("@/lib/coding-agent");
   });
 
-  afterEach(() => {
-    lib._resetCodingAgentStateForTests();
+  afterEach(async () => {
+    // Awaited: the settle path a finished run starts outlives the test that
+    // made it, and the removal below raced the work it was still doing.
+    await lib._resetCodingAgentStateForTests();
     restore();
-    fs.rmSync(base, { recursive: true, force: true });
+    // maxRetries, as the backstop for what the drain cannot promise: it is
+    // bounded, and a run this teardown had to KILL settles from its child's
+    // own handler. Node retries exactly this family (EBUSY/ENOTEMPTY/EPERM)
+    // and by default does not retry at all.
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("starts a run in a folder that is not a repository yet with no pull request, and says so once", async () => {
@@ -359,7 +374,7 @@ describe("the pull request across the owner's gestures", () => {
     // paused run is NOT that: its record survives the restart and it resumes
     // in place, so its pull request is still coming.
     const paused = await startAndPause(path.join(base, "flag-2"));
-    lib._resetCodingAgentStateForTests();
+    await lib._resetCodingAgentStateForTests();
     lib.resumePullRequestWatches();
     expect(lib.getRun(paused.id)?.status).toBe("paused");
     expect(lib.getRun(paused.id)?.pr?.phase).toBe("opening");

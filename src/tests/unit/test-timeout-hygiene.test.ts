@@ -278,6 +278,16 @@ const ALSO_REQUIRED = [
   // `test:coverage:ci` on an idle machine, and 5 318 ms on a four-worker CI
   // runner, where it failed with vitest's "Test timed out in 5000ms".
   "src/tests/unit/state-updater-purity.test.ts",
+  // The same blind spot, and now the same cost: since the teardown's reset
+  // became an AWAITED drain (SETTLE_DRAIN_BUDGET_MS, 5 s) plus the removal's
+  // retry backoff, a hook in these two can legitimately want ~7.8 s of a 10 s
+  // default. coding-pr.test.ts drives the runner against a fake claude-ds
+  // through @/lib/coding-agent; coding-agent-pr-watch.test.ts starts no run
+  // today and carries the ceiling so that adding one cannot quietly cost it.
+  // (coding-agent-cleanup.test.ts and coding-agent-spawn-failure.test.ts need
+  // no entry: both import child_process and the rule above already has them.)
+  "src/tests/unit/coding-pr.test.ts",
+  "src/tests/unit/coding-agent-pr-watch.test.ts",
 ];
 
 /**

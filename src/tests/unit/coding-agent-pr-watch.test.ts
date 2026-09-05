@@ -19,6 +19,15 @@ import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { isPrPending, MAX_WAIT_MS, POLL_INTERVAL_MS } from "@/lib/coding-pr-state";
 
+// The same ceiling the other four coding-agent suites carry, for symmetry
+// rather than for a cost this file pays today: it starts no run, so its
+// awaited reset kills nothing and the drain returns on its first iteration.
+// The declaration is here so a run added to this file later cannot quietly
+// put an awaited drain (SETTLE_DRAIN_BUDGET_MS, 5 s) plus the removal's retry
+// backoff inside vitest's 10 s DEFAULT hook budget — and it imports no
+// child_process, so test-timeout-hygiene.test.ts would not say so.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const readPullRequest = vi.hoisted(() => vi.fn());
 const mergePullRequest = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-pr", async (importOriginal) => ({
@@ -88,11 +97,17 @@ beforeEach(async () => {
   lib = await import("@/lib/coding-agent");
 });
 
-afterEach(() => {
-  lib._resetCodingAgentStateForTests();
+afterEach(async () => {
+  // Real timers first: the reset now waits for the settle path, and a frozen
+  // clock would never let it finish.
   vi.useRealTimers();
+  await lib._resetCodingAgentStateForTests();
   restore();
-  fs.rmSync(base, { recursive: true, force: true });
+  // maxRetries, as the backstop for what the drain cannot promise: it is
+  // bounded, and a run this teardown had to KILL settles from its child's
+  // own handler. Node retries exactly this family (EBUSY/ENOTEMPTY/EPERM)
+  // and by default does not retry at all.
+  fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("a pull request GitHub will not answer about", () => {

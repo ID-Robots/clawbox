@@ -15,6 +15,7 @@
  * installer puts it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -31,6 +32,15 @@ vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: announce }));
 // A roomy box unless a test says otherwise: the team's spawn slot reads it.
 const memAvailable = vi.hoisted(() => vi.fn(async (): Promise<number | null> => 8000));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: memAvailable }));
+// Every run draws its project an icon, through an upstream ClawBox AI call.
+// Nothing here asserts it, and left real each run reached for the network on
+// its way to the "could not generate an icon (continuing)" line CI logs. The
+// same stub the code-projects and webapp-registry suites use, for the same
+// reason: a unit test must not depend on what the network answers.
+vi.mock("@/lib/project-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/project-icon")>()),
+  ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })),
+}));
 
 type Lib = typeof import("@/lib/coding-agent");
 
@@ -140,6 +150,26 @@ function makeProject(id: string): string {
   return dir;
 }
 
+/** Every path under `dir`, sorted, each with what it IS — a folder, or a file
+ *  and the hash of its bytes. A folder still being written to changes. The
+ *  CONTENTS are in it because a late settle can rewrite a file that is already
+ *  there (`project.json`, a `.git` index) without adding or removing a single
+ *  entry name, and a list of names would call that tree unchanged.
+ *  A walk that trips over a directory disappearing under it has answered the
+ *  question too — as an assertion, not as a stack. */
+function entriesUnder(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir, { recursive: true, encoding: "utf-8" }).sort().map((rel) => {
+      const stat = fs.lstatSync(path.join(dir, rel));
+      if (!stat.isFile()) return `${rel} ${stat.isDirectory() ? "dir" : "other"}`;
+      const hash = crypto.createHash("sha256").update(fs.readFileSync(path.join(dir, rel))).digest("hex");
+      return `${rel} ${hash.slice(0, 16)}`;
+    });
+  } catch (err) {
+    return [`changed under the walk: ${err instanceof Error ? err.message : String(err)}`];
+  }
+}
+
 function readyDevice(): void {
   installFakeClaude();
   installFakeWrapper(HAPPY_BODY);
@@ -170,18 +200,18 @@ beforeEach(async () => {
   lib = await import("@/lib/coding-agent");
 });
 
-afterEach(() => {
-  lib._resetCodingAgentStateForTests();
+afterEach(async () => {
+  // Awaited, because the settle path a finished run starts — the commit, the
+  // review decision, the pull request — outlives the test that made it and
+  // was still spawning `git init` inside the tree removed below. Retrying the
+  // removal (maxRetries, added for PRs #643 and #648) did not fix it: CI
+  // failed the same way again on #639 with
+  // `ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'`.
+  await lib._resetCodingAgentStateForTests();
   restore();
-  // maxRetries, because this suite has twice failed CI with
-  // `ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'`
-  // (PRs #643 and #648, both on changes that touch none of this code).
-  //
-  // The test never creates that .git — the code under test does, through a
-  // spawned `git init` — so the directory can still be gaining files at the
-  // moment this line runs. Node's rm retries precisely this set of errors
-  // (EBUSY/EMFILE/ENFILE/ENOTEMPTY/EPERM) with a linear backoff, and defaults
-  // to not retrying at all.
+  // The retries stay as the backstop for what the drain cannot promise: it is
+  // bounded, and a run this teardown had to KILL settles from its child's own
+  // handler, which the drain waits for but only up to its budget.
   fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
@@ -470,11 +500,51 @@ describe("a run", () => {
     expect(lib.listRuns().map((r) => r.id)).toEqual([second.id, first.id]);
     expect(first.id).toMatch(lib.RUN_ID_RE);
 
-    lib._resetCodingAgentStateForTests();
+    await lib._resetCodingAgentStateForTests();
     vi.resetModules();
     const again = await import("@/lib/coding-agent");
     expect(again.getRun(first.id)?.summary).toMatch(/Changed/);
-    again._resetCodingAgentStateForTests();
+    await again._resetCodingAgentStateForTests();
+  });
+
+  it("has stopped writing in the project folder once a killed run's state is reset", async () => {
+    // A run that is still going when the teardown arrives is SIGKILLed by the
+    // reset — and settles from its own child's `close` handler, after it. So
+    // the commit, the review decision and the pull request all begin once the
+    // reset has returned, and the removal below runs into a `git init` that is
+    // still creating .git. That is how CI failed on #639, #643 and #648 with
+    //   ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'
+    // (#665 has since moved a NATURALLY finished run's commit ahead of its
+    // waiters, which closes the other half of the same defect; a killed run
+    // has no waiter to be ahead of.)
+    //
+    // Pictures off: the icon draw has a budget of its own and is deliberately
+    // left running (see commitProjectAssets), so it is not what this asserts.
+    writeConfig({
+      clawai_token: "claw_test_token",
+      clawai_tier: "flash",
+      coding_agent_enabled: true,
+      coding_agent_generate_images: false,
+    });
+    // Changes something, then stays up: the settle path only commits a run
+    // that touched a file, and the run has to be live at the reset.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${ASSISTANT}' | sed "s|__DIR__|$PWD|"`,
+      `echo '${TOOL_RESULTS}'`,
+      "sleep 30",
+    ].join("\n"));
+    const project = makeProject("site");
+    const run = await lib.startRun({ task: "one", projectId: "site", source: "agent" });
+    await vi.waitFor(() => {
+      expect(lib.getRun(run.id)?.filesTouched.length).toBeGreaterThan(0);
+    }, { timeout: 10_000 });
+
+    await lib._resetCodingAgentStateForTests();
+
+    const settled = entriesUnder(project);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(entriesUnder(project)).toEqual(settled);
   });
 
   it("reads a corrupt runs file as empty rather than failing", async () => {
@@ -811,7 +881,7 @@ describe("a run", () => {
 
       // A restart: forget memory, re-read the file. Both records must survive
       // (they vanished here once — RUN_STATUSES had not been widened).
-      lib._resetCodingAgentStateForTests();
+      await lib._resetCodingAgentStateForTests();
       expect(lib.getRun(draft.id)?.status).toBe("draft");
       expect(lib.getRun(started.id)?.status).toBe("paused");
       expect(lib.getRun(started.id)?.resumable).toBe(true);
@@ -1132,6 +1202,44 @@ describe("retrying a transient upstream failure", () => {
 
     expect(run.status).toBe("stopped");
     expect(run.retries).toBe(0);
+  });
+
+  it("does NOT retry a run the reset itself killed", async () => {
+    // The teardown's reset SIGKILLs whatever is still going, and finishRun
+    // then reads that kill as the provider blinking: stderr says 503, the run
+    // touched nothing, and the one-shot retry guard is
+    // `state.endRequested === null` — still true, because the reset never
+    // said it was the one ending the run. So a REPLACEMENT claude-ds is
+    // spawned that the drain neither killed (`killed` was taken before it
+    // existed) nor waits for (the retry branch returns above
+    // `trackSettleWork`), and `settleWork` answers success with a fresh child
+    // running inside the tree the teardown is about to remove — the ENOTEMPTY
+    // shape this hook exists to stop, arriving through the one path it did
+    // not model.
+    // The 503 goes out BEFORE the spawn marker: the marker is what the test
+    // waits on, and a child descheduled between the two would be killed with
+    // a stderr holding only the wrapper's own banner — which stderrTail
+    // filters out — so the RED would pass on unfixed code for the wrong
+    // reason.
+    installFakeWrapper([
+      "echo 'API Error: 503 Service Unavailable' >&2",
+      `echo spawned >> "${spawnsFile()}"`,
+      `echo '${INIT}'`,
+      "sleep 30",
+    ].join("\n"));
+    makeProject("site");
+    const spawns = () => (fs.existsSync(spawnsFile())
+      ? fs.readFileSync(spawnsFile(), "utf-8").trim().split("\n").length
+      : 0);
+    await lib.startRun({ task: "t", projectId: "site", source: "agent" });
+    await vi.waitFor(() => { expect(spawns()).toBe(1); }, { timeout: 10_000 });
+
+    await lib._resetCodingAgentStateForTests();
+
+    expect(spawns()).toBe(1);
+    // And none arrives after the drain has already answered, either.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(spawns()).toBe(1);
   });
 });
 
@@ -1848,10 +1956,10 @@ describe("the pull request on disk", () => {
     expect(run?.pr).toBeNull();
   });
 
-  it("drops a blob without a start, and one that is not an object", () => {
+  it("drops a blob without a start, and one that is not an object", async () => {
     writeRunWithPr({ phase: "waiting", number: 7 });
     expect(lib.listRuns()[0]?.pr).toBeNull();
-    lib._resetCodingAgentStateForTests();
+    await lib._resetCodingAgentStateForTests();
     writeRunWithPr("waiting" as unknown as Record<string, unknown>);
     expect(lib.listRuns()[0]?.pr).toBeNull();
   });

@@ -35,6 +35,13 @@ vi.mock("child_process", async (importOriginal) => ({
   spawn: spawnMock,
 }));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
+// Every run draws its project an icon through an upstream ClawBox AI call.
+// Nothing here asserts it, and left real it is one more thing racing the real
+// `git` below for a loaded runner's attention.
+vi.mock("@/lib/project-icon", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/project-icon")>()),
+  ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })),
+}));
 
 type Lib = typeof import("@/lib/coding-agent");
 
@@ -73,10 +80,17 @@ beforeEach(async () => {
   lib = await import("@/lib/coding-agent");
 });
 
-afterEach(() => {
-  lib._resetCodingAgentStateForTests();
+afterEach(async () => {
+  // Awaited: a settled run's commit and pull request are started from the
+  // settle path and outlive the test that made them, so the removal below
+  // raced the `git` still running inside this tree.
+  await lib._resetCodingAgentStateForTests();
   restore();
-  fs.rmSync(base, { recursive: true, force: true });
+  // maxRetries, as the backstop for what the drain cannot promise: it is
+  // bounded, and a run this teardown had to KILL settles from its child's
+  // own handler. Node retries exactly this family (EBUSY/ENOTEMPTY/EPERM)
+  // and by default does not retry at all.
+  fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("a spawn that throws synchronously", () => {
