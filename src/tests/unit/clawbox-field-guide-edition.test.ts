@@ -39,7 +39,7 @@ vi.mock("../../../mcp/lib/api", () => ({
 
 import type { McpContext } from "../../../mcp/lib/context";
 import { captureRegistrar } from "../helpers/mcp-registrar";
-import { fieldGuideForEdition, registerOrientationTools } from "../../../mcp/tools/orientation";
+import { WEBAPP_STORAGE_GUIDE, fieldGuideForEdition, registerOrientationTools } from "../../../mcp/tools/orientation";
 import { registerSystemTools } from "../../../mcp/tools/system";
 import { registerDesktopTools } from "../../../mcp/tools/desktop";
 import { registerSkillTools } from "../../../mcp/tools/skills";
@@ -51,14 +51,15 @@ import { registerCodingTools } from "../../../mcp/tools/coding";
 import { registerCodingAgentTools, registerCodingTeamTools } from "../../../mcp/tools/coding-agent";
 
 type Ed = "openclaw" | "hermes";
+type Install = "openclaw" | "hermes" | "dual";
 
 const GUIDE = readFileSync(path.join(REPO_ROOT, "Clawbox.md"), "utf-8");
-const served = (edition: Ed) => fieldGuideForEdition(GUIDE, edition);
+const served = (edition: Ed, install: Install = edition) => fieldGuideForEdition(GUIDE, edition, install);
 
 /** The shipped posture: every capability probe satisfied, every owner switch on. */
-const ctx = (edition: Ed): McpContext => ({
+const ctx = (edition: Ed, install: Install = edition): McpContext => ({
   edition,
-  install: edition,
+  install,
   appHarness: edition,
   profile: "full",
   capabilities: { screenGrabber: "gnome-screenshot", imageConvert: true, journal: true, du: true },
@@ -95,31 +96,59 @@ const onlyOn = (a: Ed, b: Ed): string[] => {
 const offers = (text: string, tool: string) =>
   new RegExp("`" + tool + "\\b[^`]*`").test(text);
 
-describe("the field guide is fenced, and both fences are well formed", () => {
-  it("balances every edition block", () => {
-    const opens = GUIDE.split("\n").filter((l) => /^<!--\s*edition:[a-z]+\s*-->\s*$/.test(l));
-    const closes = GUIDE.split("\n").filter((l) => /^<!--\s*\/edition\s*-->\s*$/.test(l));
-    expect(opens.length).toBeGreaterThan(0);
-    expect(closes.length).toBe(opens.length);
+/** Every (harness, install) a real box can present. */
+const BOXES: [Ed, Install][] = [
+  ["openclaw", "openclaw"],
+  ["hermes", "hermes"],
+  ["openclaw", "dual"],
+  ["hermes", "dual"],
+];
+
+describe("the field guide is fenced, and the fences are well formed", () => {
+  it("nests every block properly — no unmatched close, nothing left open", () => {
+    // Equal counts are NOT the property: a block opened inside another block's
+    // body, then closed, used to end BOTH — and the remainder of the outer
+    // block was served to every box with the counts still balanced.
+    const stack: string[] = [];
+    let opens = 0;
+    GUIDE.split("\n").forEach((line, i) => {
+      const open = /^<!--\s*(edition|ships):([a-z0-9_-]+)\s*-->\s*$/.exec(line);
+      if (open) {
+        opens += 1;
+        stack.push(open[1]);
+        return;
+      }
+      const close = /^<!--\s*\/(edition|ships)\s*-->\s*$/.exec(line);
+      if (!close) return;
+      expect(stack.pop(), `line ${i + 1}: close with no open`).toBe(close[1]);
+    });
+    expect(opens).toBeGreaterThan(0);
+    expect(stack, "a block was left open").toEqual([]);
   });
 
-  it("names no edition the filter cannot serve", () => {
-    const names = [...GUIDE.matchAll(/^<!--\s*edition:([a-z]+)\s*-->\s*$/gm)].map((m) => m[1]);
-    expect([...new Set(names)].sort()).toEqual(["hermes", "openclaw"]);
+  it("names no audience the filter cannot serve", () => {
+    const names = [...GUIDE.matchAll(/^<!--\s*(edition|ships):([a-z0-9_-]+)\s*-->\s*$/gm)].map((m) => `${m[1]}:${m[2]}`);
+    expect([...new Set(names)].sort()).toEqual([
+      "edition:hermes",
+      "edition:openclaw",
+      "ships:hermes",
+      "ships:openclaw",
+    ]);
   });
 
   it("leaves no fence marker in what the agent reads", () => {
-    for (const edition of ["openclaw", "hermes"] as const) {
-      expect(served(edition)).not.toMatch(/<!--\s*\/?edition/);
+    for (const [edition, install] of BOXES) {
+      expect(served(edition, install)).not.toMatch(/<!--\s*\/?(edition|ships)/);
     }
   });
 
-  it("stays inside the tool's own output cap on both editions", () => {
-    // clawbox_context declares maxChars 24_000 and appends the webapp storage
-    // guide after this text; a guide that outgrew the cap would be truncated
-    // mid-sentence, and the truncation would land on the LAST section.
-    for (const edition of ["openclaw", "hermes"] as const) {
-      expect(served(edition).length).toBeLessThan(20_000);
+  it("stays inside the tool's own output cap on every box", () => {
+    // The real budget: clawbox_context declares maxChars 24_000 and joins this
+    // text with WEBAPP_STORAGE_GUIDE and a "\n\n---\n\n" separator. capText
+    // truncates the TAIL, so an overrun eats Quick facts and the final brief.
+    const separator = "\n\n---\n\n".length;
+    for (const [edition, install] of BOXES) {
+      expect(served(edition, install).length + separator + WEBAPP_STORAGE_GUIDE.length).toBeLessThan(24_000);
     }
   });
 });
@@ -128,6 +157,17 @@ describe("the Hermes guide describes a Hermes box", () => {
   it("does not call the agent the brain of an OpenClaw ClawBox", () => {
     expect(served("hermes")).not.toMatch(/brain of an \*\*OpenClaw ClawBox\*\*/);
     expect(served("hermes")).toMatch(/brain of a \*\*Hermes ClawBox\*\*/);
+  });
+
+  it("promises none of the missing abilities in the introduction script either", () => {
+    // The one block designed to be spoken verbatim on a fresh box. It named
+    // shell, files, the app store and web search in ENGLISH, which the symbol
+    // check below cannot see — so the defect this card is about survived in
+    // the sales pitch after it was removed from the identity paragraph.
+    const guide = served("hermes");
+    for (const promise of [/run shell commands/i, /manage files/i, /install apps from the store/i, /web search/i, /web fetch/i]) {
+      expect(guide, `Hermes guide promises ${promise}`).not.toMatch(promise);
+    }
   });
 
   it("does not hand out the address of a gateway this SKU masks", () => {
@@ -148,8 +188,10 @@ describe("the Hermes guide describes a Hermes box", () => {
     expect(openclawOnly).toContain("write_file");
     expect(openclawOnly).toContain("web_search");
 
-    const leaked = openclawOnly.filter((tool) => offers(served("hermes"), tool));
-    expect(leaked).toEqual([]);
+    for (const install of ["hermes", "dual"] as const) {
+      const leaked = openclawOnly.filter((tool) => offers(served("hermes", install), tool));
+      expect(leaked, `install=${install}`).toEqual([]);
+    }
   });
 
   it("names the abilities that ARE its own", () => {
@@ -157,6 +199,49 @@ describe("the Hermes guide describes a Hermes box", () => {
     for (const tool of ["skill_search", "skill_install", "ai_list_models"]) {
       expect(offers(guide, tool)).toBe(true);
     }
+  });
+
+  it("sends the agent to a Settings tab that exists", () => {
+    // SettingsApp's `ai` section is labelled settings.providers -> "Providers".
+    // There is no tab called "AI"; the sibling workspace guide already has a
+    // test forbidding that exact wrong turn.
+    for (const [edition, install] of BOXES) {
+      expect(served(edition, install)).not.toMatch(/Settings\s*(->|→)\s*AI\b/);
+    }
+  });
+});
+
+describe("the DUAL SKU is told what it has, not what the active harness has", () => {
+  it("still names the gateway on a dual box running Hermes", () => {
+    // The gateway removal, the mask and the closed 18789 are gated on
+    // CLAWBOX_EDITION = "hermes" EXACTLY (install.sh is_hermes_edition). On
+    // dual the unit is installed and listening, so a guide that told the agent
+    // it was gone would be stating a false device fact about the box's own
+    // unauthenticated control surface.
+    const guide = served("hermes", "dual");
+    expect(guide).toContain("http://127.0.0.1:18789");
+    expect(guide).toContain("~/.openclaw/openclaw.json");
+  });
+
+  it("names the Hermes dashboard on a dual box running OpenClaw", () => {
+    const guide = served("openclaw", "dual");
+    expect(guide).toContain("~/.hermes/config.yaml");
+    expect(guide).toContain("127.0.0.2:9119");
+  });
+
+  it("never asserts the other harness is absent", () => {
+    // A locked SKU may say what it does not have; `dual` has both, and the
+    // filter cannot tell the two apart from `ctx.edition` alone.
+    for (const [edition, install] of BOXES) {
+      expect(served(edition, install)).not.toMatch(/no OpenClaw (gateway )?(at all|on this device)/i);
+      expect(served(edition, install)).not.toMatch(/there is no `~\/\.openclaw`/i);
+    }
+  });
+
+  it("keeps a Hermes box from being handed the gateway", () => {
+    const guide = served("hermes", "hermes");
+    expect(guide).not.toContain("http://127.0.0.1:18789");
+    expect(guide).not.toContain("~/.openclaw/openclaw.json");
   });
 });
 
@@ -183,9 +268,9 @@ describe("the OpenClaw guide keeps everything it had", () => {
 });
 
 describe("what is true on both editions is served to both", () => {
-  for (const edition of ["openclaw", "hermes"] as const) {
-    it(`keeps the shared guide on ${edition}`, () => {
-      const guide = served(edition);
+  for (const [edition, install] of BOXES) {
+    it(`keeps the shared guide on ${edition} (install ${install})`, () => {
+      const guide = served(edition, install);
       expect(guide).toContain('preferences_set(\'{"ui_user_name": "<name>"}\')');
       expect(guide).toContain("THE MASCOT");
       for (const tool of ["webapp_create", "ui_open_app", "code_project_init", "system_power", "wifi_status"]) {
@@ -196,9 +281,9 @@ describe("what is true on both editions is served to both", () => {
 });
 
 describe("clawbox_context serves the filtered guide, not the raw file", () => {
-  async function contextText(edition: Ed) {
+  async function contextText(edition: Ed, install: Install = edition) {
     const h = captureRegistrar(edition);
-    registerOrientationTools(h.reg, ctx(edition));
+    registerOrientationTools(h.reg, ctx(edition, install));
     const out = await h.call("clawbox_context", {});
     if (out.isError) throw new Error("clawbox_context failed");
     return out.text;
@@ -215,5 +300,43 @@ describe("clawbox_context serves the filtered guide, not the raw file", () => {
     const text = await contextText("openclaw");
     expect(text).toMatch(/brain of an \*\*OpenClaw ClawBox\*\*/);
     expect(text).toContain("http://127.0.0.1:18789");
+  });
+
+  it("passes the install through, so a dual box keeps both harnesses' facts", async () => {
+    const text = await contextText("hermes", "dual");
+    expect(text).toMatch(/brain of a \*\*Hermes ClawBox\*\*/);
+    expect(text).toContain("http://127.0.0.1:18789");
+  });
+});
+
+describe("the filter's nesting rule", () => {
+  const NESTED = [
+    "shared top",
+    "<!-- edition:openclaw -->",
+    "openclaw before",
+    "<!-- edition:hermes -->",
+    "hermes inside",
+    "<!-- /edition -->",
+    "openclaw after",
+    "<!-- /edition -->",
+    "shared tail",
+  ].join("\n");
+
+  it("keeps an inner block inside its outer one", () => {
+    // The bug this replaces: a close reset the state to "outside", so
+    // "openclaw after" was served to every box with the marker counts still
+    // balanced — the shape every well-formedness test above would pass over.
+    expect(fieldGuideForEdition(NESTED, "hermes").split("\n")).toEqual(["shared top", "shared tail"]);
+    expect(fieldGuideForEdition(NESTED, "openclaw").split("\n")).toEqual([
+      "shared top",
+      "openclaw before",
+      "openclaw after",
+      "shared tail",
+    ]);
+  });
+
+  it("drops a block whose audience it cannot place", () => {
+    const unknown = ["a", "<!-- edition:hermes2 -->", "b", "<!-- /edition -->", "c"].join("\n");
+    expect(fieldGuideForEdition(unknown, "hermes").split("\n")).toEqual(["a", "c"]);
   });
 });

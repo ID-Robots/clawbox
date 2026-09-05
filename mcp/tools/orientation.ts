@@ -123,11 +123,15 @@ function loadFieldGuide(): string | null {
   }
 }
 
-const EDITION_BLOCK_OPEN = /^<!--\s*edition:([a-z]+)\s*-->\s*$/;
-const EDITION_BLOCK_CLOSE = /^<!--\s*\/edition\s*-->\s*$/;
+// The name class is deliberately wider than the two values that exist: a typo
+// this pattern does NOT match is not a fence at all, so its block would be
+// served to every box with the marker still in the text. Recognising it is what
+// lets the unknown-name case fail closed.
+const BLOCK_OPEN = /^<!--\s*(edition|ships):([a-z0-9_-]+)\s*-->\s*$/;
+const BLOCK_CLOSE = /^<!--\s*\/(edition|ships)\s*-->\s*$/;
 
 /**
- * The field guide with the blocks that belong to the OTHER harness removed.
+ * The field guide with the blocks that do not apply to this box removed.
  *
  * TASK-540: `clawbox_context` served Clawbox.md verbatim, so a Hermes agent was
  * oriented by an OpenClaw script — told it was "the brain of an OpenClaw
@@ -140,28 +144,47 @@ const EDITION_BLOCK_CLOSE = /^<!--\s*\/edition\s*-->\s*$/;
  *
  * ONE document, fenced in place, rather than a second file: two files drift
  * within a release, and the shared four fifths of this guide is the part that
- * has to stay identical. Everything outside a fence is served to both.
+ * has to stay identical. Everything outside a fence is served to every box.
  *
- * Fails CLOSED. An unknown edition name matches nothing and its block is
- * dropped everywhere, which costs some text; the alternative — serving a block
- * whose audience could not be established — is how the Hermes agent was told
- * it had a gateway in the first place.
+ * TWO fence families, because the guide answers two different questions and
+ * `dual` separates them:
+ *   - `edition:` — the ACTIVE HARNESS, i.e. whose tool set the agent reading
+ *     this was given. `ctx.edition` resolves `dual` to one of the two.
+ *   - `ships:`   — what the DEVICE HAS INSTALLED. A dual box has an OpenClaw
+ *     gateway and a Hermes dashboard, and both blocks are served there. Keying
+ *     the gateway's address on the harness would have told a dual box running
+ *     Hermes that its gateway is gone while it is up and listening.
+ *
+ * Nesting is tracked with a stack: a close restores the enclosing block rather
+ * than declaring the rest of the file unconditional, so a Hermes note added
+ * inside an OpenClaw section cannot hand the OpenClaw remainder to every box.
+ * An unmatched close is ignored; `src/tests/unit/clawbox-field-guide-edition.test.ts`
+ * fails CI on either malformation.
+ *
+ * Fails CLOSED on an unknown name: it matches no box and its block is dropped
+ * everywhere, which costs some text. Serving a block whose audience could not
+ * be established is how the Hermes agent was told it had a gateway.
  */
-export function fieldGuideForEdition(markdown: string, edition: Ed): string {
+export function fieldGuideForEdition(
+  markdown: string,
+  edition: Ed,
+  install: "openclaw" | "hermes" | "dual" = edition,
+): string {
+  const applies = (family: string, name: string): boolean =>
+    family === "edition" ? name === edition : name === install || install === "dual";
   const kept: string[] = [];
-  // null = outside any fence; false = inside another harness's block.
-  let keeping: boolean | null = null;
+  const stack: boolean[] = [];
   for (const line of markdown.split("\n")) {
-    const open = EDITION_BLOCK_OPEN.exec(line);
+    const open = BLOCK_OPEN.exec(line);
     if (open) {
-      keeping = open[1] === edition;
+      stack.push(applies(open[1], open[2]));
       continue;
     }
-    if (EDITION_BLOCK_CLOSE.test(line)) {
-      keeping = null;
+    if (BLOCK_CLOSE.test(line)) {
+      stack.pop();
       continue;
     }
-    if (keeping === false) continue;
+    if (stack.some((keep) => !keep)) continue;
     kept.push(line);
   }
   // A dropped block leaves the blank lines that surrounded it behind. Markdown
@@ -453,7 +476,7 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 24_000 },
     async () => {
       const raw = loadFieldGuide();
-      const guide = raw === null ? null : fieldGuideForEdition(raw, ctx.edition);
+      const guide = raw === null ? null : fieldGuideForEdition(raw, ctx.edition, ctx.install);
       const parts: string[] = [];
       if (guide && guide.trim()) parts.push(guide);
       else parts.push(`(The device field guide is not installed on this ClawBox.)`);
