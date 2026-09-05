@@ -61,6 +61,8 @@ function runInstallX64(env: Record<string, string>): void {
 
 const MIRRORED_BOT = "111111:MirroredBotSecret_val";
 const NATIVE_BOT = "333333:NativeBotSecretValue";
+/** OpenClaw's other credential shape: a reference to an environment variable. */
+const ENV_REF = { source: "env", provider: "default", id: "TELEGRAM_BOT_TOKEN" };
 
 describe("install.sh registers the Telegram channel without clobbering the harness", () => {
   it("fills an empty channel block from ClawBox's mirror", () => {
@@ -100,6 +102,44 @@ describe("install.sh registers the Telegram channel without clobbering the harne
       botToken: NATIVE_BOT,
     });
   });
+
+  // The same bot, in OpenClaw's OTHER credential shape. `botToken` is absent
+  // here, so the "OpenClaw's own value wins" guard read an empty string and
+  // wrote the mirror as a literal BESIDE the reference - an older bot restored
+  // under a re-pointed one, one credential shape further out.
+  it("keeps an env-reference credential and writes no literal beside it", () => {
+    const cfg = path.join(dir, "openclaw.json");
+    fs.writeFileSync(cfg, JSON.stringify({ channels: { telegram: { enabled: true, token: ENV_REF } } }), "utf-8");
+
+    runInstallSh({ TG_TOKEN: MIRRORED_BOT, CFG: cfg });
+
+    expect(JSON.parse(fs.readFileSync(cfg, "utf-8")).channels.telegram).toEqual({
+      enabled: true,
+      token: ENV_REF,
+    });
+  });
+
+  // `renameSync` replaces the inode, so the temp file's mode is the one that
+  // lands. openclaw.json is 0600 on a box and the service user's umask is 0002,
+  // so a plain writeFileSync left the file holding the bot token and the
+  // gateway's auth token at 0664, on every install and every update.
+  it("keeps the mode of the config file it replaces", () => {
+    const cfg = path.join(dir, "openclaw.json");
+    fs.writeFileSync(cfg, JSON.stringify({ channels: {} }), { mode: 0o600 });
+    fs.chmodSync(cfg, 0o600);
+
+    runInstallSh({ TG_TOKEN: MIRRORED_BOT, CFG: cfg });
+
+    expect((fs.statSync(cfg).mode & 0o777).toString(8)).toBe("600");
+  });
+
+  it("creates a config file that was not there at 0600", () => {
+    const cfg = path.join(dir, "fresh-mode", "openclaw.json");
+
+    runInstallSh({ TG_TOKEN: MIRRORED_BOT, CFG: cfg });
+
+    expect((fs.statSync(cfg).mode & 0o777).toString(8)).toBe("600");
+  });
 });
 
 describe("install-x64.sh registers the Telegram channel the same way", () => {
@@ -133,6 +173,20 @@ describe("install-x64.sh registers the Telegram channel the same way", () => {
     expect(JSON.parse(fs.readFileSync(openclawPath, "utf-8")).channels.telegram).toEqual({
       enabled: true,
       botToken: NATIVE_BOT,
+    });
+  });
+
+  it("keeps an env-reference credential and writes no literal beside it", () => {
+    const { openclawPath, clawboxPath } = write(
+      { channels: { telegram: { enabled: true, token: ENV_REF } } },
+      { telegram_bot_token: MIRRORED_BOT },
+    );
+
+    runInstallX64({ OPENCLAW_CONFIG: openclawPath, CLAWBOX_CONFIG: clawboxPath });
+
+    expect(JSON.parse(fs.readFileSync(openclawPath, "utf-8")).channels.telegram).toEqual({
+      enabled: true,
+      token: ENV_REF,
     });
   });
 });

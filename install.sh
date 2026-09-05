@@ -3315,14 +3315,33 @@ const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
 // so copying the mirror over a bot the owner re-pointed with `openclaw config
 // set` silently restored an older one at the next update. The
 // dmPolicy/allowFrom strip above still runs either way.
+// A channel may carry its credential as an env REFERENCE under `token`
+// ({source:"env",…}) instead of a literal botToken — the shape
+// src/lib/telegram-bot-identity.ts recognises and refuses to guess at. Writing
+// the mirror as a botToken BESIDE that reference restores an older bot under a
+// re-pointed one exactly as overwriting botToken did.
 const existingToken = typeof rest.botToken === "string" ? rest.botToken.trim() : "";
-cfg.channels.telegram = { ...rest, enabled: true, botToken: existingToken || botToken };
+const openclawHasBot = existingToken !== "" || rest.token !== undefined;
+cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+// `rename` replaces the INODE, so the temp file's mode is the one that
+// survives. openclaw.json holds channels.telegram.botToken and the gateway's
+// auth token and is 0600 on a box; the service user's umask is 0002, so a plain
+// writeFileSync left it 0664 — world-readable, silently. chmod the temp as well
+// as passing `mode`, since `mode` is ignored for a file that already exists
+// (a stale .tmp from a crashed run).
+let cfgMode = 0o600;
+try {
+  cfgMode = fs.statSync(cfgPath).mode & 0o777;
+} catch (err) {
+  if (!err || err.code !== "ENOENT") throw err;
+}
 const tmp = `${cfgPath}.tmp`;
-fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: cfgMode });
+fs.chmodSync(tmp, cfgMode);
 fs.renameSync(tmp, cfgPath);
 process.stderr.write(
-  existingToken
+  openclawHasBot
     ? "  Telegram channel registered (kept the bot OpenClaw already holds)\n"
     : "  Telegram channel registered from ClawBox's saved token\n",
 );

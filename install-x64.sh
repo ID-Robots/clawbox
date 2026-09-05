@@ -725,9 +725,12 @@ try {
     // OpenClaw's own value wins over ClawBox's mirror — see the same block in
     // install.sh: the mirror re-registers the channel on a fresh ~/.openclaw,
     // it does not restore an older bot over one `openclaw config set` re-pointed.
+    // An env REFERENCE under `token` ({source:'env',…}) is a bot OpenClaw holds
+    // too — see the same block in install.sh.
     const existingToken=typeof rest.botToken==='string'?rest.botToken.trim():'';
-    c.channels.telegram={...rest,enabled:true,botToken:existingToken||cb.telegram_bot_token};
-    process.stderr.write(existingToken
+    const openclawHasBot=existingToken!==''||rest.token!==undefined;
+    c.channels.telegram=openclawHasBot?{...rest,enabled:true}:{...rest,enabled:true,botToken:cb.telegram_bot_token};
+    process.stderr.write(openclawHasBot
       ? '  Telegram channel registered in OpenClaw config (kept the bot OpenClaw already holds)\n'
       : "  Telegram channel registered in OpenClaw config from ClawBox's saved token\n");
   }
