@@ -2764,7 +2764,8 @@ export function openclawSkillRoot(): string | null {
 }
 
 /**
- * `agents.defaults.workspace`, or `undefined` when no config names one.
+ * `agents.defaults.workspace` as an absolute path (see
+ * {@link resolveWorkspaceValue}), or `undefined` when no config names one.
  *
  * Throws {@link OpenclawConfigUnreadableError} when openclaw.json exists and
  * cannot be read or parsed — the discipline {@link readConfigStrict} states at
@@ -2788,7 +2789,34 @@ function readConfiguredWorkspace(): string | undefined {
   }
   const workspace = (parsed as { agents?: { defaults?: { workspace?: unknown } } } | null)
     ?.agents?.defaults?.workspace;
-  return typeof workspace === "string" && workspace ? workspace : undefined;
+  if (typeof workspace !== "string" || !workspace.trim()) return undefined;
+  return resolveWorkspaceValue(workspace.trim());
+}
+
+/**
+ * `agents.defaults.workspace` as an ABSOLUTE path, the way the gateway itself
+ * reads it: `~` against `$HOME`, and a relative value against OpenClaw's home.
+ *
+ * The value is not guaranteed absolute — the owner writes it, or `openclaw
+ * config set` does — and the two other places in this repo that resolve it
+ * already say so and handle it: `gateway-pre-start.sh` (`expanduser`, then
+ * `isabs ? ws : join(~/.openclaw, ws)`) and `openclawWorkspaceDir()` in
+ * `src/lib/language-persona.ts`, which spells out the same rule and explains
+ * why a guard and the write it guards must name one directory. This function
+ * was the third reading and the only one that skipped it: `path.resolve(ws,
+ * "skills")` on a bare name answers `<cwd>/<ws>/skills` — the Next.js server's
+ * working directory — and on `~/…` a literal `~` folder under it. The gateway
+ * loads the skill from the real workspace, so the uninstall would find nothing
+ * at that address, answer `skillRemoved: false` and tell the owner there was
+ * no skill of that name while it stays on disk and loaded. That is TASK-551's
+ * own symptom, reached through the value rather than through the edition.
+ */
+function resolveWorkspaceValue(workspace: string): string {
+  const home = process.env.HOME || "/home/clawbox";
+  const expanded = workspace === "~" ? home
+    : workspace.startsWith("~/") ? path.join(home, workspace.slice(2))
+    : workspace;
+  return path.isAbsolute(expanded) ? expanded : path.join(openclawHome(), expanded);
 }
 
 /** The workspace when the config names none: the current path, else the legacy one. */

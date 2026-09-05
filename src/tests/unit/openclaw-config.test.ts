@@ -593,7 +593,10 @@ describe("openclaw-config", () => {
       // and a `$HOME`-shaped assertion passed whichever of the two the code
       // used. This is the delete target `openclawSkillRoot()` appends `skills`
       // to, so the two spellings must not be interchangeable here.
-      const restore = saveEnv("OPENCLAW_HOME");
+      // `CLAWBOX_OPENCLAW_HOME` outranks `OPENCLAW_HOME`, so a suite that
+      // happened to carry one would decide this assertion instead of the code.
+      const restore = saveEnv("CLAWBOX_OPENCLAW_HOME", "OPENCLAW_HOME");
+      delete process.env.CLAWBOX_OPENCLAW_HOME;
       process.env.OPENCLAW_HOME = "/custom/openclaw-home";
       try {
         mockFsSync.readFileSync.mockReturnValue(JSON.stringify({}));
@@ -604,6 +607,27 @@ describe("openclaw-config", () => {
         expect(result).toBe("/custom/openclaw-home/workspace");
       } finally {
         restore();
+      }
+    });
+
+    it("expands a ~ workspace against HOME", () => {
+      // The same rule `gateway-pre-start.sh` (expanduser) and
+      // `openclawWorkspaceDir()` in src/lib/language-persona.ts already apply
+      // to this key. Left literal, `~/clawd` resolved to a `~` directory under
+      // the server's own working directory — a delete target no configuration
+      // on the box names.
+      const originalHome = process.env.HOME;
+      process.env.HOME = "/test/home";
+      try {
+        mockFsSync.readFileSync.mockReturnValue(
+          JSON.stringify({ agents: { defaults: { workspace: "~/clawd" } } }),
+        );
+
+        const result = openclawConfig.getSkillsDir();
+
+        expect(result).toBe("/test/home/clawd");
+      } finally {
+        process.env.HOME = originalHome;
       }
     });
 

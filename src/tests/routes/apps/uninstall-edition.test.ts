@@ -263,6 +263,37 @@ describe("POST /setup-api/apps/uninstall on an OpenClaw device", () => {
     await expect(fs.stat(decoy)).resolves.toBeTruthy();
   });
 
+  it("resolves a relative workspace against OpenClaw's home, not the server's working directory", async () => {
+    // `agents.defaults.workspace` is not guaranteed absolute — the owner writes
+    // it, or `openclaw config set` does — and the gateway reads a bare name as
+    // relative to its own home. Both other readers of this key in the repo say
+    // so and handle it (`gateway-pre-start.sh`'s python, `openclawWorkspaceDir()`
+    // in src/lib/language-persona.ts); this one resolved it against the Next.js
+    // server's CWD, so the delete went to `<cwd>/work/skills/notes`, found
+    // nothing, and answered `skillRemoved: false` — "there was no skill of that
+    // name on disk" — about a skill still sitting in the real workspace and
+    // still loaded by the gateway. TASK-551's symptom, reached through the
+    // VALUE instead of the edition.
+    const overrideHome = path.join(home, "oc-home");
+    process.env.OPENCLAW_HOME = overrideHome;
+    await fs.mkdir(overrideHome, { recursive: true });
+    await fs.writeFile(
+      path.join(overrideHome, "openclaw.json"),
+      JSON.stringify({ agents: { defaults: { workspace: "work" } } }),
+    );
+    const configured = path.join(overrideHome, "work", "skills", APP);
+    await fs.mkdir(configured, { recursive: true });
+    await fs.writeFile(path.join(configured, "SKILL.md"), "# ours\n");
+
+    const { status, body } = await uninstall(APP);
+
+    expect(status).toBe(200);
+    expect(body.skillRemoved).toBe(true);
+    await expect(fs.stat(configured)).rejects.toThrow();
+    // Nothing was invented under the process's own directory.
+    await expect(fs.stat(path.resolve(process.cwd(), "work"))).rejects.toThrow();
+  });
+
   it("falls back to the workspace under OPENCLAW_HOME, not the one under $HOME", async () => {
     // The other half of the same rule: when the config names no workspace, the
     // well-known one is OpenClaw's own `<home>/workspace`. Keyed on $HOME it
