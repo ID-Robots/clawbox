@@ -443,6 +443,13 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     makeBox({ connectivity: ["full"] });
     const lock = path.join(root, "run", "gateway-online-restart.lock");
     const holder = spawn("flock", ["-n", lock, "-c", "sleep 20"], { stdio: "ignore" });
+    // `spawn` reports a missing executable asynchronously, and a ChildProcess
+    // with no `error` listener turns that into an uncaught exception that fails
+    // the entire run rather than this one case. flock is util-linux and is not
+    // guaranteed on every runner image.
+    holder.on("error", (err) => {
+      throw new Error(`flock is required for this test: ${err.message}`);
+    });
     try {
       await new Promise((resolve) => setTimeout(resolve, 500));
       const r = spawnSync("bash", [path.join(root, "libexec", "gateway-restart-when-online.sh"), "second"], {
@@ -629,7 +636,18 @@ describe("the installer reports what it actually installed", () => {
     if (start < 0) throw new Error(`${name} not found in install.sh`);
     const end = INSTALL_SH.indexOf("\n}", start);
     if (end < 0) throw new Error(`${name} has no closing brace`);
-    return INSTALL_SH.slice(start, end + 2);
+    const body = INSTALL_SH.slice(start, end + 2);
+    // The terminator is the first line starting with `}`, which is how every
+    // top-level function in install.sh closes — but a heredoc or an awk program
+    // inside the step could contain one and silently cut the body short. A
+    // truncated body is worse than a broken test: bash would fail to parse it,
+    // and every `not.toContain(...)` assertion below would then pass vacuously.
+    const opens = (body.match(/\{/g) ?? []).length;
+    const closes = (body.match(/\}/g) ?? []).length;
+    if (opens !== closes) {
+      throw new Error(`${name} was extracted truncated from install.sh (${opens} { vs ${closes} })`);
+    }
+    return body;
   }
 
   function runStep(opts: { waiterInstallFails?: boolean; dispatcherInstallFails?: boolean; shape: "update" | "fresh" }) {
@@ -641,7 +659,13 @@ describe("the installer reports what it actually installed", () => {
     copyFileSync(WAITER, path.join(project, "scripts", "gateway-restart-when-online.sh"));
 
     const body = shellFunction("step_nm_dispatcher")
-      .replace("/etc/NetworkManager/dispatcher.d", dispatcherDir);
+      .replaceAll("/etc/NetworkManager/dispatcher.d", dispatcherDir);
+    // Fail fast rather than write into the developer's or the runner's real
+    // dispatcher directory: `replace` with a string pattern rewrites only the
+    // first match, so a second literal added later would escape the sandbox.
+    if (body.includes("/etc/NetworkManager")) {
+      throw new Error("step_nm_dispatcher still references a real system path after redirection");
+    }
 
     const script = [
       // install.sh's own options, which are half of what this is about.
