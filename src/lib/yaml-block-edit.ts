@@ -348,6 +348,14 @@ function assertPath(path: string[]): void {
   }
 }
 
+/** Is there anything but blank lines and comments in [start, end)? */
+function hasContent(lines: string[], start: number, end: number): boolean {
+  for (let i = start; i < end; i += 1) {
+    if (!isSkippable(lines[i])) return true;
+  }
+  return false;
+}
+
 /** Walk as far down `path` as the file already goes. */
 function descend(
   lines: string[],
@@ -364,8 +372,29 @@ function descend(
   let indent = 0;
 
   for (let depth = 0; depth < path.length; depth += 1) {
-    const entry = findEntry(lines, start, end, indent, path[depth]);
-    if (!entry) break;
+    const entries = scanBlock(lines, start, end, indent);
+    const entry = entries.find((e) => e.key === path[depth]) ?? null;
+    if (!entry) {
+      // "No entries at all, but there are lines here" is not "the key is not
+      // written" — it is a block this editor cannot INDEX. The walk descends
+      // exactly INDENT_STEP per level and `scanBlock` skips everything deeper,
+      // so a block at any other indent (a hand edit, a writer that dumps at
+      // `indent=4`) reads as empty. Breaking here made both writers silently
+      // wrong on such a file: `unsetYamlPath` removed nothing and returned the
+      // text unchanged, and `setYamlPath` APPENDED a second `clawlocal:` at two
+      // spaces — a duplicate key written into the file that holds the provider
+      // api_keys. Both then passed `patchText`'s verification, because it reads
+      // through the same blind spot.
+      //
+      // Refusing is what hands the job to `hermes config set/unset`, which
+      // loads the file with PyYAML and does not care how it is indented.
+      if (entries.length === 0 && hasContent(lines, start, end)) {
+        throw new YamlEditUnsupported(
+          `could not read the block at ${path.slice(0, depth).join(".") || "the document root"}`,
+        );
+      }
+      break;
+    }
     matched.push(entry);
     if (depth < path.length - 1 && entry.inline !== "") {
       // `providers: {}` / `model: null` / a block scalar — descending into it
@@ -402,14 +431,6 @@ export function getYamlPath(text: string, path: string[]): string | null {
 
 /** `{}` / `[ ]` — a collection written inline with no members in it. */
 const EMPTY_FLOW_RE = /^(?:\{\s*\}|\[\s*\])$/;
-
-/** Is there anything but blank lines and comments in [start, end)? */
-function hasContent(lines: string[], start: number, end: number): boolean {
-  for (let i = start; i < end; i += 1) {
-    if (!isSkippable(lines[i])) return true;
-  }
-  return false;
-}
 
 /**
  * Is the path THERE, and — when it is a scalar — what does it say?
@@ -454,6 +475,18 @@ export type YamlPathRead =
 
 export function readYamlPath(text: string, path: string[]): YamlPathRead {
   assertPath(path);
+  // The one WHOLE-FILE fact that is evidence about every key, and the doctrine
+  // this module already states: Hermes' bridge and `hermes config get` both
+  // load config.yaml with PyYAML, so a document PyYAML refuses is a file in
+  // which no line is in effect — a tab in some other provider's value, an
+  // unterminated quote, a second document. Answering a confident `absent` there
+  // is a 200 "the provider is gone" about a file nobody can load, which is the
+  // same false success from the whole-document side. `getTopLevelScalar` has
+  // read it this way all along; this reader now asks the same question.
+  const document = documentLines(text.split(/\r\n|\r|\n/));
+  if (document.unterminated || !document.loadable) {
+    throw new YamlEditUnsupported("document PyYAML will not load");
+  }
   const { lines } = splitLines(text);
   let start = 0;
   let end = lines.length;

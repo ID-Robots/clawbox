@@ -392,16 +392,24 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   if (wasDefault) {
     unset.push("model.provider", "model.default");
   }
-  await patchHermesConfig({ unset });
-  // BEFORE the proof, not after it. `withProviderMcpRefresh` samples the
+  // `finally`, and BEFORE the proof. `withProviderMcpRefresh` samples the
   // provider set either side of this call and re-reads it in a `finally`
   // precisely because "the write threw" is not "nothing was written" — and that
   // re-read only sees the new catalogue if the memo has been dropped. Left at
   // the end, a partial removal that then refuses would leave `getModelOptions`
   // serving the pre-removal set, so no `reload.mcp` is asked for and
   // `ai_set_provider`'s enum goes on offering a provider whose endpoint is
-  // already gone. The file may have changed whatever the proof below concludes.
-  invalidateModelOptions();
+  // already out of the file.
+  //
+  // The `finally` is for the same reason one call earlier: `applyViaCli` walks
+  // the unsets one spawn at a time and does not catch, and `runHermesCli`
+  // REJECTS on a timeout — so three keys can land and the fourth take the whole
+  // call down. The file may have changed whatever happens after this line.
+  try {
+    await patchHermesConfig({ unset });
+  } finally {
+    invalidateModelOptions();
+  }
 
   // PROVED, not inferred. `patchHermesConfig`'s merge path reads every key back
   // (patchText), but its CLI fallback does not: `applyViaCli`'s unset loop
@@ -456,7 +464,11 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   // Jetson is precisely the case where they all time out and a removal that
   // landed answers 502. A CLI that failed to ANSWER once will not answer for
   // the next key either: that is a fact about the shim, not about the key.
-  let cliAnswering = true;
+  //
+  // Not asked at all once a leftover is on the record: "still registered" is
+  // already certain, and every question here is a serial 15-second budget in
+  // front of a click the owner is holding open.
+  let cliAnswering = leftovers.length === 0;
   for (const key of unresolved) {
     const presence = cliAnswering ? await cliKeyPresence(key) : "unknown";
     if (presence === "present") leftovers.push(key);
