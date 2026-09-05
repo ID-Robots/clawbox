@@ -842,6 +842,26 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
     expect(pasteWasSpawned()).toBe(true);
   });
 
+  it("reads and writes the SAME agent's credential store", async () => {
+    // `--agent` omitted means "the configured default agent", which is not
+    // necessarily the one ClawBox operates on — and a guard that read one
+    // store while the paste wrote another would be no guard at all. The auth
+    // order over these same profiles already pins it.
+    profilesInStore([{ id: "anthropic:default", provider: "anthropic", type: "api_key" }]);
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-a-real-key" }));
+    expect(res.status).toBe(200);
+
+    const args = vi.mocked(spawnOpenclawCli).mock.calls.map(([a]) => a as string[]);
+    const read = args.find((a) => a.includes("auth") && a.includes("list"));
+    const paste = args.find((a) => a.includes("paste-api-key"));
+    for (const call of [read, paste]) {
+      expect(call).toBeDefined();
+      expect(call).toContain("--agent");
+      expect(call?.[(call?.indexOf("--agent") ?? -1) + 1]).toBe("main");
+    }
+  });
+
   it("fails open on a store that answers something other than a profile list", async () => {
     // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
     // handler's catch would turn into a 500 over a save that is perfectly

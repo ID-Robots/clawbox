@@ -396,7 +396,17 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
   // save that wrote it. It is asked once, of the store as it was BEFORE this
   // request touched anything.
   await spawnOpenclawCli(
-    ["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId],
+    [
+      "models", "auth", "paste-api-key",
+      // `--agent` omitted means "the configured default agent", which is not
+      // necessarily the one ClawBox operates on. `applyOpenAiAuthOrder` already
+      // pins CLAWBOX_AGENT_ID for the order over these same profiles, and
+      // `assertNoSignInAt` reads with the same pin — a guard that read one
+      // store while the paste wrote another would be no guard at all.
+      "--agent", CLAWBOX_AGENT_ID,
+      "--provider", provider,
+      "--profile-id", profileId,
+    ],
     { stdinData: key + "\n", timeoutMs: 60_000 },
   );
 }
@@ -460,10 +470,12 @@ async function assertNoSignInAt(profileId: string): Promise<void> {
   if (openclawIsAbsent()) return;
   let raw: string;
   try {
-    raw = await spawnOpenclawCli(["models", "auth", "list", "--json"], {
-      captureStdout: true,
-      timeoutMs: 60_000,
-    });
+    // Same agent as the paste this guards and as the auth order beside it: the
+    // store `--agent` selects is the whole subject of the question.
+    raw = await spawnOpenclawCli(
+      ["models", "auth", "list", "--agent", CLAWBOX_AGENT_ID, "--json"],
+      { captureStdout: true, timeoutMs: 60_000 },
+    );
   } catch (err) {
     console.warn(
       "[configure] could not read the auth profiles before pasting a key:",
