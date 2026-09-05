@@ -828,14 +828,20 @@ export function registerSkillTools(reg: Registrar): void {
       // out) without moving the cap, which halved how many store installs fit.
       //
       // WHICH rows go is decided by what the tool is FOR, not by where the sort
-      // put them. The removable rows go LAST — those are the ids
-      // skill_uninstall resolves and the names a duplicate install would
-      // collide with — and the BUILT-IN rows give way first, because no
-      // argument to any tool can act on one. Fitting the sorted list
-      // front-to-back instead kept all 82 builtins and dropped the store
-      // skills, which is the list backwards.
-      const removable = rows.filter((s) => isRemovableOrigin(s.origin) || s.origin === "local");
-      const builtins = rows.filter((s) => !removable.includes(s));
+      // put them, and there are THREE tiers rather than two. A `hub` row is the
+      // only one skill_uninstall can act on (isRemovableOrigin is `hub` and
+      // nothing else), so it is kept first. A `local` row cannot be removed
+      // from here either, but it is a name a store install can still collide
+      // with, so it outranks a BUILT-IN, which answers to nothing the agent can
+      // call. Fitting the sorted list front-to-back instead kept all 82
+      // built-ins and dropped the store skills, which is the list backwards;
+      // fitting hub and local together let a device full of agent-written
+      // skills push out the one row the tool exists to name.
+      const tiers = [
+        rows.filter((s) => isRemovableOrigin(s.origin)),
+        rows.filter((s) => s.origin === "local"),
+        rows.filter((s) => !isRemovableOrigin(s.origin) && s.origin !== "local"),
+      ];
       const omissionLine = (store: number, builtIn: number) => {
         const parts = [
           store ? `${store} more skills from the store or made here` : "",
@@ -848,20 +854,20 @@ export function registerSkillTools(reg: Registrar): void {
       // Reserved from the longest line this could produce, so the sentence can
       // never be the thing that pushes the answer over the cap — the number in
       // it is not known until the fit below has run.
-      const budget = LIST_MAX_CHARS - header.length - 1 - omissionLine(rows.length, rows.length).length - 1;
-      const fittedRemovable = fitRows(removable.map(lineOf), budget);
-      const fittedBuiltins = fitRows(
-        builtins.map(lineOf),
-        budget - fittedRemovable.kept.reduce((n, line) => n + line.length + 1, 0),
-      );
+      let budget = LIST_MAX_CHARS - header.length - 1 - omissionLine(rows.length, rows.length).length - 1;
+      const keptIds = new Set<string>();
+      const dropped: number[] = [];
+      for (const tier of tiers) {
+        const fitted = fitRows(tier.map(lineOf), budget);
+        for (const row of tier.slice(0, fitted.kept.length)) keptIds.add(row.id);
+        budget -= fitted.kept.reduce((n, line) => n + line.length + 1, 0);
+        dropped.push(fitted.omitted);
+      }
       // Emitted in the SORTED order the agent scans, whichever rows survived.
-      const keptIds = new Set([
-        ...removable.slice(0, fittedRemovable.kept.length).map((s) => s.id),
-        ...builtins.slice(0, fittedBuiltins.kept.length).map((s) => s.id),
-      ]);
       const lines = rows.filter((s) => keptIds.has(s.id)).map(lineOf);
-      const omitted = fittedRemovable.omitted || fittedBuiltins.omitted
-        ? [omissionLine(fittedRemovable.omitted, fittedBuiltins.omitted)]
+      const [hubOut, localOut, builtinOut] = dropped;
+      const omitted = hubOut + localOut + builtinOut
+        ? [omissionLine(hubOut + localOut, builtinOut)]
         : [];
       return text([header, ...lines, ...omitted].join("\n"));
     },

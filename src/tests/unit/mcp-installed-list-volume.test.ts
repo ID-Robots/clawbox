@@ -199,6 +199,29 @@ describe("skill_list — a stocked device still gets a usable list", () => {
     expect(listedIds(out.text, bundled).length).toBeLessThan(bundled.length);
   });
 
+  it("keeps a removable skill ahead of a device-made one, which is not removable either", async () => {
+    // `isRemovableOrigin` is `hub` and nothing else: skill_uninstall refuses a
+    // `local` row ("made on this device, cannot be removed from here"). Fitting
+    // the two together let a device full of agent-written skills push out the
+    // one row the tool exists to name — and the sort decides which, since
+    // `local-…` sorts before `publisher-…`.
+    const local: Row[] = Array.from({ length: 200 }, (_, i) => ({
+      id: `local-skill-${String(i).padStart(3, "0")}`,
+      name: `local-skill-${String(i).padStart(3, "0")}`,
+      origin: "local" as const,
+      category: "other",
+    }));
+    const hub = hubInstalls(5);
+    serve([...local, ...hub]);
+
+    const out = await skills().call("skill_list", {});
+
+    expect(out.isError, JSON.stringify(out)).toBe(false);
+    if (out.isError) return;
+    expect(listedIds(out.text, hub)).toHaveLength(hub.length);
+    expect(listedIds(out.text, local).length).toBeLessThan(local.length);
+  });
+
   it("says how many it left out, and points at a tool that can answer for them", async () => {
     serve(OVERSTOCKED);
 
