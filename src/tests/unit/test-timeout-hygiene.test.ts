@@ -272,6 +272,12 @@ const ALSO_REQUIRED = [
   // another every one of 10 906 tests passed while the job exited 1 on an
   // EnvironmentTeardownError originating in this file.
   "src/tests/unit/coding-agent.test.ts",
+  // Starts no process at all: it parses ~270 files with the TypeScript compiler
+  // in ONE case, and v8 coverage instrumentation multiplies that by ~7. Measured
+  // 2026-09-05 — 426 ms of parse uninstrumented, 2 874 ms under
+  // `test:coverage:ci` on an idle machine, and 5 318 ms on a four-worker CI
+  // runner, where it failed with vitest's "Test timed out in 5000ms".
+  "src/tests/unit/state-updater-purity.test.ts",
 ];
 
 /**

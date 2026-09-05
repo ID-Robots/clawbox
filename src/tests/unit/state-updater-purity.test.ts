@@ -1,4 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// Parses ~270 files with the TypeScript compiler inside ONE case, and v8
+// coverage instrumentation multiplies that by about seven: 426 ms of parse
+// uninstrumented, 2 874 ms under `test:coverage:ci` on an idle machine, and
+// 5 318 ms on a four-worker CI runner — where it failed the whole job with
+// vitest's "Test timed out in 5000ms" over a tree the rule found CLEAN, which
+// is the false-failure class in the guard itself.
+//
+// The ceiling is declared rather than the walk narrowed, because the walk IS
+// the sibling sweep this PR leans on: it is what says the four state-holding
+// directories carry no second offender. Cutting it to the files that import
+// the streaming state, or tightening the text pre-filter into something that
+// tries to predict which files the AST rule can fire on, buys ~1.7 s and pays
+// for it in exactly the currency this file's docblock warns about — a guard
+// that silently stops looking. 30 s is ~6x the measured CI cost and still
+// fails a case that has genuinely hung. Both ceilings, per the house form; see
+// src/tests/unit/test-timeout-hygiene.test.ts, which pins this file by name.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
@@ -219,6 +237,7 @@ describe("no state write inside a state updater", () => {
       expect.stringContaining("setWithRefWrite(updater) -> streamingRef.current ="),
       expect.stringContaining("setConciseRefWrite(updater) -> streamingRef.current ="),
       expect.stringContaining("setCompoundRefWrite(updater) -> streamingRef.current +="),
+      expect.stringContaining("setThroughProperty(updater) -> catalog.setSort()"),
     ]);
   });
 });
