@@ -68,13 +68,17 @@ function buildFixture() {
   // Whatever package.json's postbuild actually invokes has to be in the
   // fixture: write-build-info.mjs on every head, and the step's own script
   // where it is one. Copied, not linked, so the fixture is self-contained.
-  for (const script of ["write-build-info.mjs", "postbuild.sh"]) {
+  for (const script of ["write-build-info.mjs", "postbuild.sh", "link-standalone-next.sh"]) {
     const src = path.join(REPO, "scripts", script);
     if (!fs.existsSync(src)) continue;
     const dest = path.join(tmp, "scripts", script);
     fs.copyFileSync(src, dest);
     fs.chmodSync(dest, 0o755);
   }
+  // The link step (scripts/link-standalone-next.sh) needs the real package
+  // in the project it is run from.
+  fs.mkdirSync(path.join(tmp, "node_modules", "next"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "node_modules", "next", "package.json"), JSON.stringify({ name: "next", version: "0.0.0-test" }));
   fs.writeFileSync(path.join(tmp, "package.json"), JSON.stringify({ version: "0.0.0-test" }));
 
   fs.mkdirSync(path.join(tmp, "public"), { recursive: true });
