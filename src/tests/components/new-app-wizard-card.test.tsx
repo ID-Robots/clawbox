@@ -128,6 +128,27 @@ describe("NewAppWizardCard — an existing project", () => {
     }
   });
 
+  it("sends on Enter in the instruction, keeps Shift+Enter as a new line, and leaves a composition alone", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(PROJECTS), { status: 200, headers: { "content-type": "application/json" } })));
+    const onMessage = vi.fn();
+    window.addEventListener(CHAT_MESSAGE_EVENT, onMessage);
+    try {
+      render(<NewAppWizardCard onClose={() => {}} initialProject="/home/clawbox/Projects/shop" />);
+      const next = await screen.findByTestId("coding-agent-new-next");
+      await waitFor(() => expect(screen.getByTestId("coding-agent-new-project")).not.toBeDisabled());
+      fireEvent.change(next, { target: { value: "Add a footer" } });
+      fireEvent.keyDown(next, { key: "Enter", shiftKey: true });
+      expect(onMessage).not.toHaveBeenCalled();
+      fireEvent.keyDown(next, { key: "Enter", isComposing: true });
+      expect(onMessage).not.toHaveBeenCalled();
+      fireEvent.keyDown(next, { key: "Enter" });
+      expect(onMessage).toHaveBeenCalledTimes(1);
+      expect((onMessage.mock.calls[0][0] as CustomEvent<{ text: string }>).detail.text).toContain("Add a footer");
+    } finally {
+      window.removeEventListener(CHAT_MESSAGE_EVENT, onMessage);
+    }
+  });
+
   it("shows the chosen project's last run, and refuses to continue without a project or an instruction", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ projects: PROJECTS }), { status: 200, headers: { "content-type": "application/json" } })));
     render(<NewAppWizardCard onClose={() => {}} />);

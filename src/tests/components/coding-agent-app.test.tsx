@@ -811,7 +811,7 @@ describe("CodingAgentApp", () => {
       expect(within(settled).getByTestId("coding-agent-run-activity-steps").querySelector("li")).toHaveAttribute("data-kind", "command");
     });
 
-    it("says when each step happened — on hover, as the clock time and the distance from the start — when the record carries the times", async () => {
+    it("says when each step happened — beside every step, in full when a step is opened — when the record carries the times", async () => {
       const startedAt = RUN.startedAt;
       const run = { ...RUN, progress: ["$ bun install", "Writing app.js"], progressAt: [startedAt + 12_000, startedAt + 3 * 60_000 + 5_000] };
       stubFetch({ enabled: true, readiness: READY }, [run], { projects: [SITE_PROJECT] });
@@ -821,12 +821,26 @@ describe("CodingAgentApp", () => {
       const steps = await screen.findByTestId("coding-agent-run-activity-steps");
       const rows = steps.querySelectorAll("li");
       expect(rows).toHaveLength(2);
-      expect(rows[0].getAttribute("title")).toMatch(/\+12s$/);
-      expect(rows[1].getAttribute("title")).toMatch(/\+3m 5s$/);
-      expect(rows[1].getAttribute("title")).toMatch(/\d{1,2}:\d{2}:\d{2}/);
+      const buttons = within(steps).getAllByTestId("coding-agent-run-activity-step");
+      expect(buttons[0].getAttribute("title")).toMatch(/\+12s$/);
+      expect(buttons[1].getAttribute("title")).toMatch(/\+3m 5s$/);
+      expect(buttons[1].getAttribute("title")).toMatch(/\d{1,2}:\d{2}:\d{2}/);
+      // The time is on every step, not behind a hover.
       const times = within(steps).getAllByTestId("coding-agent-run-activity-time");
       expect(times.map((el) => el.textContent)).toEqual(["+12s", "+3m 5s"]);
       expect(times[0]).toHaveAttribute("datetime", new Date(startedAt + 12_000).toISOString());
+      expect(times[0].className).not.toContain("opacity-0");
+      // A step opens on a click: the clock in full, its kind, its whole line; and closes again.
+      expect(rows[0]).not.toHaveAttribute("data-expanded");
+      fireEvent.click(buttons[0]);
+      expect(rows[0]).toHaveAttribute("data-expanded", "true");
+      expect(buttons[0]).toHaveAttribute("aria-expanded", "true");
+      const detail = within(rows[0] as HTMLElement).getByTestId("coding-agent-run-activity-detail");
+      expect(detail.textContent).toContain(translations.en["codingAgent.stepKind.command"]);
+      expect(detail.textContent).toContain("$ bun install");
+      expect(detail.textContent).toMatch(/\+12s/);
+      fireEvent.click(buttons[0]);
+      expect(rows[0]).not.toHaveAttribute("data-expanded");
       unmount();
 
       // A record from before the times: the steps, and no clock to invent.
@@ -835,8 +849,45 @@ describe("CodingAgentApp", () => {
       await openRuns();
       fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
       const bare = await screen.findByTestId("coding-agent-run-activity-steps");
-      expect(bare.querySelector("li")).not.toHaveAttribute("title");
+      expect(within(bare).getAllByTestId("coding-agent-run-activity-step")[0]).not.toHaveAttribute("title");
       expect(within(bare).queryByTestId("coding-agent-run-activity-time")).toBeNull();
+    });
+
+    it("opens the run from anywhere on its row, but not from a control on it; the terminal control is a glyph and Show details a link", async () => {
+      const paused = { ...RUN, id: "run-rowpause", status: "paused", sessionId: "sess-1" };
+      stubFetch({ enabled: true, readiness: READY }, [paused], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      const row = await screen.findByTestId("coding-agent-run-row-run-rowpause");
+      // The terminal control: a glyph named in full for the screen reader.
+      const terminal = within(row).getByTestId("coding-agent-terminal-run-rowpause");
+      expect(terminal).toHaveAttribute("aria-label", translations.en["codingAgent.openResume"]);
+      expect(terminal.textContent).toBe("terminal");
+      // Show details: a link, not a button chrome.
+      const details = within(row).getByTestId("coding-agent-details-run-rowpause");
+      expect(details.className).toContain("underline");
+      expect(details.className).not.toContain("border");
+      // A click on a control does not open the run…
+      fireEvent.click(within(row).getByTestId("coding-agent-resume-run-rowpause"));
+      expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
+      // …a click on the row itself does.
+      fireEvent.click(within(row).getByText(RUN.task.slice(0, 20), { exact: false }));
+      expect(await screen.findByTestId("coding-agent-run-page")).toBeInTheDocument();
+    });
+
+    it("breathes on a running badge and counts the tokens up rather than jumping", async () => {
+      const running = { ...RUN, status: "running", tokensUsed: 26_000 };
+      stubFetch({ enabled: true, readiness: READY }, [running], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      expect((await screen.findByTestId("coding-agent-status-run-k3x9q2ab")).className).toContain("coding-agent-pulse");
+      fireEvent.click(screen.getByTestId("coding-agent-details-run-k3x9q2ab"));
+      expect((await screen.findByTestId("coding-agent-run-status")).className).toContain("coding-agent-pulse");
+      const tokens = screen.getByTestId("coding-agent-stat-tokens");
+      expect(tokens).toHaveAttribute("data-value", "26000");
+      expect(tokens.textContent).toBe("26k");
+      // The agents card is up for a live run even before a helper is out.
+      expect(screen.getByTestId("coding-agent-run-agents")).toBeInTheDocument();
     });
 
     it("lists every agent on the run's page — the run itself, the helpers still out, and the ones back with how long they took", async () => {
@@ -913,7 +964,10 @@ describe("CodingAgentApp", () => {
       // this list, and three unlabelled ones tell a screen-reader user nothing
       // about which is which.
       expect(within(screen.getByTestId("coding-agent-artifact-audio")).getByLabelText("intro.wav")).toBeInTheDocument();
-      expect(screen.getByTestId("coding-agent-run-report")).toBeInTheDocument();
+      // No Report button: the report is the Summary card (below), and the
+      // file itself is a plain link in the evidence list.
+      expect(screen.queryByTestId("coding-agent-run-report")).toBeNull();
+      expect(screen.getByRole("link", { name: "report.md" })).toHaveAttribute("href", expect.stringContaining("file=report.md"));
       // The project it belongs to is one tap away, and Back is the way out.
       expect(screen.getByTestId("coding-agent-run-project").textContent).toContain(SITE_PROJECT.name);
       fireEvent.click(screen.getByTestId("coding-agent-run-back"));
@@ -1119,48 +1173,38 @@ describe("the summary and the report", () => {
     expect(link?.getAttribute("rel")).toContain("noopener");
   });
 
-  it("opens report.md rendered in a dialog, which Escape closes", async () => {
+  it("draws report.md — the run's own report — as the summary, over the record's shorter one", async () => {
     stubFetch(
       { enabled: true, readiness: READY },
-      [{ ...RUN, artifacts: [REPORT_ARTIFACT, TEXT_ARTIFACT] }],
+      [{ ...RUN, summary: "Short.", artifacts: [REPORT_ARTIFACT, TEXT_ARTIFACT] }],
       { artifacts: { "report.md": REPORT }, projects: [SITE_PROJECT] },
     );
     render(<CodingAgentApp />);
     await openDetails();
-    // A plain text file still opens the way it did: as a link to the route.
+    const summary = await screen.findByTestId("coding-agent-summary");
+    await waitFor(() => expect(summary).toHaveAttribute("data-source", "report"));
+    expect(summary.querySelector("h2")?.textContent).toBe("What I built");
+    expect(summary.querySelector("table")).not.toBeNull();
+    // Agent-written HTML in the report is text on the page, never an element.
+    expect(summary.querySelector("script")).toBeNull();
+    expect(summary.querySelector("[onerror]")).toBeNull();
+    expect(summary.textContent).toContain("<script>alert(1)</script>");
+    expect(summary.textContent).not.toContain("Short.");
+    // The files stay plain links to the route.
     expect(screen.getByRole("link", { name: "tests.txt" })).toHaveAttribute("href", expect.stringContaining("file=tests.txt"));
+    expect(screen.getByRole("link", { name: "report.md" })).toHaveAttribute("href", expect.stringContaining("file=report.md"));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-
-    const opener = screen.getByRole("button", { name: "report.md" });
-    opener.focus();
-    fireEvent.click(opener);
-    const dialog = await screen.findByRole("dialog", { name: "report.md" });
-    expect(dialog).toHaveAttribute("aria-modal", "true");
-    await waitFor(() => expect(dialog.querySelector("h2")?.textContent).toBe("What I built"));
-    expect(dialog.textContent).not.toContain("##");
-    expect(dialog.querySelector("script")).toBeNull();
-    expect(dialog.querySelector("[onerror]")).toBeNull();
-    expect(dialog.querySelector("table")).not.toBeNull();
-    // Focus moved in with the dialog.
-    expect(dialog.contains(document.activeElement)).toBe(true);
-    // The same bytes as text remain a click away.
-    expect(screen.getByRole("link", { name: translations.en["codingAgent.reportOpenText"] }))
-      .toHaveAttribute("href", expect.stringContaining("file=report.md"));
-
-    fireEvent.keyDown(document, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-    expect(document.activeElement).toBe(opener);
   });
 
-  it("says in words when the report cannot be loaded", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, artifacts: [REPORT_ARTIFACT] }], { projects: [SITE_PROJECT] });
+  it("keeps the record's summary when the report cannot be read", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, summary: "The record's own words.", artifacts: [REPORT_ARTIFACT] }], { projects: [SITE_PROJECT] });
     render(<CodingAgentApp />);
     await openDetails();
-    fireEvent.click(screen.getByRole("button", { name: "report.md" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toBe(t("codingAgent.reportFailed", { name: "report.md" }));
-    fireEvent.click(screen.getByRole("button", { name: translations.en["codingAgent.reportClose"] }));
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    const summary = await screen.findByTestId("coding-agent-summary");
+    expect(summary.textContent).toContain("The record's own words.");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(summary).toHaveAttribute("data-source", "summary");
+    expect(summary.textContent).toContain("The record's own words.");
   });
 });
 

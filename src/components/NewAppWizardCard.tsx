@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useT } from "@/lib/i18n";
 import {
   buildNewAppPrompt,
@@ -188,6 +188,15 @@ export default function NewAppWizardCard({
    * Create: check what the assistant would refuse, compose the one message,
    * hand it to the chat, and get out of the way.
    */
+  // Enter sends the form, the way the chat composer sends a message; a new
+  // line in the description is Shift+Enter. A composition in progress (an
+  // IME picking a character) is left alone.
+  const submitOnEnter = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== "Enter" || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    create();
+  };
+
   const create = () => {
     if (mode === "existing") {
       const trimmedNext = next.trim();
@@ -275,6 +284,7 @@ export default function NewAppWizardCard({
           <textarea
             value={next}
             onChange={(e) => { setNext(e.target.value); setError(null); }}
+            onKeyDown={submitOnEnter}
             maxLength={maxTaskChars}
             rows={3}
             placeholder={t("codingAgent.newNextPlaceholder")}
@@ -312,6 +322,7 @@ export default function NewAppWizardCard({
         <textarea
           value={what}
           onChange={(e) => { setWhat(e.target.value); setError(null); }}
+          onKeyDown={submitOnEnter}
           maxLength={maxTaskChars}
           rows={3}
           placeholder={t("codingAgent.newWhatPlaceholder")}
