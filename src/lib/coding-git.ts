@@ -593,16 +593,29 @@ function totals(files: ChangedFile[]): { additions: number; deletions: number } 
 /** Lines in an untracked text file, so the list can say "+12" for it the way
  *  it does for a tracked one; null for a binary or a file too big to count. */
 async function countLines(abs: string): Promise<number | null> {
+  // One open handle, stat'ed and read through it — never stat-then-read, so
+  // the file that is counted is the file that was checked.
+  let handle: fsp.FileHandle | null = null;
   try {
-    const stat = await fsp.stat(abs);
+    handle = await fsp.open(abs, "r");
+    const stat = await handle.stat();
     if (!stat.isFile() || stat.size > MAX_UNTRACKED_COUNT_BYTES) return null;
-    const buf = await fsp.readFile(abs);
-    if (buf.subarray(0, 8192).includes(0)) return null;
-    if (buf.length === 0) return 0;
+    const buf = Buffer.alloc(Math.min(stat.size, MAX_UNTRACKED_COUNT_BYTES));
+    let got = 0;
+    while (got < buf.length) {
+      const { bytesRead } = await handle.read(buf, got, buf.length - got, got);
+      if (bytesRead === 0) break;
+      got += bytesRead;
+    }
+    const bytes = buf.subarray(0, got);
+    if (bytes.subarray(0, 8192).includes(0)) return null;
+    if (bytes.length === 0) return 0;
     let n = 0;
-    for (const byte of buf) if (byte === 10) n++;
-    return buf[buf.length - 1] === 10 ? n : n + 1;
+    for (const byte of bytes) if (byte === 10) n++;
+    return bytes[bytes.length - 1] === 10 ? n : n + 1;
   } catch {
     return null;
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }
