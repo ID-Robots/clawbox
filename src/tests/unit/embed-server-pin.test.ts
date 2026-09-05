@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -98,6 +99,27 @@ describe("the unit runs the script, and the script runs an embedder", () => {
   it("is a system unit for the clawbox user with no [Install] section", () => {
     expect(UNIT).toContain("User=clawbox");
     expect(UNIT).toContain("ExecStart=/home/clawbox/clawbox/scripts/start-embed-server.sh");
+  });
+
+  it("every script a unit runs straight from Exec* is executable in git", () => {
+    // A launcher committed as 100644 is one every checkout writes without
+    // its mode bit, and systemd then fails the unit with 203/EXEC
+    // ("Permission denied") on any box that took the branch through git —
+    // install.sh chmods nothing here. Seen on a box the moment beta carried
+    // this unit. Every unit's script is held to it, not only this one.
+    const scripts = new Set<string>();
+    for (const unit of fs.readdirSync(path.join(ROOT, "config")).filter((f) => f.endsWith(".service"))) {
+      for (const m of read(`config/${unit}`).matchAll(/^Exec(?:Start|StartPre|StartPost|Stop)=-?\/home\/clawbox\/clawbox\/(scripts\/\S+)/gm)) {
+        scripts.add(m[1]);
+      }
+    }
+    expect(scripts.has("scripts/start-embed-server.sh")).toBe(true);
+    expect(scripts.size).toBeGreaterThan(3);
+    const modes = execFileSync("git", ["-C", ROOT, "ls-files", "-s", "--", ...scripts], { encoding: "utf8" })
+      .trim().split("\n").filter(Boolean)
+      .map((line) => ({ mode: line.split(" ")[0], file: line.split("\t")[1] }));
+    expect(modes.map((m) => m.file).sort()).toEqual([...scripts].sort());
+    expect(modes.filter((m) => m.mode !== "100755").map((m) => `${m.file} ${m.mode}`)).toEqual([]);
     expect(UNIT).toContain("Restart=no");
     expect(UNIT).toContain("MemoryAccounting=yes");
     // Enabled at boot it would be 2 GB resident for nothing: the proxy starts it.
