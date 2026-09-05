@@ -176,6 +176,30 @@ describe("the checks CI runs, and their blocking status", () => {
     }
   });
 
+  it("cannot be switched off a level up either", () => {
+    // The step assertions above have a blind spot one level higher, and it is
+    // cheaper to reach than any of the three they close. Measured, each leaving
+    // all the other cases green:
+    //
+    //   jobs.test.continue-on-error: true   → GitHub does not fail the workflow
+    //     on the job, so `needs.test.result` reaches the `comment` job as
+    //     `success` and the PR comment renders "Tests — Result: passed" over a
+    //     red suite. The false-success sentence this whole PR exists to prevent.
+    //   jobs.test.if: ${{ false }}          → the job is skipped outright: three
+    //     checks and the entire suite.
+    //   on.pull_request.paths: [...]        → most PRs never trigger it at all.
+    const jobsAt = tests.indexOf("\njobs:\n");
+    const header = tests.slice(jobsAt, tests.indexOf("    steps:", jobsAt));
+    expect(header).toContain("  test:");
+    expect(header, "the test job is marked continue-on-error").not.toMatch(/continue-on-error/);
+    expect(header, "the test job is conditional").not.toMatch(/^ {4}if:/m);
+
+    // The trigger, unnarrowed: `pull_request:` with no key under it. A
+    // `paths:`/`paths-ignore:`/`types:` filter would exempt whole classes of PR
+    // from every check above, and nothing else here would notice.
+    expect(tests.slice(0, jobsAt)).toMatch(/\non:\n {2}pull_request:\n(?! {4})/);
+  });
+
   it("runs the advisory step after the suite it must not delay", () => {
     // Lint is the only non-blocking step here; running it first put a check
     // nobody is waiting for in front of the verdict everybody is. `if: always()`

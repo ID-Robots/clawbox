@@ -45,8 +45,15 @@ import { DEFAULT_CWD } from "./lib/guard";
 // both postures name it.
 import type { McpContext } from "./lib/context";
 
-/** Everything a posture must decide: the context minus the server's identity. */
-type Posture = Omit<McpContext, "edition" | "install" | "profile">;
+/**
+ * Everything a posture must decide: the context minus the server's identity.
+ *
+ * `appHarness` is part of that identity here — it is the edition being
+ * simulated and is passed as an argument beside it, so a posture that also
+ * named it would silently override the argument. Everything else in the context
+ * is a capability, and leaving one out is what this type exists to prevent.
+ */
+type Posture = Omit<McpContext, "edition" | "install" | "profile" | "appHarness">;
 
 const HERMES_ONLY = ["skill_search", "skill_list", "skill_info", "skill_install", "skill_uninstall", "ai_list_models", "ai_set_provider", "ai_set_model"];
 // backup_list / backup_now are here because ClawKeep archives the OpenClaw
@@ -69,9 +76,13 @@ function schemaBytes(tools: RegisteredToolInfo[]): number {
   return JSON.stringify({ tools: listing }).length;
 }
 
+/** The tools/list schema this tool would emit, as a string. */
+function emittedSchema(tool: RegisteredToolInfo): string {
+  return JSON.stringify(z.toJSONSchema(z.object(tool.shape), { io: "input" }));
+}
+
 /** Emitted JSON Schema must stay flat: no $ref, no anyOf, no oneOf/allOf. */
-function schemaShapeViolations(tool: RegisteredToolInfo): string[] {
-  const emitted = JSON.stringify(z.toJSONSchema(z.object(tool.shape), { io: "input" }));
+function schemaShapeViolations(tool: RegisteredToolInfo, emitted: string): string[] {
   return ["$ref", "anyOf", "oneOf", "allOf", "definitions", "$defs"]
     .filter((bad) => emitted.includes(`"${bad}"`))
     .map((bad) => `${tool.name}: emitted JSON Schema contains ${bad}`);
@@ -225,12 +236,21 @@ async function main(): Promise<void> {
     // one when it did not (mcp/tools/ai.ts) — de-duplicating by name alone
     // examined whichever variant happened to be pushed first and left the one a
     // box with an unreachable dashboard actually ships unchecked.
+    //
+    // The key is the EMITTED SCHEMA and the description, not the parameter
+    // names: both `ai_set_provider` variants declare one parameter called
+    // `provider`, so a name-based key collapses them just as a bare name does.
+    // Measured — with the degraded branch made to emit an `anyOf`, the thing
+    // `schemaShapeViolations` exists to catch, a name-keyed run still printed
+    // "Tool contract OK". One `toJSONSchema` per tool per posture; the whole
+    // run is about a second.
     const seen = new Set<string>();
     for (const tool of [...enabled, ...disabled, ...probed, ...inRun]) {
-      const shape = `${tool.name}(${Object.keys(tool.shape).sort().join(",")})`;
-      if (seen.has(shape)) continue;
-      seen.add(shape);
-      problems.push(...contractViolations(tool), ...schemaShapeViolations(tool));
+      const emitted = emittedSchema(tool);
+      const key = `${tool.name}\u0000${tool.description}\u0000${emitted}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      problems.push(...contractViolations(tool), ...schemaShapeViolations(tool, emitted));
     }
 
     // The matrix and the edition gating are about what a BOX gets, so they read
