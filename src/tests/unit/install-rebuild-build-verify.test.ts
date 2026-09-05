@@ -364,6 +364,7 @@ function run(scenario: Scenario = {}): Run {
       "promote_parked_build",
       "set_previous_build_aside",
       "restore_previous_build",
+      "run_next_build",
     ),
     "",
     shellFunction(entry),
@@ -412,7 +413,7 @@ describe("the shipped function bodies these tests run", () => {
   // of every function it reads today, and silently wrong the day one grows a
   // heredoc or an indented closing brace at column 0 — the tests would then
   // assert against a fragment and pass for the wrong reason.
-  it.each(["do_rebuild", "step_build", "verify_build_present", "restore_previous_build"])(
+  it.each(["do_rebuild", "step_build", "verify_build_present", "restore_previous_build", "run_next_build"])(
     "%s is extracted whole",
     (name) => {
       const body = shellFunction(name);

@@ -1540,6 +1540,47 @@ restore_previous_build() {
 
 # Stop the setup service, free memory, reinstall, and rebuild — without ever
 # leaving the box with no build at all.
+# `bun run build`, with ONE retry and only for the mid-build file-trace race.
+#
+# WHAT RACES. Next writes a `.nft.json` beside every server entry and then
+# copies every file it lists into `.next/standalone`. The page and app-page
+# copies are `.catch`-wrapped; the MIDDLEWARE and INSTRUMENTATION ones are not
+# (node_modules/next/dist/build/utils.js, still true on 16.3.3), so one
+# `fs.copyFile` ENOENT there aborts `next build` outright. And those two traces
+# carry the project root as an asset directory — data/webapps,
+# data/code-projects, data/coding-agent-artifacts and .git among them, measured
+# on the OpenClaw box. So a web app the agent creates or removes, a coding run
+# writing a screenshot, or the update's own `git reset --hard` between the trace
+# and the copy kills the build over a file the dashboard never needed.
+#
+# WHY NOT A CONFIG. `outputFileTracingExcludes` is applied per ROUTE entry
+# (next/dist/build/collect-build-traces.js iterates the chunk trace's entry
+# map), which is why the `data/**` exclude in next.config.ts cleans the route
+# traces and leaves these two untouched — and Next exposes no other tracing
+# knob: `outputFileTracingRoot`, `-Excludes` and `-Includes` are the whole
+# surface in its config schema.
+#
+# WHY A RETRY IS THE RIGHT ANSWER. The failure is transient by construction: the
+# next trace cannot list a file that is gone. One retry, gated on the ENOENT the
+# copy throws, so a build that is broken for any other reason still fails on the
+# first attempt and is reported as such rather than hidden behind a second
+# five-minute build. Both attempts stream to the step log as before; the copy
+# here only exists so the gate can read what was printed.
+run_next_build() {
+  local log rc attempt
+  log="$(mktemp "${TMPDIR:-/tmp}/clawbox-build-XXXXXX.log")"
+  for attempt in 1 2; do
+    as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"
+    rc=${PIPESTATUS[0]}
+    [ "$rc" -eq 0 ] && break
+    [ "$attempt" -eq 2 ] && break
+    grep -Eq "ENOENT.*copyfile" "$log" || break
+    echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
+  done
+  rm -f "$log"
+  return "$rc"
+}
+
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
@@ -1579,7 +1620,7 @@ do_rebuild() {
     set_previous_build_aside "$build_dir" "$kept_dir"
     echo "Running bun build..."
     built=1
-    as_clawbox_login "cd $PROJECT_DIR && $BUN run build" || rc=$?
+    run_next_build || rc=$?
     if [ "$rc" -eq 0 ] && ! verify_build_present "$PROJECT_DIR"; then
       rc=1
     fi
