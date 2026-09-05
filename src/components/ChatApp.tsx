@@ -12,7 +12,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 
-import { renderText } from '@/lib/chat-markdown'
+import { renderText, audioLabel } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
@@ -23,6 +23,12 @@ import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib
 // apart again.
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
+// Same reason, one convention over: a generated picture and a spoken reply are
+// named by a `MEDIA:` line inside the reply text rather than delivered as
+// attachments (see lib/chat-media.ts), and only the mascot chat had learned to
+// lift them — so this surface printed an absolute path under ~/.openclaw/media
+// into the customer's transcript. TASK-698.
+import { splitMediaDirectives, splitAssistantMedia, mediaFileName } from '@/lib/chat-media'
 
 
 function extractText(msg: unknown): string {
@@ -705,8 +711,23 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           // Derived at render, as the mascot chat does it: a replayed turn
           // carries the same directive text a live one did, so the history and
           // live paths agree for free.
-          const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null
+          //
+          // Media first, then mail: `splitAssistantMedia` takes the whole
+          // directive line out, and the mail split then works on the caption
+          // the bubble will actually show. A payload with no renderable
+          // extension is dropped by both — which is what makes an INTERRUPTED
+          // turn safe: the streaming bubble had already hidden the half-written
+          // `MEDIA:` line, and a truncated path names no picture, so the stored
+          // turn still ends up as the last thing the owner saw.
+          const media = msg.role === 'assistant' ? splitAssistantMedia(msg.text) : null
+          const emailRefs = media ? splitEmailRefs(media.text) : null
           const bodyText = emailRefs ? emailRefs.text : msg.text
+          // The customer's own attachments and the ones the agent named: the
+          // two sources are disjoint (an assistant turn never carries the
+          // former), and concatenating rather than choosing means neither can
+          // be dropped if that ever changes.
+          const images = [...(msg.images ?? []), ...(media?.images ?? [])]
+          const audio = media?.audio ?? []
           return (
           <div key={i} style={{
             display: 'flex',
@@ -726,14 +747,48 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               lineHeight: 1.45,
               wordBreak: 'break-word',
             }}>
-              {msg.images && msg.images.length > 0 && (
+              {images.length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: bodyText ? 6 : 0 }}>
-                  {msg.images.map((src, j) => (
-                    <img key={j} src={src} alt="" style={{ maxWidth: 180, maxHeight: 140, borderRadius: 8, objectFit: 'cover' }} />
+                  {images.map((src, j) => (
+                    // A picture the agent drew IS the message, so it gets a
+                    // real alt and is contained rather than cropped; one the
+                    // customer sent is announced as theirs, because an
+                    // accessible name is read out verbatim.
+                    <img
+                      key={j}
+                      src={src}
+                      alt={msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")}
+                      style={{ maxWidth: 180, maxHeight: 140, borderRadius: 8, objectFit: 'contain' }}
+                    />
                   ))}
                 </div>
               )}
               {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"))}
+              {audio.length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
+                  {/* The browser's own player, for the same reasons the mascot
+                      chat uses one: play, pause, scrub and duration all work
+                      and are reachable from the keyboard. Keyed by the URL —
+                      the harness names every file with a uuid, so re-rendering
+                      a transcript cannot hand one player another's audio. */}
+                  {audio.map(src => (
+                    <audio
+                      key={src}
+                      data-testid="chat-audio"
+                      // `bodyText`, never `msg.text`: the stored text still
+                      // carries the directives, and a screen reader would read
+                      // the absolute media path and the mail ids out loud.
+                      aria-label={audioLabel(bodyText, t("chat.audioReply"))}
+                      controls
+                      preload="metadata"
+                      src={src}
+                      style={{ width: '100%', maxWidth: 280, height: 34 }}
+                    >
+                      <a href={src} download={mediaFileName(src)}>{t("chat.downloadAudio")}</a>
+                    </audio>
+                  ))}
+                </div>
+              )}
               {emailRefs && emailRefs.uids.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
                   {emailRefs.uids.map(uid => (
@@ -761,13 +816,10 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                   lands in the last chunk before the turn finalises, so without
                   this the bare id sits in the bubble for that moment, and an
                   abort keeps the raw buffer it was holding — so the turn it
-                  leaves behind can still become cards. No cards while
-                  streaming: half a directive is not an id yet.
-
-                  `MEDIA:` is deliberately left as text on this surface, here
-                  and in the body — an existing test pins that today, so
-                  changing it is its own change. TASK-698. */}
-              {renderText(streamingEmailRefsText(streaming), t("chat.table"))}
+                  leaves behind can still become cards and pictures. No cards
+                  and no pictures while streaming: half a directive is not an id
+                  or a path yet. */}
+              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
             </div>
           </div>

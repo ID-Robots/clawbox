@@ -14,8 +14,8 @@ import * as kv from "@/lib/client-kv";
  * `isInterSessionEnvelope` is unit-tested in
  * src/tests/unit/chat-inter-session-envelope.test.ts. What is worth proving
  * HERE is that both chat surfaces actually call it on the paths the envelope
- * arrives on, and that the assistant's real reply (and its MEDIA: directive)
- * survives. So this drives the components through a scripted gateway socket
+ * arrives on, and that the assistant's real reply — and the picture its MEDIA:
+ * directive names — survives. So this drives the components through a socket
  * rather than asserting on source text: the two surfaces have separate
  * `loadHistory` implementations and could drift.
  *
@@ -221,8 +221,16 @@ describe("ChatApp and the inter-session routing envelope", () => {
     expectEnvelopeHidden();
     // The turns either side of the envelope are untouched...
     expect(document.body.textContent).toContain(USER_TURN);
-    // ...including the MEDIA: directive the image renders from.
-    expect(document.body.textContent).toContain(`MEDIA:${MEDIA_PATH}`);
+    // ...including the picture the reply named. This surface printed the
+    // directive as text until TASK-698 and the assertion pinned that; what
+    // matters for TASK-416 is unchanged — a legitimate reply carrying MEDIA:
+    // survives the envelope filter — it just arrives as an <img> now, exactly
+    // as it does on the mascot chat below.
+    expect(document.body.textContent).not.toContain(`MEDIA:${MEDIA_PATH}`);
+    expect(screen.getByRole("img")).toHaveAttribute(
+      "src",
+      expect.stringContaining(encodeURIComponent(MEDIA_PATH)),
+    );
   });
 
   it("keeps it out of a live streaming turn", async () => {
@@ -267,9 +275,9 @@ describe("ChatPopup and the inter-session routing envelope", () => {
     expect(document.body.textContent).toContain(USER_TURN);
     // The mascot chat renders MEDIA: as a picture rather than printing the
     // directive (TASK-382 / PR #405), so the raw string is deliberately absent
-    // here while ChatApp still shows it as text. What matters for TASK-416 is
-    // unchanged and still asserted above: a legitimate reply carrying MEDIA:
-    // survives the envelope filter — it just arrives as an <img> now.
+    // here — and since TASK-698 on ChatApp above too. The two surfaces now
+    // assert the same thing, which is the point: they drifted because only one
+    // of them was pinned.
     expect(document.body.textContent).not.toContain(`MEDIA:${MEDIA_PATH}`);
     expect(screen.getByRole("img")).toHaveAttribute(
       "src",
