@@ -408,4 +408,31 @@ describe("chat tabs", () => {
     expect(frames("chat.send")).toHaveLength(0);
     expect(tabKeys()).toEqual([MAIN]);
   });
+  it("names the transcript as the tab strip's panel, with ids a session key can carry", async () => {
+    // The strip and the transcript are the SAME JSX on both editions; the
+    // Hermes suite proves the behaviour, and this proves the half that only
+    // exists here — an OpenClaw session key is `agent:main:clawbox-…`, and a
+    // colon has to be escaped in every CSS selector an id is looked up with.
+    await mountReady();
+    await openNewTab();
+
+    const panel = screen.getByTestId("chat-transcript");
+    expect(panel).toHaveAttribute("role", "tabpanel");
+    expect(panel.id).toBeTruthy();
+    for (const tab of tabs()) {
+      const key = tab.getAttribute("data-session-key") ?? "";
+      expect(tab.getAttribute("aria-controls"), key).toBe(panel.id);
+      expect(tab.id, key).toMatch(/^chat-tab-[A-Za-z0-9_-]+$/);
+      expect(tab.id, key).not.toContain(":");
+    }
+    expect(tabs()[0].id).toBe("chat-tab-main");
+    expect(tabs()[1].id).toMatch(/^chat-tab-agent_main_clawbox-[a-z0-9]{12}$/);
+
+    const selected = () => tabs().find((el) => el.getAttribute("aria-selected") === "true")!;
+    expect(panel.getAttribute("aria-labelledby")).toBe(selected().id);
+
+    fireEvent.click(tabs()[0]);
+    await waitFor(() => expect(activeTabKey()).toBe(MAIN));
+    expect(panel.getAttribute("aria-labelledby")).toBe(selected().id);
+  });
 });
