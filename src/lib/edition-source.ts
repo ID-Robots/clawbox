@@ -53,6 +53,24 @@ function parseEditionEnvFile(raw: string): string | null {
   return null;
 }
 
+/** Which edition, and whether anything on this device actually said so. */
+export interface EditionSource {
+  edition: EditionName;
+  /**
+   * True when NEITHER the root-owned lock nor `CLAWBOX_EDITION` named an
+   * edition, so `edition` is this module's own "openclaw" default.
+   *
+   * That default was chosen for "which SKU is this", where guessing the
+   * non-premium answer is the safe way to be wrong. It is the wrong default for
+   * "which credential stores can exist on this box", where it means a Hermes
+   * device with a missing lock file — a pre-3.x install, a partial image, a
+   * provisioning step that has not run — silently claims to have no Hermes
+   * store. A caller asking the second question has to be able to see that the
+   * answer was a guess; see telegram-bot-identity.ts.
+   */
+  defaulted: boolean;
+}
+
 /**
  * The edition this device was installed as. Root-owned file first, environment
  * second, "openclaw" (the native, non-premium SKU) as the safe default.
@@ -60,20 +78,25 @@ function parseEditionEnvFile(raw: string): string | null {
  * Cached by mtime — this is called per request from middleware, and the file
  * only changes when the installer re-bakes the lock.
  */
-export function readEdition(): EditionName {
+export function readEditionSource(): EditionSource {
   try {
     const stat = fs.statSync(EDITION_FILE);
-    if (cache && cache.mtimeMs === stat.mtimeMs) return cache.edition;
+    if (cache && cache.mtimeMs === stat.mtimeMs) return { edition: cache.edition, defaulted: false };
     const parsed = normalizeEdition(parseEditionEnvFile(fs.readFileSync(EDITION_FILE, "utf-8")));
     if (parsed) {
       cache = { mtimeMs: stat.mtimeMs, edition: parsed };
-      return parsed;
+      return { edition: parsed, defaulted: false };
     }
   } catch {
     // No /etc/clawbox/edition.env (dev box, CI, pre-3.x install) — fall back to
     // the environment below rather than failing closed on an unrelated SKU.
   }
-  return normalizeEdition(process.env.CLAWBOX_EDITION) ?? "openclaw";
+  const fromEnv = normalizeEdition(process.env.CLAWBOX_EDITION);
+  return fromEnv ? { edition: fromEnv, defaulted: false } : { edition: "openclaw", defaulted: true };
+}
+
+export function readEdition(): EditionName {
+  return readEditionSource().edition;
 }
 
 /**

@@ -29,7 +29,7 @@
 // allowed to make a save gate refuse.
 
 import { get as configGet } from "@/lib/config-store";
-import { getActiveHarness, getEdition, type Harness } from "@/lib/harness";
+import { getActiveHarness, getEdition, getEditionSource, type Harness } from "@/lib/harness";
 import { readHermesTelegramToken } from "@/lib/hermes-telegram";
 import { readConfigStrict, type OpenClawConfig } from "@/lib/openclaw-config";
 
@@ -150,16 +150,25 @@ function storeFor(harness: Harness): () => Promise<StoredBot> {
  *
  * Read per call, never cached: `readEdition()` keys its own memo on the lock
  * file's mtime, so this is not a capability probed once and believed for the
- * life of the process. It is however allowed to be WRONG — `readEdition()`
- * swallows every failure reading /etc/clawbox/edition.env and falls through to
- * "openclaw", a default chosen for "which SKU is this" and not for "which
- * credential stores exist". So this answer decides one thing only: whether an
+ * life of the process. This answer decides one thing only: whether an
  * UNREADABLE store is allowed to make the whole answer unknown. It never
  * decides which stores to read — see readTelegramBotsInUse.
+ *
+ * A DEFAULTED edition counts as both. `readEdition()` swallows every failure
+ * reading /etc/clawbox/edition.env and, with no `CLAWBOX_EDITION` either, falls
+ * through to "openclaw" — a default chosen for "which SKU is this", where the
+ * non-premium guess is the safe way to be wrong, and exactly the wrong one
+ * here. A Hermes box with a missing lock (a pre-3.x install, a partial image, a
+ * provisioning step that has not run) would otherwise have had its own
+ * unreadable ~/.hermes/.env discarded as "not installed" and the guard wave the
+ * box's own bot through — the fail-open this module exists to close, one layer
+ * below itself. A device that really IS OpenClaw has a lock, so the flagship
+ * 503 hazard the gate protects against stays closed.
  */
 function installedHarnesses(): Harness[] {
-  const edition = getEdition();
-  return edition === "dual" ? ["openclaw", "hermes"] : [edition];
+  const { edition, defaulted } = getEditionSource();
+  if (defaulted || edition === "dual") return ["openclaw", "hermes"];
+  return [edition];
 }
 
 /**
@@ -220,6 +229,17 @@ export interface TelegramBotsInUse {
  * ClawBox's mirror is included too. It is never the authority, but it costs one
  * read and it is the only trace left of a bot whose harness store this box
  * cannot currently read.
+ *
+ * THE COST OF INCLUDING IT, stated because nothing in the UI says it. The
+ * mirror has exactly one writer — /setup-api/telegram/configure — and no
+ * deleter: `DELETE /setup-api/email/chat-approval` clears the approval keys and
+ * leaves it alone. So on a box whose harness has since been re-pointed out of
+ * band, the mirror names a bot nothing polls any more and this set refuses that
+ * bot as the approvals bot for good. The owner's only way out is to save a
+ * different MAIN token first, which overwrites the mirror. That is the right
+ * trade — the mirror is the only trace left of a bot whose harness store cannot
+ * be read, and the cost of being wrong the other way is the household's own
+ * Telegram chat going deaf — but it is a trade, not a free check.
  */
 export async function readTelegramBotsInUse(): Promise<TelegramBotsInUse> {
   const [openclaw, hermes, mirror] = await Promise.all([
