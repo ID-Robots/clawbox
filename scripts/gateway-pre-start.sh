@@ -2595,6 +2595,89 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
   fi
 fi
 
+# ── OpenClaw 2's three background jobs, opted out of ONCE ───────────────────
+#
+# TASK-609, owner ruling 2026-09-03. The 2026.8.1 upgrade switches three things
+# on by default, and every one of them spends the owner's tokens or messages him
+# without being asked:
+#
+#   heartbeat        `agents.defaults.heartbeat.every` — a recurring agent turn,
+#                    30 m by default (1 h on Anthropic OAuth), whose alerts go to
+#                    the operator's DM. Measured on a box: "[heartbeat] started"
+#                    in the gateway journal at 15:41 and again at 21:08, with
+#                    commands.ownerAllowFrom naming exactly one Telegram user.
+#   dreaming         `plugins.entries.memory-core.config.dreaming.enabled` —
+#                    background memory consolidation on the DEFAULT model, which
+#                    on a linked box is the owner's own subscription. The core
+#                    logs "[plugins] memory-core: created managed dreaming cron
+#                    job." the first time it runs.
+#   self-learning    `skills.workshop.autonomous.mode` — `auto` by default, and
+#                    the core's own table says `auto` "also enables weekly
+#                    collection review", which is the `skill-collection-review`
+#                    cron row found enabled in state/openclaw.sqlite.
+#
+# SEEDED, NEVER PINNED. Written only where the key is ABSENT, so a value the
+# owner set — in Settings, in the Control UI, or with the CLI — is never
+# overwritten, and switching one back on is not undone at the next boot. That is
+# the whole difference between an opt-out and a policy, and the reason this
+# cannot be a plain `config set` on every start.
+#
+# HARNESS FIRST: all three are the core's own documented keys
+# (docs/gateway/heartbeat.md, docs/concepts/dreaming.md, docs/tools/self-learning.md)
+# and they are written through the core's own `config set --batch-json`, which
+# validates against the schema and applies the whole batch or none of it. One
+# CLI start for up to three keys, and only on a box that is missing one — a box
+# already seeded pays nothing.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  CLAWBOX_OPTOUT_BATCH="$(python3 - "$OPENCLAW_CONFIG" <<'PY' || true
+import json, sys
+
+# path -> the value ClawBox seeds when the owner has expressed no opinion.
+# `0m` rather than removing the key: the core reads an absent `every` as its own
+# default, so silence is not an opt-out (docs/gateway/heartbeat.md).
+WANTED = [
+    (("agents", "defaults", "heartbeat", "every"), "0m"),
+    (("plugins", "entries", "memory-core", "config", "dreaming", "enabled"), False),
+    (("skills", "workshop", "autonomous", "mode"), "off"),
+]
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    # No config, or one this script cannot read: seeding into it is not this
+    # step's business, and the blocks above have already reported on it.
+    print("")
+    raise SystemExit(0)
+
+def present(path):
+    node = cfg
+    for part in path:
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return node is not None
+
+batch = [
+    {"path": ".".join(path), "value": value}
+    for path, value in WANTED
+    if not present(path)
+]
+print(json.dumps(batch) if batch else "")
+PY
+)"
+  if [ -n "$CLAWBOX_OPTOUT_BATCH" ]; then
+    # Non-fatal like every other CLI call here: this is a blocking ExecStartPre,
+    # and a box that keeps its noisy defaults is far better than one with no
+    # gateway. The next boot tries again, because the keys are still absent.
+    if timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_OPTOUT_BATCH" >/dev/null 2>&1; then
+      echo "  Seeded the OpenClaw 2 background-job opt-outs (heartbeat, memory dreaming, self-learning) — Settings can switch any of them back on"
+    else
+      echo "  WARN: could not seed the OpenClaw 2 background-job opt-outs; the box may send unprompted check-ins and spend tokens on background jobs until Settings is used" >&2
+    fi
+  fi
+fi
+
 # ── Capability consent for the OTHER ClawBox-managed plugins ────────────────
 #
 # The block above is the codex half of this, and has been here since OpenClaw 2

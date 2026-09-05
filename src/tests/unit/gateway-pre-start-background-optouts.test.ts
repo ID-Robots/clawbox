@@ -1,0 +1,194 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { testEnv } from "@/tests/helpers/env";
+
+// Starts a real process (bash / python3): vitest's 5 s test and 10 s hook
+// defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+// TASK-609: OpenClaw 2 switches on three background jobs by default —
+// heartbeat DMs to the owner, memory dreaming on the default model, and
+// self-learning's weekly collection review — and ClawBox wrote none of those
+// keys, so a box that upgraded started messaging its owner and spending his
+// tokens without being asked.
+//
+// The owner's ruling (2026-09-03) is a SEED, not a policy: write the opt-out
+// only where the key is absent, so a value he set is never overwritten and
+// switching one back on is not undone at the next boot.
+//
+// The three failure shapes pinned:
+//   probe-once    — the seed runs every boot, so a key the core adds later is
+//                   still caught; it is the KEY's absence that gates it, not a
+//                   marker file.
+//   false success — a `config set` that fails must not be reported as a seeded
+//                   box, and must not stop the gateway.
+//   false failure — an owner who switched heartbeat back on must not find it
+//                   off again after a reboot. That is the case this suite
+//                   exists for.
+
+const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
+
+const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
+const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
+const d = hasPython3 && hasBash ? describe : describe.skip;
+
+/** The shipped block, out of the real script rather than a copy of it. */
+function block(): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const from = "# ── OpenClaw 2's three background jobs, opted out of ONCE ";
+  const to = "# ── Capability consent for the OTHER ClawBox-managed plugins ";
+  const start = src.indexOf(from);
+  const end = src.indexOf(to, start);
+  if (start < 0 || end < 0) throw new Error("the background-job opt-out block is not in gateway-pre-start.sh");
+  return src.slice(start, end);
+}
+
+let dir: string;
+let binDir: string;
+let configPath: string;
+
+/** An `openclaw` that applies `config set --batch-json` the way the CLI does. */
+function stubOpenclaw(exitCode = 0) {
+  const p = path.join(binDir, "openclaw");
+  writeFileSync(
+    p,
+    `#!/usr/bin/env bash\n`
+    + `printf '%s\\n' "$*" >> "$OC_CALLS"\n`
+    + `if [ "\${OC_EXIT:-${exitCode}}" != "0" ]; then exit "\${OC_EXIT:-${exitCode}}"; fi\n`
+    + `if [ "$1" = "config" ] && [ "$2" = "set" ] && [ "$3" = "--batch-json" ]; then\n`
+    + `  CLAWBOX_BATCH="$4" python3 - "$OPENCLAW_CONFIG" <<'PY'\n`
+    + `import json, os, sys\n`
+    + `cfg_path = sys.argv[1]\n`
+    + `with open(cfg_path) as fh:\n`
+    + `    cfg = json.load(fh)\n`
+    + `for entry in json.loads(os.environ["CLAWBOX_BATCH"]):\n`
+    + `    node = cfg\n`
+    + `    parts = entry["path"].split(".")\n`
+    + `    for part in parts[:-1]:\n`
+    + `        node = node.setdefault(part, {})\n`
+    + `    node[parts[-1]] = entry["value"]\n`
+    + `with open(cfg_path, "w") as fh:\n`
+    + `    json.dump(cfg, fh, indent=2)\n`
+    + `PY\n`
+    + `fi\nexit 0\n`,
+  );
+  chmodSync(p, 0o755);
+}
+
+function run(env: Record<string, string> = {}) {
+  const program = [
+    "set -euo pipefail",
+    `OPENCLAW_CONFIG=${JSON.stringify(configPath)}`,
+    `OPENCLAW_BIN=${JSON.stringify(path.join(binDir, "openclaw"))}`,
+    'CLAWBOX_OPENCLAW_V2=1',
+    block(),
+  ].join("\n");
+  const r = spawnSync("bash", ["-c", program], {
+    encoding: "utf-8",
+    env: testEnv({
+      PATH: `${binDir}:/usr/bin:/bin`,
+      OPENCLAW_CONFIG: configPath,
+      OC_CALLS: path.join(dir, "calls.log"),
+      ...env,
+    }),
+    timeout: 30_000,
+  });
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+function config(): Record<string, never> {
+  return JSON.parse(readFileSync(configPath, "utf-8"));
+}
+
+function at(pathStr: string): unknown {
+  let node: unknown = config();
+  for (const part of pathStr.split(".")) {
+    if (!node || typeof node !== "object") return undefined;
+    node = (node as Record<string, unknown>)[part];
+  }
+  return node;
+}
+
+function calls(): string {
+  const p = path.join(dir, "calls.log");
+  return existsSync(p) ? readFileSync(p, "utf-8") : "";
+}
+
+beforeEach(() => {
+  dir = mkdtempSync(path.join(tmpdir(), "clawbox-optout-"));
+  binDir = path.join(dir, "bin");
+  configPath = path.join(dir, "openclaw.json");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(configPath, JSON.stringify({}, null, 2));
+  stubOpenclaw();
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
+  it("seeds all three on a box that has never expressed an opinion", () => {
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(at("agents.defaults.heartbeat.every")).toBe("0m");
+    expect(at("plugins.entries.memory-core.config.dreaming.enabled")).toBe(false);
+    expect(at("skills.workshop.autonomous.mode")).toBe("off");
+    expect(r.stdout).toContain("Seeded the OpenClaw 2 background-job opt-outs");
+    // One CLI start for the three keys, not three.
+    expect(calls().trim().split("\n")).toHaveLength(1);
+  });
+
+  it("leaves a value the owner set alone, on every later boot", () => {
+    // THE case this exists for: switching heartbeat back on in Settings must
+    // not be undone by the next reboot.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ agents: { defaults: { heartbeat: { every: "30m" } } } }, null, 2),
+    );
+    run();
+    expect(at("agents.defaults.heartbeat.every")).toBe("30m");
+    // …while the two he has said nothing about are still seeded.
+    expect(at("plugins.entries.memory-core.config.dreaming.enabled")).toBe(false);
+    expect(at("skills.workshop.autonomous.mode")).toBe("off");
+  });
+
+  it("costs nothing on a box that is already seeded", () => {
+    run();
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    const r = run();
+    expect(r.status).toBe(0);
+    // No batch to write, so the CLI is never started at all.
+    expect(calls()).toBe("");
+    expect(r.stdout).not.toContain("Seeded");
+  });
+
+  it("keeps an owner's explicit `false` for a switch, not just a truthy one", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ skills: { workshop: { autonomous: { mode: "auto" } } } }, null, 2),
+    );
+    run();
+    expect(at("skills.workshop.autonomous.mode")).toBe("auto");
+  });
+
+  it("never fails the unit when the CLI does, and says so", () => {
+    const r = run({ OC_EXIT: "1" });
+    expect(r.status).toBe(0);
+    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(r.stderr).toContain("could not seed");
+  });
+
+  it("does nothing on an unreadable config rather than writing a fresh one", () => {
+    writeFileSync(configPath, "{ broken", "utf-8");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readFileSync(configPath, "utf-8")).toBe("{ broken");
+    expect(calls()).toBe("");
+  });
+});
