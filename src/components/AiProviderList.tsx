@@ -146,7 +146,16 @@ export default function AiProviderList() {
           ))}
         </div>
       ) : (
-        <ul className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
+        /* A CONTAINER, not the viewport. The defect is about how wide this
+           PANE is: Settings caps it at `max-w-xl` (576 px) and draws it inside
+           a ChromeWindow the owner can drag down to 300 px, so a `sm:`
+           breakpoint — which asks the viewport — is answered "wide" on a
+           desktop whose provider rows are 300 px across. `@container` is what
+           the rest of this codebase already uses for exactly this (the Coding
+           Agent panel, the skills store). `@md` is 28 rem: below it the icon,
+           the name, the Default pill, the Make-default button and the 44 px
+           switch cannot share a line without the name giving way. */
+        <ul className="@container rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
           {rows.map((row) => {
             const busy = toggling === row.id || settingDefault === row.id;
             const canMakeDefault = row.enabled && row.state === "connected" && !row.isDefault;
@@ -157,16 +166,21 @@ export default function AiProviderList() {
                  could give — the name — gave: "OpenAI G…", "Anthropic Cla…".
                  The controls go under the name at phone widths instead, and
                  the name is allowed to wrap there rather than be clipped. */
-              <li key={row.id} className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3 px-3 py-2.5" data-testid={`ai-provider-${row.id}`}>
-                <span className="flex items-center gap-3 min-w-0 sm:flex-1">
+              <li key={row.id} className="flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5" data-testid={`ai-provider-${row.id}`}>
+                <span className="flex items-center gap-3 min-w-0 @md:flex-1">
                   <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06] ${row.enabled ? "" : "opacity-40"}`}>
                     <AIProviderIcon provider={row.id} size={20} />
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="flex flex-wrap items-center gap-2">
+                    <span className="flex flex-wrap @md:flex-nowrap items-center gap-2">
                       <span
                         data-testid={`ai-provider-name-${row.id}`}
-                        className={`text-sm font-medium sm:truncate ${row.enabled ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
+                        /* `break-words` beside the wrap: on Hermes the label
+                           is whatever the dashboard reports, and an unbroken
+                           one would be hard-clipped by the row's `min-w-0`
+                           with no ellipsis to say so — worse than the
+                           truncation being removed. */
+                        className={`text-sm font-medium break-words @md:truncate ${row.enabled ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
                       >
                         {row.label}
                       </span>
@@ -194,7 +208,7 @@ export default function AiProviderList() {
                   </span>
                 </span>
 
-                <span className="flex items-center gap-3 shrink-0 self-end sm:self-auto" data-testid={`ai-provider-controls-${row.id}`}>
+                <span className="flex items-center gap-3 shrink-0 self-start @md:self-auto" data-testid={`ai-provider-controls-${row.id}`}>
                   {canMakeDefault && (
                     <button
                       type="button"

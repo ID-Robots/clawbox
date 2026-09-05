@@ -10,10 +10,15 @@
  * keep their width.
  *
  * jsdom does no layout, so these are assertions about the CLASS CONTRACT that
- * produces the clipping rather than about measured pixels: below `sm:` the name
- * must not be `truncate`d, and the controls must not share the line with it.
- * That is the half a unit test can hold; the pixels are the screenshot on the
- * card.
+ * produces the clipping rather than about measured pixels: in a narrow pane the
+ * name must not be `truncate`d, and the controls must not share its line. That
+ * is the half a unit test can hold; the pixels are the screenshot on the card.
+ *
+ * The queries must be the CONTAINER's, not the viewport's, and that is pinned
+ * here rather than left to a comment: Settings caps this pane at `max-w-xl`
+ * (576 px) and draws it inside a window the owner can drag to 300 px, so a
+ * `sm:` breakpoint is answered "wide" on a desktop whose provider rows are
+ * 300 px across — the reported clipping, at a width no phone is involved in.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@/tests/helpers/test-utils";
@@ -40,15 +45,19 @@ function stubFetch() {
     if (url.startsWith("/setup-api/providers/status")) {
       return json({ harness: "openclaw", providers: ROWS, defaultProvider: "openai", degraded: false });
     }
-    return json({});
+    // Loud, like the sibling suite: a call this fixture does not know about is
+    // a change in what the component reads, not something to answer `{}` to.
+    return new Response(JSON.stringify({ error: "unexpected" }), {
+      status: 404, headers: { "content-type": "application/json" },
+    });
   }));
 }
 
 /**
  * True when this element clips its text at EVERY width. Tailwind's `truncate`
- * is `overflow-hidden text-ellipsis whitespace-nowrap`; prefixed with a
- * breakpoint (`sm:truncate`) it only applies from that width up, which is what
- * lets the name wrap on a phone and stay on one line on a desktop.
+ * is `overflow-hidden text-ellipsis whitespace-nowrap`; behind a container
+ * query (`@md:truncate`) it applies only where the pane is wide enough, which
+ * is what lets the name wrap in a narrow one and stay on a line in a wide one.
  */
 function clipsAtEveryWidth(el: HTMLElement): boolean {
   return el.className.split(/\s+/).includes("truncate");
@@ -56,6 +65,23 @@ function clipsAtEveryWidth(el: HTMLElement): boolean {
 
 function hasClass(el: HTMLElement, cls: string): boolean {
   return el.className.split(/\s+/).includes(cls);
+}
+
+/**
+ * Every responsive class on this element, and whether it asks the CONTAINER
+ * (`@md:`) or the VIEWPORT (`sm:`). A viewport query here is the bug: the pane
+ * is narrower than `sm` on every desktop.
+ */
+function viewportQueries(el: HTMLElement): string[] {
+  return el.className.split(/\s+/).filter((c) => /^(sm|md|lg|xl|2xl):/.test(c));
+}
+
+/** The nearest ancestor that declares itself a query container. */
+function containerAncestor(el: HTMLElement): HTMLElement | null {
+  for (let node = el.parentElement; node; node = node.parentElement) {
+    if (hasClass(node, "@container")) return node;
+  }
+  return null;
 }
 
 afterEach(() => {
@@ -75,18 +101,25 @@ describe("provider rows at phone widths", () => {
       expect(name, `${row.label} has no name element of its own`).not.toBeNull();
       expect(name!).toHaveTextContent(row.label);
       expect(clipsAtEveryWidth(name!), `${row.label} is clipped at every width`).toBe(false);
-      // Still one line where there is room for one.
-      expect(hasClass(name!, "sm:truncate"), `${row.label} should still truncate from sm: up`).toBe(true);
+      // An unbroken label must still be legible rather than hard-clipped by
+      // the row's `min-w-0`: on Hermes the label is dashboard data.
+      expect(hasClass(name!, "break-words"), `${row.label} must be allowed to break`).toBe(true);
+      // Still one line where the PANE has room for one.
+      expect(hasClass(name!, "@md:truncate"), `${row.label} should truncate in a wide pane`).toBe(true);
+      expect(viewportQueries(name!), `${row.label} must not ask the viewport`).toEqual([]);
+      expect(containerAncestor(name!), `${row.label} has no query container`).not.toBeNull();
     }
   });
 
-  it("stacks the row's controls under the name below sm:", async () => {
+  it("stacks the row's controls under the name in a narrow pane", async () => {
     stubFetch();
     render(<I18nProvider><AiProviderList /></I18nProvider>);
 
     const li = await screen.findByTestId("ai-provider-anthropic");
-    expect(hasClass(li, "flex-col"), "the row stacks on a phone").toBe(true);
-    expect(hasClass(li, "sm:flex-row"), "and is one line from sm: up").toBe(true);
+    expect(hasClass(li, "flex-col"), "the row stacks in a narrow pane").toBe(true);
+    expect(hasClass(li, "@md:flex-row"), "and is one line in a wide one").toBe(true);
+    expect(viewportQueries(li), "the row must not ask the viewport").toEqual([]);
+    expect(containerAncestor(li), "the row has no query container").not.toBeNull();
     // The switch and Make-default travel together, off the name's line.
     const controls = await screen.findByTestId("ai-provider-controls-anthropic");
     expect(controls).toContainElement(screen.getByTestId("ai-provider-switch-anthropic"));
@@ -102,12 +135,15 @@ describe("provider rows at phone widths", () => {
     );
 
     const hero = screen.getByTestId("provider-default-hero");
-    expect(hasClass(hero, "flex-col"), "the hero stacks on a phone").toBe(true);
-    expect(hasClass(hero, "sm:flex-row"), "and is one line from sm: up").toBe(true);
+    expect(hasClass(hero, "flex-col"), "the hero stacks in a narrow pane").toBe(true);
+    expect(hasClass(hero, "@md:flex-row"), "and is one line in a wide one").toBe(true);
+    expect(viewportQueries(hero), "the hero must not ask the viewport").toEqual([]);
+    expect(containerAncestor(hero), "the hero declares no query container").not.toBeNull();
 
     const name = screen.getByTestId("provider-default-hero-name");
     expect(name).toHaveTextContent("Anthropic Claude");
     expect(clipsAtEveryWidth(name), "the vendor name is clipped at every width").toBe(false);
+    expect(hasClass(name, "break-words"), "the vendor name must be allowed to break").toBe(true);
 
     const model = screen.getByTestId("provider-default-hero-model");
     expect(model).toHaveTextContent("claude-opus-5-20260401");
