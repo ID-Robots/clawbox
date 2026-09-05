@@ -33,8 +33,12 @@ const ROOTS = ["src/components", "src/hooks", "src/app", "src/lib"];
 /**
  * `set` + capital is also `setTimeout`/`setInterval`/`setImmediate`, whose
  * callback is NOT a state updater — React does not re-run it — so they cannot
- * OPEN one. They stay in the nested set below, where scheduling a timer from
- * inside an updater is the same impurity.
+ * open one.
+ *
+ * They are excluded in BOTH positions, which means scheduling a timer from
+ * inside an updater is not reported either. That is a gap, stated rather than
+ * papered over: it is an impurity, but a far less damaging one than a second
+ * state write, and separating the two positions costs more than it buys.
  */
 const NOT_UPDATERS = new Set(["setTimeout", "setInterval", "setImmediate"]);
 
@@ -49,6 +53,14 @@ const NOT_UPDATERS = new Set(["setTimeout", "setInterval", "setImmediate"]);
  */
 function isStateWriter(name: string): boolean {
   return /^(set|apply)[A-Z]/.test(name) && !NOT_UPDATERS.has(name);
+}
+
+/** `someRef.current`, however it is spelled. */
+function isCurrentAccess(node: ts.Expression): boolean {
+  if (ts.isPropertyAccessExpression(node)) return node.name.text === "current";
+  return ts.isElementAccessExpression(node)
+    && ts.isStringLiteralLike(node.argumentExpression)
+    && node.argumentExpression.text === "current";
 }
 
 /** The plain `foo(...)` callee name, or null for `a.foo(...)` and the rest. */
@@ -97,17 +109,28 @@ function impureUpdaters(relativePath: string): string[] {
         const name = calleeName(node);
         if (name && isStateWriter(name)) hits.push(`${name}()`);
       }
+      // EVERY assignment operator, not just `=`. `someRef.current += 1` is the
+      // generation-counter idiom this codebase uses in thirteen places,
+      // `ChatPopup.tsx` among them, and accumulating a streaming buffer with
+      // `+=` inside an updater is the most natural wrong way to write TASK-703's
+      // own code. `ref["current"]` counts too.
       if (
         ts.isBinaryExpression(node)
-        && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
-        && ts.isPropertyAccessExpression(node.left)
-        && node.left.name.text === "current"
+        && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+        && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+        && isCurrentAccess(node.left)
       ) {
-        hits.push(`${node.left.getText(file)} =`);
+        hits.push(`${node.left.getText(file)} ${node.operatorToken.getText(file)}`);
       }
       ts.forEachChild(node, visit);
     };
-    ts.forEachChild(body, visit);
+    // The body NODE, not its children. A concise arrow body IS the expression,
+    // so `setStreamingState(prev => streamingRef.current = prev)` — which
+    // type-checks and lints clean, and is a render-phase write to the very ref
+    // this fix leans on — went unseen while the same code in braces was caught.
+    // A rule whose answer depends on a pair of brackets is not a rule. `visit`
+    // handles the node and then recurses, so a block body is unchanged.
+    visit(body);
     return hits;
   };
 
@@ -132,7 +155,7 @@ function impureUpdaters(relativePath: string): string[] {
   return found;
 }
 
-describe("a state updater is a pure function of the previous state", () => {
+describe("no state write inside a state updater", () => {
   it("has no state write inside a state updater, anywhere in the UI", () => {
     // The four directories that hold this app's React state, not just the two
     // chat surfaces: after TASK-703 there are NO such sites left, so the rule
@@ -146,7 +169,35 @@ describe("a state updater is a pure function of the previous state", () => {
     // share lives: `useChatToolCalls` (chat-tool-events.tsx) is called from
     // ChatApp and ChatPopup alike, so the same defect there would reach both
     // through the same abort path.
-    const offenders = ROOTS.flatMap((root) => sourceFiles(root)).flatMap(impureUpdaters);
+    //
+    // WHAT A GREEN TICK HERE DOES NOT PROVE, so the next reader does not read
+    // it as absence. The rule is syntactic and cannot follow a name: a setter
+    // reached through an alias (`const append = setMessages`) or an updater
+    // declared as a variable and passed in by name are both invisible, and so
+    // is a setter reached through a property (`ctx.setSort(…)`). And it detects
+    // state writes and ref writes only — an updater whose one side effect is a
+    // `localStorage.setItem`, a `fetch` or an `audio.play()` is impure and is
+    // not reported. Chasing those by AST costs more than it buys; saying so
+    // costs a paragraph.
+    //
+    // In the other direction it is deliberately over-eager: any single-argument
+    // call to a `set*`/`apply*` identifier taking a function is treated as an
+    // updater, whether or not the callee is a React setter. That is the safe
+    // side of the trade — the alternative is a rule that has to know which
+    // names are setters — but it means a legitimate `setX(fn)` helper of one's
+    // own can turn this red. If that happens, the answer is to rename the
+    // helper or to hoist the callback out of the call, not to weaken the rule.
+    const files = ROOTS.flatMap((root) => sourceFiles(root));
+    // The WALK, not only the rule. Rename a directory, add an exclude, change
+    // the extension test, and `files` becomes short or empty while both cases
+    // here stay green — an empty list assertion over an empty tree proves
+    // nothing. Two anchors and a floor: the surface the defect was on, and the
+    // shared state both surfaces consume.
+    expect(files.length).toBeGreaterThan(300);
+    expect(files).toContain("src/components/ChatApp.tsx");
+    expect(files).toContain("src/lib/chat-tool-events.tsx");
+
+    const offenders = files.flatMap(impureUpdaters);
 
     expect(offenders).toEqual([]);
   });
@@ -166,6 +217,8 @@ describe("a state updater is a pure function of the previous state", () => {
       expect.stringContaining("setFromFunctionExpression(updater) -> setMessages()"),
       expect.stringContaining("applyWrapper(updater) -> applyStreaming()"),
       expect.stringContaining("setWithRefWrite(updater) -> streamingRef.current ="),
+      expect.stringContaining("setConciseRefWrite(updater) -> streamingRef.current ="),
+      expect.stringContaining("setCompoundRefWrite(updater) -> streamingRef.current +="),
     ]);
   });
 });

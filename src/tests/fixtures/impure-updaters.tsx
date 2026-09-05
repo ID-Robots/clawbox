@@ -25,6 +25,8 @@ export function shapes(
   applyWrapper: Setter<string>,
   applyStreaming: (next: string) => void,
   setWithRefWrite: Setter<string>,
+  setConciseRefWrite: Setter<string>,
+  setCompoundRefWrite: Setter<string>,
   streamingRef: { current: string },
 ): void {
   // The defect as it shipped: a sibling setter called from inside an updater.
@@ -53,6 +55,27 @@ export function shapes(
   setWithRefWrite((prev) => {
     streamingRef.current = prev;
     return prev;
+  });
+
+  // A concise arrow body that IS the write. It type-checks (an assignment
+  // evaluates to the assigned value) and it lints clean, and it went unseen
+  // while the same code in braces was caught — the rule's answer must not
+  // depend on a pair of brackets.
+  // Deliberately UNPARENTHESISED: with brackets the body node is a
+  // ParenthesizedExpression whose child is the assignment, so a walk that
+  // visited only the children caught it; without them the body IS the
+  // assignment and that walk saw nothing. Adding the brackets here would make
+  // this case pass against the defect it exists to pin.
+  // eslint-disable-next-line no-return-assign
+  setConciseRefWrite((prev) => streamingRef.current = prev);
+
+  // The compound form. `someRef.current += 1` is the generation-counter idiom
+  // this codebase uses in thirteen places, and accumulating a streaming buffer
+  // with `+=` inside an updater is the most natural wrong way to write the
+  // defect this rule exists for.
+  setCompoundRefWrite((prev) => {
+    streamingRef.current += prev;
+    return "";
   });
 
   // NOT offenders, and here so the rule is known to leave them alone: a timer
