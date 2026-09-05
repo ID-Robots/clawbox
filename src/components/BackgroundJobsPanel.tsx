@@ -1,0 +1,150 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+import { useT } from "@/lib/i18n";
+import type { BackgroundJobId, BackgroundJobsStatus } from "@/lib/background-jobs";
+
+// The three things the box does on its own initiative (TASK-609).
+//
+// OpenClaw 2 arrives with all three on: unprompted check-ins DM'd to the owner,
+// memory consolidation on the default model, and self-learning's weekly
+// collection review — measured on a box as three enabled cron rows and two
+// "[heartbeat] started" lines in one evening. `gateway-pre-start.sh` seeds the
+// opt-outs once; this is where the owner changes his mind, and the only place
+// on the device that says the jobs exist at all.
+//
+// EVERY ROW IS A HARNESS KEY, and the panel says which one. The switches write
+// `agents.defaults.heartbeat.every`, `plugins.entries.memory-core.config.
+// dreaming.enabled` and `skills.workshop.autonomous.mode` on OpenClaw, and
+// `auxiliary.background_review.enabled` / `curator.enabled` on Hermes. Naming
+// the key is not decoration on an appliance whose owner may also have a
+// terminal open: it is how he can tell that this switch and `hermes config get`
+// are talking about the same thing.
+//
+// A ROW HERMES DOES NOT HAVE IS NOT AN OFF SWITCH. Nothing in Hermes wakes
+// itself to message the owner — its only `heartbeat` keys are transport-level —
+// so that row says so in words and draws no control. An off switch for
+// something that cannot happen is a lie in the shape of a control.
+
+const ROWS: { id: BackgroundJobId; labelKey: string; hintKey: string }[] = [
+  { id: "checkIns", labelKey: "settings.bgCheckIns", hintKey: "settings.bgCheckInsHint" },
+  { id: "memoryReview", labelKey: "settings.bgMemory", hintKey: "settings.bgMemoryHint" },
+  { id: "skillLearning", labelKey: "settings.bgLearning", hintKey: "settings.bgLearningHint" },
+];
+
+export default function BackgroundJobsPanel() {
+  const { t } = useT();
+  const [status, setStatus] = useState<BackgroundJobsStatus | null>(null);
+  const [busy, setBusy] = useState<BackgroundJobId | null>(null);
+  const [failed, setFailed] = useState<BackgroundJobId | null>(null);
+
+  // Read once, on mount. `alive` because the answer comes back after an await
+  // and a Settings tab is closed by clicking another one; the switches also
+  // stay where they are on a box that cannot answer, rather than flipping to a
+  // guess about what it is doing in the background.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await fetch("/setup-api/background-jobs", { cache: "no-store" });
+        if (!r.ok || !alive) return;
+        const body = (await r.json()) as BackgroundJobsStatus;
+        if (alive) setStatus(body);
+      } catch {
+        // Nothing to say and nothing to draw: the panel stays hidden.
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  async function toggle(id: BackgroundJobId, enabled: boolean) {
+    setBusy(id);
+    setFailed(null);
+    try {
+      const r = await fetch("/setup-api/background-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id, enabled }),
+      });
+      const body = (await r.json().catch(() => null)) as (BackgroundJobsStatus & { ok?: boolean }) | null;
+      // Only a device-verified change moves the switch. The route reads its own
+      // write back off the config before it answers, so an `ok` here is the box
+      // saying it changed — not this component assuming it did.
+      if (r.ok && body?.ok === true) setStatus(body);
+      else setFailed(id);
+    } catch {
+      setFailed(id);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (!status) return null;
+
+  return (
+    <div className="max-w-xl" data-testid="settings-background-jobs">
+      <div className="flex items-center gap-2 mb-1">
+        <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">
+          bedtime
+        </span>
+        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+          {t("settings.bgTitle")}
+        </label>
+      </div>
+      <p className="text-[11px] text-[var(--text-muted)] mb-3 leading-relaxed">{t("settings.bgHelper")}</p>
+
+      <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]">
+        {ROWS.map((row) => {
+          const job = status.jobs.find((j) => j.id === row.id);
+          if (!job) return null;
+          return (
+            <div key={row.id} className="flex items-start gap-3 px-3 py-3" data-testid={`bg-job-${row.id}`}>
+              <span className="flex-1 min-w-0">
+                <span className="block text-sm text-[var(--text-primary)] font-medium">{t(row.labelKey)}</span>
+                <span className="block text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                  {t(row.hintKey)}
+                </span>
+                {job.key && (
+                  <span className="block text-[10px] text-[var(--text-muted)] font-mono mt-0.5 break-all">
+                    {job.key}
+                  </span>
+                )}
+                {failed === row.id && (
+                  <span className="block text-[11px] text-[var(--amber-ink)] mt-1" data-testid={`bg-job-failed-${row.id}`}>
+                    {t("settings.bgFailed")}
+                  </span>
+                )}
+              </span>
+              {job.supported ? (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={job.enabled}
+                  aria-label={t(row.labelKey)}
+                  aria-busy={busy === row.id}
+                  disabled={busy === row.id}
+                  data-testid={`bg-job-switch-${row.id}`}
+                  onClick={() => void toggle(row.id, !job.enabled)}
+                  className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${job.enabled ? "bg-[var(--coral)]" : "bg-white/15"}`}
+                >
+                  <span
+                    className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${job.enabled ? "left-[22px]" : "left-0.5"}`}
+                    aria-hidden="true"
+                  />
+                </button>
+              ) : (
+                <span
+                  className="shrink-0 text-[11px] text-[var(--text-muted)] self-center"
+                  data-testid={`bg-job-unsupported-${row.id}`}
+                >
+                  {t("settings.bgUnsupported")}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
