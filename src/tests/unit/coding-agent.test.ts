@@ -149,9 +149,15 @@ function makeProject(id: string): string {
   return dir;
 }
 
-/** Every path under `dir`, sorted: a folder still being written to changes. */
+/** Every path under `dir`, sorted: a folder still being written to changes.
+ *  A walk that trips over a directory disappearing under it has answered the
+ *  question too — as an assertion, not as a stack. */
 function entriesUnder(dir: string): string[] {
-  return fs.readdirSync(dir, { recursive: true, encoding: "utf-8" }).sort();
+  try {
+    return fs.readdirSync(dir, { recursive: true, encoding: "utf-8" }).sort();
+  } catch (err) {
+    return [`changed under the walk: ${err instanceof Error ? err.message : String(err)}`];
+  }
 }
 
 function readyDevice(): void {
@@ -193,9 +199,9 @@ afterEach(async () => {
   // `ENOTEMPTY: directory not empty, rmdir '.../code-projects/site/.git'`.
   await lib._resetCodingAgentStateForTests();
   restore();
-  // The retries stay as a backstop for the one piece of work that is
-  // deliberately NOT waited for: a slow project-icon generation is left
-  // running by commitProjectAssets rather than holding a finished run.
+  // The retries stay as the backstop for what the drain cannot promise: it is
+  // bounded, and a run this teardown had to KILL settles from its child's own
+  // handler, which the drain waits for but only up to its budget.
   fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
@@ -484,7 +490,7 @@ describe("a run", () => {
     expect(lib.listRuns().map((r) => r.id)).toEqual([second.id, first.id]);
     expect(first.id).toMatch(lib.RUN_ID_RE);
 
-    lib._resetCodingAgentStateForTests();
+    await lib._resetCodingAgentStateForTests();
     vi.resetModules();
     const again = await import("@/lib/coding-agent");
     expect(again.getRun(first.id)?.summary).toMatch(/Changed/);
@@ -518,7 +524,10 @@ describe("a run", () => {
     const settled = entriesUnder(project);
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(entriesUnder(project)).toEqual(settled);
-  });
+    // Its own budget: a real setpriv spawn and a real git init/add/commit
+    // ahead of a deliberate 1.5 s wait is not a 5 s test on a loaded runner,
+    // and this must not depend on another PR raising the file's default.
+  }, 20_000);
 
   it("reads a corrupt runs file as empty rather than failing", async () => {
     fs.writeFileSync(runsFile(), "{ not json");
@@ -854,7 +863,7 @@ describe("a run", () => {
 
       // A restart: forget memory, re-read the file. Both records must survive
       // (they vanished here once — RUN_STATUSES had not been widened).
-      lib._resetCodingAgentStateForTests();
+      await lib._resetCodingAgentStateForTests();
       expect(lib.getRun(draft.id)?.status).toBe("draft");
       expect(lib.getRun(started.id)?.status).toBe("paused");
       expect(lib.getRun(started.id)?.resumable).toBe(true);
@@ -1891,10 +1900,10 @@ describe("the pull request on disk", () => {
     expect(run?.pr).toBeNull();
   });
 
-  it("drops a blob without a start, and one that is not an object", () => {
+  it("drops a blob without a start, and one that is not an object", async () => {
     writeRunWithPr({ phase: "waiting", number: 7 });
     expect(lib.listRuns()[0]?.pr).toBeNull();
-    lib._resetCodingAgentStateForTests();
+    await lib._resetCodingAgentStateForTests();
     writeRunWithPr("waiting" as unknown as Record<string, unknown>);
     expect(lib.listRuns()[0]?.pr).toBeNull();
   });

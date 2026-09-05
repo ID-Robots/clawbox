@@ -380,8 +380,26 @@ const FLUSH_INTERVAL_MS = 1_000;
  */
 const SETTLE_ICON_BUDGET_MS = 20_000;
 
-/** How long a teardown waits for the settle path — see `settleWork`. */
-const SETTLE_DRAIN_BUDGET_MS = 15_000;
+/**
+ * How long a teardown waits for the settle path — see `settleWork`.
+ *
+ * UNDER vitest's 10 s default hook budget, deliberately: a drain that outlives
+ * the hook it runs in fails the suite instead of bounding it.
+ */
+const SETTLE_DRAIN_BUDGET_MS = 5_000;
+
+/**
+ * How long after a killed child is reaped its run may still settle.
+ *
+ * finishRun runs from the child's `close` handler — or, when a grandchild holds
+ * the pipes open, 250 ms after `exit` (see spawnRun). A reaped child is
+ * therefore not a finished run, and treating it as one is how a drain returned
+ * before the work it exists to wait for had even been registered.
+ */
+const CHILD_SETTLE_GRACE_MS = 400;
+
+/** How often the drain looks at whether the children it killed are gone. */
+const REAP_POLL_MS = 20;
 
 /**
  * The run is spawned through this, not directly, so it starts with an empty
@@ -4080,34 +4098,65 @@ const settling = new Set<Promise<void>>();
 function trackSettleWork(work: Promise<unknown>): void {
   // Neutralised first: the tracked promise must never be the one that rejects,
   // or a caller that does not wait for it turns into an unhandled rejection.
-  const done = work.then(() => undefined, () => undefined);
+  // The arm still says so, because `void`ing this at least surfaced a future
+  // regression as one, and silence would be the strictly worse trade.
+  const done = work.then(() => undefined, (err: unknown) => {
+    console.error("[coding-agent] the settle path failed:", err instanceof Error ? err.message : err);
+  });
   settling.add(done);
   void done.finally(() => settling.delete(done));
+}
+
+/** A plain wait. NOT `unref`ed: the point of this path is that a caller can
+ *  wait for it, and an unref'd timer cannot keep the loop alive to do that. */
+const wait = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+/** `work`, or `ms`, whichever is first — with the timer always cleared, so a
+ *  drain that finished early does not hold the loop open to its deadline. */
+async function within(work: Promise<unknown>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([work, new Promise<void>((resolve) => { timer = setTimeout(resolve, ms); })]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
  * Wait until the settle path above is finished with the disk.
  *
- * Bounded, because this is called from a teardown: a wedged child must cost a
- * suite one budget, not the whole run. Two quiet turns rather than one empty
- * set — a killed child settles on its own `close` event, and only then does it
- * register its share of the work.
+ * `killed` is the children the caller has just signalled. They matter because
+ * a killed run registers its settle work from finishRun, which runs from the
+ * child's own handler — so an empty `settling` at the moment of asking is not
+ * evidence of anything until those children are gone AND the grace above has
+ * passed. Measured on a loaded box, looking for a quiet turn of the event loop
+ * instead missed the settle 6 times in 25.
+ *
+ * Bounded, because this is called from a teardown, and it says so when the
+ * budget runs out with work still outstanding rather than reporting the same
+ * success either way.
  */
-async function settleWork(timeoutMs: number): Promise<void> {
+async function settleWork(killed: ChildProcess[], timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  let quiet = 0;
-  while (quiet < 2 && Date.now() < deadline) {
+  const left = () => Math.max(0, deadline - Date.now());
+  const reaped = () => killed.every((child) => child.exitCode !== null || child.signalCode !== null);
+  let grace = killed.length > 0;
+  while (left() > 0) {
     if (settling.size > 0) {
-      quiet = 0;
-      await Promise.race([
-        Promise.allSettled([...settling]),
-        new Promise((resolve) => { setTimeout(resolve, Math.max(0, deadline - Date.now())).unref?.(); }),
-      ]);
-    } else {
-      quiet += 1;
+      await within(Promise.allSettled([...settling]), left());
+      continue;
     }
-    await new Promise((resolve) => { setTimeout(resolve, 0).unref?.(); });
+    if (!reaped()) {
+      await wait(Math.min(REAP_POLL_MS, left()));
+      continue;
+    }
+    if (!grace) return;
+    grace = false;
+    await wait(Math.min(CHILD_SETTLE_GRACE_MS, left()));
   }
+  console.error(
+    `[coding-agent] the settle path was still going after ${timeoutMs}ms (${settling.size} outstanding) — what it was writing may be unfinished`,
+  );
 }
 
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
@@ -4936,13 +4985,16 @@ function spawnOrSettle(
  * Every clear stays synchronous — callers that reset mid-test and read the
  * module in the next line depend on that. The promise is the added half: a
  * teardown that removes the suite's temp tree must await it, or it races the
- * `git` a just-finished run is still spawning inside that tree.
+ * `git` a just-finished run is still spawning inside that tree. A run this
+ * call kills counts too, which is why the children go to `settleWork`.
  */
 export function _resetCodingAgentStateForTests(): Promise<void> {
+  const killed: ChildProcess[] = [];
   for (const state of live.values()) {
     clearTimeout(state.timeout);
     if (state.killTimer) clearTimeout(state.killTimer);
     killTree(state.child, "SIGKILL");
+    killed.push(state.child);
   }
   live.clear();
   waiters.clear();
@@ -4953,5 +5005,5 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   }
   dirty = false;
   runs = null;
-  return settleWork(SETTLE_DRAIN_BUDGET_MS);
+  return settleWork(killed, SETTLE_DRAIN_BUDGET_MS);
 }

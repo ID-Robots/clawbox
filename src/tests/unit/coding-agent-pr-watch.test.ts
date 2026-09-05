@@ -94,7 +94,11 @@ afterEach(async () => {
   vi.useRealTimers();
   await lib._resetCodingAgentStateForTests();
   restore();
-  fs.rmSync(base, { recursive: true, force: true });
+  // maxRetries, as the backstop for what the drain cannot promise: it is
+  // bounded, and a run this teardown had to KILL settles from its child's
+  // own handler. Node retries exactly this family (EBUSY/ENOTEMPTY/EPERM)
+  // and by default does not retry at all.
+  fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("a pull request GitHub will not answer about", () => {

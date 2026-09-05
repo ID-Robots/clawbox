@@ -305,7 +305,11 @@ describe("the pull request across the owner's gestures", () => {
     // made it, and the removal below raced the work it was still doing.
     await lib._resetCodingAgentStateForTests();
     restore();
-    fs.rmSync(base, { recursive: true, force: true });
+    // maxRetries, as the backstop for what the drain cannot promise: it is
+    // bounded, and a run this teardown had to KILL settles from its child's
+    // own handler. Node retries exactly this family (EBUSY/ENOTEMPTY/EPERM)
+    // and by default does not retry at all.
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("starts a run in a folder that is not a repository yet with no pull request, and says so once", async () => {
@@ -361,7 +365,7 @@ describe("the pull request across the owner's gestures", () => {
     // paused run is NOT that: its record survives the restart and it resumes
     // in place, so its pull request is still coming.
     const paused = await startAndPause(path.join(base, "flag-2"));
-    lib._resetCodingAgentStateForTests();
+    await lib._resetCodingAgentStateForTests();
     lib.resumePullRequestWatches();
     expect(lib.getRun(paused.id)?.status).toBe("paused");
     expect(lib.getRun(paused.id)?.pr?.phase).toBe("opening");
