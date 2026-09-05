@@ -89,8 +89,13 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
   const [error, setError] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
   // One token per read: a response that started for the previous project
-  // (or before an unmount) must not paint over the current one.
+  // (or before an unmount) must not paint over the current one — and one
+  // per SCOPE (the project this card is on), so a Start or a Stop that was
+  // still in flight when the scope changed neither paints nor invalidates
+  // the new scope's reads. The page remounts the card per project, so the
+  // scope guard is belt and braces; it costs nothing to be sure.
   const request = useRef(0);
+  const scope = useRef(0);
 
   const load = useCallback(async () => {
     const mine = ++request.current;
@@ -106,11 +111,12 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
   }, [directory, projectId]);
 
   useEffect(() => {
+    scope.current++;
     // The first read of the board happens here: the card has no other
     // moment to ask, and the answer is one render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
-    return () => { request.current++; };
+    return () => { request.current++; scope.current++; };
   }, [load]);
 
   const team = teams[0] ?? null;
@@ -126,6 +132,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
   const start = async () => {
     const text = goal.trim();
     if (!text) return;
+    const startedIn = scope.current;
     setBusy(true);
     setError(null);
     try {
@@ -136,12 +143,13 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
       });
       const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
       if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.startFailed"));
+      if (startedIn !== scope.current) return;
       // A read that started before this write must not land on top of it.
       request.current++;
       setGoal("");
       setTeams((prev) => [data.team!, ...prev]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.team.startFailed"));
+      if (startedIn === scope.current) setError(err instanceof Error ? err.message : t("codingAgent.team.startFailed"));
     } finally {
       setBusy(false);
     }
@@ -149,6 +157,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
 
   const stop = async () => {
     if (!team) return;
+    const startedIn = scope.current;
     setBusy(true);
     setError(null);
     try {
@@ -159,10 +168,11 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
       });
       const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
       if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.stopFailed"));
+      if (startedIn !== scope.current) return;
       request.current++;
       setTeams((prev) => prev.map((x) => (x.id === data.team!.id ? data.team! : x)));
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.team.stopFailed"));
+      if (startedIn === scope.current) setError(err instanceof Error ? err.message : t("codingAgent.team.stopFailed"));
     } finally {
       setBusy(false);
     }
