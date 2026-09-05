@@ -396,27 +396,39 @@ export function friendlyModelName(raw: string | null | undefined): string | null
  * Never throws: a probe that cannot run answers "no engine", which points the
  * box at the cloud voice it has a credential for rather than leaving it mute.
  */
+export function localTtsEngineInstalled(stamped: boolean, unitPresent: boolean): boolean {
+  return stamped && unitPresent;
+}
+
 export async function hasLocalTtsEngine(): Promise<boolean> {
   try {
     const [stamped, unit] = await Promise.all([
       exists(KOKORO_STAMP),
       readUnitState(KOKORO_UNIT, "user"),
     ]);
-    return stamped && unit.present;
+    return localTtsEngineInstalled(stamped, unit.present);
   } catch {
     return false;
   }
 }
 
 async function kokoroEntry(): Promise<LocalModelEntry> {
-  // `installed` comes from the one rule above; `stamped` is a different
-  // question — are the WEIGHTS there — and only the wording below needs it,
-  // to tell "its service is missing" from "nothing was ever installed".
-  const [installed, stamped, unit] = await Promise.all([
-    hasLocalTtsEngine(),
+  // ONE sample of each fact, and the rule applied to it. Calling
+  // `hasLocalTtsEngine()` here instead would run the stamp read and the
+  // `systemctl --user` pair a SECOND time — measured 2 → 4 spawns — on the path
+  // whose own comment says the spoken-reply capability reads this inventory per
+  // reply; and `installed` would then come from a different sample than the one
+  // filling `enabled`, `running` and `memoryBytes`, so a unit that moved between
+  // them would produce a row that contradicts itself.
+  //
+  // `stamped` is a third question — are the WEIGHTS there — and only the
+  // wording below needs it, to tell "its service is missing" from "nothing was
+  // ever installed".
+  const [stamped, unit] = await Promise.all([
     exists(KOKORO_STAMP),
     readUnitState(KOKORO_UNIT, "user"),
   ]);
+  const installed = localTtsEngineInstalled(stamped, unit.present);
   const memoryBytes = unit.active ? await processMemoryBytes("kokoro-server.py") : null;
   return {
     id: "kokoro",

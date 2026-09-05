@@ -3824,8 +3824,12 @@ step_openclaw_tts() {
             # selection on an engineless box would move it from honestly mute
             # to speaking through a third party the customer never chose, which
             # is the one outcome `HERMES_FACTORY_TTS_PROVIDER` exists to
-            # prevent. A command provider whose engine is missing simply fails,
-            # which leaks nothing, and no panel is fooled by it:
+            # prevent. A command provider whose engine is missing FAILS, and
+            # measured on the same package: the command-provider branch resolves
+            # BEFORE the built-in dispatch (`tts_tool.py:3184`) and a non-zero
+            # exit is turned into `RuntimeError("TTS provider '<name>' exited
+            # with code …")` (`:1376-1386`) — there is no fall-through to another
+            # provider, so nothing leaves the box. And no panel is fooled by it:
             # `hermesSpeaksReplies` asks for the stamp, the unit AND a runnable
             # script before it will say this box speaks.
             #
@@ -3845,7 +3849,16 @@ step_openclaw_tts() {
               # engine (the OpenClaw arm below says so too), and VOICE_RC=0 with
               # any other verdict is not one.
               if [ "$KOKORO_HAVE" != true ]; then
-                echo "  Note: this box has no on-device engine ($KOKORO_REASON), so it stays SILENT until ClawBox AI is linked on an entitled plan and the cloud voice is selected. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
+                # Qualified by SKU. `applyClawaiToHermes` — the only writer of
+                # the Hermes cloud voice — runs where `getActiveHarness()`
+                # answers "hermes", which a dual box does not: there the Hermes
+                # harness's `tts.provider` has no automatic writer at all, and
+                # promising one would be a false success in an install log.
+                if is_hermes_edition; then
+                  echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT until ClawBox AI is linked on a plan that includes cloud speech. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
+                else
+                  echo "  Note: this box has no on-device engine ($KOKORO_REASON), so its Hermes voice stays SILENT. On a dual box nothing selects the Hermes cloud voice automatically — set it from Settings -> Voice. The $HERMES_TTS_PROVIDER selection is kept deliberately: clearing it would hand the box to Hermes' factory Edge cloud." >&2
+                fi
               fi
             else
               HERMES_TTS_FAIL="could not select the $HERMES_TTS_PROVIDER provider"

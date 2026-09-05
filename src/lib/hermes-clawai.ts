@@ -336,11 +336,13 @@ export async function applyClawaiToHermes(
   // A box with no on-device engine now has a voice, so give it one.
   //
   // install.sh registers `tts.providers.clawbox-local` on every Hermes box and
-  // selects it ONLY when Kokoro actually installed (TASK-699); a board that
-  // declines the engine is deliberately left with `tts.provider` unset rather
-  // than pointing at nothing. The cloud voice is the other half of that
-  // decision and it could not be made there: it needs this credential, and the
-  // link happens after the install. So it is made here, where the token is.
+  // SELECTS it whatever the engine did — deliberately, because to Hermes an
+  // unset `tts.provider` is its factory Edge cloud rather than silence
+  // (`tools/tts_tool.py`, measured on the box), so a board that declines Kokoro
+  // is kept on a command provider that fails loudly instead of being handed to
+  // Microsoft. The cloud voice is the other half of that decision and it could
+  // not be made there: it needs this credential, and the link happens after the
+  // install. So it is made here, where the token is.
   //
   // Never over an owner's own pick — only where nothing has been chosen, where
   // Hermes' factory `edge` cloud is still selected, or where the on-device
@@ -1573,7 +1575,7 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
         HERMES_FACTORY_TTS_PROVIDER,
         CLAWBOX_AI_SPEECH_TIER,
       },
-      { hasLocalTtsEngine },
+      { hasLocalTtsEngine, localTtsCommandRunnable },
     ] = await Promise.all([
       import("@/lib/hermes-tts"),
       import("@/lib/local-models"),
@@ -1603,11 +1605,32 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
       );
       return;
     }
-    // DEFINITION BEFORE SELECTION, and unconditionally: an entitled box's
-    // endpoint and credential are refreshed even when the cloud is already
-    // chosen, because this is the only writer of them and the portal rotates
-    // the token on a re-link.
-    await writeHermesCloudTarget(token);
+    // DEFINITION BEFORE SELECTION: the endpoint and credential land first, so a
+    // failure there leaves `tts.provider` untouched rather than selecting a
+    // provider that cannot answer. Refreshed even when the cloud is ALREADY
+    // chosen, because this is the only writer of `tts.openai.*` on this edition
+    // and the portal rotates the token on a re-link — an unrefreshed key means
+    // every utterance 401s while `hermesSpeaksReplies`, which asks only that
+    // the two keys are non-empty, calls the voice configured.
+    //
+    // ...but only over OUR OWN route. On Hermes `openai` is the generic
+    // OpenAI-compatible slot, not ClawBox's: an owner may have pointed it at a
+    // self-hosted speech server with their own key, and install.sh lists
+    // `openai` among the values it preserves untouched as the owner's choice.
+    // Writing there would redirect their speech to our proxy silently, with the
+    // selection and every panel unchanged. `gateway-pre-start.sh` — the sibling
+    // this refresh is modelled on — refuses for exactly this reason: it computes
+    // whether the speech route is already taken and prints "already names its
+    // own speech route" rather than writing.
+    const ownRoute = voice.cloudBaseUrl === null
+      || voice.cloudBaseUrl.replace(/\/+$/, "") === CLAWBOX_AI_PROXY_URL;
+    if (ownRoute) {
+      await writeHermesCloudTarget(token);
+    } else {
+      console.log(
+        "[hermes-clawai] tts.openai already names its own speech route — leaving it alone",
+      );
+    }
     const current = voice.provider;
     const unchosen = current === null
       || current === HERMES_FACTORY_TTS_PROVIDER
@@ -1618,10 +1641,29 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
     // wherever there is one — an owner on it is not moved off it by linking a
     // box, and an unset key on a box that can speak for itself is not a reason
     // to send its owner's words off the device.
-    if (voice.localRegistered && await hasLocalTtsEngine()) {
+    //
+    // THREE conjuncts, the same three every other surface asks for: Hermes has
+    // a `type: command` definition for it, the engine is installed, and the
+    // script is runnable. `local-models.ts` documents the third — "the file can
+    // lose the bit long after the config was written" — and `hermesSpeaksReplies`
+    // and the Voice route both demand it. Without it a box whose
+    // `clawbox-tts.sh` lost its execute bit is selected onto a voice every
+    // panel correctly reports it does not have, and the cloud voice it is
+    // entitled to is never wired.
+    if (voice.localRegistered
+      && voice.localCommand !== null
+      && await hasLocalTtsEngine()
+      && await localTtsCommandRunnable(voice.localCommand)) {
       if (current === HERMES_LOCAL_TTS_PROVIDER) return;
       await selectHermesEngine("local", null);
       console.log("[hermes-clawai] this box has its own voice — selecting the on-device engine");
+      return;
+    }
+    if (!ownRoute) {
+      // Nothing to select it onto: the cloud slot is the owner's and was left
+      // alone above, so pointing `tts.provider` at it would speak through their
+      // endpoint with their key, which is not ours to arrange.
+      console.log("[hermes-clawai] no on-device voice, and tts.openai is the owner's — leaving the selection alone");
       return;
     }
     await selectHermesEngine("cloud", token);
