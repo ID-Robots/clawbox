@@ -1981,40 +1981,11 @@ export default function CodingAgentApp() {
                 </div>
               )}
 
-              {run.error && (
-                <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
-                  <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
-                  <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
-                </div>
-              )}
-
-                </div>
-                <aside className="min-w-0" data-testid="coding-agent-run-rail">
-              {/* The figures. */}
-              <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-2 gap-2" data-testid="coding-agent-run-figures">
-                <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : "—"} />
-                <StatTile label={t("codingAgent.statFiles")} value={String(run.filesTouched.length)} testId="coding-agent-stat-files" />
-                <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : "—"} />
-                <StatTile
-                  label={t("codingAgent.statTokens")}
-                  value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : "—"}
-                  hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
-                />
-                <StatTile
-                  label={t("codingAgent.statHelpers")}
-                  value={String(run.subagentsTotal ?? 0)}
-                  hint={helpers.length > 0 ? helpers.map(([k, n]) => `${n}× ${k}`).join(", ") : undefined}
-                />
-                <StatTile label={t("codingAgent.statCommit")} value={run.commit ?? "—"} />
-                <StatTile
-                  label={t("codingAgent.deniedTitle")}
-                  value={String(run.permissionDenials)}
-                />
-                <StatTile label={t("codingAgent.statModels")} value={run.modelsUsed?.length ? run.modelsUsed.join(" + ") : "—"} />
-              </div>
-
               {/* The run's evidence: screenshots it took while verifying its
-                  work, its report.md, and whatever test output it saved. */}
+                  work, its report.md, and whatever test output it saved. Under
+                  the Agents card, across the whole column — the pictures were
+                  a stack of thumbnails in the rail, and the owner asked for
+                  room to see them. */}
               {artifacts.length > 0 && (
                 <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-artifacts" data-folded={artifactsFolded || undefined}>
                   <div className="flex items-center justify-between gap-2">
@@ -2035,7 +2006,7 @@ export default function CodingAgentApp() {
                     )}
                   </div>
                   {images.length > 0 && (
-                    <div className="mt-2 flex flex-wrap gap-2">
+                    <div className="mt-2 grid grid-cols-2 @lg:grid-cols-3 @3xl:grid-cols-4 gap-2" data-testid="coding-agent-artifact-images">
                       {images.map((a) => (
                         <a
                           key={a.name}
@@ -2043,10 +2014,12 @@ export default function CodingAgentApp() {
                           target="_blank"
                           rel="noreferrer"
                           title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
-                          className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25"
+                          className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25 bg-black/30"
                         >
                           {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
-                          <img src={artifactUrl(run.id, a.name)} alt={a.name} loading="lazy" className="h-24 w-auto max-w-[12rem] object-cover" />
+                          <img src={artifactUrl(run.id, a.name)} alt={a.name} loading="lazy" className="w-full h-36 object-cover object-top" />
+                          {/* The picture's alt is the link's name; the caption repeats it for the eye only. */}
+                          <span aria-hidden="true" className="block truncate px-2 py-1 text-[10px] text-[var(--text-muted)]">{a.name}</span>
                         </a>
                       ))}
                     </div>
@@ -2087,6 +2060,39 @@ export default function CodingAgentApp() {
                   )}
                 </div>
               )}
+
+
+              {run.error && (
+                <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
+                  <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
+                  <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
+                </div>
+              )}
+
+                </div>
+                <aside className="min-w-0" data-testid="coding-agent-run-rail">
+              {/* The figures. */}
+              <div className="mt-3 grid grid-cols-2 @md:grid-cols-4 @3xl:grid-cols-2 gap-2" data-testid="coding-agent-run-figures">
+                <StatTile label={t("codingAgent.statSteps")} value={started ? String(run.numTurns) : "—"} />
+                <StatTile label={t("codingAgent.statFiles")} value={String(run.filesTouched.length)} testId="coding-agent-stat-files" />
+                <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : "—"} />
+                <StatTile
+                  label={t("codingAgent.statTokens")}
+                  value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : "—"}
+                  hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
+                />
+                <StatTile
+                  label={t("codingAgent.statHelpers")}
+                  value={String(run.subagentsTotal ?? 0)}
+                  hint={helpers.length > 0 ? helpers.map(([k, n]) => `${n}× ${k}`).join(", ") : undefined}
+                />
+                <StatTile label={t("codingAgent.statCommit")} value={run.commit ?? "—"} />
+                <StatTile
+                  label={t("codingAgent.deniedTitle")}
+                  value={String(run.permissionDenials)}
+                />
+                <StatTile label={t("codingAgent.statModels")} value={run.modelsUsed?.length ? run.modelsUsed.join(" + ") : "—"} />
+              </div>
 
               {/* What was refused, spelled out. */}
               {(run.deniedActions?.length ?? 0) > 0 && (
