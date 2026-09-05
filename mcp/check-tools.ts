@@ -44,6 +44,11 @@ import { DEFAULT_CWD } from "./lib/guard";
 // with it — `bun run typecheck:mcp`, which this workflow now runs, fails until
 // both postures name it.
 import type { McpContext } from "./lib/context";
+// Where the device API probes are aimed, for the note at the end: three of the
+// seven answer over HTTP rather than by spawning, and saying they failed
+// "because of the cwd" sends the reader to the wrong place.
+import { API_BASE } from "./lib/api";
+import type { Ed } from "./lib/register";
 
 /**
  * Everything a posture must decide: the context minus the server's identity.
@@ -52,8 +57,14 @@ import type { McpContext } from "./lib/context";
  * simulated and is passed as an argument beside it, so a posture that also
  * named it would silently override the argument. Everything else in the context
  * is a capability, and leaving one out is what this type exists to prevent.
+ *
+ * `Required<…>`, not the bare `Omit<…>`: an OPTIONAL field added to McpContext
+ * satisfies a plain Omit, so `canSpeak?: boolean` typechecked clean while both
+ * postures silently fell back to this host's probed value — the exact silence
+ * the totality was introduced against. Measured: `canSpeak: boolean` fails
+ * `typecheck:mcp` with TS2741; `canSpeak?: boolean` did not, until this.
  */
-type Posture = Omit<McpContext, "edition" | "install" | "profile" | "appHarness">;
+type Posture = Required<Omit<McpContext, "edition" | "install" | "profile" | "appHarness">>;
 
 const HERMES_ONLY = ["skill_search", "skill_list", "skill_info", "skill_install", "skill_uninstall", "ai_list_models", "ai_set_provider", "ai_set_model"];
 // backup_list / backup_now are here because ClawKeep archives the OpenClaw
@@ -142,15 +153,31 @@ const NO_CAPABILITIES: Posture = {
  * measured — with one context field renamed away, three coding_agent tools
  * disappeared and the total went UP.
  */
-const PROBE_GATED_TOOLS = [
+const PROBE_GATED_COMMON = [
   "coding_agent_run", "coding_agent_status", "coding_agent_stop",
   "coding_team_run", "coding_team_status", "coding_team_stop",
   "disk_cleanup", "disk_usage", "email_list", "email_read",
   "logs_tail", "screen_capture",
 ];
 
+/**
+ * …PER EDITION, because a gate is an edition-specific fact.
+ *
+ * Every family here happens to be gated on both today, so both entries name
+ * the same list. The dimension exists because without it the only way to record
+ * a family that becomes gated on one edition — `coding_agent_run` going
+ * Hermes-only, an ordinary change — was to WEAKEN the assertion for both.
+ */
+const PROBE_GATED_TOOLS: Record<Ed, readonly string[]> = {
+  openclaw: PROBE_GATED_COMMON,
+  hermes: PROBE_GATED_COMMON,
+};
+
 /** The gate that points the OTHER way: it exists where the box cannot draw. */
-const INVERSE_GATED_TOOLS = ["image_generate"];
+const INVERSE_GATED_TOOLS: Record<Ed, readonly string[]> = {
+  openclaw: ["image_generate"],
+  hermes: ["image_generate"],
+};
 
 /**
  * The tools a delegated coding run gets, and nothing else does.
@@ -165,6 +192,15 @@ const INVERSE_GATED_TOOLS = ["image_generate"];
  */
 const RUN_ONLY_TOOLS = ["browser_view_local", "generate_audio", "generate_image"];
 
+/**
+ * Which probes SPAWN a binary and which ask the device's own HTTP API.
+ *
+ * The note at the end used to blame the spawn cwd for all seven, including the
+ * three that never spawn anything.
+ */
+const SPAWN_PROBES = ["du", "journal", "screen", "imageConvert"];
+const API_PROBES = ["email", "codingAgent", "images", "providers"];
+
 /** The environment the coding-agent runner sets around a run's MCP server. */
 const RUN_ENV = {
   CLAWBOX_RUN_DIR: "/home/clawbox/projects/example",
@@ -178,12 +214,50 @@ function only(a: RegisteredToolInfo[], b: RegisteredToolInfo[]): string[] {
   return a.filter((t) => !other.has(t.name)).map((t) => t.name).sort();
 }
 
-async function main(): Promise<void> {
+/**
+ * How the measured set differs from the recorded one, or null when it does not.
+ *
+ * SETS, not joined strings. Comparing `a.join(",")` with `b.join(",")` made a
+ * REORDER of the constant — the same twelve names, moved — fail with "a family
+ * changed its gate", over a change that changed nothing; and it reported the
+ * disagreement as two twelve-name lists for a reader to diff by eye. Only the
+ * difference is printed, which is the whole of what a reader has to act on.
+ */
+function setDelta(measured: string[], recorded: readonly string[]): string | null {
+  const have = new Set(measured);
+  const want = new Set(recorded);
+  const extra = measured.filter((n) => !want.has(n));
+  const missing = [...recorded].filter((n) => !have.has(n)).sort();
+  if (extra.length === 0 && missing.length === 0) return null;
+  return [
+    extra.length ? `not recorded: [${extra.join(", ")}]` : "",
+    missing.length ? `recorded but no longer so: [${missing.join(", ")}]` : "",
+  ].filter(Boolean).join("; ");
+}
+
+/** Put the run-context variables back exactly as they were, absent included. */
+function restoreEnv(saved: Record<string, string | undefined>): void {
+  for (const [k, v] of Object.entries(saved)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+}
+
+async function check(): Promise<void> {
   const { buildServer } = await import("./clawbox-mcp");
   const problems: string[] = [];
   const byEdition: Record<string, RegisteredToolInfo[]> = {};
   const byEditionReal: Record<string, RegisteredToolInfo[]> = {};
-  let probeResults: Record<string, boolean> = {};
+  // PER EDITION. A single map overwritten each pass described only the LAST
+  // edition's probes, which was harmless only while every probe was
+  // edition-independent — and `providers` is not: it is a Hermes-only question
+  // (mcp/lib/context.ts), and it is the probe whose answer picks the enum or the
+  // free-text `ai_set_provider` parameter.
+  const probeResults: Record<string, Record<string, boolean>> = {};
+  // Hoisted OUT of the edition loop: the key is edition-independent, so a
+  // dual-edition contract violation was reported twice and the "N problem(s)"
+  // headline ran about 2x over.
+  const seen = new Set<string>();
 
   for (const edition of ["openclaw", "hermes"] as const) {
     // The app harness is the edition being simulated: this walks each
@@ -194,7 +268,7 @@ async function main(): Promise<void> {
     // Each probe SEPARATELY. A single OR let one true answer — `emailCanRead`
     // on a dev PC with the setup API up — silence the note about the other six,
     // and the run then looked like it had exercised the device probes.
-    probeResults = {
+    probeResults[edition] = {
       du: ctx.capabilities.du,
       journal: ctx.capabilities.journal,
       screen: ctx.capabilities.screenGrabber !== null,
@@ -202,6 +276,9 @@ async function main(): Promise<void> {
       email: ctx.emailCanRead,
       codingAgent: ctx.codingAgent,
       images: ctx.canGenerateImages,
+      // Asked on Hermes only, so it is recorded on Hermes only — an entry that
+      // is always false on OpenClaw would report a probe that never ran.
+      ...(edition === "hermes" ? { providers: ctx.providers.length > 0 } : {}),
     };
 
     const { reg: fullReg } = await buildServer(edition, "full", edition, ALL_CAPABILITIES);
@@ -224,10 +301,7 @@ async function main(): Promise<void> {
       const { reg: runReg } = await buildServer(edition, "browser", edition, ALL_CAPABILITIES);
       inRun = runReg.list();
     } finally {
-      for (const [k, v] of Object.entries(savedEnv)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
+      restoreEnv(savedEnv);
     }
 
     // The CONTRACT check runs over every distinct tool SHAPE any posture
@@ -244,7 +318,6 @@ async function main(): Promise<void> {
     // `schemaShapeViolations` exists to catch, a name-keyed run still printed
     // "Tool contract OK". One `toJSONSchema` per tool per posture; the whole
     // run is about a second.
-    const seen = new Set<string>();
     for (const tool of [...enabled, ...disabled, ...probed, ...inRun]) {
       const emitted = emittedSchema(tool);
       const key = `${tool.name}\u0000${tool.description}\u0000${emitted}`;
@@ -267,19 +340,18 @@ async function main(): Promise<void> {
     // tell a working gate from a tool that lost it — a family that became
     // unconditional is in the union just the same — and a "these must all be
     // present" list cannot see a family that gained a gate nobody recorded.
-    const gated = only(enabled, disabled);
-    const inverse = only(disabled, enabled);
-    if (gated.join(",") !== PROBE_GATED_TOOLS.join(",")) {
+    const gatedDelta = setDelta(only(enabled, disabled), PROBE_GATED_TOOLS[edition]);
+    if (gatedDelta) {
       problems.push(
-        `${edition}: the capability-gated tools are [${gated.join(", ")}], not the recorded `
-        + `[${PROBE_GATED_TOOLS.join(", ")}] — a family changed its gate; check it is deliberate `
-        + "and update PROBE_GATED_TOOLS",
+        `${edition}: capability-gated tools — ${gatedDelta} — a family changed its gate; check it `
+        + `is deliberate and update PROBE_GATED_TOOLS.${edition}`,
       );
     }
-    if (inverse.join(",") !== INVERSE_GATED_TOOLS.join(",")) {
+    const inverseDelta = setDelta(only(disabled, enabled), INVERSE_GATED_TOOLS[edition]);
+    if (inverseDelta) {
       problems.push(
-        `${edition}: the tools that exist only where the capability is OFF are `
-        + `[${inverse.join(", ")}], not [${INVERSE_GATED_TOOLS.join(", ")}]`,
+        `${edition}: tools that exist only where the capability is OFF — ${inverseDelta} — update `
+        + `INVERSE_GATED_TOOLS.${edition}`,
       );
     }
 
@@ -344,15 +416,27 @@ async function main(): Promise<void> {
   console.log(`\nOpenClaw only: ${onlyOpenclaw.join(", ")}`);
   console.log(`Hermes only:   ${onlyHermes.join(", ")}`);
 
-  const unprobed = Object.entries(probeResults).filter(([, ok]) => !ok).map(([name]) => name);
-  if (unprobed.length) {
-    // Said out loud, every time, and PER PROBE: the alternative is the shape
-    // this checker exists to catch, a run that examined part of the surface and
-    // printed OK. The contract above WAS checked over every posture; what this
-    // host could not do is tell you whether these particular probes work.
+  // Said out loud, every time, PER PROBE and PER EDITION — and split by what a
+  // probe actually DOES. `email`, `codingAgent`, `images` and `providers` are
+  // HTTP calls to the device's own API, not spawns, so naming the spawn cwd
+  // beside them sent the reader to look at the wrong thing: they answer false
+  // here because there is no dashboard at API_BASE.
+  const noteLines = Object.entries(probeResults).flatMap(([edition, results]) => {
+    const failed = (names: readonly string[]) => names.filter((n) => results[n] === false);
+    const spawns = failed(SPAWN_PROBES);
+    const api = failed(API_PROBES);
+    return [
+      spawns.length ? `      ${edition} — spawn probes false: ${spawns.join(", ")}` : "",
+      api.length ? `      ${edition} — device API probes false: ${api.join(", ")}` : "",
+    ].filter(Boolean);
+  });
+  if (noteLines.length) {
+    // The contract above WAS checked over every posture; what this host could
+    // not do is tell you whether these particular probes work.
     console.log(
-      `\nnote: ${unprobed.join(", ")} probed false on this host`
-      + ` (CLAWBOX_ROOT=${DEFAULT_CWD} is where probes are spawned).`
+      `\nnote: probes that answered false on this host. Spawns run in CLAWBOX_ROOT=${DEFAULT_CWD};`
+      + `\n      device API probes call ${API_BASE}.`
+      + `\n${noteLines.join("\n")}`
       + "\n      The contract and the matrix above come from the declared postures, which are the"
       + "\n      surface a real box registers. Run this on a device to exercise the probes too.",
     );
@@ -364,6 +448,28 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   console.log("\nTool contract OK.");
+}
+
+async function main(): Promise<void> {
+  // The run posture is the ONLY one allowed to see the runner's environment
+  // triple, so the ambient shell's copy of it is cleared for the whole check
+  // and put back afterwards.
+  //
+  // Not tidiness: with CLAWBOX_RUN_DIR and CLAWBOX_RUN_ARTIFACTS_DIR exported in
+  // any shell, the three non-run postures registered the run-only tools too and
+  // this BLOCKING step exited 1 with `"browser_view_local" is registered outside
+  // a coding run` — a false failure blaming the code for the environment it was
+  // invoked in, which is exactly the kind of check that gets switched off. It
+  // also removes the hazard in making the eight builds concurrent: the run
+  // posture's variables are no longer the only thing separating it from the
+  // others.
+  const ambient = Object.fromEntries(Object.keys(RUN_ENV).map((k) => [k, process.env[k]]));
+  for (const key of Object.keys(RUN_ENV)) delete process.env[key];
+  try {
+    await check();
+  } finally {
+    restoreEnv(ambient);
+  }
 }
 
 main().catch((err) => {
