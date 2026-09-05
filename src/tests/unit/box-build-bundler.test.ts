@@ -8,11 +8,15 @@
  * webpack build of the same commit fits in ~3.7 GB. Pinned here because the
  * flag is one word in package.json and the box has no other way to build.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+
+// The link script is a real bash process: vitest's 5 s test and 10 s hook
+// defaults are not enough on a loaded runner (test-timeout-hygiene.test.ts).
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const ROOT = process.cwd();
 

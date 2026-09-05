@@ -56,6 +56,15 @@ function buildFixture() {
     path.join(REPO, "scripts", "write-build-info.mjs"),
     path.join(tmp, "scripts", "write-build-info.mjs"),
   );
+  // The step that points the standalone tree at the real `next` package
+  // (scripts/link-standalone-next.sh) runs in postbuild too, and needs that
+  // package to exist in the project it is run from.
+  fs.copyFileSync(
+    path.join(REPO, "scripts", "link-standalone-next.sh"),
+    path.join(tmp, "scripts", "link-standalone-next.sh"),
+  );
+  fs.mkdirSync(path.join(tmp, "node_modules", "next"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "node_modules", "next", "package.json"), JSON.stringify({ name: "next", version: "0.0.0-test" }));
   fs.writeFileSync(path.join(tmp, "package.json"), JSON.stringify({ version: "0.0.0-test" }));
 
   fs.mkdirSync(path.join(tmp, "public"), { recursive: true });
@@ -130,6 +139,10 @@ d("postbuild step", () => {
   it("still assembles the standalone tree it is there to assemble", () => {
     const res = runPostbuild();
     expect(res.status, res.stderr).toBe(0);
+    // …and the traced `next` is a link to the real package now.
+    const linked = path.join(standalone, "node_modules", "next");
+    expect(fs.lstatSync(linked).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(linked)).toBe(fs.realpathSync(path.join(tmp, "node_modules", "next")));
     expect(fs.existsSync(path.join(standalone, ".next", "static", "chunk.js"))).toBe(true);
     expect(fs.existsSync(path.join(standalone, "public", "marker.txt"))).toBe(true);
     expect(fs.existsSync(path.join(standalone, ".next", "build-info.json"))).toBe(true);
@@ -173,6 +186,8 @@ d("postbuild step", () => {
     const nested = path.join(standalone, "app");
     fs.mkdirSync(path.join(nested, ".next"), { recursive: true });
     fs.writeFileSync(path.join(nested, "server.js"), "// standalone server\n");
+    // The nested app carries its own traced node_modules, like the real layout.
+    fs.mkdirSync(path.join(nested, "node_modules", "next"), { recursive: true });
     fs.mkdirSync(path.join(nested, "data", "llamacpp"), { recursive: true });
     fs.writeFileSync(path.join(nested, "data", "config.json"), "{}\n");
 
