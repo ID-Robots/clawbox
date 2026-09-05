@@ -116,8 +116,16 @@ export const TASK_ID_RE = /^t[0-9]{1,3}$/;
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 function boardPath(id: string): string {
-  if (!TEAM_ID_RE.test(id)) throw new Error(`Not a team id: ${id}`);
-  return path.join(TEAM_DIR, `${id}.json`);
+  const m = /^team-([a-z0-9]{8})$/.exec(id);
+  if (!m) throw new Error(`Not a team id: ${id}`);
+  // Built from the match, never from the input, and checked to sit directly
+  // under TEAM_DIR before any read or write — the containment guard inline on
+  // the very value that reaches the sink, which is what a scanner can follow
+  // (the browse route learned this the same way).
+  const file = path.resolve(TEAM_DIR, `team-${m[1]}.json`);
+  const rel = path.relative(TEAM_DIR, file);
+  if (rel.startsWith("..") || path.isAbsolute(rel) || rel.includes(path.sep)) throw new Error(`Not a team id: ${id}`);
+  return file;
 }
 
 export function saveBoard(board: TeamBoard): void {
