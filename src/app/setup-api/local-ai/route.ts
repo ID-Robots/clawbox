@@ -61,14 +61,31 @@ export async function POST(request: Request) {
     // Clearing the OpenClaw fallback only applies where OpenClaw exists. On the
     // Hermes SKU there is no binary to spawn (it would ENOENT); the Hermes
     // unregister below is what actually takes effect there.
+    //
+    // A failure here is REPORTED, not swallowed: the model is stopped, so a
+    // fallback list that still names it sends the next turn that falls back to
+    // an endpoint with nothing behind it. It is a qualification rather than a
+    // refusal, though — the stop and the flag clear above are the steps this
+    // click is for, and they landed — so it rides the `warning` channel the
+    // panel already paints amber, and a retry re-runs only what is left.
+    let warning: string | null = null;
     if (!openclawIsAbsent()) {
-      await runCommand(OPENCLAW_BIN, [
+      const cleared = await runCommand(OPENCLAW_BIN, [
         "config",
         "set",
         "agents.defaults.model.fallbacks",
         JSON.stringify([]),
         "--json",
-      ]).catch(() => {});
+      ]).then(
+        () => true,
+        (err) => {
+          console.error("[local-ai] Failed to clear the OpenClaw fallback list:", err);
+          return false;
+        },
+      );
+      if (!cleared) {
+        warning = "Local AI is stopped, but OpenClaw still lists it as a fallback model. Turn it off again to finish clearing it.";
+      }
     }
 
     // Hermes keeps its own providers block, so disabling here has to unregister
@@ -81,11 +98,29 @@ export async function POST(request: Request) {
       // "Unknown provider 'clawlocal'"), and we remember that it WAS the
       // selection so re-enabling puts the device back where it was rather than
       // on nothing.
+      //
+      // The failure is ANSWERED rather than logged. On this SKU the unregister
+      // is the only step that reaches the customer: the OpenClaw clear above is
+      // skipped (no binary) and the restart below returns immediately (no
+      // gateway unit), so a swallowed failure left `providers.clawlocal` in
+      // config.yaml and the route still said `{success:true}` — Settings showed
+      // Local AI off while Hermes' own pickers went on offering the stopped
+      // model, and the owner learned otherwise from a chat turn. The steps that
+      // did run stand: a retry has only this one left to do.
       const removal = await removeLocalAiFromHermes().catch((err) => {
         console.error("[local-ai] Hermes local provider removal failed:", err);
         return null;
       });
-      if (removal?.wasDefault) {
+      if (!removal) {
+        return NextResponse.json(
+          {
+            error: "Local AI was stopped, but Hermes still lists it as a provider. Try turning Local AI off again.",
+            code: "hermes_unregister_failed",
+          },
+          { status: 502 },
+        );
+      }
+      if (removal.wasDefault) {
         await setMany({ local_ai_was_default: true });
       }
     }
@@ -95,7 +130,7 @@ export async function POST(request: Request) {
     // add up to the whole budget to an owner's "Turn off Local AI" click.
     await restartGateway({ awaitReady: false }).catch(() => {});
 
-    return NextResponse.json({ success: true });
+    return NextResponse.json(warning ? { success: true, warning } : { success: true });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to disable Local AI" },
