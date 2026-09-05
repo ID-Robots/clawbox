@@ -18,11 +18,18 @@ function jsonResponse(body: unknown): Response {
 
 const clawbox = { current: "4.0.0", target: null, updateAvailable: false };
 
-/** What `getVersionInfo()` really answers, per SKU. */
+/**
+ * What `getVersionInfo()` really answers, per SKU — the SHAPES, not tidied
+ * ones. `openclaw.current` is `openclaw --version` stdout, banner and all (the
+ * same fixture the About suite uses); `hermes.current` has already been through
+ * `parseHermesVersion` server-side, which is why it must not be parsed again
+ * here.
+ */
+const OPENCLAW_BANNER = "OpenClaw 2026.7.1 (3e72c03)";
 const payloads = {
   openclaw: {
     clawbox,
-    openclaw: { current: "2026.8.1", target: "2026.8.1", updateAvailable: false },
+    openclaw: { current: OPENCLAW_BANNER, target: null, updateAvailable: false },
     edition: "openclaw",
   },
   hermes: {
@@ -33,13 +40,30 @@ const payloads = {
   },
   dual: {
     clawbox,
-    openclaw: { current: "2026.8.1", target: "2026.8.1", updateAvailable: false },
+    openclaw: { current: OPENCLAW_BANNER, target: null, updateAvailable: false },
     hermes: { current: "0.20.5", target: null, updateAvailable: false },
     edition: "dual",
   },
-  // A device that has not been updated yet still answers with the old
-  // two-key shape: no `edition`, no `hermes`.
-  legacy: { clawbox, openclaw: { current: "2026.7.1", target: "2026.7.1", updateAvailable: false } },
+  // A `hermes` block with no version: the probe failed. It is NOT "Hermes is
+  // absent" — the key is only spread in on a box that ships Hermes.
+  unprobed: {
+    clawbox,
+    openclaw: { current: null, target: "2026.8.1", updateAvailable: false },
+    hermes: { current: null, target: null, updateAvailable: false },
+    edition: "hermes",
+  },
+  // An unreleased Hermes build: `parseHermesVersion` found no semver-ish token
+  // and returned the banner line as-is.
+  devBuild: {
+    clawbox,
+    openclaw: { current: null, target: "2026.8.1", updateAvailable: false },
+    hermes: { current: "Hermes Agent (dev build)", target: null, updateAvailable: false },
+    edition: "hermes",
+  },
+  // Defensive only: the route always sets `edition` (updater.ts), and page and
+  // route ship together — but the response is cast, not validated, so the
+  // component still has to render something for a body without it.
+  legacy: { clawbox, openclaw: { current: "2026.7.1", target: null, updateAvailable: false } },
 };
 
 async function openUpdateScreen(versions: unknown) {
@@ -87,8 +111,39 @@ describe("SystemUpdateApp — the agent version the box actually runs", () => {
     const block = await openUpdateScreen(payloads.openclaw);
 
     expect(block.getByText("OpenClaw")).toBeTruthy();
-    expect(block.getByText("2026.8.1")).toBeTruthy();
+    // The banner is cleaned for OpenClaw, whose grammar cleanVersion is for.
+    expect(block.getByText("2026.7.1")).toBeTruthy();
     expect(block.queryByText("Hermes")).toBeNull();
+  });
+
+  it("does not re-parse a Hermes version the server already parsed", async () => {
+    const block = await openUpdateScreen(payloads.devBuild);
+
+    // cleanVersion would strip the trailing "(dev build)" — a grammar meant for
+    // git-describe output, applied to a string parseHermesVersion owns. About
+    // renders this field raw, and the desktop can show both windows at once.
+    expect(block.getByText("Hermes Agent (dev build)")).toBeTruthy();
+  });
+
+  it("says nothing rather than 'not installed' when the version could not be read", async () => {
+    const block = await openUpdateScreen(payloads.unprobed);
+
+    // The payload only carries a `hermes` block on a box that HAS Hermes, so
+    // null is a failed probe — which is what `hermes --version` does while the
+    // update is moving the checkout aside.
+    expect(block.getByText("Hermes")).toBeTruthy();
+    expect(block.queryByText(/not installed/i)).toBeNull();
+    expect(block.getByText("—")).toBeTruthy();
+  });
+
+  it("tells the owner both harnesses ride the ClawBox update", async () => {
+    // HERMES_PIN_COMMIT (install.sh) is re-checked by step_hermes_install on
+    // every update, exactly as config/openclaw-target.txt is for OpenClaw.
+    // There is no way to update either one on its own, and saying otherwise
+    // sends the owner looking for a button that does not exist.
+    const block = await openUpdateScreen(payloads.dual);
+
+    expect(block.getAllByText("Pinned by ClawBox — updated with it")).toHaveLength(2);
   });
 
   it("names both on the dual SKU, which really runs both", async () => {
@@ -98,7 +153,9 @@ describe("SystemUpdateApp — the agent version the box actually runs", () => {
     expect(block.getByText("Hermes")).toBeTruthy();
   });
 
-  it("falls through to the OpenClaw row on a payload that predates the edition field", async () => {
+  it("renders an OpenClaw row for a body with no edition field at all", async () => {
+    // Defensive, not a supported server shape: the response is cast rather than
+    // validated, so the component still has to draw something.
     const block = await openUpdateScreen(payloads.legacy);
 
     expect(block.getByText("OpenClaw")).toBeTruthy();

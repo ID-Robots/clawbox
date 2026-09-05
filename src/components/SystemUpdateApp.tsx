@@ -8,13 +8,13 @@ import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 
-interface ComponentVersion {
+export interface ComponentVersion {
   current: string | null;
   target: string | null;
   updateAvailable?: boolean;
 }
 
-interface VersionInfo {
+export interface VersionInfo {
   clawbox: ComponentVersion & { current: string };
   openclaw: ComponentVersion;
   // Both optional: a device that has not been updated yet still answers
@@ -30,7 +30,7 @@ interface VersionInfo {
  * payload from a server that predates the `edition` field reads as OpenClaw,
  * which is what those builds were.
  */
-function shipsOpenclaw(versions: VersionInfo | null): boolean {
+export function shipsOpenclaw(versions: VersionInfo | null): boolean {
   return versions?.edition !== "hermes";
 }
 
@@ -490,9 +490,13 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 available={clawboxAvail}
                 onUpdate={() => void triggerUpdate()}
               />
-              <AgentVersions versions={versions} />
             </div>
           )}
+
+          {/* Outside the gate above: "Update complete" is exactly when an owner
+              wants to read the version their agent came back on, and the
+              components block is hidden in that state. */}
+          {versions && <AgentVersions versions={versions} />}
 
           {/* PROGRESS */}
           {(status === "updating" || status === "completed" || status === "failed") && (
@@ -721,21 +725,35 @@ function ConfirmModal({
  * version in Settings -> About and nowhere here. The rows follow the same
  * per-edition rule About uses: OpenClaw unless the SKU is `hermes`, Hermes
  * whenever the payload carries it.
+ *
+ * BOTH harnesses are pinned by ClawBox and bumped inside the full update —
+ * OpenClaw by `config/openclaw-target.txt`, Hermes by `HERMES_PIN_COMMIT` in
+ * install.sh, which `step_hermes_install` re-checks on every update — so the
+ * note is the same for both. There is no way for an owner to update either one
+ * on its own, and telling them otherwise sends them looking for a button that
+ * does not exist.
+ *
+ * `format` per row, not one shared call: `hermes.current` has already been
+ * normalised server-side by `parseHermesVersion`, whose whole reason for
+ * existing is that `cleanVersion`'s rules are shaped for OpenClaw/git-describe
+ * output. Running the second parser over the first one's result turned
+ * "Hermes Agent (dev build)" into "Hermes Agent" here while About, reading the
+ * same field raw, kept it — two windows the desktop can show side by side.
  */
 function AgentVersions({ versions }: { versions: VersionInfo }) {
-  const rows: { name: string; current: string | null; note: string }[] = [];
+  const rows: { name: string; version: string | null; note: string }[] = [];
   if (shipsOpenclaw(versions)) {
     rows.push({
       name: "OpenClaw",
-      current: versions.openclaw.current,
+      version: cleanVersion(versions.openclaw.current) || versions.openclaw.current,
       note: "Pinned by ClawBox — updated with it",
     });
   }
   if (versions.hermes) {
     rows.push({
       name: "Hermes",
-      current: versions.hermes.current,
-      note: "Installed from its own upstream",
+      version: versions.hermes.current,
+      note: "Pinned by ClawBox — updated with it",
     });
   }
   if (!rows.length) return null;
@@ -747,13 +765,17 @@ function AgentVersions({ versions }: { versions: VersionInfo }) {
       <div className="space-y-2">
         {rows.map((row) => (
           <div key={row.name} className="flex items-baseline justify-between gap-3 text-xs">
-            <div>
+            <div className="min-w-0">
               <div className="text-sm text-gray-100">{row.name}</div>
               <div className="text-[11px] text-[var(--text-muted)]">{row.note}</div>
             </div>
-            <div className="font-mono text-gray-100 truncate">
-              {cleanVersion(row.current ?? "") || row.current || "Not installed"}
-            </div>
+            {/* "—", not "not installed": a null version here means the probe
+                failed, never that the harness is absent. The payload only
+                carries a `hermes` block on a box that HAS Hermes, and
+                `hermes --version` does not answer while step_hermes_install is
+                moving the checkout aside mid-update. ComponentCard below says
+                the same nothing the same way. */}
+            <div className="min-w-0 font-mono text-gray-100 truncate">{row.version || "—"}</div>
           </div>
         ))}
       </div>

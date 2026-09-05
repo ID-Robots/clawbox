@@ -1664,9 +1664,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       target: openclawTarget && openclawCurrent && openclawCurrent.includes(openclawTarget) ? null : openclawTarget,
       updateAvailable: !!(openclawTarget && openclawCurrent && !openclawCurrent.includes(openclawTarget)),
     },
-    // Hermes ships from its own upstream installer, not from a ClawBox pin, so
-    // there is no target to converge on and nothing to offer an update for —
-    // only the installed version is reportable.
+    // Hermes IS pinned by ClawBox — `HERMES_PIN_COMMIT` in install.sh, which
+    // `step_hermes_install` re-checks and repairs on every update, exactly as
+    // `config/openclaw-target.txt` does for OpenClaw. What it has no target for
+    // is this payload: the pin is a 40-char commit SHA and `hermes --version`
+    // answers a release string, so there is nothing here the two can be
+    // compared on. `target: null` therefore means "not comparable", not
+    // "installed from somewhere ClawBox does not control".
     ...(hasHermes
       ? { hermes: { current: hermesCurrent, target: null, updateAvailable: false } }
       : {}),
