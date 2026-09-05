@@ -865,6 +865,8 @@ export const zh: Record<string, string> = {
   "codingAgent.artBrowser": "浏览器",
   "codingAgent.team.artMain": "助手",
   "codingAgent.team.artWorkers": "工作者",
+  "codingAgent.team.artPlanner": "规划者",
+  "codingAgent.team.artReviewers": "审核者",
   "codingAgent.resetConfirm": "重置全部 — 再次点击",
   "codingAgent.resetFailed": "无法重置编程助手。",
 

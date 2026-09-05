@@ -198,17 +198,20 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           </button>
         )}
       </div>
-      {/* The team as a tree — who hands to whom — sized by the board: as
-          many workers as have worked here, the ones at work pulsing. With no
-          team yet it shows the shape a team takes. */}
-      <div className="mt-2 flex flex-col @md:flex-row @md:items-center gap-3">
+      {/* The team as a tree — who hands to whom — sized by the board: the
+          planner, as many workers and reviewers as have worked here, the
+          ones at work pulsing; the sentence beneath it. With no team yet
+          it shows the shape a team takes. */}
+      <div className="mt-2 flex flex-col items-center gap-2">
         <CodingTeamTree
           workers={team?.agents && team.agents.workers > 0 ? team.agents.workers : 3}
-          reviewer
           activeWorkers={team ? team.tasks.filter((x) => x.status === "in_progress").length : 0}
-          className="shrink-0 @md:w-[22rem]"
+          reviewers={team?.agents ? team.agents.reviewers : 1}
+          activeReviewers={team && active ? team.tasks.filter((x) => x.status === "complete" && !x.review).length : 0}
+          plannerActive={team?.status === "planning"}
+          className="shrink-0"
         />
-        <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">{t("codingAgent.team.help")}</p>
+        <p className="text-[11px] text-[var(--text-muted)] leading-relaxed text-center max-w-[40rem]">{t("codingAgent.team.help")}</p>
       </div>
       {/* Who worked, and where: the owner asked to see how many agents a
           run had. Planner, workers (an attempt is a new worker), reviewers. */}

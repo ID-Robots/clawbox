@@ -841,6 +841,8 @@ export const bg: Record<string, string> = {
   "codingAgent.artBrowser": "Браузър",
   "codingAgent.team.artMain": "Асистент",
   "codingAgent.team.artWorkers": "Работници",
+  "codingAgent.team.artPlanner": "Планировчик",
+  "codingAgent.team.artReviewers": "Рецензенти",
   "codingAgent.resetConfirm": "Нулиране на всичко — докоснете отново",
   "codingAgent.resetFailed": "Кодиращият агент не можа да бъде нулиран.",
 

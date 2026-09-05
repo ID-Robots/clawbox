@@ -865,6 +865,8 @@ export const it: Record<string, string> = {
   "codingAgent.artBrowser": "Browser web",
   "codingAgent.team.artMain": "Assistente",
   "codingAgent.team.artWorkers": "Lavoratori",
+  "codingAgent.team.artPlanner": "Pianificatore",
+  "codingAgent.team.artReviewers": "Revisori",
   "codingAgent.resetConfirm": "Reimposta tutto — tocca di nuovo",
   "codingAgent.resetFailed": "Non è stato possibile reimpostare l'agente di codice.",
 

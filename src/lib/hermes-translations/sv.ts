@@ -850,6 +850,8 @@ export const sv: Record<string, string> = {
   "codingAgent.artBrowser": "Webbläsare",
   "codingAgent.team.artMain": "Assistent",
   "codingAgent.team.artWorkers": "Arbetare",
+  "codingAgent.team.artPlanner": "Planerare",
+  "codingAgent.team.artReviewers": "Granskare",
   "codingAgent.resetConfirm": "Återställ allt — tryck igen",
   "codingAgent.resetFailed": "Kodagenten kunde inte återställas.",
 

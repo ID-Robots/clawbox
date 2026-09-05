@@ -853,6 +853,8 @@ export const de: Record<string, string> = {
   "codingAgent.artBrowser": "Webbrowser",
   "codingAgent.team.artMain": "Assistent",
   "codingAgent.team.artWorkers": "Worker",
+  "codingAgent.team.artPlanner": "Planer",
+  "codingAgent.team.artReviewers": "Reviewer",
   "codingAgent.resetConfirm": "Alles zurücksetzen — erneut tippen",
   "codingAgent.resetFailed": "Der Coding-Agent konnte nicht zurückgesetzt werden.",
 

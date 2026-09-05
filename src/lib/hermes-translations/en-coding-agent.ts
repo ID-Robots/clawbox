@@ -420,6 +420,8 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.artBrowser": "Browser",
   "codingAgent.team.artMain": "Assistant",
   "codingAgent.team.artWorkers": "Workers",
+  "codingAgent.team.artPlanner": "Planner",
+  "codingAgent.team.artReviewers": "Reviewers",
   "codingAgent.resetConfirm": "Reset everything — tap again",
   "codingAgent.resetFailed": "Could not reset the coding agent.",
 };
