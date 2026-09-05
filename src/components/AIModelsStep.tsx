@@ -1776,7 +1776,10 @@ export default function AIModelsStep({
             <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
               {t("ai.model")}
             </span>
-            <span className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]">
+            {/* Wrapped, not clipped: this line is the model id, which is the
+                one thing a customer opens this button to read, and "Change"
+                beside it never shrinks. Same call as the provider hero. */}
+            <span className="break-words text-[length:var(--t-4)] text-[var(--text-primary)]">
               {currentModelLabel}
             </span>
           </span>
