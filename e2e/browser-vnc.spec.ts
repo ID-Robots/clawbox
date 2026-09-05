@@ -44,6 +44,17 @@ test("browser app walks its setup once, then shows the device's screen", async (
   await expect(browserWindow.getByTestId("browser-wizard")).toBeHidden();
 
   // The screen also has a window of its own, for a second monitor.
+  // One header holds every control: the state, Close, Paste to VNC, Open in
+  // VNC and Settings — and the title bar that used to sit above it is gone.
+  const header = browserWindow.getByTestId("browser-header");
+  for (const id of ["browser-state", "browser-close", "browser-paste", "browser-open-vnc", "browser-open-settings"]) {
+    await expect(header.getByTestId(id)).toBeVisible();
+  }
+  await expect(browserWindow.getByRole("heading", { name: "Browser Integration" })).toHaveCount(0);
+  await browserWindow.getByTestId("browser-paste").click();
+  await expect(browserWindow.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(browserWindow.getByRole("dialog")).toHaveCount(0);
   await browserWindow.getByTestId("browser-open-vnc").click();
   await expect(page.getByTestId("chrome-window-vnc")).toBeVisible();
 });
