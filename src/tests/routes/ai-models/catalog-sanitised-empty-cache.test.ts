@@ -80,8 +80,36 @@ beforeEach(() => {
   );
 });
 
+/**
+ * The GET under test deliberately returns BEFORE its enumeration finishes —
+ * that is what `warming: true` means — and the fork it leaves running logs
+ * `[catalog] refreshed …` when it publishes. Left to run past the end of the
+ * test, that line reaches vitest's reporter while the worker is being torn
+ * down and the run dies with
+ * `EnvironmentTeardownError: Closing rpc while "onUserConsoleLog" was pending`
+ * — every test passing and the job red (CI, 2026-09-04). It only bites under a
+ * loaded worker, so it is invisible when this file is run on its own.
+ *
+ * So the test waits for the fork's own log line before it ends, and then lets
+ * the tail of the chain run: after the publish, `.finally` awaits the surface
+ * fork, releases the single-flight guard and re-enters `refreshInBackground`
+ * with `serveCurrent`, which returns silently because the published generation
+ * is now the current one.
+ */
+async function settleBackgroundRefresh(logs: string[]): Promise<void> {
+  await vi.waitFor(() => {
+    expect(logs.some((line) => line.startsWith("[catalog] refreshed openai"))).toBe(true);
+  });
+  // Two turns of the macrotask queue for the awaits after that log.
+  for (let i = 0; i < 2; i++) await new Promise((resolve) => setImmediate(resolve));
+}
+
 describe("catalog — a cache the sanitiser empties is not a fresh answer", () => {
   it("re-enumerates, says stale, and says an answer is coming", async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      logs.push(args.map(String).join(" "));
+    });
     fs.mkdirSync(path.join(DATA_DIR, "catalog-cache"), { recursive: true });
     fs.writeFileSync(
       path.join(DATA_DIR, "catalog-cache", "openai.json"),
@@ -111,5 +139,7 @@ describe("catalog — a cache the sanitiser empties is not a fresh answer", () =
     // A fork really is out there, so the picker has a reason to come back.
     expect(body.warming).toBe(true);
     expect(spawnedProviders()).toContain("openai");
+
+    await settleBackgroundRefresh(logs);
   });
 });
