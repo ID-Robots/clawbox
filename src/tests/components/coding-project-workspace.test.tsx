@@ -109,14 +109,16 @@ describe("the Files tab", () => {
     await within(tree).findByTestId("coding-agent-tree-src");
     // Each row's button is titled with its path; the text also carries the
     // icon ligatures, which is why the title is what is read here.
-    const names = within(tree).getAllByRole("treeitem").map((li) => li.querySelector("button")?.getAttribute("title"));
+    const names = within(tree).getAllByRole("treeitem").map((row) => row.getAttribute("title"));
     expect(names).toEqual(["src", "README.md", "logo.png"]);
     expect(calls).toContain("/setup-api/coding-agent/tree?projectId=site&path=");
 
     fireEvent.click(within(tree).getByTestId("coding-agent-tree-src"));
     await within(tree).findByTestId("coding-agent-tree-src/app.js");
     expect(calls).toContain("/setup-api/coding-agent/tree?projectId=site&path=src");
-    expect(within(tree).getByTestId("coding-agent-tree-src").closest("[role=treeitem]")).toHaveAttribute("aria-expanded", "true");
+    // The row's button is the treeitem: its state travels with the focus.
+    expect(within(tree).getByTestId("coding-agent-tree-src")).toHaveAttribute("role", "treeitem");
+    expect(within(tree).getByTestId("coding-agent-tree-src")).toHaveAttribute("aria-expanded", "true");
   });
 
   it("opens a file read-only beside the tree, numbered, and says so for a binary one", async () => {

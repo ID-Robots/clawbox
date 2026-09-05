@@ -75,6 +75,23 @@ describe("the working tree", () => {
     expect(out.deletions).toBe(2);
   });
 
+  it("matches a non-ASCII file name between the status and the counts, and diffs it by name", async () => {
+    // git quotes `café.txt` in numstat by default (core.quotePath); the status
+    // read answers it raw. Read with -z, the two agree.
+    write("café.txt", "un\ndeux\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "--quiet", "-m", "accent");
+    write("café.txt", "un\nDEUX\ntrois\n");
+    const out = await gitChanges(repo);
+    expect(out.files).toEqual([{ path: "café.txt", status: "modified", additions: 2, deletions: 1 }]);
+    const diff = await gitFileDiff(repo, "café.txt");
+    expect(diff?.diff).toContain("+DEUX");
+    git(repo, "add", "-A");
+    git(repo, "commit", "--quiet", "-m", "accent again");
+    const [head] = await gitLog(repo);
+    expect((await gitChanges(repo, head.sha)).files).toEqual([{ path: "café.txt", status: "modified", additions: 2, deletions: 1 }]);
+  });
+
   it("is empty — and available — for a clean tree", async () => {
     const out = await gitChanges(repo);
     expect(out).toEqual({ files: [], additions: 0, deletions: 0, truncated: false, available: true });

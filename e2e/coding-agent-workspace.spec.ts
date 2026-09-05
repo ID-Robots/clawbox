@@ -117,7 +117,7 @@ test("a project's page carries its files and changes, and a run's page its bread
   await expect(win.getByTestId("coding-agent-file-view")).toContainText("<p>there</p>");
 
   await win.getByTestId("coding-agent-workspace-changes").click();
-  await expect(win.getByTestId("coding-agent-change-totals")).toContainText("1 files changed");
+  await expect(win.getByTestId("coding-agent-change-totals")).toContainText("Files changed: 1");
   await win.getByTestId("coding-agent-change-index.html").click();
   const diff = win.getByTestId("coding-agent-diff");
   await expect(diff).toContainText("+<h1>Hi</h1>");
