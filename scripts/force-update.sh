@@ -60,18 +60,39 @@ run_as_clawbox() {
   fi
 }
 
+# Same list, same reason, as install.sh's git_retryable_failure: asking again
+# only helps a refusal that is about the moment, not about the remote. This is
+# the script an owner runs when they are already stuck, so 3 s + 6 s of backoff
+# over a broken origin is time taken from someone waiting at the box.
+git_retryable_failure() {
+  case "$1" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*) return 0 ;;
+    *"Authentication failed"*|*"terminal prompts disabled"*) return 0 ;;
+    *"Could not resolve host"*|*"Connection timed out"*|*"Connection reset"*) return 0 ;;
+    *"early EOF"*|*"RPC failed"*|*"unable to access"*) return 0 ;;
+  esac
+  return 1
+}
+
 # One attempt is a coin flip: GitHub refuses anonymous git-upload-pack POSTs
 # from an address that has made too many, ~2 in 3 when measured (TASK-655).
 # install.sh's git_with_retry is not sourceable from here (that file is an
 # installer, not a library), so this is the same three-attempt shape inline.
 fetch_with_retry() {
   local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-3}" out
+  # Both knobs are operator input and both are used as numbers — see
+  # install.sh's git_with_retry: a non-numeric `max` makes the break
+  # unreachable and a non-numeric `delay` is an unbound-variable error under
+  # `set -u`.
+  case "$max" in ''|*[!0-9]*) max=3 ;; esac
+  case "$delay" in ''|*[!0-9]*) delay=3 ;; esac
   while :; do
     if out="$(run_as_clawbox "$GIT fetch origin" 2>&1)"; then
       [ -z "$out" ] || printf '%s\n' "$out" >&2
       return 0
     fi
     [ "$attempt" -ge "$max" ] && break
+    git_retryable_failure "$out" || break
     echo "[force-update] fetch attempt $attempt/$max failed, retrying in ${delay}s..." >&2
     sleep "$delay"
     attempt=$((attempt + 1))

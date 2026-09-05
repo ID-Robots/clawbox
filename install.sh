@@ -60,6 +60,15 @@ git_retryable_failure() {
 git_with_retry() {
   local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-3}"
   local out rc=0 verb
+  # Both knobs are operator input and both are used as NUMBERS. A non-numeric
+  # `max` makes `[ "$attempt" -ge "$max" ]` fail on every iteration — "integer
+  # expression expected" — so the break is never reached and the loop runs
+  # until something else kills it (8672 attempts, measured). A non-numeric
+  # `delay` makes `$((delay * 2))` an unbound-variable error under `set -u` and
+  # takes install.sh down mid-update. Clamp both to the default rather than
+  # trusting a value nothing in this repository sets.
+  case "$max" in ''|*[!0-9]*) max=3 ;; esac
+  case "$delay" in ''|*[!0-9]*) delay=3 ;; esac
   # The subcommand, not "$1": every caller here leads with -c/-C, so naming the
   # first argument produced "git -C attempt 1/3 failed" in the journal.
   verb="$(printf '%s\n' "$@" | grep -m1 -E '^(fetch|clone|pull|push|ls-remote)$' || true)"

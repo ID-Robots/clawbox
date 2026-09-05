@@ -185,6 +185,13 @@ function errorText(err: unknown): string {
  */
 const REMOTE_FETCH_ATTEMPTS = 3;
 const REMOTE_CHECK_ATTEMPTS = 2;
+/**
+ * The advisory tag fetch asks ONCE, and the retry it used to hold is spent on
+ * the `ls-remote` the tag answer is actually read from. That keeps the number
+ * of anonymous requests a version check can make exactly where it was — which
+ * matters, because the refusal being retried is caused by too many of them.
+ */
+const REMOTE_ADVISORY_ATTEMPTS = 1;
 const REMOTE_RETRY_DELAY_MS = Number(process.env.UPDATER_REMOTE_RETRY_DELAY_MS || "4000");
 const REMOTE_CHECK_RETRY_DELAY_MS = Number(process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS || "1200");
 
@@ -229,18 +236,32 @@ async function reachOrigin(
   args: string[],
   options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
 ): Promise<RemoteReachability> {
+  return (await readFromOrigin(projectDir, args, options)).remote;
+}
+
+/**
+ * The same policy, for a call whose OUTPUT is the answer.
+ *
+ * `RemoteReachability` travels into the /update/versions payload, so git's
+ * stdout is returned beside it rather than added to it.
+ */
+async function readFromOrigin(
+  projectDir: string,
+  args: string[],
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+): Promise<{ remote: RemoteReachability; stdout: string }> {
   const attempts = options.attempts ?? REMOTE_FETCH_ATTEMPTS;
   const retryDelayMs = options.retryDelayMs ?? REMOTE_RETRY_DELAY_MS;
   let lastText = "";
   let lastErr: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      await execGit(projectDir, args, {
+      const { stdout } = await execGit(projectDir, args, {
         timeout: options.timeout,
         maxBuffer: options.maxBuffer,
         env: { ...process.env, ...GIT_NO_PROMPT_ENV },
       });
-      return REMOTE_REACHABLE;
+      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? "") };
     } catch (err) {
       lastErr = err;
       lastText = errorText(err);
@@ -253,9 +274,12 @@ async function reachOrigin(
     }
   }
   return {
-    reachable: false,
-    refusedAnonymously: isAnonymousFetchRefusal(lastText),
-    reason: refusalReason(lastErr, lastText),
+    remote: {
+      reachable: false,
+      refusedAnonymously: isAnonymousFetchRefusal(lastText),
+      reason: refusalReason(lastErr, lastText),
+    },
+    stdout: "",
   };
 }
 
@@ -2130,14 +2154,25 @@ export async function getTargetVersion(): Promise<string | null> {
     const tagFetch = await reachOrigin(
       PROJECT_DIR,
       ["fetch", "--quiet", "--tags", "origin"],
-      { timeout: 20_000, attempts: REMOTE_CHECK_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
+      { timeout: 20_000, attempts: REMOTE_ADVISORY_ATTEMPTS },
     );
     if (!tagFetch.reachable) console.warn(`[Updater] advisory tag fetch did not land: ${tagFetch.reason}`);
-    const { stdout } = await execGit(
+    // The AUTHORITATIVE call, and so the one that is retried. It used to get a
+    // single attempt: one refused ls-remote then made every surface say the
+    // update server could not be reached, and TARGET_VERSION_CACHE_TTL held
+    // that answer for 60 s over a refusal that clears in seconds.
+    const lsRemote = await readFromOrigin(
       PROJECT_DIR,
       ["ls-remote", "--tags", "--refs", "origin"],
-      { timeout: 10_000, env: { ...process.env, ...GIT_NO_PROMPT_ENV } },
+      { timeout: 10_000, attempts: REMOTE_CHECK_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
     );
+    if (!lsRemote.remote.reachable) {
+      lastTagRemote = lsRemote.remote;
+      cachedTargetVersion = null;
+      targetVersionCacheTime = Date.now();
+      return null;
+    }
+    const stdout = lsRemote.stdout;
     // origin answered, on the call the tag answer depends on.
     lastTagRemote = REMOTE_REACHABLE;
     const tags = stdout
