@@ -402,9 +402,19 @@ export async function readHermesTelegramToken(): Promise<HermesTelegramToken> {
   // read on every panel poll for a value that is discarded — and log a
   // complaint about a config.yaml nothing was going to use.
   const env = await envToken();
-  if (env.value !== null) return { token: env.value || null, known: env.known };
+  // An UNREADABLE .env ends the question too, and ends it as an unknown. It may
+  // define the key — that is exactly what could not be established — so a
+  // config.yaml value is not the answer either: the bridge would only reach it
+  // for a key .env does not carry. Falling through returned that value with
+  // `known: false` beside it, and both panel routes compute `configured: token
+  // !== null` and `unknown: !known && token === null` — so a root-owned .env
+  // holding bot B and an older config.yaml holding bot A reported A as this
+  // box's bot, confidently, on /telegram/status, /telegram/pairing and the
+  // wizard, while the gateway polled B.
+  if (!env.known) return { token: null, known: false };
+  if (env.value !== null) return { token: env.value || null, known: true };
   const yaml = await readHermesConfigTopLevelScalar(HERMES_TELEGRAM_TOKEN_KEY);
-  return { token: yaml.value, known: env.known && yaml.known };
+  return { token: yaml.value, known: yaml.known };
 }
 
 /**

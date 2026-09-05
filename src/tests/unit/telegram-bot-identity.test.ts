@@ -274,6 +274,29 @@ describe("readActiveTelegramBot", () => {
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: true });
   });
 
+  // An UNREADABLE .env may DEFINE the key — that is exactly what could not be
+  // established — so a config.yaml value is not the answer either: the bridge
+  // reaches it only for a key .env does not carry. Falling through returned it
+  // with `known: false` beside it, and both panel routes read `configured` off
+  // the token alone, so a root-owned .env holding bot B and an older config.yaml
+  // holding bot A reported A as this box's bot, confidently.
+  it("does not answer from config.yaml when .env could not be read", async () => {
+    makeUnreadable(path.join(hermesHome, ".env"));
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN: ${MIRROR_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: false });
+  });
+
+  // ...and it degrades to ClawBox's own mirror instead, which is what a panel
+  // renders while `known: false` says the answer is not proved.
+  it("degrades to the mirror, not to config.yaml, when .env could not be read", async () => {
+    makeUnreadable(path.join(hermesHome, ".env"));
+    writeHermesConfigYaml(`TELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
+    mockGet.mockResolvedValue(MIRROR_BOT);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: MIRROR_BOT, known: false });
+  });
+
   // ~/.hermes as a regular file (a bad restore, a stray touch): the .env reader
   // forgives ENOTDIR, and the config.yaml reader has to forgive it the same way
   // or the two halves disagree and every approvals-bot save answers 503 for
