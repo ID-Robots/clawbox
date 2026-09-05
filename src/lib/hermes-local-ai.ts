@@ -1,7 +1,7 @@
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesCliAnswered } from "@/lib/hermes-cli-answered";
 import { get } from "@/lib/config-store";
-import { patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-yaml";
+import { HermesConfigWriteError, patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { getLocalAiToken } from "@/lib/local-ai-token";
@@ -343,6 +343,24 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
     unset.push("model.provider", "model.default");
   }
   await patchHermesConfig({ unset });
+
+  // PROVED, not inferred. `patchHermesConfig`'s merge path reads every key back
+  // (patchText), but its CLI fallback does not: `applyViaCli`'s unset loop
+  // discards the exit code, because `hermes config unset` on a key that was
+  // never there is the no-op the loop relies on. So a config.yaml the line
+  // editor refuses (a flow mapping, a duplicate key) sends the patch to a CLI
+  // that a `step_hermes_install` rebuild has left exiting 127 before argparse,
+  // and this function returned as if the provider were gone.
+  //
+  // That return is the ONE fact the disable route answers on for this SKU, so
+  // it has to be a fact. A non-null read is positive evidence the key survived;
+  // `readHermesConfigValue` also answers null for a file it could not read, so
+  // an unreadable config cannot manufacture a failure here.
+  const stillRegistered = await readHermesConfigValue(`providers.${HERMES_LOCAL_PROVIDER}.base_url`);
+  const stillSelected = wasDefault ? await readHermesConfigValue("model.provider") : null;
+  if (typeof stillRegistered === "string" || stillSelected === HERMES_LOCAL_PROVIDER) {
+    throw new HermesConfigWriteError("The local model is still registered with Hermes.");
+  }
 
   invalidateModelOptions();
   return { wasDefault, model };
