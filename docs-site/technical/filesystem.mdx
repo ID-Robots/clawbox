@@ -71,6 +71,13 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 
 The update mechanism achieves this with `git reset --hard <release>` + `git clean -fd` (note: no `-x` — gitignored paths like `data/` and `.env` are never cleaned). Details: [Update System](/technical/update-system).
 
+Every ❌ row above assumes the path really is the directory it names. If one of them has been
+replaced by a **symlink**, the factory reset removes the link and leaves whatever it pointed at
+alone — it never deletes through it — and reports the reset as **incomplete**, naming the path,
+without clearing the Wi-Fi, resetting the login password or rebooting. So the box stays reachable
+and the redirected store is still there to deal with. A plain file where a directory belongs is
+simply removed and the reset finishes normally.
+
 <Warning>
 **Do not hand-roll a factory reset over SSH from this table.** `rm -rf ~/.hermes` deletes
 `hermes-agent/` and bricks the Hermes harness; `rm -rf data/*` deletes `network.env` and the
