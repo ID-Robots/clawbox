@@ -1,12 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
 import { isLive, isSettled, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
-import CodingAgentReportPreview from "./CodingAgentReportPreview";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
 import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
@@ -22,8 +21,10 @@ import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // keys, translated in every locale, rather than a second English-only one.
 import { timeAgo } from "./clawkeep-ui";
 import { formatBytes } from "@/lib/format-bytes";
-import { renderText } from "@/lib/chat-markdown";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
+import AnimatedNumber from "./AnimatedNumber";
+import CodingRunSummary from "./CodingRunSummary";
+import CodingRunTeamMembers from "./CodingRunTeamMembers";
 import {
   OPEN_CODING_RUN_EVENT,
   dispatchOpenApp,
@@ -292,11 +293,11 @@ function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w
 }
 
 /** One cell of the run page's figures grid. */
-function StatTile({ label, value, hint, testId }: { label: string; value: string; hint?: string; testId?: string }) {
+function StatTile({ label, value, hint, testId }: { label: string; value: ReactNode; hint?: string; testId?: string }) {
   return (
     <div className={`${CARD_SURFACE} px-3 py-2 min-w-0`} data-testid={testId}>
       <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] truncate">{label}</div>
-      <div className="mt-0.5 text-sm font-semibold text-[var(--text-primary)] truncate" title={hint ?? value}>{value}</div>
+      <div className="mt-0.5 text-sm font-semibold text-[var(--text-primary)] truncate" title={hint ?? (typeof value === "string" ? value : undefined)}>{value}</div>
       {hint && <div className="text-[10px] text-[var(--text-muted)] truncate">{hint}</div>}
     </div>
   );
@@ -338,7 +339,6 @@ export default function CodingAgentApp() {
   // remembered per run, so another run's page opens on its timeline.
   const [liveTabFor, setLiveTabFor] = useState<{ id: string; tab: "timeline" | "terminal" | "browser" } | null>(null);
   /** The markdown artifact open in the preview dialog, if any. */
-  const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
   // The run whose whole evidence list is unfolded. A run that screenshots
   // every step files dozens of pictures, and drawn in full they pushed the
   // summary and the files off the page; the card shows a few and the rest
@@ -858,6 +858,9 @@ export default function CodingAgentApp() {
    *  the way out of it, the terminal, the backup. */
   /** The Live view switch: only while the run runs, since the view is the
    *  browser it drives and the terminal it writes. */
+  /** A row's glyph buttons — terminal, back up, details — one size, one row. */
+  const ROW_ICON_BUTTON = "h-7 w-7 inline-flex items-center justify-center rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 hover:text-white disabled:opacity-50";
+
   const runControls = (run: Run, where: "row" | "page") => {
     const action = RUN_ACTION[run.status];
     // Resume in a terminal is for a run that has STOPPED; a live run's
@@ -900,7 +903,20 @@ export default function CodingAgentApp() {
             {t("codingAgent.stop")}
           </button>
         ))}
-        {canOpenTerminal && (
+        {canOpenTerminal && (where === "row" ? (
+          // On a row, a glyph: the words took a third of the row's width
+          // and every row said the same thing.
+          <button
+            type="button"
+            onClick={() => openInTerminal(run)}
+            data-testid={`coding-agent-terminal-${run.id}`}
+            title={terminalLabel}
+            aria-label={terminalLabel}
+            className={ROW_ICON_BUTTON}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
+          </button>
+        ) : (
           <button
             type="button"
             onClick={() => openInTerminal(run)}
@@ -910,8 +926,20 @@ export default function CodingAgentApp() {
           >
             {terminalLabel}
           </button>
-        )}
-        {github?.connected && run.commit && (
+        ))}
+        {github?.connected && run.commit && (where === "row" ? (
+          <button
+            type="button"
+            onClick={() => void backup({ projectId: run.projectId, directory: run.directory }, run.id)}
+            disabled={busy === `backup-${run.id}`}
+            data-testid={`coding-agent-backup-${run.id}`}
+            title={busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+            aria-label={busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+            className={ROW_ICON_BUTTON}
+          >
+            <span className={`material-symbols-rounded ${busy === `backup-${run.id}` ? "animate-spin" : ""}`} style={{ fontSize: 16 }} aria-hidden="true">{busy === `backup-${run.id}` ? "progress_activity" : "cloud_upload"}</span>
+          </button>
+        ) : (
           <button
             type="button"
             onClick={() => void backup({ projectId: run.projectId, directory: run.directory }, run.id)}
@@ -921,7 +949,7 @@ export default function CodingAgentApp() {
           >
             {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
           </button>
-        )}
+        ))}
       </>
     );
   };
@@ -954,11 +982,23 @@ export default function CodingAgentApp() {
               const started = run.status !== "draft";
               const reviewedBy = runs.find((r) => r.reviewOf === run.id);
               return (
-                <li key={run.id} data-run-id={run.id} className={`${CARD_SURFACE} px-3 py-2`}>
+                <li
+                  key={run.id}
+                  data-run-id={run.id}
+                  data-testid={`coding-agent-run-row-${run.id}`}
+                  className={`${CARD_SURFACE} px-3 py-2 cursor-pointer hover:bg-black/30 transition-colors`}
+                  onClick={(e) => {
+                    // The row is the way to the run; a control on it (Stop,
+                    // the terminal glyph, a chip to another run) is its own.
+                    if ((e.target as HTMLElement).closest("button, a, input, select, textarea")) return;
+                    showRun(run.id);
+                  }}
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>
+                        <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${tone.chip} ${run.status === "running" ? "coding-agent-pulse" : ""}`} data-testid={`coding-agent-status-${run.id}`}>
+                          {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
                           {statusLabel(run.status)}
                         </span>
                         {/* A run at high effort can be silent for minutes on
@@ -1033,22 +1073,22 @@ export default function CodingAgentApp() {
                         </p>
                       )}
                     </div>
-                    <div className="flex flex-col items-end gap-1 shrink-0">
-                      {RUN_ACTION[run.status] ? (
-                        <div className="flex gap-1">{runControls(run, "row")}</div>
-                      ) : (
-                        runControls(run, "row")
-                      )}
+                    {/* One row of controls: a live run's Pause/Stop as words,
+                        then the glyphs — terminal, back up, details — the
+                        same size, side by side. */}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {runControls(run, "row")}
                       {/* The run's own page: its figures, its summary, its
-                          evidence. A row used to unfold in place instead. */}
+                          evidence. The row itself opens it too. */}
                       <button
                         type="button"
                         onClick={() => showRun(run.id)}
                         data-testid={`coding-agent-details-${run.id}`}
-                        className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 inline-flex items-center gap-1"
+                        title={t("codingAgent.showDetails")}
+                        aria-label={t("codingAgent.showDetails")}
+                        className={ROW_ICON_BUTTON}
                       >
-                        {t("codingAgent.showDetails")}
-                        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">chevron_right</span>
+                        <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_right</span>
                       </button>
                     </div>
                   </div>
@@ -1525,8 +1565,10 @@ export default function CodingAgentApp() {
           // narration, and a download is not how you check what it says.
           const clips = shownArtifacts.filter((a) => a.kind === "audio");
           const files = shownArtifacts.filter((a) => a.kind !== "image" && a.kind !== "audio");
-          const reportFile = files.find((a) => a.kind === "markdown" && a.name === "report.md") ?? files.find((a) => a.kind === "markdown");
           const helpers = Object.entries(run.subagentsByType ?? {});
+          // The run's report — its closing message filed as Markdown, or a
+          // fuller one it wrote — is what the Summary card draws.
+          const reportFile = files.find((a) => a.kind === "markdown" && a.name === "report.md") ?? files.find((a) => a.kind === "markdown");
           const todos = run.todos ?? [];
           const todosDone = todos.filter((x) => x.status === "completed").length;
           const activity = run.progress.slice(-ACTIVITY_SHOWN);
@@ -1551,7 +1593,8 @@ export default function CodingAgentApp() {
                   you can do to it. */}
               <div className={`${CARD_SURFACE} px-4 py-3`}>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>
+                  <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 inline-flex items-center gap-1.5 ${tone.chip} ${run.status === "running" ? "coding-agent-pulse" : ""}`} data-testid="coding-agent-run-status">
+                    {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
                     {statusLabel(run.status)}
                   </span>
                   {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
@@ -1653,17 +1696,6 @@ export default function CodingAgentApp() {
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">
                   {runControls(run, "page")}
-                  {reportFile && (
-                    <button
-                      type="button"
-                      onClick={() => setReport({ runId: run.id, name: reportFile.name })}
-                      data-testid="coding-agent-run-report"
-                      className={BTN_SECONDARY}
-                    >
-                      <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">description</span>
-                      {t("codingAgent.openReport")}
-                    </button>
-                  )}
                   {project?.onDesktop && (
                     <button
                       type="button"
@@ -1777,18 +1809,13 @@ export default function CodingAgentApp() {
                   agent-written words on to the owner's screen at all. */}
               <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
                 <p className={SECTION_LABEL}>{t("codingAgent.summaryTitle")}</p>
-                {run.summary ? (
-                  <div
-                    data-testid="coding-agent-summary"
-                    className="mt-2 text-xs text-[var(--text-secondary)] leading-relaxed min-w-0 break-words [&_img]:max-w-full"
-                  >
-                    {renderText(run.summary, t("chat.table"))}
-                  </div>
-                ) : (
-                  <p className="mt-2 text-xs text-[var(--text-muted)]">
-                    {isLive(run.status) ? t("codingAgent.noSummaryYet") : t("codingAgent.noSummary")}
-                  </p>
-                )}
+                <CodingRunSummary
+                  key={run.id}
+                  runId={run.id}
+                  report={reportFile?.name ?? null}
+                  summary={run.summary}
+                  live={isLive(run.status)}
+                />
               </div>
 
               {/* The plan, as the run last wrote it. */}
@@ -1823,7 +1850,7 @@ export default function CodingAgentApp() {
                   the ones still working, and the ones back with how long
                   they took. The owner asked to see how many and what each
                   did, not a count. */}
-              {((run.activeSubagents?.length ?? 0) > 0 || (run.subagents?.length ?? 0) > 0 || (run.subagentsTotal ?? 0) > 0) && (
+              {(isLive(run.status) || run.team || (run.activeSubagents?.length ?? 0) > 0 || (run.subagents?.length ?? 0) > 0 || (run.subagentsTotal ?? 0) > 0) && (
                 <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-agents">
                   <p className={SECTION_LABEL}>
                     {t("codingAgent.agentsTitle")}
@@ -1857,6 +1884,16 @@ export default function CodingAgentApp() {
                       </li>
                     ))}
                   </ul>
+                  {run.team && (
+                    <CodingRunTeamMembers
+                      key={`${run.id}/${run.team.id}`}
+                      teamId={run.team.id}
+                      runId={run.id}
+                      runs={runs.map((r) => ({ id: r.id, status: r.status }))}
+                      live={isLive(run.status)}
+                      onOpenRun={showRun}
+                    />
+                  )}
                 </div>
               )}
 
@@ -1876,7 +1913,7 @@ export default function CodingAgentApp() {
                 <StatTile label={t("codingAgent.statDuration")} value={started ? duration(run) : "—"} />
                 <StatTile
                   label={t("codingAgent.statTokens")}
-                  value={(run.tokensUsed ?? 0) > 0 ? tokens(run.tokensUsed ?? 0) : "—"}
+                  value={(run.tokensUsed ?? 0) > 0 ? <AnimatedNumber value={run.tokensUsed ?? 0} format={tokens} testId="coding-agent-stat-tokens" /> : "—"}
                   hint={(run.thinkingTokens ?? 0) > 0 ? t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 }) : undefined}
                 />
                 <StatTile
@@ -1951,24 +1988,14 @@ export default function CodingAgentApp() {
                     <ul className="mt-2 space-y-0.5">
                       {files.map((a) => (
                         <li key={a.name} className="text-[11px]">
-                          {a.kind === "markdown" ? (
-                            <button
-                              type="button"
-                              onClick={() => setReport({ runId: run.id, name: a.name })}
-                              className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all text-left"
-                            >
-                              {a.name}
-                            </button>
-                          ) : (
-                            <a
-                              href={artifactUrl(run.id, a.name)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
-                            >
-                              {a.name}
-                            </a>
-                          )}
+                          <a
+                            href={artifactUrl(run.id, a.name)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
+                          >
+                            {a.name}
+                          </a>
                           {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
                         </li>
                       ))}
@@ -2168,14 +2195,6 @@ export default function CodingAgentApp() {
       </div>
       </div>
 
-      {report && (
-        <CodingAgentReportPreview
-          key={`${report.runId}/${report.name}`}
-          runId={report.runId}
-          name={report.name}
-          onClose={() => setReport(null)}
-        />
-      )}
     </div>
   );
 }

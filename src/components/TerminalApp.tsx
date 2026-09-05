@@ -46,6 +46,90 @@ export interface TerminalAppProps {
  * only on a secure origin, and every LAN ClawBox is http://, so the
  * `execCommand` fallback is the path most boxes take.
  */
+/**
+ * The terminal's face. JetBrains Mono (shipped, public/fonts) for the text;
+ * the Nerd Fonts symbols set (shipped) for the glyphs a TUI draws with —
+ * powerline, devicons, the private-use icons; the platform's own colour
+ * font for emoji, which no monospace face carries; then the faces the box
+ * image has (DejaVu, Liberation) so a phone and the box's own Chromium fall
+ * through the same way. Box drawing comes from JetBrains Mono itself — the
+ * whole of Claude Code's UI is `╭─╮ │ ╰─╯`.
+ */
+export const TERMINAL_FONT_FAMILY = '"JetBrains Mono", "Symbols Nerd Font Mono", "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", "DejaVu Sans Mono", "Liberation Mono", "Ubuntu Mono", Menlo, Consolas, monospace';
+
+/** How long the first cell waits for the web font before it is drawn with the fallback face. */
+const FONT_WAIT_MS = 1500;
+
+/**
+ * The web font, loaded before the grid is measured — bounded, so a slow disk
+ * never holds the shell. Answers whether the wait ran out and the load
+ * itself, so a terminal drawn on the fallback face can be refitted the
+ * moment the real one lands.
+ */
+async function loadTerminalFont(): Promise<{ late: boolean; loading: Promise<boolean> | null }> {
+  if (typeof document === "undefined" || !("fonts" in document)) return { late: false, loading: null };
+  let loading: Promise<boolean>;
+  try {
+    loading = document.fonts.load('13px "JetBrains Mono"').then((faces) => faces.length > 0, () => false);
+  } catch {
+    return { late: false, loading: null };
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const late = await Promise.race([
+    loading.then(() => false),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), FONT_WAIT_MS); }),
+  ]);
+  if (timer !== null) clearTimeout(timer);
+  return { late, loading };
+}
+
+/** Re-measure the grid on the face that has just arrived: xterm measures on a font CHANGE, so the family is set away and back. */
+const FALLBACK_FONT_FAMILY = '"DejaVu Sans Mono", "Liberation Mono", monospace';
+function refitForFont(term: import("@xterm/xterm").Terminal, fitAddon: import("@xterm/addon-fit").FitAddon): void {
+  term.options.fontFamily = FALLBACK_FONT_FAMILY;
+  term.options.fontFamily = TERMINAL_FONT_FAMILY;
+  fitAddon.fit();
+}
+
+/** The Coding Agent's ground (`--win-ground`), as the terminal's canvas needs it: a literal. */
+const TERMINAL_GROUND_FALLBACK = "#0d1117";
+function terminalGround(): string {
+  if (typeof window === "undefined") return TERMINAL_GROUND_FALLBACK;
+  const v = getComputedStyle(document.documentElement).getPropertyValue("--win-ground").trim();
+  return v || TERMINAL_GROUND_FALLBACK;
+}
+
+/**
+ * The palette: GitHub's dark scheme, the same one the code editor colours
+ * with (`.tok-*` in globals.css), on the Coding Agent's ground — so a run's
+ * transcript in a Terminal window reads like the run's own page.
+ */
+export function terminalTheme(ground: string) {
+  return {
+    background: ground,
+    foreground: "#e6edf3",
+    cursor: "#f97316",
+    cursorAccent: ground,
+    selectionBackground: "rgba(255, 255, 255, 0.18)",
+    black: "#484f58",
+    red: "#ff7b72",
+    green: "#3fb950",
+    yellow: "#d29922",
+    blue: "#58a6ff",
+    magenta: "#bc8cff",
+    cyan: "#39c5cf",
+    white: "#b1bac4",
+    brightBlack: "#6e7681",
+    brightRed: "#ffa198",
+    brightGreen: "#56d364",
+    brightYellow: "#e3b341",
+    brightBlue: "#79c0ff",
+    brightMagenta: "#d2a8ff",
+    brightCyan: "#56d4dd",
+    brightWhite: "#f0f6fc",
+  };
+}
+
 function copyText(text: string) {
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
@@ -136,33 +220,20 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     const { Terminal } = await import("@xterm/xterm");
     const { FitAddon } = await import("@xterm/addon-fit");
     const { WebLinksAddon } = await import("@xterm/addon-web-links");
+    // Unmounted while the modules loaded: nothing to draw into, and the
+    // lock goes back so a remount can connect.
+    if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
 
     // Create terminal instance once
+    let fontLate: { late: boolean; loading: Promise<boolean> | null } | null = null;
     if (!termRef.current) {
+      // The face is a web font: waited for before the first cell is drawn,
+      // or xterm would size its grid on the fallback and every glyph would
+      // land off its cell once the real one arrived.
+      fontLate = await loadTerminalFont();
+      if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
       const term = new Terminal({
-        theme: {
-          background: "#0d0d1a",
-          foreground: "#e0e0e0",
-          cursor: "#22c55e",
-          cursorAccent: "#0d0d1a",
-          selectionBackground: "rgba(34, 197, 94, 0.3)",
-          black: "#1a1a2e",
-          red: "#f87171",
-          green: "#4ade80",
-          yellow: "#fbbf24",
-          blue: "#60a5fa",
-          magenta: "#c084fc",
-          cyan: "#22d3ee",
-          white: "#e0e0e0",
-          brightBlack: "#374151",
-          brightRed: "#ff6b6b",
-          brightGreen: "#22c55e",
-          brightYellow: "#fcd34d",
-          brightBlue: "#93c5fd",
-          brightMagenta: "#d8b4fe",
-          brightCyan: "#67e8f9",
-          brightWhite: "#f9fafb",
-        },
+        theme: terminalTheme(terminalGround()),
         // Box-drawing first. Claude Code's whole UI is drawn with `╭─╮ │ ╰─╯`,
         // and NONE of the four fonts the old stack named (Cascadia, JetBrains
         // Mono, Fira Code, Consolas — nor its Courier New fallback) exists on
@@ -171,7 +242,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         // viewing device's fontconfig happened to resolve. DejaVu and Liberation
         // DO ship here, so naming them makes the result the same on the box's
         // own Chromium and on a phone that has neither.
-        fontFamily: '"Cascadia Code", "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", "Liberation Mono", "Ubuntu Mono", Menlo, Consolas, monospace',
+        fontFamily: TERMINAL_FONT_FAMILY,
         fontSize: 13,
         // 1.0, not 1.4. Line height is leading BETWEEN rows, and a full-screen
         // TUI draws its vertical borders as one glyph per row — at 1.4 every
@@ -244,6 +315,14 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
 
       termRef.current = term;
       fitAddonRef.current = fitAddon;
+      // The wait ran out before the face was in: the grid was measured on
+      // the fallback, so it is measured again when the real one lands —
+      // for this terminal only, and only while it is still on screen.
+      if (fontLate?.late && fontLate.loading) {
+        void fontLate.loading.then((loaded) => {
+          if (loaded && mountedRef.current && termRef.current === term) refitForFont(term, fitAddon);
+        });
+      }
 
       term.open(containerRef.current!);
       fitAddon.fit();
@@ -533,7 +612,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   return (
     <div
       className="flex flex-col h-full"
-      style={{ background: "#0d0d1a" }}
+      style={{ background: "var(--win-ground)" }}
       onKeyDown={handleKeyDown}
     >
       {/* Status bar — only shown when disconnected/error */}
@@ -541,7 +620,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         <div
           className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
           style={{
-            background: "#12122a",
+            background: "rgba(255,255,255,0.04)",
             borderColor: "rgba(255,255,255,0.06)",
           }}
         >
@@ -558,7 +637,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
             className="text-xs px-2 py-0.5 rounded transition-colors font-mono"
             style={{
               background: "rgba(34,197,94,0.15)",
-              color: "#22c55e",
+              color: "var(--coral-bright)",
               border: "1px solid rgba(34,197,94,0.3)",
             }}
           >
@@ -574,7 +653,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         className="flex-1 overflow-hidden outline-none"
         style={{
           padding: "6px 4px",
-          background: "#0d0d1a",
+          background: "var(--win-ground)",
         }}
         onClick={handleContainerClick}
         onFocus={handleContainerClick}
@@ -625,11 +704,11 @@ const TerminalApp = dynamic(
     loading: () => (
       <div
         className="h-full flex flex-col items-center justify-center gap-3"
-        style={{ background: "#0d0d1a" }}
+        style={{ background: "var(--win-ground)" }}
       >
         <div
           className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin"
-          style={{ borderColor: "#22c55e", borderTopColor: "transparent" }}
+          style={{ borderColor: "var(--coral-bright)", borderTopColor: "transparent" }}
         />
         <span className="text-sm font-mono" style={{ color: "#4b5563" }}>
           Loading terminal…

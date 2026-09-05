@@ -71,6 +71,16 @@ beforeEach(() => { teams = []; });
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("with no team yet", () => {
+  it("draws the team's shape — three workers and a reviewer — beside the words", async () => {
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} onPlan={() => {}} />);
+    const card = await screen.findByTestId("coding-team-card");
+    const tree = within(card).getByTestId("coding-team-tree");
+    expect(tree).toHaveAttribute("data-workers", "3");
+    expect(tree).toHaveAttribute("data-reviewer", "true");
+    expect(tree).toHaveAttribute("data-active", "0");
+  });
+
   it("offers to plan the team in the chat, and hands over on a click", async () => {
     stub();
     const onPlan = vi.fn();
@@ -96,6 +106,17 @@ describe("with no team yet", () => {
 });
 
 describe("with a team working here", () => {
+  it("sizes the tree by the board: the workers who worked, the ones at work pulsing", async () => {
+    stub();
+    teams = [{ ...WORKING, agents: { planner: 1, workers: 2, reviewers: 1, total: 4 } }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    const tree = await screen.findByTestId("coding-team-tree");
+    expect(tree).toHaveAttribute("data-workers", "2");
+    expect(tree).toHaveAttribute("data-reviewer", "true");
+    // t2 is in progress: one worker at work.
+    expect(tree).toHaveAttribute("data-active", "1");
+  });
+
   it("says who worked and on which branch, and links each task's reviewer beside its worker", async () => {
     teams = [{
       ...WORKING,

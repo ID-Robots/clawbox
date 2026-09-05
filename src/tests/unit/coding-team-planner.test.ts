@@ -52,7 +52,11 @@ describe("parsePlan", () => {
   it("refuses a task without a description, a dependency on itself, a later or a non-canonical task, and bad hint shapes", () => {
     expect(parsePlan(JSON.stringify([{ files_hint: [] }]))).toEqual(refused(/t1 has no task_description/));
     expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t1"] }]))).toEqual(refused(/t1 depends on t1/));
-    expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t2"] }, { task_description: "b" }]))).toEqual(refused(/t1 depends on t2/));
+    // A dependency on a LATER task is fine — the board starts a task when what it waits for is done, whatever the order.
+    expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t2"] }, { task_description: "b" }]))).toMatchObject({ ok: true });
+    // One outside the plan, and a cycle, are not.
+    expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t3"] }, { task_description: "b" }]))).toEqual(refused(/t1 depends on t3/));
+    expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: ["t2"] }, { task_description: "b", depends_on: ["t3"] }, { task_description: "c", depends_on: ["t1"] }]))).toEqual(refused(/t1 and t2 and t3 depend on each other/));
     expect(parsePlan(JSON.stringify([{ task_description: "a" }, { task_description: "b", depends_on: ["t01"] }]))).toEqual(refused(/t2 depends on t01/));
     expect(parsePlan(JSON.stringify([{ task_description: "a", depends_on: "t1" }]))).toEqual(refused(/depends_on is not a list/));
     expect(parsePlan(JSON.stringify([{ task_description: "a", files_hint: [1] }]))).toEqual(refused(/files_hint is not a list/));

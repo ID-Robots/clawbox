@@ -1,5 +1,35 @@
 @import "tailwindcss";
 
+/* The terminal's face: JetBrains Mono (OFL, public/fonts/JetBrainsMono-OFL.txt)
+   for the text, and the Nerd Fonts symbols set (public/fonts/SymbolsNerdFont-
+   LICENSE.txt) for the glyphs a TUI draws with — powerline, devicons, the
+   private-use icons — reached only when such a glyph is on screen thanks to
+   its unicode-range, so the 1.2 MB file is not paid for by a plain shell.
+   Emoji fall through to the platform's own colour font in the stack the
+   terminal names; neither of these carries them. Served from this origin,
+   like every other font here: the box is offline-capable. */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-display: swap;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  src: url("/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  font-display: swap;
+}
+@font-face {
+  font-family: "Symbols Nerd Font Mono";
+  font-style: normal;
+  font-weight: 400;
+  src: url("/fonts/SymbolsNerdFontMono-Regular.woff2") format("woff2");
+  font-display: swap;
+  unicode-range: U+2190-23FF, U+2500-27BF, U+2B00-2BFF, U+E000-F8FF, U+F0000-FFFFD;
+}
 @font-face {
   font-family: "Material Symbols Rounded";
   font-style: normal;
@@ -438,6 +468,32 @@ h6 {
   .ca-art-flow { animation: ca-art-flow 1.6s linear infinite; }
   .ca-art-node { animation: ca-art-node 2.6s ease-in-out infinite; }
   .ca-art-hub  { animation: ca-art-hub 2.6s ease-in-out infinite; }
+}
+
+/* The coding team's tree (CodingTeamTree): the goal flows out along every
+ * connector, each node breathes, and a worker at work breathes faster in the
+ * product's coral. Guarded exactly like ca-art-*: with motion turned off the
+ * tree is still drawn, it simply holds still. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes ct-art-flow {
+    to { stroke-dashoffset: -22; }
+  }
+  @keyframes ct-art-node {
+    0%, 100% { opacity: 0.6; }
+    50%      { opacity: 1; }
+  }
+  @keyframes ct-art-live {
+    0%, 100% { opacity: 0.7; }
+    50%      { opacity: 1; }
+  }
+  @keyframes ct-art-hub {
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 1; }
+  }
+  .ct-art-flow { animation: ct-art-flow 1.6s linear infinite; }
+  .ct-art-node { animation: ct-art-node 2.8s ease-in-out infinite; }
+  .ct-art-live { animation: ct-art-live 1.1s ease-in-out infinite; }
+  .ct-art-hub  { animation: ct-art-hub 2.6s ease-in-out infinite; }
 }
 
 /* Memory Shard's accumulation diagram (MemoryShardArt).

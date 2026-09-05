@@ -129,7 +129,7 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
   }, []);
 
   return (
-    <div className="flex flex-col h-full" style={{ background: "#0d0d1a" }} data-testid="terminal-tabs">
+    <div className="flex flex-col h-full bg-[var(--win-ground)]" data-testid="terminal-tabs">
       <div
         role="tablist"
         aria-label="Terminal tabs"
@@ -144,7 +144,7 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
             // inside a role="tab" is flattened away by assistive technology.
             <div
               key={tab.id}
-              className={`flex items-stretch border-r max-w-[14rem] ${selected ? "bg-[#0d0d1a]" : "hover:bg-white/[0.04]"}`}
+              className={`flex items-stretch border-r max-w-[14rem] ${selected ? "bg-white/[0.06]" : "hover:bg-white/[0.04]"}`}
               style={{ borderColor: "rgba(255,255,255,0.06)" }}
               onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); onClose(tab.id); } }}
             >
@@ -168,7 +168,7 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
                   selected ? "text-white" : "text-white/50 hover:text-white/80"
                 }`}
               >
-                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 14, color: selected ? "#22c55e" : "rgba(255,255,255,0.35)" }} aria-hidden="true">terminal</span>
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 14, color: selected ? "var(--coral-bright)" : "rgba(255,255,255,0.35)" }} aria-hidden="true">terminal</span>
                 <span className="truncate">{terminalTabTitle(tab, t)}</span>
               </div>
               <button

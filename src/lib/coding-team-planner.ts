@@ -86,15 +86,47 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
     for (const d of depends_on) {
       // Canonical ids only — t1, not t01: the board numbers tasks t1…t999 and
       // knows no other spelling, so a plan that said `t01` would post and
-      // then never find its dependency.
+      // then never find its dependency. Any OTHER task in the plan may be
+      // depended on, listed before or after — the board starts a task when
+      // what it waits for is done, whatever the order — as long as the
+      // dependencies form no cycle (checked once every task is read).
       const n = /^t([1-9][0-9]{0,2})$/.exec(d);
-      if (!n || Number(n[1]) >= i + 1) return { ok: false, reason: `Task ${id} depends on ${d}, which is not an earlier task.` };
+      if (!n || Number(n[1]) > raw.length || Number(n[1]) === i + 1) return { ok: false, reason: `Task ${id} depends on ${d}, which is not another task in the plan.` };
     }
     const hint = item.files_hint === undefined ? [] : item.files_hint;
     if (!Array.isArray(hint) || !hint.every((f) => typeof f === "string")) return { ok: false, reason: `Task ${id}'s files_hint is not a list of paths.` };
     tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
   }
+  const cycle = dependencyCycle(tasks.map((t) => t.depends_on));
+  if (cycle) return { ok: false, reason: `Tasks ${cycle.join(" and ")} depend on each other.` };
   return { ok: true, tasks };
+}
+
+/** The first cycle among the tasks' dependencies as their ids, or null: a cycle would wait forever. */
+function dependencyCycle(dependsOn: string[][]): string[] | null {
+  const state = new Array<0 | 1 | 2>(dependsOn.length).fill(0);
+  const stack: number[] = [];
+  const visit = (i: number): string[] | null => {
+    if (state[i] === 2) return null;
+    if (state[i] === 1) {
+      const from = stack.indexOf(i);
+      return stack.slice(from).map((k) => `t${k + 1}`);
+    }
+    state[i] = 1;
+    stack.push(i);
+    for (const d of dependsOn[i]) {
+      const found = visit(Number(d.slice(1)) - 1);
+      if (found) return found;
+    }
+    stack.pop();
+    state[i] = 2;
+    return null;
+  };
+  for (let i = 0; i < dependsOn.length; i++) {
+    const found = visit(i);
+    if (found) return found;
+  }
+  return null;
 }
 
 /**
