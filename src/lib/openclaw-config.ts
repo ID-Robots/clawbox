@@ -922,9 +922,18 @@ async function listAgentSessionsFiles(agentsDir: string): Promise<string[]> {
 }
 
 async function atomicWriteSessionsFile(filePath: string, data: unknown): Promise<void> {
-  const tmp = `${filePath}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
-  await fs.rename(tmp, filePath);
+  // Same inode swap as writeConfig, on a file that holds the owner's own
+  // conversations, so the mode has to be put back after the rename rather than
+  // left to the umask. 0600 like the config: nothing on the device reads an
+  // agent's sessions as anyone but its own user.
+  //
+  // NARROWED, not preserved, even though the HARNESS owns this file — beta
+  // wrote it with no mode at all, so the umask decided. The argument that makes
+  // "preserve" right for `hermes-env.ts` (ClawBox only ever puts a value into a
+  // file the harness maintains) does not reach here: this writer replaces the
+  // inode, so there is no mode left to preserve, only one to choose. ClawBox
+  // and the gateway run as the same user on a box, so 0600 costs no reader.
+  await writeSecretJsonAtomically(filePath, data);
 }
 
 /**
@@ -1406,11 +1415,45 @@ function existingChannelBlock(
   return isPlainObject(existing) ? existing : {};
 }
 
+/**
+ * Write `file` at 0600, temp-then-rename, without a window at a looser mode.
+ *
+ * `rename` swaps the INODE, so a temp written under the process umask takes its
+ * mode with it and whatever the destination had is gone. Measured on an
+ * OpenClaw box: `~/.openclaw/openclaw.json` is 0600 and the service user's
+ * umask is 0002, so a plain temp-then-rename left the file holding
+ * `channels.telegram.botToken` and the gateway's auth token at 0664 — readable
+ * by every account on the device, from a save that reported success.
+ *
+ * 0600 unconditionally, not the mode the file happens to have: every box that
+ * already took an update is sitting at that 0664, nothing on the device chmods
+ * this file, and preserving what the defect widened would leave its own victims
+ * the only boxes the fix never reaches. It is also what OpenClaw's own CLI
+ * created the file with, and what `config-store.ts`, `writeDiscordGatewayEnv`,
+ * `email-pending.ts` and `writeAuthProfiles` all force for the same reason.
+ *
+ * The stale temp is removed first, because `writeFile`'s `mode` is ignored for
+ * a file that already exists — a temp left at 0666 by a crashed write would
+ * otherwise hold the whole credential file at that mode until the chmod, and
+ * carry it across the rename if the chmod failed.
+ */
+async function writeSecretJsonAtomically(file: string, data: unknown): Promise<void> {
+  const tmpPath = `${file}.tmp`;
+  await fs.rm(tmpPath, { force: true });
+  await fs.writeFile(tmpPath, JSON.stringify(data, null, 2), { mode: 0o600, encoding: "utf-8" });
+  try {
+    await fs.chmod(tmpPath, 0o600);
+  } catch {
+    // Best-effort, as everywhere else here: a failed chmod must not turn a
+    // working save into an error. The `mode` above already covers the ordinary
+    // path, where the temp did not exist.
+  }
+  await fs.rename(tmpPath, file);
+}
+
 export async function writeConfig(config: OpenClawConfig): Promise<void> {
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
-  const tmpPath = CONFIG_PATH + ".tmp";
-  await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
-  await fs.rename(tmpPath, CONFIG_PATH);
+  await writeSecretJsonAtomically(CONFIG_PATH, config);
 }
 
 const OPENCLAW_CONFIG_LOCK_STALE_MS = 30_000;

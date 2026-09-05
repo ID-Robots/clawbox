@@ -65,3 +65,63 @@ describe("hermesVoiceProbePending", () => {
     expect(await probePending()).toBe(false);
   });
 });
+
+/**
+ * `readHermesVoice().unread` — which config key each flag is actually derived
+ * from.
+ *
+ * The decision half of this is well covered: `hermes-clawai-voice` drives the
+ * real `applyClawaiToHermes` over every combination of the four flags. But it
+ * mocks `readHermesVoice` wholesale, and the other three suites that reach
+ * this module stub `hermesConfigReadPending` to `false` — so wiring
+ * `cloudRoute` to the wrong key, or dropping a conjunct from `localProvider`,
+ * leaves every suite in the repo green while the two HIGHs those flags exist
+ * to close are both open again. This is the one place the derivation runs for
+ * real.
+ */
+describe("readHermesVoice().unread", () => {
+  async function unread() {
+    const { readHermesVoice } = await import("@/lib/hermes-tts");
+    return (await readHermesVoice()).unread;
+  }
+
+  it("says nothing is unread when every read answered", async () => {
+    expect(await unread()).toEqual({
+      provider: false,
+      cloudRoute: false,
+      cloudKey: false,
+      localProvider: false,
+    });
+  });
+
+  it("names the one flag each key raises, and no other", async () => {
+    // One key at a time, so a flag wired to a NEIGHBOURING key fails here
+    // rather than passing on the strength of the others.
+    const expected: Record<string, Record<string, boolean>> = {
+      "tts.provider": { provider: true, cloudRoute: false, cloudKey: false, localProvider: false },
+      "tts.openai.base_url": { provider: false, cloudRoute: true, cloudKey: false, localProvider: false },
+      "tts.openai.api_key": { provider: false, cloudRoute: false, cloudKey: true, localProvider: false },
+      // Both halves of ONE definition: a `type` that answered `command` while
+      // the command string timed out is as unknown as neither answering, so
+      // either key alone raises `localProvider`.
+      "tts.providers.clawbox-local.type": { provider: false, cloudRoute: false, cloudKey: false, localProvider: true },
+      "tts.providers.clawbox-local.command": { provider: false, cloudRoute: false, cloudKey: false, localProvider: true },
+    };
+    for (const [key, flags] of Object.entries(expected)) {
+      pending.clear();
+      vi.resetModules();
+      pending.add(key);
+      expect(await unread(), `${key} raised the wrong flag`).toEqual(flags);
+    }
+  });
+
+  it("raises nothing for a key the voice does not rest on", async () => {
+    pending.add("model.default");
+    expect(await unread()).toEqual({
+      provider: false,
+      cloudRoute: false,
+      cloudKey: false,
+      localProvider: false,
+    });
+  });
+});

@@ -722,8 +722,19 @@ try {
     // default requires owner approval before the agent responds to a new
     // sender. See src/lib/openclaw-config.ts:setTelegramToken.
     const {dmPolicy:_dm,allowFrom:_af,...rest}=c.channels.telegram||{};
-    c.channels.telegram={...rest,enabled:true,botToken:cb.telegram_bot_token};
-    process.stderr.write('  Telegram channel registered in OpenClaw config\n');
+    // OpenClaw's own value wins over ClawBox's mirror — see the same block in
+    // install.sh: the mirror re-registers the channel on a fresh ~/.openclaw,
+    // it does not restore an older bot over one `openclaw config set` re-pointed.
+    // An env REFERENCE under `token` ({source:'env',…}) is a bot OpenClaw holds
+    // too — see the same block in install.sh.
+    const existingToken=typeof rest.botToken==='string'?rest.botToken.trim():'';
+    // `token: null`/`token: ""` is an UNSET reference, not a credential - see
+    // the same block in install.sh.
+    const openclawHasBot=existingToken!==''||(rest.token!==undefined&&rest.token!==null&&rest.token!=='');
+    c.channels.telegram=openclawHasBot?{...rest,enabled:true}:{...rest,enabled:true,botToken:cb.telegram_bot_token};
+    process.stderr.write(openclawHasBot
+      ? '  Telegram channel registered in OpenClaw config (kept the bot OpenClaw already holds)\n'
+      : "  Telegram channel registered in OpenClaw config from ClawBox's saved token\n");
   }
 } catch {}
 
@@ -761,6 +772,13 @@ if(!c.gateway.controlUi)c.gateway.controlUi={};
 c.gateway.controlUi.allowInsecureAuth=true;
 c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
 
+// In PLACE, deliberately: no temp file and no rename, so the inode and its
+// mode survive the write. install.sh's block replaces the inode and has to
+// force 0600 for that reason; this one must not grow a temp-then-rename
+// without the same chmod, or it will silently widen a 0600 credential file
+// to the umask. The block only runs when openclaw.json already exists.
+// It owes no REPAIR either: writeConfig re-secures this same file to 0600 on
+// the next settings save, on an x64 box as on a Jetson.
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
     echo "  OpenClaw config updated"

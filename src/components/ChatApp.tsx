@@ -76,7 +76,23 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   const [openEmailUid, setOpenEmailUid] = useState<number | null>(null)
   const closeEmail = useCallback(() => setOpenEmailUid(null), [])
   const [input, setInput] = useState('')
-  const [streaming, setStreaming] = useState('')
+  const [streaming, setStreamingState] = useState('')
+  // The streaming buffer, mirrored in a ref, and the ONLY way it is written.
+  //
+  // A state updater is a pure function of the previous state and React is
+  // entitled to call it twice — Strict Mode does, and so does any render it has
+  // to redo. The interrupted-turn append used to happen INSIDE
+  // `setStreaming(prev => …)`, so the owner's half-finished answer could land in
+  // the transcript twice. The ref lets the abort path READ the buffer without an
+  // updater at all, and the string-only signature makes putting an updater back
+  // impossible rather than merely discouraged — and the raw setter is renamed
+  // out of the way so a bare `setStreaming('')` added elsewhere in the file
+  // cannot bypass the ref and leave it holding a dead run's text. TASK-703.
+  const streamingRef = useRef('')
+  const applyStreaming = useCallback((next: string) => {
+    streamingRef.current = next
+    setStreamingState(next)
+  }, [])
   const [sending, setSending] = useState(false)
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   const [errorMsg, setErrorMsg] = useState('')
@@ -276,7 +292,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
 
           if (state === 'delta') {
             const text = extractText(msg)
-            if (text && !isInterSessionEnvelope(text, msg)) setStreaming(text)
+            if (text && !isInterSessionEnvelope(text, msg)) applyStreaming(text)
           } else if (state === 'final') {
             const text = extractText(msg)
             // Suppress protocol sentinels and "Sent." (delivery-mirror ack)
@@ -294,7 +310,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             if (text && !isAckOnly && !isInterSessionEnvelope(text, msg)) {
               setMessages(prev => [...prev, { role: 'assistant', text: prettifyAssistantText(text), timestamp: Date.now() }])
             }
-            setStreaming('')
+            applyStreaming('')
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
@@ -315,18 +331,21 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               }, 3_000)
             }
           } else if (state === 'aborted' || state === 'error') {
-            setStreaming(prev => {
-              // Stop landing between `EMAIL` and its digits used to store the
-              // half-written line, and the render keeps an unusable directive
-              // as text — so a bare `EMAIL:` stayed in the transcript for good.
-              // The bubble was already hiding it and it can never become a
-              // card, so what is stored is what the owner was looking at.
-              const kept = dropUnfinishedDirective(prev)
-              if (kept.trim() && !isSentinel(kept)) {
-                setMessages(msgs => [...msgs, { role: 'assistant', text: prettifyAssistantText(kept), timestamp: Date.now() }])
-              }
-              return ''
-            })
+            // Read, clear, THEN append — all three outside any updater. This
+            // append used to sit inside `setStreaming(prev => …)`, where React
+            // may run it twice and the owner's interrupted answer lands in the
+            // transcript twice with it.
+            //
+            // Stop landing between `EMAIL` and its digits used to store the
+            // half-written line, and the render keeps an unusable directive
+            // as text — so a bare `EMAIL:` stayed in the transcript for good.
+            // The bubble was already hiding it and it can never become a
+            // card, so what is stored is what the owner was looking at.
+            const kept = dropUnfinishedDirective(streamingRef.current)
+            applyStreaming('')
+            if (kept.trim() && !isSentinel(kept)) {
+              setMessages(msgs => [...msgs, { role: 'assistant', text: prettifyAssistantText(kept), timestamp: Date.now() }])
+            }
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
@@ -471,7 +490,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       images: imagesToSend.map(img => img.dataUrl),
     }])
     setSending(true)
-    setStreaming('')
+    applyStreaming('')
 
     const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
@@ -487,7 +506,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     }
 
     await dispatchSend(text, wirePayload, idempotencyKey)
-  }, [input, sending, pendingImages, status, dispatchSend])
+  }, [input, sending, pendingImages, status, dispatchSend, applyStreaming])
 
   // Drain queued sends on connect; flush them as system errors on error.
   // Sequential dispatch preserves user-typed order — chat.send acks fast

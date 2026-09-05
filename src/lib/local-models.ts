@@ -212,8 +212,8 @@ async function run(cmd: string, args: string[], timeout = 5000): Promise<string 
     const { stdout } = await execFileAsync(cmd, args, { timeout });
     return stdout;
   } catch (err) {
-    // systemctl exits non-zero for "inactive"/"disabled" and still prints the
-    // word we want, so a failure with usable stdout is a real answer.
+    // A non-zero exit that still printed is a real answer — `pgrep` exits 1
+    // with the matches it found on stdout when some of them have gone.
     const out = (err as { stdout?: string })?.stdout;
     return typeof out === "string" && out.trim() ? out : null;
   }
@@ -228,16 +228,56 @@ function userSystemctlEnv(): NodeJS.ProcessEnv {
   };
 }
 
-async function runUserSystemctl(args: string[]): Promise<string | null> {
+/**
+ * Which stderr from `systemctl` is systemd ANSWERING rather than failing.
+ *
+ * `is-enabled` on a unit that does not exist prints its whole answer on
+ * stderr on systemd < 252 (`Failed to get unit file state for x.service: No
+ * such file or directory`) and on stdout on 252+ (`not-found`). Read as
+ * silence, the older shape made an absent unit indistinguishable from a wedged
+ * bus — and `answered` exists precisely to tell those apart. So that one
+ * message is carried through as the answer it is.
+ *
+ * Matched on systemd's own phrase for the lookup AND the errno that means the
+ * file is not there. Neither half is enough on its own: a wedged user bus says
+ * `Failed to connect to bus: No such file or directory`, which shares the tail
+ * and says nothing about this unit, while the phrase alone is systemd's format
+ * string for EVERY failure of the lookup — `Connection reset by peer`,
+ * `Access denied`, `Invalid argument` — none of which learned anything either.
+ * All of those, and a timeout, stay silence.
+ */
+const UNIT_FILE_ABSENT = /unit file state[\s\S]*:\s*No such file or directory/i;
+
+/**
+ * One `systemctl` question, in either scope, with "there is no such unit"
+ * preserved whichever stream it arrives on.
+ *
+ * Not `run()`: that helper serves every command this module shells out to, and
+ * carrying stderr into a `pgrep` or `nvidia-smi` answer would be nonsense. The
+ * carry-through is specific to systemctl's own message, so it lives with the
+ * one caller that can read it.
+ */
+async function systemctlAnswer(scope: "user" | "system", args: string[]): Promise<string | null> {
+  const argv = scope === "user" ? ["--user", ...args] : args;
   try {
-    const { stdout } = await execFileAsync("/usr/bin/systemctl", ["--user", ...args], {
+    const { stdout } = await execFileAsync("/usr/bin/systemctl", argv, {
       timeout: 5000,
-      env: userSystemctlEnv(),
+      ...(scope === "user" ? { env: userSystemctlEnv() } : {}),
     });
     return stdout;
   } catch (err) {
+    // systemctl exits non-zero for "inactive"/"disabled"/"not-found" and still
+    // prints the word we want, so a failure with usable stdout is a real answer.
     const out = (err as { stdout?: string })?.stdout;
-    return typeof out === "string" && out.trim() ? out : null;
+    if (typeof out === "string" && out.trim()) return out;
+    // NORMALISED, never passed through. `present` is computed by exclusion —
+    // anything that is not a known absence marker is a unit that exists — so
+    // letting a free-form sentence reach it would make any unrecognised error
+    // read as a present, enabled unit. It is the one absence word systemd
+    // itself uses, or it is silence.
+    const errOut = (err as { stderr?: string })?.stderr;
+    if (typeof errOut === "string" && UNIT_FILE_ABSENT.test(errOut)) return "not-found";
+    return null;
   }
 }
 
@@ -248,6 +288,22 @@ export interface UnitState {
   enabled: boolean;
   /** `is-active` says "failed": it exited with an error, it is not merely stopped. */
   failed: boolean;
+  /**
+   * Did systemd ANSWER, or did the question fail?
+   *
+   * `is-enabled` prints a word for every unit it knows about and an error
+   * string naming the missing file for one it does not — so an EMPTY answer is
+   * neither: a 5 s timeout, a SIGKILL, or "Failed to connect to bus" on a
+   * wedged user bus, all of which arrive here as `present: false`.
+   *
+   * A cosmetic false negative is right for a panel that reloads. It is wrong
+   * for a writer that runs once: the ClawBox AI link path reads this to decide
+   * whether a box can still speak for itself, and moving it off its on-device
+   * voice is permanent (`step_openclaw_tts` then preserves the new value as
+   * the owner's choice). That caller asks `probeLocalTtsEngine`, which reports
+   * "could not ask" rather than "no".
+   */
+  answered: boolean;
 }
 
 export async function readUnitState(unit: string, scope: "user" | "system"): Promise<UnitState> {
@@ -258,23 +314,29 @@ export async function readUnitState(unit: string, scope: "user" | "system"): Pro
   // ahead of the reply's own speech budget rather than inside it). Asked
   // together the worst case is one timeout, not two.
   const [isActive, isEnabled] = await Promise.all([
-    scope === "user"
-      ? runUserSystemctl(["is-active", unit])
-      : run("/usr/bin/systemctl", ["is-active", unit]),
-    scope === "user"
-      ? runUserSystemctl(["is-enabled", unit])
-      : run("/usr/bin/systemctl", ["is-enabled", unit]),
+    systemctlAnswer(scope, ["is-active", unit]),
+    systemctlAnswer(scope, ["is-enabled", unit]),
   ]);
   const enabledWord = (isEnabled ?? "").trim();
-  // `is-enabled` answers with an error string, not a state, when the unit file
-  // is missing — that is how "absent" is told apart from "installed but off".
-  const present = enabledWord !== "" && !enabledWord.toLowerCase().includes("no such file");
+  // `is-enabled` answers "there is no such unit" in TWO shapes, and the version
+  // that answers which depends on the board: `not-found` on systemd >= 252,
+  // and an error string naming the missing file on the older systemd the
+  // shipped Jetson runs. Both are "absent"; matching only the second reported
+  // a unit that does not exist as PRESENT, which keeps a stamped box on an
+  // on-device engine it can no longer speak with.
+  const present = enabledWord !== ""
+    && enabledWord !== "not-found"
+    && !enabledWord.toLowerCase().includes("no such file");
   const activeWord = (isActive ?? "").trim();
   return {
     present,
     active: activeWord === "active",
     enabled: ["enabled", "enabled-runtime", "static", "alias", "indirect"].includes(enabledWord),
     failed: activeWord === "failed",
+    // Either shape of "there is no such unit" IS an answer — "absent" — which
+    // is exactly what `present` reads it as above. Silence is not, and only a
+    // read that said nothing on either stream reaches here empty.
+    answered: enabledWord !== "",
   };
 }
 
@@ -380,16 +442,79 @@ export function friendlyModelName(raw: string | null | undefined): string | null
   return version ? `${family} ${version}` : family;
 }
 
+/**
+ * THE rule: does this box have an on-device speech engine?
+ *
+ * BOTH the stamp and the unit. The weights alone are not an installation: on
+ * the loop's own test box the 82M Kokoro weights sit in the HuggingFace cache
+ * from a run that failed afterwards, with no unit and no stamp. Reporting that
+ * as installed is precisely the lie the Voice tab removes.
+ *
+ * Written ONCE, here, beside `kokoroEntry`: the panel's row, the chat turn's
+ * spoken-reply capability and the ClawBox AI link path all reach it, so they
+ * cannot drift into giving one box two answers. Not exported — the callers
+ * want one of the two functions below, which do the reading as well.
+ */
+function localTtsEngineInstalled(stamped: boolean, unitPresent: boolean): boolean {
+  return stamped && unitPresent;
+}
+
+/**
+ * The rule, over a fresh sample, with "I could not ask" kept distinct from "no".
+ *
+ * `null` means the question failed — a wedged user systemd bus, a 5 s timeout,
+ * a SIGKILL — on a box that does hold the Kokoro stamp, so nothing here is
+ * evidence either way. Only a caller whose write is PERMANENT needs that
+ * distinction, and there is exactly one: the ClawBox AI link path moves a box
+ * off its on-device voice for good (`step_openclaw_tts` afterwards sees the
+ * new value and preserves it as the owner's choice), so a false negative there
+ * costs the owner the engine they paid for. Everything else wants
+ * `hasLocalTtsEngine` and its fail-closed `false`.
+ *
+ * No stamp and no answer is still a real `false`: the stamp is a required half
+ * of the rule and `exists()` answers it on its own.
+ */
+export async function probeLocalTtsEngine(): Promise<boolean | null> {
+  try {
+    const [stamped, unit] = await Promise.all([
+      exists(KOKORO_STAMP),
+      readUnitState(KOKORO_UNIT, "user"),
+    ]);
+    if (!unit.answered) return stamped ? null : false;
+    return localTtsEngineInstalled(stamped, unit.present);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Does this box have an on-device speech engine, fail-closed?
+ *
+ * "Could not ask" answers "no engine", which for a panel is a cosmetic false
+ * negative that the next load corrects, and for the chat turn is one reply
+ * without a player rather than a player that plays nothing.
+ */
+export async function hasLocalTtsEngine(): Promise<boolean> {
+  return (await probeLocalTtsEngine()) === true;
+}
+
 async function kokoroEntry(): Promise<LocalModelEntry> {
+  // ONE sample of each fact, and the rule applied to it. Calling
+  // `hasLocalTtsEngine()` here instead would run the stamp read and the
+  // `systemctl --user` pair a SECOND time — measured 2 → 4 spawns — on the path
+  // whose own comment says the spoken-reply capability reads this inventory per
+  // reply; and `installed` would then come from a different sample than the one
+  // filling `enabled`, `running` and `memoryBytes`, so a unit that moved between
+  // them would produce a row that contradicts itself.
+  //
+  // `stamped` is a third question — are the WEIGHTS there — and only the
+  // wording below needs it, to tell "its service is missing" from "nothing was
+  // ever installed".
   const [stamped, unit] = await Promise.all([
     exists(KOKORO_STAMP),
     readUnitState(KOKORO_UNIT, "user"),
   ]);
-  // BOTH have to be true. The weights alone are not an installation: on the
-  // loop's own test box the 82M Kokoro weights sit in the HuggingFace cache
-  // from a run that failed afterwards, with no unit and no stamp. Reporting
-  // that as installed is precisely the lie this tab removes.
-  const installed = stamped && unit.present;
+  const installed = localTtsEngineInstalled(stamped, unit.present);
   const memoryBytes = unit.active ? await processMemoryBytes("kokoro-server.py") : null;
   return {
     id: "kokoro",

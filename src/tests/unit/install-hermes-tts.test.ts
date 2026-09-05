@@ -285,6 +285,171 @@ describe.skipIf(!hasBash)("the on-device voice is registered with Hermes nativel
     }
   });
 
+  // TASK-699. The card asked for the selection to be WITHHELD on a box with no
+  // engine. It must not be: measured read-only on the pinned Hermes 0.20.5
+  // package on the Hermes box, `tools/tts_tool.py:211` sets
+  // `DEFAULT_PROVIDER = "edge"` and `:661` resolves
+  // `(tts_config.get("provider") or DEFAULT_PROVIDER)`, so an unset
+  // `tts.provider` IS Microsoft's Edge cloud and the harness offers no "off"
+  // value at all. Withholding or clearing the selection would move an
+  // engineless box from honestly mute to speaking through a third party the
+  // customer never chose. What was missing was saying so.
+  describe("keeps an engineless box off a cloud it never chose", () => {
+    it("still selects the on-device provider when there is no engine", () => {
+      // 13 is "this board declines Kokoro" — the verdict shape the dev box
+      // publishes when there is no CUDA build for it.
+      const res = runStep("hermes", { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" });
+      const calls = res.hermesCalls.join("\n");
+
+      expect(calls).toContain(`config set tts.providers.${HERMES_PROVIDER}.type command`);
+      expect(calls, `an engineless box was left to resolve Hermes' Edge default:\n${res.out}`)
+        .toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+    });
+
+    it("never clears the selection, whatever the engine did", () => {
+      // The one write this arm must never make. `config unset tts.provider`
+      // does not mute the box, it hands it to Microsoft.
+      for (const opts of [
+        { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" },
+        { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n", hermesProvider: HERMES_PROVIDER },
+        { voiceExit: 0, ttsStatus: "KOKORO=failed:build\n", hermesProvider: "edge" },
+      ]) {
+        const res = runStep("hermes", opts);
+        expect(res.hermesCalls.join("\n"), `the selection was cleared:\n${res.out}`)
+          .not.toContain("config unset tts.provider");
+      }
+    });
+
+    it("replaces Hermes' factory Edge even on a box that cannot speak for itself", () => {
+      // The arm admits `edge`, and an engineless box is exactly where a "leave
+      // it alone" branch would strand the owner on Microsoft's cloud.
+      const res = runStep("hermes", {
+        voiceExit: 13,
+        ttsStatus: "KOKORO=skipped:no-cuda\n",
+        hermesProvider: "edge",
+      });
+
+      expect(res.hermesCalls.join("\n"), `the box was left on Hermes' Edge cloud:\n${res.out}`)
+        .toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+      expect(res.out).toMatch(/replacing Hermes' factory 'edge' cloud default/);
+    });
+
+    it("says the box has no voice yet, and why the selection is kept anyway", () => {
+      const res = runStep("hermes", { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" });
+
+      // The three facts that make the line actionable, each asserted rather
+      // than implied — the 13 arm's own banner already names the verdict and
+      // the link, so those two alone would pass unchanged against beta.
+      // The REASON in the operator's words, not the raw verdict — the line is
+      // for whoever reads the install log, and "no engine" alone is not
+      // actionable. Non-empty and specific, so a `($KOKORO_REASON)` that
+      // stopped being set fails here.
+      expect(res.out).toMatch(/no on-device engine \(this board declines Kokoro[^)]*\)/);
+      expect(res.out).toMatch(/stays SILENT until ClawBox AI is linked/);
+      expect(res.out).toMatch(/would hand the box to Hermes' factory Edge cloud/);
+    });
+
+    it("says nothing of the sort when the engine is there", () => {
+      const res = runStep("hermes", { voiceExit: 0, ttsStatus: "KOKORO=ready\n" });
+
+      expect(res.hermesCalls.join("\n"), `the engine was installed and not selected:\n${res.out}`)
+        .toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+      expect(res.out).not.toMatch(/no on-device engine/);
+    });
+
+    it("reads the published verdict, not the exit code", () => {
+      // VOICE_RC=1 with `KOKORO=ready` on file is a working engine — the
+      // OpenClaw arm of this same step says so in as many words — and a box
+      // that CAN speak must not be told it stays silent.
+      const working = runStep("hermes", { voiceExit: 1, ttsStatus: "KOKORO=ready\n" });
+      expect(working.out, `a working engine was reported as missing:\n${working.out}`)
+        .not.toMatch(/no on-device engine/);
+
+      // The other direction: "the file says the engine is not there" beats
+      // "the status code implied it was".
+      const missing = runStep("hermes", { voiceExit: 0, ttsStatus: "KOKORO=failed:build\n" });
+      expect(missing.out, `a missing engine was passed over in silence:\n${missing.out}`)
+        .toMatch(/no on-device engine \(.+\)/);
+    });
+
+    it("says what an engineless box is left with even when the selection could not be read", () => {
+      // The one arm of this step that can leave `tts.provider` UNSET on a
+      // first install — and this PR is the one that established that an unset
+      // key is Hermes' Edge cloud, not silence. Its warning says the selection
+      // is "left alone", which reads as "no change" when on an unset key it
+      // means Microsoft. The engine verdict is already in hand here; saying it
+      // costs nothing and is the only thing this step can still tell the
+      // operator on this path.
+      const res = runStep("hermes", {
+        hermesReadFails: true,
+        voiceExit: 13,
+        ttsStatus: "KOKORO=skipped:no-cuda\n",
+      });
+
+      expect(res.out).toMatch(/could not read tts.provider/);
+      expect(res.out, `the missing engine was never mentioned:\n${res.out}`)
+        .toMatch(/no on-device engine \(this board declines Kokoro[^)]*\)/);
+      // What an unread selection can be hiding, and the one command that
+      // settles it.
+      expect(res.out).toMatch(/falls back to its factory Edge cloud/);
+      expect(res.out).toMatch(/--step openclaw_tts/);
+    });
+
+    it("says the same about the selection when the engine IS there", () => {
+      // The Edge risk is the unread SELECTION's, not the engine's: a box with
+      // a perfectly good Kokoro whose `tts.provider` could not be read is
+      // equally on Microsoft's cloud if that key is unset, and equally fixed by
+      // re-running this step. Only the engine clause is conditional.
+      const res = runStep("hermes", { hermesReadFails: true, voiceExit: 0, ttsStatus: "KOKORO=ready\n" });
+
+      expect(res.out).toMatch(/could not read tts.provider/);
+      expect(res.out, `the operator was told nothing about the unread selection:\n${res.out}`)
+        .toMatch(/falls back to its factory Edge cloud/);
+      expect(res.out).toMatch(/--step openclaw_tts/);
+      expect(res.out).not.toMatch(/no on-device engine/);
+    });
+
+    it("says what a dual box's Hermes voice actually depends on", () => {
+      // `getActiveHarness()` answers the STORED harness on a licensed dual box,
+      // and `setActiveHarness` may store "hermes" — so the link does wire the
+      // Hermes voice there. Telling that operator to go and do by hand what
+      // happens by itself is the mirror of the false promise this Note exists
+      // to avoid.
+      const res = runStep("dual", { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" });
+
+      expect(res.out).toMatch(/stays SILENT/);
+      expect(res.out, `the dual note still claims nothing wires it:\n${res.out}`)
+        .toMatch(/while Hermes is the active harness/);
+      expect(res.out).not.toMatch(/nothing selects the Hermes cloud voice automatically/);
+    });
+
+    it("still leaves an owner's own provider alone when there is no engine", () => {
+      const res = runStep("hermes", {
+        voiceExit: 13,
+        ttsStatus: "KOKORO=skipped:no-cuda\n",
+        hermesProvider: "elevenlabs",
+      });
+
+      // The trailing space matters: `config set tts.providers.…` starts with
+      // the same characters, and an assertion that matched it would pass over
+      // the very definition this block is supposed to keep writing.
+      expect(res.hermesCalls.join("\n")).not.toContain("config set tts.provider ");
+    });
+  });
+
+  it("does not promise the OpenClaw arm a cloud voice the plan may not include", () => {
+    // The Hermes Note says "on a plan that includes cloud speech" because
+    // gateway-pre-start.sh gates the OpenClaw cloud voice on exactly that
+    // device tier (CLAWBOX_SPEECH_DEVICE_TIER) and refuses to write it below
+    // one. The OpenClaw line beside it promised the voice on the link alone —
+    // two harnesses, one box, two answers, in the same install log.
+    const res = runStep("openclaw", { voiceExit: 13, ttsStatus: "KOKORO=skipped:no-cuda\n" });
+
+    expect(res.out).toMatch(/NO working on-device TTS engine/);
+    expect(res.out, `the cloud voice was promised unconditionally:\n${res.out}`)
+      .toMatch(/on a plan that includes cloud speech/);
+  });
+
   it("pins the output format to wav, so no utterance needs ffmpeg", () => {
     // VERIFIED ON THE BOX: tts_tool.py's _get_command_tts_output_format reads
     // `format` or `output_format` and otherwise falls back to

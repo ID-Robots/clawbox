@@ -20,7 +20,11 @@ vi.mock("fs/promises", () => ({
     writeFile: vi.fn(),
     rename: vi.fn(),
     mkdir: vi.fn(),
+    // `rm` and `chmod`: writeConfig clears a stale temp and forces 0600 on
+    // the one it writes (rename swaps the inode), so a mocked filesystem
+    // has to answer both.
     chmod: vi.fn(),
+    rm: vi.fn(),
   },
 }));
 

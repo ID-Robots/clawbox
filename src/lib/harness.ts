@@ -12,7 +12,7 @@ import path from "path";
 import { get, set } from "@/lib/config-store";
 import { envPort } from "@/lib/port-probe";
 import { verifyDualLicense } from "@/lib/edition-license";
-import { readEdition } from "@/lib/edition-source";
+import { readEdition, readEditionSource, type EditionSource } from "@/lib/edition-source";
 
 export type Harness = "openclaw" | "hermes";
 
@@ -51,6 +51,11 @@ export type Edition = Harness | "dual";
  *  restart the service. */
 export function getEdition(): Edition {
   return readEdition();
+}
+
+/** {@link getEdition}, plus whether anything on this device actually said so. */
+export function getEditionSource(): EditionSource {
+  return readEditionSource();
 }
 
 /**

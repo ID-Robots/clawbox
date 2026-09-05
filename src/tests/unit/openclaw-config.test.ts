@@ -22,6 +22,11 @@ vi.mock("fs/promises", () => ({
     writeFile: vi.fn(),
     rename: vi.fn(),
     mkdir: vi.fn(),
+    // `rm` and `chmod`: writeConfig clears a stale temp and forces 0600 on
+    // the one it writes (rename swaps the inode), so a mocked filesystem
+    // has to answer both.
+    chmod: vi.fn(),
+    rm: vi.fn(),
   },
 }));
 
@@ -347,14 +352,19 @@ describe("openclaw-config", () => {
       );
     });
 
-    it("writes to temp file and renames atomically", async () => {
+    // The mode goes with the write and again as an explicit chmod: `rename`
+    // replaces the inode, so the temp file's mode is the one openclaw.json ends
+    // up with, and `writeFile`'s own `mode` is ignored for a stale temp that
+    // already exists.
+    it("writes to temp file at the config's own mode and renames atomically", async () => {
       await openclawConfig.setTelegramToken("123:abc");
 
       expect(mockFs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining(".tmp"),
         expect.any(String),
-        "utf-8"
+        { mode: 0o600, encoding: "utf-8" },
       );
+      expect(mockFs.chmod).toHaveBeenCalledWith(expect.stringContaining(".tmp"), 0o600);
       expect(mockFs.rename).toHaveBeenCalled();
     });
 
@@ -784,12 +794,12 @@ describe("openclaw-config", () => {
       expect(mockFs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining("openclaw.json.tmp"),
         expect.stringContaining('"baseUrl": "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"'),
-        "utf-8",
+        { mode: 0o600, encoding: "utf-8" },
       );
       expect(mockFs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining("openclaw.json.tmp"),
         expect.stringContaining('"baseUrl": "http://127.0.0.1/setup-api/local-ai/ollama"'),
-        "utf-8",
+        { mode: 0o600, encoding: "utf-8" },
       );
     });
 

@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { signSessionCookie } from "@/tests/helpers/session";
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-setup-status-tests-${process.pid}-${Date.now()}`);
@@ -124,6 +124,22 @@ describe("GET /setup-api/setup/status — unauthenticated payload", () => {
 
     expect(body.local_ai_provider).toBe("ollama");
     expect(body.telegram_configured).toBe(true);
+  });
+
+  // `telegram_configured` ends the setup wizard, so a value that could not
+  // address a bot must not set it. The mirror used to be exempt from the shape
+  // check the harness stores get, which made a truncated paste or a leftover
+  // placeholder in data/config.json enough to complete onboarding.
+  it("does not report a mirror value that could not be a bot token", async () => {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({
+      password_configured: true,
+      telegram_bot_token: "token123",
+    }), "utf-8");
+
+    const res = await statusGet();
+    const body = await res.json();
+
+    expect(body.telegram_configured).toBe(false);
   });
 });
 
@@ -291,6 +307,58 @@ describe("GET /setup-api/setup/status", () => {
     expect(body.telegram_configured).toBe(true);
   });
 
+  // The wizard's Telegram step is skipped on `telegram_configured`. On a Hermes
+  // box the credential belongs to the harness — ~/.hermes/.env, where `hermes
+  // config set TELEGRAM_BOT_TOKEN` writes — and ClawBox's copy exists only as a
+  // side effect of its own configure route. A box paired out of band therefore
+  // re-entered the wizard and was walked through setting up a bot that already
+  // worked. No probe belongs on this route (it is public and polled every 3 s),
+  // so the answer is the same CLI-free file read the pairing gate uses.
+  describe("telegram_configured on Hermes", () => {
+    let hermesHome: string;
+
+    beforeEach(async () => {
+      hermesHome = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-status-hermes-"));
+      process.env.HERMES_HOME = hermesHome;
+      // No /etc/clawbox/edition.env on a dev box or in CI, so the lock falls
+      // back to the environment.
+      process.env.CLAWBOX_EDITION = "hermes";
+    });
+
+    afterEach(async () => {
+      delete process.env.HERMES_HOME;
+      delete process.env.CLAWBOX_EDITION;
+      await fs.rm(hermesHome, { recursive: true, force: true });
+    });
+
+    it("reports the bot Hermes holds when ClawBox has no copy of the token", async () => {
+      await fs.writeFile(path.join(hermesHome, ".env"), "TELEGRAM_BOT_TOKEN=123456:HermesOwnBot\n", "utf-8");
+
+      const body = await (await statusGet()).json();
+
+      expect(body.telegram_configured).toBe(true);
+    });
+
+    it("reports no bot when neither store has one", async () => {
+      await fs.writeFile(path.join(hermesHome, ".env"), "# nothing configured yet\n", "utf-8");
+
+      const body = await (await statusGet()).json();
+
+      expect(body.telegram_configured).toBe(false);
+    });
+
+    // Still private. The flag is operational detail and stays behind the
+    // session, whichever store answered it.
+    it("keeps the flag out of the unauthenticated payload", async () => {
+      await fs.writeFile(path.join(hermesHome, ".env"), "TELEGRAM_BOT_TOKEN=123456:HermesOwnBot\n", "utf-8");
+
+      const body = await (await statusRoute(anonymousRequest())).json();
+
+      expect(body).not.toHaveProperty("telegram_configured");
+      expect(JSON.stringify(body)).not.toContain("HermesOwnBot");
+    });
+  });
+
   it("returns all configuration states correctly", async () => {
     await fs.writeFile(CONFIG_PATH, JSON.stringify({
       setup_complete: true,
@@ -302,7 +370,7 @@ describe("GET /setup-api/setup/status", () => {
       local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
       ai_model_configured: true,
       ai_model_provider: "openai",
-      telegram_bot_token: "token123",
+      telegram_bot_token: "123456:MirroredBotSecret_0",
     }), "utf-8");
 
     const res = await statusGet();

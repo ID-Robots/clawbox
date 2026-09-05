@@ -8,9 +8,9 @@
 // Hermes owns the same three jobs under its own commands:
 //   * `hermes config set TELEGRAM_BOT_TOKEN <token>` — routes to ~/.hermes/.env
 //     (the CLI's own env-key allowlist covers TELEGRAM_BOT_TOKEN) and rotates any
-//     stale config.yaml mirror of the value. A token present there is enough to
-//     enable the platform: the gateway's env pass turns Telegram on when the token
-//     is set and no explicit `enabled: false` overrides it.
+//     config.yaml copy that held the PREVIOUS value. A token present there is
+//     enough to enable the platform: the gateway's env pass turns Telegram on when
+//     the token is set and no explicit `enabled: false` overrides it.
 //   * `hermes gateway install/start/status` — the process that actually RECEIVES
 //     messages. `hermes gateway setup` is the documented configure command but it
 //     is a TTY wizard that takes no arguments, so it can never be called from a
@@ -25,6 +25,8 @@ import fs from "fs/promises";
 import path from "path";
 import { promisify } from "util";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { readHermesConfigTopLevelScalar } from "@/lib/hermes-config-yaml";
+import { getHermesEnvValue } from "@/lib/hermes-env";
 import { PAIRING_TOKEN_RE, normalizePairingToken } from "@/lib/telegram-pairing-token";
 
 const execFileAsync = promisify(execFile);
@@ -326,13 +328,103 @@ export async function clearHermesTelegramPairingState(): Promise<void> {
 
 // ── Token + gateway service ─────────────────────────────────────────────────
 
+/** The env key Hermes' own `config set` routes to ~/.hermes/.env. */
+const HERMES_TELEGRAM_TOKEN_KEY = "TELEGRAM_BOT_TOKEN";
+
+/** What Hermes holds as its Telegram credential — and whether we could look. */
+export interface HermesTelegramToken {
+  /** Hermes' bot token, or null when it has none / could not be read. */
+  token: string | null;
+  /** False when ~/.hermes/.env could not be read, so `token` proves nothing. */
+  known: boolean;
+}
+
+/**
+ * ~/.hermes/.env's answer, tri-state like the whole of this reader.
+ *
+ * `value` is null ONLY when the key is absent from the file — an empty
+ * `TELEGRAM_BOT_TOKEN=` comes back as `""`, because that is a key the bridge
+ * puts in os.environ and the config.yaml pass then skips. Collapsing the two
+ * would send the reader on to a config.yaml copy the gateway is not using and
+ * report that bot as this box's.
+ */
+async function envToken(): Promise<{ value: string | null; known: boolean }> {
+  try {
+    return { value: await getHermesEnvValue(HERMES_TELEGRAM_TOKEN_KEY), known: true };
+  } catch (err) {
+    // An unreadable .env — EACCES after a root-owned write, EIO on a failing
+    // eMMC, a directory where the file should be. Reporting "no bot" here is
+    // what let the approvals guard wave through the harness's own bot, so the
+    // caller gets `known: false` instead. Logged rather than swallowed: this is
+    // a real fault, the routes above it answer a permanent 503, and without
+    // this line the service log holds nothing to explain either. The MESSAGE
+    // only: an fs error carries the path, and a rethrown reader error can carry
+    // a window of the file it failed on.
+    console.error(
+      "[telegram] ~/.hermes/.env could not be read; Hermes' bot is unknown:",
+      err instanceof Error ? err.message : err,
+    );
+    return { value: null, known: false };
+  }
+}
+
+/**
+ * The bot token Hermes itself would use.
+ *
+ * TWO FILES, IN HERMES' OWN ORDER. Hermes resolves a credential like this one
+ * through its env bridge, not through one file: `gateway/run.py` loads
+ * ~/.hermes/.env into the environment and then bridges every TOP-LEVEL scalar
+ * in ~/.hermes/config.yaml for keys the environment does not already carry —
+ * "Top-level simple values (fallback only — don't override .env)" — and
+ * `hermes_cli/send_cmd.py`'s `_load_hermes_env` does the same two steps in the
+ * same order (verified read-only against the installed 0.20.5 package). So
+ * .env WINS, and config.yaml is a real fallback: a box whose bot was written
+ * into config.yaml — a documented way to feed env-shaped keys to the harness —
+ * polls a bot that a .env-only read reports as absent. That was this reader
+ * answering `known: true` over half the question, which is exactly the
+ * confident "no bot" the approvals guard fails open on.
+ *
+ * HARNESS GAP, stated rather than worked around: `hermes config get
+ * TELEGRAM_BOT_TOKEN` is NOT that resolved answer. `get_config_value` routes an
+ * env-shaped key to `get_env_value`, which reads os.environ and then .env and
+ * never looks at config.yaml (hermes_cli/config.py) — so the CLI would answer
+ * "not set" for precisely the box this reader exists for. There is no command
+ * that resolves the pair, so ClawBox reads the same two files the harness's own
+ * bridge reads, through the readers it already has for each.
+ *
+ * Tri-state, because "Hermes has no bot" and "we could not find out" are
+ * different answers and only one of them may be acted on.
+ */
+export async function readHermesTelegramToken(): Promise<HermesTelegramToken> {
+  // Sequential, not concurrent: .env DEFINING the key ends the question — that
+  // is what the bridge puts in the environment, and config.yaml cannot override
+  // it, empty value included. Reading the fallback anyway would spend a file
+  // read on every panel poll for a value that is discarded — and log a
+  // complaint about a config.yaml nothing was going to use.
+  const env = await envToken();
+  // An UNREADABLE .env ends the question too, and ends it as an unknown. It may
+  // define the key — that is exactly what could not be established — so a
+  // config.yaml value is not the answer either: the bridge would only reach it
+  // for a key .env does not carry. Falling through returned that value with
+  // `known: false` beside it, and both panel routes compute `configured: token
+  // !== null` and `unknown: !known && token === null` — so a root-owned .env
+  // holding bot B and an older config.yaml holding bot A reported A as this
+  // box's bot, confidently, on /telegram/status, /telegram/pairing and the
+  // wizard, while the gateway polled B.
+  if (!env.known) return { token: null, known: false };
+  if (env.value !== null) return { token: env.value || null, known: true };
+  const yaml = await readHermesConfigTopLevelScalar(HERMES_TELEGRAM_TOKEN_KEY);
+  return { token: yaml.value, known: yaml.known };
+}
+
 /**
  * Store the bot token where Hermes reads it (~/.hermes/.env) via
- * `hermes config set`, which also clears a stale config.yaml copy that would
- * otherwise outrank it.
+ * `hermes config set`, which also rotates a config.yaml copy holding the
+ * PREVIOUS value, so the fallback the env bridge would reach for cannot name a
+ * bot this box has replaced (hermes_cli/credential_lifecycle.py).
  */
 export async function setHermesTelegramToken(botToken: string, signal?: AbortSignal): Promise<void> {
-  const res = await runHermesCli(["config", "set", "TELEGRAM_BOT_TOKEN", botToken], {
+  const res = await runHermesCli(["config", "set", HERMES_TELEGRAM_TOKEN_KEY, botToken], {
     timeoutMs: CONFIG_TIMEOUT_MS,
     signal,
   });

@@ -192,6 +192,56 @@ describe("config-store", () => {
     });
   });
 
+  // JSON that parses fine and is not an object. `get` then indexed `null` and
+  // threw a TypeError out of whichever route touched the store next — a 500
+  // with nothing in it that names the file. Every reader here treats it as an
+  // unreadable store instead.
+  describe("a config.json that is not a JSON object", () => {
+    it.each(["null", "42", '"a string"', "[1, 2]"])("reads %s as an unreadable store", async (raw) => {
+      await fs.writeFile(CONFIG_PATH, raw, "utf-8");
+
+      await expect(configStore.get("any_key")).resolves.toBeUndefined();
+      await expect(configStore.getAll()).resolves.toEqual({});
+      await expect(configStore.getKnown("any_key")).resolves.toEqual({ value: undefined, known: false });
+    });
+  });
+
+  // A write reads the whole store first, and `writeConfig` renames into `data/`
+  // — which needs write permission on the DIRECTORY, not on the file. So a
+  // store nobody could read used to be REPLACED by the one key being saved,
+  // under `success: true`, taking the mailbox password and both bot tokens with
+  // it. A write over an unreadable store has to fail instead.
+  describe("a write over a store that could not be read", () => {
+    it("throws rather than replacing it", async () => {
+      await fs.writeFile(CONFIG_PATH, "{ half written", "utf-8");
+
+      await expect(configStore.set("telegram_bot_token", "111:x")).rejects.toThrow();
+      await expect(configStore.setMany({ a: 1 })).rejects.toThrow();
+      expect(await fs.readFile(CONFIG_PATH, "utf-8")).toBe("{ half written");
+    });
+
+    it("still writes the first key on a box that has never saved anything", async () => {
+      await configStore.set("first", "value");
+
+      expect(await configStore.get("first")).toBe("value");
+    });
+  });
+
+  describe("getKnown", () => {
+    it("says known for a store it could read, absent file included", async () => {
+      await expect(configStore.getKnown("nothing")).resolves.toEqual({ value: undefined, known: true });
+
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ present: "v" }), "utf-8");
+      await expect(configStore.getKnown("present")).resolves.toEqual({ value: "v", known: true });
+    });
+
+    it("says known:false for a store it could not parse", async () => {
+      await fs.writeFile(CONFIG_PATH, "{ half written", "utf-8");
+
+      await expect(configStore.getKnown("present")).resolves.toEqual({ value: undefined, known: false });
+    });
+  });
+
   describe("DATA_DIR and CONFIG_ROOT exports", () => {
     it("exports DATA_DIR constant", () => {
       expect(configStore.DATA_DIR).toBe(DATA_DIR);

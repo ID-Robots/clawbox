@@ -53,6 +53,9 @@ vi.mock("@/lib/harness", async (importOriginal) => {
 vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGetMany: async (keys: string[]) =>
     Object.fromEntries(keys.map((k) => [k, hermesConfig[k] ?? ""])),
+  // Every key in this fixture ANSWERED: `readHermesVoice` reports which of its
+  // own reads did not, and an unread key is not an unset one.
+  hermesConfigReadPending: () => false,
 }));
 
 vi.mock("@/lib/hermes-cli", () => ({
@@ -336,6 +339,70 @@ describe("a factory Hermes box still on Edge", () => {
       ["config", "set", "tts.provider", "clawbox-local"],
       expect.anything(),
     );
+  });
+});
+
+/**
+ * On Hermes `openai` is the GENERIC OpenAI-compatible slot. An owner may have
+ * aimed it at their own speech server with their own key — `install.sh` lists
+ * it among the values it preserves as their choice — and the panel must say so
+ * for the same reason it drops `edge`: the privacy line either says nothing
+ * leaves the box or NAMES the cloud the words go to, and a third party's
+ * endpoint reported as "ClawBox cloud, with your device token" names the wrong
+ * one. It also made the fix worse than the bug: re-selecting what looked
+ * already active is the one write that overwrites their endpoint, key and
+ * model.
+ */
+describe("a Hermes box whose openai slot is the owner's own", () => {
+  beforeEach(() => {
+    hermesConfig["tts.provider"] = "openai";
+    hermesConfig["tts.openai.base_url"] = "https://speech.example.internal/v1";
+    hermesConfig["tts.openai.api_key"] = "sk-owners-own-key";
+  });
+
+  it("does not present the owner's own speech server as the active ClawBox engine", async () => {
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    expect(body.activeEngine).toBeNull();
+  });
+
+  it("does not hand the owner's endpoint back as ClawBox's own", async () => {
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    expect(JSON.stringify(body)).not.toContain("speech.example.internal");
+  });
+
+  it("still offers the cloud voice as the explicit choice it would be", async () => {
+    // Dropping the SELECTION must not drop the OPTION: this box holds a
+    // `claw_` token and is entitled, so switching to ClawBox cloud has to stay
+    // one deliberate click away.
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    expect(body.engines.map((e: { id: string }) => e.id)).toContain("cloud");
+  });
+});
+
+/**
+ * The same slot, holding a route WE wrote under a proxy address that has since
+ * moved. `CLAWBOX_AI_PROXY_URL` is env-overridable and changes in a release, so
+ * matching it exactly is not what makes a route ours — the `claw_` credential
+ * beside it is.
+ */
+describe("a Hermes box we linked before the proxy address moved", () => {
+  beforeEach(() => {
+    hermesConfig["tts.provider"] = "openai";
+    hermesConfig["tts.openai.base_url"] = "https://clawbox.test/api/ai-retired";
+    hermesConfig["tts.openai.api_key"] = "claw_test_token";
+  });
+
+  it("still calls it the ClawBox cloud voice", async () => {
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    expect(body.activeEngine).toBe("cloud");
   });
 });
 

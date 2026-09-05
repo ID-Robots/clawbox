@@ -43,7 +43,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { API_BASE, authHeader } from "./lib/api";
-import { buildContext } from "./lib/context";
+import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { resolveProfile } from "./lib/profile";
 import { createRegistrar, type Profile } from "./lib/register";
@@ -126,16 +126,52 @@ function instructionsFor(edition: Ed, profile: Profile): string {
 }
 
 /**
- * Build a fully-registered server. Exported so mcp/check-tools.ts can build one
- * per edition and diff the tool lists without connecting a transport.
+ * Build a fully-registered server, and hand back its registrar and context.
+ *
+ * Exported so mcp/check-tools.ts can build one per edition and posture and diff
+ * the tool lists without connecting a transport.
+ *
+ * `overrides` exists for that CHECKER, not for the running server. Several tool
+ * families register only when a device probe says the box can do the thing —
+ * `du`, `journalctl`, a screen grabber, a readable mailbox, the coding harness.
+ * Off a real box every one of those probes answers false (mcp/lib/guard.ts
+ * spawns in CLAWBOX_ROOT, which does not exist on a CI runner or a dev PC), so
+ * a checker that built the server the ordinary way would examine a fraction of
+ * the surface and report the whole thing OK. Nothing else passes it; the
+ * running server always takes the probes.
+ *
+ * It may override CAPABILITIES only. The server's identity — `edition`,
+ * `install`, `profile`, `appHarness` — is settled by the arguments, and
+ * `instructionsFor(edition, profile)` and `createRegistrar(server, edition,
+ * profile)` go on using those; a `Partial<McpContext>` let a caller write a
+ * different edition into `ctx`, which is what the GATES read, and get a context
+ * that disagreed with its own registrar. The checker already restricts itself
+ * this way (`Posture` in mcp/check-tools.ts); saying it in the signature closes
+ * it for every caller.
+ *
+ * `install` is a parameter for the same reason, and it did not used to be: it
+ * was read from `/etc/clawbox/edition.env` here, so the surface a `dual` box
+ * registers could not be built anywhere it is not already installed — not on
+ * CI, not on a single-edition box. `device_status` emits a DIFFERENT
+ * description on `dual` (mcp/tools/orientation.ts), and description length and
+ * banned phrases are exactly what the contract checks, so that variant shipped
+ * unexamined — the same hole the two `ai_set_provider` variants had. It
+ * defaults to the installed edition, so the running server is unchanged.
  */
-export async function buildServer(edition: Ed, profile: Profile, appHarness: Ed | null) {
+export async function buildServer(
+  edition: Ed,
+  profile: Profile,
+  appHarness: Ed | null,
+  overrides?: Partial<Omit<McpContext, "edition" | "install" | "profile" | "appHarness">>,
+  install: McpContext["install"] = installEdition(),
+) {
   // The app list is a different question from the tool set — see
   // `resolveAppHarness` — but it is answered by the SAME probe, taken once in
   // `main()` and handed down. Asking again here made a dual box put two
   // requests to /setup-api/harness/active at every startup, each with its own
   // 3 s timeout, and let the two collapse a silence in opposite directions.
-  const ctx = await buildContext(edition, installEdition(), profile, appHarness);
+  const probed = await buildContext(edition, install, profile, appHarness);
+  const ctx: McpContext = overrides ? { ...probed, ...overrides } : probed;
   const server = new McpServer(
     { name: "clawbox", version: VERSION },
     { instructions: instructionsFor(edition, profile) },
@@ -184,7 +220,7 @@ async function main(): Promise<void> {
   );
 }
 
-// mcp/check-tools.ts imports buildServer to diff the two editions' tool lists;
+// mcp/check-tools.ts imports buildServer to build five postures per edition and diff the tool lists;
 // it sets this first so importing this module does not claim stdio.
 if (process.env.CLAWBOX_MCP_NO_AUTOSTART !== "1") {
   main().catch((err) => {

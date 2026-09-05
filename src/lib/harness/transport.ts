@@ -22,8 +22,17 @@ export type HarnessId = "openclaw" | "hermes";
  * Narrower than `typeof fetch` on purpose: runtimes bolt extras onto the global
  * (Bun adds `preconnect`), and a test double has no business implementing them
  * to stand in for a plain request.
+ *
+ * The parameters are DERIVED from the ambient `fetch` rather than written as
+ * `RequestInfo | URL`: this module is in the MCP server's import graph, which
+ * typechecks without the DOM lib (mcp/tsconfig.json), and `RequestInfo` is a
+ * DOM name. Deriving them resolves in both projects and cannot drift from
+ * whichever fetch the runtime declares.
  */
-export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+export type FetchLike = (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => Promise<Response>;
 
 /**
  * Capabilities as DATA.
@@ -253,7 +262,7 @@ export type TurnEvent =
    * last few characters are ever visible.
    *
    * Cumulative is the right way round because the surface's job is to paint the
-   * current state of one bubble, which is what `setStreaming(text)` already
+   * current state of one bubble, which is what `applyStreaming(text)` already
    * does for the gateway. An adapter whose transport speaks in fragments — the
    * Hermes dashboard socket does — accumulates them itself and reports the
    * whole, so the renderer stays the same one for every harness.

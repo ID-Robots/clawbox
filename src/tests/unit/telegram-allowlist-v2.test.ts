@@ -12,7 +12,10 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 // telegram-pairing.test.ts keeps covering the legacy files (v1 boxes).
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn() }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "openclaw") }));
+vi.mock("@/lib/harness", () => ({
+  getActiveHarness: vi.fn(async () => "openclaw"),
+  getEdition: vi.fn(() => "openclaw"),
+}));
 vi.mock("@/lib/hermes-telegram", () => ({
   approveHermesPairing: vi.fn(),
   listHermesPairing: vi.fn(),

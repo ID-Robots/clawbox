@@ -13,7 +13,17 @@ import fs from "fs/promises";
 
 vi.mock("child_process", () => ({ execFile: vi.fn() }));
 vi.mock("fs/promises", () => ({
-  default: { readFile: vi.fn(), writeFile: vi.fn(), rename: vi.fn(), mkdir: vi.fn() },
+  // `rm` and `chmod`: writeConfig clears a stale temp and forces 0600 on the
+  // one it writes (rename swaps the inode), so a mocked filesystem has to
+  // answer both.
+  default: {
+    readFile: vi.fn(),
+    writeFile: vi.fn(),
+    rename: vi.fn(),
+    mkdir: vi.fn(),
+    chmod: vi.fn(),
+    rm: vi.fn(),
+  },
 }));
 vi.mock("fs", () => ({ default: { readFileSync: vi.fn(), existsSync: vi.fn() } }));
 
