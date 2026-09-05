@@ -13,8 +13,9 @@
 #
 #   1. It found the entry with
 #      `find .next/standalone -maxdepth 3 -name node_modules -prune -o -name server.js -print -quit`
-#      and trusted whatever readdir handed back first. During an update the
-#      project root also holds `.next-old` — the previous build, parked by
+#      and trusted whatever readdir handed back first — while Next had already
+#      recorded where it put the entry (see "Where the entry is" below).
+#      During an update the project root also holds `.next-old` — parked by
 #      `set_previous_build_aside` so an OOM-killed rebuild cannot leave the box
 #      with no build at all — and Next's file tracing copies it INTO the new
 #      standalone tree (see "why the parked build is in there" below). So the
@@ -66,17 +67,44 @@ for swept in "$STANDALONE"/.next-old*; do
   rm -rf "$swept"
 done
 
-# The entry `next build` wrote, and only then a search.
+# Where the entry is, asked of Next rather than guessed at.
 #
-# `outputFileTracingRoot` is unset, so the tracing root is the project
-# directory and Next writes the entry at `$STANDALONE/server.js`. Next nests
-# the tree under `<standalone>/<path from the tracing root to the app>` when
-# that root is a parent directory (a monorepo layout), and the search below is
-# what supports that shape — pruning the parked tree and `node_modules` (which
-# has `server.js` files of its own in next/ and react-dom/), and taking regular
-# files only, so the symlink a previous run of this script may have left is
-# never mistaken for the entry.
-if [ -f "$STANDALONE/server.js" ] && [ ! -L "$STANDALONE/server.js" ]; then
+# `relativeAppDir` in `.next/required-server-files.json` is
+# `path.relative(outputFileTracingRoot, dir)`
+# (next/dist/build/index.js:1107) — the exact segment `copyTracedFiles` joins
+# under `.next/standalone` when it writes the entry
+# (next/dist/build/utils.js:990). It is "" for this repo, because
+# `outputFileTracingRoot` is unset and therefore the project directory; it is
+# the app's path below the tracing root for the nested layout Next produces
+# when that root is a parent (a monorepo). Either way Next has already
+# recorded the answer, so nothing here has to depend on readdir order.
+#
+# Read with node, as scripts/verify-build-identity.sh reads build-info.json:
+# a Jetson runs the server, so it has node, and it does not necessarily have
+# jq. A value that could climb out of the standalone tree is not an answer
+# this script will act on.
+rel_app_dir() {
+  node -e '
+    const fs = require("fs");
+    try {
+      const v = JSON.parse(fs.readFileSync(process.argv[1], "utf8")).relativeAppDir;
+      if (typeof v !== "string") process.exit(1);
+      if (v.startsWith("/") || v.split("/").includes("..")) process.exit(1);
+      process.stdout.write(v);
+    } catch { process.exit(1); }
+  ' "$1" 2>/dev/null
+}
+
+# The fallbacks, in order: the manifest, then the layout the manifest describes
+# for this repo, then a search for a tree that carries neither. The search
+# prunes the parked build and `node_modules` (next/ and react-dom/ have
+# `server.js` files of their own) and takes regular files only, so the symlink
+# a previous run of this script may have left is never taken for the entry.
+REL="$(rel_app_dir ".next/required-server-files.json")" || REL=""
+CANDIDATE="$STANDALONE${REL:+/$REL}/server.js"
+if [ -f "$CANDIDATE" ] && [ ! -L "$CANDIDATE" ]; then
+  SRVJS="$CANDIDATE"
+elif [ -f "$STANDALONE/server.js" ] && [ ! -L "$STANDALONE/server.js" ]; then
   SRVJS="$STANDALONE/server.js"
 else
   SRVJS="$(find "$STANDALONE" -maxdepth 3 \

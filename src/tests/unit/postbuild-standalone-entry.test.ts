@@ -170,6 +170,30 @@ d("postbuild entry selection", () => {
       .toContain("standalone server");
   });
 
+  it("takes the entry from the path Next recorded for it", () => {
+    // `relativeAppDir` in .next/required-server-files.json is
+    // path.relative(outputFileTracingRoot, dir) — the same segment
+    // copyTracedFiles joins under .next/standalone. Nesting the tree and
+    // stating it in the manifest is the whole of Next's contract here, so the
+    // parked decoy and a `find` that offers it first must change nothing.
+    fs.rmSync(path.join(standalone, "server.js"));
+    const nested = path.join(standalone, "app");
+    fs.mkdirSync(path.join(nested, ".next"), { recursive: true });
+    fs.writeFileSync(path.join(nested, "server.js"), "// nested standalone server\n");
+    fs.writeFileSync(
+      path.join(tmp, ".next", "required-server-files.json"),
+      JSON.stringify({ version: 1, relativeAppDir: "app" }),
+    );
+    sweepParkedBuildIn();
+    stubFindReturning(PARKED_ENTRY);
+
+    const res = runPostbuild();
+    expect(res.status, res.stderr).toBe(0);
+    expect(fs.existsSync(path.join(nested, ".next", "build-info.json"))).toBe(true);
+    expect(fs.realpathSync(path.join(standalone, "server.js")))
+      .toBe(fs.realpathSync(path.join(nested, "server.js")));
+  });
+
   it("removes a parked build that the file trace swept into the standalone output", () => {
     sweepParkedBuildIn();
 
