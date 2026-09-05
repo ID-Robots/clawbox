@@ -1344,6 +1344,10 @@ promote_parked_build() {
   echo "  Found a build parked by an interrupted rebuild — putting it back" >&2
   rm -rf "$build_dir"
   mv "$kept_dir" "$build_dir"
+  # The stamp names the run that died (see set_previous_build_aside); it must
+  # not ride into the tree the box is about to serve. `|| true` because a
+  # cosmetic cleanup must never be what aborts a recovery under `set -e`.
+  rm -f "$build_dir/.rebuild-pid" || true
 }
 
 # Keep the build that is serving the box until a new one exists.
@@ -1360,6 +1364,25 @@ promote_parked_build() {
 # runs out of disk is a worse outcome than one with no fallback. Said out loud
 # either way, because which of the two happened decides what an operator does
 # next.
+#
+# The park also stamps the tree it sets aside — `.rebuild-pid`, holding this
+# script's PID and the boot id. Both reclaims (promote_parked_build here and the
+# boot-time one in production-server.js) fire on a single fact: no
+# `.next/standalone/server.js`, but a `.next-old/standalone/server.js`. That is
+# ALSO the ordinary state of a rebuild in flight, for the whole length of the
+# build, because the rename below happens first and `next build` writes the
+# standalone entry last. The stamp is what separates "the rebuild died and left
+# its build here" — reclaim it — from "a rebuild is running and this is its
+# fallback" — leave it alone.
+#
+# The boot id is not decoration. A power cut mid-build, one of the very cases
+# these helpers exist for, leaves the stamp on disk, and after the reboot that
+# PID can belong to any unrelated process — which would make the reclaim refuse
+# forever and re-create the crash loop it was added to end. No rebuild survives
+# a reboot.
+#
+# The stamp lives INSIDE the parked tree, so it cannot outlive it and needs no
+# entry of its own in .gitignore (`.next-old/` is already there).
 set_previous_build_aside() {
   local build_dir="$1" kept_dir="$2" need avail
   rm -rf "$kept_dir"
@@ -1377,6 +1400,16 @@ set_previous_build_aside() {
     return 0
   fi
   echo "Setting the current build aside..."
+  # Before the rename, not after: the stamp and the park then arrive together,
+  # so there is no instant in which a restarting dashboard sees a parked build
+  # with no owner. `$$` is this script's PID — the process whose death is what
+  # "the rebuild died" means. An unreadable boot id writes an empty second
+  # field, which no reader can match: the reclaim then behaves exactly as it did
+  # before the stamp existed, which is the safe direction to fail in.
+  if ! printf '%s %s\n' "$$" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" \
+      > "$build_dir/.rebuild-pid"; then
+    echo "  Warning: could not record this rebuild as the owner of the build it is parking — a dashboard restarting mid-build may reclaim it" >&2
+  fi
   mv "$build_dir" "$kept_dir"
 }
 
@@ -1399,6 +1432,10 @@ restore_previous_build() {
   if [ -d "$kept_dir" ]; then
     rm -rf "$build_dir"
     mv "$kept_dir" "$build_dir"
+    # This shell is about to stop being a rebuild; the stamp it wrote must not
+    # stay behind inside the build the box serves. `|| true` for the same reason
+    # as in promote_parked_build, and more so: this IS the recovery path.
+    rm -f "$build_dir/.rebuild-pid" || true
     restored=1
   fi
   if ! build_entry_present "$build_dir"; then

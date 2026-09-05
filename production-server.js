@@ -619,16 +619,66 @@ http.Server.prototype.listen = function (...args) {
 // `Restart=always` means a lost race just tries again in three seconds.
 try {
   const buildEntry = path.join(__dirname, ".next", "standalone", "server.js");
-  const parkedEntry = path.join(__dirname, ".next-old", "standalone", "server.js");
+  const parkedDir = path.join(__dirname, ".next-old");
+  const parkedEntry = path.join(parkedDir, "standalone", "server.js");
   // `lstatSync`, not `existsSync`: for the nested standalone layout `postbuild`
   // supports, this path is a symlink into `.next` that DANGLES while the tree is
   // parked, and `existsSync` would call the box's only build absent.
   const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+
+  // …and "no entry, a parked one exists" is not on its own the killed rebuild
+  // this block repairs. It is ALSO the normal state of a rebuild in flight, for
+  // the whole length of the build: install.sh's do_rebuild renames `.next` to
+  // `.next-old` and `next build` writes the standalone entry last. This process
+  // is started inside that window as a matter of routine — clawbox-gateway.service
+  // carries `Wants=clawbox-setup.service`, so every gateway (re)start starts the
+  // service do_rebuild had just stopped (e2e-install run 33971129750: four
+  // seconds after the stop). Reclaiming there `rm -rf`s the half-written build
+  // out from under `next build` and renames the previous one on top of it, and
+  // the box comes back on the build the update was replacing.
+  //
+  // So the rebuild says so: set_previous_build_aside stamps the tree it parks
+  // with its own PID and boot id. Only a stamp that can be PROVEN live refuses
+  // the reclaim — anything else, absent (every build parked before this
+  // existed) or unparseable or from another boot or naming a process that is
+  // gone, leaves this block behaving exactly as it did before the stamp
+  // existed. That is the safe direction to fail in: a mid-build reclaim costs
+  // one failed update, while a stamp wrongly believed live costs a
+  // crash-looping box with its only build on disk — the state this whole block
+  // was added to end.
+  const OWNER_STAMP = ".rebuild-pid";
+  const readTrimmed = (p) => { try { return fs.readFileSync(p, "utf-8").trim(); } catch { return ""; } };
+  const rebuildOwnerPid = () => {
+    const [rawPid, stampBootId] = readTrimmed(path.join(parkedDir, OWNER_STAMP)).split(/\s+/);
+    const pid = Number.parseInt(rawPid, 10);
+    if (!Number.isInteger(pid) || pid <= 0) return 0;
+    // A PID is only meaningful within the boot that issued it: a power cut
+    // mid-build leaves the stamp behind, and after the reboot that number can
+    // belong to anything. No rebuild survives a reboot.
+    const bootId = readTrimmed("/proc/sys/kernel/random/boot_id");
+    if (!bootId || bootId !== stampBootId) return 0;
+    try {
+      process.kill(pid, 0);
+      return pid;
+    } catch (err) {
+      // EPERM: alive, but not ours to signal. do_rebuild runs as root and this
+      // server as `clawbox`, so EPERM is the ordinary answer about a live rebuild.
+      return err.code === "EPERM" ? pid : 0;
+    }
+  };
+
   if (!present(buildEntry) && present(parkedEntry)) {
-    console.warn("[production-server] No .next build, but .next-old holds one — an update was killed mid-rebuild. Putting it back.");
-    fs.rmSync(path.join(__dirname, ".next"), { recursive: true, force: true });
-    fs.renameSync(path.join(__dirname, ".next-old"), path.join(__dirname, ".next"));
-    console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
+    const owner = rebuildOwnerPid();
+    if (owner) {
+      console.warn(`[production-server] No .next build yet — a rebuild is in progress (pid ${owner}), leaving .next-old alone.`);
+    } else {
+      console.warn("[production-server] No .next build, but .next-old holds one — an update was killed mid-rebuild. Putting it back.");
+      fs.rmSync(path.join(__dirname, ".next"), { recursive: true, force: true });
+      fs.renameSync(parkedDir, path.join(__dirname, ".next"));
+      // The stamp named the run that died; it must not stay in the tree we serve.
+      fs.rmSync(path.join(__dirname, ".next", OWNER_STAMP), { force: true });
+      console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
+    }
   }
 } catch (err) {
   console.warn("[production-server] Could not reclaim a parked build:", err.message);

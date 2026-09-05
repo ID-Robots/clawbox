@@ -135,11 +135,23 @@ interface Run {
   buildId: string | null;
   hasEntry: boolean;
   parked: boolean;
+  /**
+   * What the parked tree said about its owner WHILE `bun run build` ran —
+   * "live <pid>", "stale <pid>" or "none". The reclaim in production-server.js
+   * has nothing else to go on: from the park until the standalone entry is
+   * written there is no `.next/standalone/server.js`, which is the only thing
+   * it looks at, and clawbox-setup is pulled back up inside that window by
+   * `clawbox-gateway.service`'s `Wants=`.
+   */
+  buildSawOwner: string;
+  /** Did a stamp survive into the tree the box is left serving? */
+  ownerLeftBehind: boolean;
 }
 
 let sandbox: string;
 let systemctlLog: string;
 let projectDir: string;
+let ownerProbe: string;
 
 function writeBuild(dir: string, buildId: string, withEntry = true): void {
   mkdirSync(path.join(dir, "standalone"), { recursive: true });
@@ -195,7 +207,24 @@ function run(scenario: Scenario = {}): Run {
     "exits-zero-without-output": "exit 0",
     "no-standalone-entry": 'mkdir -p "$1/.next" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && exit 0',
   };
-  writeFileSync(fakeBuild, "#!/usr/bin/env bash\n" + bodies[build] + "\n", "utf-8");
+  // Sampled from inside the build, because that is the only moment the
+  // question matters: the reclaim fires on a box whose `bun run build` is
+  // still running.
+  const probeOwner = [
+    'OWNER_FILE="$1/.next-old/.rebuild-pid"',
+    'if [ -f "$OWNER_FILE" ]; then',
+    '  read -r OWNER_PID OWNER_BOOT < "$OWNER_FILE"',
+    '  THIS_BOOT=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)',
+    '  if [ -n "$OWNER_BOOT" ] && [ "$OWNER_BOOT" = "$THIS_BOOT" ] && kill -0 "$OWNER_PID" 2>/dev/null; then',
+    '    printf "live %s\\n" "$OWNER_PID" > ' + JSON.stringify(ownerProbe),
+    "  else",
+    '    printf "stale %s\\n" "$OWNER_PID" > ' + JSON.stringify(ownerProbe),
+    "  fi",
+    "else",
+    '  printf "none\\n" > ' + JSON.stringify(ownerProbe),
+    "fi",
+  ].join("\n");
+  writeFileSync(fakeBuild, "#!/usr/bin/env bash\n" + probeOwner + "\n" + bodies[build] + "\n", "utf-8");
   spawnSync("chmod", ["+x", fakeBuild]);
 
   const lines = [
@@ -310,6 +339,8 @@ function run(scenario: Scenario = {}): Run {
     buildId: existsSync(buildIdPath) ? readFileSync(buildIdPath, "utf-8").trim() : null,
     hasEntry: existsSync(path.join(projectDir, ".next", "standalone", "server.js")),
     parked: existsSync(path.join(projectDir, ".next-old")),
+    buildSawOwner: existsSync(ownerProbe) ? readFileSync(ownerProbe, "utf-8").trim() : "not-run",
+    ownerLeftBehind: existsSync(path.join(projectDir, ".next", ".rebuild-pid")),
   };
 }
 
@@ -317,6 +348,7 @@ beforeEach(() => {
   sandbox = mkdtempSync(path.join(tmpdir(), "clawbox-rebuild-"));
   systemctlLog = path.join(sandbox, "systemctl.log");
   projectDir = path.join(sandbox, "clawbox");
+  ownerProbe = path.join(sandbox, "parked-owner.txt");
 });
 
 afterEach(() => {
@@ -525,5 +557,69 @@ describe("step_build asks the same two questions", () => {
     const r = run({ entry: "step_build", build: "oom-killed", previousBuild: "none", parkedBuild: "servable" });
     expect(r.status).not.toBe(0);
     expect(r.buildId).toBe("parked-build-id");
+  });
+});
+
+describe("do_rebuild says who owns the build it parks", () => {
+  /**
+   * The park is not a quiet moment. `set_previous_build_aside` renames `.next`
+   * to `.next-old` and only then runs `bun run build`, so for the whole length
+   * of the build there is no `.next/standalone/server.js` and there is a parked
+   * one — the exact condition production-server.js's boot-time reclaim fires
+   * on. And clawbox-setup comes back up inside that window as a matter of
+   * routine: `config/clawbox-gateway.service` carries
+   * `Wants=clawbox-setup.service`, so every gateway (re)start starts the
+   * service `do_rebuild` had just stopped (e2e-install run 33971129750: four
+   * seconds after the stop, while `bun install` was still running).
+   *
+   * Nothing in the tree said "a rebuild is in flight", so the reclaim could not
+   * tell that state from the one it exists for — a rebuild whose shell was
+   * KILLED. The parked tree carries the rebuilding shell's PID instead, and
+   * liveness is what separates the two.
+   */
+  it("stamps the parked build with the rebuilding shell while the build runs", () => {
+    const r = run({ build: "succeeds" });
+
+    expect(r.status).toBe(0);
+    expect(r.buildSawOwner).toMatch(/^live \d+$/);
+  });
+
+  it("leaves no owner behind on the build it restores after a failure", () => {
+    // The restore renames the parked tree back over `.next`. A stamp riding
+    // along would sit inside the build the box serves, naming a process that
+    // is about to exit.
+    const r = run({ build: "oom-killed" });
+
+    expect(r.status).not.toBe(0);
+    expect(r.buildId).toBe("old-build-id");
+    expect(r.ownerLeftBehind).toBe(false);
+  });
+
+  it("leaves no owner behind on the build it promotes", () => {
+    // Same rename, the other direction: promote_parked_build claims a tree an
+    // earlier killed run left behind, and that tree carries that run's stamp.
+    const r = run({ previousBuild: "none", parkedBuild: "servable", build: "succeeds" });
+
+    expect(r.status).toBe(0);
+    expect(r.ownerLeftBehind).toBe(false);
+  });
+
+  it("writes the stamp production-server.js reads", () => {
+    // Two files, one filename, and no compiler between them. A rename on either
+    // side puts the race back silently: the reclaim would find no stamp, call
+    // every running rebuild a dead one, and fire mid-build again.
+    const stamp = /\.rebuild-pid/;
+    expect(shellFunction("set_previous_build_aside")).toMatch(stamp);
+    expect(readFileSync(path.join(REPO, "production-server.js"), "utf-8")).toMatch(stamp);
+  });
+
+  it("stamps nothing when the disk could not hold two builds", () => {
+    // The no-fallback branch deletes the serving build rather than parking it.
+    // There is no parked tree to own, and no reclaim can fire — a stamp here
+    // would be a claim about a directory that does not exist.
+    const r = run({ build: "succeeds", diskHeadroom: "tight" });
+
+    expect(r.status).toBe(0);
+    expect(r.buildSawOwner).toBe("none");
   });
 });

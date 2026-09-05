@@ -24,6 +24,22 @@ import path from "node:path";
 
 const REPO = process.cwd();
 const SRC = readFileSync(path.join(REPO, "production-server.js"), "utf-8");
+/** The stamp set_previous_build_aside leaves in the tree it parks. */
+const OWNER_STAMP = ".rebuild-pid";
+
+/**
+ * The stamp's second field. A PID is only evidence within the boot that issued
+ * it — a power cut mid-build leaves the stamp on disk, and after the reboot the
+ * number can belong to anything — so writer and reader both pin it to the boot.
+ */
+function bootId(): string {
+  const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+  if (!id) throw new Error("/proc/sys/kernel/random/boot_id is empty — these cases need a Linux host");
+  return id;
+}
+
+/** What install.sh's set_previous_build_aside writes into the tree it parks. */
+const ownerStamp = (pid: number): string => `${pid} ${bootId()}\n`;
 const START = "// A build parked by an update that was killed OUTRIGHT";
 const END = 'require("./.next/standalone/server.js");';
 
@@ -68,6 +84,32 @@ const buildId = (dir: string): string | null => {
   const p = path.join(dir, ".next", "BUILD_ID");
   return existsSync(p) ? readFileSync(p, "utf-8").trim() : null;
 };
+
+/**
+ * A PID that is certainly not running.
+ *
+ * The stamp `set_previous_build_aside` leaves in the parked tree must not become
+ * a latch: an OOM kill leaves it behind together with the build, and that is
+ * the exact case the reclaim exists for. Testing "the owner is gone" needs a
+ * number that really is gone, and `pid_max` is one by definition — proc(5)
+ * says the value in that file "is one greater than the maximum PID", so the
+ * kernel never allocates it. Reading it beats spawning a child and waiting for
+ * it to die: no real process, no second timeout ceiling
+ * (test-timeout-hygiene.test.ts), and no window in which the kernel could hand
+ * the number to something else.
+ */
+function deadPid(): number {
+  const pid = Number.parseInt(readFileSync("/proc/sys/kernel/pid_max", "utf-8").trim(), 10);
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error("could not read /proc/sys/kernel/pid_max");
+  let alive = true;
+  try {
+    process.kill(pid, 0);
+  } catch {
+    alive = false;
+  }
+  if (alive) throw new Error(`pid ${pid} is running after all — it cannot stand in for a dead one`);
+  return pid;
+}
 
 let projectDir: string;
 
@@ -153,5 +195,84 @@ describe("production-server.js reclaims a parked build at boot", () => {
 
     expect(r.threw).toBeNull();
     expect(r.warnings.join(" ")).toMatch(/Could not reclaim a parked build/);
+  });
+
+  it("refuses to reclaim the parked build while the rebuild that parked it is still running", () => {
+    // The window is not narrow: `do_rebuild` renames `.next` to `.next-old`
+    // and only THEN runs `bun run build`, so for the whole length of the build
+    // — minutes on a Jetson — there is no `.next/standalone/server.js` and
+    // there is a parked one. That is exactly the condition this block reclaims
+    // on, and clawbox-setup is pulled back up inside that window routinely:
+    // `clawbox-gateway.service` carries `Wants=clawbox-setup.service`, so every
+    // gateway (re)start starts the service `do_rebuild` had just stopped (seen
+    // in e2e-install run 33971129750, four seconds after the stop). Reclaiming
+    // there `rm -rf`s the half-written build out from under `next build` and
+    // renames the previous one on top of it.
+    const kept = path.join(projectDir, ".next-old");
+    writeBuild(kept, "parked-build-id");
+    writeFileSync(path.join(kept, OWNER_STAMP), ownerStamp(process.pid), "utf-8");
+    // What `next build` has written so far: a `.next` with no standalone entry.
+    mkdirSync(path.join(projectDir, ".next", "server"), { recursive: true });
+    writeFileSync(path.join(projectDir, ".next", "BUILD_ID"), "half-written\n", "utf-8");
+
+    const r = runReclaim(projectDir);
+
+    expect(r.threw).toBeNull();
+    // The in-progress build is untouched…
+    expect(existsSync(path.join(projectDir, ".next", "server"))).toBe(true);
+    expect(buildId(projectDir)).toBe("half-written");
+    // …and so is the fallback the rebuild is counting on.
+    expect(existsSync(path.join(kept, "standalone", "server.js"))).toBe(true);
+    expect(r.warnings.join(" ")).toMatch(/rebuild is in progress/);
+  });
+
+  it("still reclaims once the rebuild that parked the build is gone", () => {
+    // An OOM kill leaves the stamp behind together with the build. A stamp
+    // that outlived its process must not disable the reclaim — that would turn
+    // the repair #632 added into the crash loop it was written to end.
+    const kept = path.join(projectDir, ".next-old");
+    writeBuild(kept, "parked-build-id");
+    writeFileSync(path.join(kept, OWNER_STAMP), ownerStamp(deadPid()), "utf-8");
+
+    const r = runReclaim(projectDir);
+
+    expect(r.threw).toBeNull();
+    expect(buildId(projectDir)).toBe("parked-build-id");
+    expect(existsSync(path.join(projectDir, ".next-old"))).toBe(false);
+    // …and the stamp does not ride into the tree the box now serves.
+    expect(existsSync(path.join(projectDir, ".next", OWNER_STAMP))).toBe(false);
+    expect(r.warnings.join(" ")).toMatch(/killed mid-rebuild/);
+  });
+
+  it("reclaims when the stamp is from an earlier boot", () => {
+    // The power-cut case, after the reboot. The PID in the stamp may well be
+    // live by then — it belongs to whatever systemd started this time — and
+    // believing it would leave the box crash-looping with its only build on
+    // disk, which is the exact state this block exists to end.
+    const kept = path.join(projectDir, ".next-old");
+    writeBuild(kept, "parked-build-id");
+    writeFileSync(
+      path.join(kept, OWNER_STAMP),
+      `${process.pid} 00000000-0000-4000-8000-000000000000\n`,
+      "utf-8",
+    );
+
+    const r = runReclaim(projectDir);
+
+    expect(r.threw).toBeNull();
+    expect(buildId(projectDir)).toBe("parked-build-id");
+    expect(existsSync(path.join(projectDir, ".next-old"))).toBe(false);
+  });
+
+  it("reclaims a parked build that carries no stamp at all", () => {
+    // Every build parked before this stamp existed, and every one parked by a
+    // shell that could not write it, has none. Absent must mean "nobody is
+    // building", or an upgrade would strand exactly the boxes already stuck.
+    writeBuild(path.join(projectDir, ".next-old"), "parked-build-id");
+
+    const r = runReclaim(projectDir);
+
+    expect(r.threw).toBeNull();
+    expect(buildId(projectDir)).toBe("parked-build-id");
   });
 });
