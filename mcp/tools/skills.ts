@@ -28,10 +28,24 @@ import {
 } from "../../src/lib/hermes-skills";
 import { type ApiOptions, apiGet, apiPost } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule, type ToolErrorCode } from "../lib/errors";
+import { fitRows } from "../lib/guard";
 import { json, text, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
 
 const BROWSABLE_SOURCES = HERMES_SKILL_SOURCES.filter((s) => isBrowsableSource(s));
+
+/**
+ * skill_list's output cap. 12,000 rather than the 6,000 it carried since it was
+ * written: measured against a real Hermes box (90 installed rows — 82 bundled,
+ * 3 from the store, 5 made on the device — emitting 3,165 characters), the old
+ * cap left room for 46 further store installs, because #582 grew every store
+ * row by a third. 12,000 covers a device with well over a hundred of them, and
+ * matches the budget coding_agent_status already takes for a comparable list.
+ */
+export const SKILL_LIST_MAX_CHARS = 12_000;
+
+/** Characters reserved for the "and N more" line, so it always fits. */
+const OMISSION_BUDGET = 200;
 
 interface BrowseSkill {
   id: string;
@@ -780,7 +794,7 @@ export function registerSkillTools(reg: Registrar): void {
       + "install something twice, and before skill_uninstall to get the exact name. "
       + "Only skills marked \"from the store\" can be removed.",
     {},
-    { editions: ["hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
+    { editions: ["hermes"], readOnly: true, profile: "core", maxChars: SKILL_LIST_MAX_CHARS },
     async () => {
       const body = await skillsGet<InstalledBody>("/setup-api/hermes/skills/installed", { timeoutMs: 15_000 });
       // A device ships ~77 built-in skills. One terse line each — pretty-printed
@@ -819,7 +833,17 @@ export function registerSkillTools(reg: Registrar): void {
       const header = `${c.total ?? lines.length} skills installed. `
         + "Only the ones marked \"from the store\" can be removed with skill_uninstall; "
         + "the rest came with the device or were made on it.";
-      return text([header, ...lines].join("\n"));
+      // Bound the list HERE rather than leave it to capText(), which slices the
+      // finished string mid-row — the first word of a line is the argument
+      // skill_uninstall takes, and half of one is not an id. #582 made every
+      // row a third longer (the lock id leads, a differing card name is spelled
+      // out) without moving the cap, which halved how many store installs fit.
+      const fitted = fitRows(lines, SKILL_LIST_MAX_CHARS - header.length - OMISSION_BUDGET);
+      const omitted = fitted.omitted
+        ? [`(${fitted.omitted} more installed skills are not listed — the full list was too long to send. `
+          + "Do not conclude a skill is absent because it is missing here; ask about it by name.)"]
+        : [];
+      return text([header, ...fitted.kept, ...omitted].join("\n"));
     },
   );
 
@@ -1266,20 +1290,41 @@ export function registerSkillTools(reg: Registrar): void {
       // `weather` beside the ClawHub `martin-weather` that actually went) and,
       // with a builtin of that name, reported removing a store skill that never
       // existed.
-      const id = removing?.id ?? (typeof done?.id === "string" ? done.id : undefined) ?? wanted;
+      // The ROUTE's answer first. The pre-read and the POST are two moments,
+      // and the route resolves the argument again at the second one — so on a
+      // lock that moved in between (a parallel install, the owner removing it
+      // from Settings) the key it acted on is not the key this tool read, and
+      // its answer is the only thing that knows which. Judging by the pre-read
+      // then checks the post-condition against a skill nobody touched and
+      // names the wrong one to the user.
+      const id = (typeof done?.id === "string" ? done.id : undefined) ?? removing?.id ?? wanted;
+      // The pre-read's row only names a CARD for the skill the route actually
+      // removed; when the two disagree, the route's `requested` is all that is
+      // true about what the agent asked for.
+      const removed = removing && removing.id === id ? removing : undefined;
       // Name the card as well as the lock id: the agent and the user only ever
       // saw the card. From the pre-read when we have it, otherwise from what the
       // route says it was asked for.
-      const asked = removing?.name ?? (typeof done?.requested === "string" ? done.requested : undefined);
+      const asked = removed?.name ?? (typeof done?.requested === "string" ? done.requested : undefined);
       const shown = asked && asked !== id
-        ? removing
+        ? removed
           ? ` (it showed as "${asked}")`
           : ` (you asked for "${asked}")`
         : "";
       // POST-CONDITION. A STORE skill still there means the CLI refused it
       // quietly; a builtin of the same name resurfacing means it worked.
       const after = await installedSkills();
-      if (after && stillInstalled(after, id, removing)) {
+      if (!after) {
+        // The route's 200 is not proof — the CLI prints its refusal and exits
+        // 0, which is the whole reason this tool reads the list back. Without
+        // that read every check below is skipped, and answering the flat
+        // "Removed the skill" turned an unverified removal into a stated fact.
+        return text(
+          `The device reported "${id}"${shown} removed, but its installed list could not be read `
+            + "back, so nothing has checked it. Call skill_list before telling the user it is gone.",
+        );
+      }
+      if (stillInstalled(after, id, removed)) {
         throw new ToolError(
           "CONFLICT",
           `The device did not remove "${id}"${shown} — it is still installed.`,
@@ -1294,10 +1339,10 @@ export function registerSkillTools(reg: Registrar): void {
       // card; that is the `weather` collision an exact lock id is allowed to
       // settle, and saying nothing about it is what would make the next
       // skill_list read as a failed uninstall.
-      const unshadowed = after?.find((sk) => sk.id === id && !isRemovableOrigin(sk.origin));
+      const unshadowed = after.find((sk) => sk.id === id && !isRemovableOrigin(sk.origin));
       const alias = unshadowed
         ? undefined
-        : after?.find((sk) => sk.id !== id && (sk.name === wanted || sk.name === asked));
+        : after.find((sk) => sk.id !== id && (sk.name === wanted || sk.name === asked));
       const survivor = unshadowed ?? alias;
       if (!survivor) return text(`Removed the skill "${id}"${shown}.`);
       const kind = survivor.origin === "local"

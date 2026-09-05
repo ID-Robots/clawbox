@@ -238,6 +238,36 @@ export async function hasBinary(bin: string): Promise<boolean> {
   return r.exitCode === 0 && r.stdout.trim().length > 0;
 }
 
+/**
+ * Keep as many rows as fit `budget` characters, and say how many did not.
+ *
+ * The alternative is capText() below, which is the LAST line of defence: it
+ * hard-slices the finished string, so a list that outgrows its cap stops
+ * mid-row — unparseable JSON for a tool that answers JSON, a half-written id
+ * for one that answers lines — and appends "narrow the query", which the two
+ * list tools cannot do because neither takes an argument. A list tool that
+ * knows its own budget can drop WHOLE rows and say how many, which is a
+ * partial answer instead of a broken one.
+ *
+ * `perRow` is what a row costs BESIDES its own characters — one newline for a
+ * list of lines, and for a JSON array the quotes, the indent and the comma
+ * `JSON.stringify` puts around each element. Counting it wrong is the whole
+ * point of the helper: an underestimate hands the slicer a string that is over
+ * the cap after all.
+ */
+export function fitRows(
+  rows: readonly string[],
+  budget: number,
+  perRow = 1,
+): { kept: string[]; omitted: number } {
+  let used = 0;
+  for (let i = 0; i < rows.length; i += 1) {
+    used += rows[i].length + perRow;
+    if (used > budget) return { kept: rows.slice(0, i), omitted: rows.length - i };
+  }
+  return { kept: [...rows], omitted: 0 };
+}
+
 /** Cap a string at the tool boundary and say what to do about the truncation. */
 export function capText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
