@@ -4982,10 +4982,19 @@ step_nm_dispatcher() {
   # landed, and the `||` warning would never fire because the function still
   # returned 0 from its last echo. Same rule step_systemd_services states for
   # itself, for the same reason.
+  #
+  # install_root_file, not `cp` + `chown` + `chmod`: NetworkManager may execute
+  # this dispatcher at any instant, including mid-update, and `cp` writes the
+  # LIVE inode with O_TRUNC — which on an existing 0755 file means NM can run a
+  # truncated, still-executable dispatcher that silently does less than half its
+  # job. That is the prefix hazard install_root_file was written for (TASK-584).
+  # It stages `$DEST.new` in the same directory and renames, so NM sees either
+  # the whole old file or the whole new one. The staged name is briefly visible
+  # to NM's scan — `.new` is not one of the suffixes it skips — but the worst
+  # that costs is one extra run of a COMPLETE dispatcher, which the waiter's
+  # lock collapses anyway; a truncated one has no such floor.
   if ! mkdir -p "$DISPATCHER_DIR" \
-     || ! cp "$SRC" "$DEST" \
-     || ! chown root:root "$DEST" \
-     || ! chmod 0755 "$DEST"; then
+     || ! install_root_file "$SRC" "$DEST" 0755; then
     echo "  Warning: could not install the NetworkManager failover dispatcher at $DEST" >&2
     record_provision_failure nm_dispatcher
     return 1

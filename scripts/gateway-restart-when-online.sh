@@ -180,17 +180,23 @@ mkdir -p "$RUN_DIR" 2>/dev/null || true
 # second before the route lands, having ignored the very event that would have
 # succeeded. So a loser leaves a marker, and the holder re-arms its deadline
 # when it finds one rather than exiting on a request it swallowed.
-if command -v flock >/dev/null 2>&1; then
-  exec 9>"$LOCK_FILE" || exit 0
+# The lock file is OPENED before `exec` is asked to take the descriptor: a failed
+# redirection on `exec` kills a non-interactive bash outright, so `exec 9>… ||
+# exit 0` cannot even reach its fallback — the event would vanish with nothing in
+# the journal, which is the silent-drop shape this script keeps guarding against.
+# `>>` so probing never truncates a lock somebody else holds.
+if command -v flock >/dev/null 2>&1 && : >>"$LOCK_FILE" 2>/dev/null; then
+  exec 9>>"$LOCK_FILE"
   if ! flock -n 9; then
     : > "$REARM_FILE" 2>/dev/null || true
     log "Gateway restart already pending ($REASON) — handed to the waiter holding the lock"
     exit 0
   fi
 else
-  # Without flock there is no mutual exclusion at all, and two waiters could
-  # both restart. Said out loud rather than assumed away.
-  log "WARN: flock unavailable — running without the single-waiter guard"
+  # Without the lock there is no mutual exclusion at all, and two waiters could
+  # both restart. Said out loud rather than assumed away — and the wait still
+  # happens, because dropping the event is the worse of the two failures.
+  log "WARN: no single-waiter guard (flock or $LOCK_FILE unavailable) — a concurrent network event could restart twice"
 fi
 rm -f "$REARM_FILE" 2>/dev/null || true
 

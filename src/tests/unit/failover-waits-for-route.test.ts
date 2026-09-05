@@ -364,6 +364,26 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     expect(restarts()).toBe(1);
   });
 
+  it("says so, rather than dropping the event, when the lock file cannot be opened", () => {
+    // `exec 9>"$LOCK_FILE" || exit 0` cannot do what it looks like it does: a
+    // failed redirection on `exec` kills a non-interactive bash outright, so
+    // the `||` fallback never runs and the network event vanishes with nothing
+    // in the journal. Same silent-drop shape as reading a failed systemctl
+    // probe as "this edition has no gateway".
+    makeBox({ connectivity: ["full"] });
+    const runDir = path.join(root, "run");
+    chmodSync(runDir, 0o555);
+    try {
+      runWaiter("Ethernet 'eth0' up");
+
+      expect(journal()).toContain("no single-waiter guard");
+      // ...and the wait still happens: dropping the event is the worse failure.
+      expect(restarts()).toBe(1);
+    } finally {
+      chmodSync(runDir, 0o755);
+    }
+  });
+
   it("takes a request that arrived while it was waiting rather than losing it", () => {
     // `flock -n` turns an overlapping event into a no-op with no memory of it,
     // so a waiter could time out one second before the route landed having
@@ -636,13 +656,17 @@ describe("the installer reports what it actually installed", () => {
       "set -euo pipefail",
       `PROJECT_DIR=${JSON.stringify(project)}`,
       `ROOT_LIBEXEC_DIR=${JSON.stringify(libexec)}`,
-      // Not root in a test: ownership is not what is under test here.
-      "chown() { :; }",
       // The step's only `install` call is `install -d … "$ROOT_LIBEXEC_DIR"`.
       "install() { for a; do :; done; mkdir -p \"$a\"; }",
-      opts.waiterInstallFails
-        ? "install_root_file() { return 1; }"
-        : "install_root_file() { cp \"$1\" \"$2\"; }",
+      // Modelled on the real install_root_file: stage "$dst.new", then rename,
+      // so the test exercises the atomicity the dispatcher now depends on. Not
+      // root in a test, so ownership is dropped rather than faked.
+      'install_root_file() { cp "$1" "$2.new" && mv -f "$2.new" "$2"; }',
+      // The dispatcher goes through install_root_file too, so a blanket failure
+      // would fire on the wrong half — fail only the waiter's destination.
+      ...(opts.waiterInstallFails
+        ? ['install_root_file() { case "$2" in *gateway-restart-when-online.sh) return 1 ;; esac; cp "$1" "$2.new" && mv -f "$2.new" "$2"; }']
+        : []),
       // The real one stamps $PROVISION_STATUS_FILE, which the dashboard and the
       // flash host read. A step that only warns leaves the update's own verdict
       // saying it was clean.
@@ -655,7 +679,7 @@ describe("the installer reports what it actually installed", () => {
     ].join("\n");
 
     const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", timeout: 25_000 });
-    return { status: r.status, out: `${r.stdout}${r.stderr}`, libexec };
+    return { status: r.status, out: `${r.stdout}${r.stderr}`, libexec, dispatcherDir };
   }
 
   it("does not claim the deferred-restart helper is installed when it is not", () => {
@@ -718,5 +742,8 @@ describe("the installer reports what it actually installed", () => {
     expect(r.out).not.toContain("Warning");
     expect(r.out).not.toContain("provision-failure");
     expect(existsSync(path.join(r.libexec, "gateway-restart-when-online.sh"))).toBe(true);
+    // The staged copy is renamed, never left behind for NetworkManager to find.
+    expect(existsSync(path.join(r.dispatcherDir, "90-clawbox-failover"))).toBe(true);
+    expect(existsSync(path.join(r.dispatcherDir, "90-clawbox-failover.new"))).toBe(false);
   });
 });
