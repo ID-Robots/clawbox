@@ -66,6 +66,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
 | Coding agent (`coding_agent_run/status/stop`) | when the owner switched it on | when the owner switched it on |
+| Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
@@ -575,6 +576,29 @@ shell tool, not less and not more:
   enforces, an explicit environment (no session secret, no service tokens),
   `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
   project that sits under it.
+
+### Coding team (both editions, the same switch)
+
+`coding_team_run` · `coding_team_status` · `coding_team_stop`
+
+The multi-agent shape of the coding agent (`src/lib/coding-team.ts`): one
+GOAL, a **planner** (a read-only run whose final message must be a JSON
+array of tasks), **workers** (one ordinary run per task, one at a time, each
+told its task with the goal and its teammates' results around it), a
+**reviewer** (v0: a rule — accepted when the worker completed with no refused
+action and touched only the files its task named; otherwise rejected, and the
+task is offered once more), all on a **shared blackboard**
+(`data/coding-team/<team>.json`) that refuses any message its sender's ROLE
+may not send — only the planner posts tasks, only the assigned worker moves
+one or submits a result, only the reviewer rules, only the owner stops — and
+logs every accepted message and every refusal (the audit trail). A worker
+that hit a permission denial or strayed outside its files raises an ALERT;
+three alerts stop the team. `coding_team_run` is for a goal that spans
+several parts; `coding_agent_run` is still the tool for one focused change.
+`coding_team_status` answers the plan, each task's status, worker and result,
+the alerts, and what to tell the user; `log: 1` adds the last lines of the
+audit log. Every agent is a coding run, so the sandbox, the ceilings and the
+one-run-at-a-time rule above apply unchanged.
 
 `coding_agent_status` can block (`wait_seconds`, up to two minutes) instead of
 polling. `coding_agent_stop` posts `{ runId }` (the stop route keeps `{ id }`

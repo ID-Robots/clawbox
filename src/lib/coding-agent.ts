@@ -467,6 +467,9 @@ export type SubagentName = keyof typeof SUBAGENT_DEFINITIONS;
  */
 export const WORKFLOW_TOOL = "Workflow";
 
+/** The tools of a run that may only read — a team's planner. */
+export const READ_ONLY_TOOLS = `Read,Grep,Glob,${SUBAGENT_TOOL}`;
+
 export function toolsFor(subagents: boolean, effort?: CodingEffort): string {
   const tools = subagents ? `${CLAUDE_TOOLS},${SUBAGENT_TOOL}` : CLAUDE_TOOLS;
   return effort === ULTRACODE_EFFORT ? `${tools},${WORKFLOW_TOOL}` : tools;
@@ -542,6 +545,20 @@ export interface CodingRun {
   commandsRun: number;
   /** Set on an automatic review pass: the id of the run it reviews. */
   reviewOf: string | null;
+  /**
+   * Set on a run a coding TEAM spawned (src/lib/coding-team.ts): which team,
+   * in which role, for which task. The board is the audit trail; this is the
+   * run's own pointer back to it.
+   */
+  team: RunTeam | null;
+  /**
+   * A run that may only read: the team's planner. Its tools are Read, Grep,
+   * Glob and the read-only helpers, and no command runs. Frozen at start
+   * like the effort, so a retry cannot widen it.
+   */
+  readOnly: boolean;
+  /** Words the team appended to the brief — the planner's or a worker's role. */
+  extraBrief: string | null;
   /**
    * The pull request this run's work went into, once the auto-PR switch is on.
    *
@@ -748,6 +765,19 @@ export interface StartRunInput {
   source: CodingRunSource;
   /** Internal: set only by the automatic review pass, naming the run under review. */
   reviewOf?: string | null;
+  /** Internal: set only by a coding team, for its planner and its workers. */
+  team?: RunTeam | null;
+  /** Internal: a read-only run (the team's planner). */
+  readOnly?: boolean;
+  /** Internal: appended to the headless brief — the role the team gave this run. */
+  extraBrief?: string | null;
+}
+
+/** A run's place in a coding team. */
+export interface RunTeam {
+  id: string;
+  role: "planner" | "worker";
+  taskId: string | null;
 }
 
 export type CodingAgentErrorKind = "disabled" | "not_ready" | "busy" | "invalid" | "not_found";
@@ -1567,6 +1597,14 @@ function isCodingRun(value: unknown): value is CodingRun {
  * argument, and a count that was not a count reached the owner as
  * "undefined of undefined checks".
  */
+function normalizeTeam(raw: unknown): RunTeam | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = raw as Record<string, unknown>;
+  if (typeof t.id !== "string" || !t.id) return null;
+  if (t.role !== "planner" && t.role !== "worker") return null;
+  return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
+}
+
 function normalizePr(raw: unknown): PrState | null {
   if (typeof raw !== "object" || raw === null) return null;
   const v = raw as Partial<Record<keyof PrState, unknown>>;
@@ -1632,6 +1670,9 @@ function normalizeRun(raw: CodingRun): CodingRun {
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
     reviewOf: typeof raw.reviewOf === "string" ? raw.reviewOf : null,
+    team: normalizeTeam(raw.team),
+    readOnly: raw.readOnly === true,
+    extraBrief: typeof raw.extraBrief === "string" && raw.extraBrief ? raw.extraBrief : null,
     // Every field must be reconstructed here: normalizeRun builds a fresh
     // object field by field, so anything omitted survives in memory and
     // disappears the next time the file is read.
@@ -2227,6 +2268,19 @@ export const HEADLESS_BRIEF = [
  * this says what a workflow IS for on this box — many read-only helpers in
  * one step — and names the three traps by name.
  */
+/**
+ * The brief for a run that may only READ — a team's planner. The headless
+ * brief describes Bash, the browser tools, the evidence folder and the
+ * workflow fan-out, none of which such a run has; a model told about them
+ * spends its steps on calls that are refused.
+ */
+export const READ_ONLY_BRIEF = [
+  "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
+  "Nobody can answer questions, so make sensible assumptions and keep going. This is a READ-ONLY session: you have Read, Grep and Glob and the read-only helper agents, no shell, no browser and no way to write — do not try to edit, create or run anything; your ANSWER is your final message.",
+  "Delegate reading to the explorer helper when a question spans many files, and keep your own context small. You have a limited number of steps and every tool call spends one.",
+  "The task text may carry copy-paste artifacts; read past them. Your final message is delivered to the party that started you and is read by a program as well as a person: answer in exactly the form the task asks for, with nothing before or after it.",
+].join(" ");
+
 export const ULTRACODE_BRIEF = [
   "Ultracode is on and the Workflow tool is approved for this run: it is the one-step way to run many READ-ONLY helpers at once — map many files, verify many pages, review many changes — with agent(), parallel() and pipeline().",
   "Every agent() must pass agentType \"explorer\", \"tester\" or \"reviewer\" (never general-purpose, never a workflow inside a workflow, never isolation: \"worktree\" — this folder is not a git repository of its own), and the writing stays with you: shared code first, then the parts, then a workflow to check them all.",
@@ -2417,13 +2471,23 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; run?: { id: string; directory: string; media?: RunMedia } }): string[] {
   const brief = [
-    opts.effort === ULTRACODE_EFFORT ? `${HEADLESS_BRIEF} ${ULTRACODE_BRIEF}` : HEADLESS_BRIEF,
+    // A read-only run has no Bash, no browser and no Write: the brief that
+    // describes them would spend its steps on calls that are refused.
+    opts.readOnly
+      ? READ_ONLY_BRIEF
+      : (opts.effort === ULTRACODE_EFFORT ? `${HEADLESS_BRIEF} ${ULTRACODE_BRIEF}` : HEADLESS_BRIEF),
     // Only for the run that HAS the tool: a brief that described a picture
     // tool to a run without one would spend steps on a call that is not there.
-    ...(opts.run?.media?.images ? [MEDIA_BRIEF_IMAGES] : []),
-    ...(opts.run?.media?.audio ? [MEDIA_BRIEF_AUDIO] : []),
+    // A read-only run holds no media tool either (runMcpTools is skipped for
+    // it below), so it hears nothing about drawing or speaking.
+    ...(opts.run?.media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
+    ...(opts.run?.media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
+    // A team's role for this run — the planner's "answer with a JSON array",
+    // a worker's "this is your task among these" — after the device's own
+    // words, never instead of them.
+    ...(opts.extraBrief ? [opts.extraBrief] : []),
   ].join(" ");
   const args = [
     "-p",
@@ -2453,7 +2517,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
   }
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
-  args.push("--tools", toolsFor(true, opts.effort));
+  args.push("--tools", opts.readOnly ? READ_ONLY_TOOLS : toolsFor(true, opts.effort));
   // The Agent tool with nothing to delegate to is a tool that never fires.
   args.push("--agents", JSON.stringify(SUBAGENT_DEFINITIONS));
   {
@@ -2466,7 +2530,9 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // Full access is about commands, not secrets.
     // The Workflow tool is listed AND pre-approved under ultracode: listed
     // alone it is refused headlessly (see WORKFLOW_TOOL).
-    args.push("--allowedTools", "Bash(*)", ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run ? runMcpTools(opts.run.media) : []));
+    // A read-only run has no Bash to approve and no browser to drive: it
+    // reads, and the helpers it delegates to read.
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []));
     args.push("--disallowedTools", ...fileDenyRules());
   }
   return args;
@@ -3676,6 +3742,7 @@ type ReviewPassOutcome = "started" | "skipped" | "refused";
 async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutcome> {
   if (finished.status !== "completed") return "skipped";
   if (finished.reviewOf !== null) return "skipped";
+  if (finished.readOnly) return "skipped";
   if (finished.filesTouched.length === 0) return "skipped";
   try {
     if (!(await getReviewPass())) return "skipped";
@@ -3866,7 +3933,7 @@ function spawnRun(
   settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
 ): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, run: { id: run.id, directory: run.directory, media: run.media } }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, run: { id: run.id, directory: run.directory, media: run.media } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -4037,6 +4104,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     status: "running",
     settings,
     reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
+    team: input.team ?? null,
+    readOnly: input.readOnly === true,
+    extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
   });
   if (run.reviewOf) pushProgress(run, `Automatic review pass of ${run.reviewOf}`);
   else if (resumeSessionId) pushProgress(run, "Resuming the previous session");
@@ -4049,7 +4119,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // request needs them and no history has to be rewritten afterwards. A review
   // pass is deliberately excluded — it resumes in the same folder and belongs
   // on the same branch, which it is already on.
-  if (!run.reviewOf && (await getAutoPr())) {
+  if (!run.reviewOf && !run.readOnly && (await getAutoPr())) {
     const branched = await startRunBranch({
       directory: run.directory,
       runId: run.id,
@@ -4125,6 +4195,9 @@ function newRunRecord(fields: {
   status: "running" | "draft";
   settings: RunSettings;
   reviewOf?: string | null;
+  team?: RunTeam | null;
+  readOnly?: boolean;
+  extraBrief?: string | null;
 }): CodingRun {
   const now = Date.now();
   return {
@@ -4160,6 +4233,9 @@ function newRunRecord(fields: {
     retries: 0,
     resumable: false,
     reviewOf: fields.reviewOf ?? null,
+    team: fields.team ?? null,
+    readOnly: fields.readOnly === true,
+    extraBrief: fields.extraBrief ?? null,
     // No pull request until the aftermath opens one.
     pr: null,
     progress: [],

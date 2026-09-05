@@ -36,6 +36,7 @@ import TerminalApp from "./TerminalApp";
 import VNCApp from "./VNCApp";
 import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
 import CodingProjectWorkspace from "./CodingProjectWorkspace";
+import CodingTeamCard from "./CodingTeamCard";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import type { AgentStatus, Effort, GitHubState } from "./CodingAgentSettingsPanel";
@@ -100,6 +101,8 @@ interface Run {
   transcriptPath?: string | null;
   /** The run this one is the automatic review pass of, when it is one. */
   reviewOf?: string | null;
+  /** Set on a run a coding team spawned: which team, in which role, for which task. */
+  team?: { id: string; role: "planner" | "worker"; taskId: string | null } | null;
   /** The pull request this run's work went into, while the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
@@ -1550,6 +1553,15 @@ export default function CodingAgentApp() {
                     </span>
                   )}
                   {prChip(run)}
+                  {run.team && (
+                    <span
+                      className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40"
+                      title={run.team.id}
+                      data-testid="coding-agent-run-team"
+                    >
+                      {run.team.role === "planner" ? t("codingAgent.team.rolePlanner") : t("codingAgent.team.roleWorker", { task: run.team.taskId ?? "" })}
+                    </span>
+                  )}
                   {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
                   {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
                   {project && (
@@ -2010,6 +2022,17 @@ export default function CodingAgentApp() {
               </div>
               {/* The folder itself, and what changed in it. */}
               <CodingProjectWorkspace key={projectQuery} query={projectQuery} live={projectLive} />
+              {/* A coding team on this folder: the goal, the board, the log. */}
+              {/* Keyed by the WHOLE scope the card reads by — the folder and
+                  the code-project id — so a project that changes kind under
+                  the same folder is a fresh card, never one holding the
+                  previous team. */}
+              <CodingTeamCard
+                key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
+                directory={p.directory}
+                projectId={p.kind === "codeProject" ? p.folder : null}
+                onOpenRun={(id) => showRun(id)}
+              />
             </div>
             {runsSection}
           </>);
