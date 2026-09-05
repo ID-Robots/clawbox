@@ -172,6 +172,18 @@ describe("/setup-api/apps/install", () => {
     expect((await POST(install({ appId: "@-owner/x" }))).status).toBe(400);
   });
 
+  // The bound every surface that has to NAME an app already applies —
+  // `zInstalledAppId` (mcp/lib/schema.ts), apps/skill-info, the webapps route,
+  // the icon route. This door had none, so it could install a skill the desktop
+  // could not open, skill-info could not answer for and no icon could load.
+  // apps/uninstall deliberately does NOT apply it: it has to be able to remove
+  // one of those if a box is already holding it.
+  it("refuses a slug longer than every other surface can name", async () => {
+    expect((await POST(install({ appId: "a".repeat(65) }))).status).toBe(400);
+    expect((await POST(install({ appId: `@owner/${"a".repeat(65)}` }))).status).toBe(400);
+    expect((await POST(install({ appId: "a".repeat(64) }))).status).toBe(200);
+  });
+
   it("accepts a @owner/slug ref and keys everything local by the bare slug", async () => {
     const res = await POST(install({ appId: "@steipete/weather" }));
     const body = await res.json();

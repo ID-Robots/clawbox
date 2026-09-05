@@ -181,21 +181,13 @@ function projectDir(projectId: string): string {
  * take an id from the same doors (`webapp_create`, `webapp_update`,
  * `code_project_build`, the webapps route), so leaving one of them joining the
  * raw string would have left the whole rule resting on whichever caller tested
- * it last.
+ * it last. Exported because the webapps route serves files out of this folder
+ * and must get its spelling from here rather than joining `WEBAPPS_DIR` again.
  */
-function webappDir(appId: string): string {
+export function webappPath(appId: string): string {
   const id = safeProjectId(appId);
   if (!id) throw new ValidationError("Invalid app ID");
   return path.join(WEBAPPS_DIR, id);
-}
-
-/**
- * The ABSOLUTE on-device directory a deployed webapp is served from. Exported
- * for the same reason `projectPath` is: a route that needs to name the folder
- * must get it from the one function that knows how it is spelled.
- */
-export function webappPath(appId: string): string {
-  return webappDir(appId);
 }
 
 /**
@@ -663,7 +655,7 @@ export async function buildProject(
   // rebuild only refreshes index.html — re-running deployWebapp would clobber
   // the saved icon and re-surface an app the user intentionally hid.
   const alreadyDeployed = await fs
-    .stat(path.join(webappDir(projectId), "meta.json"))
+    .stat(path.join(webappPath(projectId), "meta.json"))
     .then(() => true)
     .catch(() => false);
   if (alreadyDeployed) {
@@ -695,7 +687,7 @@ export async function buildProject(
  * rebuild can't wipe the saved icon or re-surface an app the user hid.
  */
 export async function writeWebappIndex(appId: string, html: string): Promise<void> {
-  const dir = webappDir(appId);
+  const dir = webappPath(appId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, "index.html"), html, "utf-8");
 }
@@ -721,7 +713,7 @@ export async function deployWebapp(
   const name = assertProjectName(meta.name);
   await writeWebappIndex(appId, html);
   await fs.writeFile(
-    path.join(webappDir(appId), "meta.json"),
+    path.join(webappPath(appId), "meta.json"),
     JSON.stringify({ name, color: meta.color || "#f97316", icon: meta.icon || "" }),
     "utf-8",
   );

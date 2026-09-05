@@ -19,6 +19,18 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
  * route was one of the three left, and CodeQL reports the icon removal as
  * `js/path-injection` (high).
  *
+ * What this file can and cannot prove, said plainly. The rebuild is
+ * SEMANTICALLY identical to the regex it replaces, so no request can tell them
+ * apart and no test here demonstrates it — that half is CodeQL's to report.
+ * What these cases pin is everything around it that a later change could take
+ * away: the refusal CONTRACT (`ok:false` / `code` / `retryable:false`, so a
+ * caller is not told to retry an id that can never work), that nothing on disk
+ * moves when an id is refused, that the leading-hyphen rule survived, and —
+ * the one case that is a live regression rather than a fence — that an app
+ * whose id is longer than sixty-four characters can still be REMOVED, because
+ * `apps/install` accepted an unbounded slug until this change and the desktop
+ * has no other way to delete one.
+ *
  * Real temp filesystem, not a mocked `fs`: the claim is that the NEIGHBOUR
  * survives, and a mocked `rm` can only prove which string was passed to it.
  */
@@ -99,8 +111,10 @@ afterAll(() => {
   fs.rmSync(ROOT, { recursive: true, force: true });
 });
 
-describe("POST /setup-api/apps/uninstall — an id that is not one path segment", () => {
-  for (const appId of ["../../etc", "notes/../other", "notes/nested", "..", ".", ""]) {
+describe("POST /setup-api/apps/uninstall — the id it will and will not act on", () => {
+  // `-x` is the leading-hyphen rule apps/install states and this route keeps;
+  // the rest are not one plain path segment.
+  for (const appId of ["../../etc", "notes/../other", "notes/nested", "..", ".", "", "-x"]) {
     it(`refuses ${JSON.stringify(appId)} without touching the disk`, async () => {
       const { status, body } = await uninstall(appId);
 
@@ -119,6 +133,26 @@ describe("POST /setup-api/apps/uninstall — an id that is not one path segment"
     expect(status).toBe(200);
     expect(body.ok).toBe(true);
     expect(onDisk("notes")).toEqual({ skill: false, webapp: false, icon: false });
+    expect(onDisk("other")).toEqual(ALL_THERE);
+  });
+
+  // The length rule is about what may ARRIVE. `apps/install` had none until
+  // this change, so a box can be holding an id longer than any other surface
+  // will name — and this route is the only thing that removes an app. A
+  // removal door that applied the arrival rule would leave that app on the
+  // desktop with nothing able to delete it.
+  it("removes an app whose id is longer than every other surface allows", async () => {
+    // One past webapp-icon's MAX_APP_ID_CHARS. Spelled out rather than
+    // imported: this file sets CLAWBOX_ROOT in its body, and a static import of
+    // a module that reads DATA_DIR at load would be evaluated before that.
+    const long = "a".repeat(65);
+    seed(long);
+
+    const { status, body } = await uninstall(long);
+
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(onDisk(long)).toEqual({ skill: false, webapp: false, icon: false });
     expect(onDisk("other")).toEqual(ALL_THERE);
   });
 });

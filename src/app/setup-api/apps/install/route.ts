@@ -134,8 +134,11 @@ function storeMeta(appId: string, detail: StoreDetail | null): InstalledMeta {
 
 async function downloadIcon(appId: string): Promise<{ saved: boolean }> {
   const iconUrl = `${STORE_ICONS_BASE}/${appId}.png`;
-  const iconPath = webappIconPath(appId);
   try {
+    // Inside the try: `webappIconPath` refuses an id outside the alphabet by
+    // throwing, and a missing icon is never a reason to fail an install that
+    // has already put the skill on disk.
+    const iconPath = webappIconPath(appId);
     // Bound the icon fetch: it's awaited inline before the install returns, so
     // a stalled ClawHub host would otherwise hang the whole install request.
     const [res] = await Promise.all([

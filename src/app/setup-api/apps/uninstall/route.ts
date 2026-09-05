@@ -70,18 +70,30 @@ export async function POST(req: Request) {
     // moving thing — #627 widened it and gave `app_uninstall`, `webapp_update`
     // and `code_project_*` one spelling of it (`INSTALLED_APP_ID_RE`,
     // mcp/lib/schema.ts) — and the rebuild is what holds when it moves again.
-    // `safeAppId` (webapp-icon.ts) is that rule: one to sixty-four of
-    // `[A-Za-z0-9_-]`, the same as `APP_ID_RE` (code-projects.ts), so `..`,
-    // `/`, `\`, NUL and the empty string are all outside it. A LEADING HYPHEN
-    // is refused on top, as apps/install refuses it, so the two doors agree on
-    // what an id may be.
-    const appId =
-      typeof requestedId === "string" && !requestedId.startsWith("-") ? safeAppId(requestedId) : null;
+    // `safeAppId` (webapp-icon.ts) is that rule: `[A-Za-z0-9_-]`, the alphabet
+    // of `APP_ID_RE` (code-projects.ts), so `..`, `/`, `\`, NUL and the empty
+    // string are all outside it. A LEADING HYPHEN is refused on top, as
+    // apps/install refuses it, so the two doors agree on what an id may be.
+    //
+    // WITHOUT the length bound, and this is the one caller that drops it.
+    // `safeAppId`'s 64 characters are a rule about what may ARRIVE — every
+    // surface that has to NAME an app applies it — and `apps/install` did not
+    // until this change, so a box can be holding a longer id already. A
+    // REMOVAL door that refuses what an install door let in would strand that
+    // app with nothing left to delete it from: the desktop still draws its
+    // tile, and this route is the only thing that removes one. Length is not
+    // what makes an id safe here — the rebuild is, and an over-long name is
+    // still exactly one path segment.
+    const appId = typeof requestedId === "string" && !requestedId.startsWith("-")
+      ? safeAppId(requestedId, Number.POSITIVE_INFINITY)
+      : null;
     if (!appId) {
-      // `retryable: false` and a code, not a bare `error`: an id that cannot be
-      // spelled will not become spellable on a second attempt, and this route's
-      // other refusals are all read as `{ok, code, retryable}` by the Store and
-      // by mcp/tools/desktop.ts. Nothing has been touched at this point.
+      // A code and `retryable: false` rather than a bare `error`: an id that
+      // cannot be spelled will not become spellable on a second attempt, and
+      // every refusal this route answers after this point already carries the
+      // three fields. (The Store renders `error`; mcp/tools/desktop.ts maps the
+      // 503s and 500s by body and lets a 400 fall through to its own
+      // BAD_ARGUMENT.) Nothing has been touched at this point.
       return NextResponse.json({
         ok: false,
         error: "That app id is not one this ClawBox can have installed, so nothing was removed.",
@@ -89,6 +101,12 @@ export async function POST(req: Request) {
         retryable: false,
       }, { status: 400 });
     }
+    // Resolved HERE, beside the rebuild, rather than at the removal below: the
+    // path is built by a function that refuses an id outside the alphabet, and
+    // an argument that throws would do so after the skill folder and the
+    // deployed webapp had already gone — a half-uninstall answered 500, which
+    // is the report this route was rewritten to stop making.
+    const iconPath = webappIconPath(appId);
 
     // Remove the skill directory (with path traversal guard).
     //
@@ -249,7 +267,7 @@ export async function POST(req: Request) {
     // `<DATA_DIR>/icons/<id>.png` — the install and icon routes each had their
     // own, and the hardcoded ~/clawbox/data/icons that preceded them diverged
     // whenever CLAWBOX_ROOT != $HOME/clawbox, orphaning the PNG on disk.
-    await fs.rm(webappIconPath(appId), { force: true }).catch(() => {});
+    await fs.rm(iconPath, { force: true }).catch(() => {});
 
     // The skill's `skills.entries.<id>` in openclaw.json goes too, or a later
     // install under the same id silently inherits `enabled: false`. Best
