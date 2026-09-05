@@ -9,7 +9,9 @@
  * flag is one word in package.json and the box has no other way to build.
  */
 import { describe, expect, it } from "vitest";
+import { spawnSync } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 const ROOT = process.cwd();
@@ -23,17 +25,77 @@ describe("the box's build", () => {
     // The webpack standalone build's traced copy of `next` misses
     // lib/metadata/get-metadata-route (the server dies on it at start —
     // both e2e suites did, 2026-09-05); postbuild points the standalone
-    // tree at the real package instead, as the box's stopgap builds had.
-    expect(pkg.scripts.postbuild).toContain('ln -s "$(pwd)/node_modules/next" "$SDIR/node_modules/next"');
-    // …and ONLY when the standalone tree's node_modules is a directory of
-    // its own: in a worktree whose node_modules is a symlink, the traced
-    // tree links to the real node_modules, and an rm through it deleted the
-    // real `next` package (2026-09-05).
-    expect(pkg.scripts.postbuild).toContain('[ ! -L "$SDIR/node_modules" ]');
+    // tree at the real package through a script that fails the build when
+    // it cannot.
+    expect(pkg.scripts.postbuild).toContain('bash scripts/link-standalone-next.sh "$SDIR" || exit 1');
   });
 
   it("is run by the updater with two webpack workers, so its peak stays where it was measured", () => {
     const install = fs.readFileSync(path.join(ROOT, "install.sh"), "utf-8");
     expect(install).toContain("NEXT_WEBPACK_PARALLELISM=2 $BUN run build");
+  });
+});
+
+describe("link-standalone-next.sh", () => {
+  const script = path.join(ROOT, "scripts", "link-standalone-next.sh");
+  /** A project with a real `next` package and a standalone tree whose node_modules is a directory, or a symlink to the project's. */
+  function fixture(standaloneNodeModules: "directory" | "symlink") {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "link-next-"));
+    const project = path.join(base, "project");
+    fs.mkdirSync(path.join(project, "node_modules", "next", "dist"), { recursive: true });
+    fs.writeFileSync(path.join(project, "node_modules", "next", "package.json"), JSON.stringify({ name: "next", version: "16.3.3" }));
+    fs.writeFileSync(path.join(project, "node_modules", "next", "dist", "real.js"), "real");
+    const standalone = path.join(project, ".next", "standalone");
+    fs.mkdirSync(standalone, { recursive: true });
+    if (standaloneNodeModules === "directory") {
+      fs.mkdirSync(path.join(standalone, "node_modules", "next"), { recursive: true });
+      fs.writeFileSync(path.join(standalone, "node_modules", "next", "package.json"), JSON.stringify({ name: "next", traced: true }));
+    } else {
+      fs.symlinkSync(path.join(project, "node_modules"), path.join(standalone, "node_modules"));
+    }
+    return { base, project, standalone };
+  }
+  const run = (standalone: string, project: string) => spawnSync("bash", [script, standalone, project], { encoding: "utf-8" });
+
+  it("replaces the traced copy in a standalone tree of its own with a link to the real package", () => {
+    const { base, project, standalone } = fixture("directory");
+    try {
+      const r = run(standalone, project);
+      expect(r.status, r.stderr).toBe(0);
+      const link = path.join(standalone, "node_modules", "next");
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(fs.readlinkSync(link)).toBe(path.join(project, "node_modules", "next"));
+      expect(fs.existsSync(path.join(link, "dist", "real.js"))).toBe(true);
+      // The real package is exactly as it was.
+      expect(JSON.parse(fs.readFileSync(path.join(project, "node_modules", "next", "package.json"), "utf-8")).version).toBe("16.3.3");
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("touches nothing when the standalone node_modules is a symlink — the real package would be what it removed", () => {
+    const { base, project, standalone } = fixture("symlink");
+    try {
+      const r = run(standalone, project);
+      expect(r.status, r.stderr).toBe(0);
+      expect(fs.lstatSync(path.join(standalone, "node_modules")).isSymbolicLink()).toBe(true);
+      const real = path.join(project, "node_modules", "next");
+      expect(fs.lstatSync(real).isDirectory()).toBe(true);
+      expect(fs.existsSync(path.join(real, "dist", "real.js"))).toBe(true);
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("fails when the standalone tree has no node_modules directory to link into", () => {
+    const { base, project, standalone } = fixture("directory");
+    try {
+      fs.rmSync(path.join(standalone, "node_modules"), { recursive: true, force: true });
+      const r = run(standalone, project);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain("not a directory");
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true });
+    }
   });
 });
