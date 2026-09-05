@@ -103,6 +103,10 @@ export async function POST(request: Request) {
     // ClawBox's poller and the harness gateway end up on one getUpdates
     // stream. Unlike the unknown BELOW, this one is not a lockout: it does not
     // stand between the owner and a first bot on a box whose store reads fine.
+    // Saving through an unreadable store would not have worked anyway —
+    // `set()` builds its write on `readConfig()`, so a store it could not read
+    // is a store this route would REPLACE with one holding the bot token and
+    // nothing else.
     const approval = await readApprovalBotToken();
     if (!approval.known) {
       return NextResponse.json(
