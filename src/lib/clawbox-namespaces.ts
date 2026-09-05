@@ -39,20 +39,74 @@
  * its caller is code: it gets JSON, like every real route under them and like
  * the middleware's own 401 for the same prefix.
  */
-const CLAWBOX_API_ROOTS = ["/setup-api", "/login-api"] as const;
+export const CLAWBOX_API_ROOTS = ["/setup-api", "/login-api"] as const;
 
 /**
  * ClawBox's page namespaces. `/app` is one of them: `src/app/app/[id]/page.tsx`
  * matches ONE segment and there is no page at the root, so both `/app` and
  * `/app/x/y` reached the catch-all (measured: 200 Control UI, token injected).
  *
- * `/api`, `/assets` and the gateway's static trees are absent for the opposite
- * reason — they are the GATEWAY's, and serving them is what the catch-all is
- * for. Checked against the pinned Control UI's own bundle rather than assumed:
- * `dist/control-ui/assets/*.js` carries route literals for `/chat`,
- * `/sessions` and `/logs`, and none for any root below.
+ * `/apps` is deliberately NOT here — see `UNCLAIMED_ROOTS`, which is where the
+ * evidence for that lives. `clawbox-namespace-coverage.test.ts` reads `src/app/`
+ * and fails when a top-level route directory is in neither list, so a namespace
+ * added later cannot be missed the way `/app` was.
  */
-const CLAWBOX_PAGE_ROOTS = ["/setup", "/login", "/portal", "/updating", "/app"] as const;
+export const CLAWBOX_PAGE_ROOTS = [
+  "/setup",
+  "/login",
+  "/portal",
+  "/updating",
+  "/app",
+] as const;
+
+/**
+ * Top-level route directories this module deliberately does NOT claim, so the
+ * coverage guard can tell "decided against" from "never noticed". An unmatched
+ * path under one of these keeps reaching the catch-all, which is the point.
+ *
+ * `/api` is the GATEWAY's own API surface — ClawBox's routes live under
+ * `/setup-api` precisely so this prefix stays the gateway's
+ * (src/app/api/[...path]/route.ts says so in as many words). `/assets` is the
+ * Control UI's static tree (src/lib/gateway-static.ts). The two favicons are
+ * the gateway's too: `public/` has no copy, their handlers proxy, and
+ * `src/middleware.ts` lists them in `GATEWAY_ONLY_EXACT`.
+ *
+ * `/apps` IS ClawBox's below the root and the GATEWAY'S at it, which is why
+ * claiming it would be wrong in both directions:
+ *
+ *   - Below it, `src/app/apps/[id]/[[...path]]/route.ts` is an OPTIONAL
+ *     catch-all, so `/apps/<id>` AND `/apps/<id>/…` are matched by a real
+ *     route. Nothing under `/apps/` ever reaches the catch-all, so an entry
+ *     here could never fire on a real path.
+ *   - At the root, `/apps` is a Control UI PAGE. Claiming it would 404 a
+ *     gateway page that works today.
+ *
+ * That second half is measured, not assumed, and the check is written down
+ * because the previous one was not reproducible: the bundle spells its route
+ * paths as backtick template literals, so a grep for double-quoted `"/apps"`
+ * finds nothing — and finds nothing for `/chat` either, which is how a grep
+ * that could not see its own positives got read as proof of a negative. Run in
+ * `/usr/lib/node_modules/openclaw/dist/control-ui/assets` at the pinned
+ * OPENCLAW_VERSION (2026.8.1, install.sh):
+ *
+ *     grep -ohE '\bpath:`/[^`]{0,50}`' *.js | sed 's/path://; s/`//g' | sort -u
+ *
+ * That is 55 routes. `/apps` is among them (and `apps-page-*.js/.css` ship with
+ * it); `/setup`, `/login`, `/portal`, `/updating`, `/app`, `/setup-api` and
+ * `/login-api` are all absent, so every root claimed above is genuinely free.
+ *
+ * SIBLINGS: adding a gateway-owned root here is not the whole job —
+ * `GATEWAY_ONLY_EXACT` / `GATEWAY_ONLY_PREFIXES` in src/middleware.ts decide
+ * the Hermes 404 gate for the same paths, and src/lib/gateway-static.ts decides
+ * which are served as bytes. Nothing cross-checks the three lists yet.
+ */
+export const UNCLAIMED_ROOTS = [
+  "/api",
+  "/assets",
+  "/favicon.svg",
+  "/favicon-32.png",
+  "/apps",
+] as const;
 
 /**
  * `/a` matches `/a` and `/a/b`, never `/ab`.
@@ -72,6 +126,49 @@ export function isSetupApiPath(pathname: string): boolean {
 }
 
 /**
+ * Percent-decoding, repeated until it stops changing, for the OWNERSHIP question
+ * only.
+ *
+ * Deny-only, which is what makes it safe. This module's decoded answer is read
+ * by exactly one caller — `src/app/[...gateway]/route.ts` — and the only thing
+ * it can produce is a 404. Claiming one path too many costs a 404 on a path
+ * that would otherwise have been answered with the Control UI shell and an
+ * injected gateway credential; that is the strictly safer error. `isUnderRoot`
+ * and `isSetupApiPath` stay literal on purpose: those feed the middleware's
+ * ALLOW gates, and decoding there would widen an auth decision.
+ *
+ * To a fixpoint because one pass is not enough: `/setup%252Fnope` decodes to
+ * `/setup%2Fnope`, which is still an encoded separator. Each pass strictly
+ * shortens the string or returns at the `next === current` fixpoint, so the
+ * loop terminates with or without the cap.
+ *
+ * The cap is NOT free, and the deny-only argument above is what pays for it:
+ * past four nestings the loop gives up with `%` still in the string and the
+ * path stays the gateway's — as it does for any path carrying one malformed
+ * escape, since `decodeURIComponent` is all-or-nothing. The decoded match is
+ * therefore BEST-EFFORT hardening and must never be leaned on as a boundary;
+ * missing one costs exactly the answer beta gives today.
+ *
+ * A malformed escape (`/%zz`) makes `decodeURIComponent` throw. That returns
+ * whatever was decoded so far, so the caller falls back to the literal spelling
+ * and today's answer, rather than the request failing.
+ */
+function decodePercentEncoding(pathname: string): string {
+  let current = pathname;
+  for (let pass = 0; pass < 4 && current.includes("%"); pass++) {
+    let next: string;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      return current;
+    }
+    if (next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
+/**
  * Which ClawBox namespace owns this path, or null when it is the gateway's.
  *
  * `"api"` and `"page"` differ only in what an unmatched path should answer
@@ -85,8 +182,20 @@ export function clawboxNamespaceKind(pathname: string): "api" | "page" | null {
   // `serveGatewayHTML` still carries a comment about. Ownership is not a
   // question of spelling; the middleware's own gates, which get a pathname that
   // is already lower-cased, keep the exact comparison.
-  const lower = pathname.toLowerCase();
-  if (CLAWBOX_API_ROOTS.some((root) => isUnderRoot(lower, root))) return "api";
-  if (CLAWBOX_PAGE_ROOTS.some((root) => isUnderRoot(lower, root))) return "page";
+  //
+  // The DECODED spelling too. Measured anonymously on an OpenClaw box at beta
+  // `dd058938`: `GET /setup-api/nope` answers 401 application/json from the
+  // middleware's own `/setup-api` gate, and `GET /setup-api%2Fnope` answers 307
+  // to /login — the gate missed it, so the platform does not decode `%2F` and
+  // the encoded spelling stays one segment, matches no route and lands here.
+  // For an owner session that was the shell with the gateway token in it.
+  const spellings = new Set([
+    pathname.toLowerCase(),
+    decodePercentEncoding(pathname).toLowerCase(),
+  ]);
+  for (const candidate of spellings) {
+    if (CLAWBOX_API_ROOTS.some((root) => isUnderRoot(candidate, root))) return "api";
+    if (CLAWBOX_PAGE_ROOTS.some((root) => isUnderRoot(candidate, root))) return "page";
+  }
   return null;
 }
