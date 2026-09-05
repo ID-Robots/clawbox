@@ -83,6 +83,24 @@ const ALL_CAPABILITIES: Partial<McpContext> = {
 };
 
 /**
+ * Every capability off — the other end of each gate, spelled out rather than
+ * inferred from this host.
+ *
+ * The all-capabilities posture alone cannot tell a working gate from a tool
+ * that lost its gate: a family that became unconditional registers in it just
+ * the same. And the ordinary probed posture is no substitute, because ON A
+ * DEVICE the probes answer TRUE — the checker is meant to be run there too, and
+ * a negative assertion that only holds off a box is not an assertion.
+ */
+const NO_CAPABILITIES: Partial<McpContext> = {
+  capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
+  emailCanRead: false,
+  codingAgent: false,
+  canGenerateImages: false,
+  providers: [],
+};
+
+/**
  * Tools that register ONLY when a device probe says the box can do the thing.
  *
  * Named rather than counted, and asserted on every host: these are what the
@@ -96,6 +114,7 @@ const PROBE_GATED_TOOLS = [
   "disk_usage", "disk_cleanup", "logs_tail", "screen_capture",
   "email_list", "email_read",
   "coding_agent_run", "coding_agent_status", "coding_agent_stop",
+  "coding_team_run", "coding_team_status", "coding_team_stop",
 ];
 
 async function main(): Promise<void> {
@@ -119,45 +138,62 @@ async function main(): Promise<void> {
     const { reg: fullReg } = await buildServer(edition, "full", edition, { ...ALL_CAPABILITIES });
     const enabled = fullReg.list();
 
-    // A THIRD posture, for the one gate that points the other way.
-    // `image_generate` registers only where the box CANNOT draw, so on a box
-    // whose probe says it can — a linked device — it would be in none of the
-    // postures above and the assertion below would fail on a healthy box.
-    const { reg: mutedReg } = await buildServer(edition, "full", {
-      ...ALL_CAPABILITIES,
-      canGenerateImages: false,
-    });
-    const inverted = mutedReg.list();
+    // A THIRD posture: every gate the other way round. It carries the one tool
+    // that registers where the box CANNOT do the thing (`image_generate`), and
+    // it is what the negative assertions below are made against.
+    const { reg: bareReg } = await buildServer(edition, "full", { ...NO_CAPABILITIES });
+    const disabled = bareReg.list();
 
-    // The UNION, not either posture. A capability gate can point either way:
-    // most families register only when the box CAN do the thing, while
-    // `image_generate` registers only where it cannot (it exists to tell the
-    // model why, and would contradict the harness's own image tool on a linked
-    // box). Both halves ship, so both halves are checked.
+    // The UNION, for the CONTRACT check only. A capability gate can point
+    // either way: most families register only when the box CAN do the thing,
+    // while `image_generate` registers only where it cannot (it exists to tell
+    // the model why, and would contradict the harness's own image tool on a
+    // linked box). Both halves ship, so both halves get their descriptions,
+    // schemas and edition gating checked.
     const tools = [...enabled];
-    for (const tool of [...probed, ...inverted]) {
+    for (const tool of [...probed, ...disabled]) {
       if (!tools.some((t) => t.name === tool.name)) tools.push(tool);
     }
     byEdition[edition] = tools;
     for (const tool of tools) problems.push(...contractViolations(tool), ...schemaShapeViolations(tool));
 
-    // The posture switch has to be doing something, and a COUNT cannot say so:
-    // a family that vanished because its context field was renamed is invisible
-    // as long as another one was added. These names are the contract — every
-    // one of them registers only behind a probe — so they are what is asserted,
-    // on every host including a device where the probes answer true.
-    const registered = new Set(tools.map((t) => t.name));
+    // Each gate against ITS OWN posture, never the union: the union cannot tell
+    // a working gate from a tool that lost it, because a family that became
+    // unconditional is in the union just the same. So both directions are
+    // asserted — present where the capability is on, ABSENT where it is off —
+    // and that holds on a device too, where the probes answer true.
+    //
+    // A COUNT could say neither: a family that vanished because its context
+    // field was renamed is invisible as long as another one was added
+    // (measured: three coding_agent tools disappeared and the total went UP).
+    const withCaps = new Set(enabled.map((t) => t.name));
+    const withoutCaps = new Set(disabled.map((t) => t.name));
     for (const name of PROBE_GATED_TOOLS) {
-      if (!registered.has(name)) {
+      if (!withCaps.has(name)) {
         problems.push(
-          `${edition}: "${name}" registers only behind a device probe and is in NEITHER posture `
-          + "— the capability overrides are not reaching the registrars",
+          `${edition}: "${name}" registers only behind a device probe and is MISSING from the `
+          + "all-capabilities posture — the capability overrides are not reaching the registrars",
+        );
+      }
+      if (withoutCaps.has(name)) {
+        problems.push(
+          `${edition}: "${name}" is registered with every capability OFF — it has lost its device `
+          + "gate and a box that cannot do the thing is now offered the tool",
         );
       }
     }
-    // …and the all-off posture's own gate, which points the other way.
-    if (!registered.has("image_generate")) {
-      problems.push(`${edition}: "image_generate" is in no posture — the inverse gate is not being read`);
+    // The one gate that points the other way, asserted the same way round.
+    if (withCaps.has("image_generate")) {
+      problems.push(
+        `${edition}: "image_generate" is registered on a box that CAN draw — it would contradict `
+        + "the harness's own image tool",
+      );
+    }
+    if (!withoutCaps.has("image_generate")) {
+      problems.push(
+        `${edition}: "image_generate" is missing from a box that cannot draw — the inverse gate is `
+        + "not being read",
+      );
     }
 
     const names = new Set(tools.map((t) => t.name));
