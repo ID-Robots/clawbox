@@ -2,13 +2,22 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("fs/promises", () => ({
   default: {
+    // The removal itself says whether a skill was there: it runs without
+    // `force`, so ENOENT means "nothing of that name" and anything else means
+    // "there and not removed". Default: it was there and it went.
     rm: vi.fn().mockResolvedValue(undefined),
   },
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({
-  getSkillsDir: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace"),
+  // See uninstall-edition.test.ts for the other two answers — null (the hermes
+  // SKU) and the throw (a config that exists and cannot be read) — both tested
+  // against the real implementation rather than a mock.
+  openclawSkillRoot: vi.fn().mockReturnValue("/home/clawbox/.openclaw/workspace/skills"),
   clearSkillEntry: vi.fn().mockResolvedValue(true),
+  OpenclawConfigUnreadableError: class OpenclawConfigUnreadableError extends Error {
+    readonly code = "config_unreadable";
+  },
 }));
 
 vi.mock("@/lib/openclaw-skill-info", () => ({
@@ -31,8 +40,8 @@ describe("/setup-api/apps/uninstall", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    const { getSkillsDir, clearSkillEntry } = await import("@/lib/openclaw-config");
-    vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
+    const { openclawSkillRoot, clearSkillEntry } = await import("@/lib/openclaw-config");
+    vi.mocked(openclawSkillRoot).mockReturnValue("/home/clawbox/.openclaw/workspace/skills");
     vi.mocked(clearSkillEntry).mockResolvedValue(true);
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.rm).mockResolvedValue(undefined);
@@ -53,11 +62,38 @@ describe("/setup-api/apps/uninstall", () => {
   it("uninstalls an app successfully", async () => {
     const res = await uninstall("test-app");
     const body = await res.json();
-    expect(body).toEqual({ ok: true, appId: "test-app" });
+    expect(body).toEqual({ ok: true, appId: "test-app", skillRemoved: true });
   });
 
   it("rejects invalid appId", async () => {
     expect((await uninstall("../hack")).status).toBe(400);
+  });
+
+  it("answers a client error for a body that is not JSON, not a retryable 500", async () => {
+    // `req.json()` throws inside the outer try, so a malformed body was
+    // answered with this PR's own failure contract — `code:"uninstall_failed"`,
+    // `retryable:true` — and `mcp/tools/desktop.ts` turns that into "Call
+    // app_uninstall once more". A body that is not JSON can never succeed on
+    // retry, and a client's mistake is not a server fault.
+    const res = await POST(new Request("http://localhost/setup-api/apps/uninstall", {
+      method: "POST",
+      body: "{ appId: not json",
+    }));
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.retryable).toBeUndefined();
+    expect(body.code).not.toBe("uninstall_failed");
+  });
+
+  it("answers a client error for a JSON body that is not an object", async () => {
+    // `const { appId } = null` throws a TypeError into the same outer catch.
+    const res = await POST(new Request("http://localhost/setup-api/apps/uninstall", {
+      method: "POST",
+      body: "null",
+    }));
+
+    expect(res.status).toBe(400);
   });
 
   it("rejects missing appId", async () => {
@@ -69,9 +105,38 @@ describe("/setup-api/apps/uninstall", () => {
     expect(res.status).toBe(400);
   });
 
+  it("refuses, and removes nothing else, when the skill folder will not go", async () => {
+    // A skill directory that is THERE and could not be removed used to be
+    // reported as `skillRemoved: false` — the value the MCP tool states out
+    // loud as "there was no skill of that name on disk" — while the tile, the
+    // preferences and the KV went anyway. The removal is refused instead, so
+    // the desktop entry the owner would retry from survives.
+    const fsMod = await import("fs/promises");
+    vi.mocked(fsMod.default.rm).mockRejectedValue(Object.assign(new Error("Permission denied"), { code: "EACCES" }));
+
+    const res = await uninstall("test-app");
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "skill_remove_failed",
+      retryable: true,
+      appId: "test-app",
+    });
+    const { clearSkillEntry } = await import("@/lib/openclaw-config");
+    const { kvDelete } = await import("@/lib/kv-store");
+    expect(clearSkillEntry).not.toHaveBeenCalled();
+    expect(kvDelete).not.toHaveBeenCalled();
+  });
+
   it("handles uninstall error gracefully", async () => {
     const fsMod = await import("fs/promises");
-    vi.mocked(fsMod.default.rm).mockRejectedValue(new Error("Permission denied"));
+    // The skill half succeeds; the deployed webapp's removal is what fails.
+    let calls = 0;
+    vi.mocked(fsMod.default.rm).mockImplementation(async () => {
+      if (calls++ === 0) return undefined;
+      throw new Error("Permission denied");
+    });
     expect((await uninstall("test-app")).status).toBe(500);
   });
 
@@ -113,6 +178,30 @@ describe("/setup-api/apps/uninstall", () => {
     const { clearSkillEntry } = await import("@/lib/openclaw-config");
     vi.mocked(clearSkillEntry).mockRejectedValue(new Error("EACCES"));
     const res = await uninstall("test-app");
-    expect(await res.json()).toEqual({ ok: true, appId: "test-app" });
+    expect(await res.json()).toEqual({ ok: true, appId: "test-app", skillRemoved: true });
+  });
+
+  it("fails with the code and the skill fact when a later step throws", async () => {
+    // The outer catch's contract, pinned HERE rather than only in the MCP
+    // fixture that quotes it: `mcp/tools/desktop.ts` matches this 500 on
+    // `"code":"uninstall_failed"` plus `"skillRemoved":true` to tell the agent
+    // the app is only partly gone. With the code asserted on one side alone,
+    // renaming it would leave both suites green while the agent fell back to
+    // "the service did not complete this request. Call clawbox_health".
+    const fsMod = await import("fs/promises");
+    // The skill folder goes; the webapp removal is what fails.
+    vi.mocked(fsMod.default.rm)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+
+    const res = await uninstall("test-app");
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "uninstall_failed",
+      retryable: true,
+      skillRemoved: true,
+    });
   });
 });

@@ -46,10 +46,12 @@ describe("skill install does not restart the gateway", () => {
   });
 
   it("still writes skills where OpenClaw watches for them", () => {
-    // getSkillsDir() resolves the workspace; the skill root is its `skills`
-    // subdirectory, which is what OpenClaw's watcher and `openclaw skills
-    // install` both target.
-    expect(INSTALL_ROUTE).toContain('path.join(skillsDir, "skills")');
+    // `openclawSkillRoot()` resolves the workspace and appends `skills` — the
+    // directory OpenClaw's watcher and `openclaw skills install` both target,
+    // and the SAME expression the uninstall route deletes under. Two spellings
+    // of one path is how a wrong-directory delete comes back (TASK-551).
+    expect(INSTALL_ROUTE).toContain("openclawSkillRoot()");
+    expect(INSTALL_ROUTE).toContain("fs.mkdir(skillRoot");
   });
 });
 

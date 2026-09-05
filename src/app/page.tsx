@@ -1029,19 +1029,71 @@ function ChromeDesktopInner() {
   const confirmUninstallApp = useCallback(async () => {
     const appId = uninstallConfirmRef.current;
     if (!appId) return;
-    // Remove skill files and reload gateway
+    // Remove skill files and reload gateway.
+    //
+    // The desktop only takes the app off itself once the route has said it
+    // removed it. A refusal is the route saying it removed NOTHING — an
+    // OpenClaw config it could not read, a skill folder it could not delete —
+    // and a thrown fetch (a network drop, or the 10 s abort below) says
+    // nothing at all about whether the removal landed. Dropping the icon on
+    // either is a false success in the one place the owner can see it: the
+    // tile is what they retry from, the list here is display-only (see the
+    // usePreferenceWriter note above — the ROUTE owns `installed_apps`), so
+    // the next reload would put the icon back with no explanation. Retrying
+    // is safe: a second uninstall of an app already gone answers `ok:true`.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10_000);
-      await fetch("/setup-api/apps/uninstall", {
+      const res = await fetch("/setup-api/apps/uninstall", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ appId }),
         signal: controller.signal,
       });
-      clearTimeout(timer);
+      if (!res.ok) {
+        const failure = await res.json().catch(() => null);
+        const message = typeof failure?.error === "string"
+          ? failure.error
+          : "Couldn't uninstall this app — please try again.";
+        window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message } }));
+        setUninstallConfirm(null);
+        return;
+      }
+      // A removal that landed, over a device whose OpenClaw configuration
+      // could not be read: the route removed the web app and never got to look
+      // for a skill of the same id (one id can be both). The app IS off the
+      // desktop, so the cleanup below is right — but saying nothing would put
+      // this route's own defect back in the one surface the owner watches.
+      const removed = await res.json().catch(() => null);
+      if (removed?.skillHalfChecked === false) {
+        window.dispatchEvent(new CustomEvent("clawbox:toast", {
+          detail: {
+            // The remedy, not just the problem. The desktop entry has just
+            // been dropped from `installed_apps`, so Settings → Apps will not
+            // list this app any more and there is no route back to it in the
+            // UI: the Terminal is the only way to remove the skill, and the
+            // agent is told exactly that (`mcp/tools/desktop.ts`). This toast
+            // auto-hides after 8 s, so the next step has to be IN it. 227 of
+            // the 280 characters `ToastHost` keeps.
+            message: "Removed from the desktop. OpenClaw's configuration couldn't be read, so its skills weren't checked — if this app also had a skill, it may still be installed. Remove it from the Terminal once the configuration is readable again.",
+          },
+        }));
+      }
     } catch (err) {
       console.warn("[uninstall] Failed to uninstall skill:", err);
+      // Worded as an unknown, not as a failure. The abort below is six times
+      // shorter than the 60 s the MCP tool gives the same route, and a skill
+      // folder with a large venv on a loaded Jetson can outrun it while the
+      // removal succeeds — so "couldn't uninstall" would be a false failure in
+      // the one surface the owner reads. A reload settles it, and a retry is
+      // harmless either way.
+      window.dispatchEvent(new CustomEvent("clawbox:toast", {
+        detail: { message: "Couldn't confirm the uninstall — reload the page to see whether it went through." },
+      }));
+      setUninstallConfirm(null);
+      return;
+    } finally {
+      clearTimeout(timer);
     }
     setInstalledApps((prev) => prev.filter((id) => id !== appId));
     // Meta and the shelf-pin override go with the app: both used to outlive

@@ -106,12 +106,19 @@ function assertProjectName(name: unknown): string {
   return trimmed;
 }
 
-/** Resolve a file path inside a project directory, preventing traversal. */
+/**
+ * Resolve a file path inside a project directory, preventing traversal.
+ *
+ * The project half comes from `projectDir()` — the id rebuilt from the
+ * alphabet — rather than a second `path.join(PROJECTS_DIR, projectId)` of its
+ * own: a local constant of the same name shadowed that function here, so the
+ * one root in this module that still joined the caller's string was the one
+ * every `code_file_*` write and delete resolves against.
+ */
 function safePath(projectId: string, filePath: string): string {
-  if (!validateProjectId(projectId)) throw new ValidationError("Invalid project ID");
-  const projectDir = path.join(PROJECTS_DIR, projectId);
-  const resolved = path.resolve(projectDir, filePath);
-  if (!resolved.startsWith(projectDir + path.sep) && resolved !== projectDir) {
+  const dir = projectDir(projectId);
+  const resolved = path.resolve(dir, filePath);
+  if (!resolved.startsWith(dir + path.sep) && resolved !== dir) {
     throw new ValidationError("Path traversal denied");
   }
   return resolved;
@@ -127,7 +134,7 @@ function assertMutableTarget(projectId: string, absPath: string): void {
   if (path.basename(absPath) === "project.json") {
     throw new ValidationError("Cannot modify project.json");
   }
-  if (absPath === path.join(PROJECTS_DIR, projectId)) {
+  if (absPath === projectDir(projectId)) {
     throw new ValidationError("Refusing to target the project root");
   }
 }
@@ -166,6 +173,21 @@ function projectDir(projectId: string): string {
   const id = safeProjectId(projectId);
   if (!id) throw new ValidationError("Invalid project ID");
   return path.join(PROJECTS_DIR, id);
+}
+
+/**
+ * The directory a DEPLOYED webapp lives in — `projectDir`'s sibling, and built
+ * the same way, from the rebuilt id rather than the caller's string. Both roots
+ * take an id from the same doors (`webapp_create`, `webapp_update`,
+ * `code_project_build`, the webapps route), so leaving one of them joining the
+ * raw string would have left the whole rule resting on whichever caller tested
+ * it last. Exported because the webapps route serves files out of this folder
+ * and must get its spelling from here rather than joining `WEBAPPS_DIR` again.
+ */
+export function webappPath(appId: string): string {
+  const id = safeProjectId(appId);
+  if (!id) throw new ValidationError("Invalid app ID");
+  return path.join(WEBAPPS_DIR, id);
 }
 
 /**
@@ -633,7 +655,7 @@ export async function buildProject(
   // rebuild only refreshes index.html — re-running deployWebapp would clobber
   // the saved icon and re-surface an app the user intentionally hid.
   const alreadyDeployed = await fs
-    .stat(path.join(WEBAPPS_DIR, projectId, "meta.json"))
+    .stat(path.join(webappPath(projectId), "meta.json"))
     .then(() => true)
     .catch(() => false);
   if (alreadyDeployed) {
@@ -665,7 +687,7 @@ export async function buildProject(
  * rebuild can't wipe the saved icon or re-surface an app the user hid.
  */
 export async function writeWebappIndex(appId: string, html: string): Promise<void> {
-  const dir = path.join(WEBAPPS_DIR, appId);
+  const dir = webappPath(appId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, "index.html"), html, "utf-8");
 }
@@ -691,7 +713,7 @@ export async function deployWebapp(
   const name = assertProjectName(meta.name);
   await writeWebappIndex(appId, html);
   await fs.writeFile(
-    path.join(WEBAPPS_DIR, appId, "meta.json"),
+    path.join(webappPath(appId), "meta.json"),
     JSON.stringify({ name, color: meta.color || "#f97316", icon: meta.icon || "" }),
     "utf-8",
   );

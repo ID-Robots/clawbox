@@ -337,7 +337,105 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             : "Call ui_list_apps and use an id from its installed_apps list, without the \"installed-\" prefix.",
         );
       }
-      await apiPost("/setup-api/apps/uninstall", { appId: app_id }, { timeoutMs: 60_000 });
+      const removed = await apiPost<{ skillRemoved?: boolean | null; skillHalfChecked?: boolean }>(
+        "/setup-api/apps/uninstall",
+        { appId: app_id },
+        {
+          timeoutMs: 60_000,
+          // The route refuses rather than half-uninstalling when it cannot
+          // read the device's OpenClaw configuration or remove the skill
+          // folder. Unmapped, a 503 falls through to the generic
+          // ENDPOINT_DOWN — "the ClawBox service did not complete this
+          // request. Call clawbox_health, then retry once" — which sends the
+          // agent to a health check over a route that answered precisely, and
+          // says nothing about the app still being installed.
+          //
+          // TWO rules, because the route's two refusals are not the same fact
+          // and one sentence for both is a false report either way. `fs.rm`
+          // deletes as it WALKS, so `skill_remove_failed` may already have
+          // removed part of the skill folder — telling the agent "nothing was
+          // removed" there is the same lie this PR removes from the route
+          // itself. `config_unreadable` really did touch nothing: it is
+          // answered before the first deletion. Matched on the body, in order,
+          // by `matchRule` (mcp/lib/errors.ts).
+          rules: [
+            {
+              status: 503,
+              match: /"code"\s*:\s*"skill_remove_failed"/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox stopped part-way through the removal: the app's skill folder could not be fully removed and some of it may already be gone. The app is still on the desktop.",
+              next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still on the desktop, that part of its skill folder may already be deleted, and quote what the device said.",
+            },
+            {
+              status: 503,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox could not finish the removal, so nothing was removed and the app is still on the desktop.",
+              next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still installed and what the device said.",
+            },
+            // The route's outer catch (500 `uninstall_failed`) says whether the
+            // skill folder had already gone before the failure. Unmapped it
+            // fell through to the generic ENDPOINT_DOWN — "call clawbox_health,
+            // then retry once" — sending the agent to a health check over a
+            // route that had just answered precisely, and saying nothing about
+            // the app being half removed. `matchRule` compares the status
+            // before the body, so the two 503s above cannot swallow these.
+            //
+            // TWO rules again, for the reason the 503s are two: the route's own
+            // 500 body words the cases apart (`skillRemoved === true` → "after
+            // the skill folder had already been removed"), and one "may already
+            // be gone" sentence for both would claim a half-removed skill on
+            // the hermes SKU, where no skills path is ever resolved. The first
+            // rule wants BOTH fields and asks for them as two INDEPENDENT
+            // lookaheads: a forward scan would have tied this sentence to the
+            // order of an object literal in the route that nothing pins, so
+            // moving `skillRemoved` above `code` there — a shared failure-body
+            // helper would — silently dropped to the second rule. That fallback
+            // is a DEGRADED answer, not an equally true one: "nothing is known
+            // to have been removed" is false of a `uninstall_failed` carrying
+            // `skillRemoved: true`, which is the whole reason there are two.
+            {
+              status: 500,
+              match: /(?=[\s\S]*"code"\s*:\s*"uninstall_failed")(?=[\s\S]*"skillRemoved"\s*:\s*true)/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox failed part-way through the uninstall, after the app's skill folder had already been removed: the app is only partly gone and is still on the desktop.",
+              next: "Call app_uninstall once more — the rest of the cleanup is repeatable. If it fails again, tell the user the app's skill is already deleted while the app is still on the desktop, and quote what the device said.",
+            },
+            {
+              status: 500,
+              match: /"code"\s*:\s*"uninstall_failed"/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox could not finish the uninstall, so nothing is known to have been removed and the app is still on the desktop.",
+              next: "Call app_uninstall once more. If it fails again, tell the user the app is still installed and quote what the device said.",
+            },
+          ],
+        },
+      );
+      // Anything but a 2xx has thrown by here, so the desktop entry IS gone.
+      // The SKILL half depends on what was there. `skillRemoved: false` — the
+      // id is in the desktop's list and no skill of that name was on disk — is
+      // the one an agent must not report as a skill removal, because the next
+      // thing it does is tell the user the skill is gone. `null` is an
+      // uninstall with no skill half to report on at all (the hermes SKU, or a
+      // web app), and says nothing about skills for the same reason: an
+      // absence report about something that never existed reads as a partial
+      // failure.
+      // `skillHalfChecked: false` is the one answer where `null` does NOT mean
+      // "no skill half to report on": the device's OpenClaw configuration
+      // could not be read, so the route removed the web app and never got to
+      // look for a skill of the same id (one id can be both). Saying "Removed"
+      // and no more would be a false success over a skill still on disk and
+      // still loaded, so the agent gets the fact to relay. Undefined-safe, so
+      // an older route degrades to the plain sentence below.
+      if (removed?.skillHalfChecked === false) {
+        return text(
+          `Removed "${app_id}" from the desktop. The device's OpenClaw configuration could not be read, so its skills were not checked: if this app also had a skill of that name, it is still installed. Do not call app_uninstall again — the desktop entry is already gone, so it would answer that there is no such app. Tell the user the skill may still be on the device and has to be removed from the Terminal once the configuration is readable again.`,
+        );
+      }
+      if (removed?.skillRemoved === false) {
+        return text(
+          `Removed "${app_id}" from the desktop. There was no skill of that name on disk, so nothing was removed from the agent's skills.`,
+        );
+      }
       return text(`Removed "${app_id}" from the desktop.`);
     },
   );

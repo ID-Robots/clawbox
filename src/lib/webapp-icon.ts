@@ -77,7 +77,13 @@ const WEBAPPS_DIR = path.join(DATA_DIR, "webapps");
  * refuse is an icon nothing could ever fetch, so it is not worth generating.
  */
 const APP_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
-const MAX_APP_ID_CHARS = 64;
+/**
+ * The length every surface that has to NAME an app stops at — the icon route,
+ * `apps/skill-info`, the webapps route, `zInstalledAppId` (mcp/lib/schema.ts).
+ * A door that decides what may ARRIVE applies it; a door that removes what is
+ * already here must not, which is why `safeAppId` takes it as an argument.
+ */
+export const MAX_APP_ID_CHARS = 64;
 
 /**
  * The app id this module builds paths from, or null for anything else.
@@ -92,8 +98,8 @@ const MAX_APP_ID_CHARS = 64;
  * the cut — a `.test()` guard leaves the caller's string in play, and a
  * static analyser rightly keeps flagging every path built from it.
  */
-export function safeAppId(appId: unknown): string | null {
-  if (typeof appId !== "string" || appId.length < 1 || appId.length > MAX_APP_ID_CHARS) return null;
+export function safeAppId(appId: unknown, maxChars: number = MAX_APP_ID_CHARS): string | null {
+  if (typeof appId !== "string" || appId.length < 1 || appId.length > maxChars) return null;
   let safe = "";
   for (const ch of appId) {
     const at = APP_ID_ALPHABET.indexOf(ch);
@@ -167,9 +173,27 @@ const appCooldownUntil = new Map<string, number>();
 /** Until when NO app is tried, after the proxy refused the box itself. */
 let boxCooldownUntil = 0;
 
-/** Where the icon for this app lives, whether or not it exists yet. */
+/**
+ * Where the icon for this app lives, whether or not it exists yet.
+ *
+ * Joined from the REBUILT id, so the one function that says where an icon
+ * lives is also the place the rule is applied: a caller that only `.test()`ed
+ * its own id still cannot put anything but `<alphabet>.png` under data/icons.
+ * It THROWS rather than answering a path, the way `projectDir` does in
+ * code-projects.ts, because there is no honest path to return for an id that
+ * is not one — every caller already holds an id that has passed this same
+ * alphabet (the apps routes rebuild it, project-icon.ts rebuilds it,
+ * coding-agent.ts tests it with `validateProjectId`).
+ *
+ * The ALPHABET only, with no length bound: what makes this one path segment is
+ * that none of those characters is a separator or a dot, and the 64 is a rule
+ * about what may arrive at a door (see MAX_APP_ID_CHARS). `apps/uninstall`
+ * has to name the icon of an app that got in before that rule did.
+ */
 export function webappIconPath(appId: string): string {
-  return path.join(ICONS_DIR, `${appId}.png`);
+  const id = safeAppId(appId, Number.POSITIVE_INFINITY);
+  if (!id) throw new Error("Not an app id");
+  return path.join(ICONS_DIR, `${id}.png`);
 }
 
 /** Collapse whitespace and cut, so the prompt stays one paragraph. */
@@ -601,7 +625,14 @@ export function isPng(bytes: Buffer): boolean {
   return bytes.length >= PNG_SIGNATURE.length && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
 }
 
-/** Is the app still deployed? Its meta.json goes when the app is uninstalled. */
+/**
+ * Is the app still deployed? Its meta.json goes when the app is uninstalled.
+ *
+ * `appId` must already have been through `safeAppId` — the same contract
+ * `ensureIconFile` states, and for the same reason: the path below is joined
+ * from it. Its only caller is `ensureOnce`, which is reached from
+ * `ensureWebappIcon` after the rebuild.
+ */
 function appExists(appId: string): Promise<boolean> {
   return exists(path.join(WEBAPPS_DIR, appId, "meta.json"));
 }

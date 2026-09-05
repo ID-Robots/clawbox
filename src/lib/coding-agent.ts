@@ -75,7 +75,7 @@ import { memAvailableMb } from "@/lib/mem-available";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { taskTitle } from "@/lib/task-title";
-import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, WEBAPPS_DIR } from "@/lib/code-projects";
+import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, webappPath } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
   decideMerge,
@@ -1522,7 +1522,10 @@ async function hasProjectIcon(folder: string): Promise<boolean> {
 
 async function isOnDesktop(folder: string): Promise<boolean> {
   if (!validateProjectId(folder)) return false;
-  const meta = await fs.promises.stat(path.join(WEBAPPS_DIR, folder, "meta.json")).catch(() => null);
+  // `webappPath`, not a join of WEBAPPS_DIR: the folder name is rebuilt from
+  // the alphabet there, the way hasProjectIcon's is by `webappIconPath`. The
+  // `validateProjectId` above is the same rule, so it cannot refuse here.
+  const meta = await fs.promises.stat(path.join(webappPath(folder), "meta.json")).catch(() => null);
   return meta?.isFile() === true;
 }
 
@@ -1721,7 +1724,10 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   if (!raw || typeof raw !== "object") return null;
   const t = raw as Record<string, unknown>;
   if (typeof t.id !== "string" || !t.id) return null;
-  if (t.role !== "planner" && t.role !== "worker") return null;
+  // Every role the team has: a reviewer run reloaded without its team would
+  // be resumed and settled as a project run — icon, review pass, pull
+  // request — in a folder that is the team's.
+  if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer") return null;
   return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
 }
 

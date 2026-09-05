@@ -30,9 +30,22 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(async () => undefined),
 }));
 
+// The real class, stubbed: the route branches on `instanceof`, so the error the
+// mocked openclawSkillRoot() throws must be the one the route imports.
+const { ConfigUnreadable } = vi.hoisted(() => ({
+  ConfigUnreadable: class OpenclawConfigUnreadableError extends Error {
+    readonly code = "config_unreadable";
+    constructor() {
+      super("openclaw.json could not be read");
+      this.name = "OpenclawConfigUnreadableError";
+    }
+  },
+}));
+
 vi.mock("@/lib/openclaw-config", () => ({
-  getSkillsDir: vi.fn(() => "/home/clawbox/.openclaw/workspace"),
+  openclawSkillRoot: vi.fn(() => "/home/clawbox/.openclaw/workspace/skills"),
   findOpenclawBin: vi.fn(() => "/usr/local/bin/openclaw"),
+  OpenclawConfigUnreadableError: ConfigUnreadable,
 }));
 
 vi.mock("@/lib/openclaw-skill-info", () => ({
@@ -105,8 +118,8 @@ describe("/setup-api/apps/install", () => {
     const fsMod = await import("fs/promises");
     vi.mocked(fsMod.default.mkdir).mockResolvedValue(undefined as never);
     writeFile = vi.mocked(fsMod.default.writeFile).mockResolvedValue(undefined);
-    const { getSkillsDir } = await import("@/lib/openclaw-config");
-    vi.mocked(getSkillsDir).mockReturnValue("/home/clawbox/.openclaw/workspace");
+    const { openclawSkillRoot } = await import("@/lib/openclaw-config");
+    vi.mocked(openclawSkillRoot).mockReturnValue("/home/clawbox/.openclaw/workspace/skills");
     upstream({
       clawhub: jsonResponse(200, { skill: { slug: "test-app" }, owner: { handle: "someone" } }),
       store: jsonResponse(200, { slug: "test-app", name: "Test App", category: "developer", developer: "someone" }),
@@ -157,6 +170,18 @@ describe("/setup-api/apps/install", () => {
     expect((await POST(install({ appId: "-x" }))).status).toBe(400);
     expect((await POST(install({ appId: "@owner/-x" }))).status).toBe(400);
     expect((await POST(install({ appId: "@-owner/x" }))).status).toBe(400);
+  });
+
+  // The bound every surface that has to NAME an app already applies —
+  // `zInstalledAppId` (mcp/lib/schema.ts), apps/skill-info, the webapps route,
+  // the icon route. This door had none, so it could install a skill the desktop
+  // could not open, skill-info could not answer for and no icon could load.
+  // apps/uninstall deliberately does NOT apply it: it has to be able to remove
+  // one of those if a box is already holding it.
+  it("refuses a slug longer than every other surface can name", async () => {
+    expect((await POST(install({ appId: "a".repeat(65) }))).status).toBe(400);
+    expect((await POST(install({ appId: `@owner/${"a".repeat(65)}` }))).status).toBe(400);
+    expect((await POST(install({ appId: "a".repeat(64) }))).status).toBe(200);
   });
 
   it("accepts a @owner/slug ref and keys everything local by the bare slug", async () => {
@@ -259,6 +284,29 @@ describe("/setup-api/apps/install", () => {
     res = await POST(install({ appId: "test-app" }));
     expect(res.status).toBe(504);
     expect((await res.json()).clawhub).toMatchObject({ code: "timeout", retryable: true });
+  });
+
+  it("refuses a config it could not read as retryable, not as a device without OpenClaw", async () => {
+    // openclawAppsGuard() only proves the ACTIVE HARNESS is openclaw, so a
+    // momentarily unreadable openclaw.json — the in-place `openclaw config
+    // set` rewrite, an EACCES — reaches this route on exactly the boxes that
+    // have skills. It used to answer "This device has no OpenClaw skills
+    // directory to install into": untrue, and without the `ok:false`/`code`/
+    // `retryable` every other failure of this route carries, so the Store
+    // could not tell the owner to try again.
+    const { openclawSkillRoot } = await import("@/lib/openclaw-config");
+    vi.mocked(openclawSkillRoot).mockImplementation(() => { throw new ConfigUnreadable(); });
+
+    const res = await POST(install({ appId: "test-app" }));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "config_unreadable",
+      retryable: true,
+      appId: "test-app",
+    });
+    expect(exec).not.toHaveBeenCalled();
   });
 
   it("downloads the icon only after the install succeeded", async () => {

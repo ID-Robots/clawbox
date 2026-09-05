@@ -3225,12 +3225,234 @@ fi
 
 CLAWBOX_GUIDE_SRC="$CLAWBOX_ROOT/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
-# The heading of the section an already-seeded CLAWBOX.md is topped up with,
-# and the marker that says it is already there. Matched with `grep -qF` and, in
-# the awk below, a WHOLE-LINE `==` against the heading — deliberately, for the
-# reason stated at that awk: a prefix match would let
-# `## System actions and restarts (advanced)` swallow every section after it.
-CLAWBOX_GUIDE_TOPUP="## System actions and restarts"
+# Topping an existing CLAWBOX.md up, section by section.
+#
+# Seeding is deliberately seed-if-MISSING, so an owner's or the agent's edits
+# survive a gateway start — and the cost of that was measured on the OpenClaw
+# dev box (2026-09-03, TASK-706): its CLAWBOX.md is dated Aug 13 and carries
+# five headings, so it has NEVER received "## Coding agent (delegate a whole
+# task)", which is how the agent learns that coding_agent_run /
+# coding_agent_status / coding_agent_stop exist and what to say when they are
+# not offered. Every box set up before that section landed is in the same state,
+# silently, and TASK-612's rule reached the field only because someone added a
+# marker for it BY HAND.
+#
+# One marker per section does not scale, so there is no marker list any more:
+# every `## ` heading in the shipped template that the box's file does not carry
+# is appended, in template order. The heading IS the marker, which is why every
+# comparison below is a WHOLE-LINE one (modulo a CR) rather than a substring —
+# a guide that says "## Skills and other things" must not satisfy "## Skills".
+#
+# The trade this takes, deliberately and per the card: an owner who DELETED a
+# section gets it back on the next gateway start. The alternative is what the
+# box has today — sections that never arrive at all, with nothing that says so.
+# Whole-line matching cuts the same way in both directions, and both are the
+# trade: `## Skills and other things` no longer satisfies `## Skills` (the old
+# substring match said it did, and would have withheld that section forever),
+# and a heading the agent DEMOTED to `### Skills` no longer satisfies it either,
+# so such a box gets one copy of the section back — once, because the appended
+# copy is found on the next boot.
+#
+# Values reach awk through the environment rather than `-v`, which runs them
+# through escape processing: a heading that ever grew a backslash would quietly
+# stop matching and the section would go missing with no warning.
+
+# ONE fence rule, shared by the three helpers below.
+#
+# Prepended to each awk program, so `text[i]` is every line with trailing
+# whitespace and a CR trimmed and `clawbox_fences()` marks in `hidden[i]` the
+# lines a fence encloses, and sets `unbalanced` when one never closed. Trailing
+# whitespace is trimmed in one place for all three: a heading that differs from
+# the template's only by a trailing space would otherwise be judged absent by
+# one helper and found by another, and the section appended a second time,
+# permanently.
+#
+# Fenced `## ` lines do not count. This template is markdown that documents
+# markdown and shell, and the destinations are the owner's and the agent's to
+# edit: a ``` block quoting a heading would otherwise be enumerated as a phantom
+# section on the source side, and read as the section already being present on
+# the destination side.
+#
+# A delimiter is a ``` or ~~~ line indented by AT MOST THREE spaces, which is
+# how CommonMark defines one — an opener and a closer alike. Matching only at
+# column 0 is not a stricter rule, it is a WRONG one: an indented closing fence
+# then goes unseen, the next opener is paired with the previous opener, and the
+# prose between two examples is marked as fenced. Measured on a COPY of this
+# template carrying two two-space-indented closers — which render correctly on
+# GitHub and are invisible in review — `## Browser (real Chromium on the
+# device)` and `## Apps and UI` were enumerated by nothing and delivered to no
+# box, exit 0, not one word on stderr. (A copy: the shipped file has exactly one
+# fenced block and it is in the LAST section, so its own closers cannot reach
+# those two headings. The shape is what matters, and the day an example lands
+# above them it would.) The interval form `{0,3}` is not available: mawk 1.3.4
+# does not merely reject it, it aborts with `REcompile() - panic`.
+#
+# A delimiter also closes only a fence opened with the SAME character, and only
+# with a run at least as long — CommonMark again, and the same mis-pairing as
+# above one delimiter character over. These files document markdown, so a ```
+# block quoting a ~~~ example is an ordinary edit; with both characters in one
+# list the ``` opener pairs with the quoted ~~~, the lines between the two
+# quoted delimiters fall outside every pair, and a heading the template only
+# QUOTES is appended to every box as a section of its own. The run-length half
+# is what lets a ```` block quote a ``` one, which is how this template shows
+# markdown inside markdown.
+#
+# CommonMark's THIRD closer rule — that a closer carries no info string, so
+# "```md" cannot close "```text" — is applied to the TEMPLATE and not to the
+# destinations, and that asymmetry is the point rather than an oversight. It
+# changes which delimiter becomes the closer, so it moves the answer in BOTH
+# directions depending on the file, and the two files want opposite things:
+#
+#   The template is OURS — shipped, reviewed, and pinned by a unit test that
+#   compares this enumerator against a fence-blind list of every `## ` line. It
+#   should be parsed by the book, and anything the book cannot parse cleanly
+#   should be REFUSED out loud. Without the rule it is not: a `` ```text ``
+#   example closed by a `` ```md `` line (a copy-paste slip that renders
+#   correctly on GitHub) pairs opener-with-content, the pairing still comes out
+#   even, and `## Real Heading` below it is enumerated by nothing. Measured on
+#   exactly that shape: `Appended to CLAWBOX.md: First`, exit 0, not one word on
+#   stderr, and the section never reaches a box. That is this card's own defect.
+#
+#   A destination is the OWNER's and the agent's, edited by hand and by a model,
+#   and there the unaffordable outcome is not a wrong parse but an UNBOUNDED
+#   one: a heading wrongly hidden is judged missing and re-appended on every
+#   boot. Measured with the rule applied there too: a CLAWBOX.md carrying one
+#   stray ``` grew 8793 -> 11731 bytes over two boots, because the rule stopped
+#   the appended section's own `` ```text `` from closing the stray and let a
+#   later bare ``` close it instead — swallowing everything appended in between.
+#   Lenient, the same file is unbalanced, read as prose, and stable from boot 1.
+#
+# So: strict on the file we control, lenient on the files we do not.
+#
+# And a fence hides only what it CLOSES, which is the whole reason these read
+# the file twice instead of toggling as they go. An opener with no closer is
+# ordinary damage in a file the owner and the agent both edit, and a naive
+# toggle makes it catastrophic in BOTH directions: on the destination every
+# heading after the stray delimiter is "missing", the copy this block appends
+# lands in the fenced region too, and the file grows by those sections on EVERY
+# boot; on the template the headings simply stop being enumerated. Such a file
+# is therefore read as prose — nothing is hidden at all, which is what this
+# script did before fences were considered — and the two blocks below SAY SO
+# rather than leaving it silent, because "read as prose" on the destination
+# means a heading quoted inside a fence counts as present and its section is
+# withheld.
+CLAWBOX_FENCE_AWK='
+  function clawbox_fences(   i, j, k, open, pairs, from, to) {
+    open = 0; pairs = 0
+    for (i = 1; i <= fences; i++) {
+      if (!open) { open = i; continue }
+      if (fchar[i] != fchar[open] || flen[i] < flen[open]) continue
+      if (strict && finfo[i]) continue
+      pairs++; from[pairs] = fence[open]; to[pairs] = fence[i]; open = 0
+    }
+    unbalanced = (open != 0)
+    if (unbalanced) return
+    for (k = 1; k <= pairs; k++)
+      for (j = from[k]; j <= to[k]; j++) hidden[j] = 1
+  }
+  {
+    line = $0; sub(/[ \t\r]+$/, "", line); text[NR] = line
+    if (line ~ /^ *(```|~~~)/ && match(line, /^ */) && RLENGTH < 4) {
+      mark = substr(line, RLENGTH + 1)
+      char = substr(mark, 1, 1)
+      run = 1
+      while (substr(mark, run + 1, 1) == char) run++
+      fences++
+      fence[fences] = NR; fchar[fences] = char; flen[fences] = run
+      # An info string ("```text"), which an opener may carry and a closer may
+      # not. `mark` has already had its trailing whitespace trimmed, so anything
+      # past the delimiter run is real text.
+      finfo[fences] = (length(mark) > run)
+    }
+  }
+'
+
+# Do this file'"'"'s fences balance? 0 yes, 1 no, 2 could not be read.
+#
+# Asked once per file rather than folded into the helpers, because the answer is
+# a fact about the FILE and the helpers are called once per heading. `$2`
+# non-empty asks the STRICT reading, and every caller passes what the helpers
+# that go on to read the same file use — the answer must come from the same
+# pairing those helpers apply, not a second rule that could drift from it.
+clawbox_fences_balanced() {
+  [ -r "$1" ] || return 2
+  awk -v strict="${2-}" "$CLAWBOX_FENCE_AWK"'
+    END { clawbox_fences(); exit(unbalanced ? 1 : 0) }
+  ' "$1"
+}
+
+# Every `## ` heading in a markdown file, in order. Template-side, so strict.
+clawbox_guide_headings() {
+  awk -v strict=1 "$CLAWBOX_FENCE_AWK"'
+    END {
+      clawbox_fences()
+      for (i = 1; i <= NR; i++)
+        if (!hidden[i] && text[i] ~ /^## +[^ ]/) print text[i]
+    }
+  ' "$1"
+}
+
+# Does this file already carry that heading, as a whole line?
+#
+# One helper for BOTH destinations — CLAWBOX.md's sections and AGENTS.md's two
+# markers — so the two files cannot come to disagree about what "already there"
+# means. No `strict`, deliberately: these are the owner's and the agent's files,
+# where the lenient closer is the reading that leans toward "unbalanced, so read
+# it as prose and hide nothing", and hiding nothing is the only answer that
+# cannot make a section be re-appended on every boot. See the rule above. The AGENTS.md blocks used `grep -qF`, a SUBSTRING match, which read
+# `### ClawBox integration notes` as the marker and withheld the pointer for
+# good; whole-line is the correction. And whole-line is exactly what a bare
+# `grep -qxF` cannot do here, because a CRLF file stores the marker as
+# `## X\r`: an exact match misses it, the block appends on EVERY boot and the
+# file grows without bound — so the CR is normalised on both sides, in one
+# place, for both files.
+#
+# Three answers, not two: 0 present, 1 absent, 2 could not be read. `awk` returns
+# 2 for a file it cannot open, and reading that as "absent" is how an unreadable
+# destination gets appended to — the defect the readability guard above exists to
+# stop, through a door that guard cannot cover once the loop is running.
+#
+clawbox_file_has_heading() {
+  [ -r "$1" ] || return 2
+  heading="$2" awk "$CLAWBOX_FENCE_AWK"'
+    END {
+      clawbox_fences()
+      for (i = 1; i <= NR; i++)
+        if (!hidden[i] && text[i] == ENVIRON["heading"]) exit 0
+      exit 1
+    }
+  ' "$1"
+}
+
+# One section of the template: its heading line and everything up to the NEXT
+# `## ` heading.
+#
+# Bounded by the next heading rather than by the `---` rule that happens to sit
+# before it: a rule inside the section would have truncated it, and a CRLF
+# template (`---\r`) would have matched no terminator at all and dragged every
+# following section along. Trailing blank lines and that closing rule are then
+# dropped, because the append supplies its own separator and carrying the
+# template's too ends the topped-up guide on a dangling rule.
+clawbox_guide_section() {
+  heading="$2" awk -v strict=1 "$CLAWBOX_FENCE_AWK"'
+    # The only helper that reproduces lines rather than matching them, so it is
+    # the only one that keeps a second copy of the file in memory. The shared
+    # prologue builds `text[]`, which is trimmed; a section must be appended to
+    # the box exactly as it is shipped.
+    { raw[NR] = $0 }
+    END {
+      clawbox_fences()
+      for (i = 1; i <= NR && !start; i++)
+        if (!hidden[i] && text[i] == ENVIRON["heading"]) start = i
+      if (!start) exit 0
+      last = NR
+      for (i = start + 1; i <= NR && last == NR; i++)
+        if (!hidden[i] && text[i] ~ /^## /) last = i - 1
+      while (last > start && (text[last] == "" || text[last] == "---")) last--
+      for (i = start; i <= last; i++) print raw[i]
+    }
+  ' "$1"
+}
 
 # Append to a file so that a write which stops PART WAY leaves nothing behind.
 #
@@ -3358,14 +3580,26 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # prevented, with no warning at all.
   if [ ! -r "$CLAWBOX_GUIDE_SRC" ]; then
     echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC; leaving CLAWBOX.md as it is" >&2
+  elif [ -e "$CLAWBOX_GUIDE_DST" ] && [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
+    # `-f` alone says "seed it" about a DIRECTORY, and `install SRC DIR` copies
+    # INTO it: two boots, two "Seeded CLAWBOX.md" success lines, a
+    # CLAWBOX.md/clawbox-workspace-guide.md nobody reads, and no guide on the
+    # box ever — a success printed on every boot, forever. A socket and a FIFO
+    # are the same shape (verified: the FIFO does not hang here either).
+    # NOT a dangling symlink: `-e` follows the link and is false, so that case
+    # goes to the seed below, where `install` replaces the link with the guide —
+    # which is the right outcome and is why this is `-e` rather than `-h`.
+    # Nothing here can fix a directory, so it says so instead of reporting work
+    # it did not do.
+    echo "  WARNING: $CLAWBOX_GUIDE_DST exists and is not a regular file; leaving it as it is" >&2
   elif [ ! -f "$CLAWBOX_GUIDE_DST" ]; then
     if install -m 644 "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_DST"; then
       echo "  Seeded CLAWBOX.md in OpenClaw workspace"
     else
       # The seed has the same partial-write problem as the appends, and it is
-      # WORSE: the fragment it leaves already contains the top-up marker, so the
-      # `grep -qF` below finds the heading on every later boot, appends nothing,
-      # and the box keeps a guide cut mid-sentence for good. The enclosing
+      # WORSE: the fragment it leaves already contains the headings that ARE the
+      # top-up markers, so the loop below finds them on every later boot, appends
+      # nothing, and the box keeps a guide cut mid-sentence for good. The enclosing
       # `elif [ ! -f "$CLAWBOX_GUIDE_DST" ]` proves the file did not exist before
       # this attempt, so removing it destroys nothing and the next boot re-seeds
       # from scratch.
@@ -3376,82 +3610,115 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
       # re-seed" step on such a box all land here.
       echo "  WARNING: could not seed CLAWBOX.md in the OpenClaw workspace" >&2
     fi
-  elif ! grep -qF "$CLAWBOX_GUIDE_TOPUP" "$CLAWBOX_GUIDE_DST"; then
-    # Seed-if-missing alone means a section ADDED to the template after a box
-    # was set up never reaches that box — every box in the field already has
-    # CLAWBOX.md, including the one whose agent queued an operator-approval
-    # proposal for a gateway restart (TASK-612). Shipping the rule to new
-    # boxes only would be a fix that reports success without arriving.
+  elif [ ! -r "$CLAWBOX_GUIDE_DST" ]; then
+    # `awk` answers exit 2 on a file it cannot read, which reads as
+    # "the heading is not there" — so a 0200 CLAWBOX.md was appended to on EVERY
+    # boot, growing without bound, while the file itself could never be checked.
+    # A file this block cannot read is a file it must not top up.
+    echo "  WARNING: could not read $CLAWBOX_GUIDE_DST; leaving it as it is" >&2
+  else
+    CLAWBOX_GUIDE_ADDED=""
+    CLAWBOX_GUIDE_HEADINGS=""
+    # A file whose fences do not balance is read as prose (see the fence rule
+    # above), and on each side that costs something different, so each side says
+    # so in its own words.
     #
-    # So: append the one section, never overwrite the file. Personalizations
-    # survive, and the `grep -qF` above is the idempotence marker — a second
-    # gateway start finds the heading and appends nothing. The awk below is the
-    # section's only source, and it is bounded by the NEXT `## ` heading rather
-    # than by the `---` rule that happens to sit before it: a rule inside the
-    # section would have truncated it, and a CRLF template (`---\r`) would have
-    # matched no terminator at all and dragged every following section along.
-    # Trailing blank lines and that closing rule are then dropped, because the
-    # append supplies its own separator and carrying the template's too ends the
-    # topped-up guide on a dangling rule.
-    #
-    # The heading is matched as a WHOLE line (modulo a CR), not as a prefix: a
-    # later `## System actions and restarts (advanced)` would otherwise open the
-    # extraction and then fail to close it, swallowing every section after it.
-    #
-    # The heading reaches awk through the environment rather than `-v`, which
-    # runs its value through escape processing: a heading that ever grew a
-    # backslash would quietly stop matching and the section would go missing
-    # with no warning. Extraction and append are both guarded, under the
-    # invariant at the top of this block — neither may abort pre-start — and a
-    # renamed heading is reported apart from an unreadable template, because the
-    # two send an operator to different files.
-    CLAWBOX_GUIDE_SECTION=""
-    if CLAWBOX_GUIDE_SECTION="$(heading="$CLAWBOX_GUIDE_TOPUP" awk '
-      { line = $0; sub(/\r$/, "", line) }
-      line == ENVIRON["heading"] { inside = 1; lines[++n] = $0; next }
-      inside && /^## / { exit }
-      inside { lines[++n] = $0 }
-      END {
-        while (n > 0) {
-          tail = lines[n]
-          sub(/\r$/, "", tail)
-          if (tail != "" && tail != "---") break
-          n--
-        }
-        for (i = 1; i <= n; i++) print lines[i]
-      }
-    ' "$CLAWBOX_GUIDE_SRC")"; then
-      if [ -z "$CLAWBOX_GUIDE_SECTION" ]; then
-        # The heading was renamed in the template without this marker following
-        # it. Appending a separator alone would report a success that added
-        # nothing, and would do it again on every gateway start.
-        echo "  WARNING: the shipped guide no longer carries '$CLAWBOX_GUIDE_TOPUP'" >&2
-      else
+    # The TEMPLATE is ours and a template we cannot parse must not be merged
+    # from: every `## ` line quoted inside its examples would be enumerated as a
+    # section, extracted from inside the fence to the next such line — so the
+    # real section above it is truncated AND a phantom one is appended, to every
+    # box, permanently. Refusing is the same call the "no headings at all" arm
+    # below already makes about the same kind of half-deployed file.
+    CLAWBOX_GUIDE_FENCES=0
+    clawbox_fences_balanced "$CLAWBOX_GUIDE_SRC" strict || CLAWBOX_GUIDE_FENCES=$?
+    # The DESTINATION is the owner's and the agent's, so it is not refused —
+    # only reported. Reading its fences as prose means a heading quoted inside
+    # one counts as present and that section is withheld, which is this card's
+    # own defect; there is no second guard that would catch it, so the operator
+    # gets the sentence instead of silence.
+    CLAWBOX_DST_FENCES=0
+    clawbox_fences_balanced "$CLAWBOX_GUIDE_DST" || CLAWBOX_DST_FENCES=$?
+    if [ "$CLAWBOX_DST_FENCES" = 1 ]; then
+      echo "  WARNING: the \`\`\` fences in $CLAWBOX_GUIDE_DST do not balance; a heading quoted inside one will be read as present and its section withheld. Close the fence, or delete the file and the next gateway start re-seeds it" >&2
+    fi
+    if [ "$CLAWBOX_GUIDE_FENCES" = 1 ]; then
+      echo "  WARNING: the \`\`\` fences in $CLAWBOX_GUIDE_SRC do not balance; CLAWBOX.md not topped up (a quoted heading would be appended as a section)" >&2
+    elif ! CLAWBOX_GUIDE_HEADINGS="$(clawbox_guide_headings "$CLAWBOX_GUIDE_SRC")"; then
+      # An I/O fault on the template, not a renamed heading: the two send an
+      # operator to different files, so they are reported apart.
+      echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC to top up CLAWBOX.md" >&2
+    elif [ -z "$CLAWBOX_GUIDE_HEADINGS" ]; then
+      # A readable template with no `## ` headings at all — a truncated or
+      # zero-byte file from a half-finished deploy. Silence here would be
+      # indistinguishable from "the guide is already complete", which is exactly
+      # the shape of the defect this card exists to fix: sections that never
+      # arrive, with nothing that says so. This replaces the old code's "the
+      # shipped guide no longer carries '<marker>'" warning, which fired on the
+      # same input.
+      echo "  WARNING: $CLAWBOX_GUIDE_SRC carries no '## ' headings; CLAWBOX.md not topped up" >&2
+    else
+      while IFS= read -r CLAWBOX_GUIDE_HEADING; do
+        [ -n "$CLAWBOX_GUIDE_HEADING" ] || continue
+        # `|| var=$?` and not a bare call: a non-zero status from a simple
+        # command is the whole shell's failure under `set -e`, and "the heading
+        # is absent" is the COMMON answer here, not an error.
+        CLAWBOX_GUIDE_SEEN=0
+        clawbox_file_has_heading "$CLAWBOX_GUIDE_DST" "$CLAWBOX_GUIDE_HEADING" \
+          || CLAWBOX_GUIDE_SEEN=$?
+        case "$CLAWBOX_GUIDE_SEEN" in
+          0) continue ;;
+          1) ;;
+          *)
+            # The destination stopped being readable mid-loop: EIO on a failing
+            # eMMC, the path replaced by a directory, a symlink that went
+            # dangling. Judging every remaining section "missing" from that is
+            # the same false success the readability guard above prevents.
+            echo "  WARNING: could not read $CLAWBOX_GUIDE_DST while topping it up; stopping" >&2
+            break
+            ;;
+        esac
+        CLAWBOX_GUIDE_SECTION=""
+        if ! CLAWBOX_GUIDE_SECTION="$(clawbox_guide_section "$CLAWBOX_GUIDE_SRC" "$CLAWBOX_GUIDE_HEADING")"; then
+          echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC to top up CLAWBOX.md" >&2
+          break
+        fi
+        if [ -z "$CLAWBOX_GUIDE_SECTION" ]; then
+          # The heading came out of this same template a moment ago, so an empty
+          # extraction is a bug in the extractor, not a renamed section.
+          # Appending a separator alone would report a success that added
+          # nothing, and would do it again on every gateway start.
+          echo "  WARNING: '$CLAWBOX_GUIDE_HEADING' extracted empty from $CLAWBOX_GUIDE_SRC" >&2
+          continue
+        fi
         # A file that does not end in a newline would otherwise have its last
-        # line joined to the separator, making it a setext heading.
+        # line joined to the separator, making it a setext heading. Re-tested per
+        # section, because the previous append in this loop changed the answer.
         CLAWBOX_GUIDE_LEAD=""
         if [ -s "$CLAWBOX_GUIDE_DST" ] && [ "$(tail -c1 "$CLAWBOX_GUIDE_DST")" != "" ]; then
           CLAWBOX_GUIDE_LEAD=$'\n'
         fi
         # Rendered whole first, then handed to the one writer that can undo a
-        # partial write. `printf -v` and not a command substitution: `$( )`
-        # strips trailing newlines, and the section's final newline is what
-        # keeps the next append off the last line of this one.
+        # partial write. `printf -v` and not a command substitution: `$( )` strips
+        # trailing newlines, and the section's final newline is what keeps the
+        # next append off the last line of this one.
+        #
+        # Undoing a partial write matters MORE here than it did for one section:
+        # a boot can now append up to seven of them, so a full disk is that many
+        # more chances to leave a heading sitting on a fragment.
         printf -v CLAWBOX_GUIDE_APPEND '%s\n---\n\n%s\n' "$CLAWBOX_GUIDE_LEAD" "$CLAWBOX_GUIDE_SECTION"
         if clawbox_append_or_rollback "$CLAWBOX_GUIDE_DST" "$CLAWBOX_GUIDE_APPEND"; then
-          echo "  Appended the system-actions section to CLAWBOX.md"
+          CLAWBOX_GUIDE_ADDED="$CLAWBOX_GUIDE_ADDED${CLAWBOX_GUIDE_ADDED:+, }${CLAWBOX_GUIDE_HEADING#\#\# }"
         else
           # The cause is on this shell's stderr already — the helper's failing
           # redirection prints it — so this line names the deliverable, not the
-          # errno.
-          echo "  WARNING: could not append the system-actions section to CLAWBOX.md" >&2
+          # errno. The loop carries on: one section that will not fit is no
+          # reason to withhold the rest.
+          echo "  WARNING: could not append '$CLAWBOX_GUIDE_HEADING' to CLAWBOX.md" >&2
         fi
+      done <<< "$CLAWBOX_GUIDE_HEADINGS"
+      if [ -n "$CLAWBOX_GUIDE_ADDED" ]; then
+        echo "  Appended to CLAWBOX.md: $CLAWBOX_GUIDE_ADDED"
       fi
-    else
-      # Separated from the empty-extraction case on purpose: an unreadable
-      # template is an I/O fault, not a renamed heading, and telling an
-      # operator the wrong one sends them to the wrong file.
-      echo "  WARNING: could not read $CLAWBOX_GUIDE_SRC to top up CLAWBOX.md" >&2
     fi
   fi
 
@@ -3470,42 +3737,100 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # and every box in the field already carries it verbatim (it has not changed
   # since it was introduced), so no box receives a second copy.
   CLAWBOX_AGENTS_POINTER="## ClawBox integration"
-  if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "$CLAWBOX_AGENTS_POINTER" "$CLAWBOX_AGENTS_MD"; then
-    # Guarded like the two appends below, and for the same reason: this one has
-    # always been bare, so a read-only AGENTS.md aborted pre-start under
-    # `set -euo pipefail` and the gateway never started — over a pointer
-    # sentence. Reachable whenever the file exists without the marker.
+  # One readability test for both blocks, and one `case` over the helper's THREE
+  # answers.
+  #
+  # `! clawbox_file_has_heading …` would collapse them to two, and reading
+  # "could not be read" as "the marker is absent" is how this file grew by ~1 KB
+  # on every single boot, each one printed as a success — mode 0200 denies the
+  # read while PERMITTING the write. `-r` closes that measured door; the `case`
+  # closes the rest of them (an EIO on a failing eMMC, `awk` missing from a
+  # stripped rootfs, the file losing readability after the test), the way the
+  # CLAWBOX.md loop above already does. AGENTS.md is the file the harness
+  # injects into every session, under a bootstrap character budget.
+  #
+  # One warning per fault, not one per marker: both calls below ask about the
+  # SAME file for the same reason, so an unreadable AGENTS.md would otherwise
+  # put two lines in the journal, and a duplicate reads as two faults to whoever
+  # is triaging a failing eMMC. The old code had this property and the hoist
+  # into a shared wrapper dropped it.
+  CLAWBOX_AGENTS_UNREADABLE=0
+  clawbox_agents_append() {
+    # `local` for namespace hygiene beside `clawbox_append_or_rollback`, which
+    # declares its own: the value is assigned on every call, so nothing leaks
+    # between them, but a name this file uses nowhere else should not become a
+    # global that a later block could read.
+    local CLAWBOX_AGENTS_SEEN=0
+    clawbox_file_has_heading "$CLAWBOX_AGENTS_MD" "$1" || CLAWBOX_AGENTS_SEEN=$?
+    case "$CLAWBOX_AGENTS_SEEN" in
+      0) return 0 ;;
+      1) ;;
+      *)
+        if [ "$CLAWBOX_AGENTS_UNREADABLE" = 0 ]; then
+          CLAWBOX_AGENTS_UNREADABLE=1
+          echo "  WARNING: could not read $CLAWBOX_AGENTS_MD while looking for its markers; leaving it as it is" >&2
+        fi
+        return 0
+        ;;
+    esac
+    # Guarded, and not a bare append: a read-only AGENTS.md used to abort
+    # pre-start under `set -euo pipefail` and the gateway never started — over a
+    # pointer sentence. Advisory text must never hold up the gateway; the next
+    # start retries.
+    if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$2"; then
+      echo "  $3"
+    else
+      echo "  WARNING: $4" >&2
+    fi
+  }
+  # The same two sentences CLAWBOX.md gets above, because this is the file the
+  # harness injects into EVERY session and a withheld rule here is TASK-612's
+  # failure mode returning.
+  #
+  # Nothing here creates AGENTS.md — the harness owns that — so there is no seed
+  # arm and no dangling-symlink case to answer: `-e` is false for a dangling
+  # link, which lands on "no AGENTS.md yet", which is correct.
+  if [ -e "$CLAWBOX_AGENTS_MD" ] && [ ! -f "$CLAWBOX_AGENTS_MD" ]; then
+    # A directory, socket or FIFO in AGENTS.md's place: `-f` alone reads that as
+    # "there is no AGENTS.md" and both blocks below are skipped in silence, boot
+    # after boot, with the pointer and the rule never delivered.
+    echo "  WARNING: $CLAWBOX_AGENTS_MD exists and is not a regular file; leaving it as it is" >&2
+  elif [ -f "$CLAWBOX_AGENTS_MD" ] && [ ! -r "$CLAWBOX_AGENTS_MD" ]; then
+    echo "  WARNING: could not read $CLAWBOX_AGENTS_MD; leaving it as it is" >&2
+  elif [ -f "$CLAWBOX_AGENTS_MD" ]; then
+    # An AGENTS.md whose own fences do not balance is read as prose, so a marker
+    # QUOTED inside a fence — the agent showing the owner what ClawBox appends —
+    # counts as present and its block is withheld for good. Nothing else here
+    # would catch it, so the operator gets the sentence instead of silence.
+    CLAWBOX_AGENTS_FENCES=0
+    clawbox_fences_balanced "$CLAWBOX_AGENTS_MD" || CLAWBOX_AGENTS_FENCES=$?
+    if [ "$CLAWBOX_AGENTS_FENCES" = 1 ]; then
+      echo "  WARNING: the \`\`\` fences in $CLAWBOX_AGENTS_MD do not balance; a marker quoted inside one will be read as present and its block withheld. Close the fence" >&2
+    fi
     printf -v CLAWBOX_AGENTS_POINTER_TEXT '\n\n%s\n\nSee `CLAWBOX.md` for device-specific conventions: where user-installed skills live, how to control the desktop Chromium via `browser_*` tools, how to install/uninstall skills through the App Store, and which system actions are the owner'"'"'s.\n' "$CLAWBOX_AGENTS_POINTER"
-    if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_POINTER_TEXT"; then
-      echo "  Appended CLAWBOX.md reference to AGENTS.md"
-    else
-      echo "  WARNING: could not append the CLAWBOX.md reference to AGENTS.md" >&2
-    fi
-  fi
+    clawbox_agents_append "$CLAWBOX_AGENTS_POINTER" "$CLAWBOX_AGENTS_POINTER_TEXT" \
+      "Appended CLAWBOX.md reference to AGENTS.md" \
+      "could not append the CLAWBOX.md reference to AGENTS.md"
 
-  # THE RULE ITSELF GOES IN AGENTS.md, not only in CLAWBOX.md.
-  #
-  # OpenClaw's workspace file map (docs/concepts/agent-workspace.md, verified in
-  # the pinned 2026.8.1 package) injects AGENTS.md, SOUL.md, USER.md,
-  # IDENTITY.md, BOOT.md, BOOTSTRAP.md and memory/ at the start of every
-  # session — and describes AGENTS.md as "operating instructions ... good place
-  # for rules". CLAWBOX.md is NOT in that set: it is read only if the agent
-  # chooses to open it, prompted by the pointer above. A behavioural
-  # prohibition that the model may never load is not a prohibition, which is
-  # how TASK-612 could otherwise have shipped green and reproduced unchanged.
-  #
-  # Its own marker, deliberately not the "CLAWBOX.md" one: that pointer is
-  # already present on every box in the field, so anything guarded by it can
-  # never be delivered again.
-  CLAWBOX_AGENTS_RULE="## System actions on this ClawBox"
-  if [ -f "$CLAWBOX_AGENTS_MD" ] && ! grep -qF "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_MD"; then
+    # THE RULE ITSELF GOES IN AGENTS.md, not only in CLAWBOX.md.
+    #
+    # OpenClaw's workspace file map (docs/concepts/agent-workspace.md, verified
+    # in the pinned 2026.8.1 package) injects AGENTS.md, SOUL.md, USER.md,
+    # IDENTITY.md, BOOT.md, BOOTSTRAP.md and memory/ at the start of every
+    # session — and describes AGENTS.md as "operating instructions ... good
+    # place for rules". CLAWBOX.md is NOT in that set: it is read only if the
+    # agent chooses to open it, prompted by the pointer above. A behavioural
+    # prohibition that the model may never load is not a prohibition, which is
+    # how TASK-612 could otherwise have shipped green and reproduced unchanged.
+    #
+    # Its own marker, deliberately not the "CLAWBOX.md" one: that pointer is
+    # already present on every box in the field, so anything guarded by it can
+    # never be delivered again.
+    CLAWBOX_AGENTS_RULE="## System actions on this ClawBox"
     printf -v CLAWBOX_AGENTS_RULE_TEXT '\n\n%s\n\nRestarting the OpenClaw gateway is not yours to do from a chat turn: the gateway hosts this session, so the restart kills the reply before it lands. It is rarely needed either — saving a setting under Settings -> Providers, Voice or Channels restarts it. Say that, and name the setting.\n\nA device restart or shutdown IS yours when the owner asks in their own words: `system_power`, `confirm: true`, with their reason. Their own control is the power menu in the desktop tray, not Settings -> System.\n\nNever queue an `operator_approval` proposal for any of this. ClawBox renders no approval card, so a queued proposal is shown to nobody; a parked one is answered with `openclaw approvals pending` / `openclaw approvals resolve` from the Terminal app. `CLAWBOX.md` has the long form.\n' "$CLAWBOX_AGENTS_RULE"
-    if clawbox_append_or_rollback "$CLAWBOX_AGENTS_MD" "$CLAWBOX_AGENTS_RULE_TEXT"; then
-      echo "  Appended the system-actions rule to AGENTS.md"
-    else
-      # Advisory text must never hold up the gateway; the next start retries.
-      echo "  WARNING: could not append the system-actions rule to AGENTS.md" >&2
-    fi
+    clawbox_agents_append "$CLAWBOX_AGENTS_RULE" "$CLAWBOX_AGENTS_RULE_TEXT" \
+      "Appended the system-actions rule to AGENTS.md" \
+      "could not append the system-actions rule to AGENTS.md"
   fi
 
   # --- clawbox language re-apply ---

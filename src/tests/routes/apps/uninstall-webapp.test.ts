@@ -26,8 +26,15 @@ const SKILLS_ROOT = path.join(ROOT, "openclaw-workspace");
 // `mockReset: true` wipes chained values before every test while a vi.fn(impl)
 // keeps its implementation, and this factory only runs once per file.
 vi.mock("@/lib/openclaw-config", () => ({
-  getSkillsDir: vi.fn(() => SKILLS_ROOT),
+  // The edition-aware skill root the route deletes under. Non-null here: this
+  // file's device is an OpenClaw one. The Hermes half — where it is null and
+  // nothing under a workspace this box does not have may be removed — is
+  // pinned in uninstall-edition.test.ts against the real implementation.
+  openclawSkillRoot: vi.fn(() => path.join(SKILLS_ROOT, "skills")),
   clearSkillEntry: vi.fn(async () => false),
+  OpenclawConfigUnreadableError: class OpenclawConfigUnreadableError extends Error {
+    readonly code = "config_unreadable";
+  },
 }));
 
 // The rescan behind an uninstall would spawn the real openclaw CLI here.
@@ -88,7 +95,18 @@ describe("/setup-api/apps/uninstall — the deployed webapp goes with the app", 
     const res = await uninstall("qa-t453a-revalidate");
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ ok: true, appId: "qa-t453a-revalidate" });
+    // `null`, not `false`: this fixture deploys a webapp and no skill
+    // directory, and a WEB APP has no skill half to report on. `false` is
+    // "this box has a skills root and nothing of that name was in it", which
+    // `mcp/tools/desktop.ts` states out loud as "there was no skill of that
+    // name on disk" — an absence report about something that never existed.
+    // The webapp is recognised here by the deployed directory this uninstall
+    // removed, since `installed_meta` is empty in this fixture.
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      appId: "qa-t453a-revalidate",
+      skillRemoved: null,
+    });
     expect(fs.existsSync(dir)).toBe(false);
   });
 

@@ -397,14 +397,19 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   // once more, and the next attempt starts from the merged state.
   let files: string[] = settled?.filesTouched ?? [];
   let mergeRefusal: string | null = null;
+  if (ok && settled?.commitError) {
+    // The runner could not commit the worker's work — in a worktree there
+    // is then nothing on the branch to merge, and in the project itself
+    // (a code project, no team branch) the next worker would build on
+    // uncommitted files. Rejected with the reason, offered once more,
+    // whichever way the worker ran.
+    mergeRefusal = `NOT COMMITTED: ${firstLine(settled.commitError, 300)}`;
+    result = `${result}\n\n${mergeRefusal}`;
+    bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Commit failed for ${task.task_id} (${run.id}): ${firstLine(settled.commitError, 200)}` });
+  }
   if (worktree) {
-    if (ok && settled?.commitError) {
-      // The runner could not commit the worker's work: there is nothing on
-      // the branch to merge, and merging the scaffold would count the task
-      // done with none of it. Rejected with the reason, offered once more.
-      mergeRefusal = `NOT COMMITTED: ${firstLine(settled.commitError, 300)}`;
-      result = `${result}\n\n${mergeRefusal}`;
-      bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `Commit failed for ${task.task_id} (${run.id}): ${firstLine(settled.commitError, 200)}` });
+    if (mergeRefusal) {
+      // Nothing to merge; the worktree goes back below.
     } else if (ok) {
       // What the branch changed; a worker that committed nothing has no
       // branch diff, and what it touched uncommitted is still what it touched.

@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
-import path from "path";
-import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
+import { getAll as configGetAll } from "@/lib/config-store";
+import { ICONS_DIR, safeAppId, webappIconPath } from "@/lib/webapp-icon";
 
 export const dynamic = "force-dynamic";
 
-const ICONS_DIR = path.join(DATA_DIR, "icons");
 const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
 
 // Ids the store has no icon for, remembered so a card re-render does not cost
@@ -52,12 +51,20 @@ export async function GET(
   req: Request,
   { params }: { params: Promise<{ appId: string }> }
 ) {
-  const { appId } = await params;
-  // Whitelist appId to prevent path traversal (e.g. "../../etc/passwd").
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(appId)) {
+  const { appId: requestedId } = await params;
+  // The id is REBUILT from the alphabet (safeAppId, webapp-icon.ts) rather than
+  // tested and passed through — the same rule as the whitelist it replaces, one
+  // to sixty-four of `[A-Za-z0-9_-]`, applied so the value that reaches a path
+  // is made of those characters instead of merely having matched them. A
+  // `.test()` guard leaves the caller's string in play; the rebuild is the
+  // discipline safeProjectId and safeSkillName already apply for the same
+  // reason. It also puts this route on the one function that says where an
+  // app's icon lives, rather than a second spelling of `<data>/icons/<id>.png`.
+  const appId = safeAppId(requestedId);
+  if (!appId) {
     return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
   }
-  const iconPath = path.join(ICONS_DIR, `${appId}.png`);
+  const iconPath = webappIconPath(appId);
 
   // Try local cached icon first. Served with `no-cache` plus an ETag rather
   // than `immutable`: the file under an id can CHANGE now — a web app's
