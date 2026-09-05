@@ -35,10 +35,10 @@ log() { logger -t "$LOG_TAG" -- "$*"; }
 #
 # The restart is never immediate any more (GH #529): a gateway bounced into a
 # network with no route loses its Telegram accounts to OpenClaw's account
-# supervisor, which gives up after its restart budget and leaves them stopped
-# for the life of the process — with no CLI verb to start them again. The
-# waiter defers the restart until a public route is proven, and a restart that
-# lands then is also what revives the suppressed accounts.
+# supervisor, which gives up after its restart budget. The waiter defers the
+# restart until a public route is proven. See the waiter's own header for what
+# OpenClaw's channel health monitor already recovers on its own, and for the
+# part of GH #529 that is still unexplained.
 #
 # Detached because NetworkManager runs dispatcher scripts serially and kills a
 # slow one: this script must return at once, and the waiting must not happen in

@@ -19,11 +19,11 @@
 # Ethernet and DHCP recovered they stayed stopped until someone started them by
 # hand.
 #
-# The restart is the point of failure and also the only cure, so it is not
-# cancelled — it is DEFERRED until a route is proven, or abandoned.
+# The restart is the point of failure, so it is not cancelled — it is DEFERRED
+# until a route is proven, or abandoned.
 #
-# WHY A RESTART IS THE WAY TO REVIVE A SUPPRESSED ACCOUNT — asked of the harness
-# first, on the box, read-only, against the installed OpenClaw 2026.8.1:
+# WHAT THE HARNESS ALREADY DOES — asked of OpenClaw first, on the box,
+# read-only, against the installed 2026.8.1:
 #
 #   * `openclaw channels --help` offers add | capabilities | dead-letters |
 #     list | login | logout | logs | remove | resolve | status. There is no
@@ -34,9 +34,27 @@
 #     `setRuntime(..., { restartPending: false, reconnectAttempts })` — not
 #     configuration. Nothing on disk records it, so nothing on disk can clear
 #     it.
+#   * BUT the gateway ALSO runs its own channel health monitor on every start —
+#     `[health-monitor] started (interval: 300s, startup-grace: 60s,
+#     channel-connect-grace: 120s)`. For a stopped account
+#     `evaluateChannelHealth` returns `not-running`,
+#     `resolveChannelRestartReason` labels that `gave-up` once
+#     reconnectAttempts >= 10, and the monitor restarts THAT ACCOUNT, bounded
+#     by cooldownCycles and maxRestartsPerHour. Three `gateway.*` keys tune it
+#     and ClawBox sets none of them.
 #
-# So a fresh gateway process is the supported way back, and this script is that
-# restart, held until it can succeed.
+# So "a fresh gateway process is the only way back" is TOO STRONG, and this
+# script does not claim it. What the monitor does not do is act on the two
+# reasons it skips outright — `terminal-disconnect` and `blocked` — and
+# `evaluateChannelHealth` tests `terminalDisconnect` BEFORE `not-running`. GH
+# #529's accounts stayed stopped until a human started them, with this monitor
+# running, so one of those skips applied; which one is UNPROVEN, because
+# establishing it means reproducing the outage on a box and losing its live
+# channels.
+#
+# What this script fixes is narrower and certain: the dispatcher used to restart
+# the gateway INTO A DEAD NETWORK, which is the sequence that suppressed the
+# accounts in the first place. Held until it can succeed, or not done at all.
 #
 # WHY A SEPARATE SCRIPT. NetworkManager runs dispatcher scripts serially and
 # kills a slow one, so the dispatcher must return immediately. It launches this
