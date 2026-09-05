@@ -4,13 +4,14 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
+import { getAll as configGetAll } from "@/lib/config-store";
 import { OpenclawConfigUnreadableError, openclawSkillRoot, findOpenclawBin } from "@/lib/openclaw-config";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR, type InstalledMeta } from "@/lib/store-categories";
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
 import { isClawhubHandle, lookupClawhubOwner, pickClawhubMatch } from "@/lib/clawhub-url";
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
+import { ICONS_DIR, safeAppId, webappIconPath } from "@/lib/webapp-icon";
 
 const STORE_API = "https://clawbox.com/api/store/apps";
 const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
@@ -18,7 +19,6 @@ const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
 export const dynamic = "force-dynamic";
 
 const execFileAsync = promisify(execFile);
-const ICONS_DIR = path.join(DATA_DIR, "icons");
 
 // Worst-case backoff ≈26s — rides out ClawHub's typical 10–20s rate-limit window.
 const RATE_LIMIT_BACKOFF_MS = [3_000, 8_000, 15_000];
@@ -65,9 +65,18 @@ function parseInstallRequest(body: unknown): { appId: string; owner?: string } |
   const ref = REF.exec(appId);
   if (ref) [, refOwner, slug] = ref;
   if (!SLUG.test(slug)) return { error: "Invalid appId" };
+  // The slug becomes `<data>/icons/<slug>.png` and, through the CLI, a folder
+  // under the skills root — so what leaves this door is the slug REBUILT from
+  // the alphabet, not the caller's string (safeAppId, webapp-icon.ts; the same
+  // discipline as safeProjectId and safeSkillName). It also applies the length
+  // the rest of the surface already applies — `zInstalledAppId` (mcp),
+  // apps/skill-info, the webapps route and the icon route all stop at 64 — so
+  // an id this route accepts is one they can all still name afterwards.
+  const safeSlug = safeAppId(slug);
+  if (!safeSlug) return { error: "Invalid appId" };
   if (owner !== undefined && !isClawhubHandle(owner)) return { error: "Invalid owner" };
   if (owner && refOwner && owner.toLowerCase() !== refOwner.toLowerCase()) return { error: "owner does not match appId" };
-  return { appId: slug, owner: owner || refOwner };
+  return { appId: safeSlug, owner: owner || refOwner };
 }
 
 function titleCaseFromSlug(slug: string): string {
@@ -125,7 +134,7 @@ function storeMeta(appId: string, detail: StoreDetail | null): InstalledMeta {
 
 async function downloadIcon(appId: string): Promise<{ saved: boolean }> {
   const iconUrl = `${STORE_ICONS_BASE}/${appId}.png`;
-  const iconPath = path.join(ICONS_DIR, `${appId}.png`);
+  const iconPath = webappIconPath(appId);
   try {
     // Bound the icon fetch: it's awaited inline before the install returns, so
     // a stalled ClawHub host would otherwise hang the whole install request.

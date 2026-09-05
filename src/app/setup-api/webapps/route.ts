@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { WEBAPPS_DIR, APP_ID_RE, ValidationError, deployWebapp, writeWebappIndex } from "@/lib/code-projects";
+import { APP_ID_RE, ValidationError, deployWebapp, webappPath, writeWebappIndex } from "@/lib/code-projects";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -34,8 +34,13 @@ export async function GET(request: NextRequest) {
 
   const file = request.nextUrl.searchParams.get("file") || "index.html";
 
-  // Prevent path traversal
-  const appDir = path.join(WEBAPPS_DIR, appId);
+  // Prevent path traversal, in both halves of the path: the app's own folder
+  // comes from `webappPath`, which builds it from the id REBUILT out of the
+  // alphabet rather than from the string that passed APP_ID_RE (a `.test()`
+  // leaves the caller's value in play — the discipline safeProjectId,
+  // safeSkillName and safeAppId all state), and the containment check below
+  // covers the `file` half.
+  const appDir = webappPath(appId);
   const filePath = path.resolve(appDir, file);
   if (!filePath.startsWith(appDir + path.sep) && filePath !== appDir) {
     return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
@@ -93,7 +98,7 @@ export async function POST(request: NextRequest) {
       // is unnecessary — the app is already on the desktop. Reject updates to an
       // app that was never created so a typo'd appId can't half-deploy.
       const exists = await fs
-        .stat(path.join(WEBAPPS_DIR, appId, "meta.json"))
+        .stat(path.join(webappPath(appId), "meta.json"))
         .then(() => true)
         .catch(() => false);
       if (!exists) {

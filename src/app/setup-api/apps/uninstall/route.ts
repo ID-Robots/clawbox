@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
+import { getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
 import { setPreferences } from "@/lib/preference-store";
 import { clearSkillEntry, OpenclawConfigUnreadableError, openclawSkillRoot } from "@/lib/openclaw-config";
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
 import { kvDelete } from "@/lib/kv-store";
 import { WEBAPPS_DIR } from "@/lib/code-projects";
+import { safeAppId, webappIconPath } from "@/lib/webapp-icon";
 
 export const dynamic = "force-dynamic";
 
@@ -56,9 +57,37 @@ export async function POST(req: Request) {
     } catch {
       return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
     }
-    const { appId } = (body ?? {}) as { appId?: unknown };
-    if (!appId || typeof appId !== "string" || !/^(?!-)[A-Za-z0-9_-]+$/.test(appId)) {
-      return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
+    const { appId: requestedId } = (body ?? {}) as { appId?: unknown };
+    // Everything local is keyed by ONE plain path segment: the skill folder,
+    // the deployed webapp directory, the icon file. The id that reaches those
+    // joins is REBUILT here out of a constant alphabet rather than tested and
+    // passed through — the discipline `safeProjectId` (code-projects.ts) and
+    // `safeSkillName` (openclaw-skill-info.ts) already apply, each for the
+    // reason it states: a `.test()` guard leaves the CALLER'S string in play,
+    // so every path joined from it is still assembled out of request data, and
+    // the containment checks below are then all that stands between a widened
+    // alphabet and a delete outside the directory. That alphabet is a shared,
+    // moving thing — #627 widened it and gave `app_uninstall`, `webapp_update`
+    // and `code_project_*` one spelling of it (`INSTALLED_APP_ID_RE`,
+    // mcp/lib/schema.ts) — and the rebuild is what holds when it moves again.
+    // `safeAppId` (webapp-icon.ts) is that rule: one to sixty-four of
+    // `[A-Za-z0-9_-]`, the same as `APP_ID_RE` (code-projects.ts), so `..`,
+    // `/`, `\`, NUL and the empty string are all outside it. A LEADING HYPHEN
+    // is refused on top, as apps/install refuses it, so the two doors agree on
+    // what an id may be.
+    const appId =
+      typeof requestedId === "string" && !requestedId.startsWith("-") ? safeAppId(requestedId) : null;
+    if (!appId) {
+      // `retryable: false` and a code, not a bare `error`: an id that cannot be
+      // spelled will not become spellable on a second attempt, and this route's
+      // other refusals are all read as `{ok, code, retryable}` by the Store and
+      // by mcp/tools/desktop.ts. Nothing has been touched at this point.
+      return NextResponse.json({
+        ok: false,
+        error: "That app id is not one this ClawBox can have installed, so nothing was removed.",
+        code: "invalid_app_id",
+        retryable: false,
+      }, { status: 400 });
     }
 
     // Remove the skill directory (with path traversal guard).
@@ -215,11 +244,12 @@ export async function POST(req: Request) {
     // cautious there).
     if (skillRemoved === false && (isWebapp || webappRemoved)) skillRemoved = null;
 
-    // Remove cached icon from the same location the install/icon routes use
-    // (DATA_DIR/icons). The old hardcoded ~/clawbox/data/icons path diverged
+    // Remove the cached icon, through the one function that says where an app's
+    // icon lives (webapp-icon.ts) rather than a third spelling of
+    // `<DATA_DIR>/icons/<id>.png` — the install and icon routes each had their
+    // own, and the hardcoded ~/clawbox/data/icons that preceded them diverged
     // whenever CLAWBOX_ROOT != $HOME/clawbox, orphaning the PNG on disk.
-    const iconPath = path.join(DATA_DIR, "icons", `${appId}.png`);
-    await fs.rm(iconPath, { force: true }).catch(() => {});
+    await fs.rm(webappIconPath(appId), { force: true }).catch(() => {});
 
     // The skill's `skills.entries.<id>` in openclaw.json goes too, or a later
     // install under the same id silently inherits `enabled: false`. Best

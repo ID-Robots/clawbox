@@ -167,9 +167,22 @@ const appCooldownUntil = new Map<string, number>();
 /** Until when NO app is tried, after the proxy refused the box itself. */
 let boxCooldownUntil = 0;
 
-/** Where the icon for this app lives, whether or not it exists yet. */
+/**
+ * Where the icon for this app lives, whether or not it exists yet.
+ *
+ * Joined from the REBUILT id, so the one function that says where an icon
+ * lives is also the place the rule is applied: a caller that only `.test()`ed
+ * its own id still cannot put anything but `<alphabet>.png` under data/icons.
+ * It THROWS rather than answering a path, the way `projectDir` does in
+ * code-projects.ts, because there is no honest path to return for an id that
+ * is not one — every caller already holds an id that has passed this same rule
+ * (the apps routes rebuild it, project-icon.ts rebuilds it, coding-agent.ts
+ * tests it with `validateProjectId`, which is the same alphabet and length).
+ */
 export function webappIconPath(appId: string): string {
-  return path.join(ICONS_DIR, `${appId}.png`);
+  const id = safeAppId(appId);
+  if (!id) throw new Error("Not an app id");
+  return path.join(ICONS_DIR, `${id}.png`);
 }
 
 /** Collapse whitespace and cut, so the prompt stays one paragraph. */
