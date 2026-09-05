@@ -34,17 +34,24 @@ describe("getLlamaCppLaunchSpec", () => {
   }
 
   it("resolves the launcher script from the checkout, not from the cwd", async () => {
-    const root = "/home/clawbox/clawbox";
-    const { getLlamaCppLaunchSpec } = await loadWithRoot(root);
+    // TWO checkouts, one process. A cwd-based spec answers the same path for
+    // both, whatever the cwd happens to be, so one of these two lines fails for
+    // it wherever the suite runs.
+    //
+    // Pinned that way rather than against `process.cwd()` itself: on a box the
+    // checkout IS the cwd (`/home/clawbox/clawbox`, CONFIG_ROOT's production
+    // default) and vitest runs from the project root, so a
+    // `not.toBe(join(process.cwd(), …))` line compares a string with itself and
+    // goes RED over correct code — on the one platform the working rules say to
+    // run the suites on, and on no other. The guard against a cwd reader must
+    // not itself depend on the cwd.
+    const box = await loadWithRoot("/home/clawbox/clawbox");
+    const boxSpec = box.getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0");
+    const elsewhere = await loadWithRoot("/srv/clawbox-elsewhere");
+    const elsewhereSpec = elsewhere.getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0");
 
-    const spec = getLlamaCppLaunchSpec("gemma4-e2b-it-q4_0");
-
-    expect(spec.scriptPath).toBe(path.join(root, "scripts", "start-llamacpp.sh"));
-    // Belt and braces, and it is the assertion that bites ON A BOX: there the
-    // checkout IS /home/clawbox/clawbox, so the line above would pass for a
-    // cwd-based spec whose cwd happened to be the checkout. Naming the cwd
-    // separately is what keeps the case honest wherever it runs.
-    expect(spec.scriptPath).not.toBe(path.join(process.cwd(), "scripts", "start-llamacpp.sh"));
+    expect(boxSpec.scriptPath).toBe(path.join("/home/clawbox/clawbox", "scripts", "start-llamacpp.sh"));
+    expect(elsewhereSpec.scriptPath).toBe(path.join("/srv/clawbox-elsewhere", "scripts", "start-llamacpp.sh"));
   });
 
   it("keeps the script and the runtime files it writes in one tree", async () => {
