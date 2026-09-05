@@ -83,7 +83,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — OpenRouter provider def",
     const { cfg, log } = migrate({ models: "operator-owned-scalar", agents: {} });
 
     expect(typeof (cfg.models as { providers?: unknown })?.providers).toBe("object");
-    expect(log).toContain("models");
+    expect(log).toContain("models was not an object");
   });
 
   it("survives models.providers = null", () => {
