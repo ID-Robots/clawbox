@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * TASK-583 — `verified` is present on every provider row and null on all of
@@ -19,6 +20,7 @@ vi.mock("@/lib/config-store", () => ({ get: getMock, set: setMock }));
 
 let lib: typeof import("@/lib/provider-verified");
 let hermesHome: string;
+let restoreEnv: () => void;
 
 /** Hermes' pooled credential store, written at `at`. */
 function writeAuthStore(at: Date): void {
@@ -28,11 +30,15 @@ function writeAuthStore(at: Date): void {
 }
 
 afterEach(() => {
-  delete process.env.HERMES_HOME;
-  rmSync(hermesHome, { recursive: true, force: true });
+  // Restored, not deleted: vitest reuses a worker across files, so a variable
+  // DELETED here goes away for every file that follows in it rather than going
+  // back to what it was (src/tests/helpers/env.ts says why).
+  restoreEnv();
+  if (hermesHome) rmSync(hermesHome, { recursive: true, force: true });
 });
 
 beforeEach(async () => {
+  restoreEnv = saveEnv("HERMES_HOME");
   hermesHome = mkdtempSync(path.join(tmpdir(), "clawbox-verified-hermes-"));
   process.env.HERMES_HOME = hermesHome;
   store.clear();

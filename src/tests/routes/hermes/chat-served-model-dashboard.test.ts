@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { saveEnv } from "@/tests/helpers/env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -244,9 +245,11 @@ describe.skipIf(!sqliteAvailable)(
   "/setup-api/hermes/chat — what the DASHBOARD transport records as the served provider",
   () => {
     let home: string;
+    let restoreEnv: () => void;
 
     beforeEach(async () => {
       vi.clearAllMocks();
+      restoreEnv = saveEnv("HERMES_HOME");
       home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-served-provider-"));
       process.env.HERMES_HOME = home;
       appendMock.mockResolvedValue(true);
@@ -257,8 +260,10 @@ describe.skipIf(!sqliteAvailable)(
     });
 
     afterEach(() => {
-      delete process.env.HERMES_HOME;
-      fs.rmSync(home, { recursive: true, force: true });
+      // Restored, not deleted — see src/tests/helpers/env.ts on why a worker
+      // reused across files must not simply lose the variable.
+      restoreEnv();
+      if (home) fs.rmSync(home, { recursive: true, force: true });
     });
 
     it("names the provider Hermes itself billed, when the frame gave a model and the request pinned nothing", async () => {
