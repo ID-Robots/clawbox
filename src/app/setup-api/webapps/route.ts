@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { WEBAPPS_DIR, APP_ID_RE, ValidationError, deployWebapp, writeWebappIndex } from "@/lib/code-projects";
+import { APP_ID_RE, ValidationError, deployWebapp, webappPath, writeWebappIndex } from "@/lib/code-projects";
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -34,8 +34,24 @@ export async function GET(request: NextRequest) {
 
   const file = request.nextUrl.searchParams.get("file") || "index.html";
 
-  // Prevent path traversal
-  const appDir = path.join(WEBAPPS_DIR, appId);
+  // Prevent path traversal, in both halves of the path: the app's own folder
+  // comes from `webappPath`, which builds it from the id REBUILT out of the
+  // alphabet rather than from the string that passed APP_ID_RE (a `.test()`
+  // leaves the caller's value in play — the discipline safeProjectId,
+  // safeSkillName and safeAppId all state), and the containment check below
+  // covers the `file` half.
+  //
+  // Caught, because `webappPath` REFUSES by throwing. APP_ID_RE and the
+  // alphabet it rebuilds from say the same thing today, so this cannot fire —
+  // but this route's whole point is that the two are separate rules that have
+  // moved before, and the POST below already answers 400 for that throw. An
+  // uncaught one here would be a 500 over a bad query string.
+  let appDir: string;
+  try {
+    appDir = webappPath(appId);
+  } catch {
+    return NextResponse.json({ error: "Invalid app ID" }, { status: 400 });
+  }
   const filePath = path.resolve(appDir, file);
   if (!filePath.startsWith(appDir + path.sep) && filePath !== appDir) {
     return NextResponse.json({ error: "Invalid file path" }, { status: 400 });
@@ -93,7 +109,7 @@ export async function POST(request: NextRequest) {
       // is unnecessary — the app is already on the desktop. Reject updates to an
       // app that was never created so a typo'd appId can't half-deploy.
       const exists = await fs
-        .stat(path.join(WEBAPPS_DIR, appId, "meta.json"))
+        .stat(path.join(webappPath(appId), "meta.json"))
         .then(() => true)
         .catch(() => false);
       if (!exists) {

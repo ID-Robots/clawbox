@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 import fsSync from "fs";
+import { saveEnv } from "../helpers/env";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -585,13 +586,54 @@ describe("openclaw-config", () => {
       expect(result).toBe("/custom/workspace");
     });
 
-    it("falls back to .openclaw/workspace when it exists", () => {
-      mockFsSync.readFileSync.mockReturnValue(JSON.stringify({}));
-      mockFsSync.existsSync.mockReturnValue(true);
+    it("falls back to <OpenClaw home>/workspace when it exists", () => {
+      // Named explicitly rather than matched as `/\.openclaw\/workspace$/`:
+      // the well-known workspace is a child of the home the CONFIG was read
+      // from (`CLAWBOX_OPENCLAW_HOME` / `OPENCLAW_HOME` / `$HOME/.openclaw`),
+      // and a `$HOME`-shaped assertion passed whichever of the two the code
+      // used. This is the delete target `openclawSkillRoot()` appends `skills`
+      // to, so the two spellings must not be interchangeable here.
+      // `CLAWBOX_OPENCLAW_HOME` outranks `OPENCLAW_HOME`, so a suite that
+      // happened to carry one would decide this assertion instead of the code.
+      const restore = saveEnv("CLAWBOX_OPENCLAW_HOME", "OPENCLAW_HOME");
+      delete process.env.CLAWBOX_OPENCLAW_HOME;
+      process.env.OPENCLAW_HOME = "/custom/openclaw-home";
+      try {
+        mockFsSync.readFileSync.mockReturnValue(JSON.stringify({}));
+        mockFsSync.existsSync.mockReturnValue(true);
 
-      const result = openclawConfig.getSkillsDir();
+        const result = openclawConfig.getSkillsDir();
 
-      expect(result).toMatch(/\.openclaw\/workspace$/);
+        expect(result).toBe("/custom/openclaw-home/workspace");
+      } finally {
+        restore();
+      }
+    });
+
+    it("expands a ~ workspace against HOME", () => {
+      // The same rule `gateway-pre-start.sh` (expanduser) and
+      // `openclawWorkspaceDir()` in src/lib/language-persona.ts already apply
+      // to this key. Left literal, `~/clawd` resolved to a `~` directory under
+      // the server's own working directory — a delete target no configuration
+      // on the box names.
+      // Through `saveEnv` like the rest of the file: `process.env` coerces an
+      // assignment to a string, so restoring an UNSET `HOME` by assignment
+      // would write the literal "undefined" — truthy — and every later
+      // `process.env.HOME || …` in this worker would resolve under a directory
+      // of that name, far from the file that caused it.
+      const restore = saveEnv("HOME");
+      process.env.HOME = "/test/home";
+      try {
+        mockFsSync.readFileSync.mockReturnValue(
+          JSON.stringify({ agents: { defaults: { workspace: "~/clawd" } } }),
+        );
+
+        const result = openclawConfig.getSkillsDir();
+
+        expect(result).toBe("/test/home/clawd");
+      } finally {
+        restore();
+      }
     });
 
     it("falls back to ~/clawd when workspace dir does not exist", () => {
@@ -661,7 +703,9 @@ describe("openclaw-config", () => {
     });
 
     it("uses HOME env var for path resolution", () => {
-      const originalHome = process.env.HOME;
+      // Through `saveEnv` for the reason spelled out on the case above: an
+      // assignment restore writes the string "undefined" for an unset HOME.
+      const restore = saveEnv("HOME");
       process.env.HOME = "/test/home";
       try {
         // Reset modules so getSkillsDir picks up new HOME
@@ -673,7 +717,7 @@ describe("openclaw-config", () => {
         // getSkillsDir reads HOME at call time
         expect(result).toBe("/test/home/clawd");
       } finally {
-        process.env.HOME = originalHome;
+        restore();
       }
     });
   });

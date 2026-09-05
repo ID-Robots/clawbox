@@ -769,9 +769,23 @@ export async function runOpenclawConfigUnset(
   }
 }
 
-export const OPENCLAW_HOME = process.env.CLAWBOX_OPENCLAW_HOME
-  || process.env.OPENCLAW_HOME
-  || path.join(process.env.HOME || "/home/clawbox", ".openclaw");
+/**
+ * OpenClaw's home directory, resolved from the environment.
+ *
+ * ONE expression for it, called from the constants below and from the
+ * skills-root readers at the end of this file — which resolve per call, the
+ * way `getSkillsDir()` has always read `HOME` per call. Identical answers on a
+ * device, where the environment does not change under a running server; the
+ * point is that there is no second, hard-coded spelling of the path to drift
+ * from this one (the wrong-directory delete of TASK-551 started as two).
+ */
+function openclawHome(): string {
+  return process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(process.env.HOME || "/home/clawbox", ".openclaw");
+}
+
+export const OPENCLAW_HOME = openclawHome();
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
@@ -2712,16 +2726,136 @@ export function findOpenclawBin(): string {
   return "openclaw";
 }
 
-/** Resolve the OpenClaw workspace/skills directory from config or well-known paths. */
-export function getSkillsDir(): string {
-  const home = process.env.HOME || "/home/clawbox";
-  const openclawConfig = path.join(home, ".openclaw", "openclaw.json");
+/**
+ * The OpenClaw skills root — `<workspace>/skills`, the directory a store app's
+ * skill lives in and the one OpenClaw watches.
+ *
+ * THREE answers, deliberately distinct, because two of them used to be one
+ * `null` and every caller read it as the harmless one:
+ *
+ *   - a PATH — this device has OpenClaw, and this is where its skills are;
+ *   - `null` — the `hermes` SKU: there is no OpenClaw here to have a skills
+ *     root, so there is nothing to remove and nothing has gone wrong;
+ *   - a thrown {@link OpenclawConfigUnreadableError} — openclaw.json EXISTS and
+ *     could not be read or parsed, so WHERE the skills are is unknown right
+ *     now. That is not "there is no OpenClaw here", and a caller told the two
+ *     apart by one `null` acts on the wrong one: `apps/uninstall` dropped the
+ *     desktop entry, the preferences and the KV, left the skill on disk and
+ *     still loaded, and answered `{ok:true}` (TASK-551).
+ *
+ * The unreadable case is real and transient: `openclaw config set` rewrites the
+ * file in place, so a half-written read is the documented race (see
+ * {@link readConfigForWrite}), and an EACCES reads the same way. `getSkillsDir()`
+ * below swallows it and falls through to a well-known path — a good enough
+ * guess for the `stat` its own caller makes, and never a delete target, because
+ * on a box whose workspace is not the well-known one it redirects the delete.
+ *
+ * Keyed on the EDITION rather than the active harness, deliberately. On `dual`
+ * the OpenClaw workspace exists and its skills are real whichever harness is
+ * running, so an app installed there stays removable; only the `hermes` SKU
+ * genuinely has no OpenClaw.
+ */
+export function openclawSkillRoot(): string | null {
+  if (openclawIsAbsent()) return null;
+  // ONE read answers both "can the config be read at all" and "what does it
+  // say": a probe followed by getSkillsDir()'s own read reopened the in-place
+  // rewrite race in the gap between them.
+  return path.resolve(readConfiguredWorkspace() ?? wellKnownWorkspace(), "skills");
+}
+
+/**
+ * `agents.defaults.workspace` as an absolute path (see
+ * {@link resolveWorkspaceValue}), or `undefined` when no config names one.
+ *
+ * Throws {@link OpenclawConfigUnreadableError} when openclaw.json exists and
+ * cannot be read or parsed — the discipline {@link readConfigStrict} states at
+ * length, for the same reason: a caller about to act on "there is nothing here"
+ * must not be told that by a file it could not read. ENOENT is not a failure —
+ * there is no config, and the well-known paths are the answer.
+ */
+function readConfiguredWorkspace(): string | undefined {
+  let raw: string;
   try {
-    const config = JSON.parse(fsSync.readFileSync(openclawConfig, "utf-8"));
-    const workspace = config?.agents?.defaults?.workspace;
-    if (typeof workspace === "string" && workspace) return workspace;
-  } catch {}
-  const openclawWorkspace = path.join(home, ".openclaw", "workspace");
+    raw = fsSync.readFileSync(path.join(openclawHome(), "openclaw.json"), "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return undefined;
+    throw new OpenclawConfigUnreadableError(err);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new OpenclawConfigUnreadableError(err);
+  }
+  const workspace = (parsed as { agents?: { defaults?: { workspace?: unknown } } } | null)
+    ?.agents?.defaults?.workspace;
+  if (typeof workspace !== "string" || !workspace.trim()) return undefined;
+  return resolveWorkspaceValue(workspace.trim());
+}
+
+/**
+ * `agents.defaults.workspace` as an ABSOLUTE path, the way the gateway itself
+ * reads it: `~` against `$HOME`, and a relative value against OpenClaw's home.
+ *
+ * The value is not guaranteed absolute — the owner writes it, or `openclaw
+ * config set` does — and this was the third reading of it in the repo and the
+ * only one that skipped that: `path.resolve(ws, "skills")` on a bare name
+ * answers `<cwd>/<ws>/skills` — the Next.js server's working directory — and on
+ * `~/…` a literal `~` folder under it. The gateway loads the skill from the
+ * real workspace, so the uninstall would find nothing at that address, answer
+ * `skillRemoved: false` and tell the owner there was no skill of that name
+ * while it stays on disk and loaded. That is TASK-551's own symptom, reached
+ * through the value rather than through the edition.
+ *
+ * Line for line the same expression as `openclawWorkspaceDir()` in
+ * `src/lib/language-persona.ts`, which spells out the rule and explains why a
+ * guard and the write it guards must name one directory.
+ * `scripts/gateway-pre-start.sh` agrees on the tilde and on preferring an
+ * absolute value, but joins a RELATIVE one — and its own default — against
+ * `$HOME/.openclaw` (`:3138,3147`) rather than the `CLAWBOX_OPENCLAW_HOME` /
+ * `OPENCLAW_HOME` override its config path already honours (`:27`). The two
+ * agree on every shipped box: on ARM (`install.sh`) neither override is set,
+ * so both sides are `$HOME/.openclaw`, and on x64 `install-x64.sh:1100,1104`
+ * sets `HOME` and `CLAWBOX_OPENCLAW_HOME` to the matching pair. They are not
+ * the same expression, and the shell side is out of this route's scope to
+ * change.
+ */
+function resolveWorkspaceValue(workspace: string): string {
+  const home = process.env.HOME || "/home/clawbox";
+  const expanded = workspace === "~" ? home
+    : workspace.startsWith("~/") ? path.join(home, workspace.slice(2))
+    : workspace;
+  return path.isAbsolute(expanded) ? expanded : path.join(openclawHome(), expanded);
+}
+
+/** The workspace when the config names none: the current path, else the legacy one. */
+function wellKnownWorkspace(): string {
+  // Under OpenClaw's home, the same one the config was read from — not a
+  // second `$HOME/.openclaw` spelling. The two agree on a shipped box by
+  // convention only (`install-x64.sh:1100,1104` sets `HOME` and
+  // `CLAWBOX_OPENCLAW_HOME` to a matching pair; on ARM neither override
+  // exists); keyed on `$HOME` this line would resolve a DELETE target from a
+  // directory the box's own config does not live in.
+  const openclawWorkspace = path.join(openclawHome(), "workspace");
   if (fsSync.existsSync(openclawWorkspace)) return openclawWorkspace;
-  return path.join(home, "clawd");
+  // The legacy workspace is a HOME-relative path in its own right, never a
+  // child of OpenClaw's home.
+  return path.join(process.env.HOME || "/home/clawbox", "clawd");
+}
+
+/**
+ * Resolve the OpenClaw workspace/skills directory from config or well-known
+ * paths. Lenient on purpose — an unreadable config falls through to the
+ * well-known paths — because its caller only `stat`s the answer, where a miss
+ * costs a cache rescan and nothing else. Anything that DELETES under the root
+ * goes through {@link openclawSkillRoot}, which refuses to guess.
+ */
+export function getSkillsDir(): string {
+  try {
+    const configured = readConfiguredWorkspace();
+    if (configured) return configured;
+  } catch {
+    // See above: a stat under the wrong root is a miss, not damage.
+  }
+  return wellKnownWorkspace();
 }
