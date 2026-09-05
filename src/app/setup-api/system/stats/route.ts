@@ -11,39 +11,55 @@ const execFileAsync = promisify(execFile);
 export const dynamic = "force-dynamic";
 
 /**
- * Remember one async answer for `ttlMs`, and let concurrent callers share the
- * read that is already in flight.
+ * Remember one async answer for a few seconds, and let concurrent callers share
+ * the read that is already in flight.
  *
  * Two surfaces poll this route every 3 s while their panel is open — Settings >
  * System (`SettingsApp.tsx`) and the System app (`SystemApp.tsx`) — and each
- * request spawned `df`, `ps aux --sort=-%cpu` and `uname -r`. That is six
- * processes every three seconds on a Jetson for two answers that barely move
- * and one that cannot change without a reboot.
+ * request spawned its own `df` and `ps aux --sort=-%cpu`. Measured on an Orin
+ * Nano: 2.8 ms and 28.5 ms per run, four processes every three seconds for two
+ * answers that barely move.
  *
- * A REJECTION is never remembered: the caller sees it, and the next call tries
- * again. Caching the failure would turn one lost `uname` into a box that
- * reports the fallback for the rest of the process's life — the probe-once
- * shape this repository keeps producing. The in-flight promise is dropped on
- * rejection for the same reason.
+ * ONE window for both, and a short one. A longer window for the disk buys
+ * almost nothing — `ps` is 91% of the cost — and it would make the payload's
+ * own `timestamp` a lie: the System app draws it as "last updated", and a disk
+ * figure half a minute old under a stamp that says "now" is how a `disk_cleanup`
+ * that worked reads as one that did nothing. Five seconds is inside the jitter
+ * of the 3 s poll that reads it.
+ *
+ * A FAILURE is remembered too, but for less. Caching only successes means the
+ * harder the box is struggling — a `fork` refused with EAGAIN under memory
+ * pressure is exactly when this matters — the more often it is asked to spawn,
+ * which is the wrong way round. Same success/failure split, and the same
+ * reasoning, as the memos in `hermes-telegram.ts` and `openclaw-channels.ts`.
+ *
+ * Callers share the value rather than a copy; nothing here mutates it, the
+ * route only serialises it.
  */
-function memoAsync<T>(read: () => Promise<T>, ttlMs: number): () => Promise<T> {
-  let cached: { value: T; at: number } | null = null;
+const STATS_TTL_MS = 5_000;
+const STATS_FAILURE_TTL_MS = 3_000;
+
+function memoAsync<T>(read: () => Promise<T>): () => Promise<T> {
+  let cached: { at: number; ok: true; value: T } | { at: number; ok: false; err: unknown } | null = null;
   let inFlight: Promise<T> | null = null;
 
   return () => {
     // `age >= 0` because Date.now() is wall-clock: an RTC corrected BACKWARDS
     // by NTP would otherwise pin the entry until the clock caught up.
     const age = cached ? Date.now() - cached.at : Infinity;
-    if (cached && age >= 0 && age < ttlMs) return Promise.resolve(cached.value);
+    if (cached && age >= 0 && age < (cached.ok ? STATS_TTL_MS : STATS_FAILURE_TTL_MS)) {
+      return cached.ok ? Promise.resolve(cached.value) : Promise.reject(cached.err);
+    }
     if (inFlight) return inFlight;
 
     const promise = read().then(
       (value) => {
-        cached = { value, at: Date.now() };
+        cached = { at: Date.now(), ok: true, value };
         inFlight = null;
         return value;
       },
       (err) => {
+        cached = { at: Date.now(), ok: false, err };
         inFlight = null;
         throw err;
       },
@@ -52,10 +68,6 @@ function memoAsync<T>(read: () => Promise<T>, ttlMs: number): () => Promise<T> {
     return promise;
   };
 }
-
-/** How long each answer stays good. The kernel release is a constant. */
-const DISK_TTL_MS = 30_000;
-const PROCESSES_TTL_MS = 5_000;
 
 interface DiskMount {
   filesystem: string;
@@ -101,7 +113,7 @@ async function readDiskUsage(): Promise<DiskMount[]> {
   return result.slice(0, 8); // max 8 mounts
 }
 
-const diskUsage = memoAsync(readDiskUsage, DISK_TTL_MS);
+const diskUsage = memoAsync(readDiskUsage);
 
 async function getDiskUsage(): Promise<DiskMount[]> {
   try {
@@ -173,7 +185,7 @@ async function readTopProcesses(): Promise<ProcessEntry[]> {
   }).filter((p) => p.pid);
 }
 
-const topProcesses = memoAsync(readTopProcesses, PROCESSES_TTL_MS);
+const topProcesses = memoAsync(readTopProcesses);
 
 async function getTopProcesses(): Promise<ProcessEntry[]> {
   try {
@@ -205,27 +217,6 @@ function getUptime(): string {
     if (h > 0) parts.push(`${h}h`);
     parts.push(`${m}m`);
     return parts.join(" ");
-  }
-}
-
-async function readKernelRelease(): Promise<string> {
-  const { stdout } = await execFileAsync("uname", ["-r"], { encoding: "utf-8", timeout: 3000 });
-  return stdout.trim();
-}
-
-/**
- * The running kernel cannot change without a reboot, and a reboot restarts this
- * process — so the answer is good for the life of the process. The FALLBACK is
- * deliberately outside the memo: a `uname` that lost one race must not pin
- * `os.release()` until the next restart.
- */
-const kernelRelease = memoAsync(readKernelRelease, Infinity);
-
-async function getKernelRelease(): Promise<string> {
-  try {
-    return await kernelRelease();
-  } catch {
-    return os.release();
   }
 }
 
@@ -274,10 +265,9 @@ export async function GET() {
     // await. Everything below it still touches the event loop (temp/gpu reads,
     // promisified execFile shells) so it stays in one Promise.all.
     const cpuUsage = getCpuUsage();
-    const [temp, gpuUsage, kernel, storage, processes] = await Promise.all([
+    const [temp, gpuUsage, storage, processes] = await Promise.all([
       getTemperature(),
       getGpuUsage(),
-      getKernelRelease(),
       getDiskUsage(),
       getTopProcesses(),
     ]);
@@ -286,7 +276,11 @@ export async function GET() {
       overview: {
         hostname: os.hostname(),
         os: `${os.type()} ${os.release()}`,
-        kernel,
+        // `uname -r` and os.release() are the same string — both are the
+        // `release` field of the utsname the kernel answers with (verified on
+        // an Orin Nano: 5.15.185-tegra from each). Spawning a process for it,
+        // two lines under a call that already has the answer, was pure cost.
+        kernel: os.release(),
         uptime: getUptime(),
         arch: os.arch(),
         platform: os.platform(),

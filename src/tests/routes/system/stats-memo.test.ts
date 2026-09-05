@@ -3,16 +3,17 @@
  *
  * `/setup-api/system/stats` spawned `df`, `ps aux --sort=-%cpu` and `uname -r`
  * on EVERY request, and two pollers ask for it every 3 s while the panel is
- * open (Settings > System at SettingsApp.tsx and the System app at
- * SystemApp.tsx). On a Jetson that is three process spawns per poller per tick
- * for two answers that barely move and one — the kernel release — that cannot
- * change without a reboot.
+ * open (Settings > System in `SettingsApp.tsx` and the System app in
+ * `SystemApp.tsx`). On an Orin Nano that measured 2.8 / 28.5 / 2.0 ms per run:
+ * six spawns every three seconds, one of them (`uname -r`) for a string
+ * `os.release()` already holds.
  *
  * These are spawn-budget assertions, not timing ones: they count calls into
  * child_process, so they mean the same thing on a laptop and on a loaded CI
  * runner.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import os from "os";
 import { promisify } from "util";
 
 const h = vi.hoisted(() => {
@@ -27,7 +28,6 @@ const h = vi.hoisted(() => {
       "USER  PID %CPU %MEM    VSZ   RSS TTY STAT START TIME COMMAND",
       "root    1  0.1  0.2  10000  5000 ?   Ss   09:00 0:01 /sbin/init",
     ].join("\n"),
-    uname: "5.15.148-tegra",
   };
   const run = vi.fn(async (file: string) => {
     calls.push(file);
@@ -41,7 +41,17 @@ vi.mock("child_process", () => {
   // `promisify(execFile)` follows util.promisify.custom, which is how the real
   // execFile resolves to `{ stdout, stderr }` rather than a bare stdout.
   const execFile = Object.assign(vi.fn(), { [promisify.custom]: h.run });
-  return { execFile, execFileSync: vi.fn(), execSync: vi.fn(), spawn: vi.fn() };
+  // Every spawn entry point, so a process started anywhere in this route's
+  // module graph shows up as an unmocked-call failure rather than as silence.
+  return {
+    execFile,
+    exec: vi.fn(),
+    execSync: vi.fn(),
+    execFileSync: vi.fn(),
+    spawn: vi.fn(),
+    spawnSync: vi.fn(),
+    fork: vi.fn(),
+  };
 });
 
 function countOf(file: string): number {
@@ -50,13 +60,15 @@ function countOf(file: string): number {
 
 describe("GET /setup-api/system/stats spawn budget", () => {
   let GET: () => Promise<Response>;
+  let startedAt: number;
 
   beforeEach(async () => {
     vi.resetModules();
     vi.useFakeTimers();
+    startedAt = new Date("2026-09-05T10:00:00Z").getTime();
+    vi.setSystemTime(startedAt);
     h.calls.length = 0;
     h.failing.clear();
-    h.outputs.uname = "5.15.148-tegra";
     h.run.mockClear();
     GET = (await import("@/app/setup-api/system/stats/route")).GET;
   });
@@ -65,64 +77,75 @@ describe("GET /setup-api/system/stats spawn budget", () => {
     vi.useRealTimers();
   });
 
-  it("does not respawn df, ps and uname for every 3 s tick", async () => {
-    // Both pollers, three ticks: six requests, which used to be eighteen
-    // spawns.
-    let res: Response | undefined;
-    for (const offset of [0, 3_000, 6_000]) {
-      vi.setSystemTime(Date.now() + offset);
-      [, res] = await Promise.all([GET(), GET()]);
+  /** Absolute, never `Date.now() + n` — offsets from "now" compound. */
+  function at(msFromStart: number) {
+    vi.setSystemTime(startedAt + msFromStart);
+  }
+
+  it("spawns nothing for the kernel release", async () => {
+    const body = await (await GET()).json();
+    // `uname -r` and os.release() are the same utsname field; the route reads
+    // os.release() two lines above for `overview.os` anyway.
+    expect(h.calls).not.toContain("uname");
+    expect(body.overview.kernel).toBe(os.release());
+    expect(body.overview.os).toContain(os.release());
+  });
+
+  it("does not respawn df and ps for every 3 s tick", async () => {
+    // Both pollers, four ticks: eight requests, which used to be 24 spawns.
+    for (const ms of [0, 3_000, 6_000, 9_000]) {
+      at(ms);
+      await Promise.all([GET(), GET()]);
     }
 
-    expect(res?.status).toBe(200);
-    expect(countOf("uname"), "uname -r is a constant for the life of the process").toBe(1);
-    expect(countOf("df"), "disk usage over three ticks").toBe(1);
-    // The 5 s window means a 3 s poll pays for `ps` every OTHER tick.
-    expect(countOf("ps"), "top processes over three ticks").toBe(2);
-    expect(h.calls.length, "six requests, three ticks").toBe(4);
+    // The 5 s window means a 3 s poll pays for each command every other tick,
+    // and the two pollers share the one spawn rather than racing for two.
+    expect(countOf("df"), "df over four ticks").toBe(2);
+    expect(countOf("ps"), "ps over four ticks").toBe(2);
+    expect(h.calls.length, "eight requests").toBe(4);
   });
 
   it("serves the two concurrent pollers from one spawn each", async () => {
-    // Settings > System and the System app poll the same route independently.
     const [a, b] = await Promise.all([GET(), GET()]);
 
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
     expect(countOf("df")).toBe(1);
     expect(countOf("ps")).toBe(1);
-    expect(countOf("uname")).toBe(1);
   });
 
-  it("still refreshes what can actually change, once its window is up", async () => {
+  it("re-reads once the window is up", async () => {
     await GET();
-    // Past the processes window but inside the disk one.
-    vi.setSystemTime(Date.now() + 6_000);
+    at(4_000);
     await GET();
-    expect(countOf("ps")).toBe(2);
     expect(countOf("df")).toBe(1);
+    expect(countOf("ps")).toBe(1);
 
-    vi.setSystemTime(Date.now() + 31_000);
+    at(5_001);
     await GET();
     expect(countOf("df")).toBe(2);
-    expect(countOf("uname"), "the kernel cannot change without a reboot").toBe(1);
+    expect(countOf("ps")).toBe(2);
   });
 
-  it("does not pin a failed uname for the life of the process", async () => {
-    // Probe-once: caching the FALLBACK forever would leave a box reporting
-    // os.release() until the next restart because one spawn lost a race.
-    h.failing.add("uname");
-    const first = await (await GET()).json();
-    expect(first.overview.kernel).toBeTruthy();
+  it("does not spawn once per request while a command keeps failing", async () => {
+    // A `fork` refused under memory pressure is exactly when the box can least
+    // afford to be asked again on every tick, so a failure is remembered too —
+    // just for less time than a success.
+    h.failing.add("df");
+    expect((await (await GET()).json()).storage).toEqual([]);
+    at(1_500);
+    expect((await (await GET()).json()).storage).toEqual([]);
+    expect(countOf("df"), "inside the failure window").toBe(1);
 
-    h.failing.delete("uname");
-    vi.setSystemTime(Date.now() + 3_000);
-    const second = await (await GET()).json();
-    expect(second.overview.kernel).toBe("5.15.148-tegra");
+    h.failing.delete("df");
+    at(3_500);
+    const body = await (await GET()).json();
+    expect(countOf("df"), "past it").toBe(2);
+    expect(body.storage).toHaveLength(1);
   });
 
   it("still answers with real values, not an empty shell", async () => {
     const body = await (await GET()).json();
-    expect(body.overview.kernel).toBe("5.15.148-tegra");
     expect(body.storage).toHaveLength(1);
     expect(body.storage[0].mountpoint).toBe("/");
     expect(body.processes).toHaveLength(1);
