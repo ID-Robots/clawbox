@@ -294,11 +294,11 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
   });
 
   it("re-verifies after a factory reset empties ~/.openclaw", () => {
-    // `removeDirectoryContents(OPENCLAW_DIR)` (setup/reset/route.ts:508) reads
+    // `removeDirectoryContents(OPENCLAW_DIR)` (setup/reset/route.ts) reads
     // the directory with `fs.readdir`, which lists dot-entries — so the stamp
     // beside `extensions/` goes with the plugin it describes, exactly as it did
     // when it lived inside `extensions/`. The route then writes a fresh
-    // openclaw.json back (:541), which is why this does too.
+    // openclaw.json back (the openclaw.json seed), which is why this does too.
     run();
     for (const entry of readdirSync(openclawHome)) {
       rmSync(path.join(openclawHome, entry), { recursive: true, force: true });

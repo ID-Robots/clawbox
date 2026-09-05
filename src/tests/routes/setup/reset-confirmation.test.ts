@@ -24,6 +24,11 @@ vi.mock("child_process", () => ({
 
 vi.mock("fs/promises", () => ({
   default: {
+    // The wipe lstats every directory before it reads one (a symlink or a
+    // plain file planted in the way is removed rather than read through — see
+    // reset.test.ts). This file is about the gate, so everything it points at
+    // is a plain directory.
+    lstat: vi.fn(async () => ({ isDirectory: () => true })),
     readdir: vi.fn(async () => []),
     rm: vi.fn(async () => {}),
     mkdir: vi.fn(async () => undefined),
