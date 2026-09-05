@@ -2140,6 +2140,7 @@ export default function CodingAgentApp() {
                 query={projectQuery}
                 live={projectLive}
                 fill
+                filesDirectory={!standalone && p.kind === "folder" ? p.directory : undefined}
                 runsCount={visibleRuns.length}
                 runsLive={projectLive}
                 runs={<div className="pt-1" data-testid="coding-agent-project-runs">{runsList}</div>}

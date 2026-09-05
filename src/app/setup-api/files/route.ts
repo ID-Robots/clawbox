@@ -267,7 +267,9 @@ export async function POST(req: NextRequest) {
     if (!body.filePath) return NextResponse.json({ error: "filePath required" }, { status: 400 });
     const resolved = safePath(body.filePath);
     if (!resolved) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
-    return NextResponse.json({ absPath: resolved });
+    // `relPath` is what the Files app navigates by — the Coding Agent's
+    // "Open in Files" asks for a project folder's, absolute as it knows it.
+    return NextResponse.json({ absPath: resolved, relPath: path.relative(path.resolve(BASE_DIR), resolved) });
   }
 
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });

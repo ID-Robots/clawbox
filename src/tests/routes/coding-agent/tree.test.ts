@@ -13,6 +13,8 @@ import path from "path";
 
 const resolveWorkingDirectory = vi.hoisted(() => vi.fn());
 const requireSession = vi.hoisted(() => vi.fn());
+const hasOwnerSession = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/owner-session", () => ({ hasOwnerSession }));
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
   return { ...actual, resolveWorkingDirectory };
@@ -23,11 +25,20 @@ vi.mock("@/lib/route-auth", async () => {
 });
 
 let GET: (req: Request) => Promise<Response>;
+let PUT: (req: Request) => Promise<Response>;
 let root: string;
 let project: string;
 
 function get(query: string): Request {
   return new Request(`http://localhost/setup-api/coding-agent/tree?${query}`, { headers: { host: "localhost" } });
+}
+
+function put(body: unknown): Request {
+  return new Request("http://localhost/setup-api/coding-agent/tree", {
+    method: "PUT",
+    headers: { host: "localhost", "content-type": "application/json" },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
 }
 
 beforeEach(async () => {
@@ -41,8 +52,11 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   requireSession.mockResolvedValue(null);
+  hasOwnerSession.mockResolvedValue(true);
   resolveWorkingDirectory.mockResolvedValue({ directory: project });
-  GET = (await import("@/app/setup-api/coding-agent/tree/route")).GET;
+  const route = await import("@/app/setup-api/coding-agent/tree/route");
+  GET = route.GET;
+  PUT = route.PUT;
 });
 
 afterEach(() => {
@@ -116,5 +130,74 @@ describe("the gates", () => {
     expect(res.status).toBe(httpStatusForCodingError(err.kind));
     expect(res.status).toBe(404);
     expect((await res.json()).kind).toBe("not_found");
+  });
+});
+
+describe("saving a file", () => {
+  it("writes the owner's text over a file in the project and answers its size", async () => {
+    const res = await PUT(put({ projectId: "site", file: "src/app.js", content: "console.log(2)\n" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ file: { path: "src/app.js", size: 15 } });
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("console.log(2)\n");
+    expect(resolveWorkingDirectory).toHaveBeenCalledWith({ projectId: "site", directory: null });
+  });
+
+  it("is the owner's alone: the MCP bearer is refused before the project is even resolved", async () => {
+    hasOwnerSession.mockResolvedValueOnce(false);
+    const res = await PUT(put({ projectId: "site", file: "src/app.js", content: "x" }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+    expect(resolveWorkingDirectory).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("console.log(1)\n");
+  });
+
+  it("answers 400 for a body that is not a save, and 413 for a text past the cap", async () => {
+    for (const body of ["not json", "[]", { projectId: "site" }, { projectId: "site", file: "", content: "x" }, { projectId: "site", file: "a", content: 1 }, { projectId: 5, file: "a", content: "x" }, { file: "a", content: "x" }]) {
+      const res = await PUT(put(body));
+      expect(res.status, JSON.stringify(body)).toBe(400);
+    }
+    const { MAX_TREE_WRITE_BYTES } = await import("@/lib/coding-project-tree");
+    const res = await PUT(put({ projectId: "site", file: "src/app.js", content: "x".repeat(MAX_TREE_WRITE_BYTES + 1) }));
+    expect(res.status).toBe(413);
+    expect((await res.json()).kind).toBe("too_large");
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("console.log(1)\n");
+  });
+
+  it("answers the same 404 for a climb, a folder, a file that is not there and .git — creating nothing", async () => {
+    for (const file of ["../outside.txt", "src", "src/new.js", ".git/config"]) {
+      const res = await PUT(put({ directory: project, file, content: "owned" }));
+      expect(res.status, file).toBe(404);
+      expect((await res.json()).kind, file).toBe("not_found");
+    }
+    expect(fs.existsSync(path.join(project, "src", "new.js"))).toBe(false);
+    expect(fs.readFileSync(path.join(root, "outside.txt"), "utf8")).toBe("no\n");
+  });
+});
+
+describe("the body cap", () => {
+  it("takes a file at the write cap whose every byte escapes to six", async () => {
+    const { MAX_TREE_WRITE_BYTES } = await import("@/lib/coding-project-tree");
+    const content = "\u0001".repeat(MAX_TREE_WRITE_BYTES);
+    const res = await PUT(put({ projectId: "site", file: "src/app.js", content }));
+    expect(res.status).toBe(200);
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe(content);
+  });
+
+  it("refuses a body past MAX_PUT_BODY_BYTES with 413 before parsing it, by its length and by what it streams", async () => {
+    const { MAX_PUT_BODY_BYTES } = await import("@/app/setup-api/coding-agent/tree/route");
+    const huge = JSON.stringify({ projectId: "site", file: "src/app.js", content: "x".repeat(MAX_PUT_BODY_BYTES) });
+    const declared = await PUT(new Request("http://localhost/setup-api/coding-agent/tree", { method: "PUT", headers: { host: "localhost", "content-type": "application/json", "content-length": String(huge.length) }, body: huge }));
+    expect(declared.status).toBe(413);
+    // No content-length: the stream itself is cut at the cap.
+    const streamed = await PUT(new Request("http://localhost/setup-api/coding-agent/tree", {
+      method: "PUT",
+      headers: { host: "localhost", "content-type": "application/json" },
+      body: new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode(huge)); c.close(); } }),
+      // @ts-expect-error -- undici needs duplex for a stream body
+      duplex: "half",
+    }));
+    expect(streamed.status).toBe(413);
+    expect(resolveWorkingDirectory).not.toHaveBeenCalled();
+    expect(fs.readFileSync(path.join(project, "src", "app.js"), "utf8")).toBe("console.log(1)\n");
   });
 });

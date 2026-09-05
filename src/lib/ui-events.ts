@@ -100,15 +100,33 @@ export function takePendingCodingRun(): string | null {
  */
 export const CHAT_MODEL_STATE_EVENT = "clawbox:chat-model-state-changed";
 
-/** What the desktop is asked for: which app, and whether its window should be maximized. */
+/**
+ * What the desktop is asked for: which app, whether its window should be
+ * maximized, whether a window of its own is wanted even while one is up,
+ * and what rides on that window's record — strings only, the way a
+ * Terminal's command does (the Files app's starting folder).
+ */
 export interface OpenAppDetail {
   appId: string;
   maximize?: boolean;
+  forceNew?: boolean;
+  meta?: Record<string, string>;
 }
 
-export function dispatchOpenApp(appId: string, opts: { maximize?: boolean } = {}): void {
+export interface OpenAppOptions {
+  maximize?: boolean;
+  forceNew?: boolean;
+  meta?: Record<string, string>;
+}
+
+export function dispatchOpenApp(appId: string, opts: OpenAppOptions = {}): void {
   if (typeof window === "undefined") return;
-  const detail: OpenAppDetail = { appId, ...(opts.maximize ? { maximize: true } : {}) };
+  const detail: OpenAppDetail = {
+    appId,
+    ...(opts.maximize ? { maximize: true } : {}),
+    ...(opts.forceNew ? { forceNew: true } : {}),
+    ...(opts.meta ? { meta: opts.meta } : {}),
+  };
   window.dispatchEvent(new CustomEvent<OpenAppDetail>(OPEN_APP_EVENT, { detail }));
 }
 

@@ -13,9 +13,12 @@
  * it), then the secret-store guard, since a project may sit inside the
  * checkout and `data/` is where the tokens live.
  *
- * Read-only. A run edits files; the owner reads them.
+ * Reading, and ONE write: the owner's edit of a file that is already there,
+ * through the same walk. The editor never creates or removes a file — a run
+ * does that, and the Files app can.
  */
 
+import crypto from "crypto";
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
@@ -46,6 +49,8 @@ export interface TreeFile {
 }
 
 export type TreeRefusal = { ok: false; status: 403 | 404 };
+/** A save refused: the same 403/404 as a read, or 413 for a text past the cap. */
+export type WriteRefusal = { ok: false; status: 403 | 404 | 413 };
 
 /** Folders a project explorer has no business opening. */
 // `.clawbox` holds a coding team's worker worktrees (coding-team-worktree.ts): the project's own files, twice over.
@@ -54,6 +59,8 @@ const SKIPPED_DIRS = new Set([".git", ".clawbox"]);
 export const MAX_TREE_ENTRIES = 1000;
 /** A file is read up to here; the rest is cut and said so. */
 export const MAX_TREE_FILE_BYTES = 512 * 1024;
+/** A save may be this large at most — the read cap, so what was opened whole can be saved whole. */
+export const MAX_TREE_WRITE_BYTES = MAX_TREE_FILE_BYTES;
 
 /**
  * `rel` (as the page names it; "" or "." is the project itself) resolved to a
@@ -104,14 +111,16 @@ export async function resolveInsideProject(
  *
  * Returns the descriptor of the target; the caller closes it.
  */
-function openThroughDescriptors(root: string, rel: string, target: "directory" | "file"): number {
+function openThroughDescriptors(root: string, rel: string, target: "directory" | "file", access: "read" | "write" = "read"): number {
   const parts = rel === "" ? [] : rel.split("/");
   let fd = fs.openSync(root, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
   try {
     for (let i = 0; i < parts.length; i++) {
       const last = i === parts.length - 1;
+      // Writing opens the file itself for writing and nothing else: every
+      // folder on the way is still opened read-only, and never created.
       const flags = last && target === "file"
-        ? fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+        ? (access === "write" ? fs.constants.O_WRONLY : fs.constants.O_RDONLY) | fs.constants.O_NOFOLLOW
         : fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
       const next = fs.openSync(path.join(`/proc/self/fd/${fd}`, parts[i]), flags);
       fs.closeSync(fd);
@@ -215,5 +224,66 @@ export async function readProjectFile(projectDir: string, rel: string): Promise<
     return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };
   } finally {
     if (fd !== null) { try { fs.closeSync(fd); } catch { /* already closed */ } }
+  }
+}
+
+/**
+ * The owner's edit, saved over a file that is already in the project. The
+ * parent folder is reached by the same walk as a read — component by
+ * component, no link followed — and the target is inspected through it
+ * (a plain file, and its mode) with O_NOFOLLOW. The new text then lands in
+ * a SIBLING first: created fresh (O_EXCL) with the target's own mode,
+ * written and fsync'ed, and given the target's name in one rename — so a
+ * disk that fills halfway through leaves the old file whole rather than
+ * empty. No file is created under the owner's name (a typo is a 404, not a
+ * new file); a folder, a link and the project root are refused alike; the
+ * sibling is removed on any failure.
+ */
+export async function writeProjectFile(projectDir: string, rel: string, content: string): Promise<{ ok: true; path: string; size: number } | WriteRefusal> {
+  const bytes = Buffer.from(content, "utf8");
+  if (bytes.length > MAX_TREE_WRITE_BYTES) return { ok: false, status: 413 };
+  const resolved = await resolveInsideProject(projectDir, rel);
+  if (!resolved.ok) return resolved;
+  if (!resolved.rel) return { ok: false, status: 404 };
+  const slash = resolved.rel.lastIndexOf("/");
+  const parentRel = slash === -1 ? "" : resolved.rel.slice(0, slash);
+  const name = slash === -1 ? resolved.rel : resolved.rel.slice(slash + 1);
+  let dirFd: number | null = null;
+  let tmpName: string | null = null;
+  try {
+    dirFd = openThroughDescriptors(resolved.root, parentRel, "directory");
+    const viaDir = `/proc/self/fd/${dirFd}`;
+    const targetFd = fs.openSync(path.join(viaDir, name), fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let mode: number;
+    try {
+      const stat = fs.fstatSync(targetFd);
+      if (!stat.isFile()) return { ok: false, status: 404 };
+      mode = stat.mode & 0o777;
+    } finally {
+      fs.closeSync(targetFd);
+    }
+    // Named apart from the target: a name near the filesystem's component
+    // limit would make its sibling too long to create.
+    tmpName = `.clawbox-save-${process.pid}-${crypto.randomBytes(8).toString("hex")}`;
+    const tmpFd = fs.openSync(path.join(viaDir, tmpName), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, mode);
+    try {
+      let written = 0;
+      while (written < bytes.length) {
+        written += fs.writeSync(tmpFd, bytes, written, bytes.length - written, written);
+      }
+      fs.fsyncSync(tmpFd);
+    } finally {
+      fs.closeSync(tmpFd);
+    }
+    fs.renameSync(path.join(viaDir, tmpName), path.join(viaDir, name));
+    tmpName = null;
+    try { fs.fsyncSync(dirFd); } catch { /* the rename is on disk either way; the folder's sync is best effort */ }
+    return { ok: true, path: resolved.rel, size: bytes.length };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };
+  } finally {
+    if (tmpName !== null && dirFd !== null) { try { fs.unlinkSync(path.join(`/proc/self/fd/${dirFd}`, tmpName)); } catch { /* never made */ } }
+    if (dirFd !== null) { try { fs.closeSync(dirFd); } catch { /* already closed */ } }
   }
 }

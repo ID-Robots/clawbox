@@ -1291,7 +1291,9 @@ function ChromeDesktopInner() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<OpenAppDetail>).detail;
-      if (detail?.appId) openAppRef.current(detail.appId, false, detail.maximize ? { maximize: "true" } : undefined);
+      if (!detail?.appId) return;
+      const meta = { ...(detail.maximize ? { maximize: "true" } : {}), ...(detail.meta ?? {}) };
+      openAppRef.current(detail.appId, detail.forceNew === true, Object.keys(meta).length ? meta : undefined);
     };
     window.addEventListener(OPEN_APP_EVENT, handler);
     return () => window.removeEventListener(OPEN_APP_EVENT, handler);
@@ -1767,7 +1769,7 @@ function ChromeDesktopInner() {
           />
         ) : null;
       case "files":
-        return <FilesApp />;
+        return <FilesApp initialPath={_meta?.path} />;
       case "clawkeep":
         return <ClawKeepApp />;
       case "memory_shard":

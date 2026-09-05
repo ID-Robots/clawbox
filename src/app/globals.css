@@ -1715,3 +1715,91 @@ input[type="range"].appearance-none::-moz-range-track {
   .coding-agent-pulse { opacity: 1; }
   .coding-agent-working-dot { opacity: 0.6; }
 }
+
+/* ── The code editor (src/components/CodeEditor.tsx) ──────────────────────
+   A gutter that sticks to the left while long lines scroll, the coloured
+   text, and over it — while editing — a textarea with transparent glyphs
+   and a visible caret, sized and padded exactly like the text beneath so
+   the caret lands on the glyph it moves. Every selector here is a flat
+   class: the setup-ground parity test parses this file with its own small
+   engine. The ground is the host's (`--cb-code-ground`), so the gutter
+   covers what scrolls under it on either app's background. */
+.cb-code {
+  display: flex;
+  align-items: flex-start;
+  min-width: max-content;
+  min-height: 100%;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  tab-size: 2;
+  color: var(--text-secondary);
+  background: var(--cb-code-ground, var(--win-ground));
+}
+.cb-code-gutter {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  flex: none;
+  min-width: 2.75rem;
+  padding: 4px 8px 4px 4px;
+  text-align: right;
+  color: var(--text-muted);
+  background: inherit;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.cb-code-gutter-line {
+  min-height: 18px;
+  opacity: 0.55;
+}
+.cb-code-body {
+  position: relative;
+  flex: 1 0 auto;
+  min-width: 0;
+}
+.cb-code-pre {
+  margin: 0;
+  padding: 4px 16px 4px 8px;
+  white-space: pre;
+  font: inherit;
+  line-height: inherit;
+  color: inherit;
+  background: transparent;
+}
+.cb-code-line {
+  min-height: 18px;
+}
+.cb-code-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 4px 16px 4px 8px;
+  border: 0;
+  outline: 0;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text-primary);
+  white-space: pre;
+  font: inherit;
+  line-height: inherit;
+  tab-size: 2;
+}
+/* The palette: GitHub's dark scheme, which reads on both grounds. */
+.tok-comment, .tok-prolog, .tok-doctype, .tok-cdata { color: #8b949e; font-style: italic; }
+.tok-punctuation { color: #9aa4b2; }
+.tok-operator, .tok-entity { color: #c9d1d9; }
+.tok-tag, .tok-selector, .tok-list, .tok-deleted { color: #7ee787; }
+.tok-attr-name, .tok-property, .tok-variable, .tok-constant, .tok-symbol, .tok-number, .tok-boolean { color: #79c0ff; }
+.tok-string, .tok-attr-value, .tok-char, .tok-template-string, .tok-inserted, .tok-code, .tok-url { color: #a5d6ff; }
+.tok-keyword, .tok-atrule, .tok-rule, .tok-important, .tok-directive { color: #ff7b72; }
+.tok-function, .tok-function-name, .tok-class-name, .tok-title, .tok-builtin { color: #d2a8ff; }
+.tok-regex, .tok-interpolation-punctuation, .tok-namespace { color: #ffa657; }
+.tok-title, .tok-bold { font-weight: 600; }
+.tok-italic { font-style: italic; }
+.tok-url { text-decoration: underline; }
