@@ -854,7 +854,7 @@ export const nl: Record<string, string> = {
   "codingAgent.artBrowser": "Webbrowser",
   "codingAgent.team.artMain": "Assistent",
   "codingAgent.team.artWorkers": "Werkers",
-  "codingAgent.team.artPlanner": "Plannenmaker",
+  "codingAgent.team.artPlanner": "Teamplanner",
   "codingAgent.team.artReviewers": "Beoordelaars",
   "codingAgent.resetConfirm": "Alles resetten — tik nogmaals",
   "codingAgent.resetFailed": "De codeagent kon niet worden gereset.",
