@@ -8,25 +8,21 @@
 # DOES have a key every indexed note is shipped to a third party to be embedded
 # — the exact opposite of what the product claims.
 #
-# install.sh used to pull the local embedding model at install time and
-# gateway-pre-start.sh only switched memorySearch over when the model was
-# already present. That is a chicken-and-egg: a box whose install-time pull
-# never ran (or failed) can never self-heal and stays pointed at the cloud
-# embedder forever. Verified on test box 192.168.50.66: ollama running, zero
-# models pulled, no agents.defaults.memorySearch key, `openclaw memory status`
-# reporting provider "openai".
-#
-# So the pull lives here, next to the switch, and both run from one place:
-# install.sh calls it directly, gateway-pre-start.sh launches it detached (the
-# model is a ~600MB download and pre-start is a blocking ExecStartPre).
+# The embedder is Qwen3-Embedding-0.6B on ClawBox's own llama.cpp, run as
+# clawbox-embed.service and reached THROUGH the web server's local-AI proxy
+# (src/lib/local-ai-proxy.ts): the proxy is what wakes the unit on the first
+# request and puts it to sleep ten idle minutes later, so OpenClaw is pointed at
+# the proxy, never at the server's own port. It used to be the same model inside
+# ollama — 2.8 GB resident whenever the agent was in use, for a batch size the
+# traffic never reached. This script is the single implementation of "have the
+# model, point memory.search at the proxy, reindex": install.sh calls it
+# directly (after the web server is up), gateway-pre-start.sh launches it
+# detached on every gateway start.
 #
 # OpenClaw 2 (2026.8+) moved the choice from agents.defaults.memorySearch.* to
 # memory.search.* and its CLI refuses the retired path outright ("moved to
-# memory.search. Run openclaw doctor --fix"). Measured on a 2026.8.1 box: the
-# config already said memory.search.provider=ollama, this script read the old
-# path, saw "unset", tried the old write and logged "could not set the local
-# embedding model" on every boot — so no upgraded box could be pointed at local
-# embeddings. The key names follow the installed core, decided below.
+# memory.search. Run openclaw doctor --fix"). The key names follow the installed
+# core, decided below.
 #
 # Everything here is best-effort. A failure must leave the box on lexical FTS,
 # never half-configured, and never block the gateway.
@@ -34,13 +30,53 @@ set -euo pipefail
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-/home/clawbox/.npm-global/bin/openclaw}"
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/home/clawbox/.openclaw/openclaw.json}"
-OLLAMA_BIN="${OLLAMA_BIN:-ollama}"
-OLLAMA_TAGS_URL="${OLLAMA_TAGS_URL:-http://localhost:11434/api/tags}"
-EMBED_MODEL="${EMBED_MODEL:-qwen3-embedding:0.6b}"
+# --- the CLI must write the file this script reads --------------------------
+# `openclaw config set` and `openclaw memory index` do not read OPENCLAW_CONFIG
+# above; they find their tree from the environment: OPENCLAW_CONFIG_PATH and
+# OPENCLAW_STATE_DIR when set, otherwise `$OPENCLAW_HOME/.openclaw` — OpenClaw
+# reads OPENCLAW_HOME as the ACCOUNT home — otherwise `$HOME/.openclaw`.
+# ClawBox uses the same name for the .openclaw directory itself, and the
+# updater once exported it into the pre-start that launches this script: the
+# CLI then wrote every key, and "reindexed" an empty workspace, under
+# ~/.openclaw/.openclaw/ while this script read the real file and logged
+# success, and the box was left half-switched with a clean log (2026-09-04).
+# Pinning both to the file every read below is made of means a write can only
+# land where the read-back at the end will find it.
+OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
+export OPENCLAW_CONFIG_PATH="$OPENCLAW_CONFIG"
+export OPENCLAW_STATE_DIR
+unset OPENCLAW_HOME
+# The alias llama-server answers to and the `model` OpenClaw sends. Keep in
+# step with src/lib/embed-server.ts and scripts/start-embed-server.sh.
+EMBED_MODEL="${EMBED_MODEL:-qwen3-embedding-0.6b}"
+EMBED_PROVIDER="openai-compatible"
+EMBED_MODEL_DIR="${EMBED_MODEL_DIR:-/home/clawbox/clawbox/data/embed/models}"
+EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
+EMBED_HF_FILE="${EMBED_HF_FILE:-Qwen3-Embedding-0.6B-Q8_0.gguf}"
+HF_BIN="${HF_BIN:-/home/clawbox/.local/bin/hf}"
+LOCAL_AI_TOKEN_FILE="${LOCAL_AI_TOKEN_FILE:-/home/clawbox/clawbox/data/.local-ai-token}"
 EMBED_STATE_FILE="${EMBED_STATE_FILE:-/home/clawbox/clawbox/data/local-embeddings.state}"
 FLOCK_BIN="${FLOCK_BIN:-flock}"
-# Don't retry a failed ~600MB pull on every gateway restart.
+# Don't retry a failed ~640MB download on every gateway restart.
 EMBED_RETRY_SECONDS="${EMBED_RETRY_SECONDS:-21600}"
+# The gateway and the web server start in parallel at boot; the proxy may not
+# be listening yet when this runs. How long to keep asking before giving up
+# for this run (the next gateway start asks again).
+EMBED_PROXY_WAIT_SECONDS="${EMBED_PROXY_WAIT_SECONDS:-120}"
+
+# Where OpenClaw reaches the embedder: the proxy's mount, the same derivation
+# src/lib/local-ai-proxy-url.ts makes (CLAWBOX_LOCAL_AI_PROXY_BASE_URL, else
+# 127.0.0.1 on the web server's port).
+_port="${CLAWBOX_PORT:-${PORT:-80}}"
+[[ "$_port" =~ ^[0-9]+$ ]] || _port=80
+if [ -n "${CLAWBOX_LOCAL_AI_PROXY_BASE_URL:-}" ]; then
+  PROXY_ROOT="${CLAWBOX_LOCAL_AI_PROXY_BASE_URL%/}"
+elif [ "$_port" = "80" ]; then
+  PROXY_ROOT="http://127.0.0.1"
+else
+  PROXY_ROOT="http://127.0.0.1:$_port"
+fi
+EMBED_PROXY_URL="${EMBED_PROXY_URL:-$PROXY_ROOT/setup-api/local-ai/embed/v1}"
 
 log() { echo "  [local-embeddings] $*"; }
 
@@ -93,6 +129,18 @@ PY
 }
 read_cfg() { read_path "$MEMORY_SEARCH_KEY.$1"; }
 
+# Is a base URL this box's own loopback? `openai-compatible` is one provider id
+# for two very different things: our embedder behind the local proxy, and a
+# server across the room the owner chose. Only the host tells them apart.
+is_loopback_url() {
+  python3 - "$1" <<'PY' 2>/dev/null
+import sys
+from urllib.parse import urlparse
+host = urlparse(sys.argv[1]).hostname or ""
+sys.exit(0 if host in ("127.0.0.1", "localhost", "::1") else 1)
+PY
+}
+
 # The other generation's home. Read for ONE decision, the guard just below.
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
   OTHER_SEARCH_KEY="agents.defaults.memorySearch"
@@ -104,13 +152,18 @@ PROVIDER="$(read_cfg provider)"
 # A remote provider the owner chose is left alone wherever it is recorded. On a
 # box upgraded to OpenClaw 2 whose config `doctor --fix` has not migrated yet,
 # that choice still sits in agents.defaults.memorySearch while memory.search is
-# empty; reading only the live home saw "unset", overwrote it with ollama, and
-# the later migration then had nothing left to carry forward. The rule belongs
-# HERE, where it decides whether to WRITE; install.sh's post-run check no longer
-# re-derives anything — it asks the core what it resolved
-# (`openclaw memory status --json`, TASK-659). Everything AFTER this guard (the "already configured" test
-# and both writes) stays on the live home, so a legacy "ollama" on a v2 box is
-# migrated, not mistaken for done.
+# empty; reading only the live home saw "unset", overwrote it, and the later
+# migration then had nothing left to carry forward. The rule belongs HERE,
+# where it decides whether to WRITE; install.sh's post-run check asks the core
+# what it resolved (`openclaw memory status --json`, TASK-659). Everything
+# AFTER this guard (the "already configured" test and the writes) stays on the
+# live home, so a legacy value on a v2 box is migrated, not mistaken for done.
+#
+# `ollama` is ours from before the move and is migrated. `openai-compatible`
+# is ours only at the loopback proxy: the same id at any other host is a
+# server the owner set up, and a failed run of THIS script must never turn
+# into a reason to take it over (that is also why a failed reindex below never
+# changes the provider back).
 RECORDED_PROVIDER="$PROVIDER"
 RECORDED_IN="$MEMORY_SEARCH_KEY"
 if [ -z "$RECORDED_PROVIDER" ]; then
@@ -119,6 +172,13 @@ if [ -z "$RECORDED_PROVIDER" ]; then
 fi
 case "$RECORDED_PROVIDER" in
   ""|auto|ollama) ;;
+  "$EMBED_PROVIDER")
+    RECORDED_BASE="$(read_path "$RECORDED_IN.remote.baseUrl")"
+    if [ -n "$RECORDED_BASE" ] && [ "$RECORDED_BASE" != "$EMBED_PROXY_URL" ] && ! is_loopback_url "$RECORDED_BASE"; then
+      log "$RECORDED_IN.provider is \"$RECORDED_PROVIDER\" at $RECORDED_BASE — a deliberate choice, leaving it alone"
+      exit 0
+    fi
+    ;;
   *)
     log "$RECORDED_IN.provider is \"$RECORDED_PROVIDER\" — a deliberate choice, leaving it alone"
     exit 0
@@ -126,14 +186,14 @@ case "$RECORDED_PROVIDER" in
 esac
 
 # --- one run at a time -------------------------------------------------------
-# Two gateway restarts in quick succession must not start two pulls. flock is an
-# advisory lock the kernel drops when this process exits, so it stays valid for
-# exactly as long as its owner runs — a pull that takes an hour on a slow link
-# still holds it, and a killed run never leaves it behind.
+# Two gateway restarts in quick succession must not start two downloads. flock
+# is an advisory lock the kernel drops when this process exits, so it stays
+# valid for exactly as long as its owner runs — a download that takes an hour
+# on a slow link still holds it, and a killed run never leaves it behind.
 #
-# No lock, no run: proceeding unserialised would let two starts pull, configure
-# and reindex at once, which is the failure this exists to prevent. Doing
-# nothing is always the safe outcome here — the next boot tries again.
+# No lock, no run: proceeding unserialised would let two starts download,
+# configure and reindex at once, which is the failure this exists to prevent.
+# Doing nothing is always the safe outcome here — the next boot tries again.
 mkdir -p "$(dirname "$EMBED_STATE_FILE")" 2>/dev/null || true
 LOCK_FILE="${EMBED_STATE_FILE}.lock"
 if ! command -v "$FLOCK_BIN" >/dev/null 2>&1; then
@@ -150,22 +210,16 @@ if ! "$FLOCK_BIN" -n 9; then
   exit 0
 fi
 
-# --- is the local model there? -----------------------------------------------
-fetch_tags() { curl -fsS --max-time 5 "$OLLAMA_TAGS_URL" 2>/dev/null || true; }
-TAGS="$(fetch_tags)"
-if [ -z "$TAGS" ]; then
-  log "ollama is not reachable at $OLLAMA_TAGS_URL — semantic memory stays on lexical FTS"
-  exit 0
-fi
-model_present() { printf '%s' "$1" | grep -qF "\"$EMBED_MODEL\""; }
-
 state_get() {
   [ -f "$EMBED_STATE_FILE" ] || { echo 0; return; }
   local v
   v="$(sed -n "s/^$1=//p" "$EMBED_STATE_FILE" | head -1)"
   case "$v" in ''|*[!0-9]*) echo 0 ;; *) echo "$v" ;; esac
 }
-# The state file carries the pull backoff and whether a reindex is still owed.
+# The state file carries the download backoff and whether a reindex is still
+# owed. Only a DOWNLOAD failure earns the backoff: a proxy that is not up yet
+# or a reindex that did not finish are transient, and the next gateway start
+# is the right time to try them again.
 state_write() {
   # temp + rename: a run killed mid-write must never leave a truncated state
   # file, because a lost reindex_pending marker means a permanently
@@ -179,44 +233,132 @@ state_set_reindex_pending() {
   state_write "$(state_get last_attempt)" "$(state_get failures)" "$1"
 }
 
-if ! model_present "$TAGS"; then
+# --- is the model there? -----------------------------------------------------
+MODEL_PATH="$EMBED_MODEL_DIR/$EMBED_HF_FILE"
+if [ ! -f "$MODEL_PATH" ]; then
   NOW="$(date +%s)"
   LAST="$(state_get last_attempt)"
   FAILURES="$(state_get failures)"
   if [ "$LAST" -gt 0 ] && [ "$((NOW - LAST))" -lt "$EMBED_RETRY_SECONDS" ]; then
-    log "$EMBED_MODEL is missing; last pull attempt was $((NOW - LAST))s ago, waiting out the retry window"
+    log "$EMBED_HF_FILE is missing; last download attempt was $((NOW - LAST))s ago, waiting out the retry window"
     exit 0
   fi
-  if ! command -v "$OLLAMA_BIN" >/dev/null 2>&1; then
-    log "WARN: $OLLAMA_BIN not on PATH, cannot pull $EMBED_MODEL (non-fatal; lexical FTS remains)"
+  if [ ! -x "$HF_BIN" ]; then
+    log "WARN: $HF_BIN is not installed, cannot fetch $EMBED_HF_FILE (non-fatal; lexical FTS remains)"
     exit 0
   fi
   state_write "$NOW" "$FAILURES"
-  log "pulling $EMBED_MODEL (local embeddings, no API key needed) — this can take a few minutes"
-  if ! "$OLLAMA_BIN" pull "$EMBED_MODEL" >/dev/null 2>&1; then
+  log "downloading $EMBED_HF_REPO/$EMBED_HF_FILE (local embeddings, no API key needed) — this can take a few minutes"
+  mkdir -p "$EMBED_MODEL_DIR" 2>/dev/null || true
+  if ! "$HF_BIN" download "$EMBED_HF_REPO" "$EMBED_HF_FILE" --local-dir "$EMBED_MODEL_DIR" >/dev/null 2>&1; then
     state_write "$NOW" "$((FAILURES + 1))"
-    log "WARN: could not pull $EMBED_MODEL (attempt $((FAILURES + 1))); semantic memory stays on lexical FTS"
+    log "WARN: could not download $EMBED_HF_FILE (attempt $((FAILURES + 1))); semantic memory stays on lexical FTS"
     exit 0
   fi
   state_write "$NOW" 0
-  TAGS="$(fetch_tags)"
-  if ! model_present "$TAGS"; then
-    log "WARN: $EMBED_MODEL still absent after a successful pull; leaving memory search untouched"
+  if [ ! -f "$MODEL_PATH" ]; then
+    log "WARN: $EMBED_HF_FILE still absent after a successful download; leaving memory search untouched"
     exit 0
   fi
-  log "pulled $EMBED_MODEL"
+  log "downloaded $EMBED_HF_FILE"
 fi
+
+# --- is the embedder reachable through the proxy? ----------------------------
+# Through the PROXY, not the server's port: the proxy is what OpenClaw will
+# call, a request to it starts the unit, and a 200 here proves the whole path
+# (web server up, token accepted, unit started, model loaded). --max-time
+# covers a cold 4 s load with room for a slow first start; the outer loop
+# covers a web server that is still booting alongside the gateway.
+TOKEN="$(cat "$LOCAL_AI_TOKEN_FILE" 2>/dev/null || true)"
+if [ "${#TOKEN}" -lt 16 ]; then
+  log "no local-AI token at $LOCAL_AI_TOKEN_FILE yet (the web server writes it at first start) — trying again on the next gateway start"
+  exit 0
+fi
+embed_ready() {
+  curl -fsS --max-time 200 -H "Authorization: Bearer $TOKEN" "$EMBED_PROXY_URL/models" >/dev/null 2>&1
+}
+# The budget is wall-clock, not a count of naps: one probe can itself hold the
+# line for its whole --max-time when the proxy accepts and then stalls, so
+# adding up the sleeps let a 120 s promise run for the better part of an hour
+# — with the flock held throughout, which kept every later gateway start out.
+deadline=$(( $(date +%s) + EMBED_PROXY_WAIT_SECONDS ))
+until embed_ready; do
+  if [ "$(date +%s)" -ge "$deadline" ]; then
+    log "the embedder did not answer through $EMBED_PROXY_URL within ${EMBED_PROXY_WAIT_SECONDS}s — semantic memory stays as it is; trying again on the next gateway start"
+    exit 0
+  fi
+  sleep 5
+done
 
 # --- point memory search at it -----------------------------------------------
 CURRENT_MODEL="$(read_cfg model)"
-SET_MODEL=0
-SET_PROVIDER=0
-if [ "$CURRENT_MODEL" != "$EMBED_MODEL" ]; then SET_MODEL=1; fi
-if [ "$PROVIDER" != "ollama" ]; then SET_PROVIDER=1; fi
+CURRENT_BASE="$(read_cfg remote.baseUrl)"
+CURRENT_KEY="$(read_cfg remote.apiKey)"
+CURRENT_QUERY_TYPE="$(read_cfg queryInputType)"
+CURRENT_DOC_TYPE="$(read_cfg documentInputType)"
+# Two questions, not one. Anything different means a write; only the fields
+# OpenClaw folds into the index identity — provider, model, base URL, the
+# input-type labels — mean a reindex. The token is not one of them: it is
+# minted by the web server and wiped with a factory reset, so a restored
+# config can carry a stale one, and a stale bearer is a 401 OpenClaw never
+# retries. Re-writing it here, at every gateway start, is the repair — and a
+# full reindex for it would be an hour of GPU time for nothing.
+NEEDS_WRITE=0
+NEEDS_REINDEX=0
+[ "$CURRENT_MODEL" = "$EMBED_MODEL" ] || NEEDS_REINDEX=1
+[ "$CURRENT_BASE" = "$EMBED_PROXY_URL" ] || NEEDS_REINDEX=1
+[ "$CURRENT_QUERY_TYPE" = "query" ] || NEEDS_REINDEX=1
+[ "$CURRENT_DOC_TYPE" = "document" ] || NEEDS_REINDEX=1
+[ "$PROVIDER" = "$EMBED_PROVIDER" ] || NEEDS_REINDEX=1
+[ "$NEEDS_REINDEX" -eq 0 ] || NEEDS_WRITE=1
+[ "$CURRENT_KEY" = "$TOKEN" ] || NEEDS_WRITE=1
 
-if [ "$SET_MODEL" -eq 0 ] && [ "$SET_PROVIDER" -eq 0 ]; then
+# ONE write, never a sequence. The keys used to go in one `config set` each,
+# provider last, so a failure midway left the old provider in charge. What it
+# could not survive was a KILL midway: the third write (the bearer, under
+# `remote`) makes the gateway restart itself, and during an update that
+# restart is a `systemctl stop` that ends every process in the unit's cgroup —
+# this one included, between the bearer and the input types. The box was then
+# on `ollama` pointed at an OpenAI-shaped proxy: a 405 on every embed and an
+# index marked dirty (2026-09-04). A single merged write is all-or-nothing, so
+# there is no "midway" left to be killed in. `--merge` keeps what the object
+# already carries (extraPaths); the value is built by python so the bearer
+# reaches the CLI byte-for-byte.
+embed_settings_json() {
+  python3 - "$EMBED_MODEL" "$EMBED_PROXY_URL" "$TOKEN" "$EMBED_PROVIDER" <<'PY'
+import json, sys
+model, base_url, token, provider = sys.argv[1:5]
+print(json.dumps({
+    "model": model,
+    "remote": {"baseUrl": base_url, "apiKey": token},
+    "queryInputType": "query",
+    "documentInputType": "document",
+    "provider": provider,
+}))
+PY
+}
+write_cfg() {
+  local payload
+  payload="$(embed_settings_json)" || return 1
+  [ -n "$payload" ] || return 1
+  "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY" "$payload" --strict-json --merge >/dev/null 2>&1
+}
+# What the CLI wrote is not taken on its exit code: the file is read back. A
+# CLI that answered 0 after writing another tree (see the pin at the top) or
+# a value it normalised into something else is the failure this script exists
+# to make visible, not one it may report as done.
+settings_landed() {
+  [ "$(read_cfg provider)" = "$EMBED_PROVIDER" ] \
+    && [ "$(read_cfg model)" = "$EMBED_MODEL" ] \
+    && [ "$(read_cfg remote.baseUrl)" = "$EMBED_PROXY_URL" ] \
+    && [ "$(read_cfg remote.apiKey)" = "$TOKEN" ] \
+    && [ "$(read_cfg queryInputType)" = "query" ] \
+    && [ "$(read_cfg documentInputType)" = "document" ]
+}
+
+if [ "$NEEDS_WRITE" -eq 0 ]; then
   if [ "$(state_get reindex_pending)" != "1" ]; then
-    log "memory search already runs on local embeddings ($EMBED_MODEL) — nothing to do"
+    log "memory search already runs on local embeddings ($EMBED_MODEL via llama.cpp) — nothing to do"
     exit 0
   fi
   # Config is right but the reindex it needs never completed, so memory search
@@ -224,38 +366,42 @@ if [ "$SET_MODEL" -eq 0 ] && [ "$SET_PROVIDER" -eq 0 ]; then
   # provider it has no key for; retrying the reindex is the recoverable half.
   log "memory search is on local embeddings but its reindex never completed — retrying it"
 else
-  # Model first, provider last. The provider write is what actually switches
-  # embedding backends, so if either call fails the box is left on exactly the
-  # provider it already had — never on ollama pointed at the wrong model.
-  if [ "$SET_MODEL" -eq 1 ] \
-    && ! "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY.model" "$EMBED_MODEL" >/dev/null 2>&1; then
-    log "WARN: could not set the local embedding model (non-fatal; nothing changed, lexical FTS remains)"
+  # Recorded BEFORE the write, not after: between switching the backend and
+  # recording that a reindex is owed there must be no window where a killed
+  # run leaves a configured provider and an index nobody rebuilds. The marker
+  # is deliberately kept if the write then fails — a later attempt finishes
+  # the job, and a stale marker only costs one extra reindex.
+  if [ "$NEEDS_REINDEX" -eq 1 ]; then
+    state_set_reindex_pending 1
+  fi
+  # `queryInputType`/`documentInputType` are what make OpenClaw label each
+  # request; the proxy restores the model's query instruction from that label
+  # (src/lib/embed-query-instruction.ts). Without them every query would be
+  # embedded bare and recall would quietly degrade.
+  if ! write_cfg; then
+    log "WARN: could not write the local embedding settings (non-fatal; provider unchanged, memory search stays as it is)"
     exit 0
   fi
-  # Recorded BEFORE the provider write, not after: between switching the
-  # backend and recording that a reindex is owed there must be no window where
-  # a killed run leaves a configured provider and an index nobody rebuilds.
-  # The marker is deliberately kept if the provider write then fails — a later
-  # attempt finishes the job, and a stale marker only costs one extra reindex.
-  state_set_reindex_pending 1
-  if [ "$SET_PROVIDER" -eq 1 ] \
-    && ! "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY.provider" ollama >/dev/null 2>&1; then
-    log "WARN: could not point memory search at Ollama (non-fatal; provider is unchanged, lexical FTS remains)"
+  if ! settings_landed; then
+    log "WARN: the settings write did not land in $OPENCLAW_CONFIG — memory search stays as it is; trying again on the next gateway start"
     exit 0
   fi
-  log "memory search -> local Ollama embeddings ($EMBED_MODEL, no API key needed)"
+  log "memory search -> local embeddings ($EMBED_MODEL via llama.cpp at $EMBED_PROXY_URL, no API key needed)"
 fi
 
 # --- and reindex, or it stays fail-closed ------------------------------------
-# Changing the embedding model changes the vector dimensions (3072 for OpenAI's
-# text-embedding-3-large vs 1024 for qwen3-embedding:0.6b). OpenClaw treats the
-# old index as a different identity and fails closed — memory search reports
-# itself disabled and stays that way until something forces a full reindex.
-# Switching the provider without this is how you get a box that looks configured
-# and returns nothing.
+# Changing the embedding provider changes the index identity — OpenClaw keeps
+# the provider id and the base URL in it — and it treats the old index as
+# somebody else's: vector search returns nothing until a full reindex runs.
+# Switching the provider without this is how you get a box that looks
+# configured and returns nothing.
+if [ "$(state_get reindex_pending)" != "1" ]; then
+  log "the index is already built for this embedder — no reindex needed"
+  exit 0
+fi
 if "$OPENCLAW_BIN" memory index --force >/dev/null 2>&1; then
   state_set_reindex_pending 0
-  log "forced a full memory reindex for the new embedding dimensions"
+  log "forced a full memory reindex for the new embedding provider"
 else
   log "WARN: forced reindex failed — memory search stays fail-closed until it succeeds; retrying on the next run"
 fi

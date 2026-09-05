@@ -36,6 +36,10 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "chromium_install",
   "clawkeep_install",
   "cloudflared_install",
+  // The memory-search embedder's GGUF (data/embed/models), for the Memory
+  // Shard wizard's first-run download. Started only by an owner-only route,
+  // never by install/run-step — so NOT on UI_ROOT_STEPS, like openclaw_tts.
+  "embed_model",
   "ffmpeg_install",
   "fix_git_perms",
   "gateway_setup",

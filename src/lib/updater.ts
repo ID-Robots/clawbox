@@ -955,19 +955,31 @@ async function runCurrentGatewayPreStart(): Promise<void> {
   const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
     || process.env.OPENCLAW_HOME
     || path.join(home, ".openclaw");
+  // Never `OPENCLAW_HOME` in a child's environment. ClawBox reads that name as
+  // the .openclaw directory; the OpenClaw CLI reads it as the ACCOUNT home and
+  // puts its tree at `$OPENCLAW_HOME/.openclaw`. Exported here it made every
+  // `openclaw` the pre-start (and the embeddings script it detaches) ran write
+  // a second config under ~/.openclaw/.openclaw/ and report success, while the
+  // real file stayed half-switched (2026-09-04). The pre-start reads
+  // CLAWBOX_OPENCLAW_HOME instead, and the two canonical CLI overrides pin
+  // every child to the real tree even if some ancestor set the misread name.
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    CLAWBOX_HOME_DIR: home,
+    CLAWBOX_ROOT: PROJECT_DIR,
+    CLAWBOX_OPENCLAW_HOME: openclawHome,
+    OPENCLAW_STATE_DIR: openclawHome,
+    OPENCLAW_CONFIG_PATH: path.join(openclawHome, "openclaw.json"),
+  };
+  delete env.OPENCLAW_HOME;
   await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
     // Match the unit's 600s TimeoutStartSec with a little process overhead.
     // Killing this halfway through a plugin migration recreates the lock race
     // this maintenance path exists to avoid.
     timeout: 650_000,
     maxBuffer: 4 * 1024 * 1024,
-    env: {
-      ...process.env,
-      HOME: home,
-      CLAWBOX_HOME_DIR: home,
-      CLAWBOX_ROOT: PROJECT_DIR,
-      OPENCLAW_HOME: openclawHome,
-    },
+    env,
   });
 }
 

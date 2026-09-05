@@ -227,9 +227,12 @@ my %DECLARED_ARGV = (
       ['-n', '/usr/bin/systemctl', 'enable', '--now', 'ollama.service'],
       ['-n', '/usr/bin/systemctl', 'start', 'ollama.service'],
       ['-n', '/usr/bin/systemctl', 'stop', 'ollama.service'],
+      ['-n', '/usr/bin/systemctl', 'start', 'clawbox-embed.service'],
+      ['-n', '/usr/bin/systemctl', 'stop', 'clawbox-embed.service'],
     ],
     resolve => {
-      '...argv' => ['OLLAMA_ENABLE_NOW_ARGV', 'OLLAMA_START_ARGV', 'OLLAMA_STOP_ARGV'],
+      '...argv' => ['OLLAMA_ENABLE_NOW_ARGV', 'OLLAMA_START_ARGV', 'OLLAMA_STOP_ARGV',
+                    'EMBED_START_ARGV', 'EMBED_STOP_ARGV'],
     },
   },
   # src/app/setup-api/system/power/route.ts — POWER_ACTIONS maps the request

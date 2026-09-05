@@ -8,10 +8,27 @@
  * rule as coding-agent/enable. (The three memory routes that existed before this
  * have no such check at all, which is how the agent can start a full reindex
  * today; that is noted for a separate change.)
+ *
+ * The provider switch also has to be OUR PAGE's: the owner's browser attaches
+ * the session cookie to a POST any other site fires at the box, and this route
+ * and embed/install are one wizard flow, so a page refused the download must
+ * not be able to move the index onto a model that is not there.
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { hasOwnerSession } from "@/lib/owner-session";
 
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => false) }));
+
+const switchToLocalEmbeddings = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("@/lib/memory-shard", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/memory-shard")>("@/lib/memory-shard");
+  return { ...actual, switchToLocalEmbeddings };
+});
+
+afterEach(() => {
+  vi.mocked(hasOwnerSession).mockReset().mockResolvedValue(false);
+  switchToLocalEmbeddings.mockClear();
+});
 
 const url = (p: string) => `http://localhost/setup-api/clawkeep/memory/${p}`;
 
@@ -32,6 +49,7 @@ describe("owner-only gates", () => {
     const res = await POST(new Request(url("provider"), { method: "POST" }));
     expect(res.status).toBe(403);
     expect((await res.json()).kind).toBe("owner_only");
+    expect(switchToLocalEmbeddings).not.toHaveBeenCalled();
   });
 
   it("refuses reading or changing the indexed folders without an owner session", async () => {
@@ -45,6 +63,38 @@ describe("owner-only gates", () => {
       const res = await call();
       expect(res.status, method).toBe(403);
     }
+  });
+});
+
+describe("the provider switch's origin guard", () => {
+  const post = (headers: Record<string, string>) =>
+    new Request(url("provider"), { method: "POST", headers: { host: "localhost", ...headers } });
+
+  it("refuses a cross-site POST that carries the owner's session, before anything is written", async () => {
+    vi.mocked(hasOwnerSession).mockResolvedValue(true);
+    const { POST } = await import("@/app/setup-api/clawkeep/memory/provider/route");
+    const res = await POST(post({ origin: "https://evil.example" }));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ kind: "cross_origin" });
+    expect(switchToLocalEmbeddings).not.toHaveBeenCalled();
+  });
+
+  it("refuses a browser that says cross-site even without an Origin", async () => {
+    vi.mocked(hasOwnerSession).mockResolvedValue(true);
+    const { POST } = await import("@/app/setup-api/clawkeep/memory/provider/route");
+    const res = await POST(post({ "sec-fetch-site": "cross-site" }));
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ kind: "cross_origin" });
+    expect(switchToLocalEmbeddings).not.toHaveBeenCalled();
+  });
+
+  it("lets the box's own page through — the guard must not refuse the wizard", async () => {
+    vi.mocked(hasOwnerSession).mockResolvedValue(true);
+    const { POST } = await import("@/app/setup-api/clawkeep/memory/provider/route");
+    const res = await POST(post({ origin: "http://localhost" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ provider: expect.any(String), model: expect.any(String) });
+    expect(switchToLocalEmbeddings).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -62,7 +112,8 @@ describe("the state module stays client-safe", () => {
     const imports = src.match(/^\s*import[\s\S]*?from\s+["'][^"']+["'];?$/gm) ?? [];
     expect(imports.join("\n")).not.toMatch(/child_process|openclaw-config|config-store|clawkeep-memory/);
     const state = await import("@/lib/memory-shard-state");
-    expect(state.LOCAL_EMBEDDING_MODEL).toBe("qwen3-embedding:0.6b");
+    // llama-server's --alias, sent as `model` — not an ollama tag any more.
+    expect(state.LOCAL_EMBEDDING_MODEL).toBe("qwen3-embedding-0.6b");
     expect(state.EXTRA_PATHS_CONFIG_PATH).toBe("memory.search.extraPaths");
     // PDFs are extracted BY CLAWBOX; OpenClaw's indexer reads .md and nothing
     // else, so these two lists must not be confused.

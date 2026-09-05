@@ -123,6 +123,8 @@ test.describe("root escalation surface", () => {
       ["gateway restart after a config write", "/usr/bin/systemctl restart clawbox-gateway.service"],
       ["web server restart (force-update.sh)", "/usr/bin/systemctl restart clawbox-setup.service"],
       ["Settings → Local Models", "/usr/bin/systemctl disable --now ollama.service"],
+      ["memory search wake (local-AI proxy)", "/usr/bin/systemctl start clawbox-embed.service"],
+      ["memory search idle stop (local-AI proxy)", "/usr/bin/systemctl stop clawbox-embed.service"],
       ["Settings → Desktop", "/usr/local/libexec/clawbox/clawbox-desktop-mode.sh --disable"],
       ["Settings → Performance mode", "/usr/local/libexec/clawbox/clawbox-power-mode.sh --performance"],
       ["saving a local Ollama model", "/usr/local/libexec/clawbox/optimize-ollama.sh"],

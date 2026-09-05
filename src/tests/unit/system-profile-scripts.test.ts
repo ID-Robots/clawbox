@@ -158,6 +158,7 @@ describe("clawbox-resource-limits.sh --check", () => {
     const systemd = tmpdir();
     const out = run(LIMITS, ["--check"], { CLAWBOX_SYSTEMD_DIR: systemd });
     expect(out).toContain("ollama.service");
+    expect(out).toContain("clawbox-embed.service");
     expect(out).toContain("clawbox-browser.service");
     expect(out).toContain("user@1000.service");
     expect(out).toContain("result: no changes made (--check)");
@@ -165,6 +166,32 @@ describe("clawbox-resource-limits.sh --check", () => {
   });
 
   it("takes its numbers from the env file, not from itself", () => {
+    const limits = path.join(tmpdir(), "limits.env");
+    fs.writeFileSync(limits, [
+      "CLAWBOX_OLLAMA_MEMORY_HIGH=3G",
+      "CLAWBOX_OLLAMA_MEMORY_MAX=4G",
+      "CLAWBOX_EMBED_MEMORY_HIGH=500M",
+      "CLAWBOX_EMBED_MEMORY_MAX=600M",
+      "CLAWBOX_BROWSER_MEMORY_HIGH=100M",
+      "CLAWBOX_BROWSER_MEMORY_MAX=200M",
+      "CLAWBOX_DESKTOP_MEMORY_HIGH=300M",
+      "CLAWBOX_DESKTOP_MEMORY_MAX=400M",
+    ].join("\n") + "\n");
+    const out = run(LIMITS, ["--check"], {
+      CLAWBOX_RESOURCE_LIMITS_FILE: limits,
+      CLAWBOX_SYSTEMD_DIR: tmpdir(),
+    });
+    // Each cap named WITH its unit: the bare pair also matched when the script
+    // printed the right numbers beside the wrong unit.
+    expect(out).toContain("unit: ollama.service MemoryHigh=3G MemoryMax=4G");
+    expect(out).toContain("unit: clawbox-embed.service MemoryHigh=500M MemoryMax=600M");
+    expect(out).toContain("unit: clawbox-browser.service MemoryHigh=100M MemoryMax=200M");
+    expect(out).toContain("unit: user@1000.service MemoryHigh=300M MemoryMax=400M");
+  });
+
+  it("skips a unit whose keys an older env file lacks, and still caps the rest", () => {
+    // The root-owned env on a box mid-update predates the embedder's keys.
+    // Aborting would leave ollama, the browser and the desktop uncapped too.
     const limits = path.join(tmpdir(), "limits.env");
     fs.writeFileSync(limits, [
       "CLAWBOX_OLLAMA_MEMORY_HIGH=3G",
@@ -178,9 +205,9 @@ describe("clawbox-resource-limits.sh --check", () => {
       CLAWBOX_RESOURCE_LIMITS_FILE: limits,
       CLAWBOX_SYSTEMD_DIR: tmpdir(),
     });
-    expect(out).toContain("MemoryHigh=3G MemoryMax=4G");
-    expect(out).toContain("MemoryHigh=100M MemoryMax=200M");
-    expect(out).toContain("MemoryHigh=300M MemoryMax=400M");
+    expect(out).toContain("unit: ollama.service MemoryHigh=3G MemoryMax=4G");
+    expect(out).toContain("unit: user@1000.service MemoryHigh=300M MemoryMax=400M");
+    expect(out).not.toContain("clawbox-embed.service MemoryHigh");
   });
 
   it("fails loudly on a malformed limits file rather than writing a broken unit", () => {
@@ -192,15 +219,18 @@ describe("clawbox-resource-limits.sh --check", () => {
     })).toThrow();
   });
 
-  it("--apply writes the three drop-ins and is idempotent", () => {
+  it("--apply writes the four drop-ins and is idempotent", () => {
     // Runs against a temp systemd dir, so this exercises the writer without
     // touching /etc. daemon-reload/set-property are best-effort no-ops here.
     const systemd = tmpdir();
     if (process.getuid?.() !== 0) return; // --apply requires root by design
-    run(LIMITS, ["--apply"], { CLAWBOX_SYSTEMD_DIR: systemd });
+    run(LIMITS, ["--apply"], {
+      CLAWBOX_SYSTEMD_DIR: systemd,
+      CLAWBOX_RESOURCE_LIMITS_FILE: path.join(process.cwd(), "config", "clawbox-resource-limits.env"),
+    });
     const first = fs.readdirSync(systemd).sort();
     expect(first).toEqual([
-      "clawbox-browser.service.d", "ollama.service.d", "user@1000.service.d",
+      "clawbox-browser.service.d", "clawbox-embed.service.d", "ollama.service.d", "user@1000.service.d",
     ]);
     run(LIMITS, ["--apply"], { CLAWBOX_SYSTEMD_DIR: systemd });
     expect(fs.readdirSync(systemd).sort()).toEqual(first);

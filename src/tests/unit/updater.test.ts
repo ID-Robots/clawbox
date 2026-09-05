@@ -651,8 +651,17 @@ describe("updater", () => {
       const preStartOptions = mockExecFile.mock.calls[preStartIndex]?.[2] as
         | { env?: NodeJS.ProcessEnv }
         | undefined;
-      expect(preStartOptions?.env?.OPENCLAW_HOME)
+      // The OpenClaw CLI reads OPENCLAW_HOME as the ACCOUNT home and would
+      // put its tree at <that>/.openclaw: the pre-start must get ClawBox's
+      // name for the directory and the CLI's two canonical overrides, never
+      // the misread one.
+      expect(preStartOptions?.env?.OPENCLAW_HOME).toBeUndefined();
+      expect(preStartOptions?.env?.CLAWBOX_OPENCLAW_HOME)
         .toBe("/tmp/clawbox-updater-openclaw-home");
+      expect(preStartOptions?.env?.OPENCLAW_STATE_DIR)
+        .toBe("/tmp/clawbox-updater-openclaw-home");
+      expect(preStartOptions?.env?.OPENCLAW_CONFIG_PATH)
+        .toBe("/tmp/clawbox-updater-openclaw-home/openclaw.json");
     });
 
     it("continues to doctor and restart when the targeted Codex repair fails", async () => {

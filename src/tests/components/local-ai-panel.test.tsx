@@ -23,7 +23,6 @@ function model(over: Record<string, unknown>) {
 
 const MODELS = [
   model({ id: "llamacpp", name: "Gemma 4", kind: "llm", running: "idle", managedBy: "localAi", detail: "Ready. Sleeps until needed." }),
-  model({ id: "ollama", name: "Ollama", kind: "llm", runtime: "System service", enabled: false, control: "system-unit", detail: "Installed and stopped." }),
   model({ id: "kokoro", name: "Kokoro", kind: "tts", runtime: "systemd user service", enabled: true, running: "running", control: "user-unit", detail: "Running as the GPU voice." }),
   model({ id: "whisper", name: "Whisper", kind: "stt", runtime: "systemd user service", enabled: false, control: "user-unit", detail: "Installed and stopped." }),
   model({ id: "embedding", name: "Memory embeddings", kind: "embedding", runtime: "ollama", running: "running", managedBy: "clawkeep", detail: "Embedding your memory on the box." }),
@@ -77,7 +76,8 @@ describe("LocalAiPanel", () => {
     renderPanel();
     const llm = await screen.findByTestId("local-ai-group-llm");
     expect(within(llm).getByTestId("local-model-llamacpp")).toBeInTheDocument();
-    expect(within(llm).getByTestId("local-model-ollama")).toBeInTheDocument();
+    // The Ollama row is gone: the memory embedder runs on llama.cpp now.
+    expect(screen.queryByTestId("local-model-ollama")).not.toBeInTheDocument();
     expect(within(screen.getByTestId("local-ai-group-tts")).getByTestId("local-model-kokoro")).toBeInTheDocument();
     expect(within(screen.getByTestId("local-ai-group-stt")).getByTestId("local-model-whisper")).toBeInTheDocument();
     expect(within(screen.getByTestId("local-ai-group-embedding")).getByTestId("local-model-embedding")).toBeInTheDocument();
@@ -343,28 +343,28 @@ describe("LocalAiPanel", () => {
     });
     renderPanel();
     await screen.findByTestId("local-ai-group-llm");
-    const ollama = screen.getByTestId("local-model-ollama");
+    const whisper = screen.getByTestId("local-model-whisper");
     const kokoro = screen.getByTestId("local-model-kokoro");
-    fireEvent.click(screen.getByTestId("local-model-menu-ollama"));
-    fireEvent.click(await screen.findByTestId("local-model-action-ollama-enable"));
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-enable"));
     fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
     fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
     await waitFor(() => {
-      expect(within(ollama).getByText("progress_activity")).toBeInTheDocument();
+      expect(within(whisper).getByText("progress_activity")).toBeInTheDocument();
       expect(within(kokoro).getByText("progress_activity")).toBeInTheDocument();
     });
-    expect(ollama).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByTestId("local-model-menu-ollama")).toHaveAttribute("aria-disabled", "true");
+    expect(whisper).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByTestId("local-model-menu-whisper")).toHaveAttribute("aria-disabled", "true");
     const inventoryReads = () => (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
       .filter((c) => String(c[0]).startsWith("/setup-api/local-models") && (c[1] as RequestInit | undefined)?.method !== "POST").length;
     const readsBefore = inventoryReads();
     // The first to settle must not clear the other row, nor let the poll in.
     releases["/setup-api/tts"]();
     await waitFor(() => expect(within(kokoro).queryByText("progress_activity")).not.toBeInTheDocument());
-    expect(within(ollama).getByText("progress_activity")).toBeInTheDocument();
+    expect(within(whisper).getByText("progress_activity")).toBeInTheDocument();
     expect(inventoryReads()).toBe(readsBefore);
     releases["/setup-api/local-models"]();
-    await waitFor(() => expect(within(ollama).queryByText("progress_activity")).not.toBeInTheDocument());
+    await waitFor(() => expect(within(whisper).queryByText("progress_activity")).not.toBeInTheDocument());
     await waitFor(() => expect(inventoryReads()).toBeGreaterThan(readsBefore));
   });
 
@@ -441,11 +441,11 @@ describe("LocalAiPanel", () => {
     stubFetch();
     const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
     const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
-    // Ollama's idle standby: the unit is enabled, so the only verb the menu
-    // used to offer was Disable, while the row itself said "turn it on".
-    const asleep = MODELS.map((m) => m.id !== "ollama" ? m : {
-      ...m, enabled: true, running: "on-demand", detailCode: "ollamaStandby",
-      detail: "Asleep to save memory. Wakes when a model is asked for, or turn it on now from the menu.",
+    // A voice engine's idle standby: the unit is enabled, so the only verb the
+    // menu used to offer was Disable, while the row itself said it was off.
+    const asleep = MODELS.map((m) => m.id !== "whisper" ? m : {
+      ...m, enabled: true, running: "on-demand", detailCode: "whisperOff",
+      detail: "Off. Starts by itself when you speak.",
     });
     stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
       if (input.toString().startsWith("/setup-api/local-models") && init?.method !== "POST") {
@@ -455,16 +455,17 @@ describe("LocalAiPanel", () => {
     });
     renderPanel();
     await screen.findByTestId("local-ai-group-llm");
-    const row = screen.getByTestId("local-model-ollama");
-    await waitFor(() => expect(within(row).getByText(/turn it on now from the menu/)).toBeInTheDocument());
-    fireEvent.click(screen.getByTestId("local-model-menu-ollama"));
+    const row = screen.getByTestId("local-model-whisper");
+    await waitFor(() => expect(within(row).getByText(/Starts by itself when you speak/)).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
     const menu = await screen.findByRole("menu");
     expect(within(menu).getAllByRole("menuitem").map((item) => item.getAttribute("data-testid"))).toEqual([
-      "local-model-action-ollama-turn-on",
-      "local-model-action-ollama-disable",
+      "local-model-action-whisper-turn-on",
+      "local-model-action-whisper-disable",
+      "local-model-action-whisper-primary",
     ]);
-    fireEvent.click(screen.getByTestId("local-model-action-ollama-turn-on"));
-    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/local-models", body: { id: "ollama", enabled: true } }));
+    fireEvent.click(screen.getByTestId("local-model-action-whisper-turn-on"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/local-models", body: { id: "whisper", enabled: true } }));
     // "Disable", the menu's verb — standby also turns the engine off, and that comes back.
     await waitFor(() => expect(screen.getByText("Anything you disable stays off after a restart.")).toBeInTheDocument());
   });
@@ -476,10 +477,10 @@ describe("LocalAiPanel", () => {
     const json = (body: unknown) =>
       new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     const coded = [
-      model({ id: "ollama", name: "Ollama", kind: "llm", runtimeCode: "runsExtraModels", enabled: true, running: "running", control: "system-unit", detailCode: "ollamaServing", params: { names: "Qwen 3" }, detail: "Serving Qwen 3." }),
+      model({ id: "llamacpp", name: "Gemma 4", kind: "llm", runtimeCode: "answersOnBox", running: "on-demand", managedBy: "localAi", detailCode: "llamacppReady", detail: "Ready. Sleeps until needed to save memory." }),
       model({ id: "kokoro", name: "Kokoro", kind: "tts", runtimeCode: "voiceOnBox", enabled: true, running: "running", control: "user-unit", detailCode: "kokoroSpeaking", detail: "Speaking from this box." }),
       model({ id: "whisper", name: "Whisper", kind: "stt", enabled: true, running: "running", control: "user-unit", detailCode: "somethingNewer", detail: "Only the server knows this one." }),
-      model({ id: "embeddings", name: "Memory search", nameCode: "memorySearch", kind: "embedding", runtimeCode: "modelVia", params: { model: "Qwen 3", via: "Ollama" }, runtime: "Qwen 3 via Ollama", running: "running", managedBy: "clawkeep", detailCode: "embeddingsLocal", detail: "Searching your memory on this box." }),
+      model({ id: "embeddings", name: "Memory search", nameCode: "memorySearch", kind: "embedding", runtimeCode: "modelVia", params: { model: "Qwen 3", via: "llama.cpp" }, runtime: "Qwen 3 via llama.cpp", running: "on-demand", managedBy: "clawkeep", detailCode: "embeddingsReady", detail: "Ready. Wakes when you search, then sleeps to save memory." }),
     ];
     stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
       const url = input.toString();
@@ -490,10 +491,10 @@ describe("LocalAiPanel", () => {
     renderPanel();
     await screen.findByTestId("local-ai-group-llm");
     await waitFor(() => {
-      expect(within(screen.getByTestId("local-model-ollama")).getByText("Stellt Qwen 3 bereit.")).toBeInTheDocument();
       expect(within(screen.getByTestId("local-model-kokoro")).getByText("Stimme auf dieser Box")).toBeInTheDocument();
       expect(within(screen.getByTestId("local-model-embeddings")).getByText("Speichersuche")).toBeInTheDocument();
-      expect(within(screen.getByTestId("local-model-embeddings")).getByText("Qwen 3 über Ollama")).toBeInTheDocument();
+      expect(within(screen.getByTestId("local-model-embeddings")).getByText("Qwen 3 über llama.cpp")).toBeInTheDocument();
+      expect(within(screen.getByTestId("local-model-embeddings")).getByText(/Bereit\. Wacht auf, wenn Sie suchen/)).toBeInTheDocument();
     });
     // A code this build has no key for must never reach the row as a raw key.
     expect(within(screen.getByTestId("local-model-whisper")).getByText("Only the server knows this one.")).toBeInTheDocument();

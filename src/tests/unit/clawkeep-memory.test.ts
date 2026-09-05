@@ -513,3 +513,50 @@ describe("the process the run supervises", () => {
     delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
   });
 });
+
+// The embedder moved off ollama onto ClawBox's own llama.cpp, which OpenClaw
+// reaches as `openai-compatible` at the loopback proxy. That provider id is
+// the same one an owner uses for a server across the room, and the status the
+// core answers carries the id but never the URL — so the URL is read from the
+// config and passed in, and only a loopback host is "on device".
+describe("an openai-compatible embedder is on device only at the loopback proxy", () => {
+  const row = (provider: string, model = "qwen3-embedding-0.6b") => [{ agentId: "main", status: { provider, model } }];
+
+  it("reads ClawBox's own embedder behind the proxy as local", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(
+      row("openai-compatible"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(),
+      "http://127.0.0.1/setup-api/local-ai/embed/v1",
+    );
+    expect(status.provider).toBe("openai-compatible");
+    expect(status.location).toBe("local");
+  });
+
+  it("reads the same provider id at another host as cloud", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(
+      row("openai-compatible"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), "http://192.168.1.50:8081/v1",
+    );
+    expect(status.location).toBe("cloud");
+  });
+
+  it("refuses to guess when no address is recorded", async () => {
+    // "unknown", never "local": the privacy claim on the Memory Shard card
+    // rests on this field, and a guess in the flattering direction is the
+    // one that lies.
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(row("openai-compatible"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.location).toBe("unknown");
+  });
+
+  it("still reads the old ollama embedder as local, whatever the URL says", async () => {
+    // The provider is checked before the URL: an ollama box whose config
+    // happens to carry a remote address is still embedding on this box.
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(
+      row("ollama", "qwen3-embedding:0.6b"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(),
+      "http://192.168.1.50:8081/v1",
+    );
+    expect(status.location).toBe("local");
+  });
+});

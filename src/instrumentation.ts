@@ -242,6 +242,24 @@ export async function register() {
     console.error('[instrumentation] Could not warm the memory status cache:', err instanceof Error ? err.message : err)
   }
   try {
+    // The memory embedder is a system unit, so it outlives this process: an
+    // update restarts the web server and the 2 GB embedder comes back into a
+    // process with no idle timer for it. Re-arm one for a unit found running.
+    // Delayed past the boot rush so the health probe is not part of it; the
+    // request path arms its own timer, so a search in the meantime loses
+    // nothing. See armIdleStopIfRunning.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { armIdleStopIfRunning } = require('./lib/local-ai-runtime')
+    const rearm = setTimeout(() => {
+      void armIdleStopIfRunning('embed').catch((err: unknown) => {
+        console.warn('[instrumentation] Could not re-arm the embedder idle stop:', err instanceof Error ? err.message : err)
+      })
+    }, 15_000)
+    rearm.unref?.()
+  } catch (err) {
+    console.error('[instrumentation] Could not load the local AI runtime:', err instanceof Error ? err.message : err)
+  }
+  try {
     // The chat's capability facts on a Hermes box cost three Python starts on
     // a cold cache, and `use-harness-adapter` asks for them on every chat
     // mount. Pay them once here, after the boot rush, so the first chat open

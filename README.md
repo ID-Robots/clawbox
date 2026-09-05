@@ -232,8 +232,9 @@ Browser (http://<box-ip>)
   └── Port 18800: Chromium CDP (browser automation)              ← closed to the LAN
 ```
 
-Everything not in that allowlist (3006, 18800, 5900/6080 VNC, 11434 Ollama, 631
-CUPS, …) is unreachable from the network and keeps working over loopback — the
+Everything not in that allowlist (3006, 18800, 5900/6080 VNC, 11434 Ollama, 8081
+the memory embedder, 631 CUPS, …) is unreachable from the network and keeps
+working over loopback — the
 terminal and noVNC reach your browser through the port-80 proxies. rpcbind
 (111) is disabled and masked, since nothing on a ClawBox speaks NFS/NIS —
 unless an NFS/NIS package is installed, in which case it is left running and
