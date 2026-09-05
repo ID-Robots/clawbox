@@ -75,6 +75,21 @@ describe("GET /setup-api/hermes/skills/inspect — a CLI failure carries a code"
     expect(body.error).not.toMatch(/hermes timed out/i);
   });
 
+  it("gives the documentation fetch the shared docs cap, so a client can size its own budget", async () => {
+    // HERMES-06: this cap and the budget the MCP tool allows the same request
+    // are one constant. While the route capped the CLI at 45 s and the tool
+    // allowed the request 30 s, the tool always gave up first and the 504
+    // above — the answer that says WHICH half failed — could not be delivered.
+    mockCli.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+
+    await inspect(`id=${encodeURIComponent(ID)}&docs=1`);
+
+    expect(mockCli).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ timeoutMs: 60_000 }),
+    );
+  });
+
   it("names a non-zero exit `cli_failed`, keeping the traceback for the log", async () => {
     mockCli.mockResolvedValue({ code: 1, stdout: "", stderr: "Traceback (most recent call last):" });
 
