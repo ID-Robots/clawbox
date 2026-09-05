@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
+import UpdateStep from "@/components/UpdateStep";
 
 vi.mock("@/lib/i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/i18n")>()),
@@ -212,4 +213,69 @@ describe("Settings sidebar — the same claim, one screen over", () => {
     const nav = await screen.findByRole("navigation");
     await waitFor(() => expect(nav.textContent).toContain(translations.en["settings.upToDate"]));
   });
+});
+
+/**
+ * The onboarding wizard, where the same claim also SKIPS WORK.
+ *
+ * `UpdateStep` reads /setup-api/update/status, whose `versions` object is the
+ * whole `getVersionInfo()` payload. On a first boot behind an address GitHub is
+ * refusing, HEAD matched the stale refs the image shipped with, the step
+ * printed "Up to date" and auto-advanced after 1.5 s — the customer onboarded
+ * onto whatever was in the image, with no update attempted and nothing said.
+ */
+function stubWizardStatus(remote: unknown) {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = input.toString();
+    if (url === "/setup-api/update/status") {
+      return jsonResponse({
+        phase: "idle",
+        steps: [],
+        currentStepIndex: -1,
+        versions: {
+          clawbox: { current: "v4.0.0", target: null, updateAvailable: false },
+          openclaw: { current: "2026.8.1", target: null, updateAvailable: false },
+          ...(remote === undefined ? {} : { remote }),
+        },
+      });
+    }
+    return jsonResponse({ error: "Not found" }, false, 404);
+  }));
+}
+
+describe("SetupWizard update step — a refused check does not skip the step", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("does not auto-advance past the update step on a box that could not check", async () => {
+    stubWizardStatus({ reachable: false, refusedAnonymously: true, reason: REFUSAL_REASON });
+    const onNext = vi.fn();
+
+    const { findByText } = render(<UpdateStep onNext={onNext} />);
+
+    await findByText(REFUSAL_REASON);
+    // The auto-advance fires 1.5 s after the step decides it is up to date.
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(onNext).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it("still auto-advances a box that reached GitHub and is current", async () => {
+    stubWizardStatus({ reachable: true });
+    const onNext = vi.fn();
+
+    render(<UpdateStep onNext={onNext} />);
+
+    await waitFor(() => expect(onNext).toHaveBeenCalled(), { timeout: 6_000 });
+  }, 20_000);
+
+  it("still auto-advances a device whose server predates the field", async () => {
+    stubWizardStatus(undefined);
+    const onNext = vi.fn();
+
+    render(<UpdateStep onNext={onNext} />);
+
+    await waitFor(() => expect(onNext).toHaveBeenCalled(), { timeout: 6_000 });
+  }, 20_000);
 });

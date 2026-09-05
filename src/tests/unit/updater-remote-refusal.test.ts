@@ -222,25 +222,34 @@ describe("a refused anonymous fetch is not 'up to date'", () => {
   });
 });
 
-describe("the restart step does not fail an update over a redundant fetch", () => {
+describe("the restart step spends no anonymous fetch of its own", () => {
   /**
    * By the time the `restart` step runs, step 0 (`bootstrap_updater` →
    * install.sh `sync_repo_to_update_target`) has already fetched origin and
-   * hard-reset the tree to it. Its own `git fetch origin` is the THIRD
-   * anonymous fetch of one update and the heaviest (all refs); a refusal
-   * there ends the run on a box whose tree is already at the target.
+   * hard-reset the tree to it — and step 0 is `failFast`, so a run that reaches
+   * here is a run where that happened. Its own `git fetch origin` was therefore
+   * the THIRD anonymous fetch of one update and the heaviest (all refs), and it
+   * could only ever cost the run: an attempt on 2026-09-02 got through the
+   * first two, ran steps 1-8, and died on this one.
    */
-  it("hard-resets to the upstream refs already on disk when the fetch is refused", async () => {
+  function boxAtTheRestartStep(overrides: Record<string, Result> = {}): void {
     install({
       // Ends the run right after the tree work, so the case does not sit in
       // waitForRebuildToTakeOver's 15-minute window.
       "clawbox-run-root-step.sh rebuild_reboot": new Error("rebuild not launched"),
-      "fetch origin": new Error(ANON_REFUSAL),
+      // The rebuild unit reports a failure, so waitForRebuildToTakeOver breaks
+      // on its first poll instead of holding the case for fifteen minutes.
+      "show clawbox-root-update@rebuild_reboot.service": { stdout: "failed\n", stderr: "" },
       "rev-parse --verify origin/beta": { stdout: `${SHA}\n`, stderr: "" },
       "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
       "symbolic-ref": { stdout: "beta\n", stderr: "" },
       openclaw: { stdout: "1.0.0", stderr: "" },
+      ...overrides,
     });
+  }
+
+  it("resets to the refs step 1 already fetched, without asking GitHub again", async () => {
+    boxAtTheRestartStep();
     const updater = await import("@/lib/updater");
 
     updater.resetUpdateState();
@@ -252,5 +261,87 @@ describe("the restart step does not fail an update over a redundant fetch", () =
       },
       { timeout: 15_000, interval: 20 },
     );
+    // The whole point: no third anonymous fetch. `fetch --quiet …` belongs to
+    // the version check, which this run does not perform.
+    expect(argvLog.filter((l) => /\bfetch origin\b/.test(l))).toEqual([]);
   }, 20_000);
+
+  it("names the missing ref instead of printing a git command line", async () => {
+    // Dropping the fetch without asking whether the ref is here would be a
+    // false success: `reset --hard` to a ref nobody fetched fails with Node's
+    // `Command failed: git -c safe.directory=…`, which explains nothing.
+    boxAtTheRestartStep({
+      "rev-parse --verify origin/beta": new Error(
+        "Command failed: git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox rev-parse --verify origin/beta^{commit}",
+      ),
+    });
+    const updater = await import("@/lib/updater");
+
+    updater.resetUpdateState();
+    updater.startUpdate();
+
+    await vi.waitFor(
+      () => {
+        const step = updater.getUpdateState().steps.find((s) => s.id === "restart");
+        expect(step?.status).toBe("failed");
+        expect(step?.error).toContain("no local copy of origin/beta");
+        expect(step?.error).not.toContain("safe.directory");
+      },
+      { timeout: 15_000, interval: 20 },
+    );
+  }, 20_000);
+});
+
+describe("what the refusal is called", () => {
+  /**
+   * "Could not reach GitHub" is the wrong sentence for two of these, and a
+   * wrong sentence sends the owner to the router or to a password field.
+   */
+  const cases: [string, string, RegExp][] = [
+    [
+      "a deleted update branch",
+      "fatal: couldn't find remote ref fix/gone",
+      /branch this ClawBox is pinned to/i,
+    ],
+    ["no network at all", "fatal: unable to access 'https://github.com/': Could not resolve host: github.com", /look up github\.com/i],
+  ];
+
+  for (const [name, gitSays, expected] of cases) {
+    it(`calls ${name} what it is`, async () => {
+      install({
+        "fetch --quiet origin beta": new Error(gitSays),
+        "fetch --quiet --tags origin": new Error(gitSays),
+        "ls-remote": new Error(gitSays),
+        "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+        "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      const updater = await import("@/lib/updater");
+
+      const info = await updater.getVersionInfo();
+
+      expect(info.remote?.reachable).toBe(false);
+      expect(info.remote?.refusedAnonymously).toBeFalsy();
+      expect(info.remote?.reason).toMatch(expected);
+    });
+  }
+
+  it("asks only once when there is no network to ask over", async () => {
+    // Retrying "there is no DNS" spends the owner's time on a question already
+    // answered — and the refusal this retry exists for is caused by an address
+    // making too many anonymous requests, so a blanket retry feeds it.
+    install({
+      "fetch --quiet origin beta": new Error("fatal: unable to access 'https://github.com/': Could not resolve host: github.com"),
+      "fetch --quiet --tags origin": new Error("fatal: unable to access 'https://github.com/': Could not resolve host: github.com"),
+      "ls-remote": new Error("Could not resolve host: github.com"),
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    const updater = await import("@/lib/updater");
+
+    await updater.getVersionInfo();
+
+    expect(countArgv("fetch --quiet origin beta")).toBe(1);
+  });
 });

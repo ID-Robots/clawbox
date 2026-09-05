@@ -427,6 +427,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // hero used to make, one card further down.
   const clawboxAvail = (!!versions && componentNeedsUpdate(versions.clawbox)) || driftDetected;
 
+  // "CURRENT" / "Up to date" on the card is derived from a comparison against
+  // the STALE refs a refused fetch left behind, so on a box whose remote could
+  // not be reached it is the same denial the hero has just stopped making, one
+  // card further down. `unknown` makes the card say so instead. Only where
+  // there is no local evidence: a drifted or genuinely-behind box keeps its
+  // offer, because that fact was established without the remote.
+  const clawboxUnknown = !clawboxAvail && versions?.remote?.reachable === false;
+
   return (
     <div className={embedded ? "relative w-full text-gray-200" : "relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200"} data-testid="system-update-app">
       <div className={embedded ? "w-full" : "min-h-full w-full flex items-start justify-center p-6 pt-10 bg-[var(--bg-deep)]"}>
@@ -511,6 +519,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 current={versions.clawbox.current}
                 target={versions.clawbox.target}
                 available={clawboxAvail}
+                unknown={clawboxUnknown}
                 onUpdate={() => void triggerUpdate()}
               />
             </div>
@@ -605,10 +614,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
 
                   {/* Force full update — recovery for a device left with a stale
                       OpenClaw/system unit by force-update.sh (restores the UI but
-                      not the full update). Only offered when otherwise up to date
-                      (the recovery scenario) so it can't fire during loading or a
-                      failed version fetch. */}
-                  {status === "up-to-date" && (
+                      not the full update). Offered when there is no update to
+                      run — up to date, or a box whose remote could not be
+                      reached — and never while loading, so it can't fire before
+                      the payload is in. The refused case is the one that most
+                      needs it: install.sh retries the fetch, so the update has a
+                      real chance of getting through where the version check did
+                      not, and this is the only control that starts it. */}
+                  {(status === "up-to-date" || (status === "fetch-error" && !!versions)) && (
                     <div className="border-t border-[var(--border-subtle)] pt-4">
                       <div className="text-sm text-gray-100 inline-flex items-center gap-2">
                         <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">restart_alt</span>
@@ -812,6 +825,7 @@ function ComponentCard({
   current,
   target,
   available,
+  unknown = false,
   onUpdate,
 }: {
   name: string;
@@ -819,6 +833,8 @@ function ComponentCard({
   current: string | null;
   target: string | null;
   available: boolean;
+  /** The remote could not be reached, so "current" is not a fact. */
+  unknown?: boolean;
   onUpdate: () => void;
 }) {
   return (
@@ -829,7 +845,7 @@ function ComponentCard({
           <p className="text-xs text-[var(--text-muted)] mt-0.5">{description}</p>
         </div>
         <span className={`shrink-0 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${available ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-[var(--text-muted)] border-[var(--border-subtle)]"}`}>
-          {available ? "UPDATE" : "CURRENT"}
+          {available ? "UPDATE" : unknown ? "UNKNOWN" : "CURRENT"}
         </span>
       </div>
       <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
@@ -840,7 +856,7 @@ function ComponentCard({
         <div>
           <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">Latest</div>
           <div className={`mt-1 font-mono truncate ${available ? "text-emerald-300" : "text-gray-100"}`}>
-            {cleanVersion(target ?? "") || target || "—"}
+            {unknown ? "—" : cleanVersion(target ?? "") || target || "—"}
           </div>
         </div>
       </div>
@@ -850,7 +866,7 @@ function ComponentCard({
         disabled={!available}
         className="mt-4 px-3 py-1.5 rounded-md text-xs font-semibold border cursor-pointer disabled:cursor-default disabled:opacity-50 transition-colors bg-emerald-500/15 border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/25"
       >
-        {available ? `Update ${name}` : "Up to date"}
+        {available ? `Update ${name}` : unknown ? "Couldn't check" : "Up to date"}
       </button>
     </div>
   );

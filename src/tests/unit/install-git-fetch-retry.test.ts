@@ -80,6 +80,7 @@ function runFetch(refusals: number): { status: number; output: string; attempts:
     "  return 0",
     "}",
     "sleep() { :; }",
+    extractShellFunction("git_retryable_failure"),
     extractShellFunction("git_with_retry"),
     `git_with_retry -C ${JSON.stringify(tmp)} fetch origin`,
   ].join("\n");
@@ -118,6 +119,64 @@ d("install.sh survives GitHub refusing an anonymous fetch", () => {
     // alone sent two people looking for credentials a ClawBox never has.
     expect(r.output).toMatch(/anonymous/i);
     expect(r.output).toMatch(/GitHub/);
+  });
+
+  it("does not retry a failure asking again cannot fix", () => {
+    // "destination path already exists" is not a refusal; three attempts and
+    // 9 s of sleeps spend the root step's budget to reach the same answer.
+    const script = [
+      "set -euo pipefail",
+      `ATTEMPTS=${JSON.stringify(attemptLog)}`,
+      "git() {",
+      "  printf 'git %s\\n' \"$*\" >> \"$ATTEMPTS\"",
+      "  echo \"fatal: destination path 'x' already exists and is not an empty directory.\" >&2",
+      "  return 128",
+      "}",
+      "sleep() { :; }",
+      extractShellFunction("git_retryable_failure"),
+      extractShellFunction("git_with_retry"),
+      `git_with_retry clone --branch beta https://example.invalid/x ${JSON.stringify(tmp)} || true`,
+    ].join("\n");
+    spawnSync("bash", ["-c", script], {
+      encoding: "utf-8",
+      env: testEnv({ PATH: process.env.PATH ?? "" }),
+    });
+
+    expect(fs.readFileSync(attemptLog, "utf-8").split("\n").filter(Boolean)).toHaveLength(1);
+  });
+
+  it("leaves git's own output on stderr, so a caller capturing stdout gets none of it", () => {
+    // The function captures git's stderr to classify it. Re-emitting it on
+    // STDOUT would make it indistinguishable from a result to any future caller
+    // that reads this function's stdout.
+    const script = [
+      "set -euo pipefail",
+      "git() { echo 'Fetching origin' >&2; return 0; }",
+      extractShellFunction("git_retryable_failure"),
+      extractShellFunction("git_with_retry"),
+      "out=$(git_with_retry -C /tmp fetch origin 2>/dev/null)",
+      'printf "[%s]" "$out"',
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], {
+      encoding: "utf-8",
+      env: testEnv({ PATH: process.env.PATH ?? "" }),
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout?.trim()).toBe("[]");
+  });
+
+  it("is defined before the bootstrap block that runs the FIRST of the three fetches", () => {
+    // bash defines a function when execution reaches it. The bootstrap block
+    // decides which install.sh the rest of the update runs, so a definition
+    // below it would leave that fetch — the one that matters most — unretried.
+    const defined = INSTALL_SH.indexOf("git_with_retry() {");
+    const bootstrap = INSTALL_SH.indexOf("# ── Bootstrap: pull latest install.sh");
+    const used = INSTALL_SH.indexOf("git_with_retry -C \"$_b\"");
+
+    expect(defined).toBeGreaterThan(-1);
+    expect(bootstrap).toBeGreaterThan(defined);
+    expect(used).toBeGreaterThan(bootstrap);
   });
 
   it("is what sync_repo_to_update_target fetches through", () => {

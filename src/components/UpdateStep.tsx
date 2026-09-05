@@ -203,6 +203,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [versions, setVersions] = useState<{
     clawbox: { current: string; target: string | null; updateAvailable?: boolean };
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+    // Optional: a payload from a server that predates the field must keep
+    // behaving exactly as before, so ABSENT is "not known", never "unreachable".
+    remote?: { reachable: boolean; refusedAnonymously?: boolean; reason?: string };
   } | null>(null);
   const [fetchError, setFetchError] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -368,7 +371,17 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const isIdle = !state || state.phase === "idle";
   const clawboxNeedsUpdate = !!versions && (versions.clawbox.updateAvailable ?? !!versions.clawbox.target);
   const openclawNeedsUpdate = !!versions && (versions.openclaw.updateAvailable ?? !!versions.openclaw.target);
-  const isUpToDateEarly = !loading && isIdle && !starting && versions && !clawboxNeedsUpdate && !openclawNeedsUpdate;
+  // GitHub refuses anonymous git-upload-pack POSTs from an address that has
+  // made too many, so a box being set up behind such an address compares HEAD
+  // against the STALE refs its image shipped with and finds no delta. On this
+  // screen that was worse than a wrong label: the wizard printed "System Up to
+  // Date" and AUTO-ADVANCED after 1.5 s, onboarding the customer onto whatever
+  // was in the image with no update attempted and nothing said (TASK-655).
+  // Routed into the existing check-failed branch, which already offers Retry
+  // and Skip — the owner decides, and setup is never blocked.
+  const remoteUnreachable = versions?.remote?.reachable === false;
+  const isUpToDateEarly = !loading && isIdle && !starting && versions
+    && !remoteUnreachable && !clawboxNeedsUpdate && !openclawNeedsUpdate;
 
   // Auto-advance if already up to date — show brief flash then continue
   const autoAdvancedRef = useRef(false);
@@ -406,7 +419,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     );
   }
 
-  if (fetchError) {
+  if (fetchError || (remoteUnreachable && isIdle && !starting)) {
     return (
       <Card>
         <h1 className="font-bold font-display mb-[var(--s-2)]" style={T_H1}>
@@ -415,6 +428,14 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         <p className="text-red-400 mb-[var(--s-6)]" style={T_LEDE}>
           {t("update.failedToCheck")}
         </p>
+        {/* Server-authored, in the owner's words rather than git's — the same
+            sentence the System Update screen shows. Rendered only when the
+            server sent one, so nothing here depends on a new locale key. */}
+        {!fetchError && versions?.remote?.reason && (
+          <p className="text-[var(--text-secondary)] mb-[var(--s-6)]" style={T_LEDE}>
+            {versions.remote.reason}
+          </p>
+        )}
         <div className="flex flex-col sm:flex-row sm:items-center gap-[var(--s-3)]">
           <button
             type="button"
@@ -433,7 +454,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   }
 
   // Idle state — show trigger button or "up to date"
-  const isUpToDate = versions && !clawboxNeedsUpdate && !openclawNeedsUpdate;
+  const isUpToDate = versions && !remoteUnreachable && !clawboxNeedsUpdate && !openclawNeedsUpdate;
 
   const isDowngrade = versions?.clawbox.target
     ? compareVersions(versions.clawbox.current, versions.clawbox.target) > 0

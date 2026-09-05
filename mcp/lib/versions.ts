@@ -31,6 +31,17 @@ export interface VersionsPayload {
    * whose software predates the field.
    */
   edition?: string;
+  /**
+   * Whether the device actually reached GitHub for this check.
+   *
+   * Declared here because `updateAvailable: false` is unfalsifiable without
+   * it: GitHub refuses anonymous git-upload-pack POSTs from an address that
+   * has made too many, the device then compares HEAD against the STALE refs
+   * its last successful fetch left, and every component reads "current"
+   * (TASK-655). Absent on a device whose software predates the field, which is
+   * "not known" — never "unreachable".
+   */
+  remote?: { reachable: boolean; refusedAnonymously?: boolean; reason?: string };
 }
 
 /**

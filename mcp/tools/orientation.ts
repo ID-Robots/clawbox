@@ -410,9 +410,20 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
               // one — and a model with no answer states one from training
               // memory. It never carries a target: see updater.ts.
               ...(versions.hermes ? { hermes: versions.hermes } : {}),
+              // "unknown", not false, when the device could not reach GitHub.
+              // This is the tool the server's instructions tell every model to
+              // call FIRST, so `waiting: false` here is how the owner asking
+              // "am I on the latest version?" gets told yes by a box that never
+              // managed to ask (TASK-655). The reason travels with it so the
+              // model can say what actually happened.
               waiting:
-                versions.clawbox?.updateAvailable === true
-                || (shipsOpenclaw(versions, ctx) && versions.openclaw?.updateAvailable === true),
+                versions.remote?.reachable === false
+                  ? "unknown"
+                  : versions.clawbox?.updateAvailable === true
+                    || (shipsOpenclaw(versions, ctx) && versions.openclaw?.updateAvailable === true),
+              ...(versions.remote?.reachable === false
+                ? { check_failed: versions.remote.reason ?? "could not reach the update repository" }
+                : {}),
             }
           : "unknown",
       });

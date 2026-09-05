@@ -44,11 +44,48 @@ if [ ! -d "$PROJECT_DIR/.git" ]; then
 fi
 
 run_as_clawbox() {
+  # GIT_TERMINAL_PROMPT=0 is git's own switch, and it is load-bearing HERE more
+  # than anywhere else: this script is run by hand over SSH, so git HAS a tty
+  # and a refused anonymous fetch blocks on `Username for 'https://github.com':`
+  # instead of failing — the recovery script hanging on the box it is recovering
+  # (TASK-655). The updater sets the same variable for the same reason.
+  # The export goes INSIDE the command string, not in front of `sudo`'s target:
+  # sudo resets the environment, so `sudo -u x VAR=1 cmd` needs a `setenv` the
+  # sudoers drop-in does not grant — and it would change the argv shape
+  # scripts/check-sudoers-coverage.sh resolves this call site by.
   if [ "$(id -un)" = "$CLAWBOX_USER" ]; then
-    bash -c "$1"
+    bash -c "export GIT_TERMINAL_PROMPT=0; $1"
   else
-    sudo -u "$CLAWBOX_USER" bash -c "$1"
+    sudo -u "$CLAWBOX_USER" bash -c "export GIT_TERMINAL_PROMPT=0; $1"
   fi
+}
+
+# One attempt is a coin flip: GitHub refuses anonymous git-upload-pack POSTs
+# from an address that has made too many, ~2 in 3 when measured (TASK-655).
+# install.sh's git_with_retry is not sourceable from here (that file is an
+# installer, not a library), so this is the same three-attempt shape inline.
+fetch_with_retry() {
+  local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-3}" out
+  while :; do
+    if out="$(run_as_clawbox "$GIT fetch origin" 2>&1)"; then
+      [ -z "$out" ] || printf '%s\n' "$out" >&2
+      return 0
+    fi
+    [ "$attempt" -ge "$max" ] && break
+    echo "[force-update] fetch attempt $attempt/$max failed, retrying in ${delay}s..." >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+  printf '%s\n' "$out" >&2
+  case "$out" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*)
+      echo "[force-update] GitHub refused this device's anonymous request for the repository." >&2
+      echo "[force-update] It is public and needs no password — GitHub answers 401 to anonymous git" >&2
+      echo "[force-update] requests from an address that has made too many. Wait a few minutes and re-run." >&2
+      ;;
+  esac
+  return 1
 }
 
 GIT="git -c safe.directory=$PROJECT_DIR -C $PROJECT_DIR"
@@ -57,7 +94,7 @@ echo "[force-update] Fixing .git ownership (any root-owned bits left by install.
 sudo chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
 
 echo "[force-update] Hard-syncing $PROJECT_DIR to $UPSTREAM..."
-run_as_clawbox "$GIT fetch origin"
+fetch_with_retry
 run_as_clawbox "$GIT reset --hard HEAD"
 run_as_clawbox "$GIT checkout $TARGET_BRANCH 2>/dev/null || $GIT checkout -b $TARGET_BRANCH $UPSTREAM"
 run_as_clawbox "$GIT reset --hard $UPSTREAM"
