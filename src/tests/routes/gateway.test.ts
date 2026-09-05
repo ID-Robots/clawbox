@@ -206,6 +206,21 @@ describe("GET /[...gateway] (catch-all route)", () => {
     ["http://localhost/updating/nope", "page"],
     ["http://localhost/app", "page"],
     ["http://localhost/app/x/y", "page"],
+    // Percent-encoded separators. Measured anonymously on BOTH boxes:
+    // `GET /setup-api/nope` answers 401 application/json from the middleware's
+    // own /setup-api gate and `GET /setup-api%2Fnope` answers 307 to /login,
+    // so that gate did not recognise it — the platform does not decode `%2F`.
+    // These stay one segment, match no route, and reached the catch-all, which
+    // answered a navigation with the shell and the injected gateway token.
+    ["http://localhost/setup-api%2Fnope", "api"],
+    ["http://localhost/setup-api%2fnope", "api"],
+    ["http://localhost/Setup-Api%2Fnope", "api"],
+    ["http://localhost/login-api%2Fnope", "api"],
+    ["http://localhost/portal%2Fnope", "page"],
+    ["http://localhost/app%2fx", "page"],
+    // Double-encoded: one decode leaves `%2F` behind, so the match has to go
+    // to a fixpoint.
+    ["http://localhost/setup%252Fnope", "page"],
   ];
 
   it.each(CLAWBOX_OWNED_UNMATCHED)(
@@ -242,6 +257,34 @@ describe("GET /[...gateway] (catch-all route)", () => {
     await gatewayGet(
       createRequest("http://localhost/chat/main", { "sec-fetch-mode": "navigate" }),
     );
+
+    expect(mockServeGatewayHTML).toHaveBeenCalled();
+  });
+
+  /**
+   * The other side of the probe, recorded because each of these is a RESULT
+   * and not an oversight: nothing here belongs to ClawBox, decoded or not, so
+   * the catch-all must go on serving it.
+   */
+  it.each([
+    // `/apps` is the Control UI's OWN page — the pinned 2026.8.1 bundle
+    // registers `apps:{path:`/apps`}` and ships apps-page-*.js/.css — so the
+    // shell is the RIGHT answer here and a 404 would break a working page.
+    // Everything BELOW it is ClawBox's and is matched by a real route
+    // (`[[...path]]` is an optional catch-all), so it never arrives here.
+    "http://localhost/apps",
+    "http://localhost/apps/",
+    "http://localhost/apps%2Fzzz",
+    // `%2e%2e` decodes to `..` inside the SAME segment: `/apps%2e%2e` is
+    // `/apps..`, no more ClawBox's than `/appsomething`. A real `/apps/..` is
+    // normalised to `/` by the platform before anything here sees it.
+    "http://localhost/setup%2e%2e",
+    "http://localhost/setup%2E%2E",
+    "http://localhost/setupsomething%2Fx",
+  ])("leaves %s with the gateway, decoded or not", async (url) => {
+    mockGetAll.mockResolvedValue({ setup_complete: true });
+
+    await gatewayGet(createRequest(url, { "sec-fetch-mode": "navigate" }));
 
     expect(mockServeGatewayHTML).toHaveBeenCalled();
   });
