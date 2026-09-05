@@ -184,7 +184,7 @@ describe("the body cap", () => {
   });
 
   it("refuses a body past MAX_PUT_BODY_BYTES with 413 before parsing it, by its length and by what it streams", async () => {
-    const { MAX_PUT_BODY_BYTES } = await import("@/app/setup-api/coding-agent/tree/route");
+    const { MAX_PUT_BODY_BYTES } = await import("@/lib/coding-project-tree");
     const huge = JSON.stringify({ projectId: "site", file: "src/app.js", content: "x".repeat(MAX_PUT_BODY_BYTES) });
     const declared = await PUT(new Request("http://localhost/setup-api/coding-agent/tree", { method: "PUT", headers: { host: "localhost", "content-type": "application/json", "content-length": String(huge.length) }, body: huge }));
     expect(declared.status).toBe(413);

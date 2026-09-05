@@ -149,13 +149,28 @@ cp .next/build-info.json "$SDIR/.next/build-info.json"
 
 # Playwright is not traced (the browser tests import it dynamically), so it is
 # copied beside the entry for the on-device browser tools.
-for pwp in playwright playwright-core; do
-  if [ -d "node_modules/$pwp" ]; then
-    rm -rf "$SDIR/node_modules/$pwp"
-    mkdir -p "$SDIR/node_modules"
-    cp -r "node_modules/$pwp" "$SDIR/node_modules/$pwp"
-  fi
-done
+# Never through a symlinked node_modules: in a worktree whose node_modules
+# is a symlink to another checkout's, the traced tree's node_modules is a
+# symlink to that real directory, and an rm through it removed the real
+# playwright package (2026-09-05). A symlinked tree resolves to the full
+# packages already, so there is nothing to copy there.
+if [ ! -L "$SDIR/node_modules" ]; then
+  for pwp in playwright playwright-core; do
+    if [ -d "node_modules/$pwp" ]; then
+      rm -rf "$SDIR/node_modules/$pwp"
+      mkdir -p "$SDIR/node_modules"
+      cp -r "node_modules/$pwp" "$SDIR/node_modules/$pwp"
+    fi
+  done
+fi
+# The webpack standalone build's traced copy of `next` misses
+# lib/metadata/get-metadata-route and the server dies on it at start: point
+# the tree at the real package (the script refuses a symlinked tree and fails
+# the build when the link cannot be made). The traced node_modules sits
+# beside the app in a nested layout, or at the standalone root.
+LINK_TREE="$SDIR"
+[ -d "$SDIR/node_modules" ] || LINK_TREE="$STANDALONE"
+bash scripts/link-standalone-next.sh "$LINK_TREE"
 
 # Nested layout only: production-server.js and install.sh both load
 # `.next/standalone/server.js`, so point it at the real entry. The link is

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 describe("/login-api/logout", () => {
-  let POST: (request?: Request) => Promise<Response>;
+  let POST: (request: Request) => Promise<Response>;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -10,7 +10,7 @@ describe("/login-api/logout", () => {
   });
 
   it("clears the session cookie", async () => {
-    const res = await POST();
+    const res = await POST(new Request("http://localhost/login-api/logout", { method: "POST" }));
     const body = await res.json();
     expect(body.success).toBe(true);
     const cookie = res.headers.get("set-cookie");

@@ -14,7 +14,7 @@ Bun runtime (package management + builds), Node.js 22 (production runtime), Next
 
 - `bun run dev` — dev server on port 3000 at 0.0.0.0
 - `bun run dev:privileged` — dev server on port 80 (requires root)
-- `bun run build` — production build (generates `.next/standalone/`)
+- `bun run build` — production build (generates `.next/standalone/`). It is `next build --webpack` on purpose: Next 16's default bundler, Turbopack, is OOM-killed on the 8 GB Jetson (measured 2026-09-05: killed at 4.6 GB resident with 5.7 GB free, the kernel's global OOM), while the webpack build of the same commit fits in ~3.7 GB; the box's own rebuild (install.sh `do_rebuild`) adds `NEXT_WEBPACK_PARALLELISM=2` to keep its peak there. The webpack standalone build's traced copy of `next` misses `lib/metadata/get-metadata-route` and the server dies on it at start, so `postbuild` replaces `.next/standalone/node_modules/next` with a symlink to the real package. A route module may export handlers and Next's config keys only — the webpack build generates the route type checks under `.next/types` that Turbopack's does not. `bun run dev` keeps Turbopack.
 - `bun run start` — run standalone production server on port 80
 - `bun run lint` — run ESLint
 - `bun run test` — run Vitest unit tests

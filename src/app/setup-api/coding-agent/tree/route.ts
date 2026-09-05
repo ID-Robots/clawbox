@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
-import { listProjectDir, MAX_TREE_WRITE_BYTES, readProjectFile, writeProjectFile } from "@/lib/coding-project-tree";
+import { listProjectDir, MAX_TREE_WRITE_BYTES, readProjectFile, writeProjectFile, MAX_PUT_BODY_BYTES } from "@/lib/coding-project-tree";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
@@ -13,7 +13,8 @@ export const dynamic = "force-dynamic";
  * own, and `request.json()` would buffer the whole thing before the
  * content's cap could be applied.
  */
-export const MAX_PUT_BODY_BYTES = MAX_TREE_WRITE_BYTES * 6 + 16 * 1024;
+// (MAX_PUT_BODY_BYTES itself lives in coding-project-tree.ts: a route module
+// may export handlers and Next's config keys only.)
 
 /** The JSON body, read chunk by chunk under the cap — never buffered whole first. */
 async function readCappedJson(request: Request, maxBytes: number): Promise<{ ok: true; body: unknown } | { ok: false; status: 400 | 413 }> {

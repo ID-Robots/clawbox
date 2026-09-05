@@ -159,7 +159,7 @@ describe("/setup-api/chat/transcribe", () => {
     vi.resetModules();
     const mod = await import("@/app/setup-api/chat/transcribe/route");
     POST = mod.POST;
-    TRANSCRIBE_MODEL = mod.TRANSCRIBE_MODEL;
+    TRANSCRIBE_MODEL = (await import("@/lib/stt-preference")).TRANSCRIBE_MODEL;
   });
 
   afterEach(() => {
@@ -325,7 +325,7 @@ describe("/setup-api/chat/transcribe", () => {
   });
 
   it("refuses a recording over the size limit without sending it", async () => {
-    const { MAX_AUDIO_BYTES } = await import("@/app/setup-api/chat/transcribe/route");
+    const { MAX_AUDIO_BYTES } = await import("@/lib/transcribe-limits");
     const res = await POST(await serializedAudioRequest(Buffer.alloc(MAX_AUDIO_BYTES + 1, 0x41)));
 
     expect(res.status).toBe(413);
@@ -333,7 +333,7 @@ describe("/setup-api/chat/transcribe", () => {
   });
 
   it("accepts a recording exactly at the documented size limit", async () => {
-    const { MAX_AUDIO_BYTES } = await import("@/app/setup-api/chat/transcribe/route");
+    const { MAX_AUDIO_BYTES } = await import("@/lib/transcribe-limits");
     fetchMock.mockResolvedValue(jsonResponse({ text: "exactly bounded" }));
 
     const res = await POST(audioRequest(Buffer.alloc(MAX_AUDIO_BYTES, 0x41)));

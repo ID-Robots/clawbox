@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { __test } from "@/app/setup-api/hermes/chat/route";
+import { hermesFailureMessage } from "@/lib/hermes-cli-message";
+import { hermesExitMessage, HERMES_INTERRUPTED_EXIT_CODE } from "@/lib/hermes-chat-exit";
 
 /**
  * A failed chat turn reported "hermes exited with code 1" — true, and useless.
@@ -14,7 +15,6 @@ import { __test } from "@/app/setup-api/hermes/chat/route";
  * the extractor fell through to the generic string and the one line that told
  * the customer what went wrong was discarded.
  */
-const { hermesFailureMessage, hermesExitMessage, HERMES_INTERRUPTED_EXIT_CODE } = __test;
 
 describe("the message shown for a failed Hermes turn", () => {
   it("uses stdout when stderr holds only the session banner", () => {

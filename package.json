@@ -11,7 +11,7 @@
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
     "prebuild": "rm -rf .next/standalone/.next/cache/images 2>/dev/null || true",
-    "build": "next build",
+    "build": "next build --webpack",
     "postbuild": "bash scripts/postbuild.sh",
     "start": "PORT=80 HOSTNAME=0.0.0.0 node production-server.js",
     "lint": "eslint",
