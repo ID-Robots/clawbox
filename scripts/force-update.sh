@@ -71,6 +71,16 @@ run_as_clawbox() {
 # only helps a refusal that is about the moment, not about the remote. This is
 # the script an owner runs when they are already stuck, so 3 s + 6 s of backoff
 # over a broken origin is time taken from someone waiting at the box.
+#
+# The list must stay byte-identical to install.sh's — a test asserts it — so
+# any change belongs in both.
+#
+# `Could not resolve host` is DELIBERATELY retryable here and deliberately not
+# in src/lib/updater.ts, which is the only case where the three classifiers
+# disagree. A run of this script or of install.sh happens once, with someone
+# waiting, and can race NetworkManager still coming up — one more ask can land.
+# The version check in updater.ts is polled by four surfaces, where the same
+# retry is dead time on every poll over a question already answered.
 git_retryable_failure() {
   case "$1" in
     *"could not read Username"*|*"could not read Password"*|*"Repository not found"*) return 0 ;;

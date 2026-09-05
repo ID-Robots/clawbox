@@ -102,8 +102,11 @@ const REMOTE_REACHABLE: RemoteReachability = { reachable: true };
  * Measured on the dev network, 2026-09-02 (TASK-655): GitHub answers git's
  * protocol-v2 POST to `/git-upload-pack` with `HTTP 401` and a body reading
  * "Repository not found." — for a PUBLIC repository — once an address has used
- * up its anonymous allowance. The GET to `/info/refs` keeps answering, so
- * `ls-remote` succeeds while `fetch` does not.
+ * up its anonymous allowance. On the day it was measured the GET to
+ * `/info/refs` kept answering while the POST did not, which is why the fetch
+ * failed and `ls-remote` did not. That was the state that afternoon, NOT a
+ * property of the endpoint: the GET is refused too, which is why it is retried
+ * and why getTargetVersion has a branch for it being unreachable.
  *
  * git reports it as `fatal: could not read Username for 'https://github.com'`.
  * That sentence points at credentials; the cause is an anonymous-access

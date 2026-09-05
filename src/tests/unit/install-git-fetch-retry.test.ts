@@ -224,16 +224,6 @@ d("scripts/force-update.sh retries the same way, or does not retry at all", () =
     expect(r.attempts).toBe(3);
   });
 
-  it("classifies with the SAME list install.sh uses, character for character", () => {
-    // Two copies exist because install.sh is an installer, not a library, and
-    // cannot be sourced from a standalone recovery script. Nothing else stops
-    // them drifting: each is extracted separately by the tests above, so either
-    // could be edited alone and stay green while the two scripts disagreed
-    // about which failures are worth asking again.
-    expect(extractShellFunctionFrom(FORCE_UPDATE_SH, "git_retryable_failure"))
-      .toBe(extractShellFunction("git_retryable_failure"));
-  });
-
   it("retries GitHub's anonymous refusal", () => {
     const r = runForceFetch(ANON_REFUSAL);
 
@@ -248,6 +238,21 @@ d("scripts/force-update.sh retries the same way, or does not retry at all", () =
     const r = runForceFetch("fatal: 'origin' does not appear to be a git repository");
 
     expect(r.attempts).toBe(1);
+  });
+});
+
+// A plain `describe`, NOT the bash-gated `d`: this is a string comparison of two
+// files, and the one assertion holding the two classifiers together is exactly
+// the thing that must not disappear on a runner that cannot spawn bash.
+describe("the two shell retry classifiers cannot drift apart", () => {
+  it("are the same list, character for character", () => {
+    // Two copies exist because install.sh is an installer, not a library, and
+    // cannot be sourced from a standalone recovery script. Nothing else stops
+    // them drifting: each is extracted separately by the tests below, so either
+    // could be edited alone and stay green while the two scripts disagreed
+    // about which failures are worth asking again.
+    expect(extractShellFunctionFrom(FORCE_UPDATE_SH, "git_retryable_failure"))
+      .toBe(extractShellFunction("git_retryable_failure"));
   });
 });
 
