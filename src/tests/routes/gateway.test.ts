@@ -221,6 +221,13 @@ describe("GET /[...gateway] (catch-all route)", () => {
     // Double-encoded: one decode leaves `%2F` behind, so the match has to go
     // to a fixpoint.
     ["http://localhost/setup%252Fnope", "page"],
+    // FIVE nestings, the exact spellings the review raised. A four-pass cap
+    // that gave up with `%` still in the string handed these to the gateway:
+    // `/portal%252525252Fnope` is four passes from `/portal%2Fnope`, which is
+    // denied one nesting down — so the check was not idempotent under its own
+    // decode and two more `25`s walked around it.
+    ["http://localhost/portal%252525252Fnope", "page"],
+    ["http://localhost/setup-api%252525252Fnope", "api"],
   ];
 
   it.each(CLAWBOX_OWNED_UNMATCHED)(
@@ -246,6 +253,33 @@ describe("GET /[...gateway] (catch-all route)", () => {
         expect(res.headers.get("content-type")).toContain("text/plain");
         await expect(res.text()).resolves.toBe("Not found");
       }
+    },
+  );
+
+  it.each([
+    ["a claimed root", "/portal"],
+    ["a root the gateway would otherwise own", "/nope"],
+  ])(
+    "answers 404 for a path nested past the decode cap (%s)",
+    async (_what, root) => {
+      // Past the cap the box cannot read the path AT ALL, and an unreadable
+      // path is not handed to the gateway either — the give-up fails CLOSED,
+      // which is what stops "append two more `25`s" from being a bypass
+      // whatever the cap is set to. Deep enough that no value of
+      // MAX_DECODE_PASSES worth having could reach the end of it.
+      const separator = `%${"25".repeat(199)}2F`;
+      mockGetAll.mockResolvedValue({ setup_complete: true });
+
+      const res = await gatewayGet(
+        createRequest(`http://localhost${root}${separator}nope`, {
+          "sec-fetch-mode": "navigate",
+          accept: "text/html",
+        }),
+      );
+
+      expect(res.status).toBe(404);
+      expect(mockServeGatewayHTML).not.toHaveBeenCalled();
+      expect(mockProxyGatewayRequest).not.toHaveBeenCalled();
     },
   );
 
@@ -281,6 +315,13 @@ describe("GET /[...gateway] (catch-all route)", () => {
     "http://localhost/setup%2e%2e",
     "http://localhost/setup%2E%2E",
     "http://localhost/setupsomething%2Fx",
+    // A MALFORMED escape is a settled fact about the path, not a decode budget
+    // running out: `decodeURIComponent` is all-or-nothing, so the literal
+    // spelling stands and `/setup-api%zz` is one segment of that name — as
+    // little ClawBox's as `/setupsomething`. This is why the give-up branch
+    // that DOES fail closed keys on the pass count and never on "contains
+    // `%`": a gateway path carrying one stray `%` must go on being answered.
+    "http://localhost/setup-api%zz",
   ])("leaves %s with the gateway, decoded or not", async (url) => {
     mockGetAll.mockResolvedValue({ setup_complete: true });
 

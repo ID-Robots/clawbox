@@ -139,33 +139,50 @@ export function isSetupApiPath(pathname: string): boolean {
  *
  * To a fixpoint because one pass is not enough: `/setup%252Fnope` decodes to
  * `/setup%2Fnope`, which is still an encoded separator. Each pass strictly
- * shortens the string or returns at the `next === current` fixpoint, so the
- * loop terminates with or without the cap.
+ * shortens the string (a `%XX` triple becomes one code unit) or returns at the
+ * `next === current` fixpoint, so the loop terminates with or without the cap.
  *
- * The cap is NOT free, and the deny-only argument above is what pays for it:
- * past four nestings the loop gives up with `%` still in the string and the
- * path stays the gateway's — as it does for any path carrying one malformed
- * escape, since `decodeURIComponent` is all-or-nothing. The decoded match is
- * therefore BEST-EFFORT hardening and must never be leaned on as a boundary;
- * missing one costs exactly the answer beta gives today.
+ * The cap is a RUNAWAY GUARD, not a policy, and it fails CLOSED: a path still
+ * carrying `%` when the passes run out is one this box cannot read, so it is
+ * claimed rather than handed to the gateway. A cap that gave up and allowed
+ * made the function non-idempotent under its own decode — it denied
+ * `/portal%2Fnope` and permitted `/portal%252525252Fnope`, which is four
+ * passes away from it, so "append two more `25`s" walked around the check this
+ * module exists to make. Failing closed is what makes the depth uninteresting:
+ * the cost of guessing wrong is a 404 on a path nobody can spell on purpose.
  *
- * A malformed escape (`/%zz`) makes `decodeURIComponent` throw. That returns
- * whatever was decoded so far, so the caller falls back to the literal spelling
- * and today's answer, rather than the request failing.
+ * A malformed escape (`/%zz`) is the OTHER outcome and keeps today's answer.
+ * `decodeURIComponent` is all-or-nothing, so it throws, and that is a settled
+ * fact about the path rather than a budget running out: the caller falls back
+ * to the literal spelling and `/assets/a%zz.js` stays the gateway's, rather
+ * than a real asset 404ing over one stray `%`.
  */
-function decodePercentEncoding(pathname: string): string {
+const MAX_DECODE_PASSES = 32;
+
+type DecodedPath = {
+  /** The path as far as it could be decoded. */
+  spelling: string;
+  /**
+   * The passes ran out with `%` still in the string — this box does not know
+   * what the path says. Never set for a malformed escape, which has an answer.
+   */
+  undecodable: boolean;
+};
+
+function decodePercentEncoding(pathname: string): DecodedPath {
   let current = pathname;
-  for (let pass = 0; pass < 4 && current.includes("%"); pass++) {
+  for (let pass = 0; pass < MAX_DECODE_PASSES; pass++) {
+    if (!current.includes("%")) return { spelling: current, undecodable: false };
     let next: string;
     try {
       next = decodeURIComponent(current);
     } catch {
-      return current;
+      return { spelling: current, undecodable: false };
     }
-    if (next === current) return current;
+    if (next === current) return { spelling: current, undecodable: false };
     current = next;
   }
-  return current;
+  return { spelling: current, undecodable: current.includes("%") };
 }
 
 /**
@@ -189,13 +206,19 @@ export function clawboxNamespaceKind(pathname: string): "api" | "page" | null {
   // to /login — the gate missed it, so the platform does not decode `%2F` and
   // the encoded spelling stays one segment, matches no route and lands here.
   // For an owner session that was the shell with the gateway token in it.
+  const decoded = decodePercentEncoding(pathname);
   const spellings = new Set([
     pathname.toLowerCase(),
-    decodePercentEncoding(pathname).toLowerCase(),
+    decoded.spelling.toLowerCase(),
   ]);
   for (const candidate of spellings) {
     if (CLAWBOX_API_ROOTS.some((root) => isUnderRoot(candidate, root))) return "api";
     if (CLAWBOX_PAGE_ROOTS.some((root) => isUnderRoot(candidate, root))) return "page";
   }
+  // Neither spelling is the path's LAST word — the decode gave up with `%`
+  // still in it — so "this is the gateway's" is not something this box knows.
+  // Claimed, as a plain 404: the deny-only argument above is what makes that
+  // the safe guess, and no client can spell a path this deep by accident.
+  if (decoded.undecodable) return "page";
   return null;
 }
