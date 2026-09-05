@@ -287,7 +287,11 @@ export function useCopy() {
       detailError: (part: 'meta' | 'docs', code?: string | null) =>
         part === 'docs'
           ? t('skills.detailDocsFailed')
-          : t(code === 'cli_missing' ? 'skills.detailUnavailable' : 'skills.detailFailed'),
+          : code === 'not_found'
+            // A permanent answer, so it must not read as "try again": Hermes was
+            // asked and said no such skill.
+            ? t('skills.detailNotFound')
+            : t(code === 'cli_missing' ? 'skills.detailUnavailable' : 'skills.detailFailed'),
 
       // === TASK-452: enabled/disabled ===
       skillDisabled: t('skills.skillDisabled'),

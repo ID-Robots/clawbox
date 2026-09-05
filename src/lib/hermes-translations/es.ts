@@ -490,6 +490,7 @@ export const es: Record<string, string> = {
   "skills.installUnknownOutcome": "La respuesta del dispositivo era demasiado larga para leerla, así que no se sabe si «{name}» se instaló. Consulte la pestaña Instaladas antes de volver a intentarlo.",
   "skills.uninstallUnknownOutcome": "La respuesta del dispositivo era demasiado larga para leerla, así que no se sabe si «{name}» se eliminó. Consulte la pestaña Instaladas antes de volver a intentarlo.",
   "skills.detailFailed": "No se pudieron cargar los detalles de esta habilidad. Inténtelo de nuevo.",
+  "skills.detailNotFound": "Esta habilidad no está en este dispositivo ni en la tienda de habilidades, así que no hay nada que mostrar.",
   "skills.detailUnavailable": "Hermes no está instalado en este dispositivo, así que los detalles de esta habilidad no se pueden cargar.",
   "skills.detailDocsFailed": "No se pudo cargar la documentación completa de esta habilidad. Los datos de arriba proceden del dispositivo.",
   "skills.skillDisabled": "Desactivada",

@@ -494,6 +494,7 @@ export const de: Record<string, string> = {
   "skills.installUnknownOutcome": "Die Antwort des Geräts war zu lang zum Lesen, daher ist unklar, ob „{name}“ installiert wurde. Prüfen Sie den Tab „Installiert“, bevor Sie es erneut versuchen.",
   "skills.uninstallUnknownOutcome": "Die Antwort des Geräts war zu lang zum Lesen, daher ist unklar, ob „{name}“ entfernt wurde. Prüfen Sie den Tab „Installiert“, bevor Sie es erneut versuchen.",
   "skills.detailFailed": "Die Details dieses Skills konnten nicht geladen werden. Versuchen Sie es erneut.",
+  "skills.detailNotFound": "Diese Fähigkeit ist weder auf diesem Gerät noch im Skill-Store vorhanden, es gibt also nichts anzuzeigen.",
   "skills.detailUnavailable": "Hermes ist auf diesem Gerät nicht installiert, daher können die Details dieses Skills nicht geladen werden.",
   "skills.detailDocsFailed": "Die vollständige Dokumentation dieses Skills konnte nicht geladen werden. Die Angaben oben stammen vom Gerät.",
   "skills.skillDisabled": "Deaktiviert",
