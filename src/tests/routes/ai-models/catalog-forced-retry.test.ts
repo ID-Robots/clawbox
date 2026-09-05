@@ -100,12 +100,16 @@ function settle(): Promise<void> {
 describe("catalog: forcing a retry after a failed enumeration", () => {
   let GET: (req: NextRequest) => Promise<Response>;
 
+  let notifyProviderSetChanged: (p: string | null | undefined) => void;
+
   beforeEach(async () => {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
     fs.mkdirSync(path.join(DATA_DIR, "catalog-cache"), { recursive: true });
     vi.resetModules();
     vi.clearAllMocks();
-    GET = (await import("@/app/setup-api/ai-models/catalog/route")).GET;
+    const mod = await import("@/app/setup-api/ai-models/catalog/route");
+    GET = mod.GET;
+    notifyProviderSetChanged = mod.notifyProviderSetChanged;
   });
 
   async function get(params = ""): Promise<Record<string, unknown>> {
@@ -168,6 +172,37 @@ describe("catalog: forcing a retry after a failed enumeration", () => {
     await get();
     await settle();
     expect(spawnsFor("anthropic")).toBe(afterRetry);
+  });
+
+  it("counts a LIVE list from before a provider-set change as not current", async () => {
+    // The change's own fork is the one that failed. `notifyProviderSetChanged`
+    // cleared the wait and started it; when it fails the wait is back, and the
+    // payload on file is seconds old and stamped live — so age and
+    // `isLivePayload` both say "current" while the generation says otherwise.
+    // Without the generation term the picker sits on the PRE-change list for
+    // the whole window, which is the shape this card is about.
+    mockSpawn.mockImplementation(
+      () => okChild(ANTHROPIC_LIVE) as unknown as ReturnType<typeof childProcess.spawn>,
+    );
+    await get();
+    await settle();
+    const afterWarmup = spawnsFor("anthropic");
+
+    mockSpawn.mockImplementation(
+      () => failingChild() as unknown as ReturnType<typeof childProcess.spawn>,
+    );
+    notifyProviderSetChanged("anthropic");
+    await settle();
+    const afterChange = spawnsFor("anthropic");
+    expect(afterChange).toBe(afterWarmup + 1);
+
+    mockSpawn.mockImplementation(
+      () => okChild(ANTHROPIC_LIVE) as unknown as ReturnType<typeof childProcess.spawn>,
+    );
+    await get();
+    await settle();
+
+    expect(spawnsFor("anthropic")).toBe(afterChange + 1);
   });
 
   it("leaves a provider with a LIVE, CURRENT catalogue alone", async () => {

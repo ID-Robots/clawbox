@@ -1463,7 +1463,15 @@ export async function GET(req: NextRequest) {
     // first time a filter is tightened; the age term is the box that was off
     // for three weeks. In both the client is looking at the curated list.
     refreshInBackground(provider, {
-      clientHasNoCurrentAnswer: !isLivePayload(cached) || servedEmpty || ageMs > REFRESH_INTERVAL_MS,
+      clientHasNoCurrentAnswer: !isLivePayload(cached)
+        || servedEmpty
+        || ageMs > REFRESH_INTERVAL_MS
+        // The box changed after this payload was enumerated, and the fork that
+        // change started has already failed. `notifyProviderSetChanged` cleared
+        // the wait and forked; when that fork fails, the wait is back and every
+        // later request is blocked — so without this term a picker sits on the
+        // PRE-change list, seconds old and live, for the whole window.
+        || !publishedIsCurrent(provider),
     });
   } else if (force) {
     // `?refresh=1` is a NUDGE, not news. The client cannot know the provider
