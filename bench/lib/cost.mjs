@@ -35,6 +35,7 @@ export function ratesFor(pricing, model) {
  * counted in `tokens`).
  */
 export function costOfUsage(byModel, pricing) {
+  /** @type {{ totalUsd: number, byModel: Record<string, { usd: number | null, priced: boolean, tokens: number }>, unpriced: string[], tokens: number }} */
   const out = { totalUsd: 0, byModel: {}, unpriced: [], tokens: 0 };
   if (!byModel || typeof byModel !== "object") return out;
   for (const [model, u] of Object.entries(byModel)) {
