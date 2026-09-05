@@ -28,9 +28,7 @@ const INSTALL_SH = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
 const CAN_RUN =
   process.platform !== "win32"
   && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
-const HAS_ZONEINFO = fs.existsSync("/usr/share/zoneinfo/Europe/Sofia");
 const d = CAN_RUN ? describe : describe.skip;
-const dz = CAN_RUN && HAS_ZONEINFO ? describe : describe.skip;
 
 function extractShellFunction(name: string): string {
   const start = INSTALL_SH.indexOf(`${name}() {`);
@@ -44,6 +42,7 @@ let tmp: string;
 let projectDir: string;
 let tzEnv: string;
 let calls: string;
+let zoneinfo: string;
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-tz-"));
@@ -52,26 +51,45 @@ beforeEach(() => {
   tzEnv = path.join(projectDir, "data", "timezone.env");
   calls = path.join(tmp, "timedatectl-calls");
   fs.writeFileSync(calls, "");
+  // A FIXTURE zoneinfo tree, so the guard assertions run everywhere — the ones
+  // that matter are the privilege-boundary ones, and gating them on the host
+  // having tzdata meant a slim CI image reported green with them never
+  // executed. It carries the non-zone files a real database has, because those
+  // are exactly what the reader must refuse.
+  zoneinfo = path.join(tmp, "zoneinfo");
+  fs.mkdirSync(path.join(zoneinfo, "Europe"), { recursive: true });
+  fs.mkdirSync(path.join(zoneinfo, "posix", "Europe"), { recursive: true });
+  fs.writeFileSync(path.join(zoneinfo, "Europe", "Sofia"), "TZif");
+  fs.writeFileSync(path.join(zoneinfo, "posix", "Europe", "Sofia"), "TZif");
+  fs.writeFileSync(path.join(zoneinfo, "zone.tab"), "# not a zone");
+  fs.writeFileSync(path.join(zoneinfo, "leapseconds"), "# not a zone");
 });
 
 afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-/** What `read_configured_timezone` makes of the file on disk. */
-function readConfigured(contents: string | null): { status: number; value: string } {
+/**
+ * What `read_configured_timezone` makes of the file on disk.
+ *
+ * `code` is the outcome that matters: 0 with a zone, 1 for "nothing recorded"
+ * (a no-op), 2 for "a value was recorded and this device will not take it".
+ */
+function readConfigured(contents: string | null): { code: number; value: string } {
   if (contents !== null) fs.writeFileSync(tzEnv, contents);
   const script = [
-    "set -euo pipefail",
+    "set -uo pipefail",
     `PROJECT_DIR=${JSON.stringify(projectDir)}`,
     extractShellFunction("read_configured_timezone"),
-    'printf "[%s]" "$(read_configured_timezone)"',
+    "out=$(read_configured_timezone); rc=$?",
+    'printf "[%s] rc=%s" "$out" "$rc"',
   ].join("\n");
   const r = spawnSync("bash", ["-c", script], {
     encoding: "utf-8",
-    env: testEnv({ PATH: process.env.PATH ?? "" }),
+    env: testEnv({ PATH: process.env.PATH ?? "", CLAWBOX_ZONEINFO_DIR: zoneinfo }),
   });
-  return { status: r.status ?? -1, value: (r.stdout ?? "").trim() };
+  const out = (r.stdout ?? "").trim();
+  return { code: Number(/rc=(\d+)/.exec(out)?.[1] ?? -1), value: out.replace(/ rc=\d+$/, "") };
 }
 
 /** Drive apply_timezone with `timedatectl` stubbed and logged. */
@@ -98,14 +116,35 @@ function runApply(tz: string, current = "Etc/UTC"): { status: number; out: strin
   };
 }
 
-dz("read_configured_timezone", () => {
+d("read_configured_timezone", () => {
   it("reads an IANA zone the device actually carries", () => {
-    expect(readConfigured("TIMEZONE=Europe/Sofia\n").value).toBe("[Europe/Sofia]");
+    const r = readConfigured("TIMEZONE=Europe/Sofia\n");
+    expect(r.value).toBe("[Europe/Sofia]");
+    expect(r.code).toBe(0);
   });
 
-  it("refuses a zone this device has no data for", () => {
-    // The zoneinfo database on the box is the list — nothing here maintains one.
-    expect(readConfigured("TIMEZONE=Mars/Olympus\n").value).toBe("[]");
+  it("REJECTS — does not ignore — a zone this device has no data for", () => {
+    // The difference is the whole defect: `read` used to answer "nothing
+    // recorded" for a rejected value, `apply_timezone` took its no-op branch,
+    // the unit exited 0, and every layer above reported the change as applied
+    // while the box stayed on Etc/UTC.
+    const r = readConfigured("TIMEZONE=Mars/Olympus\n");
+    expect(r.value).toBe("[]");
+    expect(r.code).toBe(2);
+  });
+
+  it("rejects the case ICU accepts and this filesystem does not", () => {
+    // `europe/sofia` passes Node's case-insensitive ICU in the route. The
+    // route canonicalises for that reason; this side must still refuse it.
+    expect(readConfigured("TIMEZONE=europe/sofia\n").code).toBe(2);
+  });
+
+  it("rejects files in the database that are not zones", () => {
+    for (const bad of ["zone.tab", "leapseconds", "posix/Europe/Sofia", "./Europe/Sofia"]) {
+      const r = readConfigured(`TIMEZONE=${bad}\n`);
+      expect(r.code, bad).toBe(2);
+      expect(r.value, bad).toBe("[]");
+    }
   });
 
   it("never executes what it reads", () => {
@@ -121,13 +160,15 @@ dz("read_configured_timezone", () => {
       "TIMEZONE=Europe/Sofia; rm -rf /\n",
       "TIMEZONE=-Europe/Sofia\n",
     ]) {
-      expect(readConfigured(bad).value, bad).toBe("[]");
+      const r = readConfigured(bad);
+      expect(r.value, bad).toBe("[]");
+      expect(r.code, bad).toBe(2);
     }
   });
 
-  it("answers empty — not an error — when the box has never been told a zone", () => {
+  it("answers 'nothing recorded' — not a rejection — when the box was never told", () => {
     const r = readConfigured(null);
-    expect(r.status).toBe(0);
+    expect(r.code).toBe(1);
     expect(r.value).toBe("[]");
   });
 });
@@ -147,6 +188,27 @@ d("apply_timezone", () => {
     expect(r.calls.some((c) => c.startsWith("set-timezone"))).toBe(false);
   });
 
+  it("keeps timedatectl's own refusal in the warning", () => {
+    // `2>/dev/null` threw away the one line that says why the zone was
+    // refused, leaving a red step with no reason in the journal.
+    const script = [
+      "set -uo pipefail",
+      "is_test_mode() { return 1; }",
+      "timedatectl() {",
+      '  if [ "${1:-}" = "show" ]; then printf \'Etc/UTC\\n\'; return 0; fi',
+      "  echo 'Failed to set time zone: Invalid time zone' >&2; return 1",
+      "}",
+      extractShellFunction("apply_timezone"),
+      'apply_timezone "Europe/Sofia" || true',
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], {
+      encoding: "utf-8",
+      env: testEnv({ PATH: process.env.PATH ?? "" }),
+    });
+
+    expect(`${r.stdout ?? ""}${r.stderr ?? ""}`).toContain("Invalid time zone");
+  });
+
   it("is a no-op, not a failure, when nothing has been recorded", () => {
     // Every update runs the step list; a box whose owner never answered must
     // not end its update on a red line.
@@ -157,12 +219,59 @@ d("apply_timezone", () => {
   });
 });
 
-d("step_set_timezone is wired to the same file the route writes", () => {
-  it("reads data/timezone.env and applies it", () => {
-    const step = extractShellFunction("step_set_timezone");
+d("step_set_timezone", () => {
+  function runStep(contents: string | null): { status: number; out: string; calls: string[] } {
+    if (contents !== null) fs.writeFileSync(tzEnv, contents);
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(projectDir)}`,
+      "is_test_mode() { return 1; }",
+      "timedatectl() {",
+      `  printf '%s\\n' "$*" >> ${JSON.stringify(calls)}`,
+      '  if [ "${1:-}" = "show" ]; then printf \'Etc/UTC\\n\'; return 0; fi',
+      "  return 0",
+      "}",
+      extractShellFunction("read_configured_timezone"),
+      extractShellFunction("apply_timezone"),
+      extractShellFunction("step_set_timezone"),
+      "step_set_timezone",
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], {
+      encoding: "utf-8",
+      env: testEnv({ PATH: process.env.PATH ?? "", CLAWBOX_ZONEINFO_DIR: zoneinfo }),
+    });
+    return {
+      status: r.status ?? -1,
+      out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+      calls: fs.readFileSync(calls, "utf-8").split("\n").filter(Boolean),
+    };
+  }
 
-    expect(step).toContain("apply_timezone");
-    expect(step).toContain("read_configured_timezone");
+  it("applies the recorded zone", () => {
+    const r = runStep("TIMEZONE=Europe/Sofia\n");
+
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain("set-timezone Europe/Sofia");
+  });
+
+  it("is a no-op on a box that was never told a zone", () => {
+    const r = runStep(null);
+
+    expect(r.status).toBe(0);
+    expect(r.calls.some((c) => c.startsWith("set-timezone"))).toBe(false);
+  });
+
+  it("FAILS when a zone was recorded and this device will not take it", () => {
+    // A step that discards its input must not exit 0. This is what let the
+    // route answer `{success:true}` over a box still on Etc/UTC.
+    const r = runStep("TIMEZONE=Mars/Olympus\n");
+
+    expect(r.status).not.toBe(0);
+    expect(r.out).toMatch(/not one this device carries/i);
+    expect(r.calls.some((c) => c.startsWith("set-timezone"))).toBe(false);
+  });
+
+  it("reads the same file the route writes", () => {
     expect(extractShellFunction("read_configured_timezone")).toContain("data/timezone.env");
   });
 });

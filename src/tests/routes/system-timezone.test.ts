@@ -32,12 +32,18 @@ import { patchHermesConfig } from "@/lib/hermes-config-yaml";
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-timezone-tests-${process.pid}-${Date.now()}`);
 const TZ_ENV_PATH = path.join(TEST_ROOT, "data", "timezone.env");
 
-const { getMock, setMock, hasHermesHarnessMock, openclawIsAbsentMock } = vi.hoisted(() => ({
-  getMock: vi.fn(),
-  setMock: vi.fn(),
-  hasHermesHarnessMock: vi.fn(() => false),
-  openclawIsAbsentMock: vi.fn(() => false),
-}));
+const { getMock, setMock, hasHermesHarnessMock, openclawIsAbsentMock, ownerSessionMock, sameOriginMock } =
+  vi.hoisted(() => ({
+    getMock: vi.fn(),
+    setMock: vi.fn(),
+    hasHermesHarnessMock: vi.fn(() => false),
+    openclawIsAbsentMock: vi.fn(() => false),
+    ownerSessionMock: vi.fn(async () => true),
+    sameOriginMock: vi.fn(() => true),
+  }));
+
+vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: ownerSessionMock }));
+vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: sameOriginMock }));
 
 vi.mock("@/lib/root-step-runner", () => ({
   ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
@@ -75,9 +81,26 @@ afterAll(async () => {
   await fs.rm(TEST_ROOT, { recursive: true, force: true });
 });
 
+/** A store where nothing about the timezone has ever been written. */
+function storeEmpty(): void {
+  getMock.mockResolvedValue(undefined);
+}
+
+/** A store recording `tz`, how it got there, and whether the harness took it. */
+function storeHas(tz: string, source: "adopted" | "explicit", applied = true): void {
+  getMock.mockImplementation(async (key: string) => {
+    if (key === "timezone") return tz;
+    if (key === "timezone_source") return source;
+    if (key === "timezone_applied") return applied ? tz : undefined;
+    return undefined;
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
-  getMock.mockResolvedValue(undefined);
+  ownerSessionMock.mockResolvedValue(true);
+  sameOriginMock.mockReturnValue(true);
+  storeEmpty();
   setMock.mockResolvedValue(undefined);
   hasHermesHarnessMock.mockReturnValue(false);
   openclawIsAbsentMock.mockReturnValue(false);
@@ -97,6 +120,17 @@ function post(body: unknown): Request {
     body: JSON.stringify(body),
   });
 }
+
+import { UI_ROOT_STEPS, WEB_ROOT_STEPS } from "@/lib/root-steps";
+
+describe("the privilege the timezone step adds", () => {
+  it("is startable by the web server and NOT by install/run-step", () => {
+    // `install/run-step` gates on UI_ROOT_STEPS and is reachable with the MCP
+    // bearer, so a name on that list is a step the AGENT can start by name.
+    expect(WEB_ROOT_STEPS).toContain("set_timezone");
+    expect(UI_ROOT_STEPS).not.toContain("set_timezone");
+  });
+});
 
 describe("/setup-api/system/timezone", () => {
   it("tells the OpenClaw harness the zone through its own userTimezone key", async () => {
@@ -132,6 +166,23 @@ describe("/setup-api/system/timezone", () => {
     expect(mockConfigSet).not.toHaveBeenCalled();
   });
 
+  it("does not claim a running Hermes agent is already using the new zone", async () => {
+    // Measured read-only on the Hermes box, 2026-09-06: `gateway/run.py:2529`
+    // bridges config.yaml's `timezone` into HERMES_TIMEZONE when the gateway
+    // STARTS, and hermes_time.py caches the resolved zone for the process.
+    hasHermesHarnessMock.mockReturnValue(true);
+    openclawIsAbsentMock.mockReturnValue(true);
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const res = await mod.POST(post({ timezone: "Europe/Sofia" }));
+    const body = await res.json();
+
+    // Pending is not a failure: the write landed, so the answer stays a 200.
+    expect(res.status).toBe(200);
+    expect(body.applied).toBe(true);
+    expect(String(body.warning)).toMatch(/restart/i);
+  });
+
   it("refuses a zone that is not an IANA name", async () => {
     const mod = await import("@/app/setup-api/system/timezone/route");
 
@@ -142,11 +193,19 @@ describe("/setup-api/system/timezone", () => {
     expect(mockStartRootStep).not.toHaveBeenCalled();
   });
 
-  it("adopts the browser's zone only while the box has none of its own", async () => {
-    // The desktop offers the zone on every load. Adoption is a ONE-TIME repair:
-    // a support engineer opening the dashboard from another country must not
-    // retarget a box its owner has already set.
-    getMock.mockResolvedValue("Europe/Sofia");
+  it("does adopt when the box has never been told a zone", async () => {
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const res = await mod.POST(post({ timezone: "America/New_York", adopt: true }));
+    const body = await res.json();
+
+    expect(body.changed).toBe(true);
+    expect(body.timezone).toBe("America/New_York");
+    expect(mockStartRootStep).toHaveBeenCalledWith("set_timezone");
+  });
+
+  it("never lets an offer overwrite a zone a person chose", async () => {
+    storeHas("Europe/Sofia", "explicit");
     const mod = await import("@/app/setup-api/system/timezone/route");
 
     const res = await mod.POST(post({ timezone: "America/New_York", adopt: true }));
@@ -159,16 +218,92 @@ describe("/setup-api/system/timezone", () => {
     expect(mockConfigSet).not.toHaveBeenCalled();
   });
 
-  it("does adopt when the box has never been told a zone", async () => {
-    getMock.mockResolvedValue(undefined);
+  it("re-offers over an ADOPTED zone, so a box that changed hands is not stuck", async () => {
+    // "First browser to open the desktop wins for ever" strands a box QA'd in
+    // one country and used in another: there is no other way to change it.
+    storeHas("Europe/Sofia", "adopted");
     const mod = await import("@/app/setup-api/system/timezone/route");
 
-    const res = await mod.POST(post({ timezone: "America/New_York", adopt: true }));
-    const body = await res.json();
+    const body = await (await mod.POST(post({ timezone: "America/New_York", adopt: true }))).json();
 
     expect(body.changed).toBe(true);
     expect(body.timezone).toBe("America/New_York");
-    expect(mockStartRootStep).toHaveBeenCalledWith("set_timezone");
+  });
+
+  it("costs nothing when the same zone is offered again to a box that took it", async () => {
+    storeHas("Europe/Sofia", "adopted");
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const body = await (await mod.POST(post({ timezone: "Europe/Sofia", adopt: true }))).json();
+
+    expect(body.changed).toBe(false);
+    expect(mockStartRootStep).not.toHaveBeenCalled();
+  });
+
+  it("takes the same zone again when the harness write never landed", async () => {
+    // The false success this pair of keys exists for: `openclaw config set`
+    // wants 10-12 s on a Jetson and can fail while the gateway is still coming
+    // up. If "we were told" alone silenced the offer, that box would answer in
+    // UTC for ever with its own state saying the timezone was adopted.
+    storeHas("Europe/Sofia", "adopted", false);
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const body = await (await mod.POST(post({ timezone: "Europe/Sofia", adopt: true }))).json();
+
+    expect(body.changed).toBe(true);
+    expect(mockConfigSet).toHaveBeenCalled();
+  });
+
+  it("records the zone as APPLIED only after the harness took it", async () => {
+    mockConfigSet.mockRejectedValue(new Error("config set exited 1"));
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    await mod.POST(post({ timezone: "Europe/Sofia" }));
+
+    expect(setMock).toHaveBeenCalledWith("timezone", "Europe/Sofia");
+    expect(setMock).not.toHaveBeenCalledWith("timezone_applied", "Europe/Sofia");
+  });
+
+  it("canonicalises the spelling ICU accepts but the device's zoneinfo will not", async () => {
+    // `europe/sofia` passes ICU (case-insensitive) and fails the root side's
+    // case-sensitive filesystem lookup, which used to discard it in silence.
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const body = await (await mod.POST(post({ timezone: "europe/sofia" }))).json();
+
+    expect(body.timezone).toBe("Europe/Sofia");
+    expect(await fs.readFile(TZ_ENV_PATH, "utf-8")).toContain("TIMEZONE=Europe/Sofia");
+    expect(mockConfigSet).toHaveBeenCalledWith(
+      expect.arrayContaining(["agents.defaults.userTimezone", "Europe/Sofia"]),
+    );
+  });
+
+  it("refuses the agent's bearer and a cross-origin page", async () => {
+    // middleware admits any /setup-api/* request carrying a valid MCP bearer,
+    // so without this the agent could move the box's clock, both harness zones,
+    // OpenClaw's heartbeat active hours and its cron.
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    ownerSessionMock.mockResolvedValue(false);
+    expect((await mod.POST(post({ timezone: "Europe/Sofia" }))).status).toBe(403);
+
+    ownerSessionMock.mockResolvedValue(true);
+    sameOriginMock.mockReturnValue(false);
+    expect((await mod.POST(post({ timezone: "Europe/Sofia" }))).status).toBe(403);
+
+    expect(mockStartRootStep).not.toHaveBeenCalled();
+    expect(mockConfigSet).not.toHaveBeenCalled();
+  });
+
+  it("says the device clock could not be changed when the root step is refused", async () => {
+    mockStartRootStep.mockRejectedValue(new Error("systemctl start failed"));
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const res = await mod.POST(post({ timezone: "Europe/Sofia" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(String(body.warning)).toMatch(/clock|Terminal/i);
   });
 
   it("does not report success when the harness write failed", async () => {
@@ -185,14 +320,31 @@ describe("/setup-api/system/timezone", () => {
     expect(String(body.warning ?? body.error)).toMatch(/assistant|agent|harness/i);
   });
 
-  it("reports what the box currently believes", async () => {
-    getMock.mockResolvedValue("Europe/Sofia");
+  it("reports what the box currently believes, and whether it landed", async () => {
+    storeHas("Europe/Sofia", "adopted");
     const mod = await import("@/app/setup-api/system/timezone/route");
 
     const body = await (await mod.GET()).json();
 
     expect(body.timezone).toBe("Europe/Sofia");
     expect(typeof body.os).toBe("string");
-    expect(body.adopted).toBe(true);
+    expect(body.applied).toBe(true);
+    expect(body.acceptsAdoption).toBe(true);
+  });
+
+  it("tells a browser not to offer over a zone a person chose", async () => {
+    storeHas("Europe/Sofia", "explicit");
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const body = await (await mod.GET()).json();
+
+    expect(body.acceptsAdoption).toBe(false);
+  });
+
+  it("reports a recorded-but-unapplied zone as not applied", async () => {
+    storeHas("Europe/Sofia", "adopted", false);
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    expect((await (await mod.GET()).json()).applied).toBe(false);
   });
 });

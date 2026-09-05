@@ -1893,29 +1893,61 @@ step_set_hostname() {
 # read_untrusted_env_value cannot be reused: its character class deliberately
 # excludes `/`, and every IANA zone but `UTC` contains one. The gate here is
 # therefore its own — the same shape rule as src/lib/timezone.ts's
-# isValidTimeZone (Area/Location over a small alphabet, no `..`, no leading
-# `/`) — and then the ONLY authority worth trusting for "is this a real zone":
-# the zoneinfo database on this device.
+# canonicalTimeZone (Area/Location over a small alphabet, no `..`, no leading
+# `/`, no leading `-` so nothing reaches `timedatectl` as an option) — and then
+# the ONLY authority worth trusting for "is this a real zone": the zoneinfo
+# database on this device. That is not the same authority the route asked:
+# Node's ICU is case-insensitive and may carry a NEWER tzdata than a Jetson
+# image, so `europe/sofia` or `America/Ciudad_Juarez` can pass there and fail
+# here. The route canonicalises for that reason; this side still refuses, and
+# says so.
+#
+# THREE outcomes, not two, because a rejected value and no value at all call for
+# opposite behaviour: exit 0 with the zone, 1 for "nothing recorded" (a no-op),
+# 2 for "a value was recorded and this device will not take it". A step that
+# discards its input must not exit 0.
+#
+# CLAWBOX_ZONEINFO_DIR is a TEST seam only: it is read in a root step whose
+# environment comes from systemd, never from the clawbox-writable tree, so it
+# cannot be used to widen what this accepts on a device.
 read_configured_timezone() {
   local tz_env="$PROJECT_DIR/data/timezone.env" line tz
-  [ -f "$tz_env" ] || return 0
-  [ -L "$tz_env" ] && return 0
-  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TIMEZONE=" "$tz_env" 2>/dev/null)" || return 0
+  local zoneinfo="${CLAWBOX_ZONEINFO_DIR:-/usr/share/zoneinfo}"
+  [ -f "$tz_env" ] || return 1
+  [ -L "$tz_env" ] && return 1
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TIMEZONE=" "$tz_env" 2>/dev/null)" || return 1
   tz="${line#*=}"
   case "$tz" in
     \"*\") tz="${tz#\"}"; tz="${tz%\"}" ;;
     \'*\') tz="${tz#\'}"; tz="${tz%\'}" ;;
   esac
+  [ -n "$tz" ] || return 1
   case "$tz" in
-    ""|/*|-*|*..*|*[!A-Za-z0-9._/+-]*) return 0 ;;
+    /*|-*|*..*|*[!A-Za-z0-9._/+-]*) return 2 ;;
   esac
-  # The device's own database is the list; nothing here maintains one.
-  [ -f "/usr/share/zoneinfo/$tz" ] || return 0
+  # `timedatectl list-timezones` is systemd's OWN list and the exact set
+  # `set-timezone` will accept, so it is asked first and nothing here maintains
+  # a list of its own. The zoneinfo fallback covers a container without systemd
+  # (and is the seam the guard tests drive) — it needs its own exclusions,
+  # because `/usr/share/zoneinfo` is a directory of files rather than a list of
+  # zones: `zone.tab`, `iso3166.tab`, `leapseconds` and `tzdata.zi` are all
+  # regular files and none is a zone, and `posix/` and `right/` are mirror trees
+  # `timedatectl` refuses by name. Letting one through means a step that fails
+  # on every start for anything that can write data/timezone.env.
+  local list
+  if [ -z "${CLAWBOX_ZONEINFO_DIR:-}" ] && list="$(timedatectl list-timezones 2>/dev/null)" && [ -n "$list" ]; then
+    printf '%s\n' "$list" | grep -qxF -- "$tz" || return 2
+  else
+    case "$tz" in
+      *.*|leapseconds|posix/*|right/*) return 2 ;;
+    esac
+    [ -f "$zoneinfo/$tz" ] || return 2
+  fi
   printf '%s' "$tz"
 }
 
 apply_timezone() {
-  local tz="${1:-}"
+  local tz="${1:-}" out
   if [ -z "$tz" ]; then
     # Not an error: a box whose owner has never answered simply keeps the image
     # default, and this step is a no-op rather than a red line in the update.
@@ -1926,7 +1958,9 @@ apply_timezone() {
     echo "  System timezone already $tz"
     return 0
   fi
-  if timedatectl set-timezone "$tz" 2>/dev/null; then
+  # stderr is CAPTURED, not discarded: `timedatectl`'s own refusal is the one
+  # line that says why, and throwing it away leaves a red step with no reason.
+  if out="$(timedatectl set-timezone "$tz" 2>&1)"; then
     echo "  System timezone set to $tz"
     return 0
   fi
@@ -1934,12 +1968,26 @@ apply_timezone() {
     echo "  CLAWBOX_TEST_MODE=1, timedatectl unavailable — skipping"
     return 0
   fi
-  echo "  Warning: timedatectl set-timezone $tz failed" >&2
+  echo "  Warning: timedatectl set-timezone $tz failed: $out" >&2
   return 1
 }
 
 step_set_timezone() {
-  apply_timezone "$(read_configured_timezone)"
+  local tz rc=0
+  tz="$(read_configured_timezone)" || rc=$?
+  case "$rc" in
+    0) apply_timezone "$tz" ;;
+    1) echo "  No timezone recorded, leaving the system zone alone" ;;
+    *)
+      # A value WAS recorded and this device will not take it — a newer zone
+      # name than its tzdata, a spelling its filesystem does not match, or
+      # something that is not a zone at all. Failing loudly is the point: this
+      # used to print "no timezone recorded" and exit 0, so every layer above
+      # reported the change as applied while the box stayed on Etc/UTC.
+      echo "Error: the recorded timezone is not one this device carries — leaving the system zone alone." >&2
+      return 1
+      ;;
+  esac
 }
 
 is_safe_git_ref() {

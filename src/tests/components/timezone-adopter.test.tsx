@@ -23,7 +23,7 @@ function stubBrowserZone(tz: string): void {
   }) as unknown as typeof Intl.DateTimeFormat);
 }
 
-function stubFetch(current: { adopted?: boolean } | "error") {
+function stubFetch(current: { timezone?: string | null; applied?: boolean; acceptsAdoption?: boolean } | "error") {
   const calls: { url: string; init?: RequestInit }[] = [];
   vi.stubGlobal(
     "fetch",
@@ -54,7 +54,7 @@ describe("TimezoneAdopter", () => {
 
   it("offers the browser's zone to a box that has never been told one", async () => {
     stubBrowserZone("Europe/Sofia");
-    const h = stubFetch({ adopted: false });
+    const h = stubFetch({ timezone: null, applied: false, acceptsAdoption: true });
 
     render(<TimezoneAdopter />);
 
@@ -65,11 +65,11 @@ describe("TimezoneAdopter", () => {
     });
   });
 
-  it("leaves a box whose owner has already answered alone", async () => {
-    // A support engineer opening this dashboard from another country must not
-    // retarget the owner's box.
+  it("leaves a zone the owner CHOSE alone", async () => {
+    // An explicit choice is never overwritten by whoever opens the dashboard
+    // next; the server enforces the same rule again.
     stubBrowserZone("America/New_York");
-    const h = stubFetch({ adopted: true });
+    const h = stubFetch({ timezone: "Europe/Sofia", applied: true, acceptsAdoption: false });
 
     render(<TimezoneAdopter />);
 
@@ -77,9 +77,31 @@ describe("TimezoneAdopter", () => {
     expect(h.posts()).toHaveLength(0);
   });
 
+  it("says nothing more when the box already has this zone and it landed", async () => {
+    stubBrowserZone("Europe/Sofia");
+    const h = stubFetch({ timezone: "Europe/Sofia", applied: true, acceptsAdoption: true });
+
+    render(<TimezoneAdopter />);
+
+    await waitFor(() => expect(h.all().length).toBeGreaterThan(0));
+    expect(h.posts()).toHaveLength(0);
+  });
+
+  it("offers again when the zone is recorded but never landed on the harness", async () => {
+    // The false success the applied marker exists for: `openclaw config set`
+    // wants 10-12 s on a Jetson and can fail while the gateway is still coming
+    // up, which is exactly when a first desktop load fires this.
+    stubBrowserZone("Europe/Sofia");
+    const h = stubFetch({ timezone: "Europe/Sofia", applied: false, acceptsAdoption: true });
+
+    render(<TimezoneAdopter />);
+
+    await waitFor(() => expect(h.posts()).toHaveLength(1));
+  });
+
   it("does not stamp 'answered' over a browser that is itself in UTC", async () => {
     stubBrowserZone("UTC");
-    const h = stubFetch({ adopted: false });
+    const h = stubFetch({ timezone: null, applied: false, acceptsAdoption: true });
 
     render(<TimezoneAdopter />);
 
