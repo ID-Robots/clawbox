@@ -34,6 +34,10 @@ beforeEach(() => {
   fs.writeFileSync(path.join(root, "outside.txt"), "not yours\n");
   fs.symlinkSync(path.join(root, "outside.txt"), path.join(project, "escape.txt"));
   fs.symlinkSync(root, path.join(project, "up"));
+  // A link to a folder INSIDE the project: containment would pass, and it
+  // is still not followed — the walk opens folders without following links.
+  fs.symlinkSync(path.join(project, "src"), path.join(project, "alias"));
+  fs.symlinkSync(path.join(project, "README.md"), path.join(project, "readme-link.md"));
 });
 
 afterEach(() => {
@@ -81,7 +85,7 @@ describe("listing", () => {
   });
 
   it("answers 404 alike for .git, a climb, an absolute path, a link that leaves, a file, and nothing there", async () => {
-    for (const bad of [".git", ".git/objects", "../", "..", "/etc", "up", "up/outside.txt", "README.md", "nope", "secrets"]) {
+    for (const bad of [".git", ".git/objects", "../", "..", "/etc", "up", "up/outside.txt", "README.md", "nope", "secrets", "alias"]) {
       const out = await listProjectDir(project, bad);
       expect(out, bad).toEqual({ ok: false, status: 404 });
     }
@@ -110,7 +114,7 @@ describe("reading a file", () => {
   });
 
   it("refuses the project root, a folder, a link out, a protected file, and a climb", async () => {
-    for (const bad of ["", ".", "src", "escape.txt", "up/outside.txt", "secrets/token", "../outside.txt", "/etc/passwd"]) {
+    for (const bad of ["", ".", "src", "escape.txt", "readme-link.md", "up/outside.txt", "secrets/token", "../outside.txt", "/etc/passwd"]) {
       const out = await readProjectFile(project, bad);
       expect(out.ok, bad).toBe(false);
     }

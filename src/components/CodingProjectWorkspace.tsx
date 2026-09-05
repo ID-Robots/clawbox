@@ -184,6 +184,7 @@ function FilesPane({ query }: { query: string }) {
                 <button
                   type="button"
                   role="treeitem"
+                  aria-level={depth + 1}
                   aria-expanded={isDir ? expanded : undefined}
                   aria-selected={current || undefined}
                   onClick={() => (isDir ? toggle(path) : void openFile(path))}

@@ -16,6 +16,7 @@
  * Read-only. A run edits files; the owner reads them.
  */
 
+import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
 import { isProtectedFilePath } from "@/lib/file-guard";
@@ -62,7 +63,7 @@ export const MAX_TREE_FILE_BYTES = 512 * 1024;
 export async function resolveInsideProject(
   projectDir: string,
   rel: string,
-): Promise<{ ok: true; root: string; abs: string; rel: string } | TreeRefusal> {
+): Promise<{ ok: true; root: string; abs: string; lexical: string; rel: string } | TreeRefusal> {
   const cleaned = rel === "" || rel === "." ? "" : safeProjectRelativePath(rel);
   if (cleaned === null) return { ok: false, status: 404 };
   let root: string;
@@ -80,7 +81,10 @@ export async function resolveInsideProject(
     if (realRel.startsWith("..") || path.isAbsolute(realRel)) return { ok: false, status: 404 };
     if (isProtectedFilePath(real)) return { ok: false, status: 404 };
     if (realRel.split(path.sep).some((seg) => SKIPPED_DIRS.has(seg))) return { ok: false, status: 404 };
-    return { ok: true, root, abs: real, rel: cleaned };
+    // `abs` is where the path really points (checked above); `lexical` is the
+    // path as spelled, which the readers open WITHOUT following a link — so a
+    // link planted at the name is refused rather than read through.
+    return { ok: true, root, abs: real, lexical: candidate, rel: cleaned };
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };
@@ -91,15 +95,20 @@ export async function resolveInsideProject(
 export async function listProjectDir(projectDir: string, rel: string): Promise<({ ok: true } & TreeListing) | TreeRefusal> {
   const resolved = await resolveInsideProject(projectDir, rel);
   if (!resolved.ok) return resolved;
-  // Read the folder entry by entry and stop past the cap: a generated
-  // folder with a hundred thousand files must not be allocated whole before
-  // the cap applies — this runs on the appliance itself.
+  // ONE handle for the folder, opened without following a link, and every
+  // read below goes through it (`/proc/self/fd/<n>` names the open directory
+  // itself, whatever the path is swapped for afterwards). A run works in this
+  // folder and could plant a symlink between the check above and the walk;
+  // opened this way, the walk stays on the folder that was checked. Read
+  // entry by entry and stop past the cap: a generated folder with a hundred
+  // thousand files must not be allocated whole — this runs on the appliance.
   const entries: TreeEntry[] = [];
   let truncated = false;
+  let fd: number | null = null;
   try {
-    const stat = await fsp.stat(resolved.abs);
-    if (!stat.isDirectory()) return { ok: false, status: 404 };
-    const dir = await fsp.opendir(resolved.abs);
+    fd = fs.openSync(resolved.lexical, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    const viaFd = `/proc/self/fd/${fd}`;
+    const dir = await fsp.opendir(viaFd);
     try {
       for await (const d of dir) {
         // `isDirectory()`/`isFile()` are both false for a symlink: a link is
@@ -108,13 +117,13 @@ export async function listProjectDir(projectDir: string, rel: string): Promise<(
         const isDir = d.isDirectory();
         if (!isDir && !d.isFile()) continue;
         if (isDir && SKIPPED_DIRS.has(d.name)) continue;
-        const abs = path.join(resolved.abs, d.name);
-        if (isProtectedFilePath(abs)) continue;
+        if (isProtectedFilePath(path.join(resolved.abs, d.name))) continue;
         if (entries.length >= MAX_TREE_ENTRIES) { truncated = true; break; }
         let size: number | null = null;
         let modified: string | null = null;
         try {
-          const s = await fsp.stat(abs);
+          // Through the handle, and never following the entry itself.
+          const s = await fsp.lstat(path.join(viaFd, d.name));
           size = isDir ? null : s.size;
           modified = s.mtime.toISOString();
         } catch {
@@ -128,7 +137,10 @@ export async function listProjectDir(projectDir: string, rel: string): Promise<(
     }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
+    // ENOTDIR is a file, ELOOP a link where a folder was expected: both 404.
     return { ok: false, status: code === "EACCES" || code === "EPERM" ? 403 : 404 };
+  } finally {
+    if (fd !== null) { try { fs.closeSync(fd); } catch { /* already closed */ } }
   }
   entries.sort((a, b) => (a.type !== b.type ? (a.type === "directory" ? -1 : 1) : a.name.localeCompare(b.name)));
   return { ok: true, path: resolved.rel, entries, truncated };
@@ -142,9 +154,10 @@ export async function readProjectFile(projectDir: string, rel: string): Promise<
   if (!resolved.rel) return { ok: false, status: 404 };
   let handle: fsp.FileHandle | null = null;
   try {
-    // One open handle, stat'ed and read through it: never stat-then-open, so
-    // the file that is read is the file that was checked.
-    handle = await fsp.open(resolved.abs, "r");
+    // One open handle, opened without following a link and stat'ed and read
+    // through it: never stat-then-open, so the file that is read is the file
+    // that was checked, and a link planted in its place is refused.
+    handle = await fsp.open(resolved.lexical, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     const stat = await handle.stat();
     if (!stat.isFile()) return { ok: false, status: 404 };
     const want = Math.min(stat.size, MAX_TREE_FILE_BYTES);
