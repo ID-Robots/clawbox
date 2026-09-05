@@ -525,3 +525,8 @@ http.Server.prototype.listen = function (...args) {
 };
 
 require("./.next/standalone/server.js");
+
+// After Next has started: the title Next gave this process is ours again
+// (scripts/process-title.js says why — a run's `pkill -f next-server` took
+// the box down on 2026-09-05).
+require("./scripts/process-title.js").guardProcessTitle();
