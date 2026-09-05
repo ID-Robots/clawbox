@@ -240,6 +240,14 @@ export interface TelegramBotsInUse {
  * trade — the mirror is the only trace left of a bot whose harness store cannot
  * be read, and the cost of being wrong the other way is the household's own
  * Telegram chat going deaf — but it is a trade, not a free check.
+ *
+ * The mirror is also read FORGIVINGLY, where /setup-api/telegram/configure now
+ * refuses on the same fault. Deliberately, and it is not reachable as a
+ * collision: a mirror this box cannot read can only name a bot that is polled
+ * if some harness store holds it too, and a harness store that holds it either
+ * answered (its id is in the set already) or could not be read — which has
+ * already made `known` false. Refusing here as well would 503 the approvals
+ * save on a fault that cannot change the answer.
  */
 export async function readTelegramBotsInUse(): Promise<TelegramBotsInUse> {
   const [openclaw, hermes, mirror] = await Promise.all([

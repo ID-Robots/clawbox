@@ -3321,8 +3321,12 @@ fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
 const tmp = `${cfgPath}.tmp`;
 fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
 fs.renameSync(tmp, cfgPath);
+process.stderr.write(
+  existingToken
+    ? "  Telegram channel registered (kept the bot OpenClaw already holds)\n"
+    : "  Telegram channel registered from ClawBox's saved token\n",
+);
 NODE
-      echo "  Telegram channel registered"
     fi
   fi
 

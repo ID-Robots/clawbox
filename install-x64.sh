@@ -727,7 +727,9 @@ try {
     // it does not restore an older bot over one `openclaw config set` re-pointed.
     const existingToken=typeof rest.botToken==='string'?rest.botToken.trim():'';
     c.channels.telegram={...rest,enabled:true,botToken:existingToken||cb.telegram_bot_token};
-    process.stderr.write('  Telegram channel registered in OpenClaw config\n');
+    process.stderr.write(existingToken
+      ? '  Telegram channel registered in OpenClaw config (kept the bot OpenClaw already holds)\n'
+      : "  Telegram channel registered in OpenClaw config from ClawBox's saved token\n");
   }
 } catch {}
 
