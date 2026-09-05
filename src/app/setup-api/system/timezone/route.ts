@@ -126,15 +126,31 @@ export async function POST(request: Request) {
   // read_configured_timezone re-validates the value on the root side against
   // this device's own zoneinfo database. TASK-445.
   //
+  // WRITTEN TO A TEMP FILE AND RENAMED, never opened in place. The same actor
+  // that can write this file can replace it, and `open()` is the wrong verb for
+  // every shape it might have been replaced with: on a FIFO it blocks for ever
+  // — no timeout on this path, a libuv slot gone, and TimezoneAdopter fires
+  // this route on every desktop load — and through a symlink it follows the
+  // link, truncates whatever it points at and leaves the link in place.
+  // `rename` replaces the node without opening it, is atomic against the root
+  // reader, and heals the path so the next request is a normal one. `wx` on the
+  // temp refuses to follow or reuse anything already sitting there, and a fresh
+  // file is what makes `mode` apply at all (it is ignored when the destination
+  // exists — see the same reasoning in src/lib/config-store.ts).
+  //
   // A read-only, full or otherwise refusing `data/` used to escape as a bare
   // 500 with no shape and no log line. Nothing has been recorded and no root
   // step has run yet at this point, so the honest answer is that the zone was
   // not saved — and returning here keeps it that way.
   const envPath = timezoneEnvPath();
+  const tmpPath = `${envPath}.tmp`;
   try {
     await fs.mkdir(path.dirname(envPath), { recursive: true });
-    await fs.writeFile(envPath, `TIMEZONE=${tz}\n`, { mode: 0o600 });
+    await fs.rm(tmpPath, { force: true });
+    await fs.writeFile(tmpPath, `TIMEZONE=${tz}\n`, { mode: 0o600, flag: "wx" });
+    await fs.rename(tmpPath, envPath);
   } catch (err) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
     console.error("[timezone] Failed to write the timezone env file:", err);
     return NextResponse.json(
       { error: "The timezone could not be saved on this device." },

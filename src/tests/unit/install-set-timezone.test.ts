@@ -166,32 +166,31 @@ d("read_configured_timezone", () => {
     }
   });
 
-  it("REJECTS a symlinked timezone.env instead of calling it silence", () => {
-    // `data/` is clawbox-writable and this reader runs as ROOT. A link planted
-    // where the route writes a plain file is tampering, and answering 1
-    // ("nothing recorded") made step_set_timezone exit 0 over it — the
-    // false-success shape the three-outcome contract exists to remove. The
-    // symlink is refused BEFORE the file is read either way; what changes is
-    // that the refusal is now loud.
+  it("REJECTS anything that is not the plain file the route writes", () => {
+    // `data/` is clawbox-writable and this reader runs as ROOT. `[ -f ]`
+    // FOLLOWS a symlink and is false for a directory, a FIFO and a socket, so
+    // every one of these answered 1 ("nothing recorded") — the one outcome
+    // step_set_timezone treats as a legitimate no-op and exits 0 on. A planted
+    // node is tampering, not silence.
     const target = path.join(tmp, "elsewhere.env");
     fs.writeFileSync(target, "TIMEZONE=Europe/Sofia\n");
-    fs.symlinkSync(target, tzEnv);
+    const shapes: [string, () => void][] = [
+      ["symlink to a real file", () => fs.symlinkSync(target, tzEnv)],
+      ["dangling symlink", () => fs.symlinkSync(path.join(tmp, "never-created.env"), tzEnv)],
+      ["directory", () => fs.mkdirSync(tzEnv)],
+      ["FIFO", () => spawnSync("mkfifo", [tzEnv])],
+    ];
 
-    const r = readConfigured(null);
+    for (const [name, plant] of shapes) {
+      fs.rmSync(tzEnv, { recursive: true, force: true });
+      plant();
+      // A FIFO is the one that would otherwise HANG: `grep` on it blocks until
+      // a writer appears, so the guard has to refuse before the read.
+      const r = readConfigured(null);
 
-    expect(r.code).toBe(2);
-    expect(r.value).toBe("[]");
-  });
-
-  it("REJECTS a dangling symlink rather than reading it as an untold box", () => {
-    // The dangling shape reached the missing-file check first and returned 1,
-    // so it was indistinguishable from a box whose owner never answered.
-    fs.symlinkSync(path.join(tmp, "never-created.env"), tzEnv);
-
-    const r = readConfigured(null);
-
-    expect(r.code).toBe(2);
-    expect(r.value).toBe("[]");
+      expect(r.code, name).toBe(3);
+      expect(r.value, name).toBe("[]");
+    }
   });
 
   it("answers 'nothing recorded' — not a rejection — when the box was never told", () => {
@@ -299,10 +298,12 @@ d("step_set_timezone", () => {
     expect(r.calls.some((c) => c.startsWith("set-timezone"))).toBe(false);
   });
 
-  it("FAILS on a symlinked timezone.env instead of reporting a quiet no-op", () => {
-    // The step's own half of the same defect: outcome 2 must reach the `*)`
-    // branch, not the `1)` no-op, or the unit exits 0 and the route reports
-    // the OS zone as changed over a box still on Etc/UTC.
+  it("FAILS on a planted timezone.env, and says so in its own words", () => {
+    // The step's own half of the same defect: the file-shape outcome must not
+    // reach the `1)` no-op, or the unit exits 0 and the route reports the OS
+    // zone as changed over a box still on Etc/UTC. It must also not borrow the
+    // rejected-zone sentence: the remedy is `rm data/timezone.env`, not a
+    // different zone name.
     const target = path.join(tmp, "elsewhere.env");
     fs.writeFileSync(target, "TIMEZONE=Europe/Sofia\n");
     fs.symlinkSync(target, tzEnv);
@@ -310,7 +311,8 @@ d("step_set_timezone", () => {
     const r = runStep(null);
 
     expect(r.status).not.toBe(0);
-    expect(r.out).toMatch(/not one this device carries/i);
+    expect(r.out).toMatch(/not the plain file the timezone route writes/i);
+    expect(r.out).not.toMatch(/not one this device carries/i);
     expect(r.calls.some((c) => c.startsWith("set-timezone"))).toBe(false);
   });
 

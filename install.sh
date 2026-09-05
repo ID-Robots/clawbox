@@ -1902,10 +1902,13 @@ step_set_hostname() {
 # here. The route canonicalises for that reason; this side still refuses, and
 # says so.
 #
-# THREE outcomes, not two, because a rejected value and no value at all call for
-# opposite behaviour: exit 0 with the zone, 1 for "nothing recorded" (a no-op),
-# 2 for "a value was recorded and this device will not take it". A step that
-# discards its input must not exit 0.
+# FOUR outcomes, not two, because "no value", "a value this device refuses" and
+# "the file is not the one the route writes" call for different behaviour and
+# different remedies: 0 with the zone, 1 for "nothing recorded" (a genuine
+# no-op), 2 for "a value was recorded and this device will not take it", 3 for
+# "data/timezone.env is not the plain file the route writes". A step that
+# discards its input must not exit 0, and an operator reading the journal must
+# be able to tell `rm data/timezone.env` from "pick a zone this tzdata has".
 #
 # CLAWBOX_ZONEINFO_DIR is a TEST seam only: it is read in a root step whose
 # environment comes from systemd, never from the clawbox-writable tree, so it
@@ -1913,13 +1916,17 @@ step_set_hostname() {
 read_configured_timezone() {
   local tz_env="$PROJECT_DIR/data/timezone.env" line tz
   local zoneinfo="${CLAWBOX_ZONEINFO_DIR:-/usr/share/zoneinfo}"
-  # SYMLINK first, and loudly. `[ -f ]` follows the link, so a link to a real
-  # file passed that test and only then hit the `-L` check; a dangling one
-  # failed `-f` outright. Both answered 1 — "nothing recorded" — which is the
-  # one outcome step_set_timezone treats as a legitimate no-op and exits 0 on.
-  # data/ is clawbox-writable and this runs as root: a link planted where the
-  # route writes a plain file is tampering, not silence.
-  [ -L "$tz_env" ] && return 2
+  # NOT A PLAIN FILE, first and loudly. `[ -f ]` FOLLOWS a symlink and is false
+  # for a directory, a FIFO, a socket and a device node, so the old order let
+  # every one of those shapes answer 1 — "nothing recorded", the one outcome
+  # step_set_timezone treats as a legitimate no-op and exits 0 on. data/ is
+  # clawbox-writable and this runs as ROOT: anything but the plain file the
+  # route writes is tampering, not silence. A FIFO matters twice over — the
+  # `grep` below would block on it for ever.
+  if [ -L "$tz_env" ] || { [ -e "$tz_env" ] && [ ! -f "$tz_env" ]; }; then
+    echo "Error: $tz_env is not the plain file the timezone route writes — refusing to read it." >&2
+    return 3
+  fi
   [ -f "$tz_env" ] || return 1
   line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TIMEZONE=" "$tz_env" 2>/dev/null)" || return 1
   tz="${line#*=}"
@@ -1984,15 +1991,20 @@ step_set_timezone() {
   case "$rc" in
     0) apply_timezone "$tz" ;;
     1) echo "  No timezone recorded, leaving the system zone alone" ;;
+    3)
+      # The file itself is wrong — a symlink, a directory, a FIFO. The reader
+      # has already said which path; the remedy is to remove it, which is a
+      # different action from the one below, so it gets its own line.
+      echo "Error: the timezone file was refused — leaving the system zone alone." >&2
+      return 1
+      ;;
     *)
       # A value WAS recorded and this device will not take it — a newer zone
-      # name than its tzdata, a spelling its filesystem does not match,
-      # something that is not a zone at all, or a symlink standing where the
-      # route writes a plain file. Failing loudly is the point: this used to
-      # print "no timezone recorded" and exit 0, so every layer above reported
-      # the change as applied while the box stayed on Etc/UTC.
-      echo "Error: data/timezone.env is not a plain file, or its zone is not one this device carries." >&2
-      echo "       Leaving the system zone alone." >&2
+      # name than its tzdata, a spelling its filesystem does not match, or
+      # something that is not a zone at all. Failing loudly is the point: this
+      # used to print "no timezone recorded" and exit 0, so every layer above
+      # reported the change as applied while the box stayed on Etc/UTC.
+      echo "Error: the recorded timezone is not one this device carries — leaving the system zone alone." >&2
       return 1
       ;;
   esac

@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { spawnSync } from "child_process";
 import { startRootStep } from "@/lib/root-step-runner";
 import { runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { patchHermesConfig } from "@/lib/hermes-config-yaml";
@@ -28,6 +29,12 @@ import { patchHermesConfig } from "@/lib/hermes-config-yaml";
  * "Current time, date, timezone → use terminal (e.g. `date`)"
  * (`agent/prompt_builder.py:499`), and the Terminal app is the owner's too.
  */
+
+// One real `mkfifo` runs here (the planted-node case below): vitest's 5 s test
+// and 10 s hook defaults are not enough for a file that starts a process on a
+// loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts, which
+// fails this file without the declaration.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-timezone-tests-${process.pid}-${Date.now()}`);
 const TZ_ENV_PATH = path.join(TEST_ROOT, "data", "timezone.env");
@@ -227,6 +234,49 @@ describe("/setup-api/system/timezone", () => {
       expect(mockStartRootStep).not.toHaveBeenCalled();
       expect(mockConfigSet).not.toHaveBeenCalled();
       expect(setMock).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(TZ_ENV_PATH, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces a planted node at timezone.env instead of opening it", async () => {
+    // The same actor that can write this file can replace it. `writeFile`
+    // FOLLOWS a symlink — truncating whatever it points at and leaving the link
+    // for the next request — and on a FIFO it blocks in open(2) for ever, with
+    // no timeout on a route TimezoneAdopter fires on every desktop load.
+    const target = path.join(TEST_ROOT, "data", "collateral.txt");
+    await fs.writeFile(target, "not the timezone\n");
+    const plants: [string, () => Promise<void>][] = [
+      ["symlink", async () => { await fs.symlink(target, TZ_ENV_PATH); }],
+      ["FIFO", async () => { spawnSync("mkfifo", [TZ_ENV_PATH]); }],
+    ];
+
+    for (const [name, plant] of plants) {
+      await fs.rm(TZ_ENV_PATH, { force: true });
+      await plant();
+      vi.resetModules();
+      const mod = await import("@/app/setup-api/system/timezone/route");
+
+      const res = await mod.POST(post({ timezone: "Europe/Sofia" }));
+
+      expect(res.status, name).toBe(200);
+      const stat = await fs.lstat(TZ_ENV_PATH);
+      expect(stat.isFile(), name).toBe(true);
+      expect(stat.isSymbolicLink(), name).toBe(false);
+      expect(await fs.readFile(TZ_ENV_PATH, "utf-8")).toContain("TIMEZONE=Europe/Sofia");
+      expect(await fs.readFile(target, "utf-8"), name).toBe("not the timezone\n");
+    }
+    await fs.rm(target, { force: true });
+  });
+
+  it("leaves no temp file behind when the write cannot land", async () => {
+    await fs.rm(TZ_ENV_PATH, { force: true });
+    await fs.mkdir(TZ_ENV_PATH, { recursive: true });
+    try {
+      const mod = await import("@/app/setup-api/system/timezone/route");
+
+      expect((await mod.POST(post({ timezone: "Europe/Sofia" }))).status).toBe(500);
+      await expect(fs.stat(`${TZ_ENV_PATH}.tmp`)).rejects.toThrow();
     } finally {
       await fs.rm(TZ_ENV_PATH, { recursive: true, force: true });
     }

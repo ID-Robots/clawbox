@@ -69,8 +69,11 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   // unreachability: install.sh's `read_configured_timezone` parses that file
   // (never sources it), refuses traversal, absolute paths, option injection and
   // shell metacharacters, and then requires the name to be one systemd's own
-  // `timedatectl list-timezones` carries. The worst outcome is a wrong clock,
-  // which the owner can see and change.
+  // `timedatectl list-timezones` carries — and it refuses the file outright if
+  // it is not the plain file the route writes. The worst outcome is a wrong
+  // clock: the value gate bounds what can reach `timedatectl`, and this API's
+  // GET reports the live `/etc/localtime` rather than the recorded value, so a
+  // wrong one is visible instead of silent.
   //
   // Off UI_ROOT_STEPS, like set_hostname, so `install/run-step` — the endpoint
   // the agent's bearer reaches with a step NAME — cannot start it. TASK-514.
