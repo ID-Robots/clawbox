@@ -3321,24 +3321,34 @@ const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
 // the mirror as a botToken BESIDE that reference restores an older bot under a
 // re-pointed one exactly as overwriting botToken did.
 const existingToken = typeof rest.botToken === "string" ? rest.botToken.trim() : "";
-const openclawHasBot = existingToken !== "" || rest.token !== undefined;
+// `token: null` and `token: ""` are an UNSET reference, not a credential: the
+// control UI and `openclaw config set --json` both write null for a cleared
+// value. Counting them as a bot made the installer skip the restore on the one
+// path this block exists for - a factory reset, where ClawBox's mirror is the
+// only surviving copy - and print that it kept a bot, leaving the channel
+// enabled with nothing behind it for the gateway to poll.
+const openclawHasBot =
+  existingToken !== "" || (rest.token !== undefined && rest.token !== null && rest.token !== "");
 cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
 // `rename` replaces the INODE, so the temp file's mode is the one that
 // survives. openclaw.json holds channels.telegram.botToken and the gateway's
 // auth token and is 0600 on a box; the service user's umask is 0002, so a plain
-// writeFileSync left it 0664 — world-readable, silently. chmod the temp as well
-// as passing `mode`, since `mode` is ignored for a file that already exists
-// (a stale .tmp from a crashed run).
-let cfgMode = 0o600;
-try {
-  cfgMode = fs.statSync(cfgPath).mode & 0o777;
-} catch (err) {
-  if (!err || err.code !== "ENOENT") throw err;
-}
+// writeFileSync left it 0664 — world-readable, silently, on every install and
+// every update. 0600 unconditionally rather than the mode it happens to have,
+// so a box already sitting at that 0664 is repaired instead of preserved; this
+// is also what OpenClaw's own CLI created the file with, and what
+// src/lib/openclaw-config.ts writeConfig now forces on the same file. The stale
+// temp is removed first and chmod'ed after, because `mode` is ignored for a
+// file that already exists (a .tmp from a crashed run).
 const tmp = `${cfgPath}.tmp`;
-fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: cfgMode });
-fs.chmodSync(tmp, cfgMode);
+fs.rmSync(tmp, { force: true });
+fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+try {
+  fs.chmodSync(tmp, 0o600);
+} catch {
+  // best-effort; a failed chmod must not fail the install
+}
 fs.renameSync(tmp, cfgPath);
 process.stderr.write(
   openclawHasBot

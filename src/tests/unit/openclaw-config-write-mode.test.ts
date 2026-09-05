@@ -42,13 +42,18 @@ describe("writeConfig and the mode of openclaw.json", () => {
     expect(modeOf(lib.CONFIG_PATH)).toBe("600");
   });
 
-  it("keeps a mode an operator chose deliberately", async () => {
-    fs.writeFileSync(lib.CONFIG_PATH, "{}", { mode: 0o640 });
-    fs.chmodSync(lib.CONFIG_PATH, 0o640);
+  // The reason it is 0600 unconditionally rather than the mode the file has:
+  // every box that already took an update is sitting at the 0664 this defect
+  // left, and nothing on the device chmods this file - so preserving what the
+  // defect widened would leave its own victims the only boxes the fix never
+  // reaches.
+  it("re-secures a config file an older build left group- and world-readable", async () => {
+    fs.writeFileSync(lib.CONFIG_PATH, "{}", { mode: 0o664 });
+    fs.chmodSync(lib.CONFIG_PATH, 0o664);
 
     await lib.writeConfig({} as never);
 
-    expect(modeOf(lib.CONFIG_PATH)).toBe("640");
+    expect(modeOf(lib.CONFIG_PATH)).toBe("600");
   });
 
   it("creates a config file this box has never had at 0600", async () => {

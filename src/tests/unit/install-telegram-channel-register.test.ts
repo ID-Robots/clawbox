@@ -123,10 +123,31 @@ describe("install.sh registers the Telegram channel without clobbering the harne
   // lands. openclaw.json is 0600 on a box and the service user's umask is 0002,
   // so a plain writeFileSync left the file holding the bot token and the
   // gateway's auth token at 0664, on every install and every update.
-  it("keeps the mode of the config file it replaces", () => {
+  // `token: null` is what the control UI and `openclaw config set --json` write
+  // for a CLEARED reference. Read as "OpenClaw holds a bot" it made the
+  // installer skip the restore on a factory-reset box - where ClawBox's mirror
+  // is the only surviving copy of the token - and report that it kept one,
+  // leaving the channel enabled with nothing behind it to poll.
+  it.each([
+    ["null", null],
+    ["an empty string", ""],
+  ])("fills the channel when the env reference is unset as %s", (_name, token) => {
     const cfg = path.join(dir, "openclaw.json");
-    fs.writeFileSync(cfg, JSON.stringify({ channels: {} }), { mode: 0o600 });
-    fs.chmodSync(cfg, 0o600);
+    fs.writeFileSync(cfg, JSON.stringify({ channels: { telegram: { enabled: true, token } } }), "utf-8");
+
+    runInstallSh({ TG_TOKEN: MIRRORED_BOT, CFG: cfg });
+
+    expect(JSON.parse(fs.readFileSync(cfg, "utf-8")).channels.telegram).toEqual({
+      enabled: true,
+      token,
+      botToken: MIRRORED_BOT,
+    });
+  });
+
+  it("re-secures a config file an older build left group- and world-readable", () => {
+    const cfg = path.join(dir, "openclaw.json");
+    fs.writeFileSync(cfg, JSON.stringify({ channels: {} }), { mode: 0o664 });
+    fs.chmodSync(cfg, 0o664);
 
     runInstallSh({ TG_TOKEN: MIRRORED_BOT, CFG: cfg });
 
@@ -173,6 +194,21 @@ describe("install-x64.sh registers the Telegram channel the same way", () => {
     expect(JSON.parse(fs.readFileSync(openclawPath, "utf-8")).channels.telegram).toEqual({
       enabled: true,
       botToken: NATIVE_BOT,
+    });
+  });
+
+  it("fills the channel when the env reference is unset as null", () => {
+    const { openclawPath, clawboxPath } = write(
+      { channels: { telegram: { enabled: true, token: null } } },
+      { telegram_bot_token: MIRRORED_BOT },
+    );
+
+    runInstallX64({ OPENCLAW_CONFIG: openclawPath, CLAWBOX_CONFIG: clawboxPath });
+
+    expect(JSON.parse(fs.readFileSync(openclawPath, "utf-8")).channels.telegram).toEqual({
+      enabled: true,
+      token: null,
+      botToken: MIRRORED_BOT,
     });
   });
 

@@ -25,7 +25,8 @@
  * that the leaf it wants is a scalar first (see `localCatalogueState` in
  * hermes-local-ai.ts for the read that does it).
  * Anything else on the path it is asked to touch — flow style, block scalars,
- * sequences, quoted or duplicate keys, tab indentation, multi-document files —
+ * sequences, quoted or duplicate keys, tab indentation, multi-document files,
+ * or a quoted value carrying an escape PyYAML itself raises on —
  * raises {@link YamlEditUnsupported} rather than guessing. Callers are expected
  * to fall back to the Hermes CLI on that signal: losing the comments is bad,
  * corrupting the config is worse.
@@ -236,6 +237,16 @@ export function formatYamlScalar(value: string): string {
  * YAML 1.2's double-quoted escapes, exactly as PyYAML's `ESCAPE_REPLACEMENTS`
  * resolves them — PyYAML being what Hermes' own env bridge loads config.yaml
  * with, so it decides what the gateway ends up polling.
+ *
+ * HARNESS FIRST, and the reason it is a port rather than a call: the box ships
+ * the authoritative resolver (python3 + PyYAML, the very library the bridge
+ * imports), and asking it would be the native mechanism. It is not used because
+ * this reader must never throw and is on an authenticated 3-second poll — a
+ * python spawn per read, on a Jetson, for a value that is one line of a file
+ * this module already has open. The tables below are therefore checked against
+ * the box's own `yaml.scanner.Scanner.ESCAPE_REPLACEMENTS` / `ESCAPE_CODES`
+ * rather than written from the spec, and the unit suite asserts the value
+ * PyYAML returns for each one.
  */
 const DOUBLE_QUOTED_ESCAPES: Record<string, string> = {
   "0": "\0",
@@ -402,11 +413,14 @@ const OPAQUE_VALUE_RE = /^[|>!&*{[]/;
 /**
  * Any `key:` line, whatever its depth: indent in `[1]`, inline value in `[2]`.
  *
- * The colon has to be followed by a space, a tab or the end of the line, which
- * is PyYAML's `check_value` in block context: `KEY:111111:AAH` opens no mapping
- * at all, it is a plain scalar document.
+ * The colon has to be followed by a SPACE or the end of the line, which is
+ * PyYAML's `check_value` in block context: `KEY:111111:AAH` opens no mapping at
+ * all, it is a plain scalar document. A tab there is not a separator either —
+ * PyYAML raises on `KEY:<TAB>value` and on `KEY<TAB>: value`, both measured on
+ * 6.0.1 and on the 5.4.1 the Hermes box ships — so a line spelled that way is
+ * not a mapping entry this reader may answer a bot out of.
  */
-const ANY_KEY_RE = /^([ \t]*)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)[ \t]*:(?:[ \t](.*))?$/;
+const ANY_KEY_RE = /^( *)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?) *:(?: (.*))?$/;
 
 /**
  * The file's lines, minus the CONTINUATION lines of a multi-line quoted value.
@@ -419,20 +433,36 @@ const ANY_KEY_RE = /^([ \t]*)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)[ \t]*:(?:[ \t](
  * root mapping's own indent below itself and made the real key line "somebody
  * else's".
  *
- * `unterminated` is true when a quote is still open at the end of the file.
- * Everything from it on is text PyYAML never gets to parse — it raises on the
- * whole document — so the lines beyond it are not evidence of anything, and
- * swallowing the key line among them would be a confident "no bot" invented out
- * of a missing quote. The caller degrades instead.
+ * A BLOCK scalar's content is skipped the same way and for a stronger reason:
+ * it is TEXT, not YAML, so a quote or an apostrophe in it opens nothing. A
+ * persona, a system prompt or a pasted command in a `|` block routinely carries
+ * one — `path: 'C:/tmp`, or `# don't edit this file` — and reading it as an
+ * opener swallowed the real key line after it (a confident "no bot"), or left a
+ * quote open to the end of the file (a permanent "we could not look"). PyYAML
+ * loads both of those documents without complaint.
  *
- * KNOWN LIMIT: only a `key: "…` line is recognised as opening one, which is the
- * shape a mapping value takes; a sequence item that opens a multi-line scalar
- * is not tracked.
+ * `unterminated` is true when a quote is still open at the end of the file,
+ * which after the above can only be a genuine FLOW scalar — and PyYAML does
+ * raise on the whole document there, so the lines beyond it are not evidence of
+ * anything and swallowing the key line among them would be a confident "no bot"
+ * invented out of a missing quote. The caller degrades instead.
+ *
+ * KNOWN LIMIT: only a `key: "…` line is recognised as opening a flow scalar,
+ * which is the shape a mapping value takes. A sequence item that opens one is
+ * not tracked, and neither is a flow scalar closed by a later line this reader
+ * did not know was inside it.
  */
 function documentLines(lines: string[]): { lines: string[]; unterminated: boolean } {
   const kept: string[] = [];
   let open: '"' | "'" | null = null;
+  let blockIndent: number | null = null;
   for (const raw of lines) {
+    if (blockIndent !== null) {
+      // Content of the block scalar above: everything indented deeper than the
+      // key that opened it, blank lines included.
+      if (isBlank(raw) || indentOf(raw) > blockIndent) continue;
+      blockIndent = null;
+    }
     if (open !== null) {
       if (closingQuoteIndex(raw, 0, open) !== -1) open = null;
       continue;
@@ -441,6 +471,10 @@ function documentLines(lines: string[]): { lines: string[]; unterminated: boolea
     const m = ANY_KEY_RE.exec(raw);
     if (!m) continue;
     const value = (m[2] ?? "").trim();
+    if (/^[|>]/.test(value)) {
+      blockIndent = m[1].length;
+      continue;
+    }
     const quote = value[0];
     if ((quote === '"' || quote === "'") && closingQuoteIndex(value, 1, quote) === -1) {
       open = quote;
@@ -520,9 +554,10 @@ function readInlineScalar(inline: string): TopLevelScalar {
  */
 export function getTopLevelScalar(text: string, key: string): TopLevelScalar {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // A space, a tab or the end of the line after the colon, exactly as
-  // ANY_KEY_RE and as PyYAML's block-context `check_value`.
-  const line = new RegExp(`^([ \\t]*)(?:"${escaped}"|'${escaped}'|${escaped})[ \\t]*:(?:[ \\t](.*))?$`);
+  // A space or the end of the line after the colon, exactly as ANY_KEY_RE and
+  // as PyYAML's block-context `check_value`; a tab on either side of the colon
+  // makes PyYAML raise on the whole document, so it is not a key line here.
+  const line = new RegExp(`^( *)(?:"${escaped}"|'${escaped}'|${escaped}) *:(?: (.*))?$`);
   const { lines, unterminated } = documentLines(text.split(/\r\n|\r|\n/));
   // A quote that never closes swallows every line after it, and this key's own
   // line may be one of them — "we could not look", never "there is no bot".

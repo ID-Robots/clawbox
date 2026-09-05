@@ -728,7 +728,9 @@ try {
     // An env REFERENCE under `token` ({source:'env',…}) is a bot OpenClaw holds
     // too — see the same block in install.sh.
     const existingToken=typeof rest.botToken==='string'?rest.botToken.trim():'';
-    const openclawHasBot=existingToken!==''||rest.token!==undefined;
+    // `token: null`/`token: ""` is an UNSET reference, not a credential - see
+    // the same block in install.sh.
+    const openclawHasBot=existingToken!==''||(rest.token!==undefined&&rest.token!==null&&rest.token!=='');
     c.channels.telegram=openclawHasBot?{...rest,enabled:true}:{...rest,enabled:true,botToken:cb.telegram_bot_token};
     process.stderr.write(openclawHasBot
       ? '  Telegram channel registered in OpenClaw config (kept the bot OpenClaw already holds)\n'
@@ -770,6 +772,11 @@ if(!c.gateway.controlUi)c.gateway.controlUi={};
 c.gateway.controlUi.allowInsecureAuth=true;
 c.gateway.controlUi.dangerouslyDisableDeviceAuth=true;
 
+// In PLACE, deliberately: no temp file and no rename, so the inode and its
+// mode survive the write. install.sh's block replaces the inode and has to
+// force 0600 for that reason; this one must not grow a temp-then-rename
+// without the same chmod, or it will silently widen a 0600 credential file
+// to the umask. The block only runs when openclaw.json already exists.
 fs.writeFileSync(cfgPath,JSON.stringify(c,null,2));
 NODE
     echo "  OpenClaw config updated"

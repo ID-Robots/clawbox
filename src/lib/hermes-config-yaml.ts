@@ -121,16 +121,35 @@ function patchText(text: string, patch: HermesConfigPatch): string {
   return next;
 }
 
+/**
+ * `writeFile`'s `mode` is honoured only when it CREATES the file, and both
+ * paths here can already exist — `.bak` is a stable name rewritten on every
+ * merge write, and the temp carries this process's pid, which is reused after a
+ * restart. Whatever mode either picked up first (an older build, a root run, a
+ * different umask) would otherwise stick, on a full copy of config.yaml and on
+ * the file that becomes it: this is where `TELEGRAM_BOT_TOKEN` and the provider
+ * api_keys live on the Hermes edition. Best-effort, like every other chmod
+ * here: a failed one must not turn a working save into an error.
+ */
+async function chmodBestEffort(file: string, mode: number): Promise<void> {
+  await fs.chmod(file, mode).catch(() => {});
+}
+
 async function writeAtomically(file: string, text: string, mode: number, keepBackup: string | null): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   if (keepBackup !== null) {
     // Written before the rename so a crash mid-write still leaves the previous
     // revision on disk under a name a human can find.
     await fs.writeFile(`${file}.bak`, keepBackup, { mode });
+    await chmodBestEffort(`${file}.bak`, mode);
   }
   const tmp = `${file}.clawbox-tmp-${process.pid}`;
   try {
+    // A stale temp is removed rather than truncated, so its old mode cannot
+    // hold the credential file for the length of the write or ride the rename.
+    await fs.rm(tmp, { force: true });
     await fs.writeFile(tmp, text, { mode });
+    await chmodBestEffort(tmp, mode);
     await fs.rename(tmp, file);
   } catch (err) {
     await fs.rm(tmp, { force: true }).catch(() => {});
@@ -260,7 +279,15 @@ export async function readHermesConfigValue(key: string): Promise<string | null>
   try {
     const { text } = await readConfigText(hermesConfigPath());
     return getYamlPath(text, splitKey(key));
-  } catch {
+  } catch (err) {
+    // `null` means "unset" to every caller (hermes-local-ai reads it as "this
+    // leaf is not a scalar" and as "not applied yet"), and this signature has
+    // no third state to give them. A value we could not RESOLVE is a different
+    // fact, so it is at least said out loud rather than passing silently for a
+    // key nobody set.
+    if (err instanceof YamlEditUnsupported) {
+      console.error(`[hermes-config-yaml] ${key} could not be resolved, reading as unset:`, err.message);
+    }
     return null;
   }
 }

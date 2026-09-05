@@ -418,6 +418,17 @@ describe("getTopLevelScalar and the space after the colon", () => {
     });
   });
 
+  // A tab on either side of the colon makes PyYAML raise on the WHOLE document
+  // (measured on 6.0.1 and on the 5.4.1 the Hermes box ships), so the bridge
+  // exports nothing - and a bot read out of such a line is a username printed
+  // by /telegram/status for a config no gateway can load.
+  it.each([
+    ["a tab after the colon", "TELEGRAM_BOT_TOKEN:	111111:AAH"],
+    ["a tab before the colon", "TELEGRAM_BOT_TOKEN	: 111111:AAH"],
+  ])("does not read a key out of a line with %s", (_name, line) => {
+    expect(getTopLevelScalar(`${line}\n`, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: true });
+  });
+
   it("still reads a key whose colon ends the line, and one written with a space before it", () => {
     expect(getTopLevelScalar("TELEGRAM_BOT_TOKEN:\n", "TELEGRAM_BOT_TOKEN").readable).toBe(true);
     expect(getTopLevelScalar("TELEGRAM_BOT_TOKEN : 111111:AAH\n", "TELEGRAM_BOT_TOKEN")).toEqual({
@@ -443,6 +454,30 @@ describe("getTopLevelScalar and multi-line quoted values", () => {
   it("does not take a decoy out of a single-quoted value either", () => {
     const text = "TELEGRAM_BOT_TOKEN: 111111:AAA\nnotes: 'hello\nTELEGRAM_BOT_TOKEN: DECOY\n'\n";
     expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
+  });
+
+  // A BLOCK scalar's content is text, not YAML: a quote or an apostrophe in it
+  // opens nothing. A persona, a system prompt or a pasted command routinely
+  // carries one, and PyYAML loads both documents below without complaint -
+  // reading the content as an opener swallowed the real key line after it
+  // (a confident "no bot") or left a quote open to the end of the file
+  // (a permanent "we could not look" -> 503 bot_unknown over a valid config).
+  it("does not read a block scalar's content as opening a quoted value", () => {
+    const apostrophe = "notes: |\n  path: 'C:/tmp\nTELEGRAM_BOT_TOKEN: 111111:AAA\n# don't edit this file\n";
+    const quoteBeforeTheKey =
+      'persona: |\n  Greeting: "Hello there\n  and welcome.\nTELEGRAM_BOT_TOKEN: 111111:AAA\n';
+    const quoteAfterTheKey = 'TELEGRAM_BOT_TOKEN: 111111:AAA\npersona: |\n  Greeting: "Hello there\n';
+
+    for (const text of [apostrophe, quoteBeforeTheKey, quoteAfterTheKey]) {
+      expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
+    }
+  });
+
+  // ...and a key nested UNDER the block scalar's key is still nobody's business
+  // of ours, because the block ends where the indentation does.
+  it("ends a block scalar at the first line that is not deeper than its key", () => {
+    const text = "notes: |\n  TELEGRAM_BOT_TOKEN: DECOY\nmodel: x\n";
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: true });
   });
 
   // A quote that never closes swallows every line after it, and the key's own
