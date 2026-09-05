@@ -76,7 +76,7 @@ describe("skill-info freshness", () => {
     return new NextRequest(new URL(`http://localhost/setup-api/apps/skill-info${query}`));
   }
 
-  async function advance(ms: number) {
+  function advance(ms: number) {
     vi.setSystemTime(Date.now() + ms);
   }
 
@@ -95,7 +95,7 @@ describe("skill-info freshness", () => {
     await GET(get());
     expect(exec).toHaveBeenCalledTimes(1);
 
-    await advance(10 * MINUTE + 1_000);
+    advance(10 * MINUTE + 1_000);
     const res = await GET(get());
     // Served from the cache at once — the refresh runs behind it.
     expect(await res.json()).toHaveLength(1);
@@ -121,41 +121,65 @@ describe("skill-info freshness", () => {
 
     // Two minutes later — well inside the ten-minute window — the badge the
     // window draws already agrees with the switch beside it.
-    await advance(2 * MINUTE);
+    advance(2 * MINUTE);
     expect((await (await GET(get("?appId=test-skill"))).json()).eligible).toBe(false);
     expect(exec).toHaveBeenCalledTimes(2);
   });
 
-  it("does not let a scan started before the toggle stamp itself fresh", async () => {
+  it("replaces a scan started before the toggle rather than just discarding it", async () => {
     await GET(get());
     expect(exec).toHaveBeenCalledTimes(1);
 
     // Past the window: the cached list is served and a refresh runs behind it.
-    await advance(11 * MINUTE);
-    let finishScan: (v: unknown) => void = () => {};
-    exec.mockImplementation(() => new Promise((r) => { finishScan = r; }));
+    advance(11 * MINUTE);
+    const pending: Array<(v: unknown) => void> = [];
+    exec.mockImplementation(() => new Promise((resolve) => { pending.push(resolve); }));
     await GET(get());
     expect(exec).toHaveBeenCalledTimes(2);
 
-    // The switch is flipped while that scan is still out.
+    // The switch is flipped while that scan is still out. Joining it would
+    // discard the answer AND start nothing, leaving the box with the
+    // pre-toggle list and no scan running.
     await POST(new Request("http://localhost/setup-api/apps/settings", {
       method: "POST",
       body: JSON.stringify({ appId: "test-skill", settings: { _setEnabled: false } }),
     }));
+    expect(exec, "the invalidation starts its own scan").toHaveBeenCalledTimes(3);
 
-    // ...and it comes back describing the box as it was BEFORE the flip.
-    exec.mockResolvedValue(listing(false));
-    finishScan(listing(true));
+    // The abandoned scan lands first, describing the box before the flip. It
+    // must neither be stored nor evict the scan that replaced it.
+    pending[0](listing(true));
+    await vi.advanceTimersByTimeAsync(0);
+    pending[1](listing(false));
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect((await (await GET(get("?appId=test-skill"))).json()).eligible).toBe(false);
+    expect(exec, "and no fourth scan was needed").toHaveBeenCalledTimes(3);
+  });
+
+  it("does not re-run a failing scan on every single request", async () => {
+    await GET(get());
+    expect(exec).toHaveBeenCalledTimes(1);
+
+    advance(11 * MINUTE);
+    exec.mockRejectedValue(new Error("openclaw: command not found"));
+    await GET(get());
     await vi.advanceTimersByTimeAsync(0);
     expect(exec).toHaveBeenCalledTimes(2);
 
-    // Without the epoch guard that answer would be stored and stamped fresh,
-    // and the badge would contradict the switch beside it for ten minutes.
-    // Instead the next reader is served the old list at once and starts a scan
-    // that can see the flip.
+    // A failure used to leave the timestamp untouched, so every later request
+    // started another scan — each with a 30 s timeout — for as long as the CLI
+    // stayed broken.
+    advance(5_000);
     await GET(get());
     await vi.advanceTimersByTimeAsync(0);
-    expect(exec).toHaveBeenCalledTimes(3);
-    expect((await (await GET(get("?appId=test-skill"))).json()).eligible).toBe(false);
+    expect(exec, "inside the failure window").toHaveBeenCalledTimes(2);
+
+    // But it is re-asked sooner than a good answer would be.
+    advance(31_000);
+    await GET(get());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(exec, "past the failure window").toHaveBeenCalledTimes(3);
   });
+
 });

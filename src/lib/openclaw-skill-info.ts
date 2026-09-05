@@ -20,12 +20,28 @@ import { findOpenclawBin, getSkillsDir, openclawIsAbsent } from "@/lib/openclaw-
  *
  * The window is long because nothing in it changes on its own — a skill appears,
  * disappears or changes state only when something on this box acts — so the
- * freshness comes from INVALIDATION, not from the clock: the install, uninstall
- * and enable/disable routes all call {@link refreshSkillsCache}. A toggle
- * matters as much as an install here: OpenClaw never reports a disabled skill as
- * `eligible` (measured on a box: 31 of 59 skills disabled, none of them
- * eligible), so the switch changes the field the "Ready / Needs setup" badge is
- * drawn from.
+ * freshness comes from INVALIDATION, not from the clock: install, uninstall and
+ * both write paths of `apps/settings` all call {@link refreshSkillsCache}. The
+ * two `apps/settings` paths matter as much as an install: OpenClaw never reports
+ * a disabled skill as `eligible` (measured on a box: 31 of 59 skills disabled,
+ * none of them eligible) and it evaluates a skill's required CONFIG the same way
+ * it evaluates its bins and env (`missing.config`), so both the switch and a
+ * saved credential change the fields the "Ready / Needs setup" badge is drawn
+ * from.
+ *
+ * What that buys is the NEXT open of the window, not the one on screen:
+ * `InstalledAppSettings` reads this once per mount and never refetches, so an
+ * invalidation cannot repaint an open window. Without it, the window opened a
+ * minute after a toggle or a Connect would describe the box as it was before —
+ * for up to ten minutes rather than thirty seconds, which is what makes the
+ * invalidation the price of the longer window rather than a nicety.
+ *
+ * ACCEPTED with the longer window: `eligible` can drift for up to ten minutes
+ * when something OUTSIDE these routes changes it — a Terminal
+ * `openclaw skills uninstall`/`enable`, an apt install that supplies a missing
+ * binary, an env var exported into the gateway. {@link findSkill}'s disk
+ * recheck covers only the out-of-band INSTALL, and only because that is a miss
+ * in the cached list.
  *
  * Lives outside the route file because a route module may export only its
  * handlers, and the install/uninstall routes need the refresh hook.
@@ -53,18 +69,36 @@ export class SkillListUnavailableError extends Error {
 
 const execFileAsync = promisify(execFile);
 const STALE_AFTER_MS = 10 * 60_000;
+/**
+ * How long a FAILED scan is remembered. `load()`'s catch used to leave
+ * `cacheTime` untouched, so once the CLI started failing with something cached
+ * — and after any invalidation that value is 0 — every single request started
+ * another 30 s-timeout scan. Caching only successes means the more wedged the
+ * CLI is, the harder the box is asked to run it. Same success/failure split as
+ * the gateway status memo in `hermes-telegram.ts`; kept at the old freshness
+ * window, since a failing CLI is worth re-asking about more often than a
+ * working one is.
+ */
+const FAILURE_STALE_AFTER_MS = 30_000;
 
 let cachedSkills: SkillInfo[] | null = null;
 let cacheTime = 0;
-let inFlightLoad: Promise<SkillInfo[]> | null = null;
+/** False when `cacheTime` was stamped by a FAILED scan rather than a good one. */
+let cacheAnswered = true;
+let inFlightLoad: { epoch: number; promise: Promise<SkillInfo[]> } | null = null;
 /**
  * Invalidation count. A scan that STARTED before the last invalidation is
- * describing the state that invalidation was called because it changed, so its
- * result may not be stored — clearing `cacheTime` alone would let a scan
- * already in flight land a moment later and stamp the pre-change list as fresh
- * for the whole window. Harmless while that window was 30 s; ten minutes of a
- * badge that contradicts the switch beside it is not. Same guard as the gateway
- * status memo in `hermes-telegram.ts`.
+ * describing the state that invalidation was called because it changed, so it
+ * may neither be JOINED nor STORED — clearing `cacheTime` alone would let a
+ * scan already in flight land a moment later and stamp the pre-change list as
+ * fresh for the whole window. Harmless while that window was 30 s; ten minutes
+ * of it is not.
+ *
+ * All three halves of the gateway-status memo in `hermes-telegram.ts`, because
+ * they only work together: don't store a pre-invalidation result, don't join a
+ * pre-invalidation read (or an invalidation would discard the scan it joined
+ * and start nothing in its place), and clear only your OWN in-flight entry, or
+ * an abandoned read evicts the replacement the invalidation started.
  */
 let scanEpoch = 0;
 
@@ -91,24 +125,34 @@ async function scanSkills(): Promise<SkillInfo[]> {
 
 /** One scan at a time; concurrent callers share it. Rejects only when nothing is cached. */
 function load(): Promise<SkillInfo[]> {
-  if (inFlightLoad) return inFlightLoad;
   const epoch = scanEpoch;
-  inFlightLoad = scanSkills()
+  if (inFlightLoad && inFlightLoad.epoch === epoch) return inFlightLoad.promise;
+  const promise = scanSkills()
     .then((skills) => {
       if (epoch === scanEpoch) {
         cachedSkills = skills;
         cacheTime = Date.now();
+        cacheAnswered = true;
       }
       return skills;
     })
     .catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn("[skill-info] Failed to load skills:", msg);
-      if (cachedSkills) return cachedSkills;
+      if (cachedSkills) {
+        if (epoch === scanEpoch) {
+          cacheTime = Date.now();
+          cacheAnswered = false;
+        }
+        return cachedSkills;
+      }
       throw new SkillListUnavailableError(msg);
     })
-    .finally(() => { inFlightLoad = null; });
-  return inFlightLoad;
+    .finally(() => {
+      if (inFlightLoad?.epoch === epoch) inFlightLoad = null;
+    });
+  inFlightLoad = { epoch, promise };
+  return promise;
 }
 
 /**
@@ -118,7 +162,12 @@ function load(): Promise<SkillInfo[]> {
  */
 export async function listSkills(): Promise<SkillInfo[]> {
   if (cachedSkills) {
-    if (Date.now() - cacheTime >= STALE_AFTER_MS) void load().catch(() => {});
+    const age = Date.now() - cacheTime;
+    // `age >= 0` because Date.now() is wall-clock: an RTC corrected BACKWARDS
+    // by NTP would otherwise pin the entry until the clock caught up.
+    if (!(age >= 0 && age < (cacheAnswered ? STALE_AFTER_MS : FAILURE_STALE_AFTER_MS))) {
+      void load().catch(() => {});
+    }
     return cachedSkills;
   }
   return load();
@@ -185,6 +234,7 @@ export async function findSkill(appId: string): Promise<SkillInfo | null> {
 export function refreshSkillsCache(): void {
   if (openclawIsAbsent()) return;
   cacheTime = 0;
+  cacheAnswered = true;
   scanEpoch += 1;
   void load().catch(() => {});
 }

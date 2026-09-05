@@ -81,6 +81,34 @@ describe("/setup-api/apps/settings", () => {
     expect(refreshSkillsCache).toHaveBeenCalledTimes(1);
   });
 
+  it("invalidates the skill list after a config write too", async () => {
+    // OpenClaw evaluates a skill's required CONFIG the same way it evaluates
+    // its bins and env, and this is the branch that writes the file the skill
+    // reads — so a saved credential changes `eligible` exactly as the switch
+    // does. Left out, a Connect left the badge on "Needs setup" for the whole
+    // freshness window.
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        appId: "home-assistant",
+        settings: { ha_url: "http://ha.local:8123", ha_token: "t" },
+      }),
+    }));
+    expect(await res.json()).toEqual({ ok: true, configWritten: true });
+    expect(refreshSkillsCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invalidate the skill list for an app with no writer", async () => {
+    const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");
+    const res = await POST(new Request("http://localhost/setup-api/apps/settings", {
+      method: "POST",
+      body: JSON.stringify({ appId: "some-other-app", settings: { anything: "x" } }),
+    }));
+    expect(await res.json()).toEqual({ ok: true, configWritten: false });
+    expect(refreshSkillsCache).not.toHaveBeenCalled();
+  });
+
   it("does not invalidate the skill list when the write failed", async () => {
     const { setSkillEnabled } = await import("@/lib/openclaw-config");
     const { refreshSkillsCache } = await import("@/lib/openclaw-skill-info");

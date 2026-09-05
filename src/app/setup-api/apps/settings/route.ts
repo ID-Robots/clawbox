@@ -66,6 +66,8 @@ export async function POST(req: Request) {
       // field the "Ready / Needs setup" badge is drawn from — so the cached
       // list is invalidated the way install and uninstall invalidate it.
       // Behind the answer: the rescan is a CLI boot and the write has landed.
+      // It does not repaint the window on screen (InstalledAppSettings reads
+      // skill-info once per mount); it makes the NEXT open right.
       refreshSkillsCache();
       return NextResponse.json({ ok: true, enabled });
     }
@@ -82,6 +84,12 @@ export async function POST(req: Request) {
         else return NextResponse.json({ error: `Invalid value type for key "${k}"` }, { status: 400 });
       }
       await writer(sanitized);
+      // The other half of this handler, and the same reason: OpenClaw
+      // evaluates a skill's required CONFIG (`missing.config` in the scan)
+      // exactly as it evaluates its bins and env, and CONFIG_WRITERS exists to
+      // write the files a skill reads. Without this, saving a credential left
+      // the badge on "Needs setup" until the freshness window was up.
+      refreshSkillsCache();
       return NextResponse.json({ ok: true, configWritten: true });
     }
 
