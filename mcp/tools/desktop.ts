@@ -276,6 +276,15 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       // Seed from an estimate so the exact loop below only has to nudge, then
       // shrink against the real string until it fits.
       let keptSkills = fitRows(skills, LIST_MAX_CHARS - size(render([], installed)), skillRowCost).kept;
+      // The apps are NOT seeded, only nudged, so this loop is O(n) renders of
+      // the whole payload in the app count — 27 ms at 400 installed apps on a
+      // dev PC, 3.3 s at 4 000, and a Jetson core is several times slower.
+      // Deliberately left: a compact `JSON.stringify(app)` badly underestimates
+      // what the pretty-printed object costs, so that seed would keep almost
+      // everything and buy nothing, and a seed worth having needs a measured
+      // per-app cost. `installed_apps` is the one list here that grows without
+      // bound over a device's life, so it is worth doing properly rather than
+      // approximately.
       let keptApps = installed;
       let out = render(keptSkills, keptApps);
       while (size(out) > LIST_MAX_CHARS && (keptSkills.length || keptApps.length)) {

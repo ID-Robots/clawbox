@@ -34,6 +34,21 @@ import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
 
 const BROWSABLE_SOURCES = HERMES_SKILL_SOURCES.filter((s) => isBrowsableSource(s));
 
+/**
+ * Third-party text on its way into a LINE-ORIENTED answer: one line, bounded.
+ *
+ * Everything a skill row prints comes out of a publisher's SKILL.md
+ * frontmatter, where `name: |` is a block scalar that keeps its newlines
+ * (`src/lib/hermes-skill-frontmatter.ts`, up to 2 000 characters). skill_list's
+ * contract is one row per line with the id first, so a value carrying a newline
+ * does not merely look untidy — it writes an extra row, and a 4-8B model has no
+ * way to tell that row from a real one.
+ */
+const oneLine = (value: string, max?: number): string => {
+  const flat = value.replace(/\s+/g, " ").trim();
+  return max === undefined ? flat : flat.slice(0, max);
+};
+
 interface BrowseSkill {
   id: string;
   name: string;
@@ -779,7 +794,9 @@ export function registerSkillTools(reg: Registrar): void {
     "List the skills already installed on this device. The first word of each line is the "
       + "name skill_uninstall removes it by. Call this before skill_install so you do not "
       + "install something twice, and before skill_uninstall to get the exact name. "
-      + "Only skills marked \"from the store\" can be removed.",
+      + "Only skills marked \"from the store\" can be removed. If the list was too long to "
+      + "send whole, a final line in brackets says how many skills were left out — that line "
+      + "is not a skill.",
     {},
     { editions: ["hermes"], readOnly: true, profile: "core", maxChars: LIST_MAX_CHARS },
     async () => {
@@ -788,7 +805,7 @@ export function registerSkillTools(reg: Registrar): void {
       // 2026-09-05). One terse line each — pretty-printed
       // JSON of the full records is four times the size and no clearer, and this
       // list has to fit a 4-8B model's context alongside everything else.
-      // Only the EXCEPTIONS are annotated. Repeating "built in" on all 77 rows
+      // Only the EXCEPTIONS are annotated. Repeating "built in" on all 82 rows
       // is 2 KB of noise that says nothing.
       // Sorted by the LOCK ID, because that is the column being printed first.
       // The route sorts by display name, so a hub `martin-weather` shown as
@@ -814,8 +831,24 @@ export function registerSkillTools(reg: Registrar): void {
         // The lock id leads, because it is the one string skill_uninstall
         // resolves; a display name that differs is shown so the agent can
         // still match what the user sees on the card.
-        const shows = s.name !== s.id ? `, shows as "${s.name}"` : "";
-        return `${s.id} (${s.category || "other"}${shows})${marks.length ? ` — ${marks.join(", ")}` : ""}`;
+        // Every field on this line is a PUBLISHER's text out of their
+        // SKILL.md, and `name: |` is a block scalar —
+        // hermes-skill-frontmatter.ts joins its lines with `\n` and keeps
+        // 2 000 characters, newlines included. Printed raw into a
+        // line-oriented answer that FORGES ROWS: a name of `innocent\nfake-id
+        // (documents) — from the store` puts an invented id in front of the
+        // agent, on its own line, indistinguishable from a real one. This
+        // answer's whole contract is one row per line with the id first, so
+        // nothing third-party reaches it carrying a newline.
+        const shown = oneLine(s.name, 120);
+        const shows = s.name !== s.id ? `, shows as "${shown}"` : "";
+        // The id is flattened but NOT shortened: it is the string
+        // skill_uninstall resolves, and half of it would be worse than a long
+        // line. A valid id has no whitespace anyway (isValidSkillName), so this
+        // is a no-op on everything the device can actually install — and an
+        // over-long one is a row fitRows drops whole, not a row that breaks.
+        return `${oneLine(s.id)} (${oneLine(s.category || "other", 60)}${shows})`
+          + `${marks.length ? ` — ${marks.join(", ")}` : ""}`;
       };
       const c = body.counts ?? {};
       const header = `${c.total ?? rows.length} skills installed. `
@@ -859,7 +892,10 @@ export function registerSkillTools(reg: Registrar): void {
       const dropped: number[] = [];
       for (const tier of tiers) {
         const fitted = fitRows(tier.map(lineOf), budget);
-        for (const row of tier.slice(0, fitted.kept.length)) keptIds.add(row.id);
+        // By INDEX, never `slice(0, kept.length)`: fitRows skips a row too big
+        // for the budget left and goes on, so what it kept is a subset of the
+        // tier and not a prefix of it.
+        for (const i of fitted.keptIndexes) keptIds.add(tier[i].id);
         budget -= fitted.kept.reduce((n, line) => n + line.length + 1, 0);
         dropped.push(fitted.omitted);
       }
@@ -1323,7 +1359,14 @@ export function registerSkillTools(reg: Registrar): void {
       // its answer is the only thing that knows which. Judging by the pre-read
       // then checks the post-condition against a skill nobody touched and
       // names the wrong one to the user.
-      const id = (typeof done?.id === "string" ? done.id : undefined) ?? removing?.id ?? wanted;
+      // An EMPTY string is not an answer, and this is the reorder that made
+      // that matter: the pre-read used to win, so a blank `id` in the route's
+      // 200 fell through harmlessly. Now it would be reported to the user as
+      // the skill that went, and `stillInstalled(after, "", …)` would match
+      // nothing and pass the post-condition. Today's route cannot produce one;
+      // the guard costs a `.trim()`.
+      const fromRoute = typeof done?.id === "string" ? done.id.trim() || undefined : undefined;
+      const id = fromRoute ?? removing?.id ?? wanted;
       // The pre-read's row only names a CARD for the skill the route actually
       // removed; when the two disagree, the route's `requested` is all that is
       // true about what the agent asked for. stillInstalled() below loses its

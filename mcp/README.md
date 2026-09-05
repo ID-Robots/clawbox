@@ -665,9 +665,11 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
 4. **Timeouts and output caps everywhere.** Default 8 s per API call and 4 000
    characters per result; images over 1 MB are dropped rather than truncated.
    A tool whose answer is a LIST bounds its own rows against its cap and says
-   how many it left out — `skill_list` drops built-in skills (never a removable
-   one, since those are the ids `skill_uninstall` resolves) and `ui_list_apps`
-   drops skills before apps and never a built-in app, each stating the count —
+   how many it left out — `skill_list` drops built-in skills first, then the
+   ones made on the device, and only then store skills (the ids
+   `skill_uninstall` resolves, so they are the last to go), stating the count
+   for each group; `ui_list_apps` drops skills before apps and never a
+   built-in app, also stating the count —
    because the cap's own enforcement is a hard slice: it cuts a JSON answer
    mid-object and an id mid-word, and its "narrow the query" is advice a tool
    with no arguments cannot take. `ui_list_apps` MEASURES its finished JSON

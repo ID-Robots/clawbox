@@ -241,6 +241,14 @@ export async function hasBinary(bin: string): Promise<boolean> {
 /**
  * Keep as many rows as fit `budget` characters, and say how many did not.
  *
+ * "As many as fit", not "the longest prefix that fits": a row too big for the
+ * budget left is SKIPPED and the shorter rows behind it are still considered.
+ * Returning at the first overflow spent the rest of the tier on one outlier —
+ * with a single store skill carrying a 2 000-character card name (the
+ * frontmatter ceiling), skill_list listed 61 built-ins and dropped 41 store
+ * skills that would have fitted, the exact inversion its tiers exist to
+ * prevent. Rows are in priority order, so skipping one costs only itself.
+ *
  * The alternative is capText() below, which is the LAST line of defence: it
  * hard-slices the finished string, so a list that outgrows its cap stops
  * mid-row — unparseable JSON for a tool that answers JSON, a half-written id
@@ -262,13 +270,20 @@ export function fitRows(
   rows: readonly string[],
   budget: number,
   cost: (row: string) => number = (row) => row.length + 1,
-): { kept: string[]; omitted: number } {
+): { kept: string[]; keptIndexes: number[]; omitted: number } {
+  const kept: string[] = [];
+  // The caller usually has an OBJECT behind each row and needs to know which
+  // ones survived; with a prefix it could slice, and with a skip it cannot.
+  const keptIndexes: number[] = [];
   let used = 0;
   for (let i = 0; i < rows.length; i += 1) {
-    used += cost(rows[i]);
-    if (used > budget) return { kept: rows.slice(0, i), omitted: rows.length - i };
+    const spend = cost(rows[i]);
+    if (used + spend > budget) continue;
+    used += spend;
+    kept.push(rows[i]);
+    keptIndexes.push(i);
   }
-  return { kept: [...rows], omitted: 0 };
+  return { kept, keptIndexes, omitted: rows.length - kept.length };
 }
 
 /** Cap a string at the tool boundary and say what to do about the truncation. */
