@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -42,6 +42,25 @@ function seedingBlock(): string {
   return src.slice(start, end);
 }
 
+/**
+ * Pad `body` so it ends `slack` bytes below a 1024-byte boundary.
+ *
+ * The cap `runCapped` sets can only land on a block boundary, so without this
+ * the room left for the append is whatever the template's length happens to
+ * leave — measured at 1242 bytes for today's guide, which is most of the way to
+ * the 1761-byte section. The case would still fail loudly the day the section
+ * is trimmed, but with a message about the wrong thing.
+ */
+function padToJustUnderABlock(body: string, slack = 64): string {
+  const filler = "Owner note: the printer is on the shelf.\n";
+  let out = body;
+  while ((Buffer.byteLength(out) + slack) % 1024 !== 0) {
+    const gap = (1024 - ((Buffer.byteLength(out) + slack) % 1024) + 1024) % 1024;
+    out += gap >= filler.length ? filler : "x".repeat(gap);
+  }
+  return out;
+}
+
 let dir: string;
 let workspace: string;
 let guide: string;
@@ -70,6 +89,54 @@ function run(template = TEMPLATE): { stdout: string; stderr: string } {
     throw new Error(`pre-start block exited ${res.status}\n${res.stdout}\n${res.stderr}`);
   }
   return { stdout: res.stdout, stderr: res.stderr };
+}
+
+/**
+ * The same run under a file-size limit, so an append stops PART WAY through.
+ *
+ * A full Jetson eMMC is the realistic shape and ENOSPC cannot be produced in a
+ * unit test; `ulimit -f` produces the same partial write with the same
+ * non-zero return. `trap "" XFSZ` is what makes it a return value rather than a
+ * signal — without it the kernel kills the shell and nothing in the block ever
+ * gets to see the failure it is supposed to handle.
+ *
+ * `bytes` is rounded up to the 1024-byte blocks bash's `ulimit -f` counts in
+ * (bash scales -f by 1024, not by the POSIX 512 — getting that wrong makes the
+ * cap twice as generous as intended and the append simply succeeds). Because
+ * the cap can only move in whole blocks, callers pad their fixture so the
+ * headroom is a fixed small number rather than "up to 1023 bytes, depending on
+ * how long the shipped template happens to be" — see `padToJustUnderABlock`.
+ */
+function runCapped(
+  bytes: number,
+  template = TEMPLATE,
+  opts: { hideTruncate?: boolean; hidePython?: boolean } = {},
+): { status: number | null; stdout: string; stderr: string } {
+  const root = mkdtempSync(path.join(dir, "root-"));
+  mkdirSync(path.join(root, "config"), { recursive: true });
+  writeFileSync(path.join(root, "config/clawbox-workspace-guide.md"), readFileSync(template, "utf-8"));
+  const blocks = Math.max(1, Math.ceil(bytes / 1024));
+  const script = [
+    "set -euo pipefail",
+    'trap "" XFSZ',
+    // A rootfs without coreutils' `truncate`: the shell function shadows the
+    // binary, so the helper falls through to its python3 fallback.
+    ...(opts.hideTruncate ? ["truncate() { return 127; }"] : []),
+    // …and both of them gone, which is the only way to reach the helper's
+    // "could not roll it back" warning. Two divergences from a real ENOSPC are
+    // worth knowing when reading these fixtures: the shipped script sets no
+    // XFSZ trap (correct — ENOSPC raises no signal, only `ulimit -f` does), and
+    // under the cap the rollback verbs themselves always succeed, which is why
+    // the failed-rollback branch needs a shadow of its own rather than falling
+    // out of any capped run.
+    ...(opts.hidePython ? ["python3() { return 127; }"] : []),
+    `ulimit -f ${blocks}`,
+    `CLAWBOX_ROOT=${JSON.stringify(root)}`,
+    `CLAWBOX_WORKSPACE=${JSON.stringify(workspace)}`,
+    seedingBlock(),
+  ].join("\n");
+  const res = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+  return { status: res.status, stdout: res.stdout, stderr: res.stderr };
 }
 
 beforeEach(() => {
@@ -125,26 +192,57 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
     // where both `skipIf` cases skip and nothing else covers the appends.
     //
     // A write that OPENS a statement runs with `set -e` armed, and its failure is
-    // the whole unit's failure. Both sanctioned forms put the write in a
-    // condition instead — `if printf … >> f; then` or `elif { …; } >> f; then` —
-    // where `set -e` is suspended and an else branch can warn. `… || true` is
-    // deliberately NOT sanctioned here: it keeps the boot alive but lets the
-    // success line print over a write that failed, which is the false-success
-    // class this block exists to avoid.
+    // the whole unit's failure. The sanctioned form puts the write in a
+    // condition instead — `if install …; then`, or `if clawbox_append_or_rollback
+    // …; then` — where `set -e` is suspended and an else branch can warn.
+    // `… || true` is deliberately NOT sanctioned here: it keeps the boot alive
+    // but lets the success line print over a write that failed, which is the
+    // false-success class this block exists to avoid. (`rm -f … || true` on a
+    // recovery path is the one exception, and it is matched below as a write so
+    // it stays visible; it undoes rather than produces.)
     const lines = seedingBlock()
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line && !line.startsWith("#"));
-    // Every line that writes: a copy verb, or an append redirection.
-    const writes = lines.filter((line) => /^(if |elif )?(install|cp|mv|tee)\b/.test(line) || />>/.test(line));
+    // Every line that writes: a copy verb, an append redirection, or a call to
+    // the one helper that owns the appends (its own definition line is not a
+    // write, so the call form — a quoted destination — is what is matched).
+    const writes = lines.filter((line) =>
+      /^(if |elif )?(install|cp|mv|tee|truncate|rm)\b/.test(line)
+      // The rollback is two commands on two lines — `if ! truncate …` and the
+      // continued `&& ! python3 -c '… os.truncate …'` — and without this the
+      // write-count floor would still be met with BOTH of them deleted.
+      || /^(if\s+)?!\s*truncate\b/.test(line)
+      || /^&&\s*!\s*python3\b/.test(line)
+      || />>/.test(line)
+      // The helper's CALL, not its definition line. Matched on the name alone
+      // so an unquoted first argument cannot slip past the filter — which is
+      // exactly the shape this test exists to catch.
+      || (/^(if |elif )?clawbox_append_or_rollback\b/.test(line) && !/\(\)\s*\{/.test(line)));
     // Guarded means the write sits in a condition — the line opens with
     // `if`/`elif`, or it closes a brace group the condition consumes
     // (`…; } >> file; then`). Anything else runs with `set -e` armed.
-    const unguarded = writes.filter((line) => !/^(if|elif)\b/.test(line) && !/;\s*then$/.test(line));
+    const unguarded = writes.filter((line) =>
+      !/^(if|elif)\b/.test(line)
+      && !/;\s*then$/.test(line)
+      // A rollback that cannot roll back must not take the boot down either —
+      // but the exception is `rm`'s alone. `printf … >> "$f" || true` would
+      // otherwise pass this audit while printing a success line over a failed
+      // write, which is the class the audit exists to catch.
+      && !/^rm -f "\$[A-Za-z_][A-Za-z0-9_]*" 2>\/dev\/null \|\| true$/.test(line));
 
-    // Sanity: the filter has to be finding this block's four writes (the seed
-    // and the three appends), or an empty `unguarded` would prove nothing.
-    expect(writes.length).toBeGreaterThanOrEqual(4);
+    // Sanity: the filter has to be finding this block's write sites, or an
+    // empty `unguarded` would prove nothing. The floor is the REAL count, not a
+    // token one. The eight write sites are, today:
+    //   1 the helper's own `printf >>`
+    //   2 `truncate -s`, 3 the `python3 os.truncate` fallback
+    //   4 the `install` seed, 5 its failure-branch `rm -f`
+    //   6-8 the three `clawbox_append_or_rollback` calls
+    expect(writes.length).toBeGreaterThanOrEqual(8);
+    // Both rollback verbs, by name: the write-count floor can be met
+    // without them.
+    expect(writes.join("\n")).toMatch(/truncate -s/);
+    expect(writes.join("\n")).toMatch(/os\.truncate/);
     expect(unguarded).toEqual([]);
   });
 
@@ -228,6 +326,11 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
 
     expect(stdout).not.toContain("Appended the system-actions section");
     expect(stderr).toContain("could not append");
+    // ...and nothing about a rollback. A write that failed at OPEN wrote
+    // nothing, so warning that the file "may be cut mid-section" sends an
+    // operator triaging a real disk fault to inspect a guide that is fine —
+    // every boot, in the journal they are actually reading.
+    expect(stderr).not.toContain("could not roll");
     expect(readFileSync(guide, "utf-8")).toBe(older);
   });
 
@@ -255,6 +358,139 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
 
     const after = readFileSync(guide, "utf-8");
     expect(after.indexOf(HEADING)).toBeGreaterThan(after.indexOf("## Owner's notes"));
+  });
+
+  // Every append in this block writes its HEADING first, and the heading is
+  // also the `grep -qF` idempotence marker. A write that stops part way — a
+  // full eMMC on a Jetson is the realistic shape — therefore leaves the marker
+  // sitting on a fragment: every later gateway start finds the heading,
+  // appends nothing, and the guide stays cut mid-sentence forever. The one
+  // warning went to the journal at boot and is never seen again. What is lost
+  // is exactly TASK-612's deliverable, the "never queue an operator_approval"
+  // paragraph, which is the last thing the section says.
+  // The seed is the same defect one branch up, and worse: the fragment it leaves
+  // already contains the top-up marker, so the `grep -qF` guard finds the
+  // heading on every later boot, appends nothing, and the box keeps a guide cut
+  // mid-sentence for good. First boot and post-factory-reset is exactly where a
+  // full eMMC bites.
+  it("leaves no fragment when the first seed stops part way", () => {
+    const res = runCapped(4096);
+
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain("could not seed CLAWBOX.md");
+    expect(existsSync(guide)).toBe(false);
+  });
+
+  it("seeds the whole template on the next boot after a part-way seed", () => {
+    runCapped(4096);
+    const { stdout } = run();
+
+    expect(stdout).toContain("Seeded CLAWBOX.md");
+    expect(readFileSync(guide, "utf-8")).toBe(readFileSync(TEMPLATE, "utf-8"));
+  });
+
+  it("leaves nothing behind when the append stops part way", () => {
+    const older = padToJustUnderABlock(readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0]);
+    writeFileSync(guide, older);
+
+    // Exactly 64 bytes of room for a section that is well over a kilobyte.
+    const res = runCapped(Buffer.byteLength(older) + 64);
+
+    // Boot safety first: pre-start must still exit 0 (config/clawbox-gateway.service
+    // runs it as ExecStartPre with no leading `-`).
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain("could not append");
+    expect(res.stdout).not.toContain("Appended the system-actions section");
+    // ...and the file is back to what it was, marker and fragment both gone.
+    expect(readFileSync(guide, "utf-8")).toBe(older);
+  });
+
+  it("rolls back without truncate on the PATH", () => {
+    // The fallback, exercised rather than assumed: a rootfs without coreutils'
+    // `truncate` must still remove the fragment, not empty the file.
+    const older = padToJustUnderABlock(readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0]);
+    writeFileSync(guide, older);
+
+    const res = runCapped(Buffer.byteLength(older) + 64, TEMPLATE, { hideTruncate: true });
+
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain("could not append");
+    expect(res.stderr).not.toContain("could not roll");
+    expect(readFileSync(guide, "utf-8")).toBe(older);
+  });
+
+  it.skipIf(process.getuid?.() === 0)("measures a destination it cannot open, and says nothing about it", () => {
+    // Two things at once, both in the false-failure class.
+    //
+    // The number decides whether a rollback happens at all, and `wc -c` needs
+    // to OPEN the file: on a present-but-unopenable destination the helper had
+    // no length and left the fragment. `stat` does not open, so it still
+    // answers.
+    //
+    // And the redirection ORDER: bash applies them left to right, so
+    // `wc -c < "$f" 2>/dev/null` opens BEFORE stderr is silenced and a
+    // "Permission denied" line reached the gateway journal on a boot where
+    // nothing had gone wrong — in the file an operator triaging a real disk
+    // fault is reading.
+    const target = path.join(dir, "unopenable.md");
+    writeFileSync(target, "0123456789");
+    chmodSync(target, 0o222);
+
+    const script = [
+      "set -euo pipefail",
+      `CLAWBOX_ROOT=${JSON.stringify(dir)}`,
+      // A workspace that does not exist, so the block defines its helpers and
+      // runs none of its own writes.
+      `CLAWBOX_WORKSPACE=${JSON.stringify(path.join(dir, "nowhere"))}`,
+      seedingBlock(),
+      `clawbox_file_size ${JSON.stringify(target)}`,
+    ].join("\n");
+    const res = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe("10");
+    expect(res.stderr).toBe("");
+  });
+
+  it("says the fragment is still there when NEITHER rollback verb can run", () => {
+    // The one operator-facing line in the helper that no other case reaches:
+    // both verbs shadowed, so the rollback itself fails. Without a fixture of
+    // its own the message could be malformed, or the `if ! … && ! …` chain
+    // inverted, and every other case would stay green.
+    //
+    // The three things that matter here are the three the helper promises: the
+    // boot survives, the failure is NOT reported as a success, and the file is
+    // named as suspect rather than claimed clean.
+    const older = padToJustUnderABlock(readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0]);
+    writeFileSync(guide, older);
+
+    const res = runCapped(Buffer.byteLength(older) + 64, TEMPLATE, {
+      hideTruncate: true,
+      hidePython: true,
+    });
+
+    expect(res.status).toBe(0);
+    expect(res.stderr).toContain("could not roll");
+    expect(res.stderr).toContain(guide);
+    expect(res.stdout).not.toContain("Appended the system-actions section");
+    // …and it really is still cut: the warning is not itself a false failure.
+    expect(readFileSync(guide, "utf-8").length).toBeGreaterThan(older.length);
+  });
+
+  it("appends the whole section on the next boot after a part-way write", () => {
+    const older = padToJustUnderABlock(readFileSync(TEMPLATE, "utf-8").split(`\n---\n\n${HEADING}`)[0]);
+    writeFileSync(guide, older);
+
+    runCapped(Buffer.byteLength(older) + 64);
+    const second = run();
+
+    expect(second.stdout).toContain("Appended the system-actions section");
+    const after = readFileSync(guide, "utf-8");
+    expect(after.startsWith(older)).toBe(true);
+    // The paragraph that used to be the casualty.
+    expect(after).toContain("operator_approval");
+    // And exactly one copy of the heading, not a fragment plus a full one.
+    expect(after.split(HEADING)).toHaveLength(2);
   });
 
   it("leaves a guide that already carries the section untouched", () => {
@@ -390,6 +626,33 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     expect(after.split(RULE)).toHaveLength(2);
   });
 
+  it("leaves no fragment in AGENTS.md when an append stops part way", () => {
+    // The same shape as the guide top-up, in the file the harness actually
+    // injects: a half-written rule keeps its heading, so the rule the model
+    // reads is a sentence that stops mid-word and no later boot repairs it.
+    // Padded past a 1024-byte boundary on purpose: the cap can only be set in
+    // whole blocks, so a short file would let the whole rule fit inside the
+    // first block and the write would simply succeed, testing nothing.
+    const existing = "# AGENTS\n\nBe helpful.\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n"
+      + "Owner note: the printer is on the shelf.\n".repeat(45);
+    writeFileSync(agents, existing);
+
+    const res = runCapped(Buffer.byteLength(existing) + 128);
+
+    expect(res.status).toBe(0);
+    // Proof the append really did stop part way — without this the case
+    // degenerates into "the write succeeded" the day the rule text shrinks.
+    expect(res.stderr).toContain("could not append the system-actions rule");
+    expect(readFileSync(agents, "utf-8")).toBe(existing);
+
+    const second = run();
+    expect(second.stdout).toContain("Appended the system-actions rule to AGENTS.md");
+    const after = readFileSync(agents, "utf-8");
+    expect(after).toContain(RULE);
+    expect(after).toContain("operator_approval");
+    expect(after.split(RULE)).toHaveLength(2);
+  });
+
   it.skipIf(process.getuid?.() === 0)("does not stop the gateway when AGENTS.md cannot be written", () => {
     writeFileSync(agents, "# AGENTS\n");
     chmodSync(agents, 0o444);
@@ -398,6 +661,7 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     const { stderr } = run();
 
     expect(stderr).toContain("could not append the system-actions rule");
+    expect(stderr).not.toContain("could not roll");
     expect(readFileSync(agents, "utf-8")).toBe("# AGENTS\n");
   });
 });
