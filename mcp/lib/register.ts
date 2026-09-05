@@ -73,7 +73,7 @@ export interface RegisteredToolInfo {
   opts: ToolOpts;
 }
 
-const DEFAULT_MAX_CHARS = 4_000;
+export const DEFAULT_MAX_CHARS = 4_000;
 // An image bigger than this eats a small model's whole context window.
 const MAX_IMAGE_BASE64 = 1024 * 1024;
 
@@ -96,7 +96,14 @@ export interface Registrar {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ToolHandler = (args: any) => Promise<ToolResult> | ToolResult;
 
-function capResult(result: ToolResult, maxChars: number): ToolResult {
+/**
+ * Apply a tool's output cap, exactly as the dispatcher does before the result
+ * reaches the agent. Exported so the test registrar can put a handler's return
+ * value through the same gate — a suite that inspects the UNCAPPED string is
+ * not looking at what the agent sees, and an output that outgrew its cap then
+ * passes every assertion about it.
+ */
+export function capResult(result: ToolResult, maxChars: number): ToolResult {
   const content = result.content.map((part): ContentPart => {
     if (part.type === "text") return { type: "text", text: capText(part.text, maxChars) };
     if (part.data.length > MAX_IMAGE_BASE64) {
