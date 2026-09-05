@@ -325,3 +325,66 @@ describe("skill_info — a docs lookup that failed is not a verdict on the skill
     expect(out.error.next).toMatch(/do not tell them the skill does not exist/i);
   });
 });
+
+/**
+ * Phase 2 is the ONLY phase that spawns the CLI, so it is the only one that can
+ * answer for a Hermes install that is not there — and it carries phase 1's rules
+ * now, so that fact is worded as the device-level refusal it is rather than as
+ * "retry once".
+ */
+describe("skill_info — what phase 2 alone can report", () => {
+  it("stops the agent when the device has no Hermes install", async () => {
+    twoPhases(
+      UNBACKED,
+      new ApiError(502, JSON.stringify({ error: "Hermes is not installed…", code: "cli_missing" })),
+    );
+
+    const out = await skills().call("skill_info", { id: UNKNOWN_ID });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("NOT_SUPPORTED_HERE");
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("still treats a CLI timeout as a documentation failure, not a refusal", async () => {
+    twoPhases(
+      UNBACKED,
+      new ApiError(502, JSON.stringify({ error: "…", code: "cli_timeout" })),
+    );
+
+    const out = await skills().call("skill_info", { id: UNKNOWN_ID });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).not.toBe("NOT_FOUND");
+    expect(out.error.next).toMatch(/do not tell them the skill does not exist/i);
+  });
+
+  it("says the documentation is unavailable when Hermes refused it for a real skill", async () => {
+    // Only an UNBACKED record is settled as NOT_FOUND by a refusal; a record the
+    // catalogue backs falls through to the payload, and its documentation is
+    // just as unavailable as after a failure.
+    twoPhases(
+      {
+        skill: {
+          id: "official/pdf",
+          name: "PDF",
+          description: "Work with PDFs.",
+          source: "official",
+          trust: "builtin",
+          bodySource: "none",
+          bodyTruncated: false,
+          needsRemoteDocs: true,
+        },
+      },
+      new ApiError(404, JSON.stringify({ error: "Skill not found", code: "not_found" })),
+    );
+
+    const out = await skills().call("skill_info", { id: "official/pdf" });
+
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).documentation_unavailable).toBe(true);
+  });
+});
