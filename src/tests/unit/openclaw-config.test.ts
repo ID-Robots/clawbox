@@ -803,6 +803,26 @@ describe("openclaw-config", () => {
       );
     });
 
+    it("moves the proxy bearer with the URL, never leaving a foreign key beside it", async () => {
+      // The proxy validates Authorization against data/.local-ai-token and
+      // answers 401 to anything else, so adopting the proxy URL while keeping
+      // somebody else's key turns "the wrong endpoint" into a refused request
+      // on every turn.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: { baseUrl: "http://127.0.0.1:8080/v1", apiKey: "an-operators-own-key" },
+          },
+        },
+      }) as never);
+
+      expect(await openclawConfig.ensureLocalAiProxyUrls()).toBe(true);
+
+      const written = mockFs.writeFile.mock.calls.at(-1)?.[1] as string;
+      expect(written).toContain('"baseUrl": "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"');
+      expect(written).not.toContain("an-operators-own-key");
+    });
+
     it("skips writes when local AI providers already point at the proxy", async () => {
       mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
         models: {

@@ -518,4 +518,159 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh — llamacpp primary without 
     expect(llamacppProvider(partial.cfg).apiKey).toBe("operators-own");
     expect(llamacppProvider(partial.cfg).models?.[0]?.id).toBe("gemma4-e2b-it-q4_0");
   });
+
+  // --- TASK-643 review round -------------------------------------------
+
+  it("survives a .env byte that is not UTF-8 instead of killing the gateway", () => {
+    // .env is clawbox-writable and one latin-1 byte in an operator's value
+    // raised UnicodeDecodeError out of the heredoc — which under
+    // `set -euo pipefail` fails ExecStartPre, and Restart=always then spends
+    // StartLimitBurst. No gateway, no chat, over one byte.
+    writeToken(TOKEN);
+    writeFileSync(
+      path.join(root, ".env"),
+      Buffer.concat([
+        Buffer.from("LLAMACPP_CONTEXT_WINDOW=32768\nSOME_VALUE="),
+        Buffer.from([0xe9]),
+        Buffer.from("\n"),
+      ]),
+    );
+
+    const { cfg, changed } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.[0]?.contextWindow).toBe(32768);
+  });
+
+  it("fills a model row's missing name, which the schema requires as much as the id", () => {
+    // ModelDefinitionSchema is id.min(1) AND name.min(1). A row with an id and
+    // no name looked usable, was left alone, and the whole config still failed
+    // validation — the outcome this migration exists to prevent.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: {
+        providers: {
+          llamacpp: {
+            baseUrl: "http://127.0.0.1:8080/v1",
+            models: [{ id: "gemma4-e2b-it-q4_0" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.[0]?.name).toBe("gemma4-e2b-it-q4_0");
+  });
+
+  it("registers a referenced id the existing entry does not list, keeping the rows it has", () => {
+    // The entry looked complete, so nothing ran and nothing was said, while the
+    // box answered every turn with "Unknown model".
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: {
+        providers: {
+          llamacpp: {
+            baseUrl: "http://127.0.0.1:8080/v1",
+            models: [{ id: "qwen3-1.7b-q4", name: "qwen3-1.7b-q4" }],
+          },
+        },
+      },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).models?.map((m) => m.id))
+      .toEqual(["qwen3-1.7b-q4", "gemma4-e2b-it-q4_0"]);
+  });
+
+  it("leaves an entry OpenClaw already accepts alone, api or no api", () => {
+    // `api` and `apiKey` are .optional() in ModelProviderSchema. Treating them
+    // as required rewrote configs that were already valid — and injecting `api`
+    // into one an operator left api-less changes how it routes.
+    writeToken(TOKEN);
+    const existing = {
+      baseUrl: "http://127.0.0.1:8080/v1",
+      models: [{ id: "gemma4-e2b-it-q4_0", name: "gemma4-e2b-it-q4_0" }],
+    };
+    const { cfg, changed } = migrate({
+      models: { providers: { llamacpp: existing } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(false);
+    expect(llamacppProvider(cfg)).toEqual(existing);
+  });
+
+  it("does not demand the proxy bearer for an entry that names its own server", () => {
+    // The refusal spoke about a baseUrl that is not the proxy, and left the
+    // config invalid over a credential the entry never wanted.
+    writeToken(null);
+    const { cfg, changed } = migrate({
+      models: {
+        providers: { llamacpp: { baseUrl: "http://127.0.0.1:8080/v1", models: "broken" } },
+      },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(llamacppProvider(cfg).baseUrl).toBe("http://127.0.0.1:8080/v1");
+    expect(llamacppProvider(cfg).models?.[0]?.id).toBe("gemma4-e2b-it-q4_0");
+    // ...and no key of ours was put beside a server of theirs.
+    expect(llamacppProvider(cfg)).not.toHaveProperty("apiKey");
+  });
+
+  it("never leaves a foreign key beside this box's own proxy", () => {
+    // The proxy validates the bearer against data/.local-ai-token and answers
+    // 401 to anything else: our baseUrl with somebody else's key is the
+    // 401-per-turn the token guard exists to prevent.
+    writeToken(TOKEN);
+    const { cfg, log } = migrate({
+      models: { providers: { llamacpp: { apiKey: "an-operators-own-key" } } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(llamacppProvider(cfg).baseUrl)
+      .toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+    expect(llamacppProvider(cfg).apiKey).toBe(TOKEN);
+    expect(log).toContain("Replaced models.providers.llamacpp.apiKey");
+  });
+
+  it("says so when it replaces a malformed models value", () => {
+    writeToken(TOKEN);
+    const { log } = migrate({
+      models: "operator-owned-scalar",
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    });
+
+    expect(log).toContain("models was not an object");
+  });
+
+  it("survives agents.defaults.model = null instead of aborting ExecStartPre", () => {
+    // `setdefault` returned the null and every `.get` on it raised
+    // AttributeError, which under `set -euo pipefail` means the gateway never
+    // reaches ExecStart. A null is an absence rather than a discarded value, so
+    // it is repaired without a WARN — the point is only that the run survives.
+    writeToken(TOKEN);
+    const { cfg, changed } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: null } },
+    });
+
+    expect(changed).toBe(false);
+    expect(llamacppProvider(cfg)).toEqual({});
+  });
+
+  it("says so when it replaces a NON-null malformed model block", () => {
+    writeToken(TOKEN);
+    const { log } = migrate({
+      models: { providers: {} },
+      agents: { defaults: { model: "operator-owned-scalar" } },
+    });
+
+    expect(log).toContain("agents.defaults.model was not an object");
+  });
 });
