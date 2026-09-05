@@ -1,3 +1,4 @@
+import { MAX_AUDIO_BYTES } from "@/lib/transcribe-limits";
 import { NextRequest, NextResponse } from "next/server";
 import Busboy from "busboy";
 import { Readable } from "stream";
@@ -44,9 +45,8 @@ export const dynamic = "force-dynamic";
 // that stay closed even during the pre-setup AP window.
 
 // The cloud model is defined next to the gateway's audio config so the two
-// surfaces cannot drift; re-exported here because this route is where callers
-// have always read it from.
-export { TRANSCRIBE_MODEL };
+// surfaces cannot drift (src/lib/stt-preference.ts); a route module may
+// export handlers and Next's config keys only, so it is read from there.
 
 // A minute of Opus at the bitrate MediaRecorder picks is well under a
 // megabyte, so 8 MB is half an hour of dictation while still bounding what one
@@ -62,7 +62,8 @@ export { TRANSCRIBE_MODEL };
 // platform's for the meters below to be the ones that answer — and the cloud
 // proxy refuses uploads of ~9 MB with its own 413 anyway, so nothing that
 // could have been transcribed is lost by saying 8.
-export const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
+// MAX_AUDIO_BYTES lives in src/lib/transcribe-limits.ts (a route module may
+// export handlers and Next's config keys only).
 
 // The cap above can only be applied to a part once the body has been parsed,
 // and parsing means the bytes are already in memory -- so the request as a

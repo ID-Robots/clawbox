@@ -95,7 +95,7 @@ const MAX_BYTES = 25 * 1024 * 1024;
  * controls" is not a property of the element, it is a property of this
  * response.
  */
-export function parseRange(header: string | null, size: number): { start: number; end: number } | null {
+function parseRange(header: string | null, size: number): { start: number; end: number } | null {
   if (!header) return null;
   const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
   if (!match) return null;

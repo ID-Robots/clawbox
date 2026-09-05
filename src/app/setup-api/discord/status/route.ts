@@ -49,7 +49,7 @@ const DISALLOWED_INTENTS_RE = /disallowed\s*intents|privileged\s*intent/i;
  * through its own owner-approved DM pairing, which ClawBox neither writes nor
  * reads, so there is no allowlist whose emptiness this could honestly report.
  */
-export function mapOpenclawChannelState(status: ChannelStatus): DiscordConnectionState {
+function mapOpenclawChannelState(status: ChannelStatus): DiscordConnectionState {
   if (status.lastError && DISALLOWED_INTENTS_RE.test(status.lastError) && status.running) {
     return "intents-missing";
   }

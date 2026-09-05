@@ -60,7 +60,16 @@ export const MAX_TREE_ENTRIES = 1000;
 /** A file is read up to here; the rest is cut and said so. */
 export const MAX_TREE_FILE_BYTES = 512 * 1024;
 /** A save may be this large at most — the read cap, so what was opened whole can be saved whole. */
+/**
+ * How many bytes the tree route's PUT body may be: the write cap with room
+ * for JSON's own overhead — six bytes per content byte at worst (a control
+ * character is `\u0001`), plus the envelope. Route handlers have no body
+ * limit of their own, and `request.json()` would buffer the whole thing
+ * before the content's cap could be applied. Here rather than in the route:
+ * a route module may export handlers and Next's config keys only.
+ */
 export const MAX_TREE_WRITE_BYTES = MAX_TREE_FILE_BYTES;
+export const MAX_PUT_BODY_BYTES = MAX_TREE_WRITE_BYTES * 6 + 16 * 1024;
 
 /**
  * `rel` (as the page names it; "" or "." is the project itself) resolved to a

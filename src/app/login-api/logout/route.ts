@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
-export async function POST(request?: Request) {
+export async function POST(request: Request) {
   const res = NextResponse.json({ success: true });
   // Match the Secure attribute to how the request arrived so the clear reliably
   // removes a cookie that login set Secure over HTTPS (tunnel). On plain-HTTP
