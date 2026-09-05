@@ -656,9 +656,15 @@ try {
   const stampPath = path.join(parkedDir, OWNER_STAMP);
   const readTrimmed = (p) => { try { return fs.readFileSync(p, "utf-8").trim(); } catch { return ""; } };
   const rebuildOwnerPid = () => {
-    const [rawPid, stampBootId] = readTrimmed(stampPath).split(/\s+/);
-    const pid = Number.parseInt(rawPid, 10);
-    if (!Number.isInteger(pid) || pid <= 0) return 0;
+    // Exactly two fields, and a PID that is nothing but digits.
+    // `Number.parseInt` accepts "123junk" and destructuring ignores a third
+    // field, so either would let a stamp this file cannot vouch for refuse the
+    // reclaim — the expensive direction, per the paragraph above.
+    const fields = readTrimmed(stampPath).split(/\s+/);
+    if (fields.length !== 2 || !/^[1-9][0-9]*$/.test(fields[0])) return 0;
+    const [rawPid, stampBootId] = fields;
+    const pid = Number(rawPid);
+    if (!Number.isSafeInteger(pid)) return 0;
     // A PID is only meaningful within the boot that issued it: a power cut
     // mid-build leaves the stamp behind, and after the reboot that number can
     // belong to anything. No rebuild survives a reboot.

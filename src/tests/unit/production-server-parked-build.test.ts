@@ -296,6 +296,26 @@ describe("production-server.js reclaims a parked build at boot", () => {
     expect(r.warnings.join(" ")).toMatch(/names no live rebuild/);
   });
 
+  it.each([
+    ["a pid with trailing junk", (b: string) => `123junk ${b}`],
+    ["a third field", (b: string) => `1 ${b} trailing`],
+    ["only a pid", () => "1"],
+  ])("reclaims when the stamp has %s", (_name, make) => {
+    // Only a stamp this file can vouch for may refuse the reclaim. One writer
+    // produces `<pid> <boot id>` and nothing else, so anything of another shape
+    // is corruption — and believing it would strand the box on a crash loop
+    // with its only build on disk, which is the expensive direction.
+    const kept = path.join(projectDir, ".next-old");
+    writeBuild(kept, "parked-build-id");
+    writeFileSync(path.join(kept, OWNER_STAMP), `${make(bootId())}\n`, "utf-8");
+
+    const r = runReclaim(projectDir);
+
+    expect(r.threw).toBeNull();
+    expect(buildId(projectDir)).toBe("parked-build-id");
+    expect(r.warnings.join(" ")).toMatch(/names no live rebuild/);
+  });
+
   it("reclaims a parked build that carries no stamp at all", () => {
     // Every build parked before this stamp existed, and every one parked by a
     // shell that could not write it, has none. Absent must mean "nobody is
