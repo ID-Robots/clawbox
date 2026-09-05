@@ -421,12 +421,16 @@ describe("getTopLevelScalar and the space after the colon", () => {
   // A tab on either side of the colon makes PyYAML raise on the WHOLE document
   // (measured on 6.0.1 and on the 5.4.1 the Hermes box ships), so the bridge
   // exports nothing - and a bot read out of such a line is a username printed
-  // by /telegram/status for a config no gateway can load.
+  // by /telegram/status for a config no gateway can load. The answer is "could
+  // not look" rather than "confidently nothing": nothing in a file that does
+  // not load is evidence about the bot, in either direction. See "a document
+  // PyYAML will not load" below, which is the same rule reached from the file
+  // rather than from this key's own line.
   it.each([
     ["a tab after the colon", "TELEGRAM_BOT_TOKEN:	111111:AAH"],
     ["a tab before the colon", "TELEGRAM_BOT_TOKEN	: 111111:AAH"],
   ])("does not read a key out of a line with %s", (_name, line) => {
-    expect(getTopLevelScalar(`${line}\n`, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: true });
+    expect(getTopLevelScalar(`${line}\n`, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: false });
   });
 
   it("still reads a key whose colon ends the line, and one written with a space before it", () => {
@@ -448,6 +452,15 @@ describe("getTopLevelScalar and the space after the colon", () => {
 describe("getTopLevelScalar and multi-line quoted values", () => {
   it("does not take a decoy out of the inside of a quoted value", () => {
     const text = 'TELEGRAM_BOT_TOKEN: 111111:AAA\nnotes: "hello\nTELEGRAM_BOT_TOKEN: DECOY\n"\n';
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
+  });
+
+  // ...and a SEQUENCE ITEM is a value position too. PyYAML loads this document
+  // without complaint and answers the real token; reading the item's second
+  // line as a line of its own named DECOY as this box's bot - the one shape
+  // left where a file that loads still got a confident wrong answer.
+  it("does not take a decoy out of a flow scalar a sequence item opened", () => {
+    const text = 'TELEGRAM_BOT_TOKEN: 111111:AAA\nlist:\n  - "hello\nTELEGRAM_BOT_TOKEN: DECOY\n"\n';
     expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
   });
 
@@ -494,5 +507,66 @@ describe("getTopLevelScalar and multi-line quoted values", () => {
   it("does not let a continuation line lower the root indent", () => {
     const text = '  notes: "hello\n hidden: x\n"\n  TELEGRAM_BOT_TOKEN: 111111:AAA\n';
     expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
+  });
+});
+
+/**
+ * A document PyYAML REFUSES to load is not a document this reader may answer a
+ * bot out of.
+ *
+ * Hermes' env bridge loads config.yaml with PyYAML. When PyYAML raises, the
+ * bridge exports nothing at all and the gateway polls no bot — so a token read
+ * out of such a file is a bot that does not exist, named confidently:
+ * `/telegram/status` runs getMe on it and prints a username, `/telegram/pairing`
+ * answers `configured: true`, the wizard marks Telegram done, and
+ * `/setup-api/telegram/configure`'s same-bot guard refuses a token that would in
+ * fact have been fine. The owner is told the bot is configured, sees it dead,
+ * and is blocked from re-entering it — both directions wrong, out of a file
+ * nothing loads.
+ *
+ * The two constructs a config.yaml actually meets are a TAB and a second
+ * DOCUMENT. Every row below is measured against PyYAML 6.0.1 (the reader must
+ * agree with the library, not with the spec): tabs are legal inside a quoted
+ * scalar, inside a comment, and inside a block scalar's text, and illegal
+ * anywhere a token may start — including in a block's own indentation, and
+ * including between a value and its trailing `#`, which is the shape a
+ * hand-edited file reaches first.
+ */
+describe("getTopLevelScalar and a document PyYAML will not load", () => {
+  const TOKEN = "111111:AAHrealBotSecret_abc";
+
+  it.each([
+    ["a tab between the value and its trailing comment", `TELEGRAM_BOT_TOKEN: ${TOKEN}\t# note\n`],
+    ["a tab indenting a key elsewhere in the file", `TELEGRAM_BOT_TOKEN: ${TOKEN}\nroot:\n\tnested: 1\n`],
+    ["a tab after another key's colon", `TELEGRAM_BOT_TOKEN: ${TOKEN}\nother:\tvalue\n`],
+    ["a tab where a block scalar's content begins", `notes: |\n\tx: "one\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
+    ["a tab inside a block scalar's own indentation", `notes: |\n  a\n \tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
+    ["a second document", `TELEGRAM_BOT_TOKEN: ${TOKEN}\n---\nTELEGRAM_BOT_TOKEN: DECOY\n`],
+    ["a value that only looks like a folded header", `other: >=1.0\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
+    ["a value that only looks like a block header", `other: |pipe\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`],
+    ["content after a document end marker", `TELEGRAM_BOT_TOKEN: ${TOKEN}\n...\nTELEGRAM_BOT_TOKEN: DECOY\n`],
+  ])("says it could not look when the file has %s", (_name, text) => {
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: null, readable: false });
+  });
+
+  // ...and the mirror image, which is the whole reason the check is not a bare
+  // `text.includes("\t")`: every one of these loads on PyYAML 6.0.1 and carries
+  // a real bot, so refusing them would answer "we could not read this device's
+  // Telegram configuration" over a box that is working.
+  it.each([
+    ["a tab inside a comment line", `TELEGRAM_BOT_TOKEN: ${TOKEN}\n# a\tb\n`, TOKEN],
+    ["a tab inside a trailing comment", `TELEGRAM_BOT_TOKEN: ${TOKEN} # a\tb\n`, TOKEN],
+    ["a tab inside a quoted value", 'TELEGRAM_BOT_TOKEN: "111111:AAH\tx"\n', "111111:AAH\tx"],
+    ["a tab in a block scalar's text", `notes: |\n  a\tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a tab at the block content indent", `notes: |\n  a\n  \tb\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["an explicit start for the only document", `---\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a document end marker at EOF", `TELEGRAM_BOT_TOKEN: ${TOKEN}\n...\n`, TOKEN],
+    ["--- inside a block scalar", `notes: |\n  ---\n  more\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a # with no space in front of it", "TELEGRAM_BOT_TOKEN: 111111:AAH#x\n", "111111:AAH#x"],
+    ["an apostrophe in another key's plain value", `other: don't stop\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a block header with an indent and a chomp", `notes: |2-\n  x: "one\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+    ["a block header with a trailing comment", `notes: | # a note\n  x: "one\nTELEGRAM_BOT_TOKEN: ${TOKEN}\n`, TOKEN],
+  ])("still reads the token from a file with %s", (_name, text, value) => {
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value, readable: true });
   });
 });

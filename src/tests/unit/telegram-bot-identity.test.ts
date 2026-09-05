@@ -333,12 +333,30 @@ describe("readActiveTelegramBot", () => {
   });
 
   // The fallback is read off the column-0 lines, not by parsing the document, so
-  // a construct the line editor does not model elsewhere in the file cannot turn
-  // into "we could not look" — which both save gates would then have to act on.
-  it("still reads the key out of a config.yaml it could not parse as a whole", async () => {
-    writeHermesConfigYaml(`---\n- stray\n\tTABBED: x\nTELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
+  // a construct the repo's line EDITOR refuses elsewhere in the file — a
+  // sequence, a nested block, a duplicate key, an explicit document start —
+  // cannot turn into "we could not look", which both save gates would then have
+  // to act on. PyYAML loads this file and Hermes' bridge exports the token, so
+  // that is the answer this box's panels owe.
+  it("still reads the key out of a config.yaml the line editor would refuse", async () => {
+    writeHermesConfigYaml(
+      `---\nlist:\n  - stray\nnested:\n  deep:\n    a: 1\nother: 1\nother: 2\nTELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`,
+    );
 
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
+  });
+
+  // ...and the other side of that line. A tab where a token may start makes
+  // PyYAML raise on the WHOLE document, so Hermes' bridge exports nothing and
+  // the gateway polls no bot at all — while the token sits there in plain sight
+  // one line down. Answering it would print a username on /telegram/status for
+  // a dead box and make /telegram/configure's same-bot guard refuse a token
+  // that was fine. "We could not look" is the only honest answer over a file
+  // that does not load.
+  it("says it could not look when config.yaml is one PyYAML will not load", async () => {
+    writeHermesConfigYaml(`root:\n\tnested: 1\nTELEGRAM_BOT_TOKEN: ${HERMES_BOT}\n`);
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: false });
   });
 
   // PyYAML — which is what Hermes' own bridge loads this file with — reads a

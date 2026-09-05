@@ -33,9 +33,13 @@
  *
  * That contract belongs to the EDITING half. {@link getTopLevelScalar} is a
  * reader, and a reader may not raise on a construct somewhere else in the file:
- * none of those is evidence about the key it was asked for, and a caller would
- * have to turn the refusal into one. It never throws; it answers a third state
- * (`readable: false`) for a value it cannot name, and only for THAT key.
+ * a sequence, a duplicate key or a nested block is not evidence about the key it
+ * was asked for, and a caller would have to turn the refusal into one. It never
+ * throws; it answers a third state (`readable: false`) for a value it cannot
+ * name — and for a DOCUMENT PYYAML WILL NOT LOAD, which is the one whole-file
+ * fact that IS evidence about every key: Hermes' bridge loads config.yaml with
+ * PyYAML, so when PyYAML raises the bridge exports nothing and no line in the
+ * file describes what the gateway is polling.
  */
 
 export class YamlEditUnsupported extends Error {}
@@ -423,6 +427,69 @@ const OPAQUE_VALUE_RE = /^[|>!&*{[]/;
 const ANY_KEY_RE = /^( *)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?) *:(?: (.*))?$/;
 
 /**
+ * Does this STRUCTURE line carry a TAB PyYAML would refuse?
+ *
+ * Measured against PyYAML 6.0.1 rather than read off the spec, because the spec
+ * is more permissive than the library the box actually loads config.yaml with:
+ * `Scanner.scan_to_next_token` skips only `' '`, so a tab reached anywhere a
+ * token may start raises `ScannerError` and the WHOLE document fails to load.
+ * Tabs survive in exactly three places — inside a quoted scalar, inside a
+ * comment, and inside a block scalar's content, which the caller handles
+ * because only it knows the block's indent.
+ *
+ * A `#` opens a comment only when whitespace precedes it (`abc#c` is the plain
+ * scalar `abc#c`; `abc #c` is `abc` plus a comment) — and a TAB in front of one
+ * is not that whitespace: PyYAML raises on the tab before it ever reaches the
+ * `#`. That is why the tab test comes first and why `KEY: value<TAB># note` is
+ * a refusal rather than a comment question.
+ *
+ * A quote only OPENS at the start of a token, so it is recognised only at the
+ * start of the line or after a space. `other: don't stop` is a plain scalar
+ * with an apostrophe in it, and treating that as an opening quote would swallow
+ * the rest of the line and miss a tab further along.
+ */
+function refusesTab(line: string): boolean {
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (quote === '"') {
+      if (ch === "\\") i += 1;
+      else if (ch === '"') quote = null;
+      continue;
+    }
+    if (quote === "'") {
+      if (ch !== "'") continue;
+      if (line[i + 1] === "'") i += 1;
+      else quote = null;
+      continue;
+    }
+    if (ch === "\t") return true;
+    // The rest of the line is a comment; PyYAML reads no tokens out of it.
+    if (ch === "#" && (i === 0 || line[i - 1] === " ")) return false;
+    if ((ch === '"' || ch === "'") && (i === 0 || line[i - 1] === " ")) quote = ch;
+  }
+  return false;
+}
+
+/** A sequence item, with whatever it puts in the value position. */
+const SEQ_ITEM_RE = /^ *-(?: +(.*))?$/;
+
+/** A document start or end marker on a line of its own. */
+const DOC_MARKER_RE = /^(?:---|\.\.\.)(?:\s|$)/;
+
+/**
+ * A block scalar header PyYAML accepts: the indicator, then a chomping sign
+ * and/or an indentation digit in either order, then only spaces and a comment.
+ *
+ * `scan_block_scalar_indicators` raises on anything else, which makes a value
+ * that merely LOOKS like a header — `other: >=1.0`, `other: |pipe` — a document
+ * that does not load rather than a block. Both are ordinary things to write
+ * (a version range, a word) and both used to leave the reader confidently
+ * naming this box's bot out of a file the bridge exports nothing from.
+ */
+const BLOCK_HEADER_RE = /^[|>](?:[+-][1-9]?|[1-9][+-]?)? *(?:#.*)?$/;
+
+/**
  * The file's lines, minus the CONTINUATION lines of a multi-line quoted value.
  *
  * A flow scalar may run over several lines and PyYAML does not require its
@@ -447,32 +514,91 @@ const ANY_KEY_RE = /^( *)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?) *:(?: (.*))?$/;
  * anything and swallowing the key line among them would be a confident "no bot"
  * invented out of a missing quote. The caller degrades instead.
  *
- * KNOWN LIMIT: only a `key: "…` line is recognised as opening a flow scalar,
- * which is the shape a mapping value takes. A sequence item that opens one is
- * not tracked, and neither is a flow scalar closed by a later line this reader
- * did not know was inside it.
+ * `loadable` is false when the document is one PyYAML REFUSES outright, and it
+ * is the same fact as `unterminated` reached by the two other routes a
+ * hand-edited config.yaml takes: a TAB where a token may start, and a SECOND
+ * document. The bridge then exports nothing at all and the gateway polls no
+ * bot — so a token read out of such a file is a bot that does not exist, named
+ * confidently, which is what makes `/telegram/status` print a username for a
+ * dead box and the configure route's same-bot guard refuse a token that was
+ * fine. `readable: false` costs a degraded panel the owner can act on.
+ *
+ * KNOWN LIMIT: a flow scalar is recognised in the two value positions a line
+ * can carry one — after `key:` and after a sequence item's `-` — but not when
+ * it is CLOSED by a later line this reader did not know it was inside. And the
+ * `loadable` check is a line-level one, so a document PyYAML refuses for a
+ * structural reason no single line shows (a block nested at an indentation its
+ * parent cannot hold) is still read rather than refused.
  */
-function documentLines(lines: string[]): { lines: string[]; unterminated: boolean } {
+function documentLines(lines: string[]): { lines: string[]; unterminated: boolean; loadable: boolean } {
   const kept: string[] = [];
   let open: '"' | "'" | null = null;
   let blockIndent: number | null = null;
+  let contentIndent: number | null = null;
+  let sawContent = false;
+  let documentEnded = false;
+  let loadable = true;
   for (const raw of lines) {
     if (blockIndent !== null) {
       // Content of the block scalar above: everything indented deeper than the
       // key that opened it, blank lines included.
-      if (isBlank(raw) || indentOf(raw) > blockIndent) continue;
+      if (isBlank(raw) || indentOf(raw) > blockIndent) {
+        if (contentIndent === null && !isBlank(raw)) contentIndent = indentOf(raw);
+        // A tab is TEXT once the block's own indentation is behind it (`  a\tb`
+        // loads), and a refusal while it is still being measured (`\tx`, and a
+        // line shallower than the indent already established). Measured on
+        // PyYAML 6.0.1, which scans that indentation with spaces only.
+        const tab = raw.indexOf("\t");
+        if (tab !== -1 && /^ *$/.test(raw.slice(0, tab)) && (contentIndent === null || tab < contentIndent)) {
+          loadable = false;
+        }
+        continue;
+      }
       blockIndent = null;
+      contentIndent = null;
     }
     if (open !== null) {
-      if (closingQuoteIndex(raw, 0, open) !== -1) open = null;
+      const close = closingQuoteIndex(raw, 0, open);
+      if (close !== -1) {
+        open = null;
+        // Past the closing quote the line is structure again, tabs included.
+        if (refusesTab(raw.slice(close + 1))) loadable = false;
+      }
       continue;
+    }
+    if (refusesTab(raw)) loadable = false;
+    if (DOC_MARKER_RE.test(raw)) {
+      // `safe_load` raises on a stream holding more than one document, so a
+      // second `---` (or anything after a `...`) is a file that loads nowhere —
+      // while this reader, which does not scan the document, would answer the
+      // LAST document's value: a different bot, named confidently.
+      if (raw.startsWith("---")) {
+        if (sawContent) loadable = false;
+        sawContent = true;
+      } else {
+        documentEnded = true;
+      }
+    } else if (!isBlank(raw) && !/^ *#/.test(raw)) {
+      if (documentEnded) loadable = false;
+      sawContent = true;
     }
     kept.push(raw);
     const m = ANY_KEY_RE.exec(raw);
-    if (!m) continue;
-    const value = (m[2] ?? "").trim();
+    // A SEQUENCE ITEM is a value position too, and a flow scalar opened there
+    // runs over the following lines exactly as a mapping value's does — so a
+    // `TELEGRAM_BOT_TOKEN:` line inside one was read as a line of its own and
+    // named a decoy as this box's bot, on a document PyYAML loads happily.
+    const item = m ? null : SEQ_ITEM_RE.exec(raw);
+    const inline = m ? m[2] : item?.[1];
+    if (!m && !item) continue;
+    const value = (inline ?? "").trim();
     if (/^[|>]/.test(value)) {
-      blockIndent = m[1].length;
+      if (!BLOCK_HEADER_RE.test(value)) loadable = false;
+      // Only a KEY's block is tracked. A sequence item's content is measured
+      // from the `-` rather than from a key line, and was never followed here;
+      // its header is still checked, because `- >=1.0` refuses the document
+      // exactly as `other: >=1.0` does.
+      if (m) blockIndent = m[1].length;
       continue;
     }
     const quote = value[0];
@@ -480,7 +606,7 @@ function documentLines(lines: string[]): { lines: string[]; unterminated: boolea
       open = quote;
     }
   }
-  return { lines: kept, unterminated: open !== null };
+  return { lines: kept, unterminated: open !== null, loadable };
 }
 
 /**
@@ -558,10 +684,13 @@ export function getTopLevelScalar(text: string, key: string): TopLevelScalar {
   // as PyYAML's block-context `check_value`; a tab on either side of the colon
   // makes PyYAML raise on the whole document, so it is not a key line here.
   const line = new RegExp(`^( *)(?:"${escaped}"|'${escaped}'|${escaped}) *:(?: (.*))?$`);
-  const { lines, unterminated } = documentLines(text.split(/\r\n|\r|\n/));
+  const { lines, unterminated, loadable } = documentLines(text.split(/\r\n|\r|\n/));
   // A quote that never closes swallows every line after it, and this key's own
   // line may be one of them — "we could not look", never "there is no bot".
-  if (unterminated) return { value: null, readable: false };
+  // A document PyYAML refuses outright is the same answer for the same reason:
+  // the bridge exports nothing out of it, so nothing in it is evidence about
+  // the bot this box polls.
+  if (unterminated || !loadable) return { value: null, readable: false };
   const root = rootIndentWidth(lines);
   let found: TopLevelScalar = { value: null, readable: true };
   for (const raw of lines) {
