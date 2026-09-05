@@ -109,7 +109,7 @@ interface Run {
   /** The run this one is the automatic review pass of, when it is one. */
   reviewOf?: string | null;
   /** Set on a run a coding team spawned: which team, in which role, for which task. */
-  team?: { id: string; role: "planner" | "worker"; taskId: string | null } | null;
+  team?: { id: string; role: "planner" | "worker" | "reviewer"; taskId: string | null } | null;
   /** The pull request this run's work went into, while the auto-PR switch is
    *  on. Optional: a run recorded before the feature has none. */
   pr?: PrState | null;
@@ -1566,7 +1566,11 @@ export default function CodingAgentApp() {
                       title={run.team.id}
                       data-testid="coding-agent-run-team"
                     >
-                      {run.team.role === "planner" ? t("codingAgent.team.rolePlanner") : t("codingAgent.team.roleWorker", { task: run.team.taskId ?? "" })}
+                      {run.team.role === "planner"
+                        ? t("codingAgent.team.rolePlanner")
+                        : run.team.role === "reviewer"
+                          ? t("codingAgent.team.roleReviewer", { task: run.team.taskId ?? "" })
+                          : t("codingAgent.team.roleWorker", { task: run.team.taskId ?? "" })}
                     </span>
                   )}
                   {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}

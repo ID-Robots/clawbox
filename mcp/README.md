@@ -582,12 +582,18 @@ shell tool, not less and not more:
 `coding_team_run` · `coding_team_status` · `coding_team_stop`
 
 The multi-agent shape of the coding agent (`src/lib/coding-team.ts`): one
-GOAL, a **planner** (a read-only run whose final message must be a JSON
-array of tasks), **workers** (one ordinary run per task, one at a time, each
-told its task with the goal and its teammates' results around it), a
-**reviewer** (v0: a rule — accepted when the worker completed with no refused
-action and touched only the files its task named; otherwise rejected, and the
-task is offered once more), all on a **shared blackboard**
+GOAL, a **planner** (a read-only run on the tier model whose final message
+must be a JSON array of tasks), **workers** (one ordinary run per task, each
+told its task with the goal and its teammates' results around it — in a
+folder project SIDE BY SIDE, each in its own git worktree and branch off the
+team's branch, up to `MAX_TEAM_WORKERS` (3) while the box has the memory,
+each merged home as it settles; a merge git cannot do alone is aborted and
+the task offered once more from the merged state; a code project keeps one
+worker at a time, in place), a **reviewer** (the v0 rule first — a refused
+action or a stray file rejects without a model — then a read-only run on
+the merged work that answers `{verdict, notes}`; a reviewer that gives no
+verdict is an alert and an acceptance by rule, never a silent pass), all on
+a **shared blackboard**
 (`data/coding-team/<team>.json`) that refuses any message its sender's ROLE
 may not send — only the planner posts tasks, only the assigned worker moves
 one or submits a result, only the reviewer rules, only the owner stops — and
@@ -595,10 +601,12 @@ logs every accepted message and every refusal (the audit trail). A worker
 that hit a permission denial or strayed outside its files raises an ALERT;
 three alerts stop the team. `coding_team_run` is for a goal that spans
 several parts; `coding_agent_run` is still the tool for one focused change.
-`coding_team_status` answers the plan, each task's status, worker and result,
-the alerts, and what to tell the user; `log: 1` adds the last lines of the
-audit log. Every agent is a coding run, so the sandbox, the ceilings and the
-one-run-at-a-time rule above apply unchanged.
+`coding_team_status` answers the plan, each task's status, worker, reviewer
+and result, the alerts, the team's branch, `agents` (planner, workers,
+reviewers, total — who worked), and what to tell the user; `log: 1` adds the
+last lines of the audit log. Every agent is a coding run, so the sandbox and
+the ceilings above apply unchanged; the one-run-at-a-time rule is between
+STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
 `coding_agent_status` can block (`wait_seconds`, up to two minutes) instead of
 polling. `coding_agent_stop` posts `{ runId }` (the stop route keeps `{ id }`

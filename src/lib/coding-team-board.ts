@@ -68,8 +68,28 @@ export interface TeamTask {
   /** The reviewer's verdict on the result, once there is one. */
   review: { verdict: "accepted" | "rejected"; notes: string; at: number } | null;
   attempts: number;
+  /** The worker's own worktree and branch for the current attempt (coding-team-worktree.ts), or null when the worker works in place. */
+  worktree: string | null;
+  branch: string | null;
+  /** The reviewer run that ruled on the current attempt, once there is one. */
+  reviewRunId: string | null;
   created_at: number;
   updated_at: number;
+}
+
+/** One run's part in the team. */
+export interface TeamRunRef {
+  id: string;
+  role: "planner" | "worker" | "reviewer";
+  taskId: string | null;
+}
+
+/** Who worked on a team, counted from the board: the figure the card shows. */
+export interface TeamAgents {
+  planner: number;
+  workers: number;
+  reviewers: number;
+  total: number;
 }
 
 export interface LogEntry {
@@ -96,6 +116,11 @@ export interface TeamBoard {
   status: TeamStatus;
   /** The planner's run, once it started. */
   plannerRunId: string | null;
+  /** The team's own branch in the project, and the branch it forked from — null while the team works in place (a code project). */
+  branch: string | null;
+  base: string | null;
+  /** Every run that worked for the team, in order, with its role — the audit's cast list. */
+  runs: TeamRunRef[];
   tasks: TeamTask[];
   log: LogEntry[];
   alerts: number;
@@ -211,6 +236,15 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     source: b.source === "agent" ? "agent" : "owner",
     status: b.status as TeamStatus,
     plannerRunId: typeof b.plannerRunId === "string" ? b.plannerRunId : null,
+    branch: typeof b.branch === "string" ? b.branch : null,
+    base: typeof b.base === "string" ? b.base : null,
+    runs: Array.isArray(b.runs)
+      ? (b.runs as unknown[]).flatMap((r) => {
+          const ref = r as Record<string, unknown> | null;
+          if (!ref || typeof ref.id !== "string" || (ref.role !== "planner" && ref.role !== "worker" && ref.role !== "reviewer")) return [];
+          return [{ id: ref.id, role: ref.role as TeamRunRef["role"], taskId: typeof ref.taskId === "string" ? ref.taskId : null }];
+        })
+      : [],
     tasks,
     log,
     alerts: typeof b.alerts === "number" ? b.alerts : 0,
@@ -241,6 +275,9 @@ function normalizeTask(raw: unknown): TeamTask | null {
     files_hint: Array.isArray(t.files_hint) ? (t.files_hint as unknown[]).filter((f): f is string => typeof f === "string") : [],
     review: review ? { verdict: review.verdict as "accepted" | "rejected", notes: review.notes as string, at: typeof review.at === "number" ? review.at : 0 } : null,
     attempts: typeof t.attempts === "number" ? t.attempts : 0,
+    worktree: typeof t.worktree === "string" ? t.worktree : null,
+    branch: typeof t.branch === "string" ? t.branch : null,
+    reviewRunId: typeof t.reviewRunId === "string" ? t.reviewRunId : null,
     created_at: typeof t.created_at === "number" ? t.created_at : 0,
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
   };
@@ -264,6 +301,9 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     source: input.source,
     status: "planning",
     plannerRunId: null,
+    branch: null,
+    base: null,
+    runs: [],
     tasks: [],
     log: [],
     alerts: 0,
@@ -301,6 +341,9 @@ export function postTask(
     files_hint: (input.files_hint ?? []).filter((f) => typeof f === "string" && f.trim()).map((f) => f.trim()).slice(0, 40),
     review: null,
     attempts: 0,
+    worktree: null,
+    branch: null,
+    reviewRunId: null,
     created_at: now,
     updated_at: now,
   };
@@ -440,4 +483,32 @@ function append(board: TeamBoard, entry: LogEntry): void {
 function firstLine(text: string, max = 160): string {
   const line = text.split("\n").find((l) => l.trim()) ?? "";
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/**
+ * Who worked, from the board's cast list: the planner, every worker run
+ * (an attempt is a new worker), every reviewer run. A board from before
+ * the list is counted from its tasks and its assignment log instead.
+ */
+export function teamAgents(board: TeamBoard): TeamAgents {
+  const planner = new Set<string>();
+  const workers = new Set<string>();
+  const reviewers = new Set<string>();
+  for (const r of board.runs) {
+    if (r.role === "planner") planner.add(r.id);
+    else if (r.role === "worker") workers.add(r.id);
+    else reviewers.add(r.id);
+  }
+  if (board.runs.length === 0) {
+    if (board.plannerRunId) planner.add(board.plannerRunId);
+    for (const e of board.log) {
+      const m = e.type === "task" && e.actor.kind === "system" ? /assigned to (run-[a-z0-9]+)/.exec(e.message) : null;
+      if (m) workers.add(m[1]);
+    }
+    for (const t of board.tasks) {
+      if (t.assigned_to) workers.add(t.assigned_to);
+      if (t.reviewRunId) reviewers.add(t.reviewRunId);
+    }
+  }
+  return { planner: planner.size, workers: workers.size, reviewers: reviewers.size, total: planner.size + workers.size + reviewers.size };
 }

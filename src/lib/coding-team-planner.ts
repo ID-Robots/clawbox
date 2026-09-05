@@ -11,6 +11,7 @@
  * shell.
  */
 
+import { MAX_TASK_CHARS } from "@/lib/coding-agent";
 import { MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS } from "@/lib/coding-team-board";
 
 export interface PlannedTask {
@@ -26,6 +27,26 @@ export const PLANNER_BRIEF = [
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names earlier tasks a task must wait for. Each task_description must stand on its own: say what to build or change, in which files, and how the worker verifies it — it is the whole brief that worker gets. Prefer 2–5 tasks; one task is fine for a small goal.",
   "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
 ].join(" ");
+
+/** How much of a planner's wrong answer is quoted back to it. */
+const REPLAN_QUOTE_CHARS = 1_500;
+
+/**
+ * The second ask, when the planner's final message held no plan — a page of
+ * prose about the tasks, a fenced list, a question. Seen on the box: a
+ * 43-turn planner that wrote its plan as headings and never the array. The
+ * folder is already read, so this run is asked for ONE thing: the array.
+ */
+export function replanTask(goal: string, previous: string | null | undefined, reason: string): string {
+  const quoted = (previous ?? "").trim();
+  const text = [
+    `Goal: ${goal}`,
+    `Your previous answer to this goal was not a plan the team can read (${reason}).`,
+    quoted ? `This is what you answered:\n${quoted.length > REPLAN_QUOTE_CHARS ? `${quoted.slice(0, REPLAN_QUOTE_CHARS - 1)}…` : quoted}` : "You answered nothing.",
+    "Answer again with ONLY the JSON array of tasks described in your brief — no prose before or after it. Read the folder again only if you must.",
+  ].join("\n\n");
+  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+}
 
 export interface PlanParse {
   ok: true;
