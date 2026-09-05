@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import fs from "node:fs";
-import path from "node:path";
 import { StrictMode } from "react";
 import { act, render, waitFor } from "@/tests/helpers/test-utils";
 import ChatApp from "@/components/ChatApp";
@@ -243,116 +241,9 @@ describe("an interrupted turn is appended once, however many times React renders
     expect(reply, `the notice came before the answer:\n${rendered}`).toBeLessThan(notice);
   });
 
-  // The behavioural cases above pin the two paths that were reported. This one
-  // pins the RULE, for the sites a component test cannot reach — the effort
-  // picker's "Switched effort to …" was appended from inside the
-  // `setThinkingLevel` updater the same way, and only a header dropdown with a
-  // provider that offers more than one level renders it at all.
-  it("has no state setter inside a state updater, anywhere in the UI", () => {
-    // The whole UI tree, not just the two surfaces: after this fix there are NO
-    // such sites left in src/components, src/hooks or src/app, so the rule can
-    // be stated as a rule. `src/app/page.tsx` held two more — the wallpaper
-    // upload and delete, each writing localStorage and calling two sibling
-    // setters from inside a `setCustomWallpapers` updater — and they are fixed
-    // here rather than excluded by the scope of the test that claims to cover
-    // them. They were idempotent, which is exactly why they went unnoticed.
-    const offenders = [...walk("src/components"), ...walk("src/hooks"), ...walk("src/app")]
-      .flatMap((file) => nestedSetters(file));
-
-    expect(offenders).toEqual([]);
-  });
+  // The behavioural cases above pin the two paths that were reported. The RULE
+  // — no state write inside any state updater, anywhere in the UI tree — is
+  // pinned by `src/tests/unit/state-updater-purity.test.ts`, which reads the
+  // tree with the TypeScript compiler instead of a regex and so needs neither
+  // jsdom nor React.
 });
-
-/**
- * Every `setX(prev => …)` in a file whose body calls another `setY(`.
- *
- * The body is taken by balancing parentheses from the updater's own `(`, so a
- * nested arrow or object cannot end it early, and string/comment contents are
- * not parsed — a `setSomething(` inside a string would be a false positive, and
- * there are none in these two files today.
- */
-function walk(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...walk(full));
-    else if (/\.tsx?$/.test(entry.name)) out.push(full);
-  }
-  return out;
-}
-
-/**
- * Blank out comments and string bodies, preserving length and newlines.
- *
- * The paren scan below counts brackets, so ONE unmatched paren inside a prose
- * comment closes an updater's body early and the rule silently stops guarding
- * that site — and an unmatched one inside a string runs the scan to EOF and
- * reports every setter in the rest of the file. `ChatPopup.tsx` is 6 300 lines
- * of dense comments; a `// … the ) …` would have disarmed this with no signal.
- */
-function blankNonCode(source: string): string {
-  const out = source.split("");
-  let i = 0;
-  const blank = (from: number, to: number) => {
-    for (let k = from; k < to && k < out.length; k++) if (out[k] !== "\n") out[k] = " ";
-  };
-  while (i < source.length) {
-    const two = source.slice(i, i + 2);
-    if (two === "//") {
-      const end = source.indexOf("\n", i);
-      blank(i, end < 0 ? source.length : end);
-      i = end < 0 ? source.length : end;
-    } else if (two === "/*") {
-      const end = source.indexOf("*/", i + 2);
-      blank(i, end < 0 ? source.length : end + 2);
-      i = end < 0 ? source.length : end + 2;
-    } else if (source[i] === '"' || source[i] === "'" || source[i] === "`") {
-      const quote = source[i];
-      let j = i + 1;
-      while (j < source.length && source[j] !== quote) j += source[j] === "\\" ? 2 : 1;
-      blank(i + 1, j);
-      i = j + 1;
-    } else {
-      i++;
-    }
-  }
-  return out.join("");
-}
-
-function nestedSetters(relativePath: string): string[] {
-  const source = blankNonCode(fs.readFileSync(path.join(process.cwd(), relativePath), "utf-8"));
-  // `set` + capital is also `setTimeout`/`setInterval`, whose callback is NOT a
-  // state updater — React does not re-run it — so they cannot open one. They
-  // stay in the nested set below, where scheduling a timer from inside an
-  // updater would be the same impurity. A leading `.` means a method
-  // (`localStorage.setItem`, `el.setAttribute`), never a setter from useState.
-  const opener = /(?<![.\w])set(?!Timeout|Interval|Immediate)[A-Z]\w*\(\s*(?:\w+|\([^)]*\))\s*=>/g;
-  const found: string[] = [];
-  for (const match of source.matchAll(opener)) {
-    const openParen = source.indexOf("(", match.index!);
-    let depth = 0;
-    let end = openParen;
-    for (; end < source.length; end++) {
-      if (source[end] === "(") depth++;
-      else if (source[end] === ")" && --depth === 0) break;
-    }
-    // A scan that ran to EOF found no closing paren, which means the blanking
-    // above missed something. Reporting garbage from it would be worse than
-    // saying so.
-    if (end >= source.length) {
-      found.push(`${relativePath}: unbalanced parentheses while scanning ${match[0]}`);
-      continue;
-    }
-    const body = source.slice(source.indexOf("=>", openParen) + 2, end);
-    // The project's OWN wrappers count: `setMessages(prev => { applyStreaming("");
-    // return prev })` would pass a setter-only rule while being strictly worse
-    // than the defect — React may run it twice AND it mutates a ref during the
-    // render phase, so the ref and the state can disagree at commit time.
-    const nested = [...body.matchAll(/(?<![.\w])(?:set|apply)[A-Z]\w*\(/g)].map((m) => m[0]);
-    if (nested.length > 0) {
-      const line = source.slice(0, match.index!).split("\n").length;
-      found.push(`${relativePath}:${line} ${match[0]} -> ${[...new Set(nested)].join(", ")}`);
-    }
-  }
-  return found;
-}

@@ -539,21 +539,26 @@ function ChromeDesktopInner() {
     : { backgroundSize: "auto", backgroundPosition: "center", backgroundRepeat: "no-repeat" };
   const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
   const [customWallpapers, setCustomWallpapers] = useState<string[]>([]);
-  // Mirrored so the two writers below can compute the next list without a
-  // functional updater. Both used to do their localStorage write and their
-  // sibling `setWallpaperId` from INSIDE one, which React may run twice.
+  // Mirrored so the writers below can compute the next list without a
+  // functional updater. The upload and the delete used to do their localStorage
+  // write and their sibling `setWallpaperId` from INSIDE one, which React may
+  // run twice.
   //
-  // Each writer advances the ref itself before its state update, so two
-  // callbacks that run before React commits do not both read the same list; the
-  // effect only re-syncs it against whatever state actually settled.
+  // EVERY writer advances the ref itself, before its state update — including
+  // the loader below, which is why there is no mirroring effect. An effect
+  // would have left a window one paint wide between the load committing and the
+  // ref catching up, and a delete dispatched inside it would compute
+  // `[].filter(…)` and write an empty list over every saved wallpaper.
   const customWallpapersRef = useRef<string[]>([]);
-  useEffect(() => { customWallpapersRef.current = customWallpapers; }, [customWallpapers]);
   // Wallpapers are large base64 blobs — keep in localStorage to avoid
   // bloating the KV JSON file that gets read/written on every state save.
   useEffect(() => {
     try {
       const saved = localStorage.getItem(CUSTOM_WPS_KEY);
-      if (saved) setCustomWallpapers(JSON.parse(saved));
+      if (!saved) return;
+      const parsed: string[] = JSON.parse(saved);
+      customWallpapersRef.current = parsed;
+      setCustomWallpapers(parsed);
     } catch {}
   }, []);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
