@@ -26,14 +26,16 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: vi.fn(() => false),
+  gatewayRestartGeneration: vi.fn(() => 0),
   readConfig: vi.fn(async () => ({})),
   restartGateway: vi.fn(async () => {}),
   spawnOpenclawCli: vi.fn(),
 }));
 
-import { spawnOpenclawCli } from "@/lib/openclaw-config";
+import { gatewayRestartGeneration, spawnOpenclawCli } from "@/lib/openclaw-config";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
+const mockRestarts = vi.mocked(gatewayRestartGeneration);
 
 /** What one mocked `channels status` start costs, standing in for the seconds. */
 const CLI_MS = 100;
@@ -42,6 +44,14 @@ let statusStarts = 0;
 /** Every `channels status` argv the module actually spawned. */
 let statusArgs: string[][] = [];
 let cliFails = false;
+/**
+ * Per-start answers, consumed in order: `{ ms }` is how long that start takes
+ * and `{ out }` what it prints (or `fail` for a spawn that throws). Two reads
+ * can be in flight at once now, so a mock that answers every start with the
+ * same latency and the same payload cannot exercise either the ordering or the
+ * content divergence between them.
+ */
+let script: { ms: number; out?: string; fail?: boolean }[] = [];
 
 /** The gateway's answer for a box with all three channels present. */
 function payload() {
@@ -64,15 +74,18 @@ beforeEach(async () => {
   statusStarts = 0;
   statusArgs = [];
   cliFails = false;
+  script = [];
   // A failed read is logged; the failure case below is deliberate.
   vi.spyOn(console, "warn").mockImplementation(() => {});
+  mockRestarts.mockReturnValue(0);
   mockSpawn.mockImplementation(async (args: string[]) => {
     if (args[0] === "channels" && args[1] === "status") {
+      const step = script.shift();
       statusStarts += 1;
       statusArgs.push(args);
-      await new Promise((resolve) => setTimeout(resolve, CLI_MS));
-      if (cliFails) throw new Error("gateway unreachable");
-      return payload();
+      await new Promise((resolve) => setTimeout(resolve, step?.ms ?? CLI_MS));
+      if (step?.fail || (!step && cliFails)) throw new Error("gateway unreachable");
+      return step?.out ?? payload();
     }
     return "{}";
   });
@@ -180,6 +193,100 @@ describe("one CLI start fills every channel's memo", () => {
     await stale;
     expect(statusStarts).toBe(2);
     await channels.readCachedChannelRow("whatsapp");
+    expect(statusStarts).toBe(2);
+  });
+
+  it("treats a gateway the CLI could not reach as a failed read, not as 'no channels'", async () => {
+    // Measured on the OpenClaw box with `clawbox-gateway.service` stopped:
+    // `channels status --json` exits 0 and prints a valid object —
+    // `{ gatewayReachable: false, configOnly: true, error: "Gateway not
+    // reachable at ws://…(ECONNREFUSED)…", configuredChannels: ["telegram"] }`
+    // — with no `channelAccounts` and no `channels` key at all. Read as a
+    // payload that is "the gateway answered and none of these channels exists",
+    // which is pinned for the full 15 s answer window instead of the 3 s a
+    // failed read gets. A gateway restart is the commonest event on this box.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    script = [{
+      ms: 0,
+      out: JSON.stringify({
+        gatewayReachable: false,
+        configOnly: true,
+        error: "Gateway not reachable at ws://127.0.0.1:18789 (ECONNREFUSED).",
+        configuredChannels: ["telegram"],
+      }),
+    }];
+
+    expect(await channels.readCachedChannelRow("telegram")).toBeNull();
+    expect(statusStarts).toBe(1);
+
+    // The short window, because this was not an answer about any channel.
+    vi.setSystemTime(Date.now() + 5_000);
+    expect(await channels.readCachedChannelRow("telegram")).toMatchObject({ connected: true });
+    expect(statusStarts).toBe(2);
+  });
+
+  it("does not downgrade a channel's fresh answer because another channel's read failed", async () => {
+    // One read now speaks for every channel, so a failure has to be careful in
+    // a way a per-channel read never had to be: WhatsApp's poll failing must
+    // not turn Telegram's two-second-old emerald dot into "could not ask".
+    vi.useFakeTimers({ toFake: ["Date"] });
+    script = [{ ms: 0 }, { ms: 0, fail: true }];
+
+    expect(await channels.readCachedChannelRow("telegram")).toMatchObject({ connected: true });
+    channels.invalidateChannelStatus("whatsapp");
+    vi.setSystemTime(Date.now() + 2_000);
+    expect(await channels.readCachedChannelRow("whatsapp")).toBeNull();
+    expect(statusStarts).toBe(2);
+
+    // Telegram's answer is still inside its window and still an answer.
+    const telegram = await channels.readCachedChannelRowResult("telegram");
+    expect(telegram).toEqual({ answered: true, row: expect.objectContaining({ connected: true }) });
+    expect(statusStarts).toBe(2);
+  });
+
+  it("lets the read that STARTED last own the row, whatever order they finish in", async () => {
+    // Two shared reads overlap whenever a change lands mid-flight. The older
+    // one is slower here — two CLI cold starts competing on a Jetson is exactly
+    // how that happens — so without a guard it lands second and stamps its
+    // pre-restart rows as fresh.
+    const stale = JSON.stringify({
+      channelAccounts: { telegram: [{ configured: true, connected: true }] },
+    });
+    const fresh = JSON.stringify({
+      channelAccounts: { telegram: [{ configured: true, connected: false }] },
+    });
+    script = [{ ms: 80, out: stale }, { ms: 10, out: fresh }];
+
+    const first = channels.readCachedChannelRow("telegram");
+    channels.invalidateChannelStatus("telegram");
+    const second = channels.readCachedChannelRow("telegram");
+
+    expect(await second).toMatchObject({ connected: false });
+    await first;
+    expect(statusStarts).toBe(2);
+    // The slow first read has now settled. It must not have overwritten the
+    // newer answer with the connection state it captured before the change.
+    expect(await channels.readCachedChannelRow("telegram")).toMatchObject({ connected: false });
+    expect(statusStarts).toBe(2);
+  });
+
+  it("drops every channel's row when the gateway is restarted by something that knows nothing about channels", async () => {
+    // `restartGateway()` has ~14 callers — a model save, an STT change, a
+    // browser install, the updater, boot — and none of them invalidates a
+    // channel. On beta a channel held a row only if that channel had been
+    // polled; now ONE poll seeds all three, so the stale answer covers channels
+    // the owner never opened. The monotonic restart counter is what closes it.
+    expect(await channels.readCachedChannelRow("telegram")).toMatchObject({ connected: true });
+    expect(statusStarts).toBe(1);
+
+    mockRestarts.mockReturnValue(1);
+    script = [{ ms: 0, out: JSON.stringify({
+      channelAccounts: { telegram: [{ configured: true, connected: false }] },
+    }) }];
+    expect(await channels.readCachedChannelRow("telegram")).toMatchObject({ connected: false });
+    expect(statusStarts).toBe(2);
+    // And the channels that were only seeded by the first read are re-asked too.
+    expect(await channels.readCachedChannelRow("discord")).toBeNull();
     expect(statusStarts).toBe(2);
   });
 

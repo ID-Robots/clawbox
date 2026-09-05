@@ -2730,8 +2730,33 @@ async function awaitGatewayReady(options: RestartGatewayOptions): Promise<void> 
   throw new GatewayNotReadyError();
 }
 
+/**
+ * How many times this process has bounced the gateway.
+ *
+ * A monotonic counter, exported so anything holding a memo of something the
+ * GATEWAY told us can tell whether its answer predates a restart. A restart
+ * takes every channel, every provider and every session down at once, while the
+ * ~14 callers of {@link restartGateway} — a model save, an STT change, a
+ * browser install, the updater, boot — know nothing about any of them and
+ * cannot each be taught to invalidate the right caches.
+ *
+ * Deliberately in this direction: this module imports nothing from the memo
+ * holders, so they read the counter and there is no cycle. (A previous note
+ * claimed one; it was wrong.)
+ */
+let gatewayRestartCount = 0;
+
+/** @see gatewayRestartCount */
+export function gatewayRestartGeneration(): number {
+  return gatewayRestartCount;
+}
+
 export async function restartGateway(options: RestartGatewayOptions = {}): Promise<void> {
   if (gatewayIsAbsent()) return;
+  // Bumped BEFORE the restart, not after: the systemctl call is awaited and a
+  // read that starts while it is in flight is already reading a gateway on its
+  // way down, so its answer must not be stored against the old generation.
+  gatewayRestartCount += 1;
   // Best effort, before the restart: a unit that crash-looped through its
   // StartLimitBurst (20/hour — one bad config during an update is enough)
   // refuses every restart for the rest of the window with "Start request

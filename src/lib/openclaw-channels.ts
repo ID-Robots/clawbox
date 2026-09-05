@@ -33,6 +33,7 @@
 import {
   type SpawnOpenclawOptions,
   OpenclawSpawnTimeoutError,
+  gatewayRestartGeneration,
   openclawIsAbsent,
   readConfig,
   spawnOpenclawCli,
@@ -477,6 +478,10 @@ export interface ChannelRowResult {
 interface ChannelStatusPayload {
   channelAccounts?: Record<string, unknown>;
   channels?: Record<string, unknown>;
+  /** The CLI's own word for "I could not reach the gateway". */
+  gatewayReachable?: unknown;
+  /** Set when the answer was assembled from the config file alone. */
+  configOnly?: unknown;
 }
 
 /**
@@ -544,7 +549,21 @@ async function readChannelStatusPayload(
   // configured is entitled to answer `{}`, and calling that a failed read would
   // put exactly the box this change is for back on the 3 s window.
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  return parsed as ChannelStatusPayload;
+  const payload = parsed as ChannelStatusPayload;
+  // The CLI SAYS when it could not reach the gateway, and that is not an
+  // answer about any channel. Measured on the OpenClaw box with the unit
+  // stopped: `channels status --json` exits 0 and prints a perfectly valid
+  // object — `{ gatewayReachable: false, configOnly: true, error: "Gateway not
+  // reachable at ws://127.0.0.1:18789 (ECONNREFUSED)…", configuredChannels:
+  // [...] }` — with no `channelAccounts` and no `channels` key at all. Read as
+  // a payload it says "every channel was never set up", and that answer stood
+  // for the full 15 s window instead of the 3 s a failed read gets. A gateway
+  // restart is the commonest thing on this box, so the panel reported a paired,
+  // connected WhatsApp as "Not configured" for a quarter of a minute after
+  // every one of them. Ask the harness's own field rather than guessing from
+  // the absence of keys, which a box with nothing configured is entitled to.
+  if (payload.gatewayReachable === false || payload.configOnly === true) return null;
+  return payload;
 }
 
 /**
@@ -637,6 +656,12 @@ interface CachedRow {
   /** See {@link ChannelRowResult} — picks which of the two TTLs applies. */
   answered: boolean;
   at: number;
+  /** When the read that produced this row STARTED. Two shared reads can be out
+   *  at once, and the one that started first is free to finish last; without
+   *  this the older answer overwrites the newer one and is stamped fresh. */
+  startedAt: number;
+  /** {@link gatewayRestartGeneration} when that read started. */
+  restarts: number;
 }
 interface InFlightPayload {
   /**
@@ -645,6 +670,10 @@ interface InFlightPayload {
    * has to be judged on its own.
    */
   epochs: Map<string, number>;
+  /** Wall clock when the spawn began; see {@link CachedRow.startedAt}. */
+  startedAt: number;
+  /** {@link gatewayRestartGeneration} when the spawn began. */
+  restarts: number;
   promise: Promise<ChannelStatusPayload | null>;
 }
 
@@ -691,21 +720,47 @@ const askedChannelIds = new Set<string>(MEMOISED_CHANNEL_IDS);
  * it and is dropped — for THAT channel only, which is the whole reason the
  * epochs are per channel rather than one counter.
  */
-function storeChannelPayload(
-  payload: ChannelStatusPayload | null,
-  startedEpochs: Map<string, number>,
-): void {
+function storeChannelPayload(payload: ChannelStatusPayload | null, read: InFlightPayload): void {
   const at = Date.now();
   const answered = payload !== null;
-  const ids = new Set<string>(startedEpochs.keys());
+  const restarts = read.restarts;
+  const ids = new Set<string>(read.epochs.keys());
   for (const id of askedChannelIds) ids.add(id);
   if (payload) {
-    for (const id of Object.keys(payload.channelAccounts ?? {})) ids.add(id);
-    for (const id of Object.keys(payload.channels ?? {})) ids.add(id);
+    // `payload` is an unchecked cast of whatever the CLI printed, and
+    // `Object.keys("abc")` is `["0","1","2"]` — junk ids in the memo for a
+    // malformed answer. The same plain-object test `rowFromPayload` applies per
+    // value, applied once to the container.
+    for (const group of [payload.channelAccounts, payload.channels]) {
+      if (!group || typeof group !== "object" || Array.isArray(group)) continue;
+      for (const id of Object.keys(group)) ids.add(id);
+    }
   }
   for (const id of ids) {
-    if ((epochs.get(id) ?? 0) !== (startedEpochs.get(id) ?? 0)) continue;
-    cachedRows.set(id, { row: payload ? rowFromPayload(payload, id) : null, answered, at });
+    // An invalidation that landed while this was in flight means the answer
+    // predates the change that caused it — for THAT channel only, which is the
+    // whole reason the epochs are per channel rather than one counter.
+    if ((epochs.get(id) ?? 0) !== (read.epochs.get(id) ?? 0)) continue;
+    const held = cachedRows.get(id);
+    if (held) {
+      // Two shared reads can overlap: whichever STARTED last owns the entry,
+      // whatever order they finish in. Without this the slower, older read
+      // lands second and its stale rows are stamped with a fresh `at`.
+      if (held.startedAt > read.startedAt) continue;
+      // A read that could not reach the gateway says nothing about a channel
+      // some other read has just answered for. Downgrading a live answer to a
+      // failure because a DIFFERENT channel's poll happened to fail is a false
+      // failure this memo did not have while each channel had its own read.
+      if (!answered && held.answered && held.restarts === restarts
+          && Date.now() - held.at < CHANNEL_STATUS_TTL_MS) continue;
+    }
+    cachedRows.set(id, {
+      row: payload ? rowFromPayload(payload, id) : null,
+      answered,
+      at,
+      startedAt: read.startedAt,
+      restarts,
+    });
   }
 }
 
@@ -727,8 +782,17 @@ function storeChannelPayload(
 export function readCachedChannelRowResult(channelId: string): Promise<ChannelRowResult> {
   askedChannelIds.add(channelId);
   const epoch = epochs.get(channelId) ?? 0;
+  const restarts = gatewayRestartGeneration();
   const cached = cachedRows.get(channelId);
-  if (cached) {
+  // A row from before a gateway restart is not an answer about the gateway that
+  // is up now. `restartGateway()` has ~14 callers — a model save, an STT
+  // change, a browser install, the updater, boot — and none of them knows what
+  // a channel is, so none can be taught to invalidate this. One poll of ANY
+  // channel now seeds every channel's entry, so without this the exposure
+  // covers channels the owner never even opened: the Telegram card would report
+  // a receiving bot from a row read before the restart that stopped it, which
+  // is the very thing that route says it exists to prevent.
+  if (cached && cached.restarts === restarts) {
     const age = Date.now() - cached.at;
     const ttl = cached.answered ? CHANNEL_STATUS_TTL_MS : CHANNEL_STATUS_FAILURE_TTL_MS;
     // `age >= 0` because the clock is wall-clock: a Jetson whose RTC is corrected
@@ -744,7 +808,8 @@ export function readCachedChannelRowResult(channelId: string): Promise<ChannelRo
   // return. Judged per channel, because the shared read is still perfectly
   // current for every other channel in it.
   const existing = inFlightPayload;
-  if (existing && (existing.epochs.get(channelId) ?? 0) === epoch) {
+  if (existing && (existing.epochs.get(channelId) ?? 0) === epoch
+      && existing.restarts === restarts) {
     return existing.promise.then((payload) => resultFor(payload, channelId));
   }
 
@@ -755,19 +820,26 @@ export function readCachedChannelRowResult(channelId: string): Promise<ChannelRo
   for (const id of askedChannelIds) {
     if (!startedEpochs.has(id)) startedEpochs.set(id, 0);
   }
-  const promise = readChannelStatusPayload(null)
+  const read: InFlightPayload = {
+    epochs: startedEpochs,
+    startedAt: Date.now(),
+    restarts,
+    // Assigned on the next line; the callbacks below cannot run before it is.
+    promise: null as unknown as Promise<ChannelStatusPayload | null>,
+  };
+  read.promise = readChannelStatusPayload(null)
     .then((payload) => {
-      storeChannelPayload(payload, startedEpochs);
+      storeChannelPayload(payload, read);
       return payload;
     })
     .finally(() => {
       // Only ever clear our OWN entry: an abandoned read must not evict the
       // replacement that an invalidation started, or the next caller pays for a
       // third CLI start.
-      if (inFlightPayload?.promise === promise) inFlightPayload = null;
+      if (inFlightPayload === read) inFlightPayload = null;
     });
-  inFlightPayload = { epochs: startedEpochs, promise };
-  return promise.then((payload) => resultFor(payload, channelId));
+  inFlightPayload = read;
+  return read.promise.then((payload) => resultFor(payload, channelId));
 }
 
 /**
