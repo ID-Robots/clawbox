@@ -471,13 +471,18 @@ async function assertNoSignInAt(profileId: string): Promise<void> {
     );
     return;
   }
-  let profiles: unknown;
+  let parsed: unknown;
   try {
-    profiles = (JSON.parse(raw) as { profiles?: unknown }).profiles;
+    parsed = JSON.parse(raw);
   } catch {
     console.warn("[configure] `models auth list --json` was not JSON; the key paste is unguarded");
     return;
   }
+  // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
+  // handler's own catch would turn into a 500 — the opposite of the fail-open
+  // this guard promises, over a save that is perfectly good.
+  if (!parsed || typeof parsed !== "object") return;
+  const profiles = (parsed as { profiles?: unknown }).profiles;
   if (!Array.isArray(profiles)) return;
   // The store's own shape, measured on 2026.8.1:
   // `{profiles: [{id, provider, type, label, expiresAt}]}`, `type` being
@@ -1900,10 +1905,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // profile metadata. The throw is mapped to a 409 by this handler's own
     // catch.
     //
-    // Skipped where no sign-in lane exists: the two local providers have no
-    // OAuth flow, and the ClawBox AI profile is written by this route alone.
-    // It is one CLI cold start, and this is the wizard's critical path.
-    if (authMode !== "subscription" && !isOllama && !isLlamaCpp && !isClawAI) {
+    // Skipped where no sign-in lane exists: the two local providers have none,
+    // OpenRouter is deliberately absent from OAUTH_PROVIDERS (see the
+    // openrouter branch below — every save that reaches it is key-based), and
+    // the ClawBox AI profile is written by this route alone. It is one CLI cold
+    // start, and this is the wizard's critical path.
+    if (
+      authMode !== "subscription"
+      && !isOllama && !isLlamaCpp && !isClawAI && !isOpenRouter
+    ) {
       await assertNoSignInAt(config.profileKey);
     }
 

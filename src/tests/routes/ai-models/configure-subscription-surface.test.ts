@@ -842,20 +842,36 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
     expect(pasteWasSpawned()).toBe(true);
   });
 
+  it("fails open on a store that answers something other than a profile list", async () => {
+    // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
+    // handler's catch would turn into a 500 over a save that is perfectly
+    // good. A guard that cannot read the box does not refuse.
+    vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
+      Array.isArray(args) && args.includes("list") && args.includes("auth") ? "null" : "",
+    );
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-a-real-key" }));
+
+    expect(res.status).toBe(200);
+    expect(pasteWasSpawned()).toBe(true);
+  });
+
   it("never asks the store on a lane that has no sign-in to lose", async () => {
     // The read is one CLI cold start on the wizard's critical path, and the
     // two local providers and the ClawBox AI profile have no OAuth flow at
     // all. Spending it there would be a slower wizard for nothing.
     profilesInStore([{ id: "anthropic:default", provider: "anthropic", type: "oauth" }]);
 
-    const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
-
-    expect(res.status).toBe(200);
-    expect(
-      vi.mocked(spawnOpenclawCli).mock.calls.some(
-        ([args]) => Array.isArray(args) && args.includes("auth") && args.includes("list"),
-      ),
-    ).toBe(false);
+    for (const provider of ["llamacpp", "openrouter"]) {
+      vi.mocked(spawnOpenclawCli).mockClear();
+      const res = await configurePost(jsonRequest({ provider, apiKey: "sk-or-a-real-key" }));
+      expect(res.status).toBe(200);
+      expect(
+        vi.mocked(spawnOpenclawCli).mock.calls.some(
+          ([args]) => Array.isArray(args) && args.includes("auth") && args.includes("list"),
+        ),
+      ).toBe(false);
+    }
   });
 
   it("does not refuse the sign-in lane itself", async () => {
