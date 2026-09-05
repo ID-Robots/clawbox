@@ -33,7 +33,9 @@ vi.mock("@/components/AIProviderIcon", () => ({ default: () => <span data-testid
 const ROWS = [
   { id: "openai", label: "OpenAI GPT", state: "connected", isDefault: true, section: "ai", enabled: true },
   { id: "anthropic", label: "Anthropic Claude", state: "connected", isDefault: false, section: "ai", enabled: true },
-  { id: "openrouter", label: "OpenRouter", state: "connected", isDefault: false, section: "ai", enabled: true },
+  // One UNBROKEN label, which is the shape `break-words` alone cannot save: on
+  // Hermes the label is whatever the dashboard reports.
+  { id: "openrouter", label: "OpenRouterUnbrokenVendorName", state: "connected", isDefault: false, section: "ai", enabled: true },
 ];
 
 function stubFetch() {
@@ -104,6 +106,9 @@ describe("provider rows at phone widths", () => {
       // An unbroken label must still be legible rather than hard-clipped by
       // the row's `min-w-0`: on Hermes the label is dashboard data.
       expect(hasClass(name!, "break-words"), `${row.label} must be allowed to break`).toBe(true);
+      // `overflow-wrap: break-word` does not reduce a flex item's min-content
+      // width, so `break-words` without `min-w-0` still overflows the pane.
+      expect(hasClass(name!, "min-w-0"), `${row.label} must be able to shrink`).toBe(true);
       // Still one line where the PANE has room for one.
       expect(hasClass(name!, "@md:truncate"), `${row.label} should truncate in a wide pane`).toBe(true);
       expect(viewportQueries(name!), `${row.label} must not ask the viewport`).toEqual([]);
@@ -127,7 +132,9 @@ describe("provider rows at phone widths", () => {
   });
 
   it("does not clip the vendor or the model on the hero card", () => {
-    const row = { id: "anthropic", label: "Anthropic Claude", state: "connected", isDefault: true, section: "ai", enabled: true } as unknown as ProviderStatusRow;
+    // An unbroken label and an unbroken model id: the pair `break-words` alone
+    // cannot keep inside a narrow pane.
+    const row = { id: "anthropic", label: "AnthropicUnbrokenVendorName", state: "connected", isDefault: true, section: "ai", enabled: true } as unknown as ProviderStatusRow;
     render(
       <I18nProvider>
         <ProviderDefaultHero row={row} model="claude-opus-5-20260401" onChangeModel={() => {}} />
@@ -141,9 +148,10 @@ describe("provider rows at phone widths", () => {
     expect(containerAncestor(hero), "the hero declares no query container").not.toBeNull();
 
     const name = screen.getByTestId("provider-default-hero-name");
-    expect(name).toHaveTextContent("Anthropic Claude");
+    expect(name).toHaveTextContent("AnthropicUnbrokenVendorName");
     expect(clipsAtEveryWidth(name), "the vendor name is clipped at every width").toBe(false);
     expect(hasClass(name, "break-words"), "the vendor name must be allowed to break").toBe(true);
+    expect(hasClass(name, "min-w-0"), "the vendor name must be able to shrink").toBe(true);
 
     const model = screen.getByTestId("provider-default-hero-model");
     expect(model).toHaveTextContent("claude-opus-5-20260401");
@@ -151,5 +159,6 @@ describe("provider rows at phone widths", () => {
     // A model id is one long hyphenated token: without the ellipsis it has to
     // be allowed to break, or it pushes the card wider than the phone.
     expect(hasClass(model, "break-words"), "the model id must be allowed to wrap").toBe(true);
+    expect(hasClass(model, "min-w-0"), "the model id must be able to shrink").toBe(true);
   });
 });

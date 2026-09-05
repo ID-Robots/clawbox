@@ -175,12 +175,15 @@ export default function AiProviderList() {
                     <span className="flex flex-wrap @md:flex-nowrap items-center gap-2">
                       <span
                         data-testid={`ai-provider-name-${row.id}`}
-                        /* `break-words` beside the wrap: on Hermes the label
-                           is whatever the dashboard reports, and an unbroken
-                           one would be hard-clipped by the row's `min-w-0`
-                           with no ellipsis to say so — worse than the
-                           truncation being removed. */
-                        className={`text-sm font-medium break-words @md:truncate ${row.enabled ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
+                        /* `break-words` beside the wrap: on Hermes the label is
+                           whatever the dashboard reports, so an unbroken one
+                           has to be allowed to break rather than be hard-clipped
+                           with no ellipsis to say so. `min-w-0` is what lets it:
+                           `overflow-wrap: break-word` does NOT reduce a flex
+                           item's min-content width, so without it the item
+                           refuses to shrink and the long word overflows the
+                           pane instead of wrapping inside it. */
+                        className={`min-w-0 text-sm font-medium break-words @md:truncate ${row.enabled ? "text-[var(--text-primary)]" : "text-[var(--text-muted)]"}`}
                       >
                         {row.label}
                       </span>

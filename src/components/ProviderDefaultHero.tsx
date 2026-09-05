@@ -73,7 +73,10 @@ export default function ProviderDefaultHero({
 
           <div className="flex flex-col gap-[3px] flex-1 min-w-0">
             <span className="flex flex-wrap @md:flex-nowrap items-center gap-2 text-base font-bold text-[var(--text-primary)]">
-              <span className="break-words @md:truncate" data-testid="provider-default-hero-name">{row.label}</span>
+              {/* `min-w-0` beside `break-words`: `overflow-wrap: break-word`
+                does not reduce a flex item's min-content width, so without it
+                an unbroken vendor name refuses to shrink and overflows. */}
+            <span className="min-w-0 break-words @md:truncate" data-testid="provider-default-hero-name">{row.label}</span>
               <span className="shrink-0 inline-flex items-center gap-1 px-1.5 py-px rounded-[var(--r-1)] bg-[var(--fill-2)] text-[9px] font-bold uppercase tracking-[0.08em] leading-[1.6] text-[var(--text-primary)]">
                 <span
                   className="material-symbols-rounded"
@@ -90,7 +93,7 @@ export default function ProviderDefaultHero({
               /* `break-words` because a model id is one long hyphenated token:
                  with the ellipsis gone below `sm:` it would otherwise push the
                  card wider than the phone. */
-              <span className="text-xs text-[var(--text-secondary)] break-words @md:truncate" data-testid="provider-default-hero-model">
+              <span className="min-w-0 text-xs text-[var(--text-secondary)] break-words @md:truncate" data-testid="provider-default-hero-model">
                 {model ? <span className="font-mono">{model}</span> : null}
                 {model && note ? " · " : null}
                 {note}
