@@ -856,6 +856,8 @@ export const ja: Record<string, string> = {
   "codingAgent.artBrowser": "ブラウザー",
   "codingAgent.team.artMain": "アシスタント",
   "codingAgent.team.artWorkers": "ワーカー",
+  "codingAgent.team.artPlanner": "プランナー",
+  "codingAgent.team.artReviewers": "レビュアー",
   "codingAgent.resetConfirm": "すべてリセット — もう一度タップ",
   "codingAgent.resetFailed": "コーディングエージェントをリセットできませんでした。",
 

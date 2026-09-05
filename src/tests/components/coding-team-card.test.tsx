@@ -77,8 +77,12 @@ describe("with no team yet", () => {
     const card = await screen.findByTestId("coding-team-card");
     const tree = within(card).getByTestId("coding-team-tree");
     expect(tree).toHaveAttribute("data-workers", "3");
-    expect(tree).toHaveAttribute("data-reviewer", "true");
+    expect(tree).toHaveAttribute("data-reviewers", "1");
     expect(tree).toHaveAttribute("data-active", "0");
+    // The sentence stands beneath the tree, not beside it.
+    const wrap = tree.parentElement!;
+    expect(wrap.className).toContain("flex-col");
+    expect(wrap.lastElementChild?.textContent).toBe(t("codingAgent.team.help"));
   });
 
   it("offers to plan the team in the chat, and hands over on a click", async () => {
@@ -108,13 +112,17 @@ describe("with no team yet", () => {
 describe("with a team working here", () => {
   it("sizes the tree by the board: the workers who worked, the ones at work pulsing", async () => {
     stub();
-    teams = [{ ...WORKING, agents: { planner: 1, workers: 2, reviewers: 1, total: 4 } }];
+    teams = [{ ...WORKING, agents: { planner: 1, workers: 5, reviewers: 3, total: 9 } }];
     render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
     const tree = await screen.findByTestId("coding-team-tree");
-    expect(tree).toHaveAttribute("data-workers", "2");
-    expect(tree).toHaveAttribute("data-reviewer", "true");
-    // t2 is in progress: one worker at work.
+    // Nine agents stated, nine drawn: the planner, five workers, three reviewers.
+    expect(tree).toHaveAttribute("data-workers", "5");
+    expect(tree).toHaveAttribute("data-reviewers", "3");
+    expect(within(tree).getAllByTestId("coding-team-tree-worker")).toHaveLength(5);
+    expect(within(tree).getAllByTestId("coding-team-tree-reviewer")).toHaveLength(3);
+    // t2 is in progress: one worker at work; t1 is complete and reviewed: no reviewer deciding.
     expect(tree).toHaveAttribute("data-active", "1");
+    expect(tree).toHaveAttribute("data-active-reviewers", "0");
   });
 
   it("says who worked and on which branch, and links each task's reviewer beside its worker", async () => {

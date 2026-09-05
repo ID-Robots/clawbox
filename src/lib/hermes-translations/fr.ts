@@ -854,6 +854,8 @@ export const fr: Record<string, string> = {
   "codingAgent.artBrowser": "Navigateur",
   "codingAgent.team.artMain": "L'assistant",
   "codingAgent.team.artWorkers": "Ouvriers",
+  "codingAgent.team.artPlanner": "Planificateur",
+  "codingAgent.team.artReviewers": "Relecteurs",
   "codingAgent.resetConfirm": "Tout réinitialiser — appuyez à nouveau",
   "codingAgent.resetFailed": "L'agent de code n'a pas pu être réinitialisé.",
 

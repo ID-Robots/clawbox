@@ -849,6 +849,8 @@ export const es: Record<string, string> = {
   "codingAgent.artBrowser": "Navegador",
   "codingAgent.team.artMain": "Asistente",
   "codingAgent.team.artWorkers": "Trabajadores",
+  "codingAgent.team.artPlanner": "Planificador",
+  "codingAgent.team.artReviewers": "Revisores",
   "codingAgent.resetConfirm": "Restablecer todo — toca otra vez",
   "codingAgent.resetFailed": "No se pudo restablecer el agente de código.",
 
