@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 // not enough on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -93,18 +93,34 @@ interface Scenario {
   identity?: "ok" | "drift" | "script-missing";
   /** Is there a servable build in `.next` before the rebuild? */
   previousBuild?: "servable" | "none";
-  /** Is there a build parked in `.next-old` by an earlier interrupted run? */
-  parkedBuild?: "servable" | "none";
+  /**
+   * Is there a build parked in `.next-old` by an earlier interrupted run?
+   *
+   * "nested-entry" is the layout `postbuild` supports when Next nests the
+   * standalone tree: `standalone/server.js` is a SYMLINK to an absolute path
+   * inside `.next`, which dangles for as long as the tree is parked.
+   */
+  parkedBuild?: "servable" | "nested-entry" | "none";
   /** Units `systemctl is-active --quiet` answers yes for at the start. */
   activeUnits?: string[];
   /**
-   * Does `systemctl start` actually bring the unit up?
+   * Does the dashboard actually answer on :80 after the start?
    *
-   * False models the crash-loop: the command succeeds, `Restart=always` keeps
-   * retrying, and the unit never becomes active — which is exactly the state
-   * the readiness poll exists to report.
+   * False models the REAL crash-loop, which is why the unit still goes active
+   * here: clawbox-setup is `Type=simple` with `Restart=always`, so systemd
+   * marks it active the instant node is forked — before production-server.js
+   * has required the build. `systemctl is-active` therefore says yes about a
+   * box whose port 80 is dead, and only an HTTP probe can tell them apart.
    */
   startWorks?: boolean;
+  /**
+   * Room on the filesystem for a second copy of the build.
+   *
+   * "tight" takes `set_previous_build_aside`'s no-fallback branch, where the
+   * old build is deleted rather than parked — the case in which a failed
+   * rebuild has nothing to roll back to.
+   */
+  diskHeadroom?: "ample" | "tight";
   bunInstall?: "succeeds" | "fails";
   nodePty?: "succeeds" | "fails";
   /** Which shipped function to run. */
@@ -139,6 +155,7 @@ function run(scenario: Scenario = {}): Run {
     parkedBuild = "none",
     activeUnits = ["ollama.service"],
     startWorks = true,
+    diskHeadroom = "ample",
     bunInstall = "succeeds",
     nodePty = "succeeds",
     entry = "do_rebuild",
@@ -147,6 +164,18 @@ function run(scenario: Scenario = {}): Run {
   mkdirSync(projectDir, { recursive: true });
   if (previousBuild === "servable") writeBuild(path.join(projectDir, ".next"), "old-build-id");
   if (parkedBuild === "servable") writeBuild(path.join(projectDir, ".next-old"), "parked-build-id");
+  if (parkedBuild === "nested-entry") {
+    const kept = path.join(projectDir, ".next-old");
+    writeBuild(kept, "parked-build-id", false);
+    mkdirSync(path.join(kept, "standalone", "nested"), { recursive: true });
+    writeFileSync(path.join(kept, "standalone", "nested", "server.js"), "// server\n", "utf-8");
+    // Exactly what postbuild writes: an ABSOLUTE path through `.next`, which
+    // does not exist while the tree is parked under `.next-old`.
+    symlinkSync(
+      path.join(projectDir, ".next", "standalone", "nested", "server.js"),
+      path.join(kept, "standalone", "server.js"),
+    );
+  }
 
   if (identity !== "script-missing") {
     mkdirSync(path.join(projectDir, "scripts"), { recursive: true });
@@ -179,6 +208,8 @@ function run(scenario: Scenario = {}): Run {
     "SYSTEMCTL_LOG=" + JSON.stringify(systemctlLog),
     'ACTIVE_UNITS="' + activeUnits.join(" ") + '"',
     'START_WORKS=' + (startWorks ? "1" : "0"),
+    "DASHBOARD_UP=0",
+    'DISK_HEADROOM=' + JSON.stringify(diskHeadroom),
     "",
     "is_test_mode() { return 1; }",
     "# The readiness poll waits a real second per attempt. The LOOP is the",
@@ -203,10 +234,13 @@ function run(scenario: Scenario = {}): Run {
     "",
     "systemctl() {",
     '  printf "%s\\n" "systemctl $*" >> "$SYSTEMCTL_LOG"',
-    "  # A real `start` makes the unit active, so the restore path's readiness",
-    "  # poll is answered by what it actually did rather than by a constant.",
+    "  # `Type=simple`: systemd marks the unit active as soon as ExecStart is",
+    "  # forked, whether or not the process can load the build. So `start`",
+    "  # ALWAYS makes is-active true here, and only the HTTP stub below knows",
+    "  # whether the dashboard came up.",
     '  if [ "$1" = "start" ] || [ "$1" = "restart" ]; then',
-    '    [ "$START_WORKS" = "1" ] && ACTIVE_UNITS="$ACTIVE_UNITS $2"',
+    '    ACTIVE_UNITS="$ACTIVE_UNITS $2"',
+    '    [ "$START_WORKS" = "1" ] && DASHBOARD_UP=1',
     "    return 0",
     "  fi",
     '  if [ "$1" = "stop" ]; then',
@@ -224,11 +258,31 @@ function run(scenario: Scenario = {}): Run {
     "  return 0",
     "}",
     "",
+    "# The dashboard's own answer, which is what restore_previous_build asks",
+    "# for. `command -v curl` finds a shell function, so the missing-curl arm",
+    "# stays unreached here and has its own case.",
+    "curl() {",
+    '  if [ "$DASHBOARD_UP" = "1" ]; then printf "200"; return 0; fi',
+    '  printf "000"',
+    "  return 7",
+    "}",
+    "",
+    "# Free space on the build's filesystem. `tight` reports less than twice the",
+    "# tree's size, which is set_previous_build_aside's no-fallback threshold.",
+    "df() {",
+    '  if [ "$DISK_HEADROOM" = "tight" ]; then',
+    '    printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 100 99 1 99%% /\\n"',
+    "  else",
+    '    printf "Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 100 1 99999999 1%% /\\n"',
+    "  fi",
+    "}",
+    "",
     "# beta's own memory reclaim, which do_rebuild calls. Its behaviour has its",
     "# own suite; here it only has to be present and harmless.",
     "free_memory_for_build() { :; }",
     "",
     shellFunctions(
+      "build_entry_present",
       "verify_build_present",
       "promote_parked_build",
       "set_previous_build_aside",
@@ -258,8 +312,6 @@ function run(scenario: Scenario = {}): Run {
     parked: existsSync(path.join(projectDir, ".next-old")),
   };
 }
-
-const index = (r: Run, re: RegExp) => r.systemctl.findIndex((l) => re.test(l));
 
 beforeEach(() => {
   sandbox = mkdtempSync(path.join(tmpdir(), "clawbox-rebuild-"));
@@ -347,7 +399,7 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
   it("starts clawbox-setup again after a failed build", () => {
     const r = run({ build: "oom-killed" });
     expect(restarted(r).length).toBeGreaterThan(0);
-    expect(r.stderr).toMatch(/dashboard is serving again/);
+    expect(r.stderr).toMatch(/Restored the previous build; the dashboard answers on :80 again/);
   });
 
   // The window the first version of this fix left open: `bun install` and
@@ -369,25 +421,51 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     expect(r.buildId).toBe("old-build-id");
   });
 
-  it("says the dashboard is down when the restored build will not start", () => {
-    // clawbox-setup has Restart=always, so a restore that crash-loops is
-    // invisible unless someone looks. `systemctl start … || true` under a
-    // message that asserts an outcome is the false-success shape — and an
-    // alternation over both messages would be satisfied by an implementation
-    // that skips the readiness poll entirely. This scenario's `start` is a
-    // no-op, so only the DOWN branch can produce a line.
+  it("says the dashboard is down when the restored build crash-loops", () => {
+    // The state a Type=simple unit with Restart=always really produces: the
+    // stub `systemctl start` makes the unit ACTIVE — as systemd does the
+    // instant node is forked — while nothing answers on :80. An
+    // implementation that polls `systemctl is-active` reports "serving again"
+    // here, on a box that will be dead all night. Only the HTTP probe can tell
+    // the two apart, which is why this case is the one that pins it.
     const r = run({ build: "oom-killed", startWorks: false });
 
     expect(r.status).not.toBe(0);
-    expect(r.stderr).toMatch(/dashboard is DOWN/);
-    expect(r.stderr).not.toMatch(/dashboard is serving again/);
+    expect(r.systemctl.some((l) => /^systemctl start clawbox-setup/.test(l))).toBe(true);
+    expect(r.stderr).toMatch(/it is DOWN/);
+    expect(r.stderr).not.toMatch(/answers on :80/);
   });
 
-  it("says the dashboard is serving when the restore really comes up", () => {
+  it("says the dashboard answers when the restore really comes up", () => {
     const r = run({ build: "oom-killed" });
 
-    expect(r.stderr).toMatch(/dashboard is serving again/);
-    expect(r.stderr).not.toMatch(/dashboard is DOWN/);
+    expect(r.stderr).toMatch(/answers on :80 again/);
+    expect(r.stderr).not.toMatch(/it is DOWN/);
+  });
+
+  it("does not call it a restore when nothing was ever moved aside", () => {
+    // `bun install` fails BEFORE the park, so the serving build was never
+    // touched. The outcome is right either way; the sentence is not, and this
+    // whole change is about not asserting things that did not happen.
+    const r = run({ bunInstall: "fails" });
+
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/The serving build was never moved aside/);
+    expect(r.stderr).not.toMatch(/Restored the previous build/);
+  });
+
+  it("names the build that failed verification when the disk could not hold two", () => {
+    // The no-fallback branch: `set_previous_build_aside` deleted the old build
+    // rather than parking it, the new one then failed identity, and what is on
+    // disk is that rejected build. Starting it beats a dead box — calling it a
+    // rollback does not.
+    const r = run({ build: "succeeds", identity: "drift", diskHeadroom: "tight" });
+
+    expect(r.status).not.toBe(0);
+    expect(r.parked).toBe(false);
+    expect(r.buildId).toBe("new-build-id");
+    expect(r.stderr).toMatch(/FAILED verification/);
+    expect(r.stderr).not.toMatch(/Restored the previous build/);
   });
 
   it("replaces the previous build only once the new one exists", () => {
@@ -412,6 +490,17 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     expect(r.status).not.toBe(0);
     expect(r.buildId).toBe("parked-build-id");
     expect(r.hasEntry).toBe(true);
+  });
+
+  it("reclaims a parked build whose entry is the nested layout's symlink", () => {
+    // `-f` resolves the link, and the link dangles while the tree is parked —
+    // so a `-f` guard answers "nothing parked here" about the box's only
+    // build and the rename below deletes it.
+    const r = run({ previousBuild: "none", parkedBuild: "nested-entry", build: "oom-killed" });
+
+    expect(r.stderr).toMatch(/parked by an interrupted rebuild/);
+    expect(r.buildId).toBe("parked-build-id");
+    expect(r.parked).toBe(false);
   });
 
   it("does not touch a parked build when the current one is servable", () => {

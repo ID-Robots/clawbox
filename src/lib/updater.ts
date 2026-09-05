@@ -1,6 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { readFile, rm, writeFile } from "fs/promises";
+import { readFile, realpath, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
 import { get, set, setMany } from "./config-store";
@@ -200,12 +200,21 @@ function rootStepResultFailed(result: string | null): boolean {
  * be false, and the continuation would mark the update complete over a box that
  * cannot boot. `standalone/server.js` is what production-server.js requires, so
  * its presence is what says which tree is the serving one.
+ *
+ * …and the entry is followed through `realpath` rather than assumed to sit at
+ * `.next/standalone`. `postbuild` (package.json) SEARCHES for it — Next nests
+ * the standalone tree whenever `outputFileTracingRoot` resolves above the
+ * project — copies the assets and the identity stamp beside the real entry, and
+ * symlinks `.next/standalone/server.js` at it. On such a box
+ * `.next/standalone/.next/BUILD_ID` does not exist, so reading the literal path
+ * would answer "" and turn every successful update into "the device restarted
+ * with no build at all": a false failure over a rebuild that worked.
  */
 async function readBuildId(): Promise<string> {
   try {
-    const standalone = path.join(PROJECT_DIR, ".next", "standalone");
-    const serving = existsSync(path.join(standalone, "server.js"))
-      ? path.join(standalone, ".next")
+    const entry = path.join(PROJECT_DIR, ".next", "standalone", "server.js");
+    const serving = existsSync(entry)
+      ? path.join(path.dirname(await realpath(entry)), ".next")
       : await resolveBuildDir(PROJECT_DIR);
     return (await readFile(path.join(serving, "BUILD_ID"), "utf-8")).trim();
   } catch {

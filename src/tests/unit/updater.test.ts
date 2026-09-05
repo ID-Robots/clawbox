@@ -8,8 +8,13 @@ vi.mock("child_process", () => ({
   execFile: vi.fn(),
 }));
 
+// `realpath` beside `readFile`: readBuildId follows `.next/standalone/server.js`
+// through the link `postbuild` writes for the NESTED standalone layout, so a
+// mock without it would make every case that reaches the entry throw inside
+// readBuildId's `try` and answer "" — i.e. pass for the wrong reason.
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
+  realpath: vi.fn(),
 }));
 
 // `existsSync` is how readBuildId decides WHICH tree the server runs from — the
@@ -56,6 +61,7 @@ const mockSetMany = vi.mocked(setMany);
 const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
+const mockRealpath = vi.mocked(fs.realpath);
 const mockExists = vi.mocked(existsSync);
 const mockGatewayUp = vi.mocked(waitForPortOpen);
 
@@ -202,6 +208,9 @@ describe("updater", () => {
       if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
       throw new Error("ENOENT");
     });
+    // The FLAT standalone layout — the entry is where it looks like it is.
+    // The nested one has a case of its own.
+    mockRealpath.mockImplementation((async (p: unknown) => String(p)) as never);
     mockGatewayUp.mockResolvedValue(true);
 
     setupExecMock({
@@ -1141,6 +1150,29 @@ describe("updater", () => {
 
       expect(await updater.checkContinuation()).toBe(false);
       expect(updater.getUpdateState().phase).toBe("failed");
+    });
+
+    it("reads the nested standalone layout's real build, not the path it links from", async () => {
+      // `postbuild` SEARCHES for the standalone entry (Next nests the tree when
+      // outputFileTracingRoot resolves above the project), copies the assets and
+      // the stamp beside the real one, and symlinks `.next/standalone/server.js`
+      // at it. On such a box `.next/standalone/.next/BUILD_ID` does not exist —
+      // so reading the literal path answers "" and turns a rebuild that WORKED
+      // into "the device restarted with no build at all".
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue("build-aaa");
+      mockExists.mockImplementation((file: unknown) => String(file).endsWith("standalone/server.js"));
+      mockRealpath.mockImplementation((async (p: unknown) =>
+        String(p).replace("/standalone/server.js", "/standalone/nested/app/server.js")) as never);
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("standalone/nested/app/.next/BUILD_ID")) return "build-bbb\n";
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      });
+
+      // A new build id, read from the tree the service really loads: the
+      // continuation is allowed to run.
+      expect(await updater.checkContinuation()).toBe(true);
+      expect(updater.getUpdateState().phase).not.toBe("failed");
     });
 
     it("reports a failed update when a box that had no build still has none", async () => {
