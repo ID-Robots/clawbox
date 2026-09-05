@@ -153,4 +153,28 @@ describe("/setup-api/apps/uninstall", () => {
     const res = await uninstall("test-app");
     expect(await res.json()).toEqual({ ok: true, appId: "test-app", skillRemoved: true });
   });
+
+  it("fails with the code and the skill fact when a later step throws", async () => {
+    // The outer catch's contract, pinned HERE rather than only in the MCP
+    // fixture that quotes it: `mcp/tools/desktop.ts` matches this 500 on
+    // `"code":"uninstall_failed"` plus `"skillRemoved":true` to tell the agent
+    // the app is only partly gone. With the code asserted on one side alone,
+    // renaming it would leave both suites green while the agent fell back to
+    // "the service did not complete this request. Call clawbox_health".
+    const fsMod = await import("fs/promises");
+    // The skill folder goes; the webapp removal is what fails.
+    vi.mocked(fsMod.default.rm)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+
+    const res = await uninstall("test-app");
+
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({
+      ok: false,
+      code: "uninstall_failed",
+      retryable: true,
+      skillRemoved: true,
+    });
+  });
 });

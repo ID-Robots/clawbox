@@ -1059,6 +1059,19 @@ function ChromeDesktopInner() {
         setUninstallConfirm(null);
         return;
       }
+      // A removal that landed, over a device whose OpenClaw configuration
+      // could not be read: the route removed the web app and never got to look
+      // for a skill of the same id (one id can be both). The app IS off the
+      // desktop, so the cleanup below is right — but saying nothing would put
+      // this route's own defect back in the one surface the owner watches.
+      const removed = await res.json().catch(() => null);
+      if (removed?.skillHalfChecked === false) {
+        window.dispatchEvent(new CustomEvent("clawbox:toast", {
+          detail: {
+            message: "Removed from the desktop. OpenClaw's configuration couldn't be read, so its skills weren't checked — if this app also had a skill, it may still be installed.",
+          },
+        }));
+      }
     } catch (err) {
       console.warn("[uninstall] Failed to uninstall skill:", err);
       // Worded as an unknown, not as a failure. The abort below is six times

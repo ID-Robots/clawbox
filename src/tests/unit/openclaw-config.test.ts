@@ -703,7 +703,9 @@ describe("openclaw-config", () => {
     });
 
     it("uses HOME env var for path resolution", () => {
-      const originalHome = process.env.HOME;
+      // Through `saveEnv` for the reason spelled out on the case above: an
+      // assignment restore writes the string "undefined" for an unset HOME.
+      const restore = saveEnv("HOME");
       process.env.HOME = "/test/home";
       try {
         // Reset modules so getSkillsDir picks up new HOME
@@ -715,7 +717,7 @@ describe("openclaw-config", () => {
         // getSkillsDir reads HOME at call time
         expect(result).toBe("/test/home/clawd");
       } finally {
-        process.env.HOME = originalHome;
+        restore();
       }
     });
   });

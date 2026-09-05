@@ -378,13 +378,29 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             // then retry once" — sending the agent to a health check over a
             // route that had just answered precisely, and saying nothing about
             // the app being half removed. `matchRule` compares the status
-            // before the body, so the two 503s above cannot swallow this.
+            // before the body, so the two 503s above cannot swallow these.
+            //
+            // TWO rules again, for the reason the 503s are two: the route's own
+            // 500 body words the cases apart (`skillRemoved === true` → "after
+            // the skill folder had already been removed"), and one "may already
+            // be gone" sentence for both would claim a half-removed skill on
+            // the hermes SKU, where no skills path is ever resolved. The first
+            // rule wants BOTH fields, in the order the route serialises them —
+            // if that body is ever reshaped it falls through to the second,
+            // which is true of every `uninstall_failed`.
+            {
+              status: 500,
+              match: /"code"\s*:\s*"uninstall_failed"[\s\S]*?"skillRemoved"\s*:\s*true/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox failed part-way through the uninstall, after the app's skill folder had already been removed: the app is only partly gone and is still on the desktop.",
+              next: "Call app_uninstall once more — the rest of the cleanup is repeatable. If it fails again, tell the user the app's skill is already deleted while the app is still on the desktop, and quote what the device said.",
+            },
             {
               status: 500,
               match: /"code"\s*:\s*"uninstall_failed"/,
               code: "ENDPOINT_DOWN",
-              message: "The ClawBox failed part-way through the uninstall, so the app may be partly removed: its skill folder may already be gone while the app is still on the desktop.",
-              next: "Call app_uninstall once more — the rest of the cleanup is repeatable. If it fails again, tell the user the app may be only partly removed and quote what the device said.",
+              message: "The ClawBox could not finish the uninstall, so nothing is known to have been removed and the app is still on the desktop.",
+              next: "Call app_uninstall once more. If it fails again, tell the user the app is still installed and quote what the device said.",
             },
           ],
         },
@@ -407,7 +423,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       // an older route degrades to the plain sentence below.
       if (removed?.skillHalfChecked === false) {
         return text(
-          `Removed "${app_id}" from the desktop. The device's OpenClaw configuration could not be read, so its skills were not checked: if this app also had a skill of that name, it is still installed. Tell the user, and try again once the device has settled.`,
+          `Removed "${app_id}" from the desktop. The device's OpenClaw configuration could not be read, so its skills were not checked: if this app also had a skill of that name, it is still installed. Do not call app_uninstall again — the desktop entry is already gone, so it would answer that there is no such app. Tell the user the skill may still be on the device and has to be removed from the Terminal once the configuration is readable again.`,
         );
       }
       if (removed?.skillRemoved === false) {

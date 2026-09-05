@@ -145,5 +145,10 @@ describe("catalog — a cache the sanitiser empties is not a fresh answer", () =
     expect(spawnedProviders()).toContain("openai");
 
     await settleBackgroundRefresh(logs);
-  });
+    // Above vitest's default 5 s test budget, which the waitFor inside
+    // `settleBackgroundRefresh` would otherwise share: a log line that lands
+    // late on a loaded runner would time the TEST out first, and the
+    // descriptive "expected false to be true" the waitFor exists to give is
+    // exactly what would be lost.
+  }, 15_000);
 });

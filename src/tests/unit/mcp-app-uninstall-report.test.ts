@@ -147,6 +147,11 @@ describe("app_uninstall — what the agent is told", () => {
     expect(out.text).toMatch(/could not be read/i);
     expect(out.text).toMatch(/still/i);
     expect(out.text).not.toBe(`Removed "${APP}" from the desktop.`);
+    // ...and it does NOT send the agent back into app_uninstall: the desktop
+    // entry has already gone, so the tool's own pre-check (`installedAppIds`)
+    // would answer "there is no installed app with that id" — a contradiction
+    // on top of the fact that actually matters.
+    expect(out.text).toMatch(/Do not call app_uninstall again/i);
   });
 
   it("does not send the agent to a health check over a 500 that answered precisely", async () => {
@@ -174,5 +179,32 @@ describe("app_uninstall — what the agent is told", () => {
     expect(out.error.message).not.toMatch(/did not complete this request/i);
     expect(out.error.message).toMatch(/partly/i);
     expect(out.error.next).toMatch(/app_uninstall/);
+  });
+
+  it("does not invent a half-removed skill folder in the 500 where none was touched", async () => {
+    // The same 500, with the route reporting that no skill folder went. On the
+    // hermes SKU no skills path is ever resolved, so "its skill folder may
+    // already be gone" would be a false report in the other direction — the
+    // reason the two 503s are two rules, applied to the 500 as well.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        500,
+        JSON.stringify({
+          ok: false,
+          error: "The uninstall failed. Try again in a moment.",
+          code: "uninstall_failed",
+          retryable: true,
+          skillRemoved: null,
+        }),
+      ),
+    );
+
+    const out = await uninstall("hermes");
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) throw new Error("unreachable");
+    expect(out.error.message).not.toMatch(/did not complete this request/i);
+    expect(out.error.message).not.toMatch(/skill/i);
+    expect(out.error.message).toMatch(/nothing is known to have been removed/i);
   });
 });
