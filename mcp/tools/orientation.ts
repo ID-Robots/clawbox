@@ -170,21 +170,31 @@ export function fieldGuideForEdition(
   edition: Ed,
   install: "openclaw" | "hermes" | "dual" = edition,
 ): string {
-  const applies = (family: string, name: string): boolean =>
-    family === "edition" ? name === edition : name === install || install === "dual";
+  const applies = (family: string, name: string): boolean => {
+    // The name is validated FIRST. `install === "dual"` answers true for every
+    // `ships:` block, so without this an unknown audience would be served on
+    // exactly the SKU that has both harnesses to be wrong about.
+    if (name !== "openclaw" && name !== "hermes") return false;
+    return family === "edition" ? name === edition : name === install || install === "dual";
+  };
   const kept: string[] = [];
-  const stack: boolean[] = [];
+  const stack: { family: string; keep: boolean }[] = [];
   for (const line of markdown.split("\n")) {
     const open = BLOCK_OPEN.exec(line);
     if (open) {
-      stack.push(applies(open[1], open[2]));
+      stack.push({ family: open[1], keep: applies(open[1], open[2]) });
       continue;
     }
-    if (BLOCK_CLOSE.test(line)) {
-      stack.pop();
+    const close = BLOCK_CLOSE.exec(line);
+    if (close) {
+      // A `</ships>` closing an `edition:` block is a malformed document. Pop
+      // only a matching frame: leaving the mismatched one open drops the rest
+      // of the file for the wrong audience rather than serving it, and the
+      // suite's well-nesting assertion fails CI on the file itself.
+      if (stack.length && stack[stack.length - 1].family === close[1]) stack.pop();
       continue;
     }
-    if (stack.some((keep) => !keep)) continue;
+    if (stack.some((frame) => !frame.keep)) continue;
     kept.push(line);
   }
   // A dropped block leaves the blank lines that surrounded it behind. Markdown

@@ -368,4 +368,26 @@ describe("the filter's nesting rule", () => {
     const unknown = ["a", "<!-- edition:hermes2 -->", "b", "<!-- /edition -->", "c"].join("\n");
     expect(fieldGuideForEdition(unknown, "hermes").split("\n")).toEqual(["a", "c"]);
   });
+
+  it("drops an unknown ships audience on dual, where every ships block otherwise applies", () => {
+    // `install === "dual"` answers true for every `ships:` block, so the name
+    // has to be validated FIRST — otherwise the one SKU with both harnesses to
+    // be wrong about is the one that serves an unplaceable block.
+    const unknown = ["a", "<!-- ships:openclow -->", "b", "<!-- /ships -->", "c"].join("\n");
+    expect(fieldGuideForEdition(unknown, "hermes", "dual").split("\n")).toEqual(["a", "c"]);
+  });
+
+  it("does not let a mismatched close end the block it did not open", () => {
+    // `</ships>` closing an `edition:` block is a malformed document. The
+    // enclosing block stays shut rather than releasing its remainder to every
+    // box; the well-nesting assertion above fails CI on the file itself.
+    const mismatched = [
+      "a",
+      "<!-- edition:openclaw -->",
+      "openclaw only",
+      "<!-- /ships -->",
+      "still openclaw only",
+    ].join("\n");
+    expect(fieldGuideForEdition(mismatched, "hermes").split("\n")).toEqual(["a"]);
+  });
 });
