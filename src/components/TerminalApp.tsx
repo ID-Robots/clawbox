@@ -57,17 +57,38 @@ export interface TerminalAppProps {
  */
 export const TERMINAL_FONT_FAMILY = '"JetBrains Mono", "Symbols Nerd Font Mono", "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", "DejaVu Sans Mono", "Liberation Mono", "Ubuntu Mono", Menlo, Consolas, monospace';
 
-/** The web font, loaded before the grid is measured — bounded, so a slow disk never holds the shell. */
-async function loadTerminalFont(): Promise<void> {
-  if (typeof document === "undefined" || !("fonts" in document)) return;
+/** How long the first cell waits for the web font before it is drawn with the fallback face. */
+const FONT_WAIT_MS = 1500;
+
+/**
+ * The web font, loaded before the grid is measured — bounded, so a slow disk
+ * never holds the shell. Answers whether the wait ran out and the load
+ * itself, so a terminal drawn on the fallback face can be refitted the
+ * moment the real one lands.
+ */
+async function loadTerminalFont(): Promise<{ late: boolean; loading: Promise<boolean> | null }> {
+  if (typeof document === "undefined" || !("fonts" in document)) return { late: false, loading: null };
+  let loading: Promise<boolean>;
   try {
-    await Promise.race([
-      document.fonts.load('13px "JetBrains Mono"'),
-      new Promise<void>((resolve) => setTimeout(resolve, 1500)),
-    ]);
+    loading = document.fonts.load('13px "JetBrains Mono"').then((faces) => faces.length > 0, () => false);
   } catch {
-    // Drawn with the fallback face.
+    return { late: false, loading: null };
   }
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const late = await Promise.race([
+    loading.then(() => false),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), FONT_WAIT_MS); }),
+  ]);
+  if (timer !== null) clearTimeout(timer);
+  return { late, loading };
+}
+
+/** Re-measure the grid on the face that has just arrived: xterm measures on a font CHANGE, so the family is set away and back. */
+const FALLBACK_FONT_FAMILY = '"DejaVu Sans Mono", "Liberation Mono", monospace';
+function refitForFont(term: import("@xterm/xterm").Terminal, fitAddon: import("@xterm/addon-fit").FitAddon): void {
+  term.options.fontFamily = FALLBACK_FONT_FAMILY;
+  term.options.fontFamily = TERMINAL_FONT_FAMILY;
+  fitAddon.fit();
 }
 
 /** The Coding Agent's ground (`--win-ground`), as the terminal's canvas needs it: a literal. */
@@ -199,13 +220,18 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     const { Terminal } = await import("@xterm/xterm");
     const { FitAddon } = await import("@xterm/addon-fit");
     const { WebLinksAddon } = await import("@xterm/addon-web-links");
+    // Unmounted while the modules loaded: nothing to draw into, and the
+    // lock goes back so a remount can connect.
+    if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
 
     // Create terminal instance once
+    let fontLate: { late: boolean; loading: Promise<boolean> | null } | null = null;
     if (!termRef.current) {
       // The face is a web font: waited for before the first cell is drawn,
       // or xterm would size its grid on the fallback and every glyph would
       // land off its cell once the real one arrived.
-      await loadTerminalFont();
+      fontLate = await loadTerminalFont();
+      if (!mountedRef.current || !containerRef.current) { connectLockRef.current = false; return; }
       const term = new Terminal({
         theme: terminalTheme(terminalGround()),
         // Box-drawing first. Claude Code's whole UI is drawn with `╭─╮ │ ╰─╯`,
@@ -289,6 +315,14 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
 
       termRef.current = term;
       fitAddonRef.current = fitAddon;
+      // The wait ran out before the face was in: the grid was measured on
+      // the fallback, so it is measured again when the real one lands —
+      // for this terminal only, and only while it is still on screen.
+      if (fontLate?.late && fontLate.loading) {
+        void fontLate.loading.then((loaded) => {
+          if (loaded && mountedRef.current && termRef.current === term) refitForFont(term, fitAddon);
+        });
+      }
 
       term.open(containerRef.current!);
       fitAddon.fit();

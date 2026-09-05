@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useRef } from "react";
-import { useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { describeProgressLine, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 import { useT } from "@/lib/i18n";
 import { CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
@@ -56,6 +56,9 @@ interface Props {
   testId?: string;
 }
 
+/** A store that never changes: the one `useSyncExternalStore` needs to tell "hydrated" from "server". */
+const subscribeNever = () => () => {};
+
 /** "+3m 12s" — a step's distance from the run's start. */
 function sinceStart(at: number, startedAt: number): string {
   const sec = Math.max(0, Math.round((at - startedAt) / 1000));
@@ -67,6 +70,8 @@ function sinceStart(at: number, startedAt: number): string {
 export default function CodingRunTimeline({ lines, times = [], startedAt, live, working, embedded = false, testId = "coding-agent-run-activity" }: Props) {
   const { t } = useT();
   const list = useRef<HTMLOListElement>(null);
+  // Hydrated or not — every hook before the early return below.
+  const hydrated = useSyncExternalStore(subscribeNever, () => true, () => false);
   // Steps the owner opened: the whole line, its clock time and its kind,
   // where the row shows a chip. Keyed by index and line so a re-render
   // with new lines keeps the ones already open.
@@ -83,13 +88,16 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
   }, [live, lines.length]);
   if (lines.length === 0 && !working) return null;
   const timed = times.length === lines.length;
-  // The clock time and how far into the run — beside every step, and in
-  // full when a step is opened.
-  const clockOf = (i: number) => (timed ? new Date(times[i]).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null);
+  // The clock time is the BROWSER's — its locale, its zone — so it is
+  // formatted only once hydrated; the server, which may pre-render this,
+  // would say a different time and the markup would not match. The "+3m
+  // 12s" beside each step is arithmetic and stable on both.
+  const clockOf = (i: number) => (timed && hydrated ? new Date(times[i]).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null);
   const when = (i: number) => {
     if (!timed) return null;
-    const clock = clockOf(i)!;
-    return startedAt ? `${clock} · ${sinceStart(times[i], startedAt)}` : clock;
+    const clock = clockOf(i);
+    const since = startedAt ? sinceStart(times[i], startedAt) : null;
+    return [clock, since].filter(Boolean).join(" · ") || null;
   };
   const label = (step: ProgressDescription) => (step.labelKey ? t(STEP_KEY[step.labelKey]) : step.label);
   const detail = (step: ProgressDescription) =>

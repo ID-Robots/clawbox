@@ -4,7 +4,7 @@
  * polled while this run is live and read once when it has settled.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, within } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingRunTeamMembers from "@/components/CodingRunTeamMembers";
 
@@ -57,6 +57,22 @@ describe("CodingRunTeamMembers", () => {
     expect(rows[3].textContent).toContain(t("codingAgent.team.roleReviewer", { task: "t1" }));
     fireEvent.click(within(rows[0]).getByRole("button", { name: "run-plan" }));
     expect(onOpenRun).toHaveBeenCalledWith("run-plan");
+  });
+
+  it("drops an older reply that lands after a newer one", async () => {
+    const answers: Array<(runs: unknown[]) => void> = [];
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => {
+      answers.push((runs) => resolve(new Response(JSON.stringify({ team: { id: "team-1", runs } }), { status: 200, headers: { "content-type": "application/json" } })));
+    })));
+    render(<CodingRunTeamMembers teamId="team-1" runId="run-w2" runs={RUNS} live pollMs={15} onOpenRun={() => {}} />);
+    await waitFor(() => expect(answers.length).toBeGreaterThanOrEqual(2));
+    // The newest read answers first, with two members; then the first — stale by now — with four.
+    answers[answers.length - 1]([BOARD_RUNS[0], BOARD_RUNS[1]]);
+    const list = await screen.findByTestId("coding-agent-run-team-members");
+    expect(within(list).getAllByTestId("coding-agent-team-member")).toHaveLength(2);
+    answers[0](BOARD_RUNS);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(within(list).getAllByTestId("coding-agent-team-member")).toHaveLength(2);
   });
 
   it("polls while the run is live and stops once it has settled", async () => {

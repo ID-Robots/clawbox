@@ -23,32 +23,38 @@ interface BoardRun {
  * this run is live, because teammates start and settle beside it; read once
  * when it has settled.
  */
-export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpenRun }: {
+export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpenRun, pollMs = 5000 }: {
   teamId: string;
   /** The run whose page this is: named among the members, not linked. */
   runId: string;
   runs: MemberRun[];
   live: boolean;
   onOpenRun: (id: string) => void;
+  /** How often the board is re-read while the run is live. */
+  pollMs?: number;
 }) {
   const { t } = useT();
   const [members, setMembers] = useState<BoardRun[] | null>(null);
   useEffect(() => {
     let cancelled = false;
+    // Reads can overlap when one is slow: only the newest one's answer
+    // lands, so an older reply cannot put back what a newer one replaced.
+    let newest = 0;
     const read = async () => {
+      const mine = ++newest;
       try {
         const res = await fetch(`/setup-api/coding-agent/team?id=${encodeURIComponent(teamId)}`, { cache: "no-store" });
         const data = await res.json().catch(() => null) as { team?: { runs?: BoardRun[] } } | null;
-        if (!cancelled && res.ok && Array.isArray(data?.team?.runs)) setMembers(data!.team!.runs!);
+        if (!cancelled && mine === newest && res.ok && Array.isArray(data?.team?.runs)) setMembers(data!.team!.runs!);
       } catch {
         // The chips stay as they were.
       }
     };
     void read();
     if (!live) return () => { cancelled = true; };
-    const id = setInterval(() => void read(), 5000);
+    const id = setInterval(() => void read(), pollMs);
     return () => { cancelled = true; clearInterval(id); };
-  }, [teamId, live]);
+  }, [teamId, live, pollMs]);
   if (!members || members.length === 0) return null;
   const statusOf = (id: string) => runs.find((r) => r.id === id)?.status ?? null;
   const roleLabel = (m: BoardRun) => m.role === "planner"
