@@ -151,9 +151,6 @@ function scanBlock(lines: string[], start: number, end: number, indent: number):
   return entries;
 }
 
-function findEntry(lines: string[], start: number, end: number, indent: number, key: string): Entry | null {
-  return scanBlock(lines, start, end, indent).find((e) => e.key === key) ?? null;
-}
 
 /**
  * Where a quoted scalar ends, scanning from `from`, or -1 when it does not
@@ -494,9 +491,11 @@ export function readYamlPath(text: string, path: string[]): YamlPathRead {
   let indent = 0;
 
   for (let depth = 0; depth < path.length; depth += 1) {
-    // `scanBlock` rather than `findEntry`, because a key that is not among the
-    // entries and a LEVEL WITH NO ENTRIES AT ALL are different facts and only
-    // the first is "absent".
+    // The WHOLE level, rather than a lookup that answers only "is this key
+    // here": a key that is not among the entries and a LEVEL WITH NO ENTRIES AT
+    // ALL are different facts, and only the first is "absent". (The one-key
+    // helper that used to sit over `scanBlock` was removed with its last caller
+    // for exactly that reason — it could not tell them apart.)
     //
     // The walk descends exactly INDENT_STEP per level and `scanBlock` skips
     // every line deeper than the level it is scanning, so a block written at
