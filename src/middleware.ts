@@ -255,6 +255,24 @@ const PUBLIC_EXACT = new Set([
   "/favicon.ico",
   "/favicon.svg",
   "/favicon-32.png",
+  // The icons the browser is TOLD about while it has no session: the two
+  // `public/manifest.json` declares (the manifest itself is public two lines
+  // up) and the ones the root layout puts in the document head. Gating them
+  // did not protect anything — an app icon is the same class of asset as the
+  // favicons and the clawbox-* logos below — it only broke the feature the
+  // manifest exists for: a browser fetching /icon-192.png to offer "Install
+  // page as app" followed the redirect to /login and got a 31-byte HTML body,
+  // so the prompt showed no icon, or was refused outright by browsers that
+  // require a resolvable 192 px icon first. `curl -f` cannot even see it,
+  // because a redirect is not a 4xx. `/apple-touch-icon.png` is already
+  // admitted (read-only) by the gateway-static list; the drift guard in
+  // src/tests/middleware/pwa-icons-public.test.ts derives the whole set from
+  // manifest.json and layout.tsx so a new icon cannot be declared without
+  // opening the gate for it.
+  "/icon-192.png",
+  "/icon-512.png",
+  "/favicon-32x32.png",
+  "/favicon-16x16.png",
   "/clawbox-crab.png",
   "/clawbox-icon.png",
   "/clawbox-logo.png",
