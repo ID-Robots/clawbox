@@ -302,3 +302,151 @@ describe("getTopLevelScalar on a value it cannot resolve", () => {
     });
   });
 });
+
+/**
+ * YAML 1.2's double-quoted escapes, resolved the way PyYAML resolves them.
+ *
+ * PyYAML is what Hermes' own env bridge loads config.yaml with, so it decides
+ * what the gateway ends up polling. Undoing only the four escapes this module's
+ * WRITER emits left every other one as its own literal text with
+ * `readable: true`, and two of them decode to characters that are legal inside
+ * a Telegram token:
+ *
+ *   `"111111:\x41AH..."` PyYAML gives `111111:AAH...`; this reader gave the
+ *                        literal text, which `BOT_TOKEN_RE` rejects: a
+ *                        confident "this box has no bot" over a box with one.
+ *   `"11111\x30:AAH..."` PyYAML gives `111110:AAH...`, a DIFFERENT bot id, so
+ *                        even stripping the backslash names the wrong bot.
+ *
+ * Every row below is what PyYAML 6.x returns for that line, checked against it
+ * rather than reasoned about. An escape PyYAML RAISES on has to come back
+ * `readable: false` - this module's own rule, "a value it cannot resolve is not
+ * an answer".
+ */
+describe("double-quoted escapes, as PyYAML resolves them", () => {
+  // [what it is, the text between the quotes, what PyYAML makes of it]
+  const resolved: Array<[string, string, string]> = [
+    ["a NUL", "a\\0b", "a\u0000b"],
+    ["a bell", "a\\ab", "a\u0007b"],
+    ["a backspace", "a\\bb", "a\u0008b"],
+    ["a tab", "a\\tb", "a\u0009b"],
+    ["an escaped literal tab", "a\\\u0009b", "a\u0009b"],
+    ["a line feed", "a\\nb", "a\u000Ab"],
+    ["a vertical tab", "a\\vb", "a\u000Bb"],
+    ["a form feed", "a\\fb", "a\u000Cb"],
+    ["a carriage return", "a\\rb", "a\u000Db"],
+    ["an escape character", "a\\eb", "a\u001Bb"],
+    ["an escaped space", "a\\ b", "a b"],
+    ['an escaped double quote', 'a\\"b', 'a"b'],
+    ["an escaped slash", "a\\/b", "a/b"],
+    ["an escaped backslash", "a\\\\b", "a\\b"],
+    ["a next line", "a\\Nb", "a\u0085b"],
+    ["a non-breaking space", "a\\_b", "a\u00A0b"],
+    ["a line separator", "a\\Lb", "a\u2028b"],
+    ["a paragraph separator", "a\\Pb", "a\u2029b"],
+    ["a hex escape", "a\\x41b", "aAb"],
+    ["a 16-bit unicode escape", "a\\u0041b", "aAb"],
+    ["a 32-bit unicode escape", "a\\U00000041b", "aAb"],
+    // PyYAML hands a lone surrogate straight through, so this reader may not
+    // refuse a value the bridge would have exported.
+    ["a lone surrogate", "a\\ud800b", "a\uD800b"],
+  ];
+
+  it.each(resolved)("resolves %s", (_name, body, expected) => {
+    expect(getTopLevelScalar(`K: "${body}"\n`, "K")).toEqual({ value: expected, readable: true });
+  });
+
+  // The two rows the same-bot guard is actually about.
+  it("resolves an escape inside a bot token", () => {
+    expect(
+      getTopLevelScalar('TELEGRAM_BOT_TOKEN: "111111:\\x41AHrealBotSecret_abc"\n', "TELEGRAM_BOT_TOKEN"),
+    ).toEqual({ value: "111111:AAHrealBotSecret_abc", readable: true });
+  });
+
+  it("resolves an escape that changes the bot id", () => {
+    expect(
+      getTopLevelScalar('TELEGRAM_BOT_TOKEN: "11111\\x30:AAHrealBotSecret_abc"\n', "TELEGRAM_BOT_TOKEN"),
+    ).toEqual({ value: "111110:AAHrealBotSecret_abc", readable: true });
+  });
+
+  // PyYAML RAISES on each of these, so the file does not load at all and any
+  // value invented here is nobody's. `readable: false` is the honest answer.
+  it.each([
+    ["an escape YAML does not define", "a\\qb"],
+    ["a hex escape with non-hex digits", "a\\xZZb"],
+    ["a hex escape with too few digits", "a\\x4"],
+    ["a unicode escape above the Unicode range", "a\\U0011FFFFb"],
+    ["a 32-bit unicode escape with too few digits", "a\\UD800"],
+  ])("says it could not read %s", (_name, body) => {
+    expect(getTopLevelScalar(`K: "${body}"\n`, "K")).toEqual({ value: null, readable: false });
+  });
+
+  // Single quotes have exactly one escape, `''`. A backslash is ordinary data
+  // there, and decoding it would invent a value PyYAML never produced.
+  it("leaves a backslash alone inside single quotes", () => {
+    expect(getTopLevelScalar("K: 'a\\x41b'\n", "K")).toEqual({ value: "a\\x41b", readable: true });
+  });
+
+  it("undoes doubled single quotes and nothing else", () => {
+    expect(getTopLevelScalar("K: 'a''''b'\n", "K")).toEqual({ value: "a''b", readable: true });
+  });
+
+  // The writer's own round trip: `formatYamlScalar` writes a literal
+  // backslash-n as `\\n`, and undoing `\n` before `\\` read that back as a line
+  // break - a value that did not survive its own writer.
+  it("reads back a value this module wrote that holds a literal backslash", () => {
+    const out = setYamlPath("api_key: old\n", ["api_key"], "a\\nb");
+    expect(getYamlPath(out, ["api_key"])).toBe("a\\nb");
+  });
+});
+
+/**
+ * A line is a mapping entry only when the colon is followed by a space or ends
+ * the line - PyYAML's `check_value`, in block context.
+ *
+ * `TELEGRAM_BOT_TOKEN:111111:AAH...` is a plain SCALAR document to PyYAML: there
+ * is no mapping, so the bridge exports nothing and no gateway polls anything.
+ * Reading a bot out of it is a false success on every panel - `/telegram/status`
+ * runs getMe on it and prints a username, `/telegram/pairing` says configured,
+ * and the wizard marks Telegram done, for a bot nothing is listening to.
+ */
+describe("getTopLevelScalar and the space after the colon", () => {
+  it("does not read a key out of a line with no space after the colon", () => {
+    expect(getTopLevelScalar("TELEGRAM_BOT_TOKEN:111111:AAHrealBotSecret_abc\n", "TELEGRAM_BOT_TOKEN")).toEqual({
+      value: null,
+      readable: true,
+    });
+  });
+
+  it("still reads a key whose colon ends the line, and one written with a space before it", () => {
+    expect(getTopLevelScalar("TELEGRAM_BOT_TOKEN:\n", "TELEGRAM_BOT_TOKEN").readable).toBe(true);
+    expect(getTopLevelScalar("TELEGRAM_BOT_TOKEN : 111111:AAH\n", "TELEGRAM_BOT_TOKEN")).toEqual({
+      value: "111111:AAH",
+      readable: true,
+    });
+  });
+});
+
+/**
+ * A quoted value may run over several lines, and PyYAML does not require the
+ * continuation to be indented. A continuation line is not a line of its own:
+ * reading it as one puts a decoy in front of the real key, and can pull the
+ * root indent BELOW the root mapping so the real key line is then skipped as
+ * somebody else's. Both answer confidently about a key nobody wrote.
+ */
+describe("getTopLevelScalar and multi-line quoted values", () => {
+  it("does not take a decoy out of the inside of a quoted value", () => {
+    const text = 'TELEGRAM_BOT_TOKEN: 111111:AAA\nnotes: "hello\nTELEGRAM_BOT_TOKEN: DECOY\n"\n';
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
+  });
+
+  it("does not take a decoy out of a single-quoted value either", () => {
+    const text = "TELEGRAM_BOT_TOKEN: 111111:AAA\nnotes: 'hello\nTELEGRAM_BOT_TOKEN: DECOY\n'\n";
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
+  });
+
+  it("does not let a continuation line lower the root indent", () => {
+    const text = '  notes: "hello\n hidden: x\n"\n  TELEGRAM_BOT_TOKEN: 111111:AAA\n';
+    expect(getTopLevelScalar(text, "TELEGRAM_BOT_TOKEN")).toEqual({ value: "111111:AAA", readable: true });
+  });
+});

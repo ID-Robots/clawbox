@@ -147,13 +147,17 @@ function findEntry(lines: string[], start: number, end: number, indent: number, 
 }
 
 /**
- * Where a quoted scalar ends, or -1 when it never closes on this line.
+ * Where a quoted scalar ends, scanning from `from`, or -1 when it does not
+ * close on this line.
  *
  * Double quotes escape with a backslash, single quotes by doubling — the same
- * two rules {@link parseYamlScalar} undoes.
+ * two rules {@link parseYamlScalar} undoes. `from` is 1 for the line that OPENS
+ * the scalar (past its own opening quote) and 0 for a continuation line, which
+ * is how a value that runs over several lines is skipped rather than read as
+ * lines of its own.
  */
-function endOfQuotedScalar(inline: string, quote: '"' | "'"): number {
-  for (let i = 1; i < inline.length; i += 1) {
+function closingQuoteIndex(inline: string, from: number, quote: '"' | "'"): number {
+  for (let i = from; i < inline.length; i += 1) {
     const ch = inline[i];
     if (quote === '"' && ch === "\\") {
       i += 1;
@@ -190,7 +194,7 @@ function endOfQuotedScalar(inline: string, quote: '"' | "'"): number {
 function splitTrailingComment(inline: string): { value: string; comment: string; closed: boolean } {
   const quote = inline[0];
   if (quote === '"' || quote === "'") {
-    const end = endOfQuotedScalar(inline, quote);
+    const end = closingQuoteIndex(inline, 1, quote);
     if (end === -1) return { value: inline, comment: "", closed: false };
     const rest = inline.slice(end + 1);
     if (rest === "") return { value: inline, comment: "", closed: true };
@@ -228,16 +232,87 @@ export function formatYamlScalar(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "\\r")}"`;
 }
 
-/** Inverse of {@link formatYamlScalar}, good enough to read our own writes back. */
-function parseYamlScalar(raw: string): string {
+/**
+ * YAML 1.2's double-quoted escapes, exactly as PyYAML's `ESCAPE_REPLACEMENTS`
+ * resolves them — PyYAML being what Hermes' own env bridge loads config.yaml
+ * with, so it decides what the gateway ends up polling.
+ */
+const DOUBLE_QUOTED_ESCAPES: Record<string, string> = {
+  "0": "\0",
+  a: "\x07",
+  b: "\b",
+  t: "\t",
+  "\t": "\t",
+  n: "\n",
+  v: "\v",
+  f: "\f",
+  r: "\r",
+  e: "\x1b",
+  " ": " ",
+  '"': '"',
+  "/": "/",
+  "\\": "\\",
+  N: "\x85",
+  _: "\xa0",
+  L: "\u2028",
+  P: "\u2029",
+};
+
+/** `\xNN`, `\uNNNN`, `\UNNNNNNNN` — PyYAML's `ESCAPE_CODES`, in hex digits. */
+const ESCAPE_CODE_WIDTHS: Record<string, number> = { x: 2, u: 4, U: 8 };
+
+/**
+ * The text between double quotes, unescaped, or null for an escape PyYAML
+ * would RAISE on.
+ *
+ * Undoing only the four escapes {@link formatYamlScalar} emits left every other
+ * one as its own literal text: `"111111:\x41AH…"` came back with the backslash
+ * still in it, `BOT_TOKEN_RE` rejected that, and the answer was a confident
+ * "this box has no bot" over a box that has one — and `"11111\x30:…"` named a
+ * DIFFERENT bot than the gateway polls. An escape PyYAML raises on is a file
+ * that does not load at all, so any value invented for it is nobody's: null
+ * here, `readable: false` at the reader, which is this module's own rule.
+ */
+function unescapeDoubleQuoted(body: string): string | null {
+  let out = "";
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i];
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    const escape = body[i + 1];
+    if (escape === undefined) return null; // a line continuation, not a value
+    const replacement = DOUBLE_QUOTED_ESCAPES[escape];
+    if (replacement !== undefined) {
+      out += replacement;
+      i += 1;
+      continue;
+    }
+    const width = ESCAPE_CODE_WIDTHS[escape];
+    if (width === undefined) return null;
+    const digits = body.slice(i + 2, i + 2 + width);
+    if (digits.length !== width || !/^[0-9A-Fa-f]+$/.test(digits)) return null;
+    const code = parseInt(digits, 16);
+    // Python's chr() has no character above this, so PyYAML raises there too.
+    if (code > 0x10ffff) return null;
+    out += String.fromCodePoint(code);
+    i += 1 + width;
+  }
+  return out;
+}
+
+/**
+ * One flow scalar, unquoted the way PyYAML unquotes it — null when it holds an
+ * escape this reader may not resolve (see {@link unescapeDoubleQuoted}).
+ *
+ * Single quotes have exactly ONE escape, `''`; a backslash is ordinary data
+ * there, and decoding it would invent a value PyYAML never produced.
+ */
+function parseYamlScalar(raw: string): string | null {
   const value = raw.trim();
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
-    return value
-      .slice(1, -1)
-      .replace(/\\n/g, "\n")
-      .replace(/\\r/g, "\r")
-      .replace(/\\"/g, '"')
-      .replace(/\\\\/g, "\\");
+    return unescapeDoubleQuoted(value.slice(1, -1));
   }
   if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
     return value.slice(1, -1).replace(/''/g, "'");
@@ -294,7 +369,16 @@ export function getYamlPath(text: string, path: string[]): string | null {
   if (matched.length !== path.length) return null;
   const leaf = matched[matched.length - 1];
   if (leaf.inline === "") return null;
-  return parseYamlScalar(splitTrailingComment(leaf.inline).value);
+  const value = parseYamlScalar(splitTrailingComment(leaf.inline).value);
+  // The editing half's rule: a shape this module cannot resolve is refused, not
+  // guessed at. Returning the literal escape text instead would make the
+  // read-back verification in `patchHermesConfig` pass over a value PyYAML
+  // reads differently — or, on `hermes-shell-scan`, report a setting nobody
+  // wrote. Callers fall back to the Hermes CLI on this signal.
+  if (value === null) {
+    throw new YamlEditUnsupported(`${path.join(".")} holds an escape this reader cannot resolve`);
+  }
+  return value;
 }
 
 /** One top-level entry as {@link getTopLevelScalar} reads it. */
@@ -315,8 +399,49 @@ export interface TopLevelScalar {
 /** Value shapes whose first character changes what the value IS. */
 const OPAQUE_VALUE_RE = /^[|>!&*{[]/;
 
-/** Any `key:` line, whatever its depth, with its indent captured. */
-const ANY_KEY_RE = /^([ \t]*)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)[ \t]*:(?:[ \t].*)?$/;
+/**
+ * Any `key:` line, whatever its depth: indent in `[1]`, inline value in `[2]`.
+ *
+ * The colon has to be followed by a space, a tab or the end of the line, which
+ * is PyYAML's `check_value` in block context: `KEY:111111:AAH` opens no mapping
+ * at all, it is a plain scalar document.
+ */
+const ANY_KEY_RE = /^([ \t]*)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)[ \t]*:(?:[ \t](.*))?$/;
+
+/**
+ * The file's lines, minus the CONTINUATION lines of a multi-line quoted value.
+ *
+ * A flow scalar may run over several lines and PyYAML does not require its
+ * continuation to be indented, so a line INSIDE one can be `key:`-shaped and
+ * sit at column 0. Read as a line of its own it answers confidently about a key
+ * nobody wrote — as the last match (`notes: "…\nTELEGRAM_BOT_TOKEN: DECOY\n"`
+ * named DECOY as this box's bot) and as the shallowest indent, which pulled the
+ * root mapping's own indent below itself and made the real key line "somebody
+ * else's".
+ *
+ * KNOWN LIMIT: only a `key: "…` line is recognised as opening one, which is the
+ * shape a mapping value takes; a sequence item that opens a multi-line scalar
+ * is not tracked.
+ */
+function documentLines(lines: string[]): string[] {
+  const kept: string[] = [];
+  let open: '"' | "'" | null = null;
+  for (const raw of lines) {
+    if (open !== null) {
+      if (closingQuoteIndex(raw, 0, open) !== -1) open = null;
+      continue;
+    }
+    kept.push(raw);
+    const m = ANY_KEY_RE.exec(raw);
+    if (!m) continue;
+    const value = (m[2] ?? "").trim();
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && closingQuoteIndex(value, 1, quote) === -1) {
+      open = quote;
+    }
+  }
+  return kept;
+}
 
 /**
  * The indent of the document's ROOT mapping — 0 for every file a machine wrote.
@@ -328,9 +453,10 @@ const ANY_KEY_RE = /^([ \t]*)(?:"[^"]*"|'[^']*'|[^\s#"'][^:#]*?)[ \t]*:(?:[ \t].
  * fail-open as missing a quoted key, one spelling further out.
  *
  * The shallowest `key:` line in the file is that indent, because a nested key
- * is by definition deeper than its parent. Block-scalar content and comments
- * cannot lower it: content sits deeper than the key that opens it, and a
- * comment-only line matches nothing here.
+ * is by definition deeper than its parent. Only real lines are considered (see
+ * {@link documentLines}): block-scalar content sits deeper than the key that
+ * opens it, a comment-only line matches nothing here, and a quoted value's
+ * continuation is not a line.
  */
 function rootIndentWidth(lines: string[]): number {
   let width: number | null = null;
@@ -351,7 +477,12 @@ function readInlineScalar(inline: string): TopLevelScalar {
   if (OPAQUE_VALUE_RE.test(inline)) return { value: null, readable: false };
   const split = splitTrailingComment(inline);
   if (!split.closed) return { value: null, readable: false };
-  return { value: parseYamlScalar(split.value), readable: true };
+  // An escape PyYAML would raise on is a value this reader may not name: the
+  // literal text is not what the bridge exports, and inventing one is the
+  // confident "no bot" this module exists to close.
+  const value = parseYamlScalar(split.value);
+  if (value === null) return { value: null, readable: false };
+  return { value, readable: true };
 }
 
 /**
@@ -383,8 +514,10 @@ function readInlineScalar(inline: string): TopLevelScalar {
  */
 export function getTopLevelScalar(text: string, key: string): TopLevelScalar {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const line = new RegExp(`^([ \\t]*)(?:"${escaped}"|'${escaped}'|${escaped})[ \\t]*:(.*)$`);
-  const lines = text.split(/\r\n|\r|\n/);
+  // A space, a tab or the end of the line after the colon, exactly as
+  // ANY_KEY_RE and as PyYAML's block-context `check_value`.
+  const line = new RegExp(`^([ \\t]*)(?:"${escaped}"|'${escaped}'|${escaped})[ \\t]*:(?:[ \\t](.*))?$`);
+  const lines = documentLines(text.split(/\r\n|\r|\n/));
   const root = rootIndentWidth(lines);
   let found: TopLevelScalar = { value: null, readable: true };
   for (const raw of lines) {
@@ -393,7 +526,7 @@ export function getTopLevelScalar(text: string, key: string): TopLevelScalar {
     // legitimately carry its own TELEGRAM_BOT_TOKEN, and the bridge exports
     // only top-level scalars.
     if (!m || m[1].length !== root) continue;
-    found = readInlineScalar(m[2].trim());
+    found = readInlineScalar((m[2] ?? "").trim());
   }
   return found;
 }

@@ -255,6 +255,24 @@ describe("readActiveTelegramBot", () => {
     expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: false });
   });
 
+  // A hex escape decodes to a character that is legal inside a Telegram
+  // token, so the literal text failed the `<bot id>:<secret>` check and the
+  // answer became a confident "this box has no bot" - over the bot the
+  // gateway is polling. PyYAML resolves it; so does the bridge.
+  it("resolves a config.yaml escape the way Hermes' own loader does", async () => {
+    writeHermesConfigYaml('TELEGRAM_BOT_TOKEN: "222222:\\x48ermesGatewayBot_00"\n');
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: HERMES_BOT, known: true });
+  });
+
+  // PyYAML RAISES on an escape YAML does not define, so config.yaml does not
+  // load at all and no value read out of it is anybody's.
+  it("says known:false for a config.yaml escape YAML does not define", async () => {
+    writeHermesConfigYaml('TELEGRAM_BOT_TOKEN: "222222:\\qermesGatewayBot_00"\n');
+
+    expect(await identity.readActiveTelegramBot("hermes")).toEqual({ token: null, known: false });
+  });
+
   // The reverse: the guard must not refuse for ever over a key that is simply
   // written empty, which YAML reads as null and the bridge does not export.
   it("stays known for a config.yaml key written with no value", async () => {
