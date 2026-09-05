@@ -29,6 +29,8 @@ import {
   filterAllowedPaths,
   isAllowedPath,
   assertPathAllowed,
+  assertWritePathAllowed,
+  commandDeniedByPathGuard,
   resolveUserPath,
   spawnArgv,
 } from "../lib/guard";
@@ -154,6 +156,11 @@ function commandTouchesProtectedPath(command: string): boolean {
       if (!isAllowedPath(resolveUserPath(raw))) return true;
     } catch { /* not a resolvable path */ }
   }
+  // TASK-605: the same rule the two harnesses enforce on their own shells. This
+  // tool is registered on the OpenClaw edition, where the harness's `exec` is
+  // covered by the before_tool_call hook — and this is a SECOND shell, reached
+  // by a different tool id, so without this the deny would have a door in it.
+  if (commandDeniedByPathGuard(command)) return true;
   return SECRET_NAME_RE.test(command);
 }
 
@@ -441,7 +448,7 @@ export function registerCodingTools(reg: Registrar): void {
     { editions: codingEditions, readOnly: false, destructive: true },
     async ({ file_path, content }: { file_path: string; content: string }) => {
       const abs = resolveUserPath(file_path);
-      assertPathAllowed(abs);
+      assertWritePathAllowed(abs);
 
       const existed = await stat(abs).then(() => true).catch(() => false);
       if (existed) await assertNotStale(abs);
@@ -494,7 +501,7 @@ export function registerCodingTools(reg: Registrar): void {
         throw new ToolError("BAD_ARGUMENT", "old_text and new_text are identical.", "Pass the text you actually want in the file as new_text.");
       }
       const abs = resolveUserPath(file_path);
-      assertPathAllowed(abs);
+      assertWritePathAllowed(abs);
       await assertNotStale(abs);
 
       const buf = await fsReadFile(abs).catch(() => null);
@@ -730,7 +737,7 @@ export function registerCodingTools(reg: Registrar): void {
       const abs = resolveUserPath(notebook_path);
       // This tool called no guard at all before: a notebook path pointing into
       // a credential directory was written without a check.
-      assertPathAllowed(abs);
+      assertWritePathAllowed(abs);
       if (!isNotebook(abs)) {
         throw new ToolError("BAD_ARGUMENT", "That is not a notebook file.", "Pass a path ending in .ipynb, or use edit_file for ordinary files.");
       }

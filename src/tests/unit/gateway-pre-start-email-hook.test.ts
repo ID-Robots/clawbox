@@ -41,14 +41,23 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 const d = hasPython3 && hasBash ? describe : describe.skip;
 
-/** The shipped block, from its banner to the section that follows it. */
+/**
+ * The shipped block, from its banner to the section that follows it.
+ *
+ * It starts at the shared INSTALLER now rather than at this plugin's own
+ * banner: since TASK-605 two plugins are copied in by one function, and an
+ * extract that began below it would run a call to a function that is not there.
+ * So this block also carries the protected-path guard's install — which has its
+ * own suite (gateway-pre-start-path-guard.test.ts) and is only along for the
+ * ride here.
+ */
 function block(): string {
   const src = readFileSync(SCRIPT, "utf-8");
-  const from = "# ── The outbound EMAIL:-directive hook plugin ";
+  const from = "# ── Installing a ClawBox hook plugin into ~/.openclaw/extensions ";
   const to = "# Seed CLAWBOX.md in the OpenClaw workspace";
   const start = src.indexOf(from);
   const end = src.indexOf(to, start);
-  if (start < 0 || end < 0) throw new Error("the EMAIL: directive hook block is not in gateway-pre-start.sh");
+  if (start < 0 || end < 0) throw new Error("the ClawBox hook-plugin block is not in gateway-pre-start.sh");
   return src.slice(start, end);
 }
 
@@ -290,7 +299,10 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // ClawBox state goes beside it, not in it.
     run();
     expect(existsSync(verifiedStamp())).toBe(true);
-    expect(readdirSync(path.join(openclawHome, "extensions"))).toEqual([PLUGIN_ID]);
+    // The plugins ClawBox ships and NOTHING else — no stamp, no marker file.
+    // The path guard is here because the shared installer copies both.
+    expect(readdirSync(path.join(openclawHome, "extensions")).sort())
+      .toEqual([PLUGIN_ID, "clawbox-path-guard"].sort());
   });
 
   it("re-verifies after a factory reset empties ~/.openclaw", () => {

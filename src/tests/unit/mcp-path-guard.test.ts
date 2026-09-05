@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import path from "path";
-import { isAllowedPath, filterAllowedPaths, assertPathAllowed, SECRET_NAME_RE } from "../../../mcp/lib/guard";
+import {
+  isAllowedPath,
+  filterAllowedPaths,
+  assertPathAllowed,
+  assertWritePathAllowed,
+  commandDeniedByPathGuard,
+  SECRET_NAME_RE,
+} from "../../../mcp/lib/guard";
 
 // The MCP's file tools (read_file, write_file, edit_file, list_directory, glob,
 // grep, notebook_edit) all funnel through isAllowedPath. These tests pin the
@@ -208,5 +215,58 @@ describe("mcp path guard — the refusal the agent sees", () => {
 
   it("does not throw for an allowed path", () => {
     expect(() => assertPathAllowed("/home/clawbox/clawbox/README.md")).not.toThrow();
+  });
+});
+
+// ── TASK-605: the ClawBox tree and the local-model folders ──────────────────
+//
+// The deny the two harnesses enforce on their own shells has to hold here too:
+// this server gives the agent a SECOND shell (`bash`) and a second set of file
+// tools, reached by different tool ids, and a rule with a door in it is not a
+// rule. Read stays open — the ruling forbids destroying these paths, not
+// looking at them — so the write side is a separate assertion from
+// `assertPathAllowed`, and this is where the two are held apart.
+//
+// Every case below is written so that it answers the same way whatever HOME the
+// test machine has: the home-folding half of the rule is exercised against an
+// explicit home in src/tests/unit/protected-paths.test.ts.
+describe("mcp path guard — protected paths may be read, not written", () => {
+  const TREE = "/home/clawbox/clawbox";
+
+  it.each([
+    `${TREE}/scripts/gateway-pre-start.sh`,
+    `${TREE}/data/llamacpp/models/gemma-4-E2B_q4_0-it.gguf`,
+    `${TREE}/data/embed/models/qwen3.gguf`,
+    "/mnt/big/check-acbuild/data/llamacpp/models/gemma.gguf",
+  ])("refuses a WRITE to %s", (p) => {
+    expect(() => assertWritePathAllowed(p)).toThrow();
+    // …and still allows the read.
+    expect(() => assertPathAllowed(p)).not.toThrow();
+  });
+
+  it("says why, because there is nothing secret about where the device keeps its own code", () => {
+    let thrown: unknown;
+    try {
+      assertWritePathAllowed(`${TREE}/README.md`);
+    } catch (err) {
+      thrown = err;
+    }
+    const e = thrown as { code?: string; message?: string; next?: string };
+    expect(e.code).toBe("BLOCKED_PATH");
+    expect(e.message).toContain("protected");
+    expect(e.next).toContain("refused it");
+  });
+
+  it("leaves ordinary writes alone", () => {
+    expect(() => assertWritePathAllowed("/var/tmp/notes.md")).not.toThrow();
+  });
+
+  it("still refuses a credential path on the write side", () => {
+    expect(() => assertWritePathAllowed("/home/clawbox/.hermes/.env")).toThrow();
+  });
+
+  it("recognises a destroying command through the bash pre-flight", () => {
+    expect(commandDeniedByPathGuard(`rm -rf ${TREE}/data/llamacpp/models`)).toBeTruthy();
+    expect(commandDeniedByPathGuard(`cat ${TREE}/README.md`)).toBeNull();
   });
 });
