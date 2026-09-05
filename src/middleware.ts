@@ -256,23 +256,31 @@ const PUBLIC_EXACT = new Set([
   "/favicon.svg",
   "/favicon-32.png",
   // The icons the browser is TOLD about while it has no session: the two
-  // `public/manifest.json` declares (the manifest itself is public two lines
-  // up) and the ones the root layout puts in the document head. Gating them
+  // `public/manifest.json` declares (the manifest is listed at the top of this
+  // set) and the ones the root layout puts in the document head. Gating them
   // did not protect anything — an app icon is the same class of asset as the
   // favicons and the clawbox-* logos below — it only broke the feature the
   // manifest exists for: a browser fetching /icon-192.png to offer "Install
   // page as app" followed the redirect to /login and got a 31-byte HTML body,
   // so the prompt showed no icon, or was refused outright by browsers that
   // require a resolvable 192 px icon first. `curl -f` cannot even see it,
-  // because a redirect is not a 4xx. `/apple-touch-icon.png` is already
-  // admitted (read-only) by the gateway-static list; the drift guard in
-  // src/tests/middleware/pwa-icons-public.test.ts derives the whole set from
-  // manifest.json and layout.tsx so a new icon cannot be declared without
-  // opening the gate for it.
+  // because a redirect is not a 4xx.
+  //
+  // `/apple-touch-icon.png` is listed here too, though the gateway-static list
+  // already admits it: that list is the OpenClaw Control UI's own files, and it
+  // is also what the catch-all asks before PROXYING a path to the gateway — so
+  // leaving our head icon governed by it means renaming the file quietly turns
+  // it into an unauthenticated proxy to 127.0.0.1:18789 rather than a 404. The
+  // file that declares an icon should own its public status.
+  //
+  // The drift guard in src/tests/middleware/pwa-icons-public.test.ts derives
+  // the whole set from manifest.json and layout.tsx's metadata object, so a new
+  // icon cannot be declared without the gate being opened for it.
   "/icon-192.png",
   "/icon-512.png",
   "/favicon-32x32.png",
   "/favicon-16x16.png",
+  "/apple-touch-icon.png",
   "/clawbox-crab.png",
   "/clawbox-icon.png",
   "/clawbox-logo.png",
@@ -291,8 +299,14 @@ function isDocumentRequest(headers: Headers): boolean {
   return (headers.get("accept") ?? "").includes("text/html");
 }
 
-function isPublicPath(pathname: string): boolean {
-  if (PUBLIC_EXACT.has(pathname)) return true;
+function isPublicPath(pathname: string, method: string): boolean {
+  // Every entry in PUBLIC_EXACT is something a browser READS — a manifest, a
+  // service worker, an icon, one public page — so the opening is GET/HEAD, the
+  // way `isPublicGatewayAsset` and the public-webapp carve-out below already
+  // are. A write to one of these paths happens to 405 today (Next's public/
+  // handler and the gateway catch-all both answer GET only), which makes the
+  // list safe by accident of what sits behind it rather than by construction.
+  if (PUBLIC_EXACT.has(pathname)) return method === "GET" || method === "HEAD";
   if (PRE_AUTH_API_PATHS.has(pathname)) return true;
   // `/setup-api/...` also starts with `/setup`, so this must not be a bare
   // prefix test — isWizardPagePath matches on a segment boundary.
@@ -422,7 +436,7 @@ export async function middleware(request: NextRequest) {
   // gateway catch-all and was answered, unauthenticated, with the token-
   // bearing SPA shell. Same for `/Manifest.json` and `/SW.JS`. Any gate must
   // decide on the string the router will actually use.
-  if (isPublicPath(request.nextUrl.pathname)) {
+  if (isPublicPath(request.nextUrl.pathname, request.method)) {
     return NextResponse.next();
   }
 

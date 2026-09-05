@@ -10,58 +10,99 @@
  * resolvable 192 px icon refused the prompt outright. `curl -f` does not even
  * error on it — the box answers a redirect, not a 4xx.
  *
- * The assertions are DERIVED from the declaration sites (the manifest's own
- * `icons[]` and the root layout's `metadata.icons`) rather than hard-coded, so
- * adding an icon to either place without opening the gate fails here.
+ * The assertions are DERIVED from the declaration sites — the manifest's own
+ * `icons[]` and the root layout's `metadata.icons` object, read as VALUES and
+ * not as text, so every legal shape counts (a bare string in `icons.icon`, a
+ * manifest `src` relative to the manifest URL) rather than only the two spelt
+ * today. A guard that filtered for one shape would go quietly green over an
+ * icon declared in another and 307ing on every box, which is this defect again.
  */
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { NextRequest } from "next/server";
+import type { Metadata } from "next";
 import fs from "fs";
 import os from "os";
 import path from "path";
 
 const repoRoot = path.resolve(__dirname, "../../..");
 
+/**
+ * Every icon path `public/manifest.json` declares.
+ *
+ * A manifest `src` is resolved against the manifest's own URL, so a relative
+ * one is just as real as an absolute one — resolve rather than filter.
+ */
 function manifestIconPaths(): string[] {
   const manifest = JSON.parse(
     fs.readFileSync(path.join(repoRoot, "public/manifest.json"), "utf8"),
   ) as { icons?: Array<{ src?: string }> };
-  const srcs = (manifest.icons ?? [])
-    .map((i) => i.src)
-    .filter((s): s is string => typeof s === "string" && s.startsWith("/"));
-  expect(srcs.length, "manifest.json declares no icons").toBeGreaterThan(0);
-  return srcs;
+  const paths = (manifest.icons ?? [])
+    .map((icon) => icon.src)
+    .filter((src): src is string => typeof src === "string")
+    .map((src) => new URL(src, "http://box/manifest.json").pathname);
+  expect(paths.length, "manifest.json declares no icons").toBeGreaterThan(0);
+  return paths;
 }
 
 /**
- * The icon URLs `src/app/layout.tsx` puts in the document head. Read as text
- * rather than imported: layout.tsx pulls in globals.css and the whole app
- * shell, and this only needs the declared URLs.
+ * Every icon URL `src/app/layout.tsx` puts in the document head.
+ *
+ * `Metadata["icons"]` is a union: a bare string or URL, an array of those or of
+ * `{ url }` descriptors, or an object keyed by rel (`icon`, `shortcut`,
+ * `apple`, `other`). All of them end up as a `<link>` the browser fetches, so
+ * all of them are walked. Anything absolute is somebody else's origin and not
+ * this gate's business.
  */
-function layoutIconPaths(): string[] {
-  const source = fs.readFileSync(path.join(repoRoot, "src/app/layout.tsx"), "utf8");
-  const block = source.slice(source.indexOf("icons: {"), source.indexOf("appleWebApp:"));
-  const urls = [...block.matchAll(/url:\s*"(\/[^"]+)"/g)].map((m) => m[1]);
-  expect(urls.length, "layout.tsx declares no icon urls").toBeGreaterThan(0);
+function collectIconUrls(node: unknown, into: string[]): void {
+  if (node === null || node === undefined) return;
+  if (typeof node === "string" || node instanceof URL) {
+    const value = String(node);
+    if (value.startsWith("/")) into.push(value);
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) collectIconUrls(item, into);
+    return;
+  }
+  if (typeof node === "object") {
+    for (const value of Object.values(node as Record<string, unknown>)) {
+      collectIconUrls(value, into);
+    }
+  }
+}
+
+async function layoutIconPaths(): Promise<string[]> {
+  const { metadata } = (await import("@/app/layout")) as { metadata: Metadata };
+  const urls: string[] = [];
+  collectIconUrls(metadata.icons, urls);
+  // The manifest is declared here too and is fetched by the same logged-out
+  // browser, so it belongs in the same check.
+  collectIconUrls(metadata.manifest, urls);
+  expect(urls.length, "layout.tsx declares no head icons").toBeGreaterThan(0);
   return urls;
 }
 
-describe("icons declared to the browser are reachable without a session", () => {
+describe("assets declared to the browser are reachable without a session", () => {
   let tmpRoot: string;
+
+  function armAuth(bootstrapOpen: boolean) {
+    fs.mkdirSync(path.join(tmpRoot, "data"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpRoot, "data/config.json"),
+      // An owner and a finished wizard = the gate fully armed. The empty
+      // object is a box still inside the first-boot bootstrap window, whose
+      // wizard pages carry the same head icons.
+      JSON.stringify(bootstrapOpen ? {} : { setup_complete: true, password_configured: true }),
+    );
+  }
 
   beforeEach(() => {
     vi.resetModules();
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-pwa-icons-"));
     process.env.CLAWBOX_ROOT = tmpRoot;
-    // A box with an owner and a finished wizard — the state in which the auth
-    // gate is fully armed.
-    fs.mkdirSync(path.join(tmpRoot, "data"), { recursive: true });
-    fs.writeFileSync(
-      path.join(tmpRoot, "data/config.json"),
-      JSON.stringify({ setup_complete: true, password_configured: true }),
-    );
     process.env.SESSION_SECRET = "test-secret";
     delete process.env.CLAWBOX_TEST_MODE;
+    armAuth(false);
   });
 
   afterEach(() => {
@@ -71,30 +112,60 @@ describe("icons declared to the browser are reachable without a session", () => 
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  async function get(pathname: string) {
+  async function get(pathname: string, method = "GET") {
     const mod = await import("@/middleware");
-    return mod.middleware(new NextRequest(new URL(`http://localhost${pathname}`)));
+    return mod.middleware(
+      new NextRequest(new URL(`http://localhost${pathname}`), { method }),
+    );
+  }
+
+  async function expectServed(pathname: string) {
+    const response = await get(pathname);
+    expect(response.status, `${pathname} must not need a session`).toBe(200);
+    expect(response.headers.get("Location"), pathname).toBeNull();
   }
 
   it("serves every icon public/manifest.json declares", async () => {
-    for (const iconPath of manifestIconPaths()) {
-      const response = await get(iconPath);
-      expect(response.status, `${iconPath} must not need a session`).toBe(200);
-      expect(response.headers.get("Location"), iconPath).toBeNull();
-    }
+    for (const iconPath of manifestIconPaths()) await expectServed(iconPath);
   });
 
-  it("serves every icon the root layout puts in the document head", async () => {
-    for (const iconPath of layoutIconPaths()) {
-      const response = await get(iconPath);
-      expect(response.status, `${iconPath} must not need a session`).toBe(200);
-      expect(response.headers.get("Location"), iconPath).toBeNull();
+  it("serves everything the root layout puts in the document head", async () => {
+    for (const iconPath of await layoutIconPaths()) await expectServed(iconPath);
+  });
+
+  it("serves them during the first-boot bootstrap window too", async () => {
+    // The wizard's own pages carry the same head, and this is the state a box
+    // is in when its owner first opens it.
+    armAuth(true);
+    vi.resetModules();
+    for (const iconPath of [...manifestIconPaths(), ...(await layoutIconPaths())]) {
+      await expectServed(iconPath);
     }
   });
 
   it("still shields a non-icon page and the API surface", async () => {
-    // The opening is icons only; it must not have widened the gate.
+    // The opening is these assets only; it must not have widened the gate.
     expect((await get("/dashboard")).status).toBe(307);
     expect((await get("/setup-api/system/info")).status).toBe(401);
+  });
+
+  it("admits the exact path only — never a case-folded or trailing-slash lookalike", async () => {
+    // middleware.ts decides on the RAW pathname because the ROUTER routes the
+    // raw string: a lower-cased match would admit /ICON-192.PNG, which matches
+    // no file in public/ and falls through to the gateway catch-all — served,
+    // unauthenticated, with the SPA shell. That bypass has been shipped twice
+    // (/Login, /ASSETS/x.css); this pins it for the entries added here.
+    for (const lookalike of ["/ICON-192.PNG", "/Icon-512.png", "/icon-192.png/", "/favicon-32X32.png"]) {
+      expect((await get(lookalike)).status, lookalike).toBe(307);
+    }
+  });
+
+  it("is read-only — a write to an icon path still needs a session", async () => {
+    // Safe today only because Next's public/ handler and the gateway catch-all
+    // both answer GET, so a POST 405s before anything else looks at it. The
+    // gate says so itself rather than relying on what happens to sit behind it.
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      expect((await get("/icon-192.png", method)).status, method).toBe(307);
+    }
   });
 });
