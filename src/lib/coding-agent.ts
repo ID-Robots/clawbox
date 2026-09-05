@@ -326,20 +326,25 @@ export const TEAM_SPAWN_MIN_AVAILABLE_MB = (() => {
  * Whether one more run of `team` may start beside the runs already live.
  * The orchestrator asks this before it dispatches a worker, so a full board
  * or a tight box makes it WAIT rather than fail; assertCanSpawn asks it
- * again at the spawn, which is the gate.
+ * again at the spawn, which is the gate. `starting` is how many of the
+ * team's workers the orchestrator has dispatched that have not reached
+ * their run yet (a worktree is being added): they hold a slot and a share
+ * of the memory already, and a count of persisted runs alone would admit a
+ * third worker beside two that are seconds from spawning.
  */
-export async function teamSpawnSlot(team: RunTeam): Promise<{ ok: true } | { ok: false; reason: string; wait: boolean }> {
+export async function teamSpawnSlot(team: RunTeam, starting = 0): Promise<{ ok: true } | { ok: false; reason: string; wait: boolean }> {
   const active = loadRuns().filter((r) => isLive(r.status));
   const stranger = active.find((r) => r.team?.id !== team.id);
   if (stranger) return { ok: false, wait: false, reason: `A coding run is already in progress (${stranger.id}). Wait for it or stop it first.` };
-  if (active.length >= MAX_TEAM_WORKERS) return { ok: false, wait: true, reason: `The team already has ${active.length} runs going.` };
-  if (active.length >= 1 && TEAM_SPAWN_MIN_AVAILABLE_MB > 0) {
+  const going = active.length + Math.max(0, starting);
+  if (going >= MAX_TEAM_WORKERS) return { ok: false, wait: true, reason: `The team already has ${going} runs going.` };
+  if (going >= 1 && TEAM_SPAWN_MIN_AVAILABLE_MB > 0) {
     const mb = await memAvailableMb();
     // No reading is no evidence of room: a box that cannot say how much
     // memory it has left is not one to start a second run on.
-    if (mb === null) return { ok: false, wait: true, reason: `Cannot read the box's free memory, so no second run starts beside the ${active.length} going.` };
+    if (mb === null) return { ok: false, wait: true, reason: `Cannot read the box's free memory, so no second run starts beside the ${going} going.` };
     if (mb < TEAM_SPAWN_MIN_AVAILABLE_MB) {
-      return { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${active.length} going (${mb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).` };
+      return { ok: false, wait: true, reason: `Not enough free memory for another run beside the ${going} going (${mb} MB free, ${TEAM_SPAWN_MIN_AVAILABLE_MB} MB needed).` };
     }
   }
   return { ok: true };

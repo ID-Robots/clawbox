@@ -28,6 +28,9 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-agent")>();
   return { ...actual, ...runner };
 });
+// A roomy box: the spawn slot reads it once a worker is starting, and the
+// host's own meminfo is neither the fixture nor the same on every runner.
+vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
 // The git plumbing, faked: a branch is "made", a worktree "added", a merge
 // "done" — scripted per call so a conflict can be staged.
 const plumbing = vi.hoisted(() => ({

@@ -2108,6 +2108,23 @@ describe("the team's spawn slot", () => {
     expect((unknown as { reason: string }).reason).toContain("Cannot read");
   });
 
+  it("counts the workers the orchestrator has dispatched but not yet spawned", async () => {
+    fs.writeFileSync(runsFile(), JSON.stringify([]));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    // Nothing persisted, one worker starting: the memory guard is consulted.
+    memAvailable.mockResolvedValueOnce(300);
+    expect(await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" }, 1)).toMatchObject({ ok: false, wait: true });
+    // Nothing persisted, the cap's worth starting: a wait for a slot.
+    const full = await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" }, lib.MAX_TEAM_WORKERS);
+    expect(full).toMatchObject({ ok: false, wait: true });
+    expect((full as { reason: string }).reason).toContain(`${lib.MAX_TEAM_WORKERS} runs going`);
+    // Nothing persisted, nothing starting: admitted without a memory read.
+    memAvailable.mockClear();
+    expect(await lib.teamSpawnSlot({ id: "team-1", role: "worker", taskId: "t2" }, 0)).toEqual({ ok: true });
+    expect(memAvailable).not.toHaveBeenCalled();
+  });
+
   it("refuses outright, not as a wait, while a stranger's run holds the box", async () => {
     fs.writeFileSync(runsFile(), JSON.stringify([liveWorker("team-other")]));
     vi.resetModules();

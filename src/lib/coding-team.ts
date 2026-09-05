@@ -289,7 +289,10 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     for (const task of ready) {
       if (inFlight.size >= slots) break;
       if (inFlight.size >= 1) {
-        const slot = await teamSpawnSlot({ id: board.id, role: "worker", taskId: task.task_id });
+        // The workers in flight are counted as starting: a worker whose
+        // worktree is still being added has no persisted run yet, and
+        // without this the memory guard would not even be consulted.
+        const slot = await teamSpawnSlot({ id: board.id, role: "worker", taskId: task.task_id }, inFlight.size);
         if (!slot.ok) {
           waitingForRoom = slot.wait;
           // A refusal that is not "wait" — a stranger's run holds the box —
