@@ -119,7 +119,9 @@ export async function POST(req: Request) {
     //   true  — a skill directory was there and is gone
     //   false — this box has a skills root and nothing of that name was in it
     //   null  — there is no skill half here to report on: the hermes SKU, or a
-    //           web app, which never had a skill of its own
+    //           web app, which never had a skill of its own — UNLESS
+    //           `skillHalfChecked` is false above, the one answer where `null`
+    //           means "could not look" instead
     // `{ok:true}` alone said the same thing for all three, which is the half of
     // the wrong-directory delete that a guard on its own does not close.
     if (skillRoot) {
