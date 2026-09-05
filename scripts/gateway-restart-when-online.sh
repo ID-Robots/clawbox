@@ -128,15 +128,27 @@ ONLINE_POLL="$(positive_int "${CLAWBOX_ONLINE_POLL:-}" 3)"
 # "present" on the one edition this guard exists for. Measured read-only on the
 # Hermes box: `clawbox-gateway.service masked enabled`, exit 0.
 #
-# LoadState is the answer that separates them — `loaded` for a unit systemd
-# would act on, `masked` for the Hermes edition's, `not-found` where it was
-# never installed — and it is also right when systemctl is absent entirely,
-# which is equally "no gateway here". Anything but `loaded` means there is
-# nothing to restart: not an error, and not worth a journal line per network
-# event.
-if [ "${CLAWBOX_SKIP_UNIT_CHECK:-0}" != "1" ] \
-   && [ "$(systemctl show -p LoadState --value "$UNIT" 2>/dev/null)" != "loaded" ]; then
-  exit 0
+# LoadState is the answer that separates them: `loaded` for a unit systemd would
+# act on, `masked` for the Hermes edition's, `not-found` where it was never
+# installed. Anything but `loaded` means there is nothing here to restart — not
+# an error, and not worth a journal line per network event. An EMPTY answer is a
+# different thing again and is handled separately below.
+if [ "${CLAWBOX_SKIP_UNIT_CHECK:-0}" != "1" ]; then
+  unit_load_state="$(systemctl show -p LoadState --value "$UNIT" 2>/dev/null)"
+  if [ -z "$unit_load_state" ]; then
+    # systemctl did not answer at all — a `daemon-reexec` (install.sh and the
+    # updater both trigger one), a bus hiccup, or no systemd here. That is NOT
+    # evidence that this edition has no gateway, and exiting silently on it
+    # would drop a network event with no trace anywhere. Say so once, then
+    # stand down: a systemctl that cannot answer cannot restart anything
+    # either, and the next network event starts a fresh wait.
+    # src/lib/gateway-health.ts states the same rule for the same property:
+    # "null means systemctl did not answer, which is not evidence either way."
+    log "WARN: could not read $UNIT load state — standing down for: $REASON"
+    exit 0
+  fi
+  # `loaded` is the only state describing a unit systemd would act on.
+  [ "$unit_load_state" = "loaded" ] || exit 0
 fi
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true

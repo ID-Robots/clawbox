@@ -62,6 +62,12 @@ interface BoxOptions {
    * Hermes edition went untested.
    */
   unitLoadState?: "loaded" | "masked" | "not-found";
+  /**
+   * `systemctl` itself cannot answer — a `daemon-reexec`, a bus hiccup, or no
+   * systemd at all. Distinct from every value above: it is not evidence that
+   * this edition has no gateway.
+   */
+  unitProbeFails?: boolean;
   /** Whether `curl` is on PATH for the HTTPS half of the probe. */
   curlWorks?: boolean;
   /** Drop a re-arm marker once, from inside the poll loop. */
@@ -130,14 +136,26 @@ case "$1" in
   # try-restart is a no-op on a stopped unit and reports success either way —
   # exactly what the real one does, and why the script uses it.
   try-restart) exit 0 ;;
-  # Only a unit that is not installed at all goes unlisted. Verbatim shape of
-  # what the Hermes box prints: "clawbox-gateway.service masked enabled".
+  # Kept, and kept FAITHFUL, although the shipped script no longer asks this:
+  # only a unit that is not installed at all goes unlisted, so a regression to
+  # this question turns the masked case below red instead of quietly passing.
+  # Verbatim shape of what the Hermes box prints:
+  # "clawbox-gateway.service masked enabled".
   list-unit-files)
     ${loadState === "not-found"
       ? "exit 1"
       : `echo "clawbox-gateway.service ${loadState === "masked" ? "masked" : "enabled"} enabled"`}
     ;;
-  show) echo ${JSON.stringify(loadState)} ;;
+  # Matched on the PROPERTY, not just the verb, so a change to some other
+  # 'systemctl show -p ...' cannot keep passing on this answer.
+  show)
+    case "$*" in
+      *"-p LoadState"*) ${opts.unitProbeFails
+        ? 'echo "Failed to connect to bus" >&2; exit 1'
+        : `echo ${JSON.stringify(loadState)}`} ;;
+      *) exit 0 ;;
+    esac
+    ;;
   *) exit 0 ;;
 esac`);
 
@@ -320,6 +338,21 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     expect(journal()).toBe("");
   });
 
+  it("says so, rather than standing down silently, when systemctl cannot answer", () => {
+    // `2>/dev/null` plus a `!= loaded` test would read "the question could not
+    // be asked" as "this edition has no gateway", and drop the network event
+    // with no trace anywhere — including the `dhcp4-change` that would have
+    // revived the suppressed accounts. src/lib/gateway-health.ts states the
+    // rule for the same property: systemctl not answering "is not evidence
+    // either way".
+    makeBox({ connectivity: ["full"], unitProbeFails: true });
+
+    runWaiter("Ethernet 'eth0' up", { CLAWBOX_SKIP_UNIT_CHECK: "0" });
+
+    expect(restarts()).toBe(0);
+    expect(journal()).toContain("could not read");
+  });
+
   it("still restarts on the edition that does have a live gateway unit", () => {
     // The other half of the guard, and the reason it reads LoadState rather
     // than simply refusing: a check that skipped every edition would silence
@@ -483,6 +516,49 @@ describe("the dispatcher hands the restart to the waiter rather than firing it",
     expect(asked[0]).toContain("DHCP lease on 'wlan0'");
   });
 
+  it("ignores a DHCP lease that renews the same address", async () => {
+    // NM emits dhcp4-change on every T1/T2 renew. Measured on the office LAN:
+    // `dhcp_lease_time = 86400`, so twice a day on a box where nothing at all
+    // has happened — and 24-48 times a day on the one- to two-hour leases
+    // consumer routers and hotel networks hand out. Restarting there bounces a
+    // healthy gateway and drops an in-flight conversation, which is the harm
+    // the rest of this script exists to avoid.
+    makeBox({ connectivity: ["full"] });
+    const lease = { IP4_ADDRESS_0: "192.0.2.50/24 192.0.2.1", IP4_GATEWAY: "192.0.2.1" };
+
+    runDispatcher("eth0", "dhcp4-change", lease);
+    expect(await deferredEventually(1)).toHaveLength(1);
+
+    runDispatcher("eth0", "dhcp4-change", lease);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(deferred()).toHaveLength(1);
+  });
+
+  it("asks again when a lease actually moves the box", async () => {
+    // The other half: a lease that changes the address or the gateway IS a
+    // network change, and the sockets bound to the old address are dead.
+    makeBox({ connectivity: ["full"] });
+
+    runDispatcher("eth0", "dhcp4-change", { IP4_ADDRESS_0: "192.0.2.50/24 192.0.2.1", IP4_GATEWAY: "192.0.2.1" });
+    expect(await deferredEventually(1)).toHaveLength(1);
+
+    runDispatcher("eth0", "dhcp4-change", { IP4_ADDRESS_0: "198.51.100.7/24 198.51.100.1", IP4_GATEWAY: "198.51.100.1" });
+
+    expect(await deferredEventually(2)).toHaveLength(2);
+  });
+
+  it("ignores a DHCP lease on an interface this box does not route through", async () => {
+    // The arm ran before the interface filter, so a docker or veth lease asked
+    // for a gateway restart too.
+    makeBox({ connectivity: ["full"] });
+
+    runDispatcher("docker0", "dhcp4-change");
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(deferred()).toHaveLength(0);
+  });
+
   it("asks for the restart when NetworkManager itself confirms full connectivity", async () => {
     // The upstream-router-reboot shape: carrier never drops, so there is no
     // up/down and no new lease, and this is the only event that fires.
@@ -537,13 +613,20 @@ describe("the installer reports what it actually installed", () => {
     return INSTALL_SH.slice(start, end + 2);
   }
 
-  function runStep(opts: { waiterInstallFails?: boolean; shape: "update" | "fresh" }) {
+  function runStep(opts: { waiterInstallFails?: boolean; dispatcherDirReadOnly?: boolean; shape: "update" | "fresh" }) {
     const project = path.join(root, "project");
     const dispatcherDir = path.join(root, "dispatcher.d");
     const libexec = path.join(root, "root-libexec");
     mkdirSync(path.join(project, "scripts"), { recursive: true });
     copyFileSync(DISPATCHER, path.join(project, "scripts", "nm-dispatcher-failover.sh"));
     copyFileSync(WAITER, path.join(project, "scripts", "gateway-restart-when-online.sh"));
+
+    if (opts.dispatcherDirReadOnly) {
+      // A full or read-only /etc is the likelier failure of the two, and it is
+      // the half `install_root_file` does not cover.
+      mkdirSync(dispatcherDir, { recursive: true });
+      chmodSync(dispatcherDir, 0o555);
+    }
 
     const body = shellFunction("step_nm_dispatcher")
       .replace("/etc/NetworkManager/dispatcher.d", dispatcherDir);
@@ -560,6 +643,10 @@ describe("the installer reports what it actually installed", () => {
       opts.waiterInstallFails
         ? "install_root_file() { return 1; }"
         : "install_root_file() { cp \"$1\" \"$2\"; }",
+      // The real one stamps $PROVISION_STATUS_FILE, which the dashboard and the
+      // flash host read. A step that only warns leaves the update's own verdict
+      // saying it was clean.
+      'record_provision_failure() { echo "provision-failure: $1"; }',
       body,
       opts.shape === "update"
         // Verbatim from step_post_update.
@@ -582,6 +669,7 @@ describe("the installer reports what it actually installed", () => {
 
     expect(r.out).not.toContain("Deferred gateway-restart helper installed");
     expect(r.out).toContain("could not install the deferred gateway-restart helper");
+    expect(r.out).toContain("provision-failure: nm_dispatcher");
   });
 
   it("reports the failed step to step_post_update instead of returning success", () => {
@@ -594,6 +682,21 @@ describe("the installer reports what it actually installed", () => {
 
     expect(r.out).toContain("nm_dispatcher step failed");
     expect(r.out).not.toContain("NetworkManager failover dispatcher installed");
+  });
+
+  it("does not claim the dispatcher is installed when the copy failed", () => {
+    // The other half of the same function, and the one that fires on a full or
+    // read-only /etc: `cp`, `chown` and `chmod` were unchecked too, so the
+    // update path printed "NetworkManager failover dispatcher installed" over
+    // a dispatcher that never landed.
+    makeBox();
+
+    const r = runStep({ dispatcherDirReadOnly: true, shape: "update" });
+
+    expect(r.out).not.toContain("NetworkManager failover dispatcher installed");
+    expect(r.out).toContain("could not install the NetworkManager failover dispatcher");
+    expect(r.out).toContain("provision-failure: nm_dispatcher");
+    expect(r.out).toContain("nm_dispatcher step failed");
   });
 
   it("still aborts the fresh install, where a failure is fatal by design", () => {
@@ -613,6 +716,7 @@ describe("the installer reports what it actually installed", () => {
     expect(r.out).toContain("Deferred gateway-restart helper installed");
     expect(r.out).toContain("NetworkManager failover dispatcher installed");
     expect(r.out).not.toContain("Warning");
+    expect(r.out).not.toContain("provision-failure");
     expect(existsSync(path.join(r.libexec, "gateway-restart-when-online.sh"))).toBe(true);
   });
 });

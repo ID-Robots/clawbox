@@ -25,6 +25,9 @@ LOG_TAG="clawbox-failover"
 # checkout is clawbox-owned and group-writable. See the waiter's own header and
 # install.sh's ROOT_LIBEXEC_DIR block (TASK-445).
 WAITER="${CLAWBOX_ONLINE_WAITER:-/usr/local/libexec/clawbox/gateway-restart-when-online.sh}"
+# Root-owned tmpfs, the same directory the waiter takes its lock in, and cleared
+# on boot — which is what a "what did we see last time" marker wants anyway.
+RUN_DIR="${CLAWBOX_RUN_DIR:-/run/clawbox}"
 
 log() { logger -t "$LOG_TAG" -- "$*"; }
 
@@ -97,20 +100,43 @@ case "$ACTION" in
     # can SUCCEED, and a LAN that hijacks connectivity-check.ubuntu.com would
     # otherwise veto every restart for ever. This arm decides whether an event
     # is worth ASKING about, and `full` is NM's only positive statement:
-    # `portal`, `limited` and `unknown` mean "not decided". Asking on those
-    # would hand the waiter a request on every flap of a connectivity check
-    # that is already known to be unreliable here — and because the waiter
-    # accepts a working ping whatever NM thinks, each flap on a healthy box
-    # would bounce a healthy gateway mid-conversation. A box whose LAN never
-    # lets NM say `full` still has the arms that do not depend on NM's opinion:
-    # `up`, and the DHCP lease below.
+    # `portal`, `limited` and `unknown` mean "not decided".
+    #
+    # Stated honestly, this HALVES the noise rather than removing it — a check
+    # that flaps still dispatches on each return to `full`. What it buys is that
+    # a LAN permanently parked at `portal`/`limited` cannot ask for a restart on
+    # every transition it makes, and a box that never reaches `full` still has
+    # the arms that do not depend on NM's opinion at all: `up`, and the DHCP
+    # lease below.
     if [ "${CONNECTIVITY_STATE:-}" = "FULL" ]; then
       restart_gateway_when_online "NetworkManager reports full connectivity"
     fi
     exit 0
     ;;
   dhcp4-change)
-    restart_gateway_when_online "DHCP lease on '$IFACE'"
+    # A RENEWAL is not a network change, and this arm must not treat it as one.
+    # NM emits dhcp4-change on every T1 renew and T2 rebind: the office LAN
+    # hands out `dhcp_lease_time = 86400`, so twice a day, and the one- to
+    # two-hour leases consumer routers, guest WiFi and hotel networks give make
+    # it 24-48 times a day. A renewal that keeps the same address moves no
+    # route and drops no socket, so a restart there buys nothing and costs an
+    # in-flight conversation plus a cold-Jetson `gateway-pre-start.sh` — the
+    # exact harm the rest of this script exists to avoid. Beta restarted only on
+    # Ethernet carrier up/down, which is rare; turning that into a routine event
+    # would be a worse bug than the one being fixed.
+    #
+    # So only a lease that actually MOVED the box counts. The address and
+    # gateway are remembered per interface and compared.
+    case "$IFACE" in
+      eth*|en*|"$WIFI_IFACE") ;;
+      *) exit 0 ;;
+    esac
+    lease="${IP4_ADDRESS_0:-}|${IP4_GATEWAY:-}"
+    seen="$RUN_DIR/last-lease.${IFACE//[^A-Za-z0-9._-]/_}"
+    mkdir -p "$RUN_DIR" 2>/dev/null || true
+    [ "$(cat "$seen" 2>/dev/null || true)" = "$lease" ] && exit 0
+    printf '%s' "$lease" > "$seen" 2>/dev/null || true
+    restart_gateway_when_online "DHCP lease on '$IFACE' changed"
     exit 0
     ;;
 esac

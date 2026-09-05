@@ -4987,6 +4987,7 @@ step_nm_dispatcher() {
      || ! chown root:root "$DEST" \
      || ! chmod 0755 "$DEST"; then
     echo "  Warning: could not install the NetworkManager failover dispatcher at $DEST" >&2
+    record_provision_failure nm_dispatcher
     return 1
   fi
   # The dispatcher is useless without the waiter it defers the gateway restart
@@ -5005,6 +5006,7 @@ step_nm_dispatcher() {
       echo "  Deferred gateway-restart helper installed"
     else
       echo "  Warning: could not install the deferred gateway-restart helper — the failover will not restart the gateway" >&2
+      record_provision_failure nm_dispatcher
       return 1
     fi
   else
