@@ -29,10 +29,9 @@ export type SkillChangeKind = "skill" | "app";
 
 /**
  * The one name for the event. It says "skill-installed" and it is dispatched
- * for installs, removals, enables and disables of both skills and apps — kept
- * as it is because an older tab left open across an update still listens for
- * this string, and renaming it would drop the confirmation the desktop owes
- * the owner. The constant exists so the next sender cannot invent a variant.
+ * for installs, removals, enables and disables of both skills and apps. Kept as
+ * it is because renaming a string four senders and two listeners agree on buys
+ * nothing; the constant exists so the next sender cannot invent a variant.
  */
 export const SKILL_CHANGE_EVENT = "clawbox-skill-installed";
 
@@ -43,10 +42,19 @@ export type SkillChangeEvent = {
   /** Skill or app id — what the uninstall/enable/disable paths carry. */
   id?: string;
   /**
-   * Absent means "skill": that is what every sender meant before this field
-   * existed, and an older tab left open across an update still emits it.
+   * Absent means "skill". Not a compatibility story — every sender ships in the
+   * same bundle as the listener — but a sender that forgets it should get the
+   * historical wording rather than `undefined` in the owner's own bubble.
    */
   kind?: SkillChangeKind;
+  /**
+   * One id can be BOTH: `webapp_create` replaces `installed_meta[<id>]` for any
+   * id with no collision check, and the uninstall route then removes the webapp
+   * and the store skill of that name and reports which in `skillRemoved`. Only
+   * set where the route confirmed the skill half went too — the owner has just
+   * lost a capability, and a line that mentions only the tile does not say so.
+   */
+  alsoSkill?: boolean;
 };
 
 /**
@@ -61,17 +69,28 @@ export function installedAppKind(meta: { webappUrl?: unknown } | undefined | nul
   return meta?.webappUrl ? "app" : "skill";
 }
 
-/** The event detail the desktop emits when it removes an installed app. */
+/**
+ * The event detail the desktop emits when it removes an installed app.
+ *
+ * @param skillRemoved the route's own `skillRemoved` field: true where it
+ *        confirmed a store skill of the same id went as well, null where it
+ *        could not look.
+ */
 export function installedAppRemovedDetail(
   appId: string,
   meta: { name?: string; webappUrl?: unknown } | undefined | null,
+  skillRemoved?: boolean | null,
 ): SkillChangeEvent {
+  const kind = installedAppKind(meta);
   return {
     action: "uninstall",
     id: appId,
-    // The id is a slug; the owner clicked a tile with a name on it.
+    // The id is a slug; the owner clicked a tile with a name on it. Both
+    // travel: the name is what the owner recognises, the id is what
+    // `ui_list_apps` and `skill_uninstall` actually report.
     ...(meta?.name ? { name: meta.name } : {}),
-    kind: installedAppKind(meta),
+    kind,
+    ...(kind === "app" && skillRemoved === true ? { alsoSkill: true } : {}),
   };
 }
 
@@ -80,28 +99,38 @@ export function announceSkillChange(detail: SkillChangeEvent): void {
   window.dispatchEvent(new CustomEvent(SKILL_CHANGE_EVENT, { detail }));
 }
 
-const NOUN: Record<SkillChangeKind, string> = { skill: "skill", app: "app" };
-
 export function buildSkillChangeMessage(evt: SkillChangeEvent | null | undefined): string {
   const label = evt?.name || evt?.id;
-  const noun = NOUN[evt?.kind ?? "skill"];
+  // Not an index into a record: `kind` arrives from an untyped
+  // `CustomEvent.detail`, and every other unknown input to this function is
+  // already defended. A stray value must not put `undefined` in the bubble.
+  const noun = evt?.kind === "app" ? "app" : "skill";
+  // The name is what the OWNER recognises; the id is what the agent's lists
+  // report. `ui_list_apps` emits an installed app as `{ id: "installed-<id>",
+  // name: <id> }` — the display name is never in it — and `skill_list` leads
+  // with the lock id, so a sentence carrying only the name asks the agent to
+  // verify against a string neither list contains.
+  const qualifier = evt?.name && evt?.id && evt.name !== evt.id ? ` (id: ${evt.id})` : "";
   // No label means we cannot name the thing without inventing one, so ask the
   // open question instead of asserting something we do not know.
   if (!label) return "My skills were just updated. What skills do you have available now?";
   switch (evt?.action) {
     case "install":
-      return `I just installed the "${label}" ${noun}. Can you confirm you have it and briefly tell me what it does?`;
+      return noun === "app"
+        ? `I just installed the "${label}" app${qualifier} on the desktop. Can you confirm you can see it?`
+        : `I just installed the "${label}" skill${qualifier}. Can you confirm you have it and briefly tell me what it does?`;
     case "uninstall":
       // An app is gone from the DESKTOP, which is where the agent can check
       // for it (`ui_list_apps`) — asking it to confirm a skill is gone sends
       // it to a list the app was never in.
-      return evt.kind === "app"
-        ? `I just removed the "${label}" app from the desktop. Can you confirm it is gone?`
-        : `I just removed the "${label}" skill. Can you confirm it is gone?`;
+      if (noun !== "app") return `I just removed the "${label}" skill${qualifier}. Can you confirm it is gone?`;
+      return evt?.alsoSkill
+        ? `I just removed the "${label}" app${qualifier} from the desktop, and the skill of the same id went with it. Can you confirm both are gone?`
+        : `I just removed the "${label}" app${qualifier} from the desktop. Can you confirm it is gone?`;
     case "enable":
-      return `I just enabled the "${label}" ${noun}. Can you confirm you have it?`;
+      return `I just enabled the "${label}" ${noun}${qualifier}. Can you confirm you have it?`;
     case "disable":
-      return `I just disabled the "${label}" ${noun}. Can you confirm it is no longer active?`;
+      return `I just disabled the "${label}" ${noun}${qualifier}. Can you confirm it is no longer active?`;
     default:
       return "My skills were just updated. What skills do you have available now?";
   }

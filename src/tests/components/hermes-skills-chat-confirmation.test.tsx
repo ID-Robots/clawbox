@@ -59,16 +59,20 @@ const HUB_ROW = {
 const INSTALLED = { skills: [HUB_ROW], counts: { total: 1 }, categories: [] };
 const EMPTY = { skills: [], counts: { total: 0 }, categories: [] };
 
-/** Every skill-change event the store fires, in order. */
+/** Every skill-change event the store fires, in order. Removed after each test. */
+const listeners: EventListener[] = [];
 function captureChanges(): SkillChangeEvent[] {
   const seen: SkillChangeEvent[] = [];
-  window.addEventListener(SKILL_CHANGE_EVENT, ((e: Event) => {
+  const listener = ((e: Event) => {
     seen.push((e as CustomEvent<SkillChangeEvent>).detail);
-  }) as EventListener);
+  }) as EventListener;
+  window.addEventListener(SKILL_CHANGE_EVENT, listener);
+  listeners.push(listener);
   return seen;
 }
 
-function mockStore(installedPages: unknown[]) {
+/** @param action what the install/uninstall route answers. */
+function mockStore(installedPages: unknown[], action: () => unknown = () => ({ ok: true, status: 200, json: async () => ({ ok: true }) })) {
   let calls = 0;
   vi.stubGlobal(
     "fetch",
@@ -81,12 +85,22 @@ function mockStore(installedPages: unknown[]) {
         calls += 1;
         return { ok: true, status: 200, json: async () => body };
       }
-      if (url.includes("/skills/install") || url.includes("/skills/uninstall")) {
-        return { ok: true, status: 200, json: async () => ({ ok: true }) };
-      }
+      if (url.includes("/skills/install") || url.includes("/skills/uninstall")) return action();
       return { ok: true, status: 200, json: async () => ({}) };
     }),
   );
+}
+
+async function removeFromInstalledTab() {
+  render(<HermesSkillsStore />);
+  const remove = await screen.findByRole("button", { name: /remove/i });
+  await act(async () => {
+    fireEvent.click(remove);
+  });
+  const dialog = await screen.findByRole("dialog");
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole("button", { name: /remove/i }));
+  });
 }
 
 beforeEach(() => {
@@ -96,6 +110,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  for (const listener of listeners.splice(0)) window.removeEventListener(SKILL_CHANGE_EVENT, listener);
 });
 
 describe("removing a real Hermes skill tells the agent about it", () => {
@@ -103,20 +118,56 @@ describe("removing a real Hermes skill tells the agent about it", () => {
     mockStore([INSTALLED, EMPTY]);
     const changes = captureChanges();
 
-    render(<HermesSkillsStore />);
-    const remove = await screen.findByRole("button", { name: /remove/i });
-    await act(async () => {
-      fireEvent.click(remove);
-    });
-    const dialog = await screen.findByRole("dialog");
-    await act(async () => {
-      fireEvent.click(within(dialog).getByRole("button", { name: /remove/i }));
-    });
+    await removeFromInstalledTab();
 
     await waitFor(() => expect(changes).toHaveLength(1));
-    expect(changes[0]).toMatchObject({ action: "uninstall", kind: "skill", name: "pdf-tools" });
-    // And the line the owner's bubble carries says skill, not app.
-    expect(buildSkillChangeMessage(changes[0])).toMatch(/skill/);
+    // The DISPLAY name the card showed, with the lock key beside it — the
+    // install path announces the display name, and the same skill under two
+    // names in one transcript is the defect this card is about, one surface up.
+    expect(changes[0]).toMatchObject({ action: "uninstall", kind: "skill", name: "PDF Tools", id: "pdf-tools" });
+    const line = buildSkillChangeMessage(changes[0]);
+    expect(line).toMatch(/skill/);
+    expect(line).toContain('"PDF Tools"');
+    // `skill_list` and `skill_uninstall` resolve the lock key, so that is what
+    // the agent needs to check against.
+    expect(line).toContain("pdf-tools");
+  });
+});
+
+describe("an outcome the store does not call a success announces nothing", () => {
+  const REFUSALS: [string, () => unknown][] = [
+    [
+      "a leftover the device could not undo (409)",
+      () => ({
+        ok: false,
+        status: 409,
+        json: async () => ({ error: "x", code: "removal_incomplete", name: "pdf-tools", leftover: { lockEntry: false, directory: "present" } }),
+      }),
+    ],
+    [
+      "an unproven removal (502)",
+      () => ({ ok: false, status: 502, json: async () => ({ error: "x", code: "uninstall_unproven", name: "pdf-tools" }) }),
+    ],
+    [
+      "a device that timed out (502)",
+      () => ({ ok: false, status: 502, json: async () => ({ error: "x", code: "cli_timeout" }) }),
+    ],
+  ];
+
+  it.each(REFUSALS)("stays silent on %s", async (_label, action) => {
+    // This store's whole design is that an unknown outcome is not a success.
+    // The guard that matters is against a later edit moving the announcement
+    // into the catch, or above the `!res.ok` throw.
+    mockStore([INSTALLED, INSTALLED], action);
+    const changes = captureChanges();
+
+    await removeFromInstalledTab();
+    // Let the failure path finish before asserting nothing happened.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(changes).toEqual([]);
   });
 });
 

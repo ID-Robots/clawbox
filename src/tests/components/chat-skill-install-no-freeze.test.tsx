@@ -221,3 +221,56 @@ describe("a skill change does not freeze the chat", () => {
     expect(screen.queryByText(SEED_TEXT)).not.toBeNull();
   });
 });
+
+/**
+ * TASK-544. What the chat SENDS is the only thing the owner and the agent see,
+ * and it is the one hop `kind` has to survive: the unit suite calls
+ * `buildSkillChangeMessage` directly and the Hermes store suite inspects the
+ * dispatched event, so a `kind` dropped in this handler's cast would revert the
+ * whole card with both of them green.
+ */
+describe("what the chat sends carries the kind the sender set", () => {
+  beforeEach(() => {
+    history = [assistantMessage(SEED_TEXT, 500)];
+    sent.length = 0;
+    sockets.length = 0;
+    resetHarnessCache();
+    window.localStorage.clear();
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
+    installFetch();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    resetHarnessCache();
+  });
+
+  it("calls a removed webapp an app, all the way to the wire", async () => {
+    await mountReady();
+    const before = sendFrames().length;
+
+    await fireSkillEvent({ action: "uninstall", name: "Pomodoro", id: "pomodoro-timer", kind: "app" });
+
+    await waitFor(() => expect(sendFrames().length).toBe(before + 1));
+    const message = String((sendFrames()[before].params as Record<string, unknown>).message);
+    expect(message).toMatch(/"Pomodoro" app .* from the desktop/);
+    // And the id the agent can actually look up: `ui_list_apps` reports
+    // installed apps by id, never by display name.
+    expect(message).toContain("pomodoro-timer");
+    expect(message).not.toMatch(/skill/);
+  });
+
+  it("still calls a removed skill a skill", async () => {
+    await mountReady();
+    const before = sendFrames().length;
+
+    await fireSkillEvent({ action: "uninstall", name: "PDF Tools", id: "pdf-tools", kind: "skill" });
+
+    await waitFor(() => expect(sendFrames().length).toBe(before + 1));
+    const message = String((sendFrames()[before].params as Record<string, unknown>).message);
+    expect(message).toMatch(/"PDF Tools" skill/);
+    expect(message).not.toMatch(/\bapp\b/);
+  });
+});
