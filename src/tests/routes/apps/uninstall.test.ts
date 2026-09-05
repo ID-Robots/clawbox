@@ -69,6 +69,33 @@ describe("/setup-api/apps/uninstall", () => {
     expect((await uninstall("../hack")).status).toBe(400);
   });
 
+  it("answers a client error for a body that is not JSON, not a retryable 500", async () => {
+    // `req.json()` throws inside the outer try, so a malformed body was
+    // answered with this PR's own failure contract — `code:"uninstall_failed"`,
+    // `retryable:true` — and `mcp/tools/desktop.ts` turns that into "Call
+    // app_uninstall once more". A body that is not JSON can never succeed on
+    // retry, and a client's mistake is not a server fault.
+    const res = await POST(new Request("http://localhost/setup-api/apps/uninstall", {
+      method: "POST",
+      body: "{ appId: not json",
+    }));
+
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.retryable).toBeUndefined();
+    expect(body.code).not.toBe("uninstall_failed");
+  });
+
+  it("answers a client error for a JSON body that is not an object", async () => {
+    // `const { appId } = null` throws a TypeError into the same outer catch.
+    const res = await POST(new Request("http://localhost/setup-api/apps/uninstall", {
+      method: "POST",
+      body: "null",
+    }));
+
+    expect(res.status).toBe(400);
+  });
+
   it("rejects missing appId", async () => {
     const req = new Request("http://localhost/setup-api/apps/uninstall", {
       method: "POST",

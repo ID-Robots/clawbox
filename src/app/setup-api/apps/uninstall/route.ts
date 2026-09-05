@@ -43,7 +43,20 @@ export async function POST(req: Request) {
   // agent need to decide what to do next.
   let skillRemoved: boolean | null = null;
   try {
-    const { appId } = await req.json();
+    // Parsed OUTSIDE the outer catch's contract. A body that is not JSON, or
+    // one that is JSON but not an object, threw into that catch and was
+    // answered `500 { code: "uninstall_failed", retryable: true }` — and
+    // `mcp/tools/desktop.ts` turns that body into "Call app_uninstall once
+    // more". A malformed body cannot succeed on retry however long the caller
+    // waits, so that is both a client error reported as a server fault and a
+    // retry instruction attached to a request that can never be satisfied.
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+    }
+    const { appId } = (body ?? {}) as { appId?: unknown };
     if (!appId || typeof appId !== "string" || !/^(?!-)[A-Za-z0-9_-]+$/.test(appId)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
