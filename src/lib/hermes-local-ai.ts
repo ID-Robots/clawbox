@@ -229,9 +229,6 @@ type LocalCatalogueState = "absent" | "scalar" | "foreign" | "unknown";
  * there", and anything else — including the 126/127 a `step_hermes_install`
  * rebuild produces without ever reaching argparse — is the CLI failing to
  * answer rather than answering "no".
- *
- * Never logs or returns the value: this file holds `TELEGRAM_BOT_TOKEN` and the
- * provider `api_key`s, and the question here is only whether the key is there.
  */
 type HermesKeyPresence = "present" | "absent" | "unknown";
 
@@ -242,11 +239,13 @@ type HermesCliRead =
 /**
  * The one spawn behind both readers below.
  *
- * NOT to be pointed at a credential key. It carries the value out, and this
- * file also names `providers.<slug>.api_key`; the two callers that read a value
- * ask only for `model.provider` and `model.default`, which name a provider slug
- * and a model id. `cliKeyPresence` is what every other key goes through, and it
- * drops the value on the floor.
+ * It carries the value out, and the read-back loop points it at
+ * `providers.<slug>.api_key` on every removal that reaches the CLI — so the
+ * rule is not "never ask it about a credential", it is that the value never
+ * leaves this function except through `selectionValue`, whose only two call
+ * sites pass the literals `model.provider` and `model.default` (a provider slug
+ * and a model id). `cliKeyPresence` is what every other key goes through and it
+ * drops the value on the floor; nothing here logs one.
  */
 async function cliKeyRead(key: string): Promise<HermesCliRead> {
   // `runHermesCli` REJECTS for a missing binary, a timeout and its own SIGKILL.
@@ -427,10 +426,20 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
   // BEFORE the write, and three-state. There is no safe unset list to send
   // while this is unknown: putting `model.provider` on it blind would drop the
   // owner's cloud selection on a Local AI toggle-off, and leaving it off is the
-  // 502-per-turn state above. Refusing here costs nothing that a retry cannot
-  // redo — nothing has been written yet, so Local AI stays registered and the
-  // box goes on working — whereas the same doubt one step later would leave the
-  // providers block half removed around a selection nobody could read.
+  // 502-per-turn state above. Nothing has been written when we refuse, so Local
+  // AI stays registered and the box goes on working, whereas the same doubt one
+  // step later would leave the providers block half removed around a selection
+  // nobody could read.
+  //
+  // It is NOT free, and one shape pays for it: a `model:` written as a flow
+  // mapping over an ordinary two-space `providers:` block is the only config
+  // where our line reader can resolve the providers keys while it cannot
+  // resolve the selection. With the CLI also dead (a `step_hermes_install`
+  // rebuild, ~90 s), that removal used to complete through the merge path with
+  // no CLI spawn at all and now answers 502 with the block still in place. That
+  // success was luck rather than knowledge — "not the default" was a guess, and
+  // the guess being wrong is precisely the defect this read exists to end — so
+  // the conservative branch is kept and the cost is stated instead of hidden.
   const selection = await selectionValue("model.provider");
   if (!selection.known) {
     console.error("[hermes-local-ai] the active provider could not be read; nothing was removed");
@@ -440,6 +449,13 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
     );
   }
   const wasDefault = selection.value === HERMES_LOCAL_PROVIDER;
+  // `known` is deliberately not checked for this one. It is reached only once
+  // `wasDefault` is PROVED true, so whatever is there is a local model id and
+  // goes on the unset list either way; the value is a courtesy for a later
+  // enable, and nothing reads it today (`local-ai/route.ts` takes only
+  // `wasDefault`). Refusing the whole removal because the id could not be
+  // re-read would trade a completed removal for a 502 over a field with no
+  // consumer.
   const model = wasDefault ? (await selectionValue("model.default")).value : null;
 
   // `models` rides with the endpoint it describes. Left behind, it is a

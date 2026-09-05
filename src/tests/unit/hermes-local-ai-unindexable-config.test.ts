@@ -179,7 +179,7 @@ describe("removing the local provider from a config.yaml our reader cannot index
     const before = configText();
     cliMock.mockRejectedValue(new Error("hermes: timed out"));
 
-    await expect(removeLocalAiFromHermes()).rejects.toThrow();
+    await expect(removeLocalAiFromHermes()).rejects.toThrow(/was not attempted/);
     expect(configText()).toBe(before);
     expect(cliUnsets()).toEqual([]);
   });
