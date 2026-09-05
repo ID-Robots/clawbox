@@ -78,6 +78,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
     leftover: false,
+    commitError: null,
     ...over,
   };
 }

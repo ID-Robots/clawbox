@@ -2088,6 +2088,24 @@ describe("the run's plan", () => {
   });
 });
 
+describe("a run's commit", () => {
+  it("records why the work could not be committed, on the record, and clears it when it is", async () => {
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+    installFakeClaude();
+    installFakeWrapper(HAPPY_BODY);
+    // A folder git cannot work in: a FILE named .git.
+    const dir = path.join(home, "Projects", "broken-git");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, ".git"), "not a gitdir\n");
+    const run = await lib.startRun({ task: "edit", directory: dir, source: "agent" });
+    const settled = await finished(run.id);
+    expect(settled.status).toBe("completed");
+    expect(settled.commit).toBeNull();
+    expect(settled.commitError).toMatch(/git|repository/i);
+    expect(settled.progress.some((p) => p.startsWith("Not committed:"))).toBe(true);
+  });
+});
+
 describe("the team's spawn slot", () => {
   const liveWorker = (teamId: string) => ({
     id: "run-teamwork", task: "a task", directory: home, projectId: null, source: "agent", status: "running",

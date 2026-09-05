@@ -125,9 +125,10 @@ export async function liveRuns() {
 export async function waitForIdle(deadlineMs = 10 * 60_000, everyMs = 5_000) {
   const until = Date.now() + deadlineMs;
   for (;;) {
-    let live = [];
+    // A poll that failed is not an answer: asked again, never read as idle.
+    let live = null;
     try { live = await liveRuns(); } catch { /* asked again below */ }
-    if (live.length === 0) return true;
+    if (live !== null && live.length === 0) return true;
     if (Date.now() >= until) return false;
     await new Promise((r) => setTimeout(r, everyMs));
   }

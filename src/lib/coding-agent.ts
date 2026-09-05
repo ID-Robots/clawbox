@@ -747,6 +747,8 @@ export interface CodingRun {
    * pattern and a leak nobody can see.
    */
   leftover: boolean;
+  /** Why the run's work could not be committed at settle — null when it was, or when there was nothing to commit. A team acts on it: a worker whose commit failed has no branch to merge. */
+  commitError: string | null;
 }
 
 /** Which media a run may ask this box for — read once, at its start. */
@@ -1793,6 +1795,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     },
     pgid: typeof raw.pgid === "number" && raw.pgid > 0 ? raw.pgid : null,
     leftover: raw.leftover === true,
+    commitError: typeof raw.commitError === "string" ? raw.commitError : null,
   };
 }
 
@@ -3488,14 +3491,22 @@ async function recordRunWork(run: CodingRun): Promise<void> {
     });
     if (outcome.committed) {
       run.commit = outcome.sha;
+      run.commitError = null;
       pushProgress(run, `Committed as ${outcome.sha}${outcome.initialized ? " (new repository)" : ""}`);
       console.error(`[coding-agent] ${run.id} committed ${outcome.sha}`);
     } else if (outcome.reason !== "no_changes") {
+      // On the record, not only in the log: a team reads it before it
+      // merges, since a worker whose commit failed has no branch to merge.
+      run.commitError = (outcome.detail ?? outcome.reason).slice(0, MAX_ERROR_CHARS);
       pushProgress(run, `Not committed: ${outcome.detail ?? outcome.reason}`);
       console.error(`[coding-agent] ${run.id} not committed: ${outcome.reason}`);
+    } else {
+      run.commitError = null;
     }
     persist(true);
   } catch (err) {
+    run.commitError = (err instanceof Error ? err.message : String(err)).slice(0, MAX_ERROR_CHARS);
+    persist(true);
     console.error("[coding-agent] commit failed:", err instanceof Error ? err.message : err);
   }
 }
@@ -3537,9 +3548,9 @@ async function drawProjectIcon(run: CodingRun): Promise<{ icon: string; favicon:
   });
 }
 
-/** The start-of-run hook: only when the owner left pictures on, and never for a review. */
+/** The start-of-run hook: only when the owner left pictures on, never for a review, and never for a team's worker or reviewer — their folder is a worktree named after a task, not a project. */
 function startProjectIcon(run: CodingRun): void {
-  if (!run.media.images || run.reviewOf) return;
+  if (!run.media.images || run.reviewOf || (run.team && run.team.role !== "planner")) return;
   void drawProjectIcon(run).catch(() => {
     // ensureProjectIcon already logged; a missing icon never reaches the run.
   });
@@ -3861,6 +3872,8 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   if (finished.status !== "completed") return "skipped";
   if (finished.reviewOf !== null) return "skipped";
   if (finished.readOnly) return "skipped";
+  // A team's worker is reviewed by the team's own reviewer, on the merged work.
+  if (finished.team) return "skipped";
   if (finished.filesTouched.length === 0) return "skipped";
   try {
     if (!(await getReviewPass())) return "skipped";
@@ -4029,6 +4042,12 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     persist(true);
     wakeWaiters(run.id);
     console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
+    // A team's worker or reviewer ends here: its worktree is the
+    // orchestrator's to merge and remove the moment it is woken, its
+    // review is the team's own reviewer's, and it never opens a pull
+    // request — the assets, review pass and PR below would run in a folder
+    // that is gone. The planner works in the project itself and keeps them.
+    if (run.team && run.team.role !== "planner") return;
     await reviewAndShip(run, state.endRequested);
   })();
   // A pause is the owner's own gesture — no finish notice for it.
@@ -4378,6 +4397,7 @@ function newRunRecord(fields: {
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
     leftover: false,
+    commitError: null,
   };
 }
 

@@ -79,7 +79,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
 }
 
 /** How each run ends, keyed by the order it was started. */
-let outcomes: Array<Partial<{ status: string; summary: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[] }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; commitError: string | null }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -187,6 +187,30 @@ describe("a planner that wrote prose", () => {
     expect(done.status).toBe("failed");
     expect(done.error).toMatch(/no JSON array/);
     expect(starts).toHaveLength(2);
+  });
+});
+
+describe("a worker whose commit failed", () => {
+  it("is rejected with the reason and offered once more, and its branch is never merged", async () => {
+    outcomes = [
+      { summary: PARALLEL_PLAN },
+      // Started in this order: t1 and t2 side by side, t1 once more, then t3 (which waits for both).
+      { summary: "index done", filesTouched: ["index.html"], commitError: "fatal: cannot change to '/x/worktrees/t1-1': No such file or directory" },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "index done for real", filesTouched: ["index.html"] },
+      { summary: "app wired", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const t1 = done.tasks.find((t) => t.task_id === "t1")!;
+    expect(t1.attempts).toBe(2);
+    expect(done.log.some((e) => e.type === "review" && /NOT COMMITTED: fatal: cannot change to/.test(e.message) && /could not be committed/.test(e.message))).toBe(true);
+    expect(done.log.some((e) => e.type === "alert" && /Commit failed for t1/.test(e.message))).toBe(true);
+    // The first attempt's branch was never merged; the second's was.
+    const merges = plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1]);
+    expect(merges).not.toContain("clawbox/team-00000001-t1-1");
+    expect(merges.filter((b) => /-t1-2$/.test(b))).toHaveLength(1);
   });
 });
 
