@@ -271,12 +271,15 @@ describe("gateway-pre-start seeds and tops up CLAWBOX.md", () => {
 
     // Sanity: the filter has to be finding this block's write sites, or an
     // empty `unguarded` would prove nothing. The floor is the REAL count, not a
-    // token one. The eight write sites are, today:
+    // token one. The seven write sites are, today:
     //   1 the helper's own `printf >>`
     //   2 `truncate -s`, 3 the `python3 os.truncate` fallback
     //   4 the `install` seed, 5 its failure-branch `rm -f`
-    //   6-8 the three `clawbox_append_or_rollback` calls
-    expect(writes.length).toBeGreaterThanOrEqual(8);
+    //   6 the guide loop's `clawbox_append_or_rollback`, once for every missing
+    //     section, and 7 the one inside `clawbox_agents_append`, which both
+    //     AGENTS.md markers go through. Seven rather than eight because this
+    //     change replaced two hand-named appends with those two loops.
+    expect(writes.length).toBeGreaterThanOrEqual(7);
     // Both rollback verbs, by name: the write-count floor can be met
     // without them.
     expect(writes.join("\n")).toMatch(/truncate -s/);
