@@ -1071,8 +1071,9 @@ const CLAWBOX_MANAGED_PLUGIN_IDS: ReadonlySet<string> = new Set([
  * finished: `scripts/gateway-pre-start.sh` reinstalls `@openclaw/codex` when
  * its package directory is missing, installs the pinned DeepSeek provider from
  * ClawHub (not npm, and not a `<pkg>@<version>` spec), and copies
- * `clawbox-email-directives` out of the checkout. Codex is still listed here
- * because its repair below is the one this file already owns.
+ * `clawbox-email-directives` out of the checkout. Codex IS listed: its own
+ * pinned reinstall is the repair this file has always run for it, for a
+ * migrated-v1 project as well as for an orphaned payload.
  */
 const MANAGED_PLUGIN_NPM_PACKAGES: ReadonlyMap<string, string> = new Map([
   ["codex", "@openclaw/codex"],
@@ -1212,8 +1213,12 @@ async function repairPluginsBlockingReadiness(journal: string): Promise<void> {
   }
   for (const pluginId of consent.managed) {
     if (repaired.has(normalizeManagedPluginId(pluginId))) continue;
+    // Codex answers a consent refusal with the same pinned force-install it
+    // answers a missing payload with: a v1 migration can leave that ONE plugin
+    // as a project declaration with no `node_modules`, where `enable` says
+    // "Plugin not found".
     if (normalizeManagedPluginId(pluginId) === "codex") {
-      if (await codexCapabilityRepairIsAllowed()) await repairCodexCapabilityConsent();
+      await repairManagedPluginPayload(pluginId);
       continue;
     }
     if (!(await pluginConsentRepairIsAllowed(pluginId))) continue;
@@ -1231,11 +1236,6 @@ async function repairPluginsBlockingReadiness(journal: string): Promise<void> {
  */
 async function repairManagedPluginPayload(pluginId: string): Promise<boolean> {
   const key = normalizeManagedPluginId(pluginId);
-  if (key === "codex") {
-    if (!(await codexCapabilityRepairIsAllowed())) return false;
-    await repairCodexCapabilityConsent();
-    return true;
-  }
   const npmPackage = MANAGED_PLUGIN_NPM_PACKAGES.get(key);
   if (!npmPackage) {
     // The pre-start owns this one, and `runCurrentGatewayPreStart()` has just
@@ -1246,14 +1246,15 @@ async function repairManagedPluginPayload(pluginId: string): Promise<boolean> {
     );
     return false;
   }
-  if (!(await pluginConsentRepairIsAllowed(pluginId))) return false;
+  // Codex has its own opt-out test, which also asks whether Codex is in use at
+  // all — an owner who moved to another provider must not have a stale journal
+  // line buy him a six-minute npm install on every update.
+  const allowed = key === "codex"
+    ? await codexCapabilityRepairIsAllowed()
+    : await pluginConsentRepairIsAllowed(pluginId);
+  if (!allowed) return false;
   await reinstallManagedPluginPayload(npmPackage);
   return true;
-}
-
-/** The pinned force-install that repairs a partial Codex project AND consents it. */
-async function repairCodexCapabilityConsent(): Promise<void> {
-  await reinstallManagedPluginPayload("@openclaw/codex");
 }
 
 /**
