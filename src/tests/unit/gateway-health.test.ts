@@ -88,9 +88,25 @@ describe("gateway service health", () => {
 
   it("asks systemd for every property it parses", () => {
     // A parser reading a property the query omits answers undefined forever,
-    // and the branch that depends on it silently never runs.
-    expect(GATEWAY_SHOW_PROPERTIES).toContain("LoadState");
-    expect(GATEWAY_SHOW_PROPERTIES).toContain("Result");
+    // the branch that depends on it silently never runs, and no test that feeds
+    // the parser its own hand-written stdout can see it. So the stdout here is
+    // built FROM the query list: every field the parser returns must be settled
+    // by it, and a field added to the parser without being added to the query
+    // comes back null.
+    const stdout = GATEWAY_SHOW_PROPERTIES
+      .map((property) => `${property}=${property === "NRestarts" ? "0" : "loaded"}`)
+      .join("\n");
+    const parsed = parseGatewaySystemctlProperties(stdout) as Record<string, unknown>;
+
+    for (const [field, value] of Object.entries(parsed)) {
+      expect(value, `${field} is not settled by --property=${GATEWAY_SHOW_PROPERTIES.join(",")}`)
+        .not.toBeNull();
+      expect(value, `${field} is not settled by --property=${GATEWAY_SHOW_PROPERTIES.join(",")}`)
+        .not.toBeUndefined();
+    }
+    // The journal scope reads InvocationID off the SAME stdout, so it is part of
+    // the same contract.
+    expect(gatewayJournalArgs(`InvocationID=${"a".repeat(32)}\n`)).not.toBeNull();
     expect(GATEWAY_SHOW_PROPERTIES).toContain("InvocationID");
   });
 
