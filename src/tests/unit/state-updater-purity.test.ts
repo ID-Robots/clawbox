@@ -54,8 +54,27 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * instead of a slice of text.
  */
 
-/** Directories whose React state this rule covers. */
-const ROOTS = ["src/components", "src/hooks", "src/app", "src/lib"];
+/**
+ * Directories whose React state this rule covers, each with a FLOOR under the
+ * number of files it must walk.
+ *
+ * Roughly half of today's counts (110 / 10 / 200 / 323), so the floors survive
+ * ordinary churn and still fail an exclude that guts a root. A `> 0` floor was
+ * not enough: an exclude leaving `src/app` with ONE of its 200 files kept all
+ * six cases green — the total floor is 300 against 444 remaining, and both
+ * anchors sit in the other two roots. That is the same silent narrowing the pin
+ * below catches, one order weaker.
+ *
+ * ROOTS is DERIVED from this map, so a root cannot be added without a floor
+ * under it.
+ */
+const ROOT_FLOORS: Record<string, number> = {
+  "src/components": 50,
+  "src/hooks": 5,
+  "src/app": 100,
+  "src/lib": 200,
+};
+const ROOTS = Object.keys(ROOT_FLOORS);
 
 /**
  * `set` + capital is also `setTimeout`/`setInterval`/`setImmediate`, whose
@@ -297,8 +316,11 @@ describe("no state write inside a state updater", () => {
     expect(files).toContain("src/lib/chat-tool-events.tsx");
     // Per ROOT as well as over the total, because the anchors sit in two of the
     // four and `src/hooks` is 10 of 643 files: an exclude in `sourceFiles` that
-    // emptied a root would clear the 300 floor and both anchors untouched.
-    for (const root of ROOTS) expect(sourceFiles(root).length).toBeGreaterThan(0);
+    // gutted a root would leave the 300 floor and both anchors untouched.
+    for (const root of ROOTS) {
+      expect(sourceFiles(root).length, `${root} walks far fewer files than it holds`)
+        .toBeGreaterThan(ROOT_FLOORS[root]);
+    }
     expect(files.filter((f) => mayHoldStateWrite(readSource(f))).length).toBeGreaterThan(200);
   });
 
@@ -339,14 +361,19 @@ describe("no state write inside a state updater", () => {
     // the answer is to name its receiver in SIDE_EFFECT_RECEIVERS, which is why
     // that set is keyed on the receiver rather than on method names.
     //
-    // And the receiver is matched by its SOURCE TEXT, not resolved: `kv.set` is
-    // named, `window.localStorage.setItem` is named because that whole spelling
-    // is in the set, but `storage.kv.set`, `kv!.set`, `(kv).set`, `kv["set"]`
-    // and `window.fetch` are all invisible — the first three because the text
-    // differs, the last because `fetch` is matched only as a bare identifier.
-    // None is written in this tree today (grep), and the live style
-    // `window.localStorage?.setItem(…)` IS covered; the answer when one arrives
-    // is another entry in the set, not a resolver.
+    // And the receiver is matched by its SOURCE TEXT, not resolved. `kv.set` is
+    // named, and `window.localStorage.setItem` is named because that whole
+    // spelling is in the set — which is why the live style
+    // `window.localStorage?.setItem(…)`, used nine times here, IS covered.
+    // Invisible, for three different reasons: `storage.kv.set`, `kv!.set` and
+    // `(kv).set`, because the receiver's text is not the text in the set;
+    // `kv["set"]`, because an element access takes neither branch of
+    // `isSideEffectCall` and so has no receiver text at all; `window.fetch` and
+    // `globalThis.fetch`, because `fetch` is matched only as a bare identifier.
+    // None is written in this tree today (grep). The answer when one arrives is
+    // another entry in the set, not a resolver — a resolver would have to
+    // un-name `window.localStorage`, which is the spelling carrying the live
+    // sites.
     //
     // In the other direction it is deliberately over-eager: any call to a
     // `set*`/`apply*` identifier whose FIRST argument is a function is treated

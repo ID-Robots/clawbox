@@ -583,8 +583,9 @@ function ChromeDesktopInner() {
       // shape TASK-703 removes from the chat surfaces. Idempotent today, which
       // is exactly why it would go unnoticed.
       const next = [...customWallpapersRef.current, dataUrl];
-      // The ref is advanced HERE, not by the mirroring effect: two uploads (or
-      // an upload and a delete) can both run before React commits, and both
+      // `applyCustomWallpapers` advances the ref synchronously with the write,
+      // rather than a mirroring effect doing it after the commit: two uploads
+      // (or an upload and a delete) can both run before React commits, and both
       // would otherwise read the same list and the second would discard the
       // first — from the state AND from localStorage.
       applyCustomWallpapers(next);
