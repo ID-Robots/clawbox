@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { BACKUP_MESSAGE, backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
+import { openProjectPullRequest } from "@/lib/coding-pr";
 import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
 import { gitChanges, gitFileDiff, gitInfo, gitLog } from "@/lib/coding-git";
 import { requireSession } from "@/lib/route-auth";
@@ -117,7 +118,10 @@ export async function POST(request: Request) {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
-  const fields = body as { projectId?: unknown; directory?: unknown };
+  const fields = body as { projectId?: unknown; directory?: unknown; action?: unknown };
+  if (fields.action !== undefined && fields.action !== "backup" && fields.action !== "pr") {
+    return NextResponse.json({ error: "Invalid request body", kind: "invalid" }, { status: 400 });
+  }
 
   try {
     // The same resolver a run uses, so a backup cannot reach a folder a run
@@ -126,6 +130,17 @@ export async function POST(request: Request) {
       projectId: typeof fields.projectId === "string" ? fields.projectId : null,
       directory: typeof fields.directory === "string" ? fields.directory : null,
     });
+    if (fields.action === "pr") {
+      // The project page's Create PR: the branch the project is on, against
+      // the remote's default. `no_remote` and `on_base` are the request being
+      // wrong as it stands (409); a timed-out local probe is worth a retry (503).
+      const pr = await openProjectPullRequest(directory);
+      if (!pr.ok) {
+        return NextResponse.json({ error: pr.detail, kind: pr.reason }, { status: pr.transient ? 503 : 409 });
+      }
+      console.error(`[coding-agent] ${pr.existing ? "found" : "opened"} pull request #${pr.number} for ${directory} (${pr.branch} → ${pr.base})`);
+      return NextResponse.json(pr);
+    }
     const outcome = await backupToGitHub(directory);
     if (!outcome.pushed) {
       // 409 means "the request cannot be satisfied as it stands" — true of a

@@ -468,6 +468,16 @@ export type SubagentName = keyof typeof SUBAGENT_DEFINITIONS;
 export const WORKFLOW_TOOL = "Workflow";
 
 /** The tools of a run that may only read — a team's planner. */
+/**
+ * The one place outside its folder a run may read: /tmp, where it puts what
+ * it curls out of its own server or a build's log. Claude Code asks before
+ * reading outside the working folder, and a headless run cannot answer, so
+ * the ask became a refusal on the run's page ("Not allowed: Read
+ * /tmp/…") for a file the run had written itself. `//` is Claude Code's
+ * absolute-path prefix in a permission rule.
+ */
+export const TMP_READ_RULE = "Read(//tmp/**)";
+
 export const READ_ONLY_TOOLS = `Read,Grep,Glob,${SUBAGENT_TOOL}`;
 
 export function toolsFor(subagents: boolean, effort?: CodingEffort): string {
@@ -591,6 +601,8 @@ export interface CodingRun {
   subagentsActive: number;
   /** WHICH ones, so the app can show what each is doing rather than a count. */
   activeSubagents: ActiveSubagent[];
+  /** The helpers that have finished, oldest first, the newest SUBAGENT_HISTORY_KEPT: what each did and how long it took. */
+  subagents: FinishedSubagent[];
   /** Sub-agents this run spawned in total, live or finished. */
   subagentsTotal: number;
   /** The commit this run's work was recorded as, when it changed anything. */
@@ -635,6 +647,8 @@ export interface CodingRun {
    */
   resumable: boolean;
   progress: string[];
+  /** When each progress line was recorded (ms since the epoch), one for one with `progress`. */
+  progressAt: number[];
   /**
    * The run's OWN plan — the latest list Claude Code wrote with its TodoWrite
    * tool, whole, replacing the one before it.
@@ -700,6 +714,15 @@ export interface ActiveSubagent {
   description: string;
   startedAt: number;
 }
+
+/** A helper that has come back — or was refused — with when, so the page can say how long it took. */
+export interface FinishedSubagent extends ActiveSubagent {
+  endedAt: number;
+  refused: boolean;
+}
+
+/** How many finished helpers a run record keeps — the newest; the counts by type keep the total. */
+export const SUBAGENT_HISTORY_KEPT = 40;
 
 export interface CodingHarnessReadiness {
   ready: boolean;
@@ -1655,6 +1678,19 @@ function normalizeRun(raw: CodingRun): CodingRun {
     subagentsActive: 0,
     // A record loaded from disk has none out by definition.
     activeSubagents: [],
+    subagents: Array.isArray((raw as { subagents?: unknown }).subagents)
+      ? ((raw as { subagents: unknown[] }).subagents).flatMap((s) => {
+          const h = s as Record<string, unknown> | null;
+          if (!h || typeof h.type !== "string" || typeof h.startedAt !== "number") return [];
+          return [{
+            type: h.type,
+            description: typeof h.description === "string" ? h.description : "",
+            startedAt: h.startedAt,
+            endedAt: typeof h.endedAt === "number" ? h.endedAt : h.startedAt,
+            refused: h.refused === true,
+          }];
+        }).slice(-SUBAGENT_HISTORY_KEPT)
+      : [],
     subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
     subagentsByType: (raw.subagentsByType && typeof raw.subagentsByType === "object")
       ? (raw.subagentsByType as Record<string, number>) : {},
@@ -1678,6 +1714,13 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // disappears the next time the file is read.
     pr: normalizePr(raw.pr),
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
+    // Only a list that matches the lines one for one is a list of their times;
+    // a record from before the field has none, and the timeline says nothing.
+    progressAt: (() => {
+      const lines = Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string").length : 0;
+      const at = Array.isArray((raw as { progressAt?: unknown }).progressAt) ? ((raw as { progressAt: unknown[] }).progressAt) : [];
+      return at.length === lines && at.every((n) => typeof n === "number") ? (at as number[]) : [];
+    })(),
     todos: parseTodos(raw.todos) ?? [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
     // A record written before the media switches existed had neither tool, so
@@ -1907,8 +1950,10 @@ function cloneRun(run: CodingRun): CodingRun {
     ...run,
     filesTouched: [...run.filesTouched],
     progress: [...run.progress],
+    progressAt: [...run.progressAt],
     deniedActions: [...run.deniedActions],
     activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
+    subagents: run.subagents.map((a) => ({ ...a })),
     subagentsByType: { ...run.subagentsByType },
     modelsUsed: [...run.modelsUsed],
     todos: run.todos.map((t) => ({ ...t })),
@@ -2532,7 +2577,12 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // alone it is refused headlessly (see WORKFLOW_TOOL).
     // A read-only run has no Bash to approve and no browser to drive: it
     // reads, and the helpers it delegates to read.
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []));
+    // `Read(//tmp/**)`: a run may READ what it put in /tmp — the HTML it
+    // curled out of its own server, a build log — without a permission
+    // prompt it cannot answer in headless mode. Reads only, and only there:
+    // the deny rules below still win for anything secret, and a write
+    // outside the folder is still refused.
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), TMP_READ_RULE);
     args.push("--disallowedTools", ...fileDenyRules());
   }
   return args;
@@ -2706,7 +2756,10 @@ function pushProgress(run: CodingRun, line: string): void {
   const cleaned = line.replace(/\s+/g, " ").trim();
   if (!cleaned) return;
   run.progress.push(cleaned.length > MAX_PROGRESS_LINE_CHARS ? `${cleaned.slice(0, MAX_PROGRESS_LINE_CHARS - 1)}…` : cleaned);
+  // When it happened, kept in step with the line: the timeline shows it on hover.
+  run.progressAt.push(Date.now());
   if (run.progress.length > PROGRESS_KEEP) run.progress.splice(0, run.progress.length - PROGRESS_KEEP);
+  if (run.progressAt.length > run.progress.length) run.progressAt.splice(0, run.progressAt.length - run.progress.length);
 }
 
 function relativeToRun(run: CodingRun, file: unknown): string | null {
@@ -3021,6 +3074,8 @@ function closeSubagent(run: CodingRun, state: LiveRun, id: string, refused = fal
   state.helperBilled.delete(id);
   run.subagentsActive = state.openSubagents.size;
   run.activeSubagents = [...state.openSubagents.values()];
+  // The record of it: what it did and how long it took, for the run's page.
+  run.subagents = [...run.subagents.slice(-(SUBAGENT_HISTORY_KEPT - 1)), { ...done, endedAt: Date.now(), refused }];
   const noun = done.type === WORKFLOW_SUBAGENT_TYPE ? "Workflow" : "Sub-agent";
   const kind = done.type === WORKFLOW_SUBAGENT_TYPE || done.type === "sub-agent" ? "" : ` (${done.type})`;
   if (refused) {
@@ -4221,6 +4276,7 @@ function newRunRecord(fields: {
     effort: fields.settings.effort,
     subagentsActive: 0,
     activeSubagents: [],
+    subagents: [],
     subagentsTotal: 0,
     subagentsByType: {},
     modelsUsed: [],
@@ -4239,6 +4295,7 @@ function newRunRecord(fields: {
     // No pull request until the aftermath opens one.
     pr: null,
     progress: [],
+    progressAt: [],
     todos: [],
     exitCode: null,
     media: { images: fields.settings.generateImages, audio: fields.settings.generateAudio },

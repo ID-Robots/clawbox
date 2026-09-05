@@ -210,6 +210,66 @@ export async function openPullRequest(input: {
   }
 }
 
+/**
+ * The project page's "Create PR": a pull request for whatever branch the
+ * project is on, against the remote's default branch.
+ *
+ * A run's PR is opened by the runner with the run's own title and body;
+ * this is the owner's hand on the same lever, for a branch a run left behind
+ * without one (the auto-PR switch off, a network fault at the time, a branch
+ * the owner made in the terminal). The title is the newest commit's subject
+ * and the body lists the commits the branch adds — what `gh pr create --fill`
+ * would write, spelled out because gh 2.4.0's --fill takes the FIRST commit.
+ *
+ * Refusals are answers, each with its own reason: `no_remote` (nothing to
+ * open it on — a backup comes first), `on_base` (the project is on the
+ * default branch, so there is nothing to compare), and `failed` for the
+ * rest, with gh's own words. A PR that is already open for the branch is
+ * returned as it is (`existing`), never opened twice.
+ */
+export type ProjectPrOutcome =
+  | { ok: true; number: number; url: string; branch: string; base: string; existing: boolean }
+  | { ok: false; reason: "no_remote" | "on_base" | "failed"; detail: string; transient?: boolean };
+
+export async function openProjectPullRequest(directory: string): Promise<ProjectPrOutcome> {
+  const dir = path.resolve(directory);
+
+  const remote = await run("git", ["remote", "get-url", "origin"], dir);
+  if (!ok(remote)) {
+    return { ok: false, reason: "no_remote", detail: "This project is not on GitHub yet. Back it up first, then a pull request has somewhere to go." };
+  }
+  const head = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], dir);
+  if (!ok(head) || !out(head) || out(head) === "HEAD") {
+    return { ok: false, reason: "failed", detail: failureDetail(head, "Reading the current branch", "Check out a branch first."), transient: head.code === null };
+  }
+  const branch = out(head);
+  const base = await resolveBaseBranch(dir);
+  if (branch === base) {
+    return { ok: false, reason: "on_base", detail: `The project is on its default branch (${base}), so there is nothing to compare. A pull request is opened from a run's branch.` };
+  }
+
+  // One already open for this branch: hand it back rather than opening a twin.
+  const existing = await run("gh", ["pr", "view", branch, "--json", "number,url,state"], dir);
+  if (ok(existing)) {
+    try {
+      const parsed = JSON.parse(out(existing)) as { number?: number; url?: string; state?: string };
+      if (typeof parsed.number === "number" && parsed.url && parsed.state === "OPEN") {
+        return { ok: true, number: parsed.number, url: parsed.url, branch, base, existing: true };
+      }
+    } catch { /* not JSON: treat as none open */ }
+  }
+
+  const subject = await run("git", ["log", "-1", "--format=%s"], dir);
+  const title = ok(subject) && out(subject) ? out(subject).slice(0, 200) : branch;
+  const commits = await run("git", ["log", `${base}..${branch}`, "--format=- %s"], dir);
+  const list = ok(commits) && out(commits) ? out(commits).split("\n").slice(0, 40).join("\n") : "";
+  const body = [`Opened from ClawBox for \`${branch}\`.`, ...(list ? ["", "Commits:", list] : [])].join("\n");
+
+  const opened = await openPullRequest({ directory: dir, branch, base, title, body });
+  if (!opened.ok) return { ok: false, reason: "failed", detail: opened.detail };
+  return { ok: true, number: opened.number, url: opened.url, branch, base, existing: false };
+}
+
 /** Read a PR's current state. */
 export async function readPullRequest(dir: string, number: number): Promise<PrSnapshot | { error: string }> {
   const viewed = await run(

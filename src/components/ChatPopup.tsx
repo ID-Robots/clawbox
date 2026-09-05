@@ -858,7 +858,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // View: the run's own page in the Coding Agent app, with the whole
       // desktop for it — the live terminal is embedded there while it runs.
       openLabel={t("codingAgent.liveView")}
-      onOpen={() => dispatchOpenCodingRun(run.id, { maximize: true, live: true })}
+      onOpen={() => dispatchOpenCodingRun(run.id, { maximize: true })}
       // A run's screenshot opens in the SAME full-size preview the generated
       // and attached images use (the portal at the end of this component),
       // not a second lightbox of the card's own.
@@ -980,6 +980,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // the run route once, when the card opens; until it answers the card uses
   // the route's own default, and the route still refuses anything longer.
   const [showNewApp, setShowNewApp] = useState(false)
+  // What the last opener asked the card to open on: the Coding Agent's
+  // project page hands over its project and the team switch.
+  const [newAppOptions, setNewAppOptions] = useState<{ project?: string; team?: boolean }>({})
   const [newAppMaxChars, setNewAppMaxChars] = useState<number | null>(null)
   const toggleNewApp = useCallback(() => {
     // The fetch sits BESIDE the setter, not inside the updater: React may run
@@ -993,14 +996,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         })
         .catch(() => { /* the card keeps the default ceiling */ })
     }
+    // Closing forgets what the last opener asked for (a project, the team
+    // switch): the next "+" must open a fresh card, not the previous
+    // project's team form.
+    if (showNewApp) setNewAppOptions({})
     setShowNewApp(open => !open)
   }, [showNewApp, newAppMaxChars])
+  const closeNewApp = useCallback(() => { setShowNewApp(false); setNewAppOptions({}) }, [])
 
   // The Coding Agent hands "Create app" over to here: the card composes one
   // message for the assistant, so it belongs in the conversation that will
   // carry the reply, not in a second window that cannot show it.
   useEffect(() => {
-    const onNewApp = () => { if (!showNewApp) toggleNewApp() }
+    const onNewApp = (e: Event) => {
+      const detail = (e as CustomEvent<{ project?: unknown; team?: unknown } | undefined>).detail
+      setNewAppOptions({
+        project: typeof detail?.project === 'string' ? detail.project : undefined,
+        team: detail?.team === true,
+      })
+      if (!showNewApp) toggleNewApp()
+    }
     window.addEventListener(NEW_APP_EVENT, onNewApp)
     return () => window.removeEventListener(NEW_APP_EVENT, onNewApp)
   }, [showNewApp, toggleNewApp])
@@ -1028,7 +1043,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // owner resized it once and expects it to stay that way.
   useEffect(() => {
     if (isOpen) { setPos(null); setPreview(null) }
-    else { setGeneratingImage(false); setShowNewApp(false) }
+    else { setGeneratingImage(false); closeNewApp() }
   }, [isOpen])
 
   // Provider id for the header model dropdown. Memoised on the active
@@ -5787,8 +5802,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       {showNewApp && (
         <div data-testid="chat-new-app" style={{ padding: '10px 14px 0', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           <NewAppWizardCard
+            key={`${newAppOptions.project ?? ''}|${newAppOptions.team ? 'team' : ''}`}
+            initialProject={newAppOptions.project}
+            initialTeam={newAppOptions.team}
             maxTaskChars={newAppMaxChars ?? DEFAULT_MAX_TASK_CHARS}
-            onClose={() => setShowNewApp(false)}
+            onClose={closeNewApp}
             // In the chat it floats over the composer like a popover, so it
             // behaves like one: click away (or Escape) and it goes.
             closeOnOutsideClick

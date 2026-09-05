@@ -4,7 +4,7 @@ import { installClawboxMocks } from "./helpers/clawbox";
 // The Coding Agent app's project page and run page, on a real desktop against
 // a mocked device: a project's files and changes beside its runs (the Claude
 // Code web layout), the one breadcrumb every page but home carries, the
-// browser preview above a live run's terminal, and the Live view that fills
+// browser preview folded above a live run's terminal, the timeline, and
 // the window with both. The routes the workspace reads are answered here
 // rather than in the shared helper, because this is the only spec that walks
 // them and the helper's device has no projects on purpose.
@@ -109,6 +109,9 @@ test("a project's page carries its files and changes, and a run's page its bread
   await expect(win.getByTestId("coding-agent-breadcrumb")).toContainText("My Site");
   await expect(win.getByTestId("coding-agent-git-info")).toContainText("main");
   await expect(win.getByTestId("coding-agent-project-copy")).toContainText(PROJECT.directory);
+  // The page opens on its runs; the files are one tab away.
+  await expect(win.getByTestId("coding-agent-workspace-runs")).toHaveAttribute("aria-selected", "true");
+  await win.getByTestId("coding-agent-workspace-files").click();
   const tree = win.getByTestId("coding-agent-file-tree");
   await expect(tree.getByTestId("coding-agent-tree-src")).toBeVisible();
   await tree.getByTestId("coding-agent-tree-src").click();
@@ -123,21 +126,23 @@ test("a project's page carries its files and changes, and a run's page its bread
   await expect(diff).toContainText("+<h1>Hi</h1>");
   await expect(diff.locator("[data-diff-line=del]")).toHaveText("-<h1>Hello</h1>");
 
-  // The run, from the project's own list.
+  // The run, from the project's own list — the Runs tab.
+  await win.getByTestId("coding-agent-workspace-runs").click();
   await win.getByTestId("coding-agent-details-run-e2e00001").click();
   const runPage = win.getByTestId("coding-agent-run-page");
   await expect(runPage).toBeVisible();
   await expect(win.getByTestId("coding-agent-crumb-project")).toHaveText("My Site");
-  await expect(win.getByTestId("coding-agent-browser-preview")).toBeVisible();
+  // The live card: the timeline first, the terminal and the browser one tab away.
+  const liveCard = win.getByTestId("coding-agent-live-card");
+  await expect(liveCard).toHaveAttribute("data-tab", "timeline");
+  await expect(win.getByTestId("coding-agent-run-activity")).toBeVisible();
+  await win.getByTestId("coding-agent-live-tab-terminal").click();
   await expect(win.getByTestId("coding-agent-run-terminal")).toBeVisible();
-
-  // Live view: the screen over the terminal, nothing else.
-  await win.getByTestId("coding-agent-run-live-view").click();
-  await expect(runPage).toHaveAttribute("data-live-view", "true");
-  await expect(win.getByTestId("coding-agent-live-view")).toBeVisible();
-  await expect(win.getByTestId("coding-agent-run-rail")).toHaveCount(0);
-  await win.getByTestId("coding-agent-run-live-view").click();
+  await win.getByTestId("coding-agent-live-tab-browser").click();
+  await expect(win.getByTestId("coding-agent-browser-preview")).toBeVisible();
+  await expect(win.getByTestId("coding-agent-open-vnc")).toBeVisible();
   await expect(win.getByTestId("coding-agent-run-rail")).toBeVisible();
+  await expect(win.getByTestId("coding-agent-run-live-view")).toHaveCount(0);
 
   // Back leads to the project, and the first crumb home.
   await win.getByTestId("coding-agent-run-back").click();

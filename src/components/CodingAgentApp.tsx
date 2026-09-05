@@ -12,9 +12,11 @@ import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
 import CodingAgentSetupWizard from "./CodingAgentSetupWizard";
-import { BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, SECTION_LABEL } from "./coding-agent-ui";
+import { APP_GROUND, BTN_BASE, BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, CARD_SURFACE, INSET_SURFACE, RAIL_SURFACE, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
+import { githubRepoName, githubWebUrl } from "@/lib/github-url";
+import CodingRunTimeline from "./CodingRunTimeline";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
@@ -29,7 +31,6 @@ import {
   onCodingAgentChanged,
   onStandaloneAppPage,
   takePendingCodingRun,
-  takePendingCodingRunLive,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import TerminalApp from "./TerminalApp";
@@ -84,6 +85,8 @@ interface Run {
   /** What was refused, in the owner's words. */
   deniedActions?: string[];
   progress: string[];
+  /** When each progress line happened, one for one with `progress`; absent on a record from before the field. */
+  progressAt?: number[];
   effort?: Effort;
   /** Sub-agents working right now; 0 once the run has settled. */
   subagentsActive?: number;
@@ -91,7 +94,11 @@ interface Run {
   subagentsByType?: Record<string, number>;
   modelsUsed?: string[];
   lastActivityAt?: number;
+  /** The model the run started with, as the runner recorded it. */
+  model?: string | null;
   activeSubagents?: { type: string; description: string; startedAt: number }[];
+  /** The helpers that came back: what each did, when, and whether it was refused. */
+  subagents?: { type: string; description: string; startedAt: number; endedAt: number; refused: boolean }[];
   /** The commit this run's work was recorded as — what a backup would push. */
   commit?: string | null;
   thinkingTokens?: number;
@@ -156,6 +163,16 @@ export function installedAppId(folder: string): string {
 /** One page of runs. The list is open by default now, so it has to be paged
  *  rather than unbounded — a long history should not push the settings off
  *  the top of the window. */
+/** "12s" / "3m 4s" — how long a helper has been out, or took. */
+function elapsedShort(from: number, to: number): string {
+  const sec = Math.max(0, Math.round((to - from) / 1000));
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  return `${m}m ${sec - m * 60}s`;
+}
+
+/** How many pictures a run's evidence card shows before it asks to be unfolded. */
+const ARTIFACT_PREVIEW = 4;
 const RUNS_PAGE = 10;
 /** Where the preview script lives on the device. */
 const CLAWBOX_ROOT = "/home/clawbox/clawbox";
@@ -277,7 +294,7 @@ function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w
 /** One cell of the run page's figures grid. */
 function StatTile({ label, value, hint, testId }: { label: string; value: string; hint?: string; testId?: string }) {
   return (
-    <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 min-w-0" data-testid={testId}>
+    <div className={`${CARD_SURFACE} px-3 py-2 min-w-0`} data-testid={testId}>
       <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] truncate">{label}</div>
       <div className="mt-0.5 text-sm font-semibold text-[var(--text-primary)] truncate" title={hint ?? value}>{value}</div>
       {hint && <div className="text-[10px] text-[var(--text-muted)] truncate">{hint}</div>}
@@ -316,11 +333,17 @@ export default function CodingAgentApp() {
   // terminal, filling the window. Keyed by the run rather than a flag, so
   // opening another run lands on its normal page and a run that settles
   // simply falls out of the view (the toggle exists only while it is live).
-  const [liveViewFor, setLiveViewFor] = useState<string | null>(null);
   // The browser preview above a live run's terminal, shown or folded.
-  const [browserPreview, setBrowserPreview] = useState(true);
+  // The live card's tab — Timeline, Terminal or Browser, one at a time —
+  // remembered per run, so another run's page opens on its timeline.
+  const [liveTabFor, setLiveTabFor] = useState<{ id: string; tab: "timeline" | "terminal" | "browser" } | null>(null);
   /** The markdown artifact open in the preview dialog, if any. */
   const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
+  // The run whose whole evidence list is unfolded. A run that screenshots
+  // every step files dozens of pictures, and drawn in full they pushed the
+  // summary and the files off the page; the card shows a few and the rest
+  // on request. Keyed by run so the next run's page starts folded.
+  const [artifactsOpenFor, setArtifactsOpenFor] = useState<string | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
   // the whole point of opening this window, and a list of past runs pushed it
   // below the fold.
@@ -340,6 +363,8 @@ export default function CodingAgentApp() {
   const [projectsDir, setProjectsDir] = useState<string | null>(null);
   /** Which folder name was just copied, for the two-second "Copied". */
   const [copiedFolder, setCopiedFolder] = useState<string | null>(null);
+  // Pull requests opened from a project's page this session, by folder.
+  const [projectPrs, setProjectPrs] = useState<Record<string, { number: number; url: string }>>({});
   // The New app wizard: an inline card, closed by Cancel, by Create, and
   // never by a poll. `handed` is the line left behind once the message is
   // in the chat — the card is gone by then, and the chat is where to look.
@@ -567,22 +592,19 @@ export default function CodingAgentApp() {
    */
   useEffect(() => {
     const pending = takePendingCodingRun();
-    const pendingLive = takePendingCodingRunLive();
     // A handoff parked on `window` before this window existed; the effect is
     // the one place it can be read, and reading it is one render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (pending) { setOpenRunId(pending); setPage("home"); setLiveViewFor(pendingLive ? pending : null); }
+    if (pending) { setOpenRunId(pending); setPage("home"); }
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ runId?: unknown; live?: unknown }>).detail;
+      const detail = (e as CustomEvent<{ runId?: unknown }>).detail;
       const id = detail?.runId;
       if (typeof id === "string" && id) {
         // The dispatcher also parks the id on `window` for a cold open; this
         // window is up, so take it back rather than leave it for a later mount.
         takePendingCodingRun();
-        takePendingCodingRunLive();
         setOpenRunId(id);
         setPage("home");
-        setLiveViewFor(detail?.live === true ? id : null);
       }
     };
     window.addEventListener(OPEN_CODING_RUN_EVENT, handler);
@@ -590,6 +612,29 @@ export default function CodingAgentApp() {
   }, []);
 
   /** Push a run's folder to GitHub, private, creating the repo if needed. */
+  /** The project page's Create PR: the branch the project is on, against the remote's default. */
+  const createPr = async (target: { projectId: string | null; directory: string }, key: string) => {
+    setBusy(`pr-${key}`);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/git", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...(target.projectId ? { projectId: target.projectId } : { directory: target.directory }), action: "pr" }),
+      });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.prFailed")));
+      const out = await res.json() as { number: number; url: string; existing?: boolean };
+      setProjectPrs((m) => ({ ...m, [target.directory]: { number: out.number, url: out.url } }));
+      window.dispatchEvent(new CustomEvent("clawbox:toast", {
+        detail: { message: t(out.existing ? "codingAgent.prExists" : "codingAgent.prOpened", { n: out.number }) },
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.prFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const backup = async (target: { projectId: string | null; directory: string }, key: string) => {
     setBusy(`backup-${key}`);
     setError(null);
@@ -723,7 +768,6 @@ export default function CodingAgentApp() {
    *  route lists that folder, so a run always has a project page to live on
    *  (the sidebar's recent runs reach every run). */
   // Live view: only for the run whose page is open, and only while it runs.
-  const liveMode = openRun !== null && liveViewFor === openRun.id && isLive(openRun.status);
 
   const visibleRuns = useMemo(() => (
     openProject ? runs.filter((r) => runBelongsTo(r, openProject)) : []
@@ -749,7 +793,7 @@ export default function CodingAgentApp() {
 
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.
-  if (loading) return <div className="h-full bg-[var(--bg-deep)]" data-testid="coding-agent-panel" />;
+  if (loading) return <div className={`h-full ${APP_GROUND}`} data-testid="coding-agent-panel" />;
 
   const readiness = status?.readiness;
   // Only what is missing is ever listed, so a check carries only the words
@@ -814,27 +858,12 @@ export default function CodingAgentApp() {
    *  the way out of it, the terminal, the backup. */
   /** The Live view switch: only while the run runs, since the view is the
    *  browser it drives and the terminal it writes. */
-  const liveToggle = (run: Run) => {
-    if (!isLive(run.status)) return null;
-    const on = liveViewFor === run.id;
-    return (
-      <button
-        type="button"
-        onClick={() => setLiveViewFor(on ? null : run.id)}
-        aria-pressed={on}
-        data-testid="coding-agent-run-live-view"
-        className={on ? BTN_PRIMARY : BTN_SECONDARY}
-      >
-        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{on ? "close_fullscreen" : "open_in_full"}</span>
-        {on ? t("codingAgent.liveViewExit") : t("codingAgent.liveViewMode")}
-      </button>
-    );
-  };
-
   const runControls = (run: Run, where: "row" | "page") => {
     const action = RUN_ACTION[run.status];
-    const canOpenTerminal = Boolean(run.sessionId || (run.status === "running" && run.transcriptPath));
-    const terminalLabel = run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume");
+    // Resume in a terminal is for a run that has STOPPED; a live run's
+    // transcript is on its page already, with its own Open in Terminal.
+    const canOpenTerminal = Boolean(run.sessionId) && run.status !== "running";
+    const terminalLabel = t("codingAgent.openResume");
     const small = where === "row" && action;
     const secondary = small ? `${RUN_BUTTON} border-white/10 text-[var(--text-primary)] hover:bg-white/5` : BTN_SECONDARY;
     return (
@@ -904,35 +933,18 @@ export default function CodingAgentApp() {
    * filed under no project — those used to be computed and never drawn, so a
    * run in a folder the projects list does not know was invisible.
    */
-  const runsSection = (
-    <div className="mt-4">
-      <button
-        type="button"
-        onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
-        aria-expanded={showRuns}
-        data-testid="coding-agent-runs-toggle"
-        className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
-      >
-        <span className="flex items-center gap-2">
-          <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
-          {t("codingAgent.projectRuns")}
-          {visibleRuns.length > 0 && <span className="text-[var(--text-muted)]">({visibleRuns.length})</span>}
-          {anyRunning && (
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
-              {t("codingAgent.statusRunning")}
-            </span>
-          )}
-        </span>
-        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
-          {showRuns ? "expand_less" : "expand_more"}
-        </span>
-      </button>
-
-      {showRuns && (
+  /**
+   * The rows and the More button — the list itself. Home draws it under a
+   * toggle (the runs filed under no project); a project's page draws it
+   * inside its Runs tab, where it has the whole width.
+   */
+  const runsList = (
+    <>
+      {
         visibleRuns.length === 0 ? (
           <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
         ) : (
-          <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
+          <ul className="mt-2 flex flex-col gap-2" data-testid="coding-agent-runs">
             {visibleRuns.slice(0, runsShown).map((run) => {
               const tone = RUN_TONE[run.status];
               // A draft has not run: its startedAt is when it was drafted
@@ -942,7 +954,7 @@ export default function CodingAgentApp() {
               const started = run.status !== "draft";
               const reviewedBy = runs.find((r) => r.reviewOf === run.id);
               return (
-                <li key={run.id} data-run-id={run.id} className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
+                <li key={run.id} data-run-id={run.id} className={`${CARD_SURFACE} px-3 py-2`}>
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -1059,8 +1071,8 @@ export default function CodingAgentApp() {
             })}
           </ul>
         )
-      )}
-      {showRuns && visibleRuns.length > runsShown && (
+      }
+      {visibleRuns.length > runsShown && (
         <button
           type="button"
           onClick={() => setRunsShown((n) => n + RUNS_PAGE)}
@@ -1070,19 +1082,47 @@ export default function CodingAgentApp() {
           {t("codingAgent.more")} ({visibleRuns.length - runsShown})
         </button>
       )}
+    </>
+  );
+
+  const runsSection = (
+    <div className="mt-4">
+      <button
+        type="button"
+        onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
+        aria-expanded={showRuns}
+        data-testid="coding-agent-runs-toggle"
+        className={`w-full flex items-center justify-between gap-2 ${CARD_SURFACE} px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors`}
+      >
+        <span className="flex items-center gap-2">
+          <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
+          {t("codingAgent.projectRuns")}
+          {visibleRuns.length > 0 && <span className="text-[var(--text-muted)]">({visibleRuns.length})</span>}
+          {anyRunning && (
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
+              {t("codingAgent.statusRunning")}
+            </span>
+          )}
+        </span>
+        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+          {showRuns ? "expand_less" : "expand_more"}
+        </span>
+      </button>
+
+      {showRuns && runsList}
     </div>
   );
 
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
     // a desktop window the owner can resize independently of the screen.
-    <div ref={rootRef} className="h-full flex bg-[var(--bg-deep)] text-white @container" data-testid="coding-agent-panel" data-help-bounds>
+    <div ref={rootRef} className={`h-full flex ${APP_GROUND} text-white @container`} data-testid="coding-agent-panel" data-help-bounds>
       {/* The sidebar — the Claude Code web layout's left rail: New, Home,
           Settings, the projects, the recent runs. Only when the window is
           wide enough to spare it (the phone and a small window keep the
           lists on the pages themselves), and not while the wizard runs. */}
-      {wide && view.face !== "wizard" && !liveMode && (
-        <aside className="flex w-[15rem] shrink-0 flex-col border-r border-white/[0.06] bg-black/[0.18] overflow-y-auto" data-testid="coding-agent-sidebar">
+      {wide && view.face !== "wizard" && (
+        <aside className={`flex w-[15rem] shrink-0 flex-col border-r ${RAIL_SURFACE} overflow-y-auto`} data-testid="coding-agent-sidebar">
           <div className="px-3 pt-4 pb-2 space-y-1">
             {!standalone && (
               <button type="button" onClick={openNew} data-testid="coding-agent-sidebar-new" className={`${SIDEBAR_ITEM} text-[var(--text-primary)]`}>
@@ -1168,12 +1208,20 @@ export default function CodingAgentApp() {
           intro centres itself in it. min-h-0 keeps the scroll on the parent. */}
       {/* A run's page is data — figures, files, a summary, an activity log —
           and reads better wide; the home and project pages stay a column. */}
-      <div className={`mx-auto w-full ${view.face === "run" ? (liveMode ? "max-w-none" : "max-w-6xl") : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
+      <div className={`mx-auto w-full ${view.face === "run" ? "max-w-6xl" : view.face === "project" ? "max-w-none" : "max-w-2xl"} px-5 py-4 flex-1 flex flex-col min-h-0`}>
 
         {/* One row: what this is, whether it is on, and everything you can do
             from here. The primary action used to sit on its own line below,
             left-aligned against nothing; paired with Settings it reads as a
             toolbar and the page below it starts clean. */}
+        {/* The header row is the narrow window's: with the rail up it would
+            repeat the rail's New/Home/Settings and cost the page a row it
+            needs for files — and the window's own title bar already names
+            the app. The owner asked for no name and no state chip in the
+            rail either; the switch is one tap away in Settings. The setup
+            WIZARD has no rail at any width, so it keeps the row: without it
+            a wide window on the wizard had no way to Settings at all. */}
+        {(!wide || view.face === "wizard") && (
         <div className="flex items-center justify-between gap-4 pb-3 mb-1 border-b border-white/[0.06]">
           <div className="flex items-center gap-2 min-w-0">
             <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">smart_toy</span>
@@ -1230,6 +1278,7 @@ export default function CodingAgentApp() {
           )}
           </div>
         </div>
+        )}
 
         {view.face === "settings" && (<>
           <CodingAgentBreadcrumb
@@ -1313,7 +1362,7 @@ export default function CodingAgentApp() {
             "Ready" is a row that never tells the owner anything; the checklist
             appears only when something is actually missing. */}
         {readiness && !readiness.ready && (
-          <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
+          <div className={`mt-3 ${CARD_SURFACE} px-3 py-2`}>
             <ul className="space-y-1">
               {checks.filter((c) => !c.ok).map((c) => (
                 <li key={c.label} className="flex items-center gap-2 text-xs">
@@ -1402,7 +1451,7 @@ export default function CodingAgentApp() {
                         setOpenProjectDir(project.directory);
                       }
                     }}
-                    className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 flex items-start justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60"
+                    className={`${CARD_SURFACE} px-3 py-2 flex items-start justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60`}
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -1466,65 +1515,24 @@ export default function CodingAgentApp() {
           const project = projects.find((pr) => runBelongsTo(run, pr)) ?? null;
           const reviewedBy = runs.find((r) => r.reviewOf === run.id);
           const artifacts = run.artifacts ?? [];
-          const images = artifacts.filter((a) => a.kind === "image");
+          const artifactsFolded = artifacts.length > ARTIFACT_PREVIEW && artifactsOpenFor !== run.id;
+          // Folded: the first few of WHATEVER kind — a run with two pictures
+          // and three files shows five entries' worth of the first four, not
+          // two pictures and a hidden rest.
+          const shownArtifacts = artifactsFolded ? artifacts.slice(0, ARTIFACT_PREVIEW) : artifacts;
+          const images = shownArtifacts.filter((a) => a.kind === "image");
           // Clips get a player rather than a link: a run can now record its own
           // narration, and a download is not how you check what it says.
-          const clips = artifacts.filter((a) => a.kind === "audio");
-          const files = artifacts.filter((a) => a.kind !== "image" && a.kind !== "audio");
+          const clips = shownArtifacts.filter((a) => a.kind === "audio");
+          const files = shownArtifacts.filter((a) => a.kind !== "image" && a.kind !== "audio");
           const reportFile = files.find((a) => a.kind === "markdown" && a.name === "report.md") ?? files.find((a) => a.kind === "markdown");
           const helpers = Object.entries(run.subagentsByType ?? {});
           const todos = run.todos ?? [];
           const todosDone = todos.filter((x) => x.status === "completed").length;
           const activity = run.progress.slice(-ACTIVITY_SHOWN);
+          const activityAt = (run.progressAt?.length === run.progress.length ? run.progressAt : []).slice(-ACTIVITY_SHOWN);
           const title = run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 160);
           const fullTask = !run.reviewOf && run.task.trim() !== firstLine(run.task, 160) ? run.task : null;
-          const liveCommand = run.transcriptPath
-            ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
-            : null;
-          if (liveMode) {
-            // Live view: the browser the run drives and its terminal, and
-            // nothing else — the figures, the plan and the log are one tap
-            // away on the normal page, and the window is the screen.
-            return (
-              <div className="mt-1 pb-2 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-run-page" data-run-id={run.id} data-live-view="true">
-                <CodingAgentBreadcrumb
-                  crumbs={[
-                    { label: t("codingAgent.projectsTitle"), onClick: () => { setOpenRunId(null); setOpenProjectDir(null); }, testId: "coding-agent-crumb-projects" },
-                    ...(project ? [{ label: project.name, onClick: () => { setOpenRunId(null); setOpenProjectDir(project.directory); }, testId: "coding-agent-crumb-project" }] : []),
-                    { label: title },
-                  ]}
-                  onBack={() => { setOpenRunId(null); if (project) setOpenProjectDir(project.directory); }}
-                  backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
-                navLabel={t("codingAgent.breadcrumbLabel")}
-                  backTestId="coding-agent-run-back"
-                  trailing={<>{runControls(run, "page")}{liveToggle(run)}</>}
-                />
-                <div className="mt-2 flex items-center gap-2 flex-wrap">
-                  <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>{statusLabel(run.status)}</span>
-                  <h2 className="text-xs font-medium text-[var(--text-secondary)] truncate min-w-0" data-testid="coding-agent-run-title">{title}</h2>
-                  <RunProgressBar
-                    estimate={estimateRunProgress(run, now)}
-                    color={tone.color}
-                    timeLeft={t("codingAgent.timeLeft")}
-                    testId={`coding-agent-progress-${run.id}`}
-                    className="ml-auto w-48"
-                  />
-                </div>
-                <div className="mt-2 flex-1 min-h-0 grid grid-rows-2 gap-2" data-testid="coding-agent-live-view">
-                  <div className="min-h-0 rounded-xl border border-white/10 overflow-hidden bg-black" data-testid="coding-agent-browser-preview">
-                    <VNCApp viewOnly pasteButton="hidden" />
-                  </div>
-                  <div className="min-h-0 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ background: "#0d0d0d" }} data-testid="coding-agent-run-terminal">
-                    {liveCommand ? (
-                      <TerminalApp key={run.id} initialCommand={liveCommand} />
-                    ) : (
-                      <p className="px-4 py-3 text-[11px] text-[var(--text-muted)]">{t("codingAgent.liveWaiting")}</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            );
-          }
           return (
             <div className="mt-4 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
               <CodingAgentBreadcrumb
@@ -1537,12 +1545,11 @@ export default function CodingAgentApp() {
                 backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
                 navLabel={t("codingAgent.breadcrumbLabel")}
                 backTestId="coding-agent-run-back"
-                trailing={liveToggle(run)}
               />
 
               {/* The header: what this run is, how it stands, and everything
                   you can do to it. */}
-              <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
+              <div className={`${CARD_SURFACE} px-4 py-3`}>
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>
                     {statusLabel(run.status)}
@@ -1671,69 +1678,100 @@ export default function CodingAgentApp() {
                   Claude Code web layout, in short. Narrow: one column. */}
               <div className="@3xl:grid @3xl:grid-cols-[minmax(0,1fr)_296px] @3xl:gap-4 @3xl:items-start">
                 <div className="min-w-0">
-              {/* While the run works: the browser it drives, on the device's
-                  own screen — a picture only, so a click here cannot steer a
-                  page the run is on — folded away with one tap. */}
-              {isLive(run.status) && (
-                <div className="mt-3 rounded-xl border border-white/10 overflow-hidden flex flex-col bg-black" data-testid="coding-agent-browser-preview">
-                  <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-white/[0.03] shrink-0">
-                    <span className="material-symbols-rounded text-sky-300" style={{ fontSize: 16 }} aria-hidden="true">web</span>
-                    <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.browserPreviewTitle")}</p>
-                    <span className="ml-auto" />
-                    <button
-                      type="button"
-                      onClick={() => setBrowserPreview((v) => !v)}
-                      aria-expanded={browserPreview}
-                      data-testid="coding-agent-browser-preview-toggle"
-                      className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
-                    >
-                      {browserPreview ? t("codingAgent.browserPreviewHide") : t("codingAgent.browserPreviewShow")}
-                    </button>
-                  </div>
-                  {browserPreview && (
-                    <div style={{ height: 280 }}>
-                      <VNCApp viewOnly pasteButton="hidden" />
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* While the run works: its terminal, embedded — the transcript
-                  tailed live where the activity log used to be. Once it has
-                  settled, the log (below) is the record. */}
-              {isLive(run.status) && run.transcriptPath && (() => {
-                const command = livePreviewCommand({ transcriptPath: run.transcriptPath ?? null, sessionId: run.sessionId ?? null, directory: run.directory, live: true });
-                if (!command) return null;
+              {/* While the run works: ONE card with three tabs — the timeline
+                  (first, and the default), the terminal tailing the transcript,
+                  and the browser the run drives (a picture only, with a way to
+                  the VNC app for the real thing). One at a time: the three
+                  stacked were three screens tall. Once the run has settled,
+                  the timeline alone is the record. */}
+              {isLive(run.status) && (() => {
+                const command = run.transcriptPath
+                  ? livePreviewCommand({ transcriptPath: run.transcriptPath, sessionId: run.sessionId ?? null, directory: run.directory, live: true })
+                  : null;
+                const tab = liveTabFor?.id === run.id ? liveTabFor.tab : "timeline";
+                const pick = (next: "timeline" | "terminal" | "browser") => setLiveTabFor({ id: run.id, tab: next });
+                const tabButton = (id: "timeline" | "terminal" | "browser", icon: string, label: string, disabled = false) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === id}
+                    aria-controls={`coding-agent-live-pane-${id}`}
+                    disabled={disabled}
+                    onClick={() => pick(id)}
+                    data-testid={`coding-agent-live-tab-${id}`}
+                    className={tab === id ? SEGMENT_ON : SEGMENT_OFF}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{icon}</span>
+                    {label}
+                  </button>
+                );
                 return (
-                  <div className="mt-3 rounded-xl border border-emerald-400/20 overflow-hidden flex flex-col" style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
-                    <div className="flex items-center gap-2 px-4 py-2 border-b border-white/[0.06] bg-white/[0.03] shrink-0">
-                      <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }} aria-hidden="true">terminal</span>
-                      <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.livePreviewTitle")}</p>
+                  <div className={`mt-3 ${CARD_SURFACE} overflow-hidden flex flex-col`} data-testid="coding-agent-live-card" data-tab={tab}>
+                    <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06] bg-black/30 shrink-0">
+                      <div className={`${SEGMENTED_TRACK} max-w-md`} role="tablist" aria-label={t("codingAgent.timelineTitle")}>
+                        {tabButton("timeline", "timeline", t("codingAgent.timelineTitle"))}
+                        {tabButton("terminal", "terminal", t("codingAgent.livePreviewTitle"), !command)}
+                        {tabButton("browser", "web", t("codingAgent.browserPreviewTitle"))}
+                      </div>
                       <span className="ml-auto" />
-                      <button
-                        type="button"
-                        onClick={() => openInTerminal(run)}
-                        data-testid="coding-agent-run-terminal-open"
-                        className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
-                      >
-                        {t("codingAgent.livePreviewOpenApp")}
-                      </button>
+                      {tab === "terminal" && command && (
+                        <button
+                          type="button"
+                          onClick={() => openInTerminal(run)}
+                          data-testid="coding-agent-run-terminal-open"
+                          className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
+                        >
+                          {t("codingAgent.livePreviewOpenApp")}
+                        </button>
+                      )}
+                      {tab === "browser" && (
+                        <button
+                          type="button"
+                          onClick={() => dispatchOpenApp("vnc")}
+                          data-testid="coding-agent-open-vnc"
+                          className="text-[11px] px-2 py-0.5 rounded-md border border-white/10 text-[var(--text-muted)] hover:bg-white/5 cursor-pointer"
+                        >
+                          {t("codingAgent.openVnc")}
+                        </button>
+                      )}
                     </div>
-                    <div className="flex-1 min-h-0">
-                      {/* Keyed by the run: a terminal types its command once,
-                          on its first output, so a reused one would keep
-                          tailing the previous run. */}
-                      <TerminalApp key={run.id} initialCommand={command} />
+                    <div id="coding-agent-live-pane-timeline" role="tabpanel" hidden={tab !== "timeline"} className="px-4 py-3">
+                      <CodingRunTimeline
+                        lines={activity}
+                        times={activityAt}
+                        startedAt={run.startedAt}
+                        live
+                        embedded
+                        working={{
+                          label: t("codingAgent.chatWorking"),
+                          busy: t("codingAgent.chatBusy"),
+                          tokens: (run.tokensUsed ?? 0) > 0 ? `${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}` : undefined,
+                          duration: started ? duration(run) : undefined,
+                        }}
+                      />
                     </div>
+                    {command && (
+                      // Mounted whatever the tab, hidden otherwise: the terminal
+                      // types its command once, and a remount would tail from the top.
+                      <div id="coding-agent-live-pane-terminal" role="tabpanel" hidden={tab !== "terminal"} style={{ height: 460, background: "#0d0d1a" }} data-testid="coding-agent-run-terminal">
+                        <TerminalApp key={run.id} initialCommand={command} />
+                      </div>
+                    )}
+                    {tab === "browser" && (
+                      <div id="coding-agent-live-pane-browser" role="tabpanel" className="h-[420px] bg-black" data-testid="coding-agent-browser-preview" data-open="true">
+                        <VNCApp viewOnly pasteButton="hidden" />
+                      </div>
+                    )}
                   </div>
                 );
               })()}
+              {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} />}
 
               {/* The summary is the run's closing message, and that is
                   markdown. Drawn through the chat's renderer, which builds
                   elements from the text and never injects HTML — what lets
                   agent-written words on to the owner's screen at all. */}
-              <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
+              <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
                 <p className={SECTION_LABEL}>{t("codingAgent.summaryTitle")}</p>
                 {run.summary ? (
                   <div
@@ -1751,7 +1789,7 @@ export default function CodingAgentApp() {
 
               {/* The plan, as the run last wrote it. */}
               {todos.length > 0 && (
-                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-plan">
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-plan">
                   <p className={SECTION_LABEL}>
                     {t("codingAgent.planTitle")}
                     <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{todosDone}/{todos.length}</span>
@@ -1777,16 +1815,41 @@ export default function CodingAgentApp() {
                 </div>
               )}
 
-              {/* Which helpers are out right now. */}
-              {(run.activeSubagents?.length ?? 0) > 0 && (
-                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3">
-                  <p className={SECTION_LABEL}>{t("codingAgent.helpersTitle")}</p>
+              {/* The agents: the run itself and every helper it sent out —
+                  the ones still working, and the ones back with how long
+                  they took. The owner asked to see how many and what each
+                  did, not a count. */}
+              {((run.activeSubagents?.length ?? 0) > 0 || (run.subagents?.length ?? 0) > 0 || (run.subagentsTotal ?? 0) > 0) && (
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-agents">
+                  <p className={SECTION_LABEL}>
+                    {t("codingAgent.agentsTitle")}
+                    <span className="normal-case tracking-normal font-normal text-[var(--text-secondary)]" data-testid="coding-agent-run-agents-count">
+                      {t("codingAgent.agentsWorking", { n: isLive(run.status) ? 1 + (run.activeSubagents?.length ?? 0) : 0 })}
+                      {" · "}
+                      {t("codingAgent.agentsFinished", { n: (run.subagents?.length ?? 0) + (isLive(run.status) ? 0 : 1) })}
+                      {(run.subagentsTotal ?? 0) > 0 && ` · ${helpers.map(([k, n]) => `${n}× ${k}`).join(", ")}`}
+                    </span>
+                  </p>
                   <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
+                    <li className="flex items-start gap-2 text-[11px]">
+                      <span className={`material-symbols-rounded shrink-0 ${isLive(run.status) ? "text-amber-400 animate-pulse" : "text-[var(--text-muted)]"}`} style={{ fontSize: 13 }} aria-hidden="true">{isLive(run.status) ? "sync" : "check_circle"}</span>
+                      <span className="text-[var(--text-primary)] font-medium shrink-0">{t("codingAgent.agentMain")}</span>
+                      <span className="text-[var(--text-muted)] break-words min-w-0">{run.model ?? run.modelsUsed?.[0] ?? ""}{started ? ` · ${duration(run)}` : ""}</span>
+                    </li>
                     {run.activeSubagents?.map((a, i) => (
-                      <li key={i} className="flex items-start gap-2 text-[11px]">
+                      <li key={`live-${i}`} className="flex items-start gap-2 text-[11px]" data-testid="coding-agent-subagent-live">
                         <span className="material-symbols-rounded text-sky-400 animate-pulse shrink-0" style={{ fontSize: 13 }} aria-hidden="true">sync</span>
                         <span className="text-sky-300 font-medium shrink-0">{a.type}</span>
                         <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
+                        <span className="ml-auto shrink-0 text-[var(--text-muted)]">{t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, now) })}</span>
+                      </li>
+                    ))}
+                    {[...(run.subagents ?? [])].reverse().map((a, i) => (
+                      <li key={`done-${i}`} className="flex items-start gap-2 text-[11px]" data-testid="coding-agent-subagent-done" data-refused={a.refused || undefined}>
+                        <span className={`material-symbols-rounded shrink-0 ${a.refused ? "text-amber-400" : "text-emerald-400/80"}`} style={{ fontSize: 13 }} aria-hidden="true">{a.refused ? "block" : "check_circle"}</span>
+                        <span className={`font-medium shrink-0 ${a.refused ? "text-amber-300" : "text-emerald-300/90"}`}>{a.type}</span>
+                        <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
+                        <span className="ml-auto shrink-0 text-[var(--text-muted)]">{a.refused ? t("codingAgent.helperRefused") : t("codingAgent.helperFor", { t: elapsedShort(a.startedAt, a.endedAt) })}</span>
                       </li>
                     ))}
                   </ul>
@@ -1800,21 +1863,6 @@ export default function CodingAgentApp() {
                 </div>
               )}
 
-              {/* The newest steps, as the runner recorded them — the record
-                  once the run has settled. */}
-              {activity.length > 0 && !(isLive(run.status) && run.transcriptPath) && (
-                <details className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-run-activity" open={isLive(run.status)}>
-                  <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
-                    {t("codingAgent.activityTitle")}
-                    <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{activity.length}</span>
-                  </summary>
-                  <ol className="mt-2 space-y-0.5 font-mono text-[11px] text-[var(--text-muted)] max-h-72 overflow-y-auto">
-                    {activity.map((line, i) => (
-                      <li key={i} className="break-words whitespace-pre-wrap">{line}</li>
-                    ))}
-                  </ol>
-                </details>
-              )}
                 </div>
                 <aside className="min-w-0" data-testid="coding-agent-run-rail">
               {/* The figures. */}
@@ -1843,8 +1891,24 @@ export default function CodingAgentApp() {
               {/* The run's evidence: screenshots it took while verifying its
                   work, its report.md, and whatever test output it saved. */}
               {artifacts.length > 0 && (
-                <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-agent-artifacts">
-                  <p className={SECTION_LABEL}>{t("codingAgent.artifactsTitle")}</p>
+                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-artifacts" data-folded={artifactsFolded || undefined}>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className={SECTION_LABEL}>
+                      {t("codingAgent.artifactsTitle")}
+                      <span className="ml-1.5 normal-case tracking-normal font-normal text-[var(--text-muted)]">({artifacts.length})</span>
+                    </p>
+                    {artifacts.length > ARTIFACT_PREVIEW && (
+                      <button
+                        type="button"
+                        onClick={() => setArtifactsOpenFor(artifactsFolded ? run.id : null)}
+                        aria-expanded={!artifactsFolded}
+                        data-testid="coding-agent-artifacts-toggle"
+                        className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
+                      >
+                        {artifactsFolded ? t("codingAgent.artifactsShowAll", { n: artifacts.length }) : t("codingAgent.artifactsShowFewer")}
+                      </button>
+                    )}
+                  </div>
                   {images.length > 0 && (
                     <div className="mt-2 flex flex-wrap gap-2">
                       {images.map((a) => (
@@ -1935,6 +1999,10 @@ export default function CodingAgentApp() {
             ? `projectId=${encodeURIComponent(p.folder)}`
             : `directory=${encodeURIComponent(p.directory)}`;
           const projectLive = runs.some((r) => runBelongsTo(r, p) && isLive(r.status));
+          // The pull request for the branch the project is on: one opened from
+          // this page, or one a run opened for that same branch.
+          const runPr = git?.branch ? runs.find((r) => runBelongsTo(r, p) && r.pr?.url && r.pr.number && r.pr.branch === git.branch)?.pr : undefined;
+          const projectPr = projectPrs[p.directory] ?? (runPr?.url && runPr.number ? { number: runPr.number, url: runPr.url } : null);
           const lastSubject = git?.lastCommit?.subject ?? p.lastCommit?.subject ?? null;
           const lastDate = git?.lastCommit?.date ?? p.lastCommit?.date ?? null;
           return (<>
@@ -1948,7 +2016,7 @@ export default function CodingAgentApp() {
             navLabel={t("codingAgent.breadcrumbLabel")}
               backTestId="coding-agent-project-back"
             />
-            <div className="mt-3" data-testid="coding-agent-project-page">
+            <div className="mt-3 flex-1 min-h-0 flex flex-col" data-testid="coding-agent-project-page">
               {/* One row: who this is and what it is. The folder under it is
                   one tap to copy — the home row no longer carries that. */}
               <div className="flex items-center gap-2 flex-wrap">
@@ -1996,45 +2064,98 @@ export default function CodingAgentApp() {
               {/* The git state on ONE line: branch, commits, the newest
                   commit, and whether the folder has reached GitHub — the
                   store road starts there. */}
-              <div className="mt-2 flex items-center gap-x-2 gap-y-1 flex-wrap text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-git-info">
+              <div className={`mt-3 ${INSET_SURFACE} px-3 py-1.5 flex items-center gap-x-2 gap-y-1 flex-wrap text-[11px] text-[var(--text-muted)]`} data-testid="coding-agent-git-info">
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
                 {git?.branch && <span className="font-mono text-[var(--text-primary)]">{git.branch}</span>}
                 {git && <span>{t("codingAgent.gitCommits", { n: git.commits })}</span>}
                 <span className="break-all">
                   {lastSubject && lastDate ? <>{firstLine(lastSubject, 70)} · {timeAgo(lastDate, t)}</> : t("codingAgent.noCommits")}
                 </span>
-                <span className="ml-auto break-all">
-                  {git?.remote
-                    ? <span className="font-mono text-emerald-400/90">{git.remote}</span>
-                    : <span>{t("codingAgent.gitNoRemote")}</span>}
+                <span className="ml-auto flex items-center gap-2 flex-wrap justify-end">
+                  {/* On GitHub: the repository's page, and the way to a pull
+                      request for the branch the project is on (or the one
+                      already open for it). Not yet: a quiet Back up, the one
+                      road there — the green button it used to be shouted over
+                      the whole page. */}
+                  {githubWebUrl(git?.remote) ? (
+                    <>
+                      <a
+                        href={githubWebUrl(git?.remote) ?? undefined}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={t("codingAgent.openOnGithub")}
+                        data-testid="coding-agent-project-github"
+                        className="inline-flex items-center gap-1 font-mono text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20"
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
+                        {githubRepoName(git?.remote)}
+                      </a>
+                      {projectPr ? (
+                        <a href={projectPr.url} target="_blank" rel="noreferrer" data-testid="coding-agent-project-pr" className={BTN_SECONDARY}>
+                          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">merge</span>
+                          {t("codingAgent.viewPr", { n: projectPr.number })}
+                        </a>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => void createPr({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
+                          disabled={busy === `pr-project-${p.folder}`}
+                          data-testid="coding-agent-project-create-pr"
+                          className={BTN_SECONDARY}
+                        >
+                          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">merge</span>
+                          {busy === `pr-project-${p.folder}` ? t("codingAgent.createPrBusy") : t("codingAgent.createPr")}
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {git?.remote
+                        ? <span className="font-mono break-all">{git.remote}</span>
+                        : <span>{t("codingAgent.gitNoRemote")}</span>}
+                      {!git?.remote && github?.connected && (git?.lastCommit || p.lastCommit) && (
+                        <button
+                          type="button"
+                          onClick={() => void backup({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
+                          disabled={busy === `backup-project-${p.folder}`}
+                          data-testid="coding-agent-project-backup"
+                          className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20 disabled:opacity-50"
+                        >
+                          {busy === `backup-project-${p.folder}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+                        </button>
+                      )}
+                    </>
+                  )}
                 </span>
-                {github?.connected && (git?.lastCommit || p.lastCommit) && (
-                  <button
-                    type="button"
-                    onClick={() => void backup({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
-                    disabled={busy === `backup-project-${p.folder}`}
-                    data-testid="coding-agent-project-backup"
-                    className={`${BTN_BASE} border border-emerald-400/40 bg-emerald-400/[0.07] text-emerald-400 hover:bg-emerald-400/[0.14]`}
-                  >
-                    {busy === `backup-project-${p.folder}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
-                  </button>
-                )}
               </div>
-              {/* The folder itself, and what changed in it. */}
-              <CodingProjectWorkspace key={projectQuery} query={projectQuery} live={projectLive} />
-              {/* A coding team on this folder: the goal, the board, the log. */}
-              {/* Keyed by the WHOLE scope the card reads by — the folder and
-                  the code-project id — so a project that changes kind under
-                  the same folder is a fresh card, never one holding the
-                  previous team. */}
-              <CodingTeamCard
-                key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
-                directory={p.directory}
-                projectId={p.kind === "codeProject" ? p.folder : null}
-                onOpenRun={(id) => showRun(id)}
+              {/* Four tabs, each with the whole width: the folder, what changed,
+                  the runs, the team. The runs sat in a 22rem rail before and
+                  their rows wrapped three deep. */}
+              <CodingProjectWorkspace
+                key={projectQuery}
+                query={projectQuery}
+                live={projectLive}
+                fill
+                runsCount={visibleRuns.length}
+                runsLive={projectLive}
+                runs={<div className="pt-1" data-testid="coding-agent-project-runs">{runsList}</div>}
+                team={(
+                  /* Keyed by the WHOLE scope the card reads by — the folder
+                     and the code-project id — so a project that changes kind
+                     under the same folder is a fresh card, never one holding
+                     the previous team. */
+                  <div className="pt-1">
+                    <CodingTeamCard
+                      key={`${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
+                      directory={p.directory}
+                      projectId={p.kind === "codeProject" ? p.folder : null}
+                      onOpenRun={(id) => showRun(id)}
+                      onPlan={standalone ? undefined : () => openNewAppCard({ project: p.directory, team: true })}
+                    />
+                  </div>
+                )}
               />
             </div>
-            {runsSection}
           </>);
         })()}
 

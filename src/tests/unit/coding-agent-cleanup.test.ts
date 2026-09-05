@@ -150,10 +150,10 @@ describe("the browser tab a run opened", () => {
       id: "run-abc12345", task: "t", directory: path.join(home, "Projects", "site"), projectId: null,
       source: "owner", status: "running", startedAt: Date.now(), completedAt: null, sessionId: null,
       model: null, summary: null, error: null, numTurns: 0, filesTouched: [], commandsRun: 0,
-      permissionDenials: 0, deniedActions: [], effort: "max", subagentsActive: 0, activeSubagents: [],
+      permissionDenials: 0, deniedActions: [], effort: "max", subagentsActive: 0, activeSubagents: [], subagents: [],
       subagentsTotal: 0, subagentsByType: {}, modelsUsed: [], commit: null, maxTurns: 150, tokensUsed: 0,
       tokenLimit: null, thinkingTokens: 0, lastActivityAt: Date.now(), retries: 0, resumable: false,
-      reviewOf: null, pr: null, progress: [], todos: [], exitCode: null,
+      reviewOf: null, pr: null, progress: [], progressAt: [], todos: [], exitCode: null,
     }]));
     const stopped = lib.stopRun("run-abc12345");
     expect(stopped.status).toBe("stopped");

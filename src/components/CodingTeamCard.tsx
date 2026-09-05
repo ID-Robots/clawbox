@@ -12,7 +12,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { BTN_BASE, BTN_PRIMARY, BTN_SECONDARY, SECTION_LABEL } from "./coding-agent-ui";
+import { BTN_BASE, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import { timeAgo } from "./clawkeep-ui";
 
 export interface TeamTaskView {
@@ -46,6 +46,13 @@ interface Props {
   projectId: string | null;
   /** Open a run's page — the planner's or a worker's. */
   onOpenRun: (runId: string) => void;
+  /**
+   * Ask for a team: opens the chat's Create App card on this project with
+   * the team switch on, so the goal is written where every other task is
+   * and the assistant carries it. Absent on a standalone page, which has no
+   * chat to hand to — the card then only shows what ran.
+   */
+  onPlan?: () => void;
 }
 
 const POLL_MS = 5000;
@@ -81,10 +88,9 @@ function isActive(status: TeamView["status"]): boolean {
   return status === "planning" || status === "working" || status === "reviewing";
 }
 
-export default function CodingTeamCard({ directory, projectId, onOpenRun }: Props) {
+export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan }: Props) {
   const { t } = useT();
   const [teams, setTeams] = useState<TeamView[]>([]);
-  const [goal, setGoal] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showLog, setShowLog] = useState(false);
@@ -129,32 +135,6 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
     return () => clearInterval(id);
   }, [active, load]);
 
-  const start = async () => {
-    const text = goal.trim();
-    if (!text) return;
-    const startedIn = scope.current;
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch("/setup-api/coding-agent/team", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(projectId ? { goal: text, projectId } : { goal: text, directory }),
-      });
-      const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
-      if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.startFailed"));
-      if (startedIn !== scope.current) return;
-      // A read that started before this write must not land on top of it.
-      request.current++;
-      setGoal("");
-      setTeams((prev) => [data.team!, ...prev]);
-    } catch (err) {
-      if (startedIn === scope.current) setError(err instanceof Error ? err.message : t("codingAgent.team.startFailed"));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const stop = async () => {
     if (!team) return;
     const startedIn = scope.current;
@@ -181,7 +161,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
   const done = team ? team.tasks.filter((x) => x.status === "complete").length : 0;
 
   return (
-    <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-4 py-3" data-testid="coding-team-card">
+    <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-team-card">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">groups</span>
         <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.team.title")}</p>
@@ -212,26 +192,17 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
       </div>
       <p className="mt-1 text-[11px] text-[var(--text-muted)] leading-relaxed">{t("codingAgent.team.help")}</p>
 
-      {/* The goal, while no team works here. */}
-      {!active && (
-        <div className="mt-2 flex flex-col gap-2" data-testid="coding-team-form">
-          <textarea
-            value={goal}
-            onChange={(e) => setGoal(e.target.value)}
-            rows={2}
-            maxLength={4000}
-            placeholder={t("codingAgent.team.goalPlaceholder")}
-            aria-label={t("codingAgent.team.goalLabel")}
-            data-testid="coding-team-goal"
-            className="w-full rounded-lg bg-black/20 border border-[var(--border-subtle)] px-3 py-2 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)] outline-none focus:border-white/30 resize-y"
-          />
-          <div className="flex items-center gap-2">
-            <button type="button" onClick={() => void start()} disabled={busy || !goal.trim()} data-testid="coding-team-start" className={BTN_PRIMARY}>
-              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">rocket_launch</span>
-              {busy ? t("codingAgent.team.starting") : t("codingAgent.team.start")}
-            </button>
-            {error && <span className="text-[11px] text-red-300" role="alert" data-testid="coding-team-error">{error}</span>}
-          </div>
+      {/* Asking for a team happens in the chat, the way every other task
+          does: the Create App card, on this project, with the team switch
+          on. A textarea here was a second composer for one conversation, and
+          a goal typed into it never reached the assistant's memory. */}
+      {!active && onPlan && (
+        <div className="mt-2 flex items-center gap-2" data-testid="coding-team-form">
+          <button type="button" onClick={onPlan} data-testid="coding-team-plan" className={BTN_SECONDARY}>
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">forum</span>
+            {t("codingAgent.team.plan")}
+          </button>
+          {error && <span className="text-[11px] text-red-300" role="alert" data-testid="coding-team-error">{error}</span>}
         </div>
       )}
       {active && error && <p className="mt-2 text-[11px] text-red-300" role="alert" data-testid="coding-team-error">{error}</p>}
@@ -258,7 +229,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun }: Prop
           {team.tasks.length > 0 && (
             <ul className="mt-2 space-y-1.5" data-testid="coding-team-tasks">
               {team.tasks.map((task) => (
-                <li key={task.task_id} className="rounded-lg bg-black/20 border border-[var(--border-subtle)] px-3 py-2" data-testid={`coding-team-task-${task.task_id}`} data-status={task.status}>
+                <li key={task.task_id} className={`${INSET_SURFACE} px-3 py-2`} data-testid={`coding-team-task-${task.task_id}`} data-status={task.status}>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-mono text-[11px] text-[var(--text-muted)]">{task.task_id}</span>
                     <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${TASK_TONE[task.status]}`}>

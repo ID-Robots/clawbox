@@ -253,7 +253,14 @@ export interface GitHubStatus {
 }
 
 export type BackupOutcome =
-  | { pushed: true; repo: string; created: boolean; branch: string }
+  | {
+      pushed: true;
+      repo: string;
+      created: boolean;
+      branch: string;
+      /** The base branch pushed beside a run branch and made the repository's default, when there was one. */
+      base?: string;
+    }
   | {
       pushed: false;
       reason: BackupFailure;
@@ -465,6 +472,71 @@ export async function disconnectGitHub(): Promise<DisconnectOutcome> {
   return { ok: true };
 }
 
+/**
+ * A folder whose repository already exists on the owner's account: wire
+ * `origin` to it and push the current branch. Answers null when the
+ * repository cannot be read (then the caller reports the create's own
+ * refusal), a refusal when the push is rejected, and the backup otherwise.
+ */
+async function attachExistingRepo(dir: string, fullName: string, branch: string): Promise<BackupOutcome | null> {
+  // The repo is POSITIONAL on gh 2.4.0 (`--repo` is rejected there).
+  const viewed = await run("gh", ["repo", "view", fullName, "--json", "url"], { cwd: dir });
+  // A probe that carried no finding — killed on the uplink, or never
+  // started — is not "the repository cannot be read": answering the
+  // create's refusal for it would tell the owner to rename a repository
+  // that is theirs, with a 409 that says not to retry. Report the fault.
+  if (inconclusive(viewed)) return noFinding(viewed, "Reading the existing repository on GitHub", "network");
+  if (viewed.code !== 0 || !viewed.stdout) return null;
+  let url: string;
+  try {
+    const parsed = JSON.parse(viewed.stdout) as { url?: unknown };
+    if (typeof parsed.url !== "string" || !/^https:\/\/github\.com\//.test(parsed.url)) return null;
+    url = `${parsed.url.replace(/\/$/, "")}.git`;
+  } catch {
+    return null;
+  }
+  const added = await run("git", ["-C", dir, "remote", "add", "origin", url]);
+  if (inconclusive(added)) return noFinding(added, "Attaching the existing repository", "local");
+  if (added.code !== 0) {
+    return { pushed: false, reason: "failed", detail: failureDetail(added, "Attaching the existing repository") };
+  }
+  const pushed = await run("git", ["-C", dir, "push", "--set-upstream", "origin", branch], { cwd: dir, timeoutMs: PUSH_TIMEOUT_MS });
+  if (pushed.code !== 0) {
+    if (inconclusive(pushed)) return noFinding(pushed, "Pushing to the existing repository", "network");
+    return {
+      pushed: false,
+      reason: "failed",
+      detail: failureDetail(pushed, `Pushing ${branch} to the existing repository ${fullName}`, "The repository on GitHub has a history this folder does not share. Push it from the Terminal, or rename the folder."),
+    };
+  }
+  return { pushed: true, repo: url, created: false, branch };
+}
+
+/** The base branch beside a run branch — `main` or `master`, whichever the folder has and is not on. */
+async function localBaseBranch(dir: string, current: string): Promise<string | null> {
+  for (const candidate of ["main", "master"]) {
+    if (candidate === current) return null;
+    const r = await run("git", ["-C", dir, "rev-parse", "--verify", "--quiet", `refs/heads/${candidate}`]);
+    if (r.code === 0) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Push the base branch of a repository just created from a run branch, and
+ * make it the default on GitHub (the REST call: gh 2.4.0 has no `repo
+ * edit`). Best effort — the backup itself succeeded; a base that could not
+ * be pushed is reported as absent, never as a failed backup.
+ */
+async function settleDefaultBranch(dir: string, fullName: string, current: string): Promise<string | null> {
+  const base = await localBaseBranch(dir, current);
+  if (!base) return null;
+  const pushed = await run("git", ["-C", dir, "push", "--set-upstream", "origin", base], { timeoutMs: PUSH_TIMEOUT_MS });
+  if (pushed.code !== 0) return null;
+  const set = await run("gh", ["api", "-X", "PATCH", `repos/${fullName}`, "-f", `default_branch=${base}`], { cwd: dir });
+  return set.code === 0 ? base : null;
+}
+
 /** A repository name GitHub will accept, from a folder name. */
 export function repoNameFor(directory: string): string {
   const base = path.basename(path.resolve(directory));
@@ -569,15 +641,31 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
       if (inconclusive(create)) {
         return noFinding(create, "Creating the repository on GitHub", "network");
       }
-      // GitHub itself refusing — a name already taken, a scope missing — IS a
-      // request that cannot be satisfied as it stands. That one keeps its 409,
-      // and failureDetail keeps its message from ever being blank.
+      // The name is already taken ON THIS ACCOUNT: the repository IS the
+      // folder's — a project the box re-created (the harness test remakes its
+      // folder; a restore from a backup does too) whose checkout lost its
+      // remote. Attach it and push, rather than tell the owner to rename a
+      // repository that is theirs. A push GitHub rejects (histories that do
+      // not meet) is still reported, never forced.
+      if (/already exists/i.test(create.stderr + create.stdout) && status.login) {
+        const attached = await attachExistingRepo(dir, `${status.login}/${name}`, branch);
+        if (attached) return attached;
+      }
+      // GitHub itself refusing — a name already taken elsewhere, a scope
+      // missing — IS a request that cannot be satisfied as it stands. That one
+      // keeps its 409, and failureDetail keeps its message from ever being blank.
       return { pushed: false, reason: "failed", detail: failureDetail(create, "Creating the repository on GitHub") };
     }
     created = true;
     const url = await run("git", ["-C", dir, "remote", "get-url", "origin"]);
     repo = url.stdout || name;
-    return { pushed: true, repo, created, branch };
+    // `--push` sent the CURRENT branch, and GitHub made it the default. A
+    // checkout on a run's branch (every run branches before it works) would
+    // leave the repository defaulting to `clawbox/run-…`, and a pull request
+    // then has nothing to compare against: push the base beside it and make
+    // that the default.
+    const base = await settleDefaultBranch(dir, `${status.login}/${name}`, branch);
+    return { pushed: true, repo, created, branch, ...(base ? { base } : {}) };
   }
 
   const push = await run(

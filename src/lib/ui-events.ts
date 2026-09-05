@@ -25,10 +25,18 @@ export const CHAT_MESSAGE_EVENT = "clawbox:chat-message";
  */
 export const NEW_APP_EVENT = "clawbox:new-app";
 
+/** What the Create App card should open on: an existing project, and whether the work is for a team. */
+export interface NewAppCardOptions {
+  /** The absolute directory of a project to preselect in the existing-project mode. */
+  project?: string;
+  /** Compose the message for a coding TEAM (coding_team_run) rather than one run. */
+  team?: boolean;
+}
+
 /** Ask the desktop to open the chat with the New app card. */
-export function openNewAppCard(): void {
+export function openNewAppCard(opts: NewAppCardOptions = {}): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new Event(NEW_APP_EVENT));
+  window.dispatchEvent(new CustomEvent<NewAppCardOptions>(NEW_APP_EVENT, { detail: opts }));
 }
 export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
 
@@ -43,31 +51,30 @@ export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
  */
 export const OPEN_CODING_RUN_EVENT = "clawbox:open-coding-run";
 
-/** How the run should open: `live` is the run page's Live view — the
- *  browser the run drives and its terminal, filling the window. */
+/** How the run should open: `maximize` brings the window full-screen. */
 export interface OpenCodingRunOptions {
-  live?: boolean;
+  maximize?: boolean;
 }
 
-type PendingRunWindow = Window & { __clawboxPendingCodingRun?: unknown; __clawboxPendingCodingRunLive?: unknown };
+type PendingRunWindow = Window & { __clawboxPendingCodingRun?: unknown };
 
-/** The two handoffs WITHOUT opening the app — for a desktop that opens it itself. */
-export function handoffCodingRun(runId: string, opts: OpenCodingRunOptions = {}): void {
+/** The handoff WITHOUT opening the app — for a desktop that opens it itself. */
+export function handoffCodingRun(runId: string): void {
   if (typeof window === "undefined") return;
   const w = window as PendingRunWindow;
   w.__clawboxPendingCodingRun = runId;
-  w.__clawboxPendingCodingRunLive = opts.live === true;
-  window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId, live: opts.live === true } }));
+  window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId } }));
 }
 
 /**
  * Open the Coding Agent app on a run. `maximize` opens (or brings) the window
  * full-screen: the chat's View button lands the owner on the run's page with
- * the whole desktop for it — and with `live`, in the page's Live view.
+ * the whole desktop for it. (The page's separate Live view is gone: the run
+ * page itself carries the browser preview, the terminal and the timeline.)
  */
-export function dispatchOpenCodingRun(runId: string, opts: { maximize?: boolean } & OpenCodingRunOptions = {}): void {
+export function dispatchOpenCodingRun(runId: string, opts: OpenCodingRunOptions = {}): void {
   if (typeof window === "undefined") return;
-  handoffCodingRun(runId, { live: opts.live });
+  handoffCodingRun(runId);
   dispatchOpenApp("coding", { maximize: opts.maximize });
 }
 
@@ -80,14 +87,6 @@ export function takePendingCodingRun(): string | null {
   return id;
 }
 
-/** Whether the handed-off run asked for the Live view; taken exactly once. */
-export function takePendingCodingRunLive(): boolean {
-  if (typeof window === "undefined") return false;
-  const w = window as PendingRunWindow;
-  const live = w.__clawboxPendingCodingRunLive === true;
-  delete w.__clawboxPendingCodingRunLive;
-  return live;
-}
 
 
 /**
@@ -279,6 +278,28 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
   ];
   if (req.kind === "codeProject") lines.push("Then tell me what changed, what was verified, and what is left for the next run.");
   return lines.join("\n");
+}
+
+/**
+ * The message that asks the assistant for a coding TEAM on an existing
+ * project — the multi-agent shape (coding_team_run): a planner splits the
+ * goal, workers do the parts one after another, a reviewer checks each. The
+ * project page's "Plan with the assistant" button opens the Create App card
+ * with the team switch on, and this is what the card then hands the chat.
+ */
+export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRun">): string {
+  // Trailing periods come off so the sentence reads as one; a goal that is
+  // nothing but periods keeps what the owner typed rather than becoming an
+  // empty request.
+  const trimmed = req.instructions.trim();
+  const goal = trimmed.replace(/[.\s]+$/u, "") || trimmed;
+  const target = req.kind === "codeProject" ? `project_id "${req.folder}"` : `directory "${req.directory}"`;
+  return [
+    `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
+    `Start it with coding_team_run (${target}) — the planner reads the folder and splits the goal into tasks, workers do them one after another, and a reviewer checks each result. Do not start single runs for the parts yourself.`,
+    "Tell me when it is running, and check on it later with coding_team_status; when it is done, summarise what each task did and what was verified.",
+    ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
+  ].join("\n");
 }
 
 export function buildFixErrorPrompt(ctx: FixErrorContext): string {

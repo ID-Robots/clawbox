@@ -225,8 +225,21 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await page.getByTestId("shelf-app-coding").click();
   const codingWindow = page.getByTestId("chrome-window-coding");
   await expect(codingWindow).toBeVisible();
-  await expect(codingWindow.getByTestId("coding-agent-state")).toContainText("Off");
-  await codingWindow.getByTestId("coding-agent-open-settings").click();
+  // A wide window carries Settings in its rail and draws no header row (no
+  // state chip either); a narrow one has the row with both. Whichever this
+  // window has — the switch inside the panel is the fact under test.
+  // The rail is measured, not a breakpoint: the first paint is the narrow
+  // row and the rail replaces it a tick later, so wait for the layout to
+  // settle before deciding which shape this window has.
+  const rail = codingWindow.getByTestId("coding-agent-sidebar");
+  const stateChip = codingWindow.getByTestId("coding-agent-state");
+  // Presence, not visibility, is the discriminator: the row is drawn iff
+  // there is no rail. Give the observer a moment to report the width.
+  await expect(codingWindow.getByTestId("coding-agent-sidebar-settings").or(codingWindow.getByTestId("coding-agent-open-settings")).first()).toBeAttached();
+  await page.waitForTimeout(1500);
+  const hasRail = (await rail.count()) > 0;
+  if (!hasRail) await expect(stateChip).toContainText("Off");
+  await (hasRail ? codingWindow.getByTestId("coding-agent-sidebar-settings") : codingWindow.getByTestId("coding-agent-open-settings")).click();
   const codingAgent = codingWindow.getByTestId("coding-agent-settings-panel");
   const agentSwitch = codingAgent.getByRole("switch", { name: "Let the assistant delegate coding work" });
   await expect(agentSwitch).toHaveAttribute("aria-checked", "false");
@@ -234,8 +247,11 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await expect(codingAgent.getByTestId("coding-agent-effort-max")).toBeVisible();
   await agentSwitch.click();
   await expect(agentSwitch).toHaveAttribute("aria-checked", "true");
-  // The app's header reads the same status the panel just published.
-  await expect(codingWindow.getByTestId("coding-agent-state")).toContainText("On");
+  // The header's state chip reads the status the panel just published —
+  // where the window still draws the row: the wizard is gone now that the
+  // switch is on, so a wide window has its rail instead of the row.
+  await page.waitForTimeout(1000);
+  if ((await rail.count()) === 0) await expect(stateChip).toContainText("On");
 });
 
 // The other half of the Voice tab's contract: a cloud voice this box cannot

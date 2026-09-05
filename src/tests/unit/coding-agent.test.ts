@@ -388,6 +388,8 @@ describe("a run", () => {
     expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
     for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
+    // A run may read what it put in /tmp; the rule is the last of the allowed list.
+    expect(argv.slice(argv.indexOf("--allowedTools") + 1, argv.indexOf("--disallowedTools"))).toContain(lib.TMP_READ_RULE);
     expect(argv).toContain("--agents");
     // The credential folders and this checkout's secrets are denied to
     // Read/Edit/Write — but never the run's own folder under data/, because a
@@ -1304,6 +1306,10 @@ describe("counting sub-agents", () => {
     expect(run.subagentsActive).toBe(0);
     expect(run.progress.join(" ")).toContain("Sub-agent started: search the tests");
     expect(run.progress.join(" ")).toContain("Sub-agent finished");
+    // Every line carries the moment it was recorded, in step and in order.
+    expect(run.progressAt).toHaveLength(run.progress.length);
+    expect(run.progressAt.every((at, i) => i === 0 || at >= run.progressAt[i - 1])).toBe(true);
+    expect(run.progressAt.every((at) => at >= run.startedAt)).toBe(true);
   });
 
   it("does not double-count a repeated tool_result", async () => {
