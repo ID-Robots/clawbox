@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import type { FileHandle } from "fs/promises";
 import path from "path";
-import { DATA_DIR, getAll } from "./config-store";
+import { CONFIG_ROOT, DATA_DIR, getAll } from "./config-store";
 import {
   getDefaultLlamaCppFile,
   getDefaultLlamaCppModel,
@@ -113,7 +113,16 @@ export function getLlamaCppLaunchSpec(alias = getDefaultLlamaCppModel()): LlamaC
     hfFile,
     binPath: process.env.LLAMACPP_BIN?.trim() || DEFAULT_LLAMACPP_BIN,
     hfBinPath: process.env.HF_BIN?.trim() || DEFAULT_HF_BIN,
-    scriptPath: path.join(process.cwd(), "scripts", "start-llamacpp.sh"),
+    // The checkout, not the cwd. In production the cwd is `.next/standalone`
+    // (Next's standalone server.js chdirs there), so this resolved to a path
+    // whose only occupant is whatever @vercel/nft happened to trace in — a
+    // build artefact that refreshes on a full rebuild and not before. Every
+    // other path in this spec already comes from CONFIG_ROOT via DATA_DIR;
+    // the launcher script was the one that did not, so the script and the
+    // runtime files it writes could come from two different trees.
+    // src/instrumentation-node.ts resolves scripts/terminal-server.mjs the
+    // same way, for the same reason.
+    scriptPath: path.join(CONFIG_ROOT, "scripts", "start-llamacpp.sh"),
     pidPath: LLAMACPP_PID_PATH,
     logPath: LLAMACPP_LOG_PATH,
     modelDir: path.join(LLAMACPP_RUNTIME_DIR, "models"),

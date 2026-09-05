@@ -1,7 +1,24 @@
 import path from "path";
 import fs from "fs";
 
-export const CONFIG_ROOT = process.env.CLAWBOX_ROOT || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
+/**
+ * Where this ClawBox is installed, resolved AT CALL TIME.
+ *
+ * `CONFIG_ROOT` below is the same answer captured at import time, and it is
+ * what almost everything should use. Call this instead only where the root can
+ * still change after the module is loaded — the tests set `CLAWBOX_ROOT` in a
+ * `beforeEach`, which a module-level constant never sees.
+ *
+ * NOT `process.cwd()` outside development: the production server chdirs into
+ * `.next/standalone` (Next's standalone `server.js` does `process.chdir`), so
+ * the cwd there is the build output, not the install.
+ */
+export function resolveConfigRoot(): string {
+  return process.env.CLAWBOX_ROOT
+    || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
+}
+
+export const CONFIG_ROOT = resolveConfigRoot();
 export const DATA_DIR = path.join(CONFIG_ROOT, "data");
 const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 

@@ -250,7 +250,20 @@ export async function POST(request: Request) {
         emit(controller, { status: "Checking local Gemma 4 runtime..." });
 
         const existingModels = await queryLlamaCppModels(spec.baseUrl);
-        if (existingModels.includes(alias)) {
+        // Any model, not only this alias. `getLlamaCppLaunchSpec()` resolves
+        // `modelPath` from getDefaultLlamaCppFile() whatever the alias is, and
+        // start-llamacpp.sh passes that as `--model` while the alias is only
+        // `--alias` — so every alias on a box is the SAME GGUF and a non-empty
+        // /v1/models means THE runtime is up, whatever it calls itself.
+        //
+        // waitForLlamaCppReady() and isLlamaCppUp() (src/lib/local-ai-runtime.ts)
+        // already read it that way on every proxied inference request. This
+        // route was the one that did not, and it is the one with a 20-minute
+        // budget: a warm runtime under a label from an earlier install left the
+        // live pid blocking a restart, the alias never appeared, and the wizard
+        // polled for the full startupTimeoutMs before reporting a timeout for a
+        // runtime that was answering the whole time.
+        if (existingModels.length > 0) {
           emit(controller, { status: "llama.cpp is already running. Applying configuration..." });
           const configured = await configureLlamaCpp(alias, scope, activate);
           if (!configured.ok) {
@@ -328,7 +341,9 @@ export async function POST(request: Request) {
           }
 
           const models = await queryLlamaCppModels(spec.baseUrl);
-          if (models.includes(alias)) {
+          // Same rule as the pre-check above: the runtime answering at all is
+          // the readiness signal, because one GGUF backs every alias.
+          if (models.length > 0) {
             emit(controller, { status: "llama.cpp is ready. Applying ClawBox configuration..." });
             const configured = await configureLlamaCpp(alias, scope, activate);
             if (!configured.ok) {
