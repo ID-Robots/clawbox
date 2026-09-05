@@ -6,6 +6,7 @@ import { verifyMcpBearer } from "@/lib/mcp-token";
 import { isPublicGatewayAsset } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
 import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
+import { isSetupApiPath } from "@/lib/clawbox-namespaces";
 import { UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
@@ -414,7 +415,7 @@ export async function middleware(request: NextRequest) {
   //   - ALLOW-list, not deny-list. The default is now 401.
   //   - keyed on `password_configured`, not `setup_complete`. A box that has a
   //     password but an unfinished wizard is a box with an owner.
-  if (pathname.startsWith("/setup-api/") && isBootstrapWindowOpen()) {
+  if (isSetupApiPath(pathname) && isBootstrapWindowOpen()) {
     if (isBootstrapAllowedPath(pathname)) {
       return NextResponse.next();
     }
@@ -431,7 +432,7 @@ export async function middleware(request: NextRequest) {
   // boots under CLAWBOX_TEST_MODE.
   if (
     process.env.CLAWBOX_TEST_MODE === "1"
-    && (pathname.startsWith("/setup-api/") || isWizardPagePath(pathname))
+    && (isSetupApiPath(pathname) || isWizardPagePath(pathname))
   ) {
     return NextResponse.next();
   }
@@ -444,7 +445,7 @@ export async function middleware(request: NextRequest) {
   // service-to-service auth via a per-install bearer (see
   // src/lib/mcp-token.ts), scoped to /setup-api/* only so the dashboard
   // and login flow still go through the normal session gate.
-  if (pathname.startsWith("/setup-api/")) {
+  if (isSetupApiPath(pathname)) {
     const authHeader = request.headers.get("authorization");
     if (authHeader && verifyMcpBearer(authHeader)) {
       return NextResponse.next();
@@ -505,7 +506,7 @@ export async function middleware(request: NextRequest) {
   // prefix) still redirect below.
   const accept = request.headers.get("accept") || "";
   if (
-    pathname.startsWith("/setup-api/") ||
+    isSetupApiPath(pathname) ||
     pathname.startsWith("/api/") ||
     accept.includes("application/json")
   ) {

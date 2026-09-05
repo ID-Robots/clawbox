@@ -3,6 +3,7 @@ import { getAll } from "@/lib/config-store";
 import { proxyGatewayRequest, redirectToSetup, serveGatewayHTML } from "@/lib/gateway-proxy";
 import { isGatewayStaticPath } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
+import { clawboxNamespaceKind } from "@/lib/clawbox-namespaces";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,33 @@ export async function GET(request: NextRequest) {
     if (!config.setup_complete) {
       return redirectToSetup(request);
     }
+    // A path in ClawBox's OWN namespaces — /setup-api and /login-api for its
+    // endpoints, /setup, /login, /portal, /updating and /app for its pages —
+    // that reached this catch-all is a route that does not exist, and the
+    // gateway serves nothing there. The honest answer is 404: proxied, it came
+    // back 502 from a gateway that had never heard of it, and answered as a
+    // NAVIGATION it came back as the Control UI shell with the gateway token
+    // injected into it — somebody else's application, with a credential in it,
+    // over a ClawBox address the owner mistyped (TASK-631).
+    //
+    // ABOVE the Hermes gate on purpose. That gate answers text/plain for every
+    // path, so leaving this below it made `/setup-api/nope` a JSON 404 on
+    // OpenClaw and a text one on Hermes — a shared surface answering two
+    // shapes by edition.
+    //
+    // The list and the segment-boundary matching live in
+    // src/lib/clawbox-namespaces.ts, beside the evidence.
+    const owned = clawboxNamespaceKind(request.nextUrl.pathname);
+    if (owned) {
+      // Code asked, so code is answered: the endpoint namespaces get the same
+      // `{ error: "Not found" }` shape the real routes under them use.
+      return owned === "api"
+        ? NextResponse.json({ error: "Not found" }, { status: 404 })
+        : new NextResponse("Not found", {
+          status: 404,
+          headers: { "Content-Type": "text/plain" },
+        });
+    }
     // On the Hermes SKU there is no OpenClaw gateway — it is disabled and
     // masked by install.sh — so proxying to 127.0.0.1:18789 is a guaranteed
     // ECONNREFUSED. This route matches EVERY otherwise-unhandled path (it wins
@@ -22,19 +50,6 @@ export async function GET(request: NextRequest) {
     // alone was not enough), so without this check /chat, /sessions and every
     // typo answered with a 500 from the catch below instead of a plain 404.
     if (readEdition() === "hermes") {
-      return new NextResponse("Not found", {
-        status: 404,
-        headers: { "Content-Type": "text/plain" },
-      });
-    }
-    // /setup-api/ is ClawBox's OWN namespace — the route handlers live there
-    // precisely so they cannot collide with the gateway's /api/* — and the
-    // gateway serves nothing under it. A /setup-api path that reached this
-    // catch-all is therefore a route that does not exist, and the honest
-    // answer is 404: proxied, it came back 502 from a gateway that had never
-    // heard of it (or the SPA shell, before the resource rule below), and a
-    // client probing for an endpoint could not tell "not here" from "down".
-    if (request.nextUrl.pathname.startsWith("/setup-api/")) {
       return new NextResponse("Not found", {
         status: 404,
         headers: { "Content-Type": "text/plain" },
