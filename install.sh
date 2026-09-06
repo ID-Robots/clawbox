@@ -748,6 +748,25 @@ OPENCLAW_VERSION="2026.8.1"
 #
 # Current pin: upstream tag v2026.8.19 == "Hermes Agent v0.20.5".
 HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-fcbd1076a93841fa88855acce810e342a5b78101}"
+
+# The OpenAI Codex CLI (TASK-439). The pinned version and the digest that
+# authorises it live in config/codex-target.txt; these two are only WHERE the
+# result lands.
+#
+# The binary the vendor's installer links into ~/.local/bin, and the only path
+# this file ever treats as "the native Codex". `command -v codex` is not that
+# test: ~/.bashrc and as_clawbox_login both put ~/.npm-global/bin AHEAD of
+# ~/.local/bin, so while the npm copy survives it answers for `codex`.
+CODEX_NATIVE_BIN="$CLAWBOX_HOME/.local/bin/codex"
+# Where the installer unpacks its standalone package — deliberately NOT its
+# default, which is $CODEX_HOME (~/.codex). A factory reset removes ~/.codex
+# whole (HOME_REMOVE_PATHS in src/app/setup-api/setup/reset/route.ts), and that
+# is right for the credentials and state it holds; it would be wrong for a
+# 117 MB binary, because the reset leaves the box in AP mode with no internet
+# and ~/.local/bin/codex would dangle until an update ran. Only the installer
+# is told this — nothing exports CODEX_HOME at runtime, so the CLI still reads
+# its auth and config from ~/.codex, which is what the auth-sync timer writes.
+CODEX_PACKAGE_HOME="$CLAWBOX_HOME/.local/share/codex"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
@@ -934,7 +953,10 @@ as_clawbox_login() {
 ensure_clawbox_bashrc_path() {
   # Make ~/.npm-global/bin and ~/.local/bin available in the clawbox user's
   # interactive shells (e.g. the in-UI terminal) so CLIs like openclaw, claude,
-  # codex, gemini, hf, and clawkeep resolve without a full path.
+  # codex, gemini, hf, and clawkeep resolve without a full path. Codex is a
+  # user-local binary since TASK-439; the stanza's own wording is left as it
+  # is, because it is TEXT ALREADY WRITTEN into every shipped box's ~/.bashrc
+  # and rewording it here would only make the two disagree.
   local BASHRC="$CLAWBOX_HOME/.bashrc"
   if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
     cat >> "$BASHRC" <<'PATHEOF'
@@ -6070,6 +6092,12 @@ step_post_update() {
   # already-shipped box has `claude` on it today. Idempotent — a present
   # `claude` short-circuits after one `command -v`, and the wrapper is a copy.
   step_coding_harness || echo "  Warning: coding_harness step failed (non-fatal)"
+  # The Codex CLI. Without this call the pinned native binary would be
+  # fresh-install-only — step_post_update does not run step_ai_tools_install —
+  # and every box in the field would keep the unpinned, unverified npm copy for
+  # good. Idempotent: a box already on the pin does one `codex --version` and
+  # stops.
+  step_codex_cli || echo "  Warning: codex_cli step failed (non-fatal)"
   # On-device TTS: installs/refreshes Kokoro and the voice scripts, and seeds
   # the tts-local-cli provider. Without this call the whole of TASK-383 would
   # be fresh-install-only, and every already-shipped box would keep answering
@@ -7496,6 +7524,198 @@ step_coding_harness() {
   fi
 }
 
+# ── The OpenAI Codex CLI (TASK-439) ──────────────────────────────────────────
+#
+# One field of config/codex-target.txt: 1 = the pinned version, 2 = the sha256
+# of that release's own installer. Comment lines are skipped, and a file that
+# carries no `<version> <sha256>` line answers nothing — which every caller
+# treats as "install nothing", never as a default.
+codex_pin_field() {
+  local file="${CODEX_PIN_FILE:-$PROJECT_DIR/config/codex-target.txt}"
+  [ -f "$file" ] || return 1
+  awk -v n="$1" '
+    /^[[:space:]]*#/ { next }
+    NF >= 2 { print $n; found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$file"
+}
+
+# Is the pinned native Codex the binary at $CODEX_NATIVE_BIN?
+#
+# Asked of the FILE, never through `command -v`: while the npm copy survives it
+# comes first on the login shell's PATH, so a PATH probe answers "not the
+# native one" on a box where the native one is installed and current — and this
+# step would then re-download OpenAI's package on every single update until the
+# npm removal finally succeeded.
+codex_native_is_current() {
+  local want="$1" reported
+  [ -x "$CODEX_NATIVE_BIN" ] || return 1
+  reported="$(as_clawbox_login "'$CODEX_NATIVE_BIN' --version" 2>/dev/null | tr -d '\r' | tail -n1)"
+  # A whole token, so 0.153.40 is not read as 0.153.4, and tolerant of whatever
+  # else the vendor puts on that line.
+  case " $reported " in *" $want "*) return 0 ;; esac
+  return 1
+}
+
+npm_codex_present() {
+  # -e alone is false for a DANGLING symlink, which is what a half-finished npm
+  # uninstall leaves behind. Such a link shadows nothing (it is not executable),
+  # but it is still something left over, and reporting it beats calling the
+  # removal a success over it.
+  [ -e "$NPM_PREFIX/bin/codex" ] || [ -L "$NPM_PREFIX/bin/codex" ]
+}
+
+# Take the npm-installed Codex away, so exactly one codex is on PATH.
+#
+# Called ONLY over a native install that has been verified — never before one,
+# and never over an installer that merely exited 0. A box left with no codex at
+# all is worse than a box still running the old one.
+remove_npm_codex() {
+  npm_codex_present || return 0
+  local rc=0
+  as_clawbox_login "npm uninstall -g @openai/codex --prefix '$NPM_PREFIX'" >/dev/null 2>&1 || rc=$?
+  # That exit code is a DIAGNOSTIC, not the verdict: npm exits non-zero for a
+  # package it never had, and zero for one it failed to unlink. The re-probe is
+  # the verdict.
+  if npm_codex_present; then
+    echo "  WARN: npm uninstall exited $rc and $NPM_PREFIX/bin/codex is still there;" >&2
+    echo "  it comes before ~/.local/bin on PATH, so it still shadows the native Codex." >&2
+    return 1
+  fi
+  echo "  Removed the npm-installed Codex"
+}
+
+# What the box is left running when an install did not happen. Said out loud,
+# because "could not install Codex" and "this box now has no Codex" are
+# different facts and only one of them needs anybody's attention.
+codex_left_as_is() {
+  if [ -x "$CODEX_NATIVE_BIN" ]; then
+    echo "  Keeping the Codex already at $CODEX_NATIVE_BIN" >&2
+  elif npm_codex_present; then
+    echo "  Keeping the npm-installed Codex at $NPM_PREFIX/bin/codex" >&2
+  else
+    echo "  This box has no Codex CLI" >&2
+  fi
+}
+
+# Install the pinned Codex CLI with OpenAI's own installer, and leave exactly
+# one codex on PATH.
+#
+# The vendor's documented installer is `curl -fsSL https://chatgpt.com/codex/
+# install.sh | sh`, which always serves `latest` and cannot be checksummed. The
+# SAME script is attached to every release as an immutable asset, so that is
+# what is fetched, verified against config/codex-target.txt and then run with
+# `--release` pinned. The installer itself resolves the release from
+# releases.openai.com (GitHub Releases is its own fallback), checks the package
+# archive against OpenAI's published codex-package_SHA256SUMS, unpacks it and
+# links ~/.local/bin/codex at it — none of which is reimplemented here.
+#
+# Returns 0 only when `codex` on the owner's PATH IS the pinned native binary.
+ensure_codex_cli() {
+  local version sha url installer actual resolved rc
+
+  version="$(codex_pin_field 1 2>/dev/null || true)"
+  sha="$(codex_pin_field 2 2>/dev/null || true)"
+  if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+    echo "  WARN: config/codex-target.txt carries no '<version> <sha256>' pin; not installing Codex" >&2
+    codex_left_as_is
+    return 1
+  fi
+
+  if codex_native_is_current "$version"; then
+    echo "  OpenAI Codex $version already installed"
+    # Still converge on ONE codex: an earlier run may have installed the binary
+    # and failed to take the npm copy away, and until it goes the owner's
+    # `codex` is still the old one.
+    remove_npm_codex || return 1
+    return 0
+  fi
+
+  url="https://github.com/openai/codex/releases/download/rust-v$version/install.sh"
+  installer="$(mktemp)"
+  # --max-time bounds a stalled vendor: this runs inside step_post_update and
+  # every later recovery step waits behind it. --proto-redir stops a redirect
+  # stepping down to plain HTTP on the way to something we then execute.
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+      --connect-timeout 15 --max-time 300 "$url" -o "$installer" 2>/dev/null \
+    || [ ! -s "$installer" ]; then
+    echo "  WARN: could not download OpenAI's Codex installer from $url" >&2
+    codex_left_as_is
+    rm -f "$installer"
+    return 1
+  fi
+
+  actual="$(sha256sum "$installer" 2>/dev/null | cut -d' ' -f1)"
+  if [ "$actual" != "$sha" ]; then
+    echo "  WARN: the Codex installer for rust-v$version does not match its pinned sha256 — not running it" >&2
+    echo "  expected $sha, got ${actual:-<none>}" >&2
+    codex_left_as_is
+    rm -f "$installer"
+    return 1
+  fi
+
+  # AFTER the download and before the run — both halves paid for on hardware by
+  # the sibling coding CLI (TASK-378). mktemp makes the file root:root 0600 and
+  # it is executed AS the clawbox user, so without this every run answers
+  # "Permission denied"; moved before the curl, fs.protected_regular=2 stops
+  # even root writing a file it does not own in sticky world-writable /tmp and
+  # curl exits 23, "Failure writing output to destination".
+  if ! chown "$CLAWBOX_USER" "$installer"; then
+    echo "  WARN: could not hand the Codex installer to $CLAWBOX_USER; not running it" >&2
+    codex_left_as_is
+    rm -f "$installer"
+    return 1
+  fi
+
+  # </dev/null as well as CODEX_NON_INTERACTIVE=true: an installer that found a
+  # tty here would be asking an unattended update a question nobody can answer.
+  # It DOES notice the npm copy and offer to remove it; under non-interactive
+  # that offer is declined, which is why the removal below is ours to do — and
+  # ours is the honest order, since the vendor's would take the working Codex
+  # away before knowing whether the new one runs.
+  if ! as_clawbox_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' sh '$installer'" </dev/null; then
+    echo "  WARN: OpenAI's Codex installer ran but failed" >&2
+    codex_left_as_is
+    rm -f "$installer"
+    return 1
+  fi
+  rm -f "$installer"
+
+  # Its exit code is not the outcome. Ask the binary.
+  if ! codex_native_is_current "$version"; then
+    echo "  WARN: the Codex installer exited 0 but $CODEX_NATIVE_BIN does not report $version" >&2
+    codex_left_as_is
+    return 1
+  fi
+  echo "  OpenAI Codex $version installed at $CODEX_NATIVE_BIN"
+
+  rc=0
+  remove_npm_codex || rc=1
+
+  # The acceptance this card is about: what the owner gets when they type
+  # `codex` in the box's own terminal, which is PATH order and not the presence
+  # of a file.
+  resolved="$(as_clawbox_login "command -v codex" 2>/dev/null | tr -d '\r' | tail -n1)"
+  if [ "$resolved" != "$CODEX_NATIVE_BIN" ]; then
+    echo "  WARN: \`codex\` still resolves to ${resolved:-nothing}, not $CODEX_NATIVE_BIN" >&2
+    rc=1
+  fi
+  return "$rc"
+}
+
+# Dispatchable on its own and called from step_post_update — the same shape
+# step_coding_harness has, and for the same reason: an in-app update has to
+# deliver this without also reinstalling the Gemini CLI on every box that
+# updates, and every box in the field today carries the npm Codex it replaces.
+step_codex_cli() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the Codex CLI install"
+    return 0
+  fi
+  ensure_codex_cli
+}
+
 step_ai_tools_install() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping Claude/Codex/Gemini CLI install"
@@ -7509,14 +7729,10 @@ step_ai_tools_install() {
 
   ensure_claude_code || true
 
-  # OpenAI Codex CLI (optional)
-  if as_clawbox_login "command -v codex" &>/dev/null; then
-    echo "  OpenAI Codex already installed"
-  elif as_clawbox_login "npm i -g @openai/codex --prefix $NPM_PREFIX"; then
-    echo "  OpenAI Codex installed"
-  else
-    echo "  WARN: OpenAI Codex CLI install failed; skipping (optional, continuing)"
-  fi
+  # OpenAI Codex CLI (optional): the pinned native binary, never an npm global.
+  # Swallowed here for the same reason as Claude Code above — this step must not
+  # abort over an optional tool — and reported honestly inside the function.
+  ensure_codex_cli || true
 
   # Google Gemini CLI (optional)
   if as_clawbox_login "command -v gemini" &>/dev/null; then
@@ -8197,7 +8413,7 @@ step_validate_services() {
 DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
   embed_model
-  chromium_install ai_tools_install coding_harness vnc_install vnc_refresh
+  chromium_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
   # Edition steps must be dispatchable or no in-app update can ever re-bake the
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes

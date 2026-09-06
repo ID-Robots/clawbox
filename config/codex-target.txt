@@ -1,0 +1,15 @@
+# The OpenAI Codex CLI this fleet runs, and the digest that proves what we ran
+# to install it. ONE line, two fields: <version> <sha256 of the installer>.
+#
+#   version — the openai/codex release, installed by the vendor's own installer
+#             as `--release <version>` (its `rust-v<version>` tag).
+#   sha256  — sha256 of that release's own `install.sh` asset, which
+#             install.sh verifies before executing anything.
+#
+# The two are ONE fact and are bumped together: a version without its digest
+# cannot be installed, which is the point. Read by install.sh and
+# install-x64.sh, in the same spirit as config/openclaw-target.txt.
+#
+# 0.153.4 published 2026-09-04; its install.sh asset is byte-identical to the
+# https://chatgpt.com/codex/install.sh that OpenAI's README documents.
+0.153.4 ba92dd27e5c06f0d3bbc58bfa4b9cfb6599cd2742fbb1f92a2765e6c07dedb5a
