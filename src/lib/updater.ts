@@ -8,6 +8,8 @@ import {
   findOpenclawBin,
   GATEWAY_PORT,
   restartGateway,
+  runOpenclawConfigSet,
+  runOpenclawConfigSetBatch,
   openclawIsAbsent,
   gatewayIsAbsent,
 } from "./openclaw-config";
@@ -1774,10 +1776,15 @@ interface CoreMissingPlugin {
  * Asked once, and only for a box whose gateway has already refused readiness
  * over a plugin ClawBox does not manage — a healthy update never pays for it.
  */
-async function coreReportedMissingPlugins(): Promise<Map<string, CoreMissingPlugin>> {
-  const found = new Map<string, CoreMissingPlugin>();
+async function coreReportedMissingPlugins(): Promise<Map<string, CoreMissingPlugin> | null> {
   const payload = (await askCoreToValidateConfig())?.payload;
-  if (!payload) return found;
+  // NULL, not an empty map. "The core could not be asked" and "the core
+  // answered and named none of them" are different facts and the caller says
+  // different things about them — an empty map here would put the sentence
+  // "the core knows this plugin's package" in the update log of a box whose
+  // validator never ran.
+  if (!payload) return null;
+  const found = new Map<string, CoreMissingPlugin>();
   // Read on BOTH exits. The measured shape is `valid: true` with exit 0 — an
   // entry with no package behind it is a warning, not a refusal — but a config
   // that is refused for some other reason carries the same warnings, and a box
@@ -1790,7 +1797,13 @@ async function coreReportedMissingPlugins(): Promise<Map<string, CoreMissingPlug
       ? (CORE_PLUGIN_WARNING_PATH_RE.exec(at)?.[1] ?? "")
       : "";
     if (!configuredId) continue;
-    found.set(normalizeManagedPluginId(configuredId), {
+    // `canonicalPluginId`, the rule every other reader of this marker uses —
+    // it strips the `-provider` suffix as well as the two prefixes. Matching
+    // on `normalizeManagedPluginId` here and `canonicalPluginId` everywhere
+    // else meant a config key of `@openclaw/foo-provider` and a refusal naming
+    // `foo` did not meet, and the box stayed dark. `deepseek` is filed exactly
+    // that way, which is why the canonical rule exists at all.
+    found.set(canonicalPluginId(configuredId), {
       configuredId,
       reason: message,
       spec: CORE_PLUGIN_INSTALL_SPEC_RE.exec(message)?.[1] ?? "",
@@ -1800,81 +1813,171 @@ async function coreReportedMissingPlugins(): Promise<Map<string, CoreMissingPlug
 }
 
 /**
- * Switch one unusable entry off through the CORE's own config writer, and prove
- * it landed.
+ * Is this entry SWITCHED OFF, by the core's own rule?
  *
- * `openclaw config set plugins.entries["<id>"].enabled false` — the same verb
- * and the same bracket-notation key `scripts/gateway-pre-start.sh` uses, not a
- * hand-written JSON patch, and the entry itself is left exactly as the owner
- * had it: only `enabled` moves, so everything he configured is still there for
- * the Retry to switch back on.
+ * `enabled === false` and nothing else. An entry with no `enabled` key at all
+ * is ACTIVE on 2026.8.1 — `resolvePluginActivationDecisionShared` short-circuits
+ * only on an explicit `false` and otherwise falls through to its default
+ * decision — so reading "off" from a missing key would skip exactly the entries
+ * a provider-config flow writes (`{ "config": { … } }`, no `enabled`), leave
+ * the gateway refusing readiness over them and say nothing. The same rule
+ * `pluginConsentRepairIsAllowed` already applies one function away: absent or
+ * unreadable is not an opt-out.
  *
- * The exit code is not the answer. This is bounded, and a spawn killed at its
- * deadline may still have written the file — reporting that as a failure would
- * leave a row saying "still enabled" over a config that says otherwise. The
- * read-back is the verdict, and it is never `|| true`: what it answers is
- * recorded on the row the owner sees.
+ * Deliberately NOT `pluginEntryEnabled`, whose strict `=== true` belongs to its
+ * own caller — the post-`plugins enable` read-back, where "we could not read
+ * the config" must answer "not proved" and keep the badge.
+ *
+ * A config that cannot be read answers FALSE here, and that is right for both
+ * uses: as the guard it means "try the switch-off" (the core has just told us
+ * the entry is there), and as the read-back it means "this is not proved", so
+ * the row says the write did not land rather than claiming it did.
  */
-async function switchOffUnusablePluginEntry(configuredId: string): Promise<boolean> {
+async function pluginEntryExplicitlyDisabled(configuredId: string): Promise<boolean> {
+  const cfg = await readOpenclawConfigForRepair();
+  if (!cfg) return false;
+  const plugins = cfg.plugins && typeof cfg.plugins === "object"
+    ? cfg.plugins as Record<string, unknown>
+    : {};
+  const entries = plugins.entries && typeof plugins.entries === "object"
+    ? plugins.entries as Record<string, unknown>
+    : {};
+  const entry = entries[configuredId];
+  return !!entry && typeof entry === "object"
+    && (entry as Record<string, unknown>).enabled === false;
+}
+
+/**
+ * Switch the stranded entries off through the REPO's own config writer.
+ *
+ * `runOpenclawConfigSetBatch` rather than a bare spawn, and not for tidiness:
+ * it is the writer this repo already owns for this exact key (the Retry route
+ * writes `plugins.entries["<id>"].enabled` with it). It retries
+ * `ConfigMutationConflictError` — whose own doc names back-to-back `config set`
+ * calls as the trigger, which is precisely what eleven stranded entries would
+ * otherwise be — it settles a write killed at its deadline against the config
+ * on disk, and the batch form spends ONE CLI cold start instead of eleven.
+ * That last part is downtime: this runs inside `withGatewayQuiesced`, with the
+ * gateway stopped, so ~12 s and ~2 minutes are the same difference to the owner.
+ *
+ * The batch is ATOMIC, which is the one thing that could make it worse than
+ * the loop: one entry the CLI refuses would take the other ten down with it and
+ * leave the box dark. So a failed batch falls back to one write per entry, and
+ * a single entry that cannot be written costs only itself.
+ *
+ * `openclawChildEnv()` is passed through, and its `delete OPENCLAW_HOME` does
+ * NOT survive `spawnOpenclaw`'s own `{ HOME, ...process.env, ...options.env }`
+ * merge — an inherited `OPENCLAW_HOME` is re-admitted. That is harmless here
+ * for the reason `runCurrentGatewayPreStart` gives: `OPENCLAW_STATE_DIR` and
+ * `OPENCLAW_CONFIG_PATH` are the two canonical CLI overrides and they pin the
+ * child to the real tree whatever else is set.
+ */
+async function switchOffStrandedEntries(entries: readonly CoreMissingPlugin[]): Promise<void> {
+  const writes = entries.map((entry) =>
+    [`plugins.entries["${entry.configuredId}"].enabled`, "false", "--strict-json"]);
+  const options = { timeoutMs: 60_000, env: openclawChildEnv() };
   try {
-    await execFile(
-      OPENCLAW_BIN,
-      ["config", "set", `plugins.entries["${configuredId}"].enabled`, "false", "--strict-json"],
-      { timeout: 60_000, maxBuffer: 4 * 1024 * 1024, env: openclawChildEnv() },
-    );
+    await runOpenclawConfigSetBatch(writes, options);
+    return;
   } catch (err) {
+    if (writes.length === 1) {
+      console.warn(
+        `[Updater] \`config set\` did not complete for "${entries[0].configuredId}"; `
+        + "reading the config back anyway:",
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
     console.warn(
-      `[Updater] \`config set\` did not complete for "${configuredId}"; reading the config back anyway:`,
+      "[Updater] the batched switch-off of the stranded plugin entries did not complete; "
+      + "writing them one at a time so a single refusal cannot keep the rest enabled:",
       err instanceof Error ? err.message : err,
     );
   }
-  return !(await pluginEntryEnabled(configuredId));
+  for (const write of writes) {
+    await runOpenclawConfigSet(write, options).catch((err) => {
+      console.warn(
+        `[Updater] \`config set\` did not complete for ${write[0]}; reading the config back anyway:`,
+        err instanceof Error ? err.message : err,
+      );
+    });
+  }
 }
 
 /**
  * The entries a core bump stranded: enabled, blocking readiness, and with no
  * package behind them (TASK-738).
  *
- * WHY DISABLE RATHER THAN INSTALL. The core names an official package for each
- * one, so installing is technically available — and it is the wrong move here.
- * These entries are not the owner's choices: an older core BUNDLED these
- * plugins, so the config carries an entry he never asked for, and the installed
- * core does not. Fetching eleven npm packages onto a Jetson mid-update for
- * providers nobody uses would cost minutes each, and `plugins install` without
+ * WHAT THE RULE ACTUALLY IS. Not "an older core bundled it" and not "the owner
+ * never asked for it" — neither is knowable here. It is: the gateway's refusal
+ * named this plugin, ClawBox does not manage it, and the installed core says it
+ * has no package for the entry. Whoever put the entry there, the box cannot
+ * load it and cannot report ready while it is on. The blast radius is bounded
+ * by the core's own wording: `plugin not installed: <id> — install the official
+ * external plugin with …` is emitted only for the OFFICIAL EXTERNAL CATALOG; a
+ * genuinely third-party entry gets `plugin not found: <id> (stale config entry
+ * ignored…)`, which `CORE_PLUGIN_NOT_INSTALLED_RE` does not match. So what this
+ * can switch off is an official plugin — one an older core bundled, or one the
+ * owner installed himself and this core bump stranded — and his route back is
+ * the row it files, whose Retry runs the core's own install.
+ *
+ * WHY DISABLE RATHER THAN INSTALL. `plugins install` WITHOUT
  * `--accept-capabilities` leaves the gateway refusing readiness for exactly the
- * same entry — while consenting on his behalf for a plugin ClawBox neither
- * chose nor pinned is precisely what `CLAWBOX_MANAGED_PLUGIN_IDS` exists to
- * prevent. So the entry is switched off, the box comes back, and the install
- * the core named is offered on a Settings row where the owner's press supplies
- * the consent: `/setup-api/plugins/repair` runs `openclaw plugins install
- * <spec> --force --accept-capabilities`, bounded, with the package the CORE
- * named rather than one guessed from the id.
+ * same entry, so the install only helps if ClawBox also consents on the owner's
+ * behalf for a plugin it neither chose nor pinned — precisely what
+ * `CLAWBOX_MANAGED_PLUGIN_IDS` exists to prevent — and eleven npm fetches on a
+ * Jetson mid-update is the wrong cost for a provider nobody may use. So the
+ * entry is switched off, the box comes back, and the install the core named is
+ * offered on a Settings row where the owner's press supplies the consent:
+ * `/setup-api/plugins/repair` runs `openclaw plugins install <spec> --force
+ * --accept-capabilities`, bounded, with the package the CORE named rather than
+ * one guessed from the id.
  *
  * Nothing of the owner's is deleted or overwritten: only `enabled` moves, and
- * an entry that is already `enabled: false` is not touched at all — the core
- * warns about those too (measured), and writing over one would be answering a
- * question he has already answered.
+ * an entry that is already explicitly `enabled: false` is not touched at all —
+ * the core warns about those too (measured), and writing over one would be
+ * answering a question he has already answered.
  */
 async function disableStrandedPluginEntries(blockingIds: Iterable<string>): Promise<void> {
   const wanted = new Set<string>();
-  for (const id of blockingIds) wanted.add(normalizeManagedPluginId(id));
+  for (const id of blockingIds) wanted.add(canonicalPluginId(id));
   if (wanted.size === 0) return;
   const missing = await coreReportedMissingPlugins();
+  const stranded: CoreMissingPlugin[] = [];
   for (const key of wanted) {
+    // Said out loud in every arm rather than skipped in silence: the update log
+    // is where a support session looks for why nothing happened, and each of
+    // these means something different.
+    if (!missing) {
+      console.info(
+        `[Updater] "${key}" is blocking gateway readiness and is not a ClawBox-managed plugin; `
+        + "the core could not be asked whether its package is even installed — leaving it to its owner",
+      );
+      continue;
+    }
     const entry = missing.get(key);
     if (!entry) {
-      // The core knows this plugin's package. Whatever is wrong with it is a
-      // question about a plugin ClawBox did not install, and the owner is the
-      // one who can answer it. Said out loud rather than skipped in silence:
-      // the update log is where a support session looks for why nothing
-      // happened.
       console.info(
         `[Updater] "${key}" is blocking gateway readiness and is not a ClawBox-managed plugin — leaving it to its owner`,
       );
       continue;
     }
-    if (!(await pluginEntryEnabled(entry.configuredId))) continue;
-    const disabled = await switchOffUnusablePluginEntry(entry.configuredId);
+    if (await pluginEntryExplicitlyDisabled(entry.configuredId)) {
+      console.info(
+        `[Updater] "${entry.configuredId}" has no package on this core and is already switched off; leaving it alone`,
+      );
+      continue;
+    }
+    stranded.push(entry);
+  }
+  if (stranded.length === 0) return;
+  await switchOffStrandedEntries(stranded);
+  for (const entry of stranded) {
+    // PROVED AGAINST THE FILE, never against an exit code — the same read-back
+    // the boot script's own `clawbox_plugin_disable` does, and the reason this
+    // is a separate pass: `runOpenclawConfigSetBatch` verifies its own writes,
+    // but the per-entry fallback above can leave some landed and some not.
+    const disabled = await pluginEntryExplicitlyDisabled(entry.configuredId);
     if (disabled) {
       console.info(
         `[Updater] "${entry.configuredId}" has no package on this core and was blocking gateway readiness; `
@@ -1967,6 +2070,13 @@ async function repairPluginsBlockingReadiness(
   // dark over. The core is asked which of them have no package at all, and
   // those entries — and only those — are switched off; the rest are the
   // owner's, and are logged and left (TASK-738).
+  //
+  // RUN ON THE `consentOnly` PATH TOO, deliberately, although that option
+  // exists to keep minutes of CLI work off a failed pre-start. This is one
+  // `config validate` and one batched `config set` — seconds, not the six
+  // minutes per plugin an npm reinstall costs — and unlike a consent record it
+  // is the write that lets the NEXT boot come up, on a path that is about to
+  // report the pre-start's failure either way.
   await disableStrandedPluginEntries([...payload.unmanaged, ...consent.unmanaged]);
   // Payloads FIRST, and the plugins they repaired are then skipped by the
   // consent pass below: `plugins install --accept-capabilities` puts the
@@ -2466,6 +2576,9 @@ async function describeDeadGateway(
   journal: string,
   prefix = `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
 ): Promise<string> {
+  // Asked again rather than reusing the plugin repair's answer: that one was
+  // taken BEFORE the repair rewrote the config, and this is a diagnosis of the
+  // state the gateway just failed from.
   const refusal = await getOpenclawConfigRefusal();
   if (refusal) {
     return `${prefix}: OpenClaw refuses this device's configuration — ${refusal}`;

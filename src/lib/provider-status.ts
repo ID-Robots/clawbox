@@ -140,6 +140,11 @@ export interface ProviderStatusSummary {
    * These are those rows, listed under the provider list with the same notice
    * and the same Retry every other repair uses.
    *
+   * NOT filtered to the `not-installed` stage, on purpose: the rule is "no
+   * other surface will draw this row", not "the updater wrote it". If the boot
+   * script ever marks a plugin outside `ROW_PLUGIN_IDS`, that row belongs here
+   * too rather than nowhere.
+   *
    * Absent rather than empty on a box that could not be asked, and absent on
    * Hermes, where nothing writes the record at all.
    */

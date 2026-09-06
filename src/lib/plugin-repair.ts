@@ -99,6 +99,14 @@ export interface PluginRepairEntry {
    * Retry that ran `plugins install codex` would resolve `@latest`, drift ahead
    * of the pinned runtime and crash every Codex chat — the bug the pin exists
    * to prevent — and `plugins install deepseek` names no ClawHub scheme at all.
+   *
+   * NOT ALWAYS PINNED, and deliberately so for the `not-installed` stage: what
+   * the core names in `plugin not installed: <id> — install … with: openclaw
+   * plugins install @openclaw/<pkg>` is the catalogue's own unversioned
+   * `npmSpec`, because these provider packages are versioned independently of
+   * the core (unlike `@openclaw/codex`). A pin invented here would be a
+   * version this repo made up; the core's own install-time host-version check
+   * is what refuses a build that does not fit.
    */
   spec: string;
 }
@@ -177,6 +185,13 @@ export type PluginRepairRecord = Omit<PluginRepairEntry, "atMs">;
  * the core reports an entry as never installed on a core the update has just
  * put on the box (TASK-738). One record, one reader, one Retry.
  *
+ * THREE WRITERS, no lock, and only one pair can overlap. The boot script's is
+ * excluded by construction — the updater writes inside `withGatewayQuiesced`,
+ * after the pre-start has been waited out. What is left is an owner pressing
+ * Retry (`clearPluginRepair`) while an update is in its gateway-verify step:
+ * last writer wins and one row can be lost. It costs a badge, not a repair, and
+ * an `O_EXCL` lock file is where to start if it ever matters.
+ *
  * A file that EXISTS and cannot be read is a THROW, not an empty map — the
  * distinction `readPluginRepairs` deliberately does not make, because its
  * wrong answer costs a missing badge while this one would rewrite the file and
@@ -207,10 +222,29 @@ export async function recordPluginRepair(row: PluginRepairRecord): Promise<void>
     }
   }
   rows[row.id] = { ...row, atMs: Date.now() };
+  await writeRowsAtomically(target, rows);
+}
+
+/**
+ * Stage the whole file beside itself and rename it into place.
+ *
+ * Temp file plus rename in the same directory, so no reader ever sees half a
+ * file; `pid + uuid` because two writes in flight inside one process must not
+ * stage over each other. AND the temp is removed when the rename fails, the
+ * way the boot script's writer already does it: a full `data/` partition or a
+ * read-only remount would otherwise leave one `plugin-repair.json.tmp.*` per
+ * attempt, for ever, on exactly the box that can least afford them.
+ */
+async function writeRowsAtomically(target: string, rows: unknown): Promise<void> {
   const tmp = `${target}.tmp.${process.pid}.${randomUUID()}`;
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(tmp, `${JSON.stringify(rows, null, 2)}\n`, "utf-8");
-  await fs.rename(tmp, target);
+  try {
+    await fs.writeFile(tmp, `${JSON.stringify(rows, null, 2)}\n`, "utf-8");
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 /**
@@ -235,14 +269,7 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
   const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
   if (keys.length === 0) return false;
   for (const key of keys) delete current[key];
-  const target = pluginRepairPath();
-  // The pid alone is not unique WITHIN a process: two clears in flight at once
-  // would stage over each other and one rename would land a file the other was
-  // still writing.
-  const tmp = `${target}.tmp.${process.pid}.${randomUUID()}`;
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(tmp, `${JSON.stringify(current, null, 2)}\n`, "utf-8");
-  await fs.rename(tmp, target);
+  await writeRowsAtomically(pluginRepairPath(), current);
   return true;
 }
 

@@ -573,6 +573,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.bgPending": "Saved — it takes effect when the assistant next restarts.",
     "settings.bgDegraded": "The device could not be read, so these may not be what it is doing.",
     "settings.providers.needsRepair": "Needs repair",
+    "settings.providers.strandedPlugins": "Plugins needing repair",
     "settings.providers.repairRetry": "Retry",
     "settings.providers.repairing": "Repairing…",
     "settings.providers.repairFailed": "Repair failed",

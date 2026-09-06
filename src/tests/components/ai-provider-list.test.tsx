@@ -458,7 +458,11 @@ describe("AiProviderList — plugins with no row of their own", () => {
     renderList();
 
     expect(await screen.findByTestId("plugin-repair-byteplus")).toBeInTheDocument();
-    expect(screen.getByTestId("ai-provider-plugin-repairs")).toHaveTextContent("byteplus");
+    const group = screen.getByTestId("ai-provider-plugin-repairs");
+    // The label, or a name the owner has never seen is just sitting in his
+    // provider list with nothing saying what it is.
+    expect(group).toHaveTextContent(translations.en["settings.providers.strandedPlugins"]);
+    expect(group).toHaveTextContent("byteplus");
     expect(screen.getByTestId("plugin-repair-byteplus")).toHaveTextContent(/plugin not installed: byteplus/);
     expect(screen.getByTestId("plugin-repair-retry-byteplus")).toBeInTheDocument();
   });

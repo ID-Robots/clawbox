@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -192,8 +192,31 @@ describe("plugin-repair — recording a row from the server side", () => {
   it("leaves no temp file behind", async () => {
     const { recordPluginRepair } = await load();
     await recordPluginRepair(strandedRow);
-    expect(existsSync(path.join(dir, "data", "plugin-repair.json"))).toBe(true);
     expect(readFileSync(path.join(dir, "data", "plugin-repair.json"), "utf-8")).toContain("not-installed");
+    // The staging file is the assertion, not the target: a rename that lands
+    // is easy, and a `.tmp.<pid>.<uuid>` left in `data/` is what a failed one
+    // used to leave behind for ever.
+    expect(readdirSync(path.join(dir, "data"))).toEqual(["plugin-repair.json"]);
+  });
+
+  it("removes the staging file when the rename cannot land", async () => {
+    // A read-only remount or a full partition, on exactly the box that can
+    // least afford one stale temp file per boot. Mocked at the module rather
+    // than spied: `fs/promises` is an ESM namespace and its exports cannot be
+    // redefined in place.
+    vi.doMock("fs/promises", async () => {
+      const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises");
+      const rename = async () => { throw new Error("EROFS: read-only file system"); };
+      return { ...actual, default: { ...actual, rename }, rename };
+    });
+    try {
+      const { recordPluginRepair } = await load();
+      mkdirSync(path.join(dir, "data"), { recursive: true });
+      await expect(recordPluginRepair(strandedRow)).rejects.toThrow("EROFS");
+      expect(readdirSync(path.join(dir, "data"))).toEqual([]);
+    } finally {
+      vi.doUnmock("fs/promises");
+    }
   });
 
   it("is read back as the third stage rather than dropped as an unknown one", async () => {
