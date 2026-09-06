@@ -53,7 +53,7 @@ const PORTAL_TIER_CACHE_MAX_ENTRIES = 64;
 const PORTAL_UNREACHABLE_TTL_MS = 30_000;
 // Enough for the service's own error envelope and nothing like enough for an
 // interception page. Only ever parsed, never shown.
-const MAX_ERROR_BODY_CHARS = 4_096;
+const MAX_ERROR_BODY_BYTES = 4_096;
 
 export interface DeviceInfoResponse {
   tier?: string;
@@ -264,7 +264,13 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
         const planTier = mapPortalPlanTier(body);
         const allowedModels = mapPortalAllowedModels(body);
         rememberTier(token, tier, planTier, allowedModels, now);
-        portalUnreachableCache.delete(token);
+        // Every negative verdict, not just this token's. A device holds ONE
+        // ClawBox AI credential at a time, so a 200 for the one it holds now
+        // says the rejection recorded against the one it held a minute ago is
+        // about a credential that no longer exists — and `clawaiTokenRejectedByPortal`
+        // scans, so leaving it would keep the Providers strip in "Needs
+        // sign-in" for the rest of that entry's window after a re-link.
+        portalUnreachableCache.clear();
         return { source: "portal", tier, planTier, allowedModels };
       }
       // 401/403 is ambiguous AS A TIER: it can mean genuinely Free OR token
@@ -338,15 +344,36 @@ export function clawaiTokenRejectedByPortal(): boolean {
  */
 async function portalRefusedTheToken(res: Response): Promise<boolean> {
   if (res.status !== 401 && res.status !== 403) return false;
-  let text: string;
+  const body = res.body;
+  if (!body) return false;
+  // Counted as it arrives. `res.text()` would buffer whatever the far side
+  // sends BEFORE anything could object to its size, and the 4 s timeout above
+  // bounds duration, not bytes — while a 401/403 is exactly the response an
+  // interception appliance answers with a full HTML page, on a device where
+  // memory is the scarce thing. Past the cap this is not the envelope we are
+  // looking for, and draining the rest of it buys nothing.
+  const reader = body.getReader();
+  const chunks: string[] = [];
+  let total = 0;
   try {
-    text = (await res.text()).slice(0, MAX_ERROR_BODY_CHARS);
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) {
+        total += value.byteLength;
+        if (total > MAX_ERROR_BODY_BYTES) {
+          await reader.cancel().catch(() => {});
+          return false;
+        }
+        chunks.push(Buffer.from(value).toString("utf8"));
+      }
+      if (done) break;
+    }
   } catch {
     return false;
   }
   let payload: unknown;
   try {
-    payload = JSON.parse(text);
+    payload = JSON.parse(chunks.join(""));
   } catch {
     return false;
   }

@@ -374,6 +374,51 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiTier).toBe("pro");
     });
 
+    it("stops accusing the OLD token once a new one works", async () => {
+      // A device holds one ClawBox AI credential. Re-linking mints a new one,
+      // and the rejection recorded against the retired one must not keep the
+      // Providers strip in "Needs sign-in" for the rest of its cache window —
+      // re-linking is the remedy the failure text prints.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token" } }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
+      expect((await (await GET()).json()).clawaiTokenRejected).toBe(true);
+
+      mockReadConfig.mockResolvedValue({
+        ...clawaiConfigBase,
+        models: { providers: { deepseek: { apiKey: "claw_relinked456" } } },
+      } as never);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+      expect(body.clawaiTokenRejected).toBe(false);
+      const { clawaiTokenRejectedByPortal } = await import("@/lib/clawbox-ai-portal-tier");
+      expect(clawaiTokenRejectedByPortal()).toBe(false);
+    });
+
+    it("does not buffer an oversized refusal body looking for a code", async () => {
+      // An interception appliance can answer 401/403 with a full HTML page, and
+      // the 4 s fetch timeout bounds duration, not bytes.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token" }, pad: "x".repeat(8192) }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
+
+      const body = await (await GET()).json();
+      // Past the cap it is not the envelope we are looking for: unreachable,
+      // not rejected — the safe direction.
+      expect(body.clawaiTokenRejected).toBe(false);
+      expect(body.clawaiTier).toBe("pro");
+    });
+
     it("surfaces the portal's entitlement list beside the badge", async () => {
       // The badge is the device-pair stamp; the list is what the account may
       // actually run. A Max account paired while it was on the Pro plan reads
