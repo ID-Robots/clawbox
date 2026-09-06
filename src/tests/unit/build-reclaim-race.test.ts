@@ -93,6 +93,7 @@ describe("install.sh's reclaim cannot destroy a build the other reclaimer restor
       'rm() { wedge; command rm "$@"; }',
       'mv() { wedge; command mv "$@"; }',
       `sed -n '/^build_entry_present() {/,/^}/p' "$1" > "${projectDir}/fns.sh"`,
+      `sed -n '/^drain_build_transients() {/,/^}/p' "$1" >> "${projectDir}/fns.sh"`,
       `sed -n '/^promote_parked_build() {/,/^}/p' "$1" >> "${projectDir}/fns.sh"`,
       `. "${projectDir}/fns.sh"`,
       'promote_parked_build "$PROJECT_DIR/.next" "$PROJECT_DIR/.next-old" 2>&1',
@@ -145,16 +146,34 @@ describe("install.sh's reclaim cannot destroy a build the other reclaimer restor
     expect(strays).toEqual([]);
   });
 
+  /** The shipped reclaim, with nothing wedged into it. */
+  function runReclaimAlone() {
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR="${projectDir}"`,
+      `sed -n '/^build_entry_present() {/,/^}/p' "$1" > "${projectDir}/fns.sh"`,
+      `sed -n '/^drain_build_transients() {/,/^}/p' "$1" >> "${projectDir}/fns.sh"`,
+      `sed -n '/^promote_parked_build() {/,/^}/p' "$1" >> "${projectDir}/fns.sh"`,
+      `. "${projectDir}/fns.sh"`,
+      'promote_parked_build "$PROJECT_DIR/.next" "$PROJECT_DIR/.next-old" 2>&1',
+    ].join(NL);
+    return execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+
   it("finishes a claim a kill interrupted, instead of leaving the build hidden", () => {
     // The cost of claiming under a private name: a SIGKILL between the claim
     // and the placement leaves the box's only build under a name nothing else
     // looks at. The next reclaim has to fold it back.
-    writeBuild(path.join(projectDir, ".next-claim"), "the-interrupted-build");
+    writeBuild(path.join(projectDir, ".next-claim.999999"), "the-interrupted-build");
 
     const script = [
       "set -euo pipefail",
       `PROJECT_DIR="${projectDir}"`,
       `sed -n '/^build_entry_present() {/,/^}/p' "$1" > "${projectDir}/fns.sh"`,
+      `sed -n '/^drain_build_transients() {/,/^}/p' "$1" >> "${projectDir}/fns.sh"`,
       `sed -n '/^promote_parked_build() {/,/^}/p' "$1" >> "${projectDir}/fns.sh"`,
       `. "${projectDir}/fns.sh"`,
       'promote_parked_build "$PROJECT_DIR/.next" "$PROJECT_DIR/.next-old" 2>&1',
@@ -162,7 +181,51 @@ describe("install.sh's reclaim cannot destroy a build the other reclaimer restor
     execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
     expect(buildIdAt(path.join(projectDir, ".next"))).toBe("the-interrupted-build");
-    expect(fs.existsSync(path.join(projectDir, ".next-claim"))).toBe(false);
+    expect(fs.existsSync(path.join(projectDir, ".next-claim.999999"))).toBe(false);
+  });
+
+  it("adopts a build stranded under a discard name by a kill", () => {
+    // The cost of moving `.next` aside instead of deleting it: a process killed
+    // between the move-aside and the placement can leave the box's ONLY build
+    // under `.next-discard.<pid>`, which nothing used to read. Same brick,
+    // new name.
+    writeBuild(path.join(projectDir, ".next-discard.999998"), "the-stranded-build");
+
+    runReclaimAlone();
+
+    expect(buildIdAt(path.join(projectDir, ".next"))).toBe("the-stranded-build");
+    expect(fs.existsSync(path.join(projectDir, ".next-discard.999998"))).toBe(false);
+  });
+
+  it("throws away a discard that holds no build, rather than hoarding it", () => {
+    // A discard is entry-less by construction — it is the `.next` both
+    // reclaimers only ever touch when it HAS no entry — so an orphaned one is
+    // junk. Left on disk it is traced into every later standalone build and
+    // eats the `avail < need*2` headroom that decides whether the next park
+    // keeps a fallback at all.
+    fs.mkdirSync(path.join(projectDir, ".next-discard.999997", "standalone"), { recursive: true });
+    writeBuild(path.join(projectDir, ".next-old"), "the-only-build");
+
+    runReclaimAlone();
+
+    expect(fs.existsSync(path.join(projectDir, ".next-discard.999997"))).toBe(false);
+    expect(buildIdAt(path.join(projectDir, ".next"))).toBe("the-only-build");
+  });
+
+  it("is not latched by a stray claim beside an existing parked build", () => {
+    // With a SHARED claim destination this state was stable and fatal: the
+    // fold-back failed ENOTEMPTY, the claim failed ENOTEMPTY, and both
+    // reclaimers were disabled for ever — precisely in the window where they
+    // are needed. Private destinations make it unrepresentable.
+    writeBuild(path.join(projectDir, ".next-claim.999996"), "a-stray-older-build");
+    writeBuild(path.join(projectDir, ".next-old"), "the-only-current-build");
+
+    runReclaimAlone();
+
+    expect(
+      buildIdAt(path.join(projectDir, ".next")),
+      "the reclaim must still place the current build",
+    ).toBe("the-only-current-build");
   });
 
   it("claims before it destroys, in the text as well as in the behaviour", () => {
@@ -170,7 +233,7 @@ describe("install.sh's reclaim cannot destroy a build the other reclaimer restor
     // accident cannot lose it: nothing destructive may precede the claim.
     const start = INSTALL_SH.indexOf("promote_parked_build() {");
     const body = INSTALL_SH.slice(start, INSTALL_SH.indexOf(`${NL}}`, start));
-    const claim = body.indexOf('mv -T "$kept_dir"');
+    const claim = body.indexOf('mv -T "$kept_dir" "$claim_dir"');
     const destroy = body.search(/\brm -rf "\$build_dir"|\bmv -T "\$build_dir"/);
     expect(claim, "the parked tree must be claimed with a rename").toBeGreaterThan(-1);
     expect(destroy).toBeGreaterThan(claim);
@@ -236,7 +299,7 @@ describe("production-server.js's reclaim cannot destroy a build install.sh resto
   });
 
   it("folds an interrupted claim back and places it", () => {
-    writeBuild(path.join(projectDir, ".next-claim"), "the-interrupted-build");
+    writeBuild(path.join(projectDir, ".next-claim.999999"), "the-interrupted-build");
 
     const warnings: string[] = [];
     new Function("fs", "path", "__dirname", "console", reclaimBlock())(
@@ -247,7 +310,7 @@ describe("production-server.js's reclaim cannot destroy a build install.sh resto
     );
 
     expect(buildIdAt(path.join(projectDir, ".next"))).toBe("the-interrupted-build");
-    expect(fs.existsSync(path.join(projectDir, ".next-claim"))).toBe(false);
+    expect(fs.existsSync(path.join(projectDir, ".next-claim.999999"))).toBe(false);
   });
 
   it("claims before it destroys, in the text as well as in the behaviour", () => {
@@ -268,7 +331,7 @@ describe("the transient names survive the update's own git clean", () => {
     // mid-flight is a box with no build — the same reason `.next-old/` has an
     // entry.
     const ignore = fs.readFileSync(path.join(REPO, ".gitignore"), "utf-8");
-    expect(ignore).toMatch(/^\.next-claim\/$/m);
+    expect(ignore).toMatch(/^\.next-claim\.\*\/$/m);
     expect(ignore).toMatch(/^\.next-discard\.\*\/$/m);
   });
 
@@ -277,7 +340,7 @@ describe("the transient names survive the update's own git clean", () => {
     // standalone output, which is why `.next-old*` is swept there. A transient
     // that happened to exist during a build would be copied the same way.
     const postbuild = fs.readFileSync(path.join(REPO, "scripts", "postbuild.sh"), "utf-8");
-    expect(postbuild).toMatch(/\.next-claim\*/);
+    expect(postbuild).toMatch(/\.next-claim\.\*/);
     expect(postbuild).toMatch(/\.next-discard\.\*/);
   });
 });

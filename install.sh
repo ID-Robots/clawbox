@@ -1465,19 +1465,53 @@ verify_build_present() {
 # Ctrl-C leaves no `.next` at all and the good build under a gitignored
 # directory nothing else in the tree reads. Reclaim it before anything else
 # runs, or the next rename would delete it.
+# Every transient this reclaim can leave behind, and what to do with each.
+#
+# TASK-729's claim is a rename, which is what makes it a mutex — but a rename
+# needs somewhere to move the tree TO, and a process killed mid-claim leaves the
+# box's only build under that name. There are two such names, and BOTH are
+# private per process (`.<pid>` suffixed) so no shared destination can be
+# occupied and latch the reclaim: a stray shared `.next-claim` beside an
+# existing `.next-old` made every later claim fail ENOTEMPTY, on both
+# reclaimers, for ever.
+#
+# So the recovery is one drain over both globs, run before either reclaimer
+# decides anything:
+#   - an orphan with no build entry is junk and goes (a discard is entry-less by
+#     construction — it is the `.next` both reclaimers only ever touch when it
+#     has no entry — so a LIVE one loses nothing here, and its owner already
+#     copes with a discard that is gone);
+#   - an orphan WITH a build is a build, and is adopted under the parked name a
+#     rename at a time. Adopting a live claimer's tree is safe by the same
+#     property the claim rests on: the victim's placement rename then fails, it
+#     stands down, and the build is under `.next-old` for whoever claims next.
+#   - an orphan with a build while `.next-old` already holds one is a duplicate
+#     of a fallback we already have. It is REPORTED and left, never destroyed:
+#     this cannot prove which of the two is wanted, and the next park clears
+#     `.next-old` and adopts it on the run after.
+drain_build_transients() {
+  local root="$1" kept_dir="$2" orphan
+  for orphan in "$root"/.next-claim.* "$root"/.next-discard.*; do
+    [ -e "$orphan" ] || continue
+    if ! build_entry_present "$orphan"; then
+      rm -rf "$orphan" || true
+      continue
+    fi
+    if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
+      echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
+    else
+      echo "  Note: $(basename "$orphan") holds a build and $kept_dir already does — leaving it for the next run" >&2
+    fi
+  done
+}
+
 promote_parked_build() {
   local build_dir="${1:-$PROJECT_DIR/.next}" kept_dir="${2:-$PROJECT_DIR/.next-old}"
-  local claim_dir="${build_dir%/.next}/.next-claim" discard_dir
+  local root="${build_dir%/.next}" claim_dir discard_dir
+  claim_dir="${build_dir%/.next}/.next-claim.$$"
   discard_dir="${build_dir%/.next}/.next-discard.$$"
 
-  # A claim a kill interrupted left the build under the claim name. Fold it back
-  # under the parked name so the one path below handles both. `mv -T` is a
-  # rename, so two processes doing this produce one winner and one failure, and
-  # a `.next-old` that is already there refuses the move rather than nesting
-  # the tree inside it.
-  if build_entry_present "$claim_dir"; then
-    mv -T "$claim_dir" "$kept_dir" 2>/dev/null || true
-  fi
+  drain_build_transients "$root" "$kept_dir"
 
   # `-e`, and `-L` beside it: for the nested standalone layout `postbuild`
   # supports, `.next/standalone/server.js` is a SYMLINK to an absolute path
@@ -1495,15 +1529,17 @@ promote_parked_build() {
   # its own rename into a best-effort catch, leaving the box with NEITHER tree
   # — the exact outcome the park exists to prevent.
   #
-  # A rename is atomic and has exactly one winner, so the claim goes first and
-  # nothing is destroyed before it: the loser gets a failed `mv` and returns
-  # having touched nothing.
+  # A rename of the SOURCE is atomic and has exactly one winner, so the claim
+  # goes first and nothing is destroyed before it: the loser gets a failed `mv`
+  # and returns having touched nothing. The destination is private, so it can
+  # never be occupied by somebody else's leftovers.
   if ! mv -T "$kept_dir" "$claim_dir" 2>/dev/null; then
-    # ENOENT means the other reclaimer took it — a normal outcome. Anything
-    # else (a read-only rootfs, EACCES, ENOSPC) is a real failure, and the tree
-    # still being there is how this tells them apart. Saying "someone else got
-    # there first" over a box that cannot move its own directories would be a
-    # false cause in the one line an operator triages from.
+    # A tree that is no longer there was taken by the other reclaimer — a normal
+    # outcome. One that IS still there could not be moved, which is a real
+    # failure (a read-only rootfs, EACCES, ENOSPC) and reads differently to an
+    # operator. Saying "someone else got there first" over a box that cannot
+    # move its own directories would be a false cause in the line they triage
+    # from.
     if [ -e "$kept_dir" ]; then
       echo "  Warning: could not claim the parked build at $kept_dir — leaving it where it is" >&2
     fi
@@ -1513,15 +1549,15 @@ promote_parked_build() {
   # Everything from here destroys only PRIVATE names. `.next` is moved aside
   # rather than deleted, so even if the "it has no build entry" judgement above
   # was raced by the other reclaimer placing a good one, nothing is lost: the
-  # branch below puts it back.
+  # branch below puts it back, and a kill in between leaves it for the drain.
   mv -T "$build_dir" "$discard_dir" 2>/dev/null || true
   if mv -T "$claim_dir" "$build_dir" 2>/dev/null; then
-    rm -rf "$discard_dir"
+    rm -rf "$discard_dir" || true
   else
-    # Our claim was taken by the other reclaimer's fold-back above, which means
-    # it is placing this same build. Return what we moved aside and get out of
-    # its way; the tree we were carrying is not lost, it is in its hands.
-    mv -T "$discard_dir" "$build_dir" 2>/dev/null || rm -rf "$discard_dir"
+    # Our claim was adopted by the other reclaimer's drain, which means it is
+    # placing this same build. Return what we moved aside and get out of its
+    # way; the tree we were carrying is not lost, it is in its hands.
+    mv -T "$discard_dir" "$build_dir" 2>/dev/null || rm -rf "$discard_dir" || true
     return 0
   fi
 

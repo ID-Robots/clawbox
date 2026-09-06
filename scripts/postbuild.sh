@@ -127,7 +127,7 @@ SDIR="$(dirname "$SRVJS")"
 # that happened to run while one of them existed would trace it in exactly the
 # way it traces `.next-old`.
 for swept in "$STANDALONE"/.next-old* "$SDIR"/.next-old* \
-             "$STANDALONE"/.next-claim* "$SDIR"/.next-claim* \
+             "$STANDALONE"/.next-claim.* "$SDIR"/.next-claim.* \
              "$STANDALONE"/.next-discard.* "$SDIR"/.next-discard.*; do
   [ -e "$swept" ] || continue
   echo "postbuild: removing $swept — a parked previous build was traced into the standalone output" >&2

@@ -779,10 +779,11 @@ try {
   // parked, and `existsSync` would call the box's only build absent.
   const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
   const nextDir = path.join(__dirname, ".next");
-  // The claim name is SHARED with install.sh's promote_parked_build, and taking
-  // it is a rename — see the block that uses it below.
-  const claimDir = path.join(__dirname, ".next-claim");
-  const claimEntry = path.join(claimDir, "standalone", "server.js");
+  // BOTH transients are private per process. The mutex is the atomic rename of
+  // the SOURCE (`.next-old`); sharing a destination buys nothing for that and
+  // costs a latch — a stray shared `.next-claim` beside an existing `.next-old`
+  // made every later claim fail ENOTEMPTY, here and in install.sh, for ever.
+  const claimDir = path.join(__dirname, `.next-claim.${process.pid}`);
   const discardDir = path.join(__dirname, `.next-discard.${process.pid}`);
   /**
    * A rename that answers WHY it failed instead of throwing.
@@ -797,13 +798,26 @@ try {
     try { fs.renameSync(from, to); return null; } catch (err) { return err; }
   };
 
-  // A claim a kill interrupted left the build under the claim name, where
-  // nothing looks for it. Fold it back under the parked name so the one block
-  // below handles both — a rename again, so this cannot take a tree from a
-  // reclaim that is mid-flight without that reclaim noticing and standing down.
-  if (present(claimEntry)) {
-    console.warn("[production-server] A previous reclaim left the parked build under .next-claim — folding it back.");
-    renameQuiet(claimDir, parkedDir);
+  // The drain, and install.sh's `drain_build_transients` is its twin — keep the
+  // two in step. A process killed mid-claim leaves the box's only build under a
+  // private name nothing else looks at, so every orphan is dealt with before
+  // either reclaimer decides anything: junk goes, a build is adopted under the
+  // parked name by a rename (safe against a LIVE owner, whose placement then
+  // fails and which stands down), and a build that would displace a parked one
+  // is reported and left rather than destroyed.
+  const hasEntry = (dir) => present(path.join(dir, "standalone", "server.js"));
+  for (const name of fs.readdirSync(__dirname)) {
+    if (!name.startsWith(".next-claim.") && !name.startsWith(".next-discard.")) continue;
+    const orphan = path.join(__dirname, name);
+    if (!hasEntry(orphan)) {
+      fs.rmSync(orphan, { recursive: true, force: true });
+      continue;
+    }
+    if (renameQuiet(orphan, parkedDir) === null) {
+      console.warn(`[production-server] Adopted a build left behind by an interrupted reclaim (${name}).`);
+    } else {
+      console.warn(`[production-server] ${name} holds a build and .next-old already does — leaving it for the next run.`);
+    }
   }
 
 
