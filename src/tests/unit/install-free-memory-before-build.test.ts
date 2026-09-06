@@ -98,14 +98,16 @@ function sourceInstallShellFns(tmp: string): string[] {
     "llamacpp_pid_if_running",
     "pause_engine_unit",
     "pause_engine_user_unit",
+    "forget_paused_engines",
     "resume_paused_engines",
     "free_memory_for_build",
   ];
   return [
     `: > "${tmp}/fns.sh"`,
-    // The top-level state the pair keeps between the stop and the start. Cut
-    // from install.sh too, so a test cannot pass by declaring it itself.
-    `grep -E '^PAUSED_ENGINE_[A-Z_]+=' "$1" >> "${tmp}/fns.sh" || true`,
+    // The top-level state the pair keeps between the stop and the start, and
+    // the settle the check waits out. Cut from install.sh too, so a test cannot
+    // pass by declaring them itself.
+    `grep -E '^(PAUSED_ENGINE_[A-Z_]+|ENGINE_SETTLE_S)=' "$1" >> "${tmp}/fns.sh" || true`,
     ...fns.map((f) => `sed -n '/^${f}() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`),
     `. "${tmp}/fns.sh"`,
   ];
@@ -540,6 +542,9 @@ describe("free_memory_for_build gives back what it took", () => {
       { mode: 0o755 },
     );
     fs.writeFileSync(path.join(tmp, "bin", "sync"), `#!/bin/sh${NL}exit 0${NL}`, { mode: 0o755 });
+    // The settle is real seconds on a box and nothing this file is about; the
+    // stub keeps the suite fast. That the settle EXISTS is asserted as text.
+    fs.writeFileSync(path.join(tmp, "bin", "sleep"), `#!/bin/sh${NL}exit 0${NL}`, { mode: 0o755 });
   });
 
   afterEach(() => {
@@ -665,17 +670,65 @@ describe("free_memory_for_build gives back what it took", () => {
 describe("both stops an update performs have a start", () => {
   const POST_UPDATE = shellCode(extractShellFunction("step_post_update"));
 
-  it("do_rebuild resumes on the success path and on the failure path", () => {
-    // Above the `rc` branch rather than inside both of its arms: an exit added
-    // to either arm later cannot then skip it, which is how the stop came to
-    // have no start in the first place.
-    const resumeIdx = DO_REBUILD.indexOf("resume_paused_engines");
+  it("do_rebuild accounts for the paused engines on BOTH of its exits", () => {
+    // Every arm has to end in one of the two verbs. The failure arm resumes
+    // (nothing reboots after it — errexit ends step_rebuild_reboot before its
+    // `reboot`); the success arm resumes unless the caller announced a reboot,
+    // in which case it hands them over explicitly rather than dropping them.
     const branchIdx = DO_REBUILD.search(/if \[ "\$rc" -ne 0 \]/);
-    expect(resumeIdx).toBeGreaterThan(-1);
     expect(branchIdx).toBeGreaterThan(-1);
-    expect(resumeIdx).toBeLessThan(branchIdx);
-    // And after the build, or it would hand the memory back before it is used.
-    expect(DO_REBUILD.indexOf("run_next_build")).toBeLessThan(resumeIdx);
+    const failureArm = DO_REBUILD.slice(branchIdx, DO_REBUILD.indexOf('return "$rc"'));
+    const successArm = DO_REBUILD.slice(DO_REBUILD.indexOf('return "$rc"'));
+    expect(failureArm).toContain("resume_paused_engines");
+    expect(successArm).toContain("resume_paused_engines");
+    expect(successArm).toContain("forget_paused_engines");
+    // After the build in both cases, or it would hand the memory back before
+    // it is used.
+    expect(DO_REBUILD.indexOf("run_next_build")).toBeLessThan(branchIdx);
+  });
+
+  it("resumes AFTER the restore on the failure arm, not before it", () => {
+    // restore_previous_build gives the dashboard a fixed twenty seconds to
+    // answer on :80. This arm is the memory-starved one by definition, so four
+    // model servers asked for first would make a slow dashboard look dead.
+    const branchIdx = DO_REBUILD.search(/if \[ "\$rc" -ne 0 \]/);
+    const failureArm = DO_REBUILD.slice(branchIdx);
+    expect(failureArm.indexOf("restore_previous_build"))
+      .toBeLessThan(failureArm.indexOf("resume_paused_engines"));
+  });
+
+  it("does not spin four model servers up seconds before a reboot", () => {
+    // step_rebuild_reboot is the in-app updater's step. On the arm that really
+    // reboots, the engines are systemd's to bring back; starting them here
+    // restores nothing that survives and lengthens the shutdown the updater is
+    // already waiting through.
+    const STEP = shellCode(extractShellFunction("step_rebuild_reboot"));
+    expect(STEP).toContain("do_rebuild --reboot-follows");
+    const testArm = STEP.slice(0, STEP.indexOf("do_rebuild --reboot-follows"));
+    expect(testArm, "test mode does not reboot, so it takes the resuming call")
+      .toMatch(/is_test_mode; then\s*\n\s*do_rebuild\s*\n/);
+  });
+
+  it("cannot be aborted between the pause and the resume by the park", () => {
+    // errexit is live in do_rebuild (both callers invoke it bare) and
+    // set_previous_build_aside's `rm -rf` and `mv` can fail on a full disk. As
+    // a bare statement it killed the shell with every engine stopped and no
+    // resume — the state the pair exists to prevent, on exactly the pressured
+    // box where it is most likely.
+    expect(DO_REBUILD).toMatch(/elif ! set_previous_build_aside/);
+  });
+
+  it("waits before it believes a Type=simple unit came up", () => {
+    // systemd calls a Type=simple unit active the instant it forks, and every
+    // unit in the pair is Type=simple — so `is-active` asked immediately after
+    // `start` says no more than the exit status does.
+    const RESUME = shellCode(findShellFunction("resume_paused_engines") ?? "");
+    const start = RESUME.indexOf("systemctl start");
+    const settle = RESUME.indexOf("sleep \"$ENGINE_SETTLE_S\"");
+    const check = RESUME.indexOf("is-active");
+    expect(start).toBeGreaterThan(-1);
+    expect(settle).toBeGreaterThan(start);
+    expect(check).toBeGreaterThan(settle);
   });
 
   it("step_post_update's own ollama stop is paired too", () => {
@@ -698,5 +751,12 @@ describe("both stops an update performs have a start", () => {
     const RESUME = findShellFunction("resume_paused_engines");
     expect(RESUME, "resume_paused_engines must exist for the pair to close").not.toBeNull();
     expect(shellCode(RESUME ?? "")).not.toMatch(/llama/i);
+    // Asserted where it is ENFORCED, not only where it shows: the llama.cpp
+    // branch of free_memory_for_build must never feed the pause helpers, or the
+    // exclusion would move into the arrays and this file would stay green.
+    const llamaBranch = FREE_MEMORY.slice(FREE_MEMORY.indexOf("llamacpp_pid_if_running"));
+    expect(llamaBranch.length).toBeGreaterThan(0);
+    expect(llamaBranch).not.toContain("pause_engine_unit");
+    expect(llamaBranch).not.toContain("pause_engine_user_unit");
   });
 });

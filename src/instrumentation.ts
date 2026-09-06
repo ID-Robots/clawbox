@@ -248,12 +248,22 @@ export async function register() {
     // Delayed past the boot rush so the health probe is not part of it; the
     // request path arms its own timer, so a search in the meantime loses
     // nothing. See armIdleStopIfRunning.
+    //
+    // OLLAMA TOO, since TASK-724. It is the same system unit shape and the same
+    // ten-minute standby, and install.sh's update path now STARTS it again
+    // after the rebuild that stopped it — from a root shell, which cannot arm a
+    // timer that lives in this process. Without this line every update ended
+    // with `ollama serve` resident and no idle stop for it until something
+    // happened to go through the proxy. Both are no-ops for a unit that is not
+    // running, so a box that never had one loses nothing.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { armIdleStopIfRunning } = require('./lib/local-ai-runtime')
     const rearm = setTimeout(() => {
-      void armIdleStopIfRunning('embed').catch((err: unknown) => {
-        console.warn('[instrumentation] Could not re-arm the embedder idle stop:', err instanceof Error ? err.message : err)
-      })
+      for (const provider of ['embed', 'ollama'] as const) {
+        void armIdleStopIfRunning(provider).catch((err: unknown) => {
+          console.warn(`[instrumentation] Could not re-arm the ${provider} idle stop:`, err instanceof Error ? err.message : err)
+        })
+      }
     }, 15_000)
     rearm.unref?.()
   } catch (err) {

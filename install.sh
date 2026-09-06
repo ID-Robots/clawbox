@@ -1344,31 +1344,56 @@ pause_engine_user_unit() {
     || echo "  Warning: could not stop $unit" >&2
 }
 
-# Start back every engine this run stopped, and PROVE each one came back.
+# How long a Type=simple unit is given to prove it did not fork and die.
+#
+# systemd calls a Type=simple unit ACTIVE the instant it forks, and every unit
+# in this pair is Type=simple (config/clawbox-embed.service, the kokoro and
+# whisper units scripts/install-voice.sh writes, and ollama's upstream unit).
+# So `is-active` asked immediately after `start` says no more than the exit
+# status does; asked again after a settle it separates a server that came up
+# from one that exited two seconds later — which clawbox-embed.service, with
+# `Restart=no`, will not retry.
+ENGINE_SETTLE_S="${CLAWBOX_ENGINE_SETTLE_S:-3}"
+
+# Start back every engine this run stopped, and check each one after a settle.
 #
 # The stop half of this pair has existed since TASK-709; the start half did
-# not. Measured on the OpenClaw box 2026-09-05 and again on every deploy of the
-# 2026-09-06 run: the update stopped ollama.service so `next build` would fit,
-# the build succeeded, the updater reported `phase=completed` — and the box was
-# left with local AI dead until somebody noticed and started it by hand. The
-# update's own report said the box was fine while a service the update had
-# stopped was still down, which is the false-success class this codebase keeps
-# producing (TASK-724).
+# not. Measured on the OpenClaw box 2026-09-05 and on the Hermes box 2026-09-06:
+# step_post_update stopped ollama.service at 07:44:02, one second before the
+# step finished, and the updater reported the update complete; three hours later
+# the unit was still inactive because nothing had happened to ask for it. These
+# engines are on-demand — the local-AI proxy wakes ollama and the embedder,
+# `tts/warm` and the speak path wake the voice — so what the update leaves
+# behind is not a dead box but a box in a state it was not in before, whose
+# next use pays a cold start it did not have to. An update should hand the box
+# back as it found it, and saying "completed" over an engine it stopped and did
+# not restart is the false-success class (TASK-724).
 #
-# `is-active` AFTER the start, never the exit status of `systemctl start`:
-# systemd answers 0 for a unit whose ExecStart forked and then died, so taking
-# the exit code as the outcome would be the same false success one level down.
+# Never fails the update: refusing an otherwise-good update over one engine
+# would strand the box on the old build, which is strictly worse. What a failed
+# restart gets is a named [WARN] line on this step's stderr — the step's journal
+# — and nothing else. It deliberately does NOT go through
+# record_provision_failure: that channel turns the step's exit code non-zero,
+# which would paint a whole good update red over a voice engine, and there is no
+# quieter surface for it today. Whoever adds one should start here.
 #
-# Never fails the update. An engine that refuses to come back is reported in
-# the register of the post-update smokes and left to the owner: refusing an
-# otherwise-good update over it would strand the box on the old build, which is
-# strictly worse than a named warning about one engine.
+# RESIDUAL, stated rather than hidden: a shell SIGKILLed between the pause and
+# this call resumes nothing. That is not hypothetical — run_next_build's own
+# comment records this shell as a documented OOM-kill target (TASK-709) — and
+# nothing in bash can survive it. The box is then in exactly the pre-fix state
+# for those engines, and a reboot (which starts what is enabled) or the first
+# request through the proxy is what ends it.
 resume_paused_engines() {
-  local unit
+  local unit uid_dir
   if [ "${#PAUSED_ENGINE_UNITS[@]}" -gt 0 ]; then
     for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
       echo "  Starting $unit again (it was running before)..."
       systemctl start "$unit" 2>/dev/null || true
+    done
+    # One settle for the whole set rather than one each: they are independent,
+    # and the update has already paid for the starts.
+    sleep "$ENGINE_SETTLE_S"
+    for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
       if systemctl is-active --quiet "$unit" 2>/dev/null; then
         echo "    [ok] $unit is back"
       else
@@ -1377,25 +1402,39 @@ resume_paused_engines() {
     done
   fi
   if [ "${#PAUSED_ENGINE_USER_UNITS[@]}" -gt 0 ] && [ -n "$PAUSED_ENGINE_UID" ]; then
-    for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
-      echo "  Starting $unit again (it was running before)..."
-      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$PAUSED_ENGINE_UID" \
-        systemctl --user start "$unit" 2>/dev/null || true
-      if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$PAUSED_ENGINE_UID" \
-          systemctl --user is-active --quiet "$unit" 2>/dev/null; then
-        echo "    [ok] $unit is back"
-      else
-        echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
-      fi
-    done
+    uid_dir="/run/user/$PAUSED_ENGINE_UID"
+    # The same test the pause side applies. A session that ended during the
+    # build (no linger, the last login closed) leaves nothing to start into, and
+    # a [WARN] about that would be a false failure over a box that is fine.
+    if [ ! -d "$uid_dir" ]; then
+      echo "  The clawbox user has no session bus any more — leaving ${PAUSED_ENGINE_USER_UNITS[*]} to the next login"
+    else
+      for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+        echo "  Starting $unit again (it was running before)..."
+        sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="$uid_dir" \
+          systemctl --user start "$unit" 2>/dev/null || true
+      done
+      sleep "$ENGINE_SETTLE_S"
+      for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+        if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="$uid_dir" \
+            systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+          echo "    [ok] $unit is back"
+        else
+          echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+        fi
+      done
+    fi
   fi
-  # Emptied so a second call cannot start an engine the box has since stopped
-  # on purpose, and so the pair below (step_post_update) accounts only for what
-  # IT paused.
+  forget_paused_engines
+  return 0
+}
+
+# Drop the record without acting on it — for the one caller that hands the
+# engines to something else (a reboot).
+forget_paused_engines() {
   PAUSED_ENGINE_UNITS=()
   PAUSED_ENGINE_USER_UNITS=()
   PAUSED_ENGINE_UID=""
-  return 0
 }
 
 # The llama.cpp server is deliberately NOT in that pair. It has no unit: the
@@ -1851,10 +1890,14 @@ run_next_build() {
 
 # Stop the setup service, free memory, reinstall, and rebuild — without ever
 # leaving the box with no build at all.
+# `do_rebuild [--reboot-follows]`. The flag is the caller telling this function
+# that a reboot comes next, which decides one thing only: whether the engines
+# freed for the build are started again here or left to systemd.
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
-  local rc=0 built=0
+  local rc=0 built=0 reboot_follows=0
+  if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
 
   echo "Stopping clawbox-setup.service for rebuild..."
   systemctl stop clawbox-setup.service 2>/dev/null || true
@@ -1886,8 +1929,17 @@ do_rebuild() {
     rc=1
   elif ! ensure_node_pty; then
     rc=1
+  # A CONDITION, like its two neighbours above, and for a reason the neighbours
+  # did not have: errexit is live in this function (both callers invoke it
+  # bare), and set_previous_build_aside's `rm -rf` and `mv` can legitimately
+  # fail on a full or busy filesystem. A bare call there killed the shell
+  # between the engine pause and the resume below — leaving every engine
+  # stopped, which is the state this pair exists to prevent, on exactly the
+  # pressured box where it is most likely.
+  elif ! set_previous_build_aside "$build_dir" "$kept_dir"; then
+    echo "Error: could not set the current build aside" >&2
+    rc=1
   else
-    set_previous_build_aside "$build_dir" "$kept_dir"
     echo "Running bun build..."
     built=1
     run_next_build || rc=$?
@@ -1896,20 +1948,35 @@ do_rebuild() {
     fi
   fi
 
-  # The build is over either way, so the engines it borrowed the memory from
-  # come back HERE — on the success path and on the failure path alike. Placed
-  # ABOVE the branch rather than inside both of its arms so that an exit added
-  # to either arm later cannot skip it, which is how the stop came to have no
-  # start in the first place.
-  resume_paused_engines
-
   if [ "$rc" -ne 0 ]; then
     echo "Error: rebuild failed (exit $rc)" >&2
     restore_previous_build "$build_dir" "$kept_dir" "$built" || true
+    # AFTER the restore, not before it: restore_previous_build gives the
+    # dashboard a fixed twenty seconds to answer on :80 before it reports the
+    # box DOWN, and this arm is by definition the memory-starved one. Four
+    # model servers asked for at the same moment would make a dashboard that is
+    # merely slow look dead — a false failure on the recovery path.
+    #
+    # Reached on this arm whichever caller we have: `reboot` in
+    # step_rebuild_reboot is BELOW its `do_rebuild`, and errexit ends the step
+    # before it.
+    resume_paused_engines
     return "$rc"
   fi
 
   rm -rf "$kept_dir"
+  if [ "$reboot_follows" = "1" ]; then
+    # The caller reboots in a moment. Starting ollama, the ~2 GB embedder and
+    # both voice engines seconds before shutdown restores nothing that survives
+    # it, and it lengthens the very shutdown the updater is waiting through
+    # (REBUILD_TAKEOVER_TIMEOUT_MS). systemd starts what is enabled on the way
+    # back up, and the rest are on-demand — which is what the reboot leaves
+    # them as either way.
+    echo "  Leaving the paused engines to the reboot that follows this step"
+    forget_paused_engines
+  else
+    resume_paused_engines
+  fi
   echo "  Build complete"
 }
 
@@ -7317,7 +7384,14 @@ step_rebuild_reboot() {
   # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
   # sees the new restore.py / scheduler logic.
   step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
-  do_rebuild
+  # The flag, on the arm that really reboots: see do_rebuild. In test mode
+  # nothing reboots, so the engines this rebuild stopped are this function's to
+  # give back and do_rebuild is called without it.
+  if is_test_mode; then
+    do_rebuild
+  else
+    do_rebuild --reboot-follows
+  fi
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
     systemctl restart clawbox-setup.service
