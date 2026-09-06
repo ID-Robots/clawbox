@@ -70,7 +70,7 @@ esac
 ALLOWED_STEPS="
 bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install
 ollama_install llamacpp_install llamacpp_model embed_model chromium_install ai_tools_install
-coding_harness vnc_install vnc_refresh openclaw_setup openclaw_install
+coding_harness codex_cli vnc_install vnc_refresh openclaw_setup openclaw_install
 openclaw_patch openclaw_config openclaw_models openclaw_tts edition_lock
 edition_foreign_teardown hermes_install hermes_edition network_setup
 set_hostname set_timezone setup_config system_config git_pull build rebuild rebuild_reboot

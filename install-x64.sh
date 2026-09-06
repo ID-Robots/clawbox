@@ -1010,6 +1010,141 @@ step_chromium_install() {
   ensure_playwright_chromium
 }
 
+# ── The OpenAI Codex CLI (TASK-439) ──────────────────────────────────────────
+#
+# The device installer's twin, kept deliberately small and parallel to it. Same
+# pin file — one `<version> <sha256>` line in config/codex-target.txt, so this
+# host and the fleet cannot end up on two different builds — same vendor
+# installer, the same refusal to run a script whose digest is not the pinned
+# one, and the same order: install the native binary, prove it, and only then
+# take the npm copy away. The installer resolves x86_64-unknown-linux-musl here
+# on its own.
+CODEX_NATIVE_BIN="$CLAWBOX_HOME/.local/bin/codex"
+# NOT the installer's default package root ($CODEX_HOME, ~/.codex): that
+# directory is the CLI's auth and state. Kept identical to install.sh, where a
+# factory reset removes ~/.codex whole, so the two hosts have one layout.
+CODEX_PACKAGE_HOME="$CLAWBOX_HOME/.local/share/codex"
+
+codex_pin_field() {
+  local file="${CODEX_PIN_FILE:-$PROJECT_DIR/config/codex-target.txt}"
+  [ -f "$file" ] || return 1
+  awk -v n="$1" '
+    /^[[:space:]]*#/ { next }
+    NF >= 2 { print $n; found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$file"
+}
+
+# By path, never through `command -v`: ~/.npm-global/bin comes first on this
+# PATH too, so while the npm copy survives it is what answers for `codex`.
+codex_native_is_current() {
+  local want="$1" reported
+  [ -x "$CODEX_NATIVE_BIN" ] || return 1
+  # `|| true`: under `set -euo pipefail` a binary that will not exec would fail
+  # the pipeline, fail the assignment and end the whole run, over the very case
+  # this line exists to detect.
+  reported="$(as_user_login "'$CODEX_NATIVE_BIN' --version" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+  case " $reported " in *" $want "*) return 0 ;; esac
+  return 1
+}
+
+npm_codex_present() {
+  # -L as well as -e: a half-finished npm uninstall leaves a dangling symlink.
+  [ -e "$NPM_PREFIX/bin/codex" ] || [ -L "$NPM_PREFIX/bin/codex" ]
+}
+
+remove_npm_codex() {
+  npm_codex_present || return 0
+  local rc=0
+  as_user_login "npm uninstall -g @openai/codex --prefix '$NPM_PREFIX'" >/dev/null 2>&1 || rc=$?
+  # npm exits non-zero for a package it never had and zero for one it failed to
+  # unlink, so the re-probe is the verdict and that code only a diagnostic.
+  if npm_codex_present; then
+    echo "  WARN: npm uninstall exited $rc and $NPM_PREFIX/bin/codex is still there; it shadows the native Codex on PATH" >&2
+    return 1
+  fi
+  echo "  Removed the npm-installed Codex"
+}
+
+ensure_codex_cli() {
+  local version sha url installer actual
+
+  version="$(codex_pin_field 1 2>/dev/null || true)"
+  sha="$(codex_pin_field 2 2>/dev/null || true)"
+  if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    || ! printf '%s' "$sha" | grep -Eq '^[0-9a-f]{64}$'; then
+    echo "  WARN: config/codex-target.txt carries no '<version> <sha256>' pin; not installing Codex" >&2
+    return 1
+  fi
+
+  if codex_native_is_current "$version"; then
+    echo "  OpenAI Codex $version already installed"
+    remove_npm_codex
+    return $?
+  fi
+
+  url="https://github.com/openai/codex/releases/download/rust-v$version/install.sh"
+  installer="$(mktemp || true)"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+      --connect-timeout 15 --max-time 300 "$url" -o "$installer" 2>/dev/null \
+    || [ ! -s "$installer" ]; then
+    echo "  WARN: could not download OpenAI's Codex installer from $url" >&2
+    rm -f "$installer"
+    return 1
+  fi
+
+  # `|| true` for the same reason: an unusable sha256sum must reach the
+  # refusal below (which already words an empty digest), not end the run.
+  actual="$(sha256sum "$installer" 2>/dev/null | cut -d' ' -f1 || true)"
+  if [ "$actual" != "$sha" ]; then
+    echo "  WARN: the Codex installer for rust-v$version does not match its pinned sha256 — not running it" >&2
+    rm -f "$installer"
+    return 1
+  fi
+
+  # After the download, before the run: mktemp makes the file root:root 0600 and
+  # it is executed as the unprivileged user.
+  if ! chown "$CLAWBOX_USER" "$installer"; then
+    echo "  WARN: could not hand the Codex installer to $CLAWBOX_USER; not running it" >&2
+    rm -f "$installer"
+    return 1
+  fi
+
+  # CODEX_NON_INTERACTIVE=true is what declines the installer's own offer to
+  # remove the npm copy (its prompt opens /dev/tty, so </dev/null alone would
+  # not) — the removal is ours, after the verification. `timeout` bounds the
+  # ~117 MB package fetch, which the vendor leaves unbounded on its GitHub
+  # fallback path.
+  if ! as_user_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' timeout -k 30 1800 sh '$installer'" </dev/null; then
+    echo "  WARN: OpenAI's Codex installer ran but failed" >&2
+    rm -f "$installer"
+    return 1
+  fi
+  rm -f "$installer"
+
+  # The installer's exit code is not the outcome. Ask the binary.
+  if ! codex_native_is_current "$version"; then
+    echo "  WARN: the Codex installer exited 0 but $CODEX_NATIVE_BIN does not report $version" >&2
+    return 1
+  fi
+  echo "  OpenAI Codex $version installed at $CODEX_NATIVE_BIN"
+
+  local rc=0
+  remove_npm_codex || rc=1
+  # The same verdict the device installer ends on: PATH order, not the presence
+  # of a file. `as_user_login` puts ~/.bun/bin ahead of ~/.local/bin, so a codex
+  # installed by bun still shadows the pinned one and this would otherwise
+  # report success — and the two installers would answer differently about the
+  # same box.
+  local resolved
+  resolved="$(as_user_login "command -v codex" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+  if [ "$resolved" != "$CODEX_NATIVE_BIN" ]; then
+    echo "  WARN: \`codex\` still resolves to ${resolved:-nothing}, not $CODEX_NATIVE_BIN" >&2
+    rc=1
+  fi
+  return "$rc"
+}
+
 step_ai_tools_install() {
   # Claude Code
   if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
@@ -1019,13 +1154,8 @@ step_ai_tools_install() {
     echo "  Claude Code installed"
   fi
 
-  # OpenAI Codex CLI
-  if as_user_login "command -v codex" &>/dev/null; then
-    echo "  OpenAI Codex already installed"
-  else
-    as_user_login "npm i -g @openai/codex --prefix $NPM_PREFIX" 2>/dev/null || echo "  Warning: Codex install failed"
-    echo "  OpenAI Codex installed"
-  fi
+  # OpenAI Codex CLI — the pinned native binary, never an npm global (TASK-439).
+  ensure_codex_cli || echo "  Warning: Codex install failed"
 
   # Google Gemini CLI
   if as_user_login "command -v gemini" &>/dev/null; then
