@@ -28,6 +28,9 @@ vi.mock("@/lib/provider-status", async (importOriginal) => {
     ...actual,
     readProviderStatus: async () => ({
       harness: "openclaw",
+      // Nothing hidden here: a provider dropped for running no model is still
+      // switchable, and that case has its own assertion below.
+      unrunnable: hiddenProviders,
       providers: [
         { id: "anthropic", isDefault: true },
         { id: "openrouter", isDefault: false },
@@ -37,6 +40,9 @@ vi.mock("@/lib/provider-status", async (importOriginal) => {
   };
 });
 
+/** Ids `readProviderStatus` dropped from its rows for this test. */
+let hiddenProviders: string[] = [];
+
 type Lib = typeof import("@/lib/provider-enablement");
 let lib: Lib;
 
@@ -44,6 +50,7 @@ beforeEach(async () => {
   vi.resetModules();
   store.values = {};
   store.writeDelayMs = 0;
+  hiddenProviders = [];
   lib = await import("@/lib/provider-enablement");
 });
 
@@ -75,5 +82,15 @@ describe("setProviderEnabled", () => {
 
   it("refuses a provider the status does not know", async () => {
     expect(await lib.setProviderEnabled("nonesuch", false)).toMatchObject({ ok: false, kind: "unknown_provider" });
+  });
+
+  it("still flips the switch for a provider the strip hides", async () => {
+    // A row dropped because the box can run no model from it (TASK-668) is not
+    // an unknown provider: the strip hides the row, it does not forget the
+    // provider, and answering "not known to this box" would leave the switch
+    // stuck at whatever it was last set to.
+    hiddenProviders = ["google"];
+    expect(await lib.setProviderEnabled("google", false)).toEqual({ ok: true });
+    expect(store.values.ai_disabled_providers).toEqual(["google"]);
   });
 });

@@ -3,7 +3,7 @@
  * browser page) so happy-path tests can exercise the full install/setup
  * lifecycle without needing a full graphical session.
  */
-import { BASE_URL } from "./container";
+import { BASE_URL, dockerExec } from "./container";
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -188,9 +188,15 @@ export const systemPower = (action: "restart" | "shutdown") =>
 export const getPreferences = () =>
   request<Record<string, unknown>>("/setup-api/preferences?all=1");
 
-export const setPreferences = (patch: Record<string, unknown>) =>
+// `cookie`: the owner's session, needed for an `installed_*` write. The route's
+// gate on that prefix is cookie-only ON PURPOSE — it has no CLAWBOX_TEST_MODE
+// door, because the bearer holder it refuses (the agent) runs on the box the
+// same way in test mode — so a spec that changes the installed-app list logs
+// in first, exactly as the desktop does.
+export const setPreferences = (patch: Record<string, unknown>, cookie?: string) =>
   request<{ success: boolean }>("/setup-api/preferences", {
     method: "POST",
+    headers: cookie ? { cookie } : {},
     body: JSON.stringify(patch),
   });
 
@@ -377,14 +383,81 @@ export const getGatewayHealth = () =>
  * Returns the final state. Tolerates transient fetch failures with
  * `maxConsecutiveFetchErrors` so a service restart doesn't abort the wait.
  */
+/**
+ * "Nothing has started" — the state a box reports when no update was ever asked
+ * for.
+ *
+ * It is also, before TASK-731, what a box reported when an update HAD been
+ * asked for and the web server that was running it was replaced: the step
+ * list's position lived only in that process, and the next one released the
+ * update lock and answered this. Six e2e-install runs polled it for the whole
+ * 45-minute budget.
+ */
+function looksUnstarted(state: UpdateState): boolean {
+  return (
+    state.phase === "idle"
+    && state.currentStepIndex < 0
+    && state.steps.length > 0
+    && state.steps.every((step) => step.status === "pending")
+  );
+}
+
+/** What the container can say about a run that vanished. Never throws. */
+async function diagnoseLostUpdate(): Promise<string> {
+  const parts: string[] = [];
+  // Bounded well under dockerExec's 60 s default: this runs on a path that has
+  // already spent its 120 s budget, and three sequential defaults would turn a
+  // two-minute verdict into a five-minute one.
+  const DIAGNOSIS_TIMEOUT_MS = 15_000;
+  const ask = async (label: string, cmd: string[]) => {
+    try {
+      parts.push(`${label}:\n${(await dockerExec(cmd, { user: "root", timeoutMs: DIAGNOSIS_TIMEOUT_MS })).trim()}`);
+    } catch (err) {
+      parts.push(`${label}: could not be read (${err instanceof Error ? err.message : String(err)})`);
+    }
+  };
+  // How many times the web server has been (re)started, and when: an update
+  // whose process was replaced shows a restart between the POST and now.
+  await ask("clawbox-setup.service", [
+    "systemctl", "show", "clawbox-setup.service",
+    "-p", "NRestarts", "-p", "ActiveEnterTimestamp", "-p", "ExecMainStartTimestamp", "-p", "Result",
+  ]);
+  await ask("the updater's own keys on disk", [
+    "bash", "-lc",
+    "python3 -c \"import json;d=json.load(open('/home/clawbox/clawbox/data/config.json'));"
+    + "print({k:d.get(k) for k in ('update_in_progress','update_needs_continuation',"
+    + "'update_interrupted_at','update_completed','update_completed_at')})\" 2>&1 || true",
+  ]);
+  // REDACTED, and only the web server's own unit. This message becomes a
+  // Playwright error and is uploaded as a CI artifact on a PUBLIC repository,
+  // where GitHub's `***` masking does not reach; the container is started with
+  // real provider keys in its environment (e2e-install/.env.test). Anything
+  // that looks like a token is replaced before it can be written down, and the
+  // `clawbox-root-update@*` journal — the unit that runs install.sh, which
+  // handles four provider keys — is deliberately not dumped at all.
+  await ask("the last 40 web-server journal lines (redacted)", [
+    "bash", "-lc",
+    "journalctl -u clawbox-setup.service -n 40 --no-pager 2>&1 | sed -E 's/[A-Za-z0-9_-]{20,}/[redacted]/g' || true",
+  ]);
+  return parts.join("\n\n");
+}
+
 export async function waitForUpdate(
-  opts: { timeoutMs?: number; maxConsecutiveFetchErrors?: number } = {},
+  opts: { timeoutMs?: number; maxConsecutiveFetchErrors?: number; unstartedBudgetMs?: number } = {},
 ): Promise<UpdateState> {
   const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
   const maxConsecutiveFetchErrors = opts.maxConsecutiveFetchErrors ?? 60; // ~3min downtime
+  // How long a state that says "nothing has started" is tolerated before it is
+  // called what it is. It is legitimate only briefly — a web server that has
+  // just come back answers it until `checkContinuation()` resumes the second
+  // half, which is one poll later — so two minutes is generous by a wide
+  // margin, and it replaces a 45-minute wait for a state machine that cannot
+  // move.
+  const unstartedBudgetMs = opts.unstartedBudgetMs ?? 120_000;
   const deadline = Date.now() + timeoutMs;
   let consecutiveErrors = 0;
   let lastState: UpdateState | null = null;
+  let unstartedSince: number | null = null;
   while (Date.now() < deadline) {
     try {
       const state = await getUpdateStatus();
@@ -393,7 +466,33 @@ export async function waitForUpdate(
       if (state.phase === "completed" || state.phase === "failed") {
         return state;
       }
-    } catch {
+      if (looksUnstarted(state)) {
+        unstartedSince ??= Date.now();
+        if (Date.now() - unstartedSince > unstartedBudgetMs) {
+          // The headline says what was OBSERVED, not what caused it. This shape
+          // has two causes and the poller cannot tell them apart: a run that
+          // lost its process (TASK-731), and a run that FINISHED whose status
+          // the container cannot synthesise as `completed` — the e2e box is
+          // permanently `checkout-dirty`, which forces drift and disables that
+          // synthesis for the whole run, so a web-server restart after a good
+          // update lands here too. The disk keys below say which: an
+          // `update_interrupted_at` is the first, an `update_completed` with no
+          // lock is the second.
+          throw new Error(
+            `the box has reported "nothing is running" for `
+            + `${Math.round((Date.now() - unstartedSince) / 1000)}s after the update was accepted. `
+            + `Either the web server that owned the run was replaced and its successor had nothing to `
+            + "resume (TASK-731), or the run finished and this container cannot report completed "
+            + "because it is permanently drifted. The updater's own keys below say which.\n"
+            + `last state: ${JSON.stringify(lastState)}\n\n${await diagnoseLostUpdate()}`,
+          );
+        }
+      } else {
+        unstartedSince = null;
+      }
+    } catch (err) {
+      // Our own verdict is not a fetch failure; it must not be counted as one.
+      if (err instanceof Error && err.message.startsWith("the box has reported")) throw err;
       consecutiveErrors += 1;
       if (consecutiveErrors > maxConsecutiveFetchErrors) {
         throw new Error(`update status unreachable for ${consecutiveErrors * 3}s — giving up`);
@@ -401,7 +500,10 @@ export async function waitForUpdate(
     }
     await new Promise((r) => setTimeout(r, 3_000));
   }
-  throw new Error(`update did not complete within ${timeoutMs}ms; last state: ${JSON.stringify(lastState)}`);
+  throw new Error(
+    `update did not complete within ${timeoutMs}ms; last state: ${JSON.stringify(lastState)}`
+    + `\n\n${await diagnoseLostUpdate()}`,
+  );
 }
 
 // ── Tunnel (Cloudflare quick-tunnel) ─────────────────────────────────

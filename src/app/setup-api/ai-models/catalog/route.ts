@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { coreRetiredModels } from "@/lib/core-model-lifecycle";
 import { spawn } from "child_process";
 import { promises as fsp } from "fs";
 import path from "path";
@@ -13,6 +14,7 @@ import {
   isNonChatModelId,
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
+import { forgetProviderEnumeration, recordProviderEnumeration } from "@/lib/provider-runnable";
 
 export const dynamic = "force-dynamic";
 
@@ -567,6 +569,13 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
     publishedSeq.set(surfaceProvider, currentSeq(surfaceProvider));
     recordSuccessfulRefresh(surfaceProvider);
     await writeDiskCache(surfaceProvider, payload);
+    // The same count `publish` records. This is the file's second full publish
+    // path, and a catalogue published here while the record still said zero
+    // would keep a provider hidden that had just answered with rows. Dead
+    // today — no `SUBSCRIPTION_SURFACE` entry names a separate provider — and
+    // closed rather than left for the day one does, like every other rule this
+    // function had to be taught twice.
+    await recordProviderEnumeration(surfaceProvider, payload.models.length);
     return new Set(payload.models.map((m) => m.id));
   } catch (err) {
     console.warn(
@@ -614,6 +623,16 @@ function transformOpenclawEntries(
     if (entry.available === false) continue;
     // The only checks that read the ROW rather than the id; everything else is
     // `isOfferableModelId`, shared with the sanitiser.
+    //
+    // The `deprecated` TAG cannot fire on the pinned core and is kept only for
+    // the day it can: `toModelRow` builds `tags` from configured entries and
+    // aliases and never projects a model's lifecycle, so
+    // `anthropic/claude-opus-4-8` — `status: "deprecated"` in the core's own
+    // manifest — arrives here with `tags: []` (measured, 2026.8.1). The
+    // lifecycle is read from where the core actually publishes it, at SERVE
+    // time in `withoutRetiredModels` below — never here and never in the
+    // sanitiser, so a payload an older build cached keeps every row this box
+    // will still accept.
     if (entry.tags?.includes("deprecated")) continue;
     if (!isOfferableModelId(provider, id)) continue;
     out.push({
@@ -664,6 +683,53 @@ function isOfferableModelId(provider: string, id: string): boolean {
   // is the set doing what it says rather than a change in what is offered.
   if (DEPRECATED_MODEL_IDS.has(lastModelSegment(id))) return false;
   return true;
+}
+
+/**
+ * The payload as the PICKER should see it: without the models the installed
+ * core has retired.
+ *
+ * Applied when a payload is SERVED, never when one is stored, and that
+ * distinction is the whole of it. `subscription-surface.ts` reads the cache
+ * file back as the set of ids this box will ACCEPT — "a row the picker offers
+ * must be a row that route accepts" — so filtering the stored payload would not
+ * merely stop recommending a retired model, it would start REFUSING one the
+ * customer is already on, with `… is not in the Anthropic model catalogue this
+ * box enumerated`. That sentence would be untrue on both halves: the box did
+ * enumerate it, and the core still routes it by exact reference. What we
+ * recommend and what we accept are two questions, and only the first one has a
+ * new answer.
+ *
+ * The default is re-resolved, because dropping rows can drop the one the
+ * payload named — and a `defaultModelId` outside `models` is a picker with
+ * nothing selected.
+ *
+ * ASYMMETRY, deliberate and worth naming: the lookup is keyed on the CATALOGUE
+ * provider, and the core ships no `codex` extension — so the openai picker
+ * loses `gpt-5.5` while the codex picker keeps it as its default. That is the
+ * same upstream model, hidden on one auth mode and offered on the other, and it
+ * is the behaviour we want today: the core's replacement, `gpt-5.6-sol`, is
+ * plan-gated, and a Free ChatGPT account handed it as the only row AND as the
+ * saved default would 400 on every turn. If a `codex` manifest ever appears, or
+ * the mapping is "fixed" to consult openai's, that default moves silently —
+ * which is what `curated-defaults-offerable.test.ts` is there to notice.
+ */
+function withoutRetiredModels(payload: CatalogResponse): CatalogResponse {
+  // Resolved ONCE. A payload can run to hundreds of rows (the OpenRouter
+  // catalogue was measured at 423), and asking per row would put one blocking
+  // stat per row on the request thread.
+  const retired = coreRetiredModels(payload.provider);
+  if (retired.size === 0) return payload;
+  const models = payload.models.filter((m) => !retired.has(m.id));
+  if (models.length === payload.models.length) return payload;
+  // Never to empty. If the core has retired everything this box enumerated,
+  // the honest picker is the one the box actually has — an empty one offers
+  // the customer nothing to do.
+  if (models.length === 0) return payload;
+  const defaultModelId = models.some((m) => m.id === payload.defaultModelId)
+    ? payload.defaultModelId
+    : (models.find((m) => m.isDefault)?.id ?? models[0].id);
+  return { ...payload, models, defaultModelId };
 }
 
 function sanitizeCatalogModels(provider: string, models: CatalogModel[]): CatalogModel[] {
@@ -931,6 +997,18 @@ interface CatalogFetchResult {
    * the command, else its stderr. Empty when it simply had nothing to list.
    */
   diagnostic: string;
+  /**
+   * True when an empty `models` is THE BOX'S ANSWER rather than a failure to
+   * get one — the CLI ran, refused nothing, printed nothing on stderr and
+   * listed no rows at all.
+   *
+   * The distinction is the whole false-failure guard for TASK-668: a refusal, a
+   * timeout, a plugin that is gone, or rows that our own chat-model filter ate
+   * all produce an empty list too, and recording any of them as "this box can
+   * run no <provider> model" would hide a provider that works. Only the clean
+   * zero is recorded, and only it stops the row being offered.
+   */
+  emptyIsAnswer: boolean;
 }
 
 function toFetchResult(
@@ -962,7 +1040,24 @@ function toFetchResult(
       ? `all ${rows.length} listed rows report available: false (no route this box can take yet)`
       : `${rows.length} rows listed, none of them chat models this picker can offer`;
   }
-  return { models, diagnostic };
+  // A clean zero: the command ran, said nothing was wrong, and STATED that it
+  // has nothing — `count: 0` beside an empty `models`. Read positively rather
+  // than inferred from absence, because a truncated or shape-shifted payload
+  // parses into the same emptiness as a real answer and this verdict hides a
+  // row. `diagnostic` covers the rest: a refusal or stderr fills it above, and
+  // rows that were all filtered out by OUR chat rule fill it just now.
+  //
+  // Deliberately NOT extended to "rows listed, every one `available: false`",
+  // which the core does report and which is the other way a box says it can
+  // route nothing here. It is also exactly what a provider with no credential
+  // looks like, and the two cannot be told apart from the payload — so that
+  // case keeps beta's behaviour and records nothing.
+  const emptyIsAnswer = models.length === 0
+    && rows.length === 0
+    && parsed.ok !== false
+    && parsed.count === 0
+    && !diagnostic;
+  return { models, diagnostic, emptyIsAnswer };
 }
 
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
@@ -1050,7 +1145,10 @@ async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
     throw new Error(`openrouter ${res.status}`);
   }
   const data = (await res.json()) as OpenRouterListResponse;
-  return { models: transformOpenRouterEntries(data.data ?? []), diagnostic: "" };
+  // Never an authoritative empty: this is openrouter.ai's catalogue, not this
+  // box's answer about what it can route, and an empty `data` from a REST
+  // endpoint is far more likely to be a bad hour upstream than a fact.
+  return { models: transformOpenRouterEntries(data.data ?? []), diagnostic: "", emptyIsAnswer: false };
 }
 
 // Refresh the catalog for `provider` in the background. Returns
@@ -1225,7 +1323,7 @@ export function refreshInBackground(
     // The only catalogue with no upstream to ask: Mike's gateway routes the
     // two device tiers and nothing else, so these two rows ARE the device's
     // answer rather than a stand-in for one.
-    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, diagnostic: "" });
+    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, diagnostic: "", emptyIsAnswer: false });
   } else {
     fetcher = fetchOpenclawCatalog(provider);
   }
@@ -1276,6 +1374,12 @@ export function refreshInBackground(
     memCache.set(provider, payload);
     publishedSeq.set(provider, forkSeq);
     await writeDiskCache(provider, payload);
+    // What the box can run, for the surfaces that only need the COUNT (the
+    // Providers rows, the picker). Written from the published list rather than
+    // the raw one, so the number and the catalogue the picker is offered cannot
+    // disagree. Reached only past the generation guard above, so a fork from
+    // before the box changed records nothing.
+    await recordProviderEnumeration(provider, payload.models.length);
     console.log(
       `[catalog] refreshed ${provider}: ${models.length} models`
       + (surfaceIds ? ` (${surfaceIds.size} on the subscription surface)` : ""),
@@ -1297,14 +1401,29 @@ export function refreshInBackground(
   };
 
   fetcher
-    .then(async ({ models, diagnostic }) => {
+    .then(async ({ models, diagnostic, emptyIsAnswer }) => {
       if (models.length === 0) {
-        // NOT a success. "[catalog] refreshed codex: 0 models" used to be
-        // followed by a disk write of the curated list, which then read back
-        // as a device answer — a false success in the exact shape this
-        // codebase keeps producing. An empty enumeration says the plugin is
-        // disabled, the provider id is gone, or the CLI failed silently; none
-        // of those are facts about what the box can run.
+        // NOT a success, and every line of beta's handling stands: nothing is
+        // published, the previous catalogue is kept, and `markStale` records
+        // the backoff that rations the retries. "[catalog] refreshed codex: 0
+        // models" used to be followed by a disk write of the curated list,
+        // which then read back as a device answer.
+        //
+        // What is NEW is only that a clean zero is written down as a COUNT
+        // (TASK-668). Under `models.mode: "replace"` the core skips the
+        // authenticated catalogue and `openclaw models list --provider google`
+        // genuinely lists nothing, and the surfaces need to know that to stop
+        // offering a connected provider whose every row the gateway refuses.
+        // It changes no freshness or backoff rule: this branch behaves exactly
+        // as it does on beta, and the record is an extra fact beside it.
+        //
+        // Generation-guarded like `publish` is, and for the same reason: a fork
+        // that started before a credential landed is answering about a box that
+        // no longer exists, and its zero would hide the provider the customer
+        // just connected.
+        if (emptyIsAnswer && forkSeq >= currentSeq(provider)) {
+          await recordProviderEnumeration(provider, 0);
+        }
         console.warn(
           `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
           + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
@@ -1376,6 +1495,12 @@ export function refreshInBackground(
 export function notifyProviderSetChanged(ocProvider: string | null | undefined): void {
   if (!ocProvider) return;
   const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
+  // The recorded model COUNT is about the box as it was, and the box has just
+  // changed (TASK-668). Forgetting it is what makes a hidden row come back on
+  // the next render — a plan change, a model install, a key paste — without
+  // waiting for an enumeration that, for a hidden provider, nothing would ask
+  // for. It costs one small file write and starts nothing.
+  void forgetProviderEnumeration(catalogProvider);
   if (!isCatalogProvider(catalogProvider)) return;
   if (NO_CLI_ENUMERATION_PROVIDERS.has(catalogProvider)) return;
   refreshInBackground(catalogProvider, { providerChanged: true });
@@ -1516,7 +1641,7 @@ export async function GET(req: NextRequest) {
         ? { warming: true }
         : {}),
     };
-    return NextResponse.json(payload, { headers: noStore() });
+    return NextResponse.json(withoutRetiredModels(payload), { headers: noStore() });
   }
 
   // Nothing cached yet — the first picker open after a restart. Serve the
@@ -1526,5 +1651,5 @@ export async function GET(req: NextRequest) {
     ...buildFallbackPayload(provider),
     ...(enumerating ? { warming: true } : {}),
   };
-  return NextResponse.json(payload, { headers: noStore() });
+  return NextResponse.json(withoutRetiredModels(payload), { headers: noStore() });
 }

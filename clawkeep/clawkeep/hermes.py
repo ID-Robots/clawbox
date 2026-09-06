@@ -160,6 +160,17 @@ ASSETS: tuple[HermesAsset, ...] = (
     HermesAsset("identity", "agent-identity", root="clawbox"),
 )
 
+#: The same allowlist keyed by kind — a TEST-ONLY mirror of :data:`ASSETS`,
+#: nothing production reads. Restore never looks here: `agent.restore_roots`
+#: builds the Hermes roots straight from `ASSETS`, and
+#: `agent.assert_destination_allowed` matches a manifest asset's `kind` and
+#: path against THOSE roots, so the manifest never gets to say where a kind
+#: lands. What this mapping pins is the property that lookup relies on: one
+#: root per kind. `test_every_asset_kind_is_unique…` checks it stays in step
+#: with `ASSETS`, because a duplicated kind would make the by-kind match
+#: ambiguous and hand the choice back to the manifest.
+ASSETS_BY_KIND: dict[str, HermesAsset] = {a.kind: a for a in ASSETS}
+
 #: Only these assets survive `only_config=True` — the "just the settings"
 #: backup the config flag promises. Credentials are NOT among them: a
 #: config-only snapshot is the one a customer is most likely to hand to

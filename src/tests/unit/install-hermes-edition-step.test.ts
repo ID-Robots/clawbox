@@ -64,7 +64,7 @@ describe("hermes_edition is the updater's own step", () => {
     // Negative assertion → the slice has to cover the whole function, so name
     // its last statement.
     expect(
-      extractShellFunction("step_post_update", "step_update_smoke ||"),
+      extractShellFunction("step_post_update", "resume_paused_engines"),
     ).not.toMatch(/^\s*step_hermes_edition\b/m);
   });
 

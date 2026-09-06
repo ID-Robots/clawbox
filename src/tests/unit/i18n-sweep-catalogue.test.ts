@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { translations } from "@/lib/translations";
-import { de as hermesDe } from "@/lib/hermes-translations/de";
+import { de as editionDe } from "@/lib/edition-translations/de";
 import type { Locale } from "@/lib/i18n";
 
 /**
@@ -192,7 +192,7 @@ describe("German register", () => {
    */
   it("addresses the owner as 'Sie' throughout the Coding Agent", () => {
     const informal = /\b(du|dein|deine|deinen|deinem|deiner|deines|dich|dir)\b/i;
-    const offenders = Object.entries(hermesDe)
+    const offenders = Object.entries(editionDe)
       .filter(([key, value]) => key.startsWith("codingAgent.") && informal.test(value))
       .map(([key]) => key);
     expect(offenders, "codingAgent.* German strings still using the du-form").toEqual([]);

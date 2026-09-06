@@ -30,11 +30,19 @@ vi.mock("fs", async (importOriginal) => {
   return { ...actual, existsSync: vi.fn(actual.existsSync) };
 });
 
-vi.mock("@/lib/config-store", () => ({
-  get: vi.fn(),
-  set: vi.fn(),
-  setMany: vi.fn(),
-}));
+vi.mock("@/lib/config-store", () => {
+  // `getKnown` is the tri-state reader ("we could not read the file" is not
+  // "the key is unset"), and it answers from the SAME mock every fixture in
+  // this file already drives — so a case that wants an unreadable store says
+  // so by overriding `getKnown` alone.
+  const get = vi.fn();
+  return {
+    get,
+    getKnown: vi.fn(async (key: string) => ({ value: await get(key), known: true })),
+    set: vi.fn(),
+    setMany: vi.fn(),
+  };
+});
 
 // `waitForGateway` is the readiness wait, and it is what these tests drive: the
 // polling loop lives in port-probe now (shared with restartGateway's own wait),
@@ -318,19 +326,23 @@ describe("updater", () => {
         expect(updater.getUpdateState().phase).toBe("failed");
       });
 
-      await vi.waitFor(() => {
-        expect(updater.dismissSettledUpdate()).toBe(true);
+      await vi.waitFor(async () => {
+        expect((await updater.dismissSettledUpdate()).dismissed).toBe(true);
       });
       const state = updater.getUpdateState();
       expect(state.phase).toBe("idle");
       expect(state.steps.every((step) => step.status === "pending")).toBe(true);
     });
 
-    it("refuses while a run owns the box, so it cannot clear a live run's state", () => {
+    it("refuses while a run owns the box, so it cannot clear a live run's state", async () => {
       updater.resetUpdateState();
       updater.startUpdate();
 
-      expect(updater.dismissSettledUpdate()).toBe(false);
+      expect(await updater.dismissSettledUpdate()).toEqual({
+        dismissed: false,
+        reason: "in-progress",
+        error: "An update is in progress",
+      });
       expect(updater.getUpdateState().phase).toBe("running");
     });
   });
@@ -591,6 +603,32 @@ describe("updater", () => {
       );
     });
 
+    it("clears the interruption record in the same write that records the completion", async () => {
+      // Any reader that finds "locked, nothing left to resume, not completed"
+      // stamps `update_interrupted_at` — and that is exactly what the SECOND
+      // half of an ordinary update looks like from a process that is not the
+      // one running it. A completion that leaves the record standing is the
+      // false failure of 2026-09-06: the box answered "Update failed", every
+      // step pending, over an update that had finished 71 seconds later.
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_completed: true, update_interrupted_at: undefined }),
+      );
+    });
+
     it("does not stop the gateway while its pre-start is still running", async () => {
       // At boot clawbox-gateway.service and clawbox-setup.service start
       // together, and the gateway's ExecStartPre (gateway-pre-start.sh) can
@@ -733,7 +771,12 @@ describe("updater", () => {
       const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
       expect(postStep?.status).toBe("failed");
       expect(postStep?.error).toBe("post_update exited with status 1");
-      expect(mockSetMany).not.toHaveBeenCalled();
+      // No COMPLETION was persisted. `setMany` itself is called once per run
+      // now — the prologue clears the previous run's markers with it
+      // (TASK-731) — so the assertion is about the payload, not the call.
+      expect(mockSetMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ update_completed: true }),
+      );
     });
 
     it("fails the continuation when gateway verification still finds no known recovery path", async () => {
@@ -1844,7 +1887,26 @@ describe("updater", () => {
       const result = await updater.checkContinuation();
 
       expect(result).toBe(true);
-      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_needs_continuation: undefined }),
+      );
+    });
+
+    it("treats the restart it asked for as expected, not as an interruption", async () => {
+      // The continuation flag IS the proof that the web server was replaced on
+      // purpose. Anything a reader stamped while that restart was under way
+      // describes this update's own normal path, so it goes with the flag.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+
+      await updater.checkContinuation();
+
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update_needs_continuation: undefined,
+          update_interrupted_at: undefined,
+        }),
+      );
     });
 
     it("resumes once when a boot check and a status poll overlap, and tells both", async () => {
@@ -1865,7 +1927,9 @@ describe("updater", () => {
       flagRead.resolve();
 
       expect(await Promise.all([fromBoot, fromPoll])).toEqual([true, true]);
-      expect(mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+      expect(
+        mockSetMany.mock.calls.filter(([entries]) => "update_needs_continuation" in entries),
+      ).toHaveLength(1);
       expect(mockGet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
     });
 
@@ -1910,7 +1974,9 @@ describe("updater", () => {
 
       expect(result).toBe(false);
       // Flag still cleared — the failure must not replay on every poll.
-      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_needs_continuation: undefined }),
+      );
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toBe("ConfigMutationConflictError: config changed since last load");
@@ -2377,6 +2443,197 @@ describe("updater", () => {
       );
     });
   });
+
+  /**
+   * TASK-737 — a customer box was dark for 25 hours after the OpenClaw
+   * 2026.7.1 → 2026.8.1 core upgrade.
+   *
+   * 2026.8 does not migrate a 2026.7 config on load, it REFUSES it and exits
+   * 78. Measured against 2026.8.1 on 2026-09-06, the gateway's LAST journal
+   * line in that state is `Run "openclaw doctor --fix" to repair the config,
+   * then retry.` — advice for the command the updater has just run and that
+   * has just failed — and `getGatewayFailureDetail` hands exactly that line
+   * back as the cause. The keys the core actually named are three lines
+   * further up and were never reported at all.
+   *
+   * Two shapes pinned here:
+   *   false success — a doctor that could not finish was swallowed whole, so
+   *                   the single most useful fact about the update never
+   *                   reached the owner.
+   *   false lead    — the reported cause was advice that could not work,
+   *                   which is how a config refusal reads as "the gateway is
+   *                   not listening".
+   */
+  describe("a core the config no longer suits", () => {
+    // The mock matches on `key.includes(k) || k.includes(cmd)`, and `cmd` is
+    // whatever `findOpenclawBin()` resolved — the bare string `openclaw` on a
+    // machine with no core installed, which is every CI runner. Keyed on the
+    // argv SUFFIX so `openclaw config validate --json` cannot fall through to
+    // the `openclaw doctor --fix` entry via `k.includes("openclaw")`, which is
+    // what made these cases pass only on a developer PC that happened to have
+    // the core installed.
+    const DOCTOR = " doctor --fix";
+    const VALIDATE = " config validate";
+
+    /** `openclaw config validate --json` on a 2026.7-layout config. */
+    const validateRefusal = Object.assign(new Error("Command failed: openclaw config validate --json"), {
+      // The core's own shape, measured on 2026.8.1: the verdict is JSON on
+      // stdout and the exit code is 1.
+      stdout: JSON.stringify({
+        error: { type: "cli_error", message: "OpenClaw config is invalid" },
+        valid: false,
+        path: "/home/clawbox/.openclaw/openclaw.json",
+        issues: [
+          { path: "agents.defaults", message: 'Unrecognized keys: "memorySearch", "imageGenerationModel"' },
+          { path: "messages", message: 'Unrecognized key: "tts"' },
+        ],
+      }),
+      stderr: "",
+    });
+
+    /** The gateway's own journal in that state — advice line last, on purpose. */
+    const refusedJournal = [
+      "Gateway failed to start: Invalid config at /home/clawbox/.openclaw/openclaw.json:",
+      'openclaw.json:4 \u2014 agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"',
+      'Run "openclaw doctor --fix" to repair, then retry.',
+      'Run "openclaw doctor --fix" to repair the config, then retry.',
+      "",
+    ].join("\n");
+
+    async function runContinuation() {
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      return updater.getUpdateState();
+    }
+
+    it("names the keys the core refused instead of repeating its own advice", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        [DOCTOR]: Object.assign(new Error("Command failed: openclaw doctor --fix"), {
+          stdout: "Legacy exec approvals exist at /home/clawbox/.openclaw/exec-approvals.json."
+            + " Run `openclaw doctor --fix` before using exec approvals.\n",
+          stderr: "",
+        }),
+        [VALIDATE]: validateRefusal,
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.error).toContain('agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"');
+      expect(state.error).toContain('messages: Unrecognized key: "tts"');
+      // The line that is true and useless. Handing it back as the cause tells
+      // the owner to run the command that has just failed.
+      expect(state.error).not.toContain("to repair the config, then retry");
+    });
+
+    it("records that doctor could not finish rather than swallowing it", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        [DOCTOR]: Object.assign(new Error("Command failed: openclaw doctor --fix"), {
+          stdout: "Legacy exec approvals exist at /home/clawbox/.openclaw/exec-approvals.json."
+            + " Run `openclaw doctor --fix` before using exec approvals.\n",
+          stderr: "",
+        }),
+        [VALIDATE]: validateRefusal,
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.warnings?.map((w) => w.code)).toContain("openclaw-doctor-fix-failed");
+      // The warning exists to name the reason, so it must carry doctor's own
+      // sentence and not node's `Command failed: <argv>`, which names the
+      // command back at the owner and nothing else.
+      const doctorWarning = state.warnings?.find((w) => w.code === "openclaw-doctor-fix-failed");
+      expect(doctorWarning?.message).toContain("Legacy exec approvals exist at");
+      expect(doctorWarning?.message).not.toContain("Command failed:");
+    });
+
+    it("keys the mock on argv that cannot collide with the binary's own path", () => {
+      // NOT decoration. `setupExecFileMock` matches on
+      // `key.includes(k) || k.includes(cmd)`, and `cmd` is whatever
+      // `findOpenclawBin()` resolved: an absolute path on a machine with the
+      // core installed, and the BARE string `openclaw` on one without — which
+      // is every CI runner, and not the PC these cases were written on. A key
+      // containing "openclaw" would then swallow the bare `cmd` and route
+      // `config validate` to the doctor's fixture, so the case above would
+      // pass here and fail in CI over a diagnosis that was never exercised.
+      // Keys that never mention the binary cannot do that under either shape.
+      expect(DOCTOR).not.toContain("openclaw");
+      expect(VALIDATE).not.toContain("openclaw");
+      expect("/usr/bin/openclaw config validate --json").toContain(VALIDATE);
+      expect("openclaw config validate --json").toContain(VALIDATE);
+      expect("/usr/bin/openclaw doctor --fix --yes --non-interactive").toContain(DOCTOR);
+      expect("openclaw doctor --fix --yes --non-interactive").toContain(DOCTOR);
+      expect("openclaw config validate --json").not.toContain(DOCTOR);
+    });
+
+    it("says nothing when the validator itself could not run", async () => {
+      // A half-finished core install leaves a binary that exits non-zero on
+      // everything. Reporting its stack as "OpenClaw refuses this device's
+      // configuration" would be a false failure over a config that is fine.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        [DOCTOR]: new Error("Command failed: openclaw doctor --fix"),
+        [VALIDATE]: Object.assign(new Error("Command failed"), {
+          stdout: "",
+          stderr: "node: bad option: --experimental-strip-types\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.error).not.toContain("refuses this device's configuration");
+      expect(state.error).toContain("gateway crashed for an unrelated reason");
+    });
+
+    it("still blames the journal when the core ACCEPTS the config", async () => {
+      // The load-bearing half: doctor exiting non-zero is not by itself proof
+      // of anything — it is what a doctor that lost a lock to a LIVE gateway
+      // does — so a config the core accepts must leave the existing diagnosis
+      // exactly as it was.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        [DOCTOR]: new Error("Command failed: openclaw doctor --fix"),
+        [VALIDATE]: { stdout: JSON.stringify({ valid: true, warnings: [] }), stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.error).toContain("OpenClaw gateway is not listening on port 18789");
+      expect(state.error).toContain("gateway crashed for an unrelated reason");
+      expect(state.error).not.toContain("refuses this device's configuration");
+    });
+  });
 });
 
 /**
@@ -2418,7 +2675,15 @@ describe("getVersionInfo harness reporting", () => {
 
     expect(info.edition).toBe("hermes");
     expect(info.hermes?.current).toBe("v0.20.5");
-    expect(mockRunHermesCli).toHaveBeenCalledWith(["--version"], expect.anything());
+    // TASK-613: and it asks for the banner WITHOUT the agent's passive update
+    // check. `--version` is the only hermes call that runs one, and on a
+    // six-hourly cache miss that check does a `git fetch` plus a GitHub
+    // compare inside the 10 s this probe allows for the whole call — after
+    // which the About screen reports no Hermes version at all.
+    expect(mockRunHermesCli).toHaveBeenCalledWith(
+      ["--version"],
+      expect.objectContaining({ silenceUpdateCheck: true }),
+    );
   });
 
   it("never spawns hermes on the openclaw edition, and reports no hermes field", async () => {

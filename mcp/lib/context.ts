@@ -119,7 +119,17 @@ export interface Capabilities {
   screenGrabber: string | null;
   /** ImageMagick `convert`, used to shrink a capture before it is returned. */
   imageConvert: boolean;
-  /** journalctl present AND able to read at least one ClawBox unit. */
+  /**
+   * journalctl present and the journal readable by this process.
+   *
+   * NOT "there are entries for a ClawBox unit": `journalctl -u <absent unit>`
+   * exits 0 over "-- No entries --", so an empty answer is indistinguishable
+   * from a quiet one. Tightening it to require output would make logs_tail
+   * depend on a unit having logged something by startup, and this answer is
+   * kept for the process lifetime — a box whose journal was briefly empty would
+   * lose the tool until the next restart, which is a worse trade than a tool
+   * that answers "nothing yet" on a host that is not a ClawBox.
+   */
   journal: boolean;
   /** `du` present — disk_usage needs it for the cache breakdown. */
   du: boolean;

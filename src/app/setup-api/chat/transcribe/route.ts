@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import Busboy from "busboy";
 import { Readable } from "stream";
-import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
+import { boundedBody } from "@/lib/bounded-body";
+import {
+  CLAWBOX_AI_PROXY_URL,
+  clawaiCredentialRefused,
+  clawaiCredentialGeneration,
+  noteClawaiCredentialRefused,
+  proxyRefusedClawaiCredential,
+  resolveClawaiToken,
+} from "@/lib/harness/credentials";
 import { localSttInstalled, transcribeLocally } from "@/lib/stt-local";
 import { getSttPrimary, sttEngineOrder, TRANSCRIBE_MODEL } from "@/lib/stt-preference";
 
@@ -84,41 +92,6 @@ const UPSTREAM_TIMEOUT_MS = 120_000;
 type Failure = { status: number; error: string };
 
 /**
- * Meter the body and cut the stream off past `MAX_REQUEST_BYTES`.
- *
- * Counting the bytes as they pass rather than trusting Content-Length: a
- * chunked upload declares no length at all, so a header check bounds only the
- * callers that were never the problem. Erroring the transform cancels the
- * source, so someone pushing gigabytes stops being read one chunk after the
- * cap instead of at the end of their upload.
- *
- * The overflow is reported by the flag rather than by matching on what the
- * parser rethrows, because what a parser makes of a cancelled source is its
- * own business and not something to pin an HTTP status on.
- */
-function boundedBody(body: ReadableStream<Uint8Array>): {
-  stream: ReadableStream<Uint8Array>;
-  overflowed: () => boolean;
-} {
-  let total = 0;
-  let over = false;
-  const stream = body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        total += chunk.byteLength;
-        if (total > MAX_REQUEST_BYTES) {
-          over = true;
-          controller.error(new Error("request body exceeds the transcription size limit"));
-          return;
-        }
-        controller.enqueue(chunk);
-      },
-    }),
-  );
-  return { stream, overflowed: () => over };
-}
-
-/**
  * Read the one audio part out of the request.
  *
  * The byte meter protects against a huge file or chunked body. Busboy adds the
@@ -139,7 +112,13 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
   }
   if (!req.body) return { status: 400, error: "Could not read the recording." };
 
-  const bounded = boundedBody(req.body);
+  // The meter (src/lib/bounded-body.ts) counts what actually arrives and cuts
+  // the source off past the cap; a chunked upload declares no length, so the
+  // header check above bounds only the callers that were never the problem.
+  const bounded = boundedBody(req.body, {
+    limit: MAX_REQUEST_BYTES,
+    message: "request body exceeds the transcription size limit",
+  });
   try {
     return await new Promise<{ file: Blob; name: string } | Failure>((resolve) => {
       let busboy: ReturnType<typeof Busboy>;
@@ -266,6 +245,7 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
 type Audio = { file: Blob; name: string };
 type Transcript = { text: string };
 
+
 /** The cloud engine: the recording goes to the ClawBox AI proxy. */
 async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transcript | Failure> {
   const token = await resolveClawaiToken();
@@ -277,6 +257,24 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
       error: "This ClawBox is not linked to ClawBox AI yet, so it cannot transcribe audio.",
     };
   }
+
+  // The proxy has already told this box it will not accept this credential,
+  // and a recording is ~9 MB. Uploading it to be refused again costs the
+  // customer their uplink and the box its time, and answers nothing the first
+  // refusal did not already answer — so the same sentence is returned here,
+  // without the upload. Cleared the moment the device is re-linked.
+  const refused = clawaiCredentialRefused();
+  if (refused !== null) {
+    return {
+      status: 503,
+      error: "ClawBox AI rejected this device's credentials. Re-link the device and try again.",
+    };
+  }
+
+  // Snapshotted BEFORE the upload, for the reason the image path documents: a
+  // re-link that lands mid-request makes the answer a verdict on a credential
+  // the box no longer holds.
+  const generation = clawaiCredentialGeneration();
 
   const upstream = new FormData();
   upstream.set("file", audio.file, audio.name);
@@ -307,6 +305,11 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
     // request carried a bearer token. Only the status is relayed, never the
     // body, so a proxy that echoes cannot leak the device credential into a
     // browser console.
+    // The proxy names the credential as the problem with its own
+    // `missing_token` / `invalid_token`; a bare 401/403 can be an edge rule or
+    // a plan gate, and remembering one of those would mute the microphone on a
+    // box whose credential is fine. Only the proxy's own verdict is recorded.
+    if (await proxyRefusedClawaiCredential(res)) noteClawaiCredentialRefused(res.status, generation);
     const status = res.status === 401 || res.status === 403
       ? 503
       : res.status >= 400 && res.status < 500 ? 400 : 502;

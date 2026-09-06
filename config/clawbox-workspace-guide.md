@@ -76,14 +76,17 @@ tab holds the harness picker, the performance mode, the read-only device stats a
 password. The update is under Settings → About. The device name is the Local URL card under
 Settings → Network, and saving it reboots the box.
 
-**Never queue an `operator_approval` proposal for any of this.** OpenClaw's approvals mechanism is
-real — `approval.request` over the gateway RPC, the `operator.approvals` scope, `openclaw approvals`
-on the CLI — but ClawBox's chat renders no card for a pending approval, so one queued here is shown
-to nobody in the place the owner is actually looking. It waits until the run ends, or until the very
-restart it asked for cancels it (`operator_approval_cancelled_gateway_restart`). If a proposal is
-already parked, the one way to answer it is `openclaw approvals pending` and `openclaw approvals
-resolve <id> allow-once|allow-always|deny` from the Terminal app (`ui_open_app("terminal")`) — tell
-the owner that rather than leaving them waiting.
+**An `operator_approval` proposal is now answerable, so raise one only when it is the real
+question.** OpenClaw's approvals mechanism is native — `approval.request` over the gateway RPC, the
+`operator.approvals` scope, `openclaw approvals` on the CLI — and ClawBox's chat now renders each
+pending approval as an approve/deny card the owner can press where they are already looking, with
+the decisions the request offered and no others. So a proposal no longer waits for nobody. Two
+things still hold. The window is the request's own and it is short, so a proposal raised while the
+owner is not at the box expires unanswered — for anything they may not be there for, tell them the
+path instead. And the answer is theirs: never ask for `allow-always` where `allow-once` is the
+honest request. If a proposal is parked and the chat is not open, `openclaw approvals pending` and
+`openclaw approvals resolve <id> allow-once|allow-always|deny` from the Terminal app
+(`ui_open_app("terminal")`) still answer it.
 
 ---
 

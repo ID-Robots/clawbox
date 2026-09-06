@@ -721,7 +721,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "backup_now",
-    "Start a cloud backup of this ClawBox now. It can take several minutes; if this call times out the backup is still running, so do not start another one — call backup_list later to confirm it landed.",
+    "Start a cloud backup of this ClawBox now. It can take several minutes; if this call times out the backup may still be running, so do not start another one — call backup_list later to confirm it landed.",
     { label: zText(64, "Short name for this backup, e.g. \"before update\"").optional() },
     { editions: ["openclaw"], readOnly: false },
     async ({ label }: { label?: string }) => {
@@ -743,7 +743,36 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       const body = await apiPost<{ ok?: boolean; exitCode?: number }>(
         "/setup-api/clawkeep/backup",
         { ...(label ? { label } : {}) },
-        { timeoutMs: 180_000, rules: BACKUP_RULES },
+        {
+          timeoutMs: 180_000,
+          rules: BACKUP_RULES,
+          // A 12 GB backup runs for well over an hour (TASK-675), so this
+          // abort is the NORMAL outcome for the box this tool matters most
+          // on — and the generic "Retry once" would start a second full
+          // archive-and-upload beside the first. `clawkeepd` has no
+          // single-instance guard of any kind, so nothing downstream would
+          // stop it. `mcp/tools/email.ts` catches the same class by hand for
+          // `email_send`; this is that idea as an option, so a route no
+          // longer has to wrap its own call to say it.
+          //
+          // It names `backup_list`, as the description above does, and NOT
+          // `backup_status`: that tool answers from `deriveProtection`, which
+          // judges the last COMPLETED backup and knows nothing of a run in
+          // flight — mid-run on a box that has never finished one it would
+          // report "never backed up, unprotected", which is a worse answer
+          // than none.
+          //
+          // All three sentences hedge on purpose. The abort establishes that
+          // THIS CLIENT stopped waiting and nothing else — `clawkeepd` may
+          // have exited, the box may have rebooted, the Next worker may have
+          // been replaced — so stating the run is alive is the same false
+          // certainty as the "Retry once" it replaces, pointing the other
+          // way. The ACTION is right either way, and is the part that matters.
+          onTimeout: {
+            message: "The backup is taking longer than this call waits. It may still be running.",
+            next: "Do not start another one. Tell the user it may still be running, and call backup_list later to confirm it landed.",
+          },
+        },
       );
       if (body.ok !== true) {
         throw new ToolError(

@@ -23,7 +23,11 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
-import { BACKUP_RUN_CAP_MS, expectedBackupWindowMs } from "@/lib/clawkeep-protection";
+import {
+  BACKUP_RUN_CAP_MS,
+  RESTORE_RUN_CAP_MS,
+  expectedBackupWindowMs,
+} from "@/lib/clawkeep-protection";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { get as configGet, set as configSet } from "@/lib/config-store";
 import { getEdition } from "@/lib/harness";
@@ -218,7 +222,22 @@ async function ensureDataDir(): Promise<void> {
 // Stale-flag window: if the restoring marker is older than the restore
 // timeout it almost certainly means the Next.js process crashed mid-run
 // and never cleaned up. Treat as not-restoring so the shield stops glowing.
-const RESTORING_FLAG_MAX_AGE_MS = 30 * 60 * 1000;
+//
+// It has to BE the restore timeout, not a number that happens to equal it.
+// The two were both 30 minutes, so the flag could never go stale during a
+// live restore — the run was SIGKILLed at the same instant. Raising the
+// restore cap without this would have had `isRestoring()` DELETE the flag of
+// a restore still in flight (it removes the file, it does not merely report
+// false), dropping the shelf's orange restoring shield back to a calm green
+// verdict while the box's whole state directory was being replaced.
+const RESTORING_FLAG_MAX_AGE_MS = RESTORE_RUN_CAP_MS;
+
+/**
+ * "HH:MM", 24-hour, and a time that exists. Kept in step with the memory
+ * index's own schedule (`clawkeep-memory.ts`): both are read by a scheduler
+ * that arms nothing for an hour outside 00:00-23:59.
+ */
+const TIME_OF_DAY_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   // Coerce-and-default: tolerate a missing/partial schedule file rather than
@@ -227,7 +246,14 @@ function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   const r = (input ?? {}) as Record<string, unknown>;
   const frequency: ScheduleFrequency =
     r.frequency === "weekly" ? "weekly" : "daily";
-  const time = typeof r.timeOfDay === "string" && /^\d{2}:\d{2}$/.test(r.timeOfDay)
+  // Range, not just shape. `/^\d{2}:\d{2}$/` accepted "99:99", "24:00" and
+  // "00:60" — and `computeNextRunMs` answers 0 for exactly those, so the file
+  // kept `enabled: true` over a schedule the scheduler could never arm: the
+  // panel said auto-backup was on and no backup ever ran (TASK-433). Same
+  // expression as `clawkeep-memory.ts`, which got this right for the memory
+  // index; a value this rejects falls back to the default, so a box with a
+  // hand-edited or half-written file still backs itself up.
+  const time = typeof r.timeOfDay === "string" && TIME_OF_DAY_RE.test(r.timeOfDay)
     ? r.timeOfDay
     : DEFAULT_SCHEDULE.timeOfDay;
   const weekdayRaw = Number(r.weekday);
@@ -331,10 +357,6 @@ export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> 
   };
 }
 
-export async function readSchedule(): Promise<ClawKeepSchedule> {
-  return (await readScheduleSnapshot()).schedule;
-}
-
 /**
  * The stamp given to a schedule that was armed before stamps existed. Any
  * value above 0 answers "a window has been started on this box"; 1 ms past the
@@ -432,7 +454,7 @@ export async function writeSchedule(next: ClawKeepSchedule): Promise<{
   // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
   // a read-modify-write now, and two saves from the same card must not
   // interleave into one temp file and rename a torn schedule into place —
-  // readSchedule() would then fall back to DEFAULT_SCHEDULE and silently turn
+  // readScheduleSnapshot() would then fall back to DEFAULT_SCHEDULE and silently turn
   // auto-backup off.
   const tmp = `${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`;
   // `armedAtMs` rides alongside the schedule rather than in it: it is not a
@@ -1200,7 +1222,7 @@ export class RestoreNeedsPassphraseError extends ClawKeepError {
   }
 }
 
-const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
+const RESTORE_TIMEOUT_MS = RESTORE_RUN_CAP_MS;
 // Generous cap for a full backup (openclaw backup create + multipart upload).
 // A hung clawkeepd must not hold a Next.js worker open forever. Shared with
 // the UI's "is this `running` heartbeat still alive" rule, which is only

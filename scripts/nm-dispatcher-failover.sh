@@ -252,9 +252,19 @@ log "Failover failed — no saved WiFi profile would connect; starting hotspot a
 # Stranded recovery: no saved WiFi reachable, so bring the captive-portal
 # hotspot back up. start-ap.sh honours the user's configured SSID/password
 # and falls back to ClawBox-Setup if none is set.
-START_AP="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/start-ap.sh"
+#
+# The ROOT-OWNED copy, exactly as $WAITER above: this hook runs as root from
+# NetworkManager's dispatcher.d, and the tree under $CLAWBOX_ROOT is
+# clawbox-writable, so running scripts/start-ap.sh from there was root
+# executing whatever clawbox had put in it. The override is for the tests that
+# stand a witness in for the copy. A box whose libexec copy is missing (an
+# install_root_libexec that has not run yet) gets the WARN below rather than
+# the tree copy. Security scan #21.
+START_AP="${CLAWBOX_START_AP:-/usr/local/libexec/clawbox/start-ap.sh}"
 if [ -x "$START_AP" ]; then
   bash "$START_AP" >/dev/null 2>&1 &
   log "Recovery AP launch dispatched"
+else
+  log "WARN: $START_AP missing or not executable — recovery hotspot not started"
 fi
 exit 0

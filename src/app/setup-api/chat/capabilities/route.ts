@@ -122,7 +122,10 @@ export async function GET() {
   // `hasClawaiImageRoute` is deliberately NOT counted. Its probe caches a plain
   // `false` for a minute whether the proxy answered "no" or did not answer at
   // all — it draws no answer/failure distinction to report — so folding it in
-  // would mean claiming a precision that module does not have.
+  // would mean claiming a precision that module does not have. (It answers
+  // false for a third reason too: the proxy has named this device's credential
+  // invalid, remembered for fifteen minutes. That one is not pending either —
+  // it is settled until the device is re-linked.)
   const factsPending =
     harness === "hermes" &&
     (hermesFeatureProbePending()

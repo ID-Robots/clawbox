@@ -32,6 +32,20 @@ const h = vi.hoisted(() => ({
   execCalls: [] as { file: string; args: string[] }[],
   execFailure: null as string | null,
   gatewayUp: true,
+  ownerSession: true,
+  sameOrigin: true,
+  restoreCalls: 0,
+}));
+
+// A restore is OWNER-ONLY and same-origin: middleware admits the MCP bearer to
+// every /setup-api route, and there is deliberately no MCP tool for a restore,
+// so the route re-checks. These cases are about what the OWNER gets, so both
+// answer yes; the refusal itself is asserted in its own block below.
+vi.mock("@/lib/owner-session", () => ({
+  hasOwnerSession: vi.fn(async () => h.ownerSession),
+}));
+vi.mock("@/lib/same-origin", () => ({
+  isSameOriginRequest: vi.fn(() => h.sameOrigin),
 }));
 
 vi.mock("node:child_process", () => ({
@@ -70,12 +84,15 @@ vi.mock("@/lib/clawkeep", () => ({
     status = 401;
     kind = "passphrase_missing";
   },
-  runRestore: async () => ({
-    archive: "2026-08-28T00-00-00.000Z-openclaw-backup.tar.gz",
-    archiveBytes: 4096,
-    assets: [],
-    skippedMembers: [],
-  }),
+  runRestore: async () => {
+    h.restoreCalls += 1;
+    return {
+      archive: "2026-08-28T00-00-00.000Z-openclaw-backup.tar.gz",
+      archiveBytes: 4096,
+      assets: [],
+      skippedMembers: [],
+    };
+  },
 }));
 
 import type { NextRequest } from "next/server";
@@ -98,6 +115,48 @@ beforeEach(() => {
   h.execCalls.length = 0;
   h.execFailure = null;
   h.gatewayUp = true;
+  h.ownerSession = true;
+  h.sameOrigin = true;
+  h.restoreCalls = 0;
+});
+
+describe("POST /setup-api/clawkeep/restore — who may ask", () => {
+  // The MCP bearer is a valid credential to middleware and no credential at
+  // all here: a restore swaps the agent's whole state for a snapshot that
+  // anyone paired to the account could have uploaded, and mcp/tools/system.ts
+  // says out loud that restoring is not a tool. The route used to take
+  // middleware's word for it.
+  it("refuses the MCP bearer (no session cookie) with 403 owner_only and never restores", async () => {
+    h.ownerSession = false;
+    const res = await post();
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe("owner_only");
+    // `kind` too: the field every other clawkeep refusal is keyed on.
+    expect(body.kind).toBe("owner_only");
+    expect(h.restoreCalls).toBe(0);
+    // Nothing downstream either: no restart of a state holder that did not
+    // change.
+    expect(h.execCalls).toEqual([]);
+    expect(h.bounceCalls).toBe(0);
+  });
+
+  it("refuses a cookie-bearing POST from another origin, before reading the body", async () => {
+    // The browser attaches the owner's cookie to a POST any page fires at the
+    // box, and `request.json()` here does not care about Content-Type, so a
+    // cookie-only gate would still do that page's bidding.
+    h.sameOrigin = false;
+    const res = await post();
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("owner_only");
+    expect(h.restoreCalls).toBe(0);
+  });
+
+  it("lets the owner's own page through", async () => {
+    const res = await post();
+    expect(res.status).toBe(200);
+    expect(h.restoreCalls).toBe(1);
+  });
 });
 
 describe("POST /setup-api/clawkeep/restore — bringing the state holder back", () => {

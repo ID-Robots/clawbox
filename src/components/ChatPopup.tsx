@@ -16,6 +16,18 @@ import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
+import { ApprovalPrompt } from '@/lib/chat-approvals'
+import {
+  APPROVAL_SESSION_EVENT,
+  approvalsAfterReplay,
+  approvalsAfterResolve,
+  markApprovalBusy,
+  mergeApprovalCard,
+  readApproval,
+  subscribeSessionApprovals,
+  type ApprovalCard,
+  type ApprovalDecision,
+} from '@/lib/gateway-approvals'
 import {
   EmailBatchCard,
   OWN_ENDING,
@@ -671,6 +683,7 @@ const MIN_CHAT_WIDTH = 340
 // desktop brings a chat in that state back.
 const VIEWPORT_MARGIN = 8
 
+
 /**
  * Is this tool call the one that queues outgoing mail?
  *
@@ -990,6 +1003,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // a draft still waiting is on disk and Settings → Email lists it, and one
   // that has been decided has a receipt there saying how.
   const [emailBatches, setEmailBatches] = useState<EmailBatchCardState[]>([])
+  // Pending operator approvals, as the gateway reports them. Never a store of
+  // our own: the harness owns the queue, its expiry and its first-answer-wins
+  // resolution, and the next subscribe replays whatever is still open.
+  const [approvals, setApprovals] = useState<ApprovalCard[]>([])
+  // The clock the cards judge their own window against.
+  //
+  // A pending approval's window closes on its own, and the card has to stop
+  // offering a button AT THAT MOMENT rather than at the next render that
+  // happens to occur — a button that cannot work is the UI's own false
+  // success, and pressing it would come back as "that did not reach the box"
+  // over a gateway that answered perfectly well. One timeout at the earliest
+  // expiry still ahead of this clock, never a ticker: an idle chat with a card
+  // on screen must not re-render once a second on a Jetson.
+  const [approvalNow, setApprovalNow] = useState(() => Date.now())
+  useEffect(() => {
+    const soonest = approvals.reduce(
+      (min, card) => (card.status === 'pending' && card.expiresAtMs > approvalNow
+        ? Math.min(min, card.expiresAtMs)
+        : min),
+      Number.POSITIVE_INFINITY,
+    )
+    if (!Number.isFinite(soonest)) return
+    const timer = window.setTimeout(() => setApprovalNow(Date.now()), Math.max(0, soonest - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [approvals, approvalNow])
   /**
    * Which read of the approval queue is the current one.
    *
@@ -2032,11 +2070,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // so that stream alone can never show it — this event is how we learn
           // the transcript gained something the live turn could not render.
           // Same projection `chat.history` uses, so the directive is intact.
-          void wsRequest('sessions.messages.subscribe', { key: boundKey })
-            .catch(() => {
-              // A gateway without the RPC just means we fall back to the
-              // backstop reconcile below; the chat still works.
-            })
+          //
+          // `includeApprovals: true` is the whole of TASK-704's data path: the
+          // response then carries the authoritative pending `approvalReplay`
+          // and the socket carries `session.approval` from here on. The opt-in
+          // needs `operator.approvals` on a paired device, which this connect
+          // frame already is — so an approve/deny card costs one flag on a call
+          // that was being made anyway, and no poll.
+          void subscribeSessionApprovals(wsRequest, boundKey, (replay, forKey) => {
+            if (forKey !== sessionKeyRef.current) return
+            setApprovals(prev => approvalsAfterReplay(prev, replay))
+          })
           // Only a provider change or a plain gateway restart gets here: those
           // are the two things that still bounce the gateway and drop this
           // socket. A skill change no longer does either, so it never raises
@@ -2112,7 +2156,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           }
         },
         reject: (err: Error) => {
-
+          // The fifth terminal-failure path, and it used to be the one that
+          // forgot both halves. A gateway that REFUSES the connect frame
+          // (protocol skew, a rejected device identity, a denied scope) keeps
+          // the socket open, so without the close below `connect()` returns at
+          // its `readyState === OPEN` guard and even the manual Try again is a
+          // no-op; and without the teardown the reconnect overlay hides the
+          // error panel, which is the TASK-712 spinner-that-never-comes-down
+          // from a far likelier trigger than an unparsable URL.
+          tearDownReloadOverlay()
+          if (wsRef.current === ws) wsRef.current = null
+          try { ws.close() } catch { /* already closing */ }
           setStatus('error')
           setErrorMsg(err.message || 'Auth failed')
         },
@@ -2464,6 +2518,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }
           }
         }
+
+        // The approval lifecycle for the session we opted in to: pending when
+        // one is raised, and the terminal truth when it is answered — by this
+        // chat, by Telegram's own `/approve`, by the Control UI, or by the
+        // clock. Every one of those has to reach the card, or it sits saying
+        // "waiting" over something already decided.
+        //
+        // THE PAYLOAD IS AN ENVELOPE, not the approval:
+        // `{sessionKey, sourceSessionKey?, updatedAtMs, phase, approval}`
+        // (`PendingSessionApprovalEventSchema` / `TerminalSessionApprovalEventSchema`
+        // in the pinned core). Reading it as the approval answers `null` for
+        // every event, which looks exactly like a box with nothing waiting.
+        if (eventName === APPROVAL_SESSION_EVENT) {
+          const envelope = data.payload as {
+            sessionKey?: unknown
+            sourceSessionKey?: unknown
+            approval?: unknown
+          } | undefined
+          // Every other session event here filters on the bound key; this one
+          // has to as well, or an approval still in flight for the conversation
+          // the owner has just left lands in the one they switched to.
+          // `sourceSessionKey` is the raising session when the event is
+          // projected into a reviewer surface, so either may name ours.
+          const forKey = typeof envelope?.sessionKey === 'string' ? envelope.sessionKey : ''
+          const fromKey = typeof envelope?.sourceSessionKey === 'string' ? envelope.sourceSessionKey : ''
+          if (forKey && fromKey && forKey !== sessionKeyRef.current && fromKey !== sessionKeyRef.current) return
+          if (forKey && !fromKey && forKey !== sessionKeyRef.current) return
+          const card = readApproval(envelope?.approval)
+          if (card) setApprovals(prev => mergeApprovalCard(prev, card))
+          return
+        }
       }
     }
 
@@ -2538,9 +2623,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Create WebSocket AFTER all handlers are defined to avoid race conditions
     try {
       ws = new WebSocket(wsUrl)
-    } catch {
+    } catch (err) {
+      // The same terminal-failure teardown the other three error paths do, and
+      // for the same reason. A wsUrl the browser's parser rejects throws here
+      // on EVERY attempt, so leaving the overlay up left the safety-net retry
+      // effect armed — and that effect resets `retryCountRef` to 0 before it
+      // reconnects, which is the counter both exhaustion branches are gated
+      // on. The ladder could never run out: one doomed attempt every
+      // RETRY_DELAY for as long as the chat window stayed open, behind a
+      // spinner that never came down (TASK-712).
+      tearDownReloadOverlay()
       setStatus('error')
-      setErrorMsg('WebSocket creation failed')
+      // With the reason. The realistic triggers are browser-side refusals —
+      // mixed content (a `ws://` url offered to an HTTPS page behind a proxy
+      // that hid the scheme) and a CSP `connect-src` block — and the bare
+      // message sent the owner looking at the gateway instead. Safe to show:
+      // the token travels in the connect frame, not in `wsUrl`.
+      const reason = err instanceof Error ? err.message : String(err)
+      setErrorMsg(reason ? `WebSocket creation failed: ${reason}` : 'WebSocket creation failed')
       return
     }
     wsRef.current = ws
@@ -2702,6 +2802,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // but a card left under a blanked conversation refers to a turn that is no
     // longer on screen, which is a consent form with its context deleted.
     setEmailBatches([])
+    // The approvals belong to the session that is going away. The gateway
+    // still holds them; the next subscribe replays whatever is still open.
+    setApprovals([])
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
@@ -2797,7 +2900,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Blanks the view and marks the greet done, so an empty new tab does not
     // greet itself with an unasked-for "hi".
     clearTranscript()
-    void wsRequest('sessions.messages.subscribe', { key }).catch(() => { /* best effort */ })
+    void subscribeSessionApprovals(wsRequest, key, (replay, forKey) => {
+      if (forKey !== sessionKeyRef.current) return
+      setApprovals(prev => approvalsAfterReplay(prev, replay))
+    })
     lastSentThinkingRef.current = undefined
     setSessionEpoch(e => e + 1)
     const stash = tabStashRef.current.get(key)
@@ -3835,6 +3941,35 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     recoverEmailDrafts()
     return installPendingRefresh(recoverEmailDrafts)
   }, [isOpen, recoverEmailDrafts])
+
+  /**
+   * Answer one approval through the gateway's own resolver.
+   *
+   * `approval.resolve` is first-answer-wins and hands every contender the
+   * canonical recorded state, so this NEVER reports what it asked for: it shows
+   * what the gateway wrote down. An owner who approved the same request in
+   * Telegram a moment earlier sees "allowed" here rather than an error, and
+   * nothing is resolved twice. A call that never REACHED the gateway is a
+   * different thing: the card goes back to pending with the reason on it, and
+   * the owner may press again — `approval.resolve` is first-answer-wins, so a
+   * second press over a decision that did land is answered with that decision
+   * rather than taken as one.
+   */
+  const decideApproval = useCallback(async (card: ApprovalCard, decision: ApprovalDecision) => {
+    setApprovals(prev => markApprovalBusy(prev, card.id, decision))
+    try {
+      const result = await wsRequest('approval.resolve', {
+        id: card.id,
+        // Explicitly, never inferred from the id's prefix: the core's own docs
+        // tell channel adapters not to read the kind out of the identifier.
+        kind: card.kind,
+        decision,
+      })
+      setApprovals(prev => approvalsAfterResolve(prev, card.id, result))
+    } catch (err) {
+      setApprovals(prev => approvalsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
+    }
+  }, [wsRequest])
 
   /**
    * Send the drafts the owner ticked — one request, whatever N is.
@@ -4932,9 +5067,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [])
   // Tear the reconnect overlay down and reset the reload flags. Called from
-  // every terminal-failure path (both retry-exhaustion branches) so the error
-  // panel — gated on `!reloadingSkill` — can render and the safety-net retry
-  // effect (which fires on `error && reloadingSkill`) stops looping.
+  // every terminal-failure path — the two retry-exhaustion branches, the 1008
+  // auth close, the refused connect frame and the socket constructor that
+  // threw — so the error panel, gated on `!reloadingSkill`, can render and the
+  // safety-net retry effect (which fires on `error && reloadingSkill`) stops
+  // looping.
   const tearDownReloadOverlay = useCallback(() => {
     if (reloadTimerRef.current) {
       clearInterval(reloadTimerRef.current)
@@ -4942,6 +5079,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     skillInstalledRef.current = false
     reloadReasonRef.current = 'skill'
+    // The pending switch goes with the overlay it was waiting behind. Its only
+    // consumer is the `hello` resolve branch gated on `skillInstalledRef`,
+    // which the line above clears — so a kept value can never be used for the
+    // switch that stored it, and would instead fire on the NEXT provider
+    // change, resetting the owner's transcript for a switch that ended
+    // minutes ago.
+    pendingModelSwitchResetRef.current = null
     setReloadingSkill(false)
     setReloadProgress(0)
   }, [])
@@ -5824,6 +5968,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             hermes={harnessId === 'hermes'}
             onApprove={approveEmailBatch}
             onCancel={cancelEmailBatch}
+          />
+        ))}
+
+        {/* Operator approvals, one card each, beside the mail they resemble.
+            OpenClaw only, and not by a harness check here but by construction:
+            they arrive on the gateway socket, and a Hermes box has none — its
+            own approvals are answered by `hermes-dashboard-turn.ts` the moment
+            they are raised, so there is never one of these waiting there. */}
+        {!reloadingSkill && approvals.map(card => (
+          <ApprovalPrompt
+            key={card.id}
+            card={card}
+            nowMs={approvalNow}
+            onDecide={decideApproval}
           />
         ))}
 

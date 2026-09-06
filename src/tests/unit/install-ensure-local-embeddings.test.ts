@@ -81,7 +81,9 @@ describe("the embedding model is repaired on an update, not only on a fresh inst
 
   it("stops the old embedder inside ollama afterwards — stop, never disable", () => {
     const at = POST_UPDATE.indexOf("ensure_local_embeddings");
-    const stop = POST_UPDATE.indexOf("systemctl stop ollama.service");
+    // Through the pause helper since TASK-724, so the stop has a start; the
+    // ordering it has to keep — after the embeddings helper — is unchanged.
+    const stop = POST_UPDATE.indexOf("pause_engine_unit ollama.service");
     expect(stop).toBeGreaterThan(at);
     expect(POST_UPDATE).not.toMatch(/systemctl disable[^\n]*ollama/);
   });
@@ -96,9 +98,12 @@ describe("the embedding model is repaired on an update, not only on a fresh inst
 
   it("frees the embedder's memory before a build, the way it frees ollama's", () => {
     const FREE = shellCode(extractShellFunction("free_memory_for_build"));
-    expect(FREE).toContain("systemctl stop clawbox-embed.service");
-    expect(FREE).toContain("stop ollama.service");
-    expect(FREE.indexOf("stop ollama.service")).toBeLessThan(FREE.indexOf("stop clawbox-embed.service"));
+    // Both go through the pause helper now (TASK-724), which is what gives each
+    // stop a matching start; the order between them is unchanged.
+    expect(FREE).toContain("pause_engine_unit clawbox-embed.service");
+    expect(FREE).toContain("pause_engine_unit ollama.service");
+    expect(FREE.indexOf("pause_engine_unit ollama.service"))
+      .toBeLessThan(FREE.indexOf("pause_engine_unit clawbox-embed.service"));
   });
 
   it("registers the unit as installed-but-never-enabled, and dispatches the model step", () => {

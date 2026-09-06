@@ -18,7 +18,9 @@
  *   CLAWBOX_API_BASE          device API origin (default http://127.0.0.1:80)
  *   CLAWBOX_MCP_TOKEN         bearer for /setup-api/*; falls back to
  *                             <root>/data/.mcp-token so a provisioning entry
- *                             need carry no secret
+ *                             need carry no secret. Read once at startup and
+ *                             DELETED from process.env before any child can
+ *                             inherit it (mcp/lib/api.ts primeApiToken)
  *   CLAWBOX_MCP_PROFILE       full (default) | core | browser pins the tool
  *                             set; auto makes it FOLLOW THE MODEL — a device
  *                             running the on-device provider on a small model
@@ -42,7 +44,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { API_BASE, authHeader } from "./lib/api";
+import { API_BASE, authHeader, primeApiToken } from "./lib/api";
 import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { resolveProfile } from "./lib/profile";
@@ -134,10 +136,12 @@ function instructionsFor(edition: Ed, profile: Profile): string {
  * `overrides` exists for that CHECKER, not for the running server. Several tool
  * families register only when a device probe says the box can do the thing —
  * `du`, `journalctl`, a screen grabber, a readable mailbox, the coding harness.
- * Off a real box every one of those probes answers false (mcp/lib/guard.ts
- * spawns in CLAWBOX_ROOT, which does not exist on a CI runner or a dev PC), so
- * a checker that built the server the ordinary way would examine a fraction of
- * the surface and report the whole thing OK. Nothing else passes it; the
+ * Off a real box most of those probes answer false — there is no device API to
+ * ask, and a runner has neither a screen grabber nor ImageMagick — so a checker
+ * that built the server the ordinary way would examine a fraction of the
+ * surface and report the whole thing OK. (It was ALL of them until TASK-722:
+ * the spawns ran in CLAWBOX_ROOT and a missing directory answered false for
+ * binaries that were installed.) Nothing else passes it; the
  * running server always takes the probes.
  *
  * It may override CAPABILITIES only. The server's identity — `edition`,
@@ -202,6 +206,10 @@ export async function buildServer(
 }
 
 async function main(): Promise<void> {
+  // FIRST, before the probes below spawn anything: the bearer goes into this
+  // process's cache and out of its environment, so no child — a startup probe,
+  // a `bash` command, a `spawnArgv` — inherits it. See `primeApiToken`.
+  primeApiToken();
   // ONE probe of /setup-api/harness/active, for both questions it settles.
   const appHarness = await resolveAppHarness(API_BASE, authHeader());
   const edition = resolveEdition(appHarness);

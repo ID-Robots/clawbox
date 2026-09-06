@@ -4,7 +4,8 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
-import { setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition } from "@/lib/harness";
+import { setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition, type Harness } from "@/lib/harness";
+import { refreshHarnessToolsIfSwitched } from "@/lib/harness-mcp-refresh";
 import { CONFIG_ROOT } from "@/lib/config-store";
 
 const exec = promisify(execFile);
@@ -72,8 +73,17 @@ export async function POST(request: Request) {
   // failure the device is in an uncertain state (synced but maybe not flipped);
   // return the JSON error contract and tell the client to re-read status rather
   // than letting a framework-generated 500 leak through.
+  // The harness this call REPLACED, answered by the write itself, so the refresh
+  // below can tell a real flip from a re-select of the one already running.
+  //
+  // It has to come from the persist rather than from a read of our own: a read
+  // would sit above the identity sync and its 60 s budget, and two switches in
+  // opposite directions inside that window both see the same predecessor — the
+  // second persists its harness, concludes nothing moved, and leaves the box on
+  // one harness with the agent's whole tool list built for the other.
+  let previous: Harness;
   try {
-    await setActiveHarness(harness);
+    previous = await setActiveHarness(harness);
   } catch (err) {
     console.error("[harness/select] failed to persist active harness:", err instanceof Error ? err.message : err);
     return NextResponse.json(
@@ -81,5 +91,10 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+  // The agent's own tool list is built from a startup probe of which harness is
+  // active, and nothing here bounces it — so ask the harness to rebuild it. Best
+  // effort, after the write: see harness-mcp-refresh.ts for why it is the whole
+  // MCP reload and not a poll in the two handlers whose answer is visible.
+  await refreshHarnessToolsIfSwitched(previous, harness);
   return NextResponse.json({ success: true, active: harness });
 }

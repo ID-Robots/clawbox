@@ -12,6 +12,7 @@ const path = require("path");
 const WebSocket = require("ws");
 const { Transform } = require("stream");
 const { attachAccessLog } = require("./scripts/access-log.js");
+const { attachProxyPeerGuard } = require("./scripts/proxy-peer.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -721,6 +722,16 @@ http.Server.prototype.listen = function (...args) {
   // Attached here, on the ONE server Next actually creates, before it starts
   // accepting. HTTPS requests are re-emitted onto this same server (see
   // startHttpsServer), so this single call covers :80 and :443 both.
+  //
+  // The peer guard goes on FIRST (it prepends, so it runs ahead of Next's
+  // handler and ahead of the access log): a request from anywhere but loopback
+  // has its CF-Connecting-IP / CF-Connecting-IPv6 / True-Client-IP deleted
+  // before the login route can key a lockout bucket on a value the client
+  // chose, and before the access line records it as the client's address. The
+  // only honest source of those headers on this box is cloudflared, which
+  // arrives from 127.0.0.1 — see scripts/proxy-peer.js for what trusting
+  // loopback also trusts.
+  attachProxyPeerGuard(this);
   if (attachAccessLog(this)) {
     console.log("[production-server] HTTP access log enabled");
   }
@@ -778,15 +789,91 @@ try {
   // supports, this path is a symlink into `.next` that DANGLES while the tree is
   // parked, and `existsSync` would call the box's only build absent.
   const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+  const nextDir = path.join(__dirname, ".next");
+  // BOTH transients are private per process. The mutex is the atomic rename of
+  // the SOURCE (`.next-old`); sharing a destination buys nothing for that and
+  // costs a latch — a stray shared `.next-claim` beside an existing `.next-old`
+  // made every later claim fail ENOTEMPTY, here and in install.sh, for ever.
+  const claimDir = path.join(__dirname, `.next-claim.${process.pid}`);
+  const discardDir = path.join(__dirname, `.next-discard.${process.pid}`);
+  /**
+   * A rename that answers WHY it failed instead of throwing.
+   *
+   * The distinction matters at the claim below: ENOENT means the other
+   * reclaimer took the parked tree, which is a normal outcome and not a
+   * problem; anything else — EROFS, EACCES, ENOSPC — is a real failure an
+   * operator has to see, and reporting it as "someone else got there first"
+   * would be a false cause in the one line they triage from.
+   */
+  const renameQuiet = (from, to) => {
+    try { fs.renameSync(from, to); return null; } catch (err) { return err; }
+  };
+
+  // The drain, and install.sh's `drain_build_transients` is its twin — keep the
+  // two in step. A process killed mid-claim leaves the box's only build under a
+  // private name nothing else looks at, so every orphan is dealt with before
+  // either reclaimer decides anything: junk goes, a build is adopted under the
+  // parked name by a rename (safe against a LIVE owner, whose placement then
+  // fails and which stands down), and a build that would displace a parked one
+  // is reported and left rather than destroyed.
+  const hasEntry = (dir) => present(path.join(dir, "standalone", "server.js"));
+  for (const name of fs.readdirSync(__dirname)) {
+    if (!name.startsWith(".next-claim.") && !name.startsWith(".next-discard.")) continue;
+    const orphan = path.join(__dirname, name);
+    if (!hasEntry(orphan)) {
+      fs.rmSync(orphan, { recursive: true, force: true });
+      continue;
+    }
+    if (renameQuiet(orphan, parkedDir) === null) {
+      console.warn(`[production-server] Adopted a build left behind by an interrupted reclaim (${name}).`);
+      continue;
+    }
+    // A rename onto a non-empty destination fails whatever is in it, so "it
+    // failed" is not "there is a build there". An entry-less but non-empty
+    // `.next-old` — an interrupted `rm -rf` in set_previous_build_aside leaves
+    // exactly that — is worth nothing and must not strand a real build for ever.
+    //
+    // CLAIMED before it is destroyed, never probed and then deleted: those are
+    // two syscalls apart and a concurrent set_previous_build_aside can rename a
+    // real build into `.next-old` in between, which a check-then-delete would
+    // destroy. The claim is a rename to the private discard name — the same
+    // mutex the whole reclaim rests on — and what was claimed is asked again
+    // before anything is removed.
+    if (!hasEntry(parkedDir)) {
+      if (renameQuiet(parkedDir, discardDir) === null) {
+        if (hasEntry(discardDir)) {
+          // It gained a build between the probe and the claim. Put it back and
+          // leave the orphan for the next run.
+          renameQuiet(discardDir, parkedDir);
+          console.warn(`[production-server] ${name} holds a build and .next-old gained one — leaving it for the next run.`);
+          continue;
+        }
+        fs.rmSync(discardDir, { recursive: true, force: true });
+      }
+      if (renameQuiet(orphan, parkedDir) === null) {
+        console.warn(`[production-server] Adopted a build left behind by an interrupted reclaim (${name}).`);
+      } else {
+        console.warn(`[production-server] Could not adopt ${name} into .next-old.`);
+      }
+      continue;
+    }
+    console.warn(`[production-server] ${name} holds a build and .next-old already does — leaving it for the next run.`);
+  }
+
 
   // …and "no entry, a parked one exists" is not on its own the killed rebuild
   // this block repairs. It is ALSO the normal state of a rebuild in flight, for
   // the whole length of the build: install.sh's do_rebuild renames `.next` to
   // `.next-old` and `next build` writes the standalone entry last. This process
-  // is started inside that window as a matter of routine — clawbox-gateway.service
-  // carries `Wants=clawbox-setup.service`, so every gateway (re)start starts the
+  // was started inside that window as a matter of routine — clawbox-gateway.service
+  // carried `Wants=clawbox-setup.service`, so every gateway (re)start started the
   // service do_rebuild had just stopped (e2e-install run 33971129750: four
-  // seconds after the stop). Reclaiming there `rm -rf`s the half-written build
+  // seconds after the stop). That line is gone (TASK-728), which removes the
+  // routine trigger and not the case: `install.sh --step rebuild` run by hand, a
+  // box where the gateway unit was never installed so gateway_setup is skipped,
+  // and an operator (or the sudoers grant) restarting clawbox-setup all still
+  // land inside the window. Reclaiming
+  // there `rm -rf`s the half-written build
   // out from under `next build` and renames the previous one on top of it, and
   // the box comes back on the build the update was replacing.
   //
@@ -849,19 +936,64 @@ try {
         console.warn("[production-server] .next-old carries a rebuild stamp that names no live rebuild — treating the parked build as abandoned.");
       }
       console.warn("[production-server] No .next build, but .next-old holds one — an update was killed mid-rebuild. Putting it back.");
-      fs.rmSync(path.join(__dirname, ".next"), { recursive: true, force: true });
-      fs.renameSync(parkedDir, path.join(__dirname, ".next"));
-      console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
-      // Its own try, deliberately: the reclaim is already done by the line
-      // above, and `force` swallows ENOENT but not EACCES or EIO. Letting one
-      // reach the catch below would report "Could not reclaim a parked build"
-      // over a reclaim that succeeded — a false failure in the line an
-      // operator triages from.
-      try {
-        fs.rmSync(path.join(__dirname, ".next", OWNER_STAMP), { force: true });
-      } catch {
-        // A stale stamp inside the restored tree is inert: the next park
-        // overwrites it, and nothing else reads it there.
+
+      // THE CLAIM, and the whole of TASK-729's fix. There are two reclaimers of
+      // these directories — this one and install.sh's promote_parked_build —
+      // with no lock between them, and both used to run the same non-atomic
+      // pair, `rm -rf .next` then `mv .next-old .next`. Whichever arrived
+      // second deleted what the first had just restored and then failed its own
+      // rename into this file's best-effort catch, leaving the box with NEITHER
+      // tree: the exact outcome the park exists to prevent.
+      //
+      // A rename is atomic and has exactly one winner, so the claim goes first
+      // and nothing is destroyed before it. The loser returns having touched
+      // nothing, which is the whole point.
+      const claimErr = renameQuiet(parkedDir, claimDir);
+      if (claimErr && claimErr.code === "ENOENT") {
+        console.warn("[production-server] Another reclaim took the parked build first — leaving it to finish.");
+      } else if (claimErr) {
+        // Not a lost race: the tree is still there and this box could not move
+        // it. Same sentence the outer catch used to produce, because it is the
+        // line an operator triages from.
+        console.warn("[production-server] Could not reclaim a parked build:", claimErr.message);
+      } else {
+        // Everything from here destroys only PRIVATE names. `.next` is moved
+        // aside rather than deleted, so even if "it has no build entry" was
+        // raced by the other reclaimer placing a good one, nothing is lost.
+        // The move-aside's result is the difference between "somebody took our
+        // claim" and "this filesystem will not let us move a directory".
+        // Discarded, an EACCES/EROFS/EBUSY here left `.next` in place, made the
+        // placement fail ENOTEMPTY, and was then reported as a lost race while
+        // the build stayed under the claim — a false cause on a process that is
+        // about to crash-loop for want of an entry.
+        const asideErr = renameQuiet(nextDir, discardDir);
+        if (asideErr && present(nextDir)) {
+          console.warn(
+            `[production-server] Could not move .next aside (${asideErr.message}) — the parked build stays claimed at ${path.basename(claimDir)}.`,
+          );
+        } else if (!renameQuiet(claimDir, nextDir)) {
+          fs.rmSync(discardDir, { recursive: true, force: true });
+          console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
+          // Its own try, deliberately: the reclaim is already done by the lines
+          // above, and `force` swallows ENOENT but not EACCES or EIO. Letting
+          // one reach the catch below would report "Could not reclaim a parked
+          // build" over a reclaim that succeeded — a false failure in the line
+          // an operator triages from.
+          try {
+            fs.rmSync(path.join(nextDir, OWNER_STAMP), { force: true });
+          } catch {
+            // A stale stamp inside the restored tree is inert: the next park
+            // overwrites it, and nothing else reads it there.
+          }
+        } else {
+          // Our claim was folded back by the other reclaimer, which means it is
+          // placing this same build. Return what we moved aside and get out of
+          // its way; the tree is not lost, it is in the other one's hands.
+          if (renameQuiet(discardDir, nextDir)) {
+            fs.rmSync(discardDir, { recursive: true, force: true });
+          }
+          console.warn("[production-server] Another reclaim claimed the parked build mid-flight — leaving it to finish.");
+        }
       }
     }
   }

@@ -270,7 +270,10 @@ describe("isBackupRunning", () => {
     // The bound is not a guess: `runBackup()` SIGKILLs the daemon at
     // BACKUP_RUN_CAP_MS, so past it there is nothing left alive to pulse for.
     expect(STALE_RUNNING_MS).toBe(BACKUP_RUN_CAP_MS);
-    expect(BACKUP_RUN_CAP_MS).toBe(60 * MINUTE);
+    // The number itself is pinned to ClawKeep's own service unit by
+    // `clawkeep-backup-run-cap.test.ts`; what matters here is that the pulse
+    // and the kill timer are one value, whatever that value becomes.
+    expect(BACKUP_RUN_CAP_MS).toBe(4 * HOUR);
   });
 
   it("does not let a clock-skewed heartbeat pulse for as long as the skew", () => {

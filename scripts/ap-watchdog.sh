@@ -24,11 +24,23 @@
 set -uo pipefail
 
 IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
+# $ROOT names the files this script READS — parsed with read_env_value or
+# grep, never sourced — and nothing it executes.
 ROOT="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
 CONFIG_FILE="$ROOT/data/config.json"
 CONNECT_LOCK="$ROOT/data/wifi-connecting.lock"
 HOTSPOT_ENV="$ROOT/data/hotspot.env"
-START_AP="$ROOT/scripts/start-ap.sh"
+# The script this one EXECUTES is the root-owned copy under
+# /usr/local/libexec/clawbox — never derived from $ROOT. This runs as root on a
+# timer (clawbox-ap-watchdog.service has no User=), while $ROOT/scripts is
+# clawbox-owned and clawbox-writable, so "$ROOT/scripts/start-ap.sh" was root
+# executing whatever clawbox had put there. The override exists for the tests
+# that stand a witness in for start-ap.sh (the shape nm-dispatcher-failover.sh
+# uses for CLAWBOX_ONLINE_WAITER); it is only safe because the unit loads its
+# environment from the root-owned /etc/clawbox/network.env, not data/ — a
+# CLAWBOX_START_AP line in a clawbox-writable EnvironmentFile would be the same
+# hole by another name. Security scan #21.
+START_AP="${CLAWBOX_START_AP:-/usr/local/libexec/clawbox/start-ap.sh}"
 # A connect (with retries) + AP restore can legitimately take a couple of
 # minutes; ignore a lock older than this so a web-server crash mid-handoff can't
 # wedge the watchdog off forever.
@@ -109,5 +121,20 @@ case "$STATE" in
 esac
 
 echo "[AP-watchdog] $IFACE is '${STATE:-unknown}' (not connected) and setup is incomplete — restoring hotspot"
+# No fallback to the tree copy: a missing libexec copy means install.sh has not
+# run install_root_libexec yet (or it failed), and the answer to that is the
+# next root step, not root running a clawbox-writable file. Exit 0 so the timer
+# does not paint a failed unit every twenty seconds while it waits. There is
+# one known window where this branch runs on purpose: the FIRST in-app update
+# carrying this script, between the updater's `git reset --hard` (which puts
+# this file in the tree) and post_update's first install_root_libexec (which
+# puts the copy in libexec) — for the length of that build the old unit runs
+# this new script and it stands down. A hotspot that drops in those minutes on
+# a pre-setup box is not re-raised until the copy lands; that is the intended
+# cost of having no tree fallback, since the fallback IS the hole.
+if [ ! -x "$START_AP" ]; then
+  echo "[AP-watchdog] $START_AP is missing or not executable — hotspot NOT restored; run 'sudo bash /home/clawbox/clawbox/install.sh --step systemd_services'" >&2
+  exit 0
+fi
 # SKIP_PRESCAN: we only need the hotspot back, not a fresh network scan.
 SKIP_PRESCAN=1 bash "$START_AP"

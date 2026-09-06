@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { useT } from "@/lib/i18n";
-import { shellScanEn } from "@/lib/hermes-translations/en-shell-scan";
+import { shellScanEn } from "@/lib/edition-translations/en-shell-scan";
 
 interface HarnessEntry {
   id: string;

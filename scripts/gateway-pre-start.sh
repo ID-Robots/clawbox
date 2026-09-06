@@ -189,6 +189,242 @@ if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_V2
 
+# ── First boot on a NEW OpenClaw core: make the config loadable again ───────
+#
+# THE INCIDENT (TASK-737). A customer box was dark for 25 hours after the
+# 2026.7.1 → 2026.8.1 core upgrade. OpenClaw 2026.8 does not migrate a 2026.7
+# config on load: its startup guard runs the preflight with
+# `migrateLegacyConfig: false` and exits 78 with `Unrecognized keys`. The
+# migrations exist (`LEGACY_CONFIG_MIGRATIONS`, "applied by doctor") but only
+# `openclaw doctor --fix` performs them, and nothing on the boot path ran it
+# for THIS reason — the auth-profile block below is gated on its own sentinel,
+# and the updater's call happens after the gateway has already failed.
+#
+# HARNESS FIRST, TWICE OVER. The question "will the core load this?" is asked
+# of the core in its own machine-readable form — `openclaw config validate
+# --json` answers `{valid, path, issues[]}` — and the repair is the core's own
+# `doctor --fix`. No rename table lives here: the moves the 2026.8 core makes
+# are its business, and a table in this file would be a second, staler copy of
+# it. The human `config validate` output is NOT parsed: it goes to stderr and
+# marks each issue with a themed `×` that any `FORCE_COLOR` in the environment
+# repaints, so it is presentation, not a contract.
+#
+# AND THE THING THAT BLOCKS THE REPAIR. Measured against 2026.8.1 on
+# 2026-09-06: with a legacy `exec-approvals.json` in the state directory,
+# `doctor --fix` exits 1 having migrated NOTHING, and its last line is `Legacy
+# exec approvals exist at … Run \`openclaw doctor --fix\`` — advice for the
+# command that just ran. The core's gate throws on the file's mere PRESENCE,
+# so its contents do not matter to it; move the file aside and the same
+# command exits 0 and migrates everything. It is therefore cleared FIRST, and
+# only when it provably holds no decision of the owner's.
+#
+# COST. Gated on a fingerprint of the config the core last ACCEPTED and the
+# core that accepted it, so a steady box pays nothing; a core bump or a
+# rewrite of openclaw.json costs one `config validate`. The stamp is written
+# only on an accepted config, so a failed repair is retried next boot rather
+# than remembered as done.
+#
+# BUDGET. This is a blocking ExecStartPre under `TimeoutStartSec=600`
+# (config/clawbox-gateway.service) and the rest of this script's own bounds
+# already add up to well over half of it — the version probe, two plugin
+# installs, the codex install and enable, the deepseek installs and the
+# auth-profile doctor below. The worst case added here is 65 + 180 + 65 = 310 s
+# (the two validate bounds carry a 5 s `-k` grace each), and only on a box
+# whose config the core actually refuses; an accepted config costs one probe.
+# The doctor bound is SIGTERM-only, deliberately: a SIGKILL mid-import is how
+# a half-finished `exec-approvals.json.doctor-importing` claim gets left
+# behind, which blocks every later doctor exactly as the original file does.
+CLAWBOX_CONFIG_VALIDATED_STAMP="$CLAWBOX_ROOT/data/openclaw-config-validated"
+
+# Does this approvals file hold a decision of the OWNER's?
+# 0 = provably none, 1 = yes, 2 = cannot tell. Only 0 may lead to a move.
+clawbox_exec_approvals_hold_a_decision() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    raw = open(sys.argv[1], "rb").read()
+except Exception:
+    sys.exit(2)
+# A zero-byte file is what a power cut mid-write leaves. It carries no
+# approval, and the core's gate refuses to migrate while it exists — so it is
+# the one shape that must not be left alone.
+if raw.strip() == b"":
+    sys.exit(0)
+try:
+    doc = json.loads(raw)
+except Exception:
+    sys.exit(2)
+if not isinstance(doc, dict):
+    sys.exit(2)
+# `socket` is MACHINE state, not a decision: the core fills socket.path and a
+# fresh socket.token into every file it persists, with no owner involvement,
+# and regenerates both on its next write. Reading that as an approval is what
+# would make this repair decline to fire on the shape a real box carries.
+socket = doc.get("socket")
+if socket is not None and not isinstance(socket, dict):
+    sys.exit(2)
+if isinstance(socket, dict) and set(socket) - {"path", "token"}:
+    sys.exit(1)
+# These two are where a decision can live.
+for key in ("defaults", "agents"):
+    node = doc.get(key)
+    if node in (None, {}, []):
+        continue
+    sys.exit(1)
+# Anything the core added that this predicate does not understand is content.
+if set(doc) - {"version", "socket", "defaults", "agents"}:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+# What the core says about this config, in the core's own words.
+# Echoes `accepted`, `refused<TAB><issues>` or `unknown<TAB><why>`.
+clawbox_core_config_verdict() {
+  local out rc=0
+  out="$(timeout 60 "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
+  # 0 = valid, 1 = the core's verdict. Anything else (124 the bound fired,
+  # 126/127 nothing to run, a crash) is NOT an answer about the config, and
+  # reporting one as a refusal would spend 180 s of doctor on every single
+  # start of a box whose config is perfectly fine.
+  case "$rc" in
+    0|1) ;;
+    *) printf 'unknown\tthe validator did not answer (exit %s)\n' "$rc"; return 0 ;;
+  esac
+  CLAWBOX_VERDICT_JSON="$out" python3 <<'PY'
+import json, os, sys
+try:
+    doc = json.loads(os.environ.get("CLAWBOX_VERDICT_JSON") or "")
+except Exception:
+    print("unknown\tthe validator did not answer in JSON")
+    sys.exit(0)
+if not isinstance(doc, dict) or "valid" not in doc:
+    print("unknown\tthe validator's answer carried no verdict")
+    sys.exit(0)
+if doc.get("valid") is True:
+    print("accepted")
+    sys.exit(0)
+parts = []
+for issue in doc.get("issues") or []:
+    if not isinstance(issue, dict):
+        continue
+    text = ": ".join(str(x) for x in (issue.get("path"), issue.get("message")) if x)
+    if text:
+        parts.append(text)
+print("refused\t" + ("; ".join(parts) or "the core gave no reason"))
+PY
+}
+
+# A stamp is a record of a FILE this core accepted, so a later rewrite of that
+# file — this script's own python pass below, or a boot on a core one
+# generation back that writes the legacy names again — invalidates it and the
+# next boot asks again.
+clawbox_config_fingerprint() {
+  printf '%s %s' "$CLAWBOX_OPENCLAW_EFFECTIVE" \
+    "$(stat -c '%s %Y' "$OPENCLAW_CONFIG" 2>/dev/null || echo 'unknown')"
+}
+
+clawbox_stamp_read() {
+  [ -f "$CLAWBOX_CONFIG_VALIDATED_STAMP" ] || return 0
+  head -n1 "$CLAWBOX_CONFIG_VALIDATED_STAMP" 2>/dev/null || true
+}
+
+clawbox_stamp_write() {
+  mkdir -p "$(dirname "$CLAWBOX_CONFIG_VALIDATED_STAMP")" 2>/dev/null || true
+  if ! printf '%s\n' "$(clawbox_config_fingerprint)" > "$CLAWBOX_CONFIG_VALIDATED_STAMP" 2>/dev/null; then
+    # Not fatal, but not silent either: without the stamp every gateway start
+    # pays for a `config validate` it did not need, and "a steady box pays
+    # nothing" quietly stops being true with nothing in the log to say why.
+    echo "  WARN: could not record $CLAWBOX_CONFIG_VALIDATED_STAMP — this boot's config validation will be repeated on every gateway start" >&2
+  fi
+}
+
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] \
+  && [ -x "$OPENCLAW_BIN" ] \
+  && [ -f "$OPENCLAW_CONFIG" ] \
+  && [ "$(clawbox_stamp_read)" != "$(clawbox_config_fingerprint)" ]
+then
+  # Both names block the core's gate: doctor renames the file to the
+  # `.doctor-importing` claim for the duration of an import, so a killed
+  # import leaves one behind that refuses every later doctor just as the
+  # original does.
+  for _ea_file in \
+    "$OPENCLAW_STATE_DIR/exec-approvals.json" \
+    "$OPENCLAW_STATE_DIR/exec-approvals.json.doctor-importing"
+  do
+    [ -e "$_ea_file" ] || continue
+    # Captured, not read from `$?` after a bare call: under `set -e` a bare
+    # call answering "holds a decision" (exit 1) would abort the whole
+    # pre-start, which is the opposite of leaving the owner's file alone.
+    _ea_verdict=0
+    clawbox_exec_approvals_hold_a_decision "$_ea_file" || _ea_verdict=$?
+    case "$_ea_verdict" in
+      0)
+        _ea_moved="$_ea_file.legacy-$(date +%Y%m%d-%H%M%S)"
+        if mv "$_ea_file" "$_ea_moved" 2>/dev/null; then
+          echo "  Moved a legacy exec approvals file aside ($_ea_moved): it holds no approval of yours, and its presence stops openclaw doctor before it migrates anything"
+        else
+          echo "  WARN: could not move $_ea_file aside; openclaw doctor will refuse to migrate this config while it is there" >&2
+        fi
+        ;;
+      1)
+        echo "  NOTE: $_ea_file holds exec approvals, and openclaw doctor refuses every config migration while it exists. Nothing here will move it: review it, move it aside by hand, and restart the gateway." >&2
+        ;;
+      *)
+        echo "  WARN: could not read $_ea_file — leaving it alone; openclaw doctor will refuse to migrate this config while it is there" >&2
+        ;;
+    esac
+  done
+
+  _cfg_verdict="$(clawbox_core_config_verdict)"
+  _cfg_state="${_cfg_verdict%%$'\t'*}"
+  _cfg_detail=""
+  case "$_cfg_verdict" in *"$(printf '\t')"*) _cfg_detail="${_cfg_verdict#*$'\t'}" ;; esac
+
+  case "$_cfg_state" in
+    accepted)
+      clawbox_stamp_write
+      ;;
+    refused)
+      echo "  The installed OpenClaw core ($CLAWBOX_OPENCLAW_EFFECTIVE) refuses this config; running its own migrations..."
+      echo "  refused: $_cfg_detail" >&2
+      # Named for the core, and never overwritten. A timestamped copy would
+      # leave one file per boot on a box whose repair keeps failing — and
+      # `Restart=always` means that is a lot of boots — while the copy anyone
+      # would want is the FIRST one, taken before anything touched the file.
+      _pre_migration_backup="$OPENCLAW_CONFIG.pre-$CLAWBOX_OPENCLAW_EFFECTIVE-migration"
+      if [ ! -e "$_pre_migration_backup" ]; then
+        cp -p "$OPENCLAW_CONFIG" "$_pre_migration_backup" 2>/dev/null \
+          || echo "  WARN: could not back up $OPENCLAW_CONFIG before migrating it" >&2
+      fi
+      # SIGTERM only, no `-k`: see BUDGET above.
+      if ! timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
+        echo "  WARN: openclaw doctor --fix did not complete" >&2
+      fi
+      _cfg_verdict="$(clawbox_core_config_verdict)"
+      _cfg_state="${_cfg_verdict%%$'\t'*}"
+      _cfg_detail=""
+      case "$_cfg_verdict" in *"$(printf '\t')"*) _cfg_detail="${_cfg_verdict#*$'\t'}" ;; esac
+      if [ "$_cfg_state" = "accepted" ]; then
+        echo "  Config migrated to the $CLAWBOX_OPENCLAW_EFFECTIVE layout"
+        clawbox_stamp_write
+      else
+        # Not fatal: everything below still runs on a config the core will
+        # refuse, exactly as it did before this block existed, and the
+        # gateway's own exit 78 stays the authority. What changes is that the
+        # keys are named HERE, in the boot log, instead of only in a gateway
+        # journal nobody reads until an owner calls.
+        echo "  ERROR: the core still refuses this config — the gateway will exit 78 until this is fixed: ${_cfg_detail:-$_cfg_state}" >&2
+      fi
+      ;;
+    *)
+      # A validator that could not be run says nothing about the config.
+      # Claiming a refusal here would put every boot of a healthy box through
+      # a 180 s doctor run, permanently.
+      echo "  WARN: could not ask the installed core whether it will load this config (${_cfg_detail:-no reason given}) — leaving it exactly as it is" >&2
+      ;;
+  esac
+fi
 # Resolve configured mDNS hostname (defaults to "clawbox" if unset/invalid)
 CONFIGURED_HOSTNAME="clawbox"
 if [ -f "$HOSTNAME_ENV" ]; then
@@ -1542,8 +1778,10 @@ def _url_host(_url):
 # install.sh's CLAWBOX_AI_API_KEY branch provisions a RAW DeepSeek key at
 # api.deepseek.com, and admitting that host would make a genuine third party
 # "not foreign". Here that is already true without a test of its own — every
-# reader of this set (`_is_our_image_row`, `_is_foreign`) sits inside the
-# `claw_` gate below, so on a raw-DeepSeek box the set is never consulted.
+# reader of this set (`_is_our_image_row`, `_is_foreign`, `_clawai_host_is_ours`)
+# sits inside the `claw_` gate below — the speech migration through
+# `_clawai_openai_route_is_ours`, which is only set there — so on a raw-DeepSeek
+# box the set is never consulted.
 # clawboxProxyHosts() in src/app/setup-api/ai-models/configure/route.ts DOES
 # test it, because its call site is not gated; the two therefore agree on
 # every box. If a reader of this set is ever moved ABOVE that gate, the
@@ -1860,6 +2098,112 @@ def _same_endpoint(_a, _b):
     return _without_one_trailing_slash(_a) == _without_one_trailing_slash(_b)
 
 
+def _clawai_host_is_ours(_url):
+    """Does this address name a host CLAWBOX ITSELF has written?
+
+    The same `_clawbox_proxy_hosts` the image row's ownership test uses — the
+    live proxy (so a staging box names its staging host) plus the retired ones —
+    rather than a second list, so "is this row mine to repair" and "is this
+    speech route mine" cannot drift into two answers.
+
+    Host, not full address, and deliberately: the arms below that ask this one
+    are looking for a route of OURS that has MOVED, and a move is exactly the
+    case an equality test cannot see. The arms that need the precise address
+    still ask `_same_endpoint`.
+
+    Same gate caveat as the set it reads: every caller must sit inside the
+    `claw_` test above it, or a raw-DeepSeek box would admit api.deepseek.com as
+    ours. This one does — the speech migration runs only when
+    `_clawai_openai_route_is_ours`, which is set inside that gate.
+    """
+    return _url_host(_url) in _clawbox_proxy_hosts if isinstance(_url, str) else False
+
+
+def _clawai_route_is_ours(_base_url, _api_key, _stamped, _proxy_base_url):
+    """Is a configured media route OURS — ours to refresh, ours to take back?
+
+    THE CURRENT PROXY URL IS NOT THE QUESTION, and asking it as though it were
+    is what this replaces. `CLAWBOX_AI_PROXY_URL` is env-overridable and moves
+    between releases, so a box we linked under a previous address carries an
+    entry we wrote, pointing at an endpoint that has since been retired — and
+    an equality test reads that as the OWNER'S own speech server and skips it,
+    while the chat provider and the image row are repaired in the same boot.
+    The customer's transcription and voice stay pointed at a dead host and
+    nothing says so: the false-failure class.
+
+    Ownership needs POSITIVE evidence, in the four shapes below. The Hermes half
+    (`hermesCloudRouteIsOurs`, src/lib/hermes-tts.ts — TASK-726 is this half of
+    it) asks the same question with the arms IT has: it writes no stamp, so it
+    has three, and it needs no delete arm at all because it HAS no destructive
+    path — `writeHermesCloudTarget` is the only writer of `tts.openai.*` and a
+    downgrade there just stops exposing the endpoint. The consequence is one
+    real divergence, and it is deliberate: our own `claw_` token at an address
+    of the owner's reads as OURS on Hermes and as THEIRS here, which is what
+    beta did and what the suite pins.
+
+      - our own stamp on the entry (`clawboxManaged`);
+      - or a `claw_` portal token on it, which is what survives the proxy URL
+        moving;
+      - or the endpoint names our proxy, or a host of ours it has moved from;
+      - or the slot is genuinely EMPTY — no endpoint AND no key. An unset
+        endpoint alone says nothing: the canonical way an owner uses the
+        generic `openai` slot is their key with no URL at all.
+
+    FOREIGN EVIDENCE IS ASKED FIRST, and it comes in two kinds. A host that is
+    none of ours is decisive on its own: no stamp and no token of ours outranks
+    it. Their CREDENTIAL is weighed against the address rather than over it — an
+    `sk-` key on one of our own addresses still reads as ours, which is what beta
+    did and what this deliberately does not change (see the delete arm below).
+
+    The key was the only evidence this asked for at first. But a speech server on
+    the LAN needs no key at all, so on the shape an owner is most likely to run,
+    THE ADDRESS IS THE ONLY THING THAT SPEAKS FOR IT. This is
+    the only generic OpenAI-compatible speech slot OpenClaw has, so an owner who
+    wants their own speech server has to edit the entry we already wrote — which
+    `openclaw config set` does in place, leaving our `clawboxManaged` key behind
+    on a route that is now theirs. Trusting a stamp on its own would overwrite
+    their server, their key and their model at the next gateway start, and
+    DELETE the whole entry on a downgrade. `hermesCloudRouteIsOurs` refuses that
+    same entry, and so did the rule this replaces.
+
+    ONE WIDENING, recorded rather than hidden: an entry carrying our stamp or our
+    token on a DIFFERENT PATH of one of our own hosts (`clawbox.com/api/ai-2025`)
+    reads as ours here, where the equality test called it theirs. That is the
+    card — it is how an entry we wrote under a moved proxy is recognised — and it
+    needs TWO pieces of our-ness at once, which a customer serving from their own
+    machine cannot produce. It does sit against the premise
+    gateway-pre-start-clawai-audio.test.ts:167 pins for the transcription block,
+    where another route on our own host IS the owner's; the difference is that
+    that block has no stamp and no credential to ask about.
+
+    The transcription block above deliberately does NOT use this: nothing it
+    writes carries a stamp or a credential, so its endpoint really is the only
+    evidence it has, and treating its seeded model list as one would claim an
+    owner's own route on our host that happens to serve the same model (two
+    cases in gateway-pre-start-clawai-audio.test.ts pin exactly that). Stamping
+    what it writes, so the same repair becomes possible there, is its own card.
+    """
+    _key = _api_key.strip() if isinstance(_api_key, str) else ""
+    _has_endpoint = isinstance(_base_url, str) and bool(_base_url.strip())
+    if _key and not _key.startswith("claw_"):
+        # Somebody else's credential on the entry: only the endpoint can still
+        # say it is ours, and a stale stamp cannot.
+        return _has_endpoint and _same_endpoint(_base_url, _proxy_base_url)
+    if _has_endpoint and not _clawai_host_is_ours(_base_url):
+        # Somebody else's HOST. The same kind of evidence as somebody else's
+        # key, and the only kind a KEYLESS speech server ever produces — a
+        # Kokoro or a Piper on the LAN has no credential to speak for it, and
+        # asking only about the key claimed it, overwrote it, and deleted it on
+        # a downgrade. Retired addresses of ours are still ours, so this costs
+        # the repair below nothing.
+        return False
+    if _stamped or _key.startswith("claw_"):
+        return True
+    if not _has_endpoint:
+        return not _key
+    return _same_endpoint(_base_url, _proxy_base_url)
+
+
 if _clawai_openai_route_is_ours:
     # Anything already under tools.media.audio that is not what we would write
     # is the owner's own transcription setup: a self-hosted Whisper, a Deepgram
@@ -2022,16 +2366,20 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
     if not isinstance(_speech, dict):
         _speech = {}
 
-    # An entry pointing somewhere that is not our proxy is the owner's own
+    # Whose entry is this? `_clawai_route_is_ours` above holds the whole rule —
+    # a foreign credential takes the slot back whatever else says, then our own
+    # stamp or a `claw_` token claims it wherever it points, then the endpoint,
+    # then an empty slot. An entry that is not ours is the owner's own
     # OpenAI-compatible voice — a self-hosted Kokoro, an OpenAI key of their
-    # own, a different route on our host. Leave every field of it alone. The
-    # same one-trailing-slash rule the transcription migration uses, for the
-    # same reason: `.../api/ai//` is a deliberate route, not a typo to tidy.
+    # own, a different route on our host — and every field of it is left alone.
+    # The endpoint arm keeps the one-trailing-slash rule the transcription
+    # migration uses: `.../api/ai//` is a deliberate route, not a typo to tidy.
     _speech_base_url = _speech.get("baseUrl")
-    _speech_route_taken = bool(
-        isinstance(_speech_base_url, str)
-        and _speech_base_url.strip()
-        and not _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
+    _speech_route_taken = not _clawai_route_is_ours(
+        _speech_base_url,
+        _speech.get("apiKey"),
+        _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True,
+        _clawai_proxy_base_url,
     )
     if _speech_route_taken:
         print(
@@ -2042,9 +2390,10 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
         _speech["baseUrl"] = _clawai_proxy_base_url
         _speech["model"] = CLAWBOX_SPEECH_MODEL_ID
         _speech["apiKey"] = _clawai_token
-        # Adopt and normalise an unmarked entry that already points at us — a
-        # hand repair, or one written before this stamp existed — rather than
-        # leave a box with a half-configured voice. Writing is recoverable and
+        # Adopt and normalise an unmarked entry that is ours by any of the other
+        # arms — a hand repair, one written before this stamp existed, or one
+        # still naming an address we have since retired — rather than leave a
+        # box with a half-configured voice. Writing is recoverable and
         # deleting is not, which is why only the delete below insists on it.
         _speech[CLAWBOX_SPEECH_MANAGED_KEY] = True
         if _speech != _speech_before:
@@ -2062,11 +2411,13 @@ elif _clawai_openai_route_is_ours:
     # A box that was Max and is not any more keeps an entry pointing at an
     # endpoint that now answers 403, so every spoken reply buys a refused round
     # trip before falling back — and the panel calls the cloud voice configured
-    # while it does it. Take back only what we wrote, and "what we wrote" means
-    # our own stamp plus our own proxy, not the proxy alone: an entry pointing
-    # at this host that we did not stamp is somebody's hand-written config, and
-    # this is the one place in the file that destroys configuration. An owner's
-    # own voice is theirs whatever their ClawBox AI plan says.
+    # while it does it. Take back only what we wrote: our own STAMP — whatever
+    # address it names, which is the half this fixes — and not an entry the
+    # owner has since re-aimed with a credential of their own. An entry
+    # pointing at this host that we did not stamp is somebody's hand-written
+    # config, and this is the one place in the file that destroys
+    # configuration. An owner's own voice is theirs whatever their ClawBox AI
+    # plan says.
     #
     # `messages.tts.provider` is deliberately NOT touched here either. If the
     # customer had explicitly chosen the cloud voice, the panel's job is to show
@@ -2079,11 +2430,43 @@ elif _clawai_openai_route_is_ours:
     _speech = _tts_providers.get("openai") if isinstance(_tts_providers, dict) else None
     if isinstance(_speech, dict):
         _speech_base_url = _speech.get("baseUrl")
+        # The STAMP is the authorisation, not the address. Requiring the
+        # current proxy URL as well left a downgraded box that had been linked
+        # under a previous address holding our own dead entry for good — every
+        # spoken reply buying a refused round trip, and the panel calling the
+        # cloud voice configured while it did. The stamp still has to be there:
+        # this is the one place in the file that destroys configuration, and an
+        # unstamped entry is somebody's hand-written config whatever it points
+        # at.
+        # THE STAMP, and only the stamp, opens this door — narrower than the
+        # adopt path above on purpose, and the difference is that this one
+        # cannot be undone. A `claw_` token is enough to REFRESH an entry
+        # because the worst case is our own fields rewritten to our own values;
+        # it is not enough to DELETE one, because an owner can point our own
+        # token at our own proxy with a model of their choosing, and that entry
+        # is theirs (the suite pins it).
+        #
+        # `_clawai_route_is_ours` is still asked, for its FOREIGN arms: a
+        # stamped entry the owner has since re-aimed is not ours to take,
+        # whatever the stamp says — and it is re-aimed whether or not they put a
+        # credential of their own on it. The address has to still be one of
+        # OURS, because this is the one place in the file that destroys
+        # configuration.
+        #
+        # Residual, and unchanged either way by this rule: a FOREIGN credential
+        # sitting on our own CURRENT proxy address still reads as ours, so such
+        # an entry is still overwritten and, here, deleted. Narrowing that is a
+        # behaviour change beyond this card.
         if (
             _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True
             and isinstance(_speech_base_url, str)
             and _speech_base_url.strip()
-            and _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
+            and _clawai_route_is_ours(
+                _speech_base_url,
+                _speech.get("apiKey"),
+                True,
+                _clawai_proxy_base_url,
+            )
         ):
             del _tts_providers["openai"]
             print(
@@ -2191,11 +2574,23 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
   LEGACY_AUTH_PROFILE="$(find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null || true)"
   if [ -n "$LEGACY_AUTH_PROFILE" ]; then
     echo "  Migrating legacy auth profiles into OpenClaw 2 SQLite state..."
-    if ! timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
+    # Doctor exits non-zero over a legacy exec-approvals file having done
+    # nothing at all — measured against 2026.8.1, 2026-09-06, and the reason
+    # the block at the top of this script clears one first. That is not a
+    # failed auth-profile migration, and failing this ExecStartPre over it is
+    # STRICTLY WORSE than letting the gateway start and refuse: exit 78 is
+    # covered by RestartPreventExitStatus (config/clawbox-gateway.service), a
+    # failed pre-start is not, so it burns StartLimitBurst=20 and leaves the
+    # box with no gateway and no way back without a console.
+    _authdoc_rc=0
+    _authdoc_out="$(timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _authdoc_rc=$?
+    printf '%s\n' "$_authdoc_out"
+    if printf '%s\n' "$_authdoc_out" | grep -q 'Legacy exec approvals exist at'; then
+      echo "  WARN: openclaw doctor is blocked by a legacy exec approvals file, so the auth profiles were NOT migrated; starting the gateway anyway rather than failing this boot" >&2
+    elif [ "$_authdoc_rc" -ne 0 ]; then
       echo "  ERROR: OpenClaw 2 auth-profile migration failed" >&2
       exit 1
-    fi
-    if find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null | grep -q .; then
+    elif find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null | grep -q .; then
       echo "  ERROR: OpenClaw doctor left a legacy auth-profiles.json in place" >&2
       exit 1
     fi
@@ -4962,8 +5357,9 @@ clawbox_guide_section() {
 # shape — therefore leaves the marker sitting on a fragment: every later gateway
 # start finds the heading, appends nothing, and the file stays cut mid-sentence
 # FOREVER, while the only warning is a journal line from a boot nobody is
-# watching. What is lost is the tail of the section, which is where TASK-612's
-# deliverable ("never queue an operator_approval proposal") lives.
+# watching. What is lost is the tail of the section, which is where the
+# operator-approval paragraph lives — TASK-612's "never queue one" until
+# TASK-704 built the card, and since then the rule about WHEN to raise one.
 #
 # Rolling the file back to the length it had removes the fragment AND the
 # marker, so the next boot retries. Rollback rather than build-a-copy-and-

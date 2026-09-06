@@ -17,6 +17,7 @@
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import { hasClawaiToken } from "@/lib/harness/credentials";
+import { clawaiTokenRejectedByPortal } from "@/lib/clawbox-ai-portal-tier";
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue } from "@/lib/config-store";
 import {
@@ -26,6 +27,7 @@ import {
 } from "@/lib/hermes-providers";
 import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
 import { readPluginRepairs, repairFor, type PluginRepairStage } from "@/lib/plugin-repair";
+import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 
 /**
  * What the strip paints, and the only five things it may say.
@@ -101,6 +103,17 @@ export interface ProviderStatusSummary {
   providers: ProviderStatusRow[];
   /** The default provider's id, or null when the box has none yet. */
   defaultProvider: string | null;
+  /**
+   * Provider ids dropped from `providers` because this box can run NO model
+   * from them — the owner's ruling on TASK-668, and the only reason a curated
+   * row ever goes missing.
+   *
+   * Carried rather than left implicit because "absent" and "the summary could
+   * not be built" look the same to a client, and a second surface that renders
+   * its own hard-coded provider list (the Connect panel) has to be able to tell
+   * them apart: an empty array means every row it knows about may be shown.
+   */
+  unrunnable: string[];
   /**
    * True when the answer came from a fallback rather than from the live box —
    * a Hermes dashboard that did not respond, or an unreadable config. The strip
@@ -191,7 +204,7 @@ function sectionFor(id: string): "ai" | "localAi" {
 
 /** A row before the owner's switch is stamped on it; see `readProviderStatus`. */
 type UnstampedRow = Omit<ProviderStatusRow, "enabled">;
-interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
+interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers" | "unrunnable"> {
   providers: UnstampedRow[];
 }
 
@@ -204,6 +217,25 @@ interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
  * Painting "not connected" over a provider we simply failed to ask about is the
  * failure mode most likely to send someone to re-enter a key that was fine.
  */
+/**
+ * Has the portal already refused THIS box's ClawBox AI token?
+ *
+ * CACHE-ONLY, which is the whole point: this reader probes nothing and is
+ * polled, so it answers from what `/setup-api/ai-models/status` has already
+ * asked (every 30 s, while any client is open) and says "nobody has asked" on a
+ * cold process — no request, and not even a credential read. A cold answer
+ * keeps beta's row exactly as it was.
+ *
+ * Why it belongs here at all: `credentialed` is credential PRESENCE, so a
+ * revoked token painted the cyan dot and the word "Connected" on the one screen
+ * the chat's own "reconnect it in Settings" sends the customer to (TASK-419).
+ * `needs-reauth` is the state that was written for exactly this — "the box is
+ * pointed at this provider and cannot authenticate to it".
+ */
+function clawaiTokenRefused(): boolean {
+  return clawaiTokenRejectedByPortal();
+}
+
 function stateFor(
   credentialed: boolean | null,
   isDefault: boolean,
@@ -236,6 +268,7 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   // Asked once, outside the loop: it reads config and the config store, and the
   // answer is the same for every row that consults it.
   const clawaiLinked = await hasClawaiToken();
+  const clawaiRefused = clawaiTokenRefused();
 
   // Did the live dashboard actually answer? `stale` is set on every fallback
   // path (dashboard down, disk-catalog cold start). It draws the line between
@@ -286,7 +319,9 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
     return {
       id,
       label: hermesProviderLabel(id, byId.get(id)?.name),
-      state: stateFor(credentialed, isDefault, awaitingProbe),
+      state: id === CLAWAI_PROVIDER && clawaiRefused && credentialed === true
+        ? "needs-reauth"
+        : stateFor(credentialed, isDefault, awaitingProbe),
       isDefault,
       section: sectionFor(id),
     };
@@ -331,7 +366,8 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
   // The ClawBox AI credential can live in the config store instead of the
   // config file (a box migrated from a Hermes install), and `hasClawaiToken`
   // is the helper that knows both homes.
-  if (await hasClawaiToken()) credentialed.add("clawai");
+  const clawaiRefused = clawaiTokenRefused();
+  if (await hasClawaiToken()) credentialed.add(CLAWAI_PROVIDER);
 
   const primary = config.agents?.defaults?.model?.primary ?? null;
   const defaultProvider = normalizeProviderId(primary ? primary.split("/")[0] : null);
@@ -376,13 +412,58 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
       // summary's own doc promises. Same shape of false failure as the one
       // this fix addresses, different reader, and it needs `readConfigStrict`
       // rather than a probe state.
-      state: stateFor(credentialed.has(id), isDefault),
+      state: id === CLAWAI_PROVIDER && clawaiRefused && credentialed.has(id)
+        ? "needs-reauth"
+        : stateFor(credentialed.has(id), isDefault),
       isDefault,
       section: sectionFor(id),
     };
   });
 
   return { harness: "openclaw", providers, defaultProvider, degraded: false };
+}
+
+/**
+ * The catalogues that answer for one ROW.
+ *
+ * A row can stand for more than one: `codex` — the ChatGPT-subscription
+ * catalogue — normalises onto the `openai` row, and a box signed in to ChatGPT
+ * with no API key runs on the one while the other has nothing.
+ */
+const CATALOGUES_BY_ROW: ReadonlyMap<string, readonly string[]> = new Map(
+  Object.entries({
+    clawai: ["clawai"],
+    openai: ["openai", "codex"],
+    anthropic: ["anthropic"],
+    google: ["google"],
+    openrouter: ["openrouter"],
+  }),
+);
+
+/**
+ * "Can this box run any model from the provider this ROW stands for?"
+ *
+ * `none` demands UNANIMITY, and every catalogue behind the row must actually
+ * have answered: one `some` keeps the row, and so does one that nobody has
+ * asked about. That is what stops a ChatGPT-subscription box losing its OpenAI
+ * row because the API-key catalogue is empty — and, since `codex` has no
+ * enumeration on this core at all (`hasNoEnumerationOnThisCore` in the catalog
+ * route), it means the OpenAI row is never hidden today. Deliberate: the
+ * alternative is hiding the row a subscription box actually runs on.
+ */
+export function providerRowRunnable(
+  rowId: string,
+  verdicts: Map<string, ProviderRunnable>,
+): ProviderRunnable {
+  const catalogues = CATALOGUES_BY_ROW.get(rowId) ?? [rowId];
+  let sawNone = false;
+  for (const catalogue of catalogues) {
+    const verdict = verdicts.get(catalogue);
+    if (verdict === "some") return "some";
+    if (verdict === "none") sawNone = true;
+    else return "unknown";
+  }
+  return sawNone ? "none" : "unknown";
 }
 
 /**
@@ -407,9 +488,45 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
     // readers from having to know about it at all. On Hermes the file never
     // exists and this is an empty map, so the badge is absent by construction.
     const repairs = await readPluginRepairs();
+    // TASK-668, the owner's ruling: a provider this box can run NO model from
+    // is not offered at all. The verdict is read from what the enumeration the
+    // catalog route already performs recorded — no probe, no fork — and a
+    // provider with no recorded answer keeps its row exactly as on beta.
+    //
+    // OpenClaw only. Hermes' rows carry a `total` from the dashboard, but a
+    // zero there is documented (see `providerHasModels` in
+    // hermes-model-options.ts) as "credentialed and its /v1/models could not be
+    // enumerated" as often as "serves nothing" — the two are indistinguishable
+    // under `include_unconfigured=true`, so hiding on it would delete a working
+    // provider. Hermes keeps every panel row until that answer exists.
+    const verdicts = summary.harness === "openclaw"
+      ? await readProviderRunnable().catch(() => new Map<string, ProviderRunnable>())
+      : new Map<string, ProviderRunnable>();
+    const unrunnable = summary.providers
+      .filter((row) => {
+        // A row the owner has NOT connected is never hidden, whatever the
+        // count says — that row IS the fix. Connecting a cloud provider writes
+        // its configured model rows and `models.mode: "merge"`
+        // (`writeOpenAICompatProvider` in the configure route), which is
+        // exactly what turns a zero-row provider back into a routable one, so
+        // hiding it would leave the box with no way out of the state that hid
+        // it. What this hides is the other case: a provider the box IS set up
+        // for and still cannot run a single model from.
+        if (row.state !== "connected" && row.state !== "needs-reauth") return false;
+        // The provider the box is POINTED AT is never hidden. It is the reason
+        // chat is broken, and a row nobody can see is a row nobody can change.
+        if (row.isDefault) return false;
+        // Nor is one whose plugin the boot script had to switch off: that row
+        // carries the Retry, the single affordance that repairs it (TASK-606).
+        if (repairFor(repairs, row.id)) return false;
+        return providerRowRunnable(row.id, verdicts) === "none";
+      })
+      .map((row) => row.id);
+    const hidden = new Set(unrunnable);
     return {
       ...summary,
-      providers: summary.providers.map((row) => {
+      unrunnable,
+      providers: summary.providers.filter((row) => !hidden.has(row.id)).map((row) => {
         const repair = repairFor(repairs, row.id);
         return {
           ...row,
@@ -428,6 +545,6 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
       }),
     };
   } catch {
-    return { harness, providers: [], defaultProvider: null, degraded: true };
+    return { harness, providers: [], defaultProvider: null, unrunnable: [], degraded: true };
   }
 }

@@ -15,13 +15,20 @@ vi.mock("@/lib/harness", () => ({
   HERMES_BIN: "/usr/bin/hermes-test",
 }));
 vi.mock("@/app/setup-api/hermes/models/route", () => ({ POST: vi.fn() }));
-vi.mock("@/app/setup-api/chat/model/route", () => ({ GET: vi.fn(), POST: vi.fn() }));
+vi.mock("@/app/setup-api/chat/model/route", () => ({
+  GET: vi.fn(),
+  POST: vi.fn(),
+  // Consulted only when the filtered list has no row for the named provider
+  // (TASK-668); an empty list here keeps every existing case unchanged.
+  readChatModelStateUnfiltered: vi.fn(),
+}));
 vi.mock("@/lib/provider-enablement", () => ({ isProviderEnabled: vi.fn() }));
 
 let POST: (request: Request) => Promise<Response>;
 let getActiveHarness: Mock;
 let hermesModelsPOST: Mock;
 let chatModelGET: Mock;
+let chatModelStateUnfiltered: Mock;
 let chatModelPOST: Mock;
 let isProviderEnabled: Mock;
 
@@ -45,7 +52,14 @@ beforeEach(async () => {
   vi.clearAllMocks();
   ({ getActiveHarness } = (await import("@/lib/harness")) as unknown as { getActiveHarness: Mock });
   ({ POST: hermesModelsPOST } = (await import("@/app/setup-api/hermes/models/route")) as unknown as { POST: Mock });
-  ({ GET: chatModelGET, POST: chatModelPOST } = (await import("@/app/setup-api/chat/model/route")) as unknown as { GET: Mock; POST: Mock });
+  ({
+    GET: chatModelGET,
+    POST: chatModelPOST,
+    readChatModelStateUnfiltered: chatModelStateUnfiltered,
+  } = (await import("@/app/setup-api/chat/model/route")) as unknown as {
+    GET: Mock; POST: Mock; readChatModelStateUnfiltered: Mock;
+  });
+  chatModelStateUnfiltered.mockResolvedValue({ options: [] });
   ({ isProviderEnabled } = (await import("@/lib/provider-enablement")) as unknown as { isProviderEnabled: Mock });
   isProviderEnabled.mockResolvedValue(true);
   ({ POST } = await import("@/app/setup-api/providers/default/route"));
@@ -117,6 +131,29 @@ describe("POST /setup-api/providers/default — OpenClaw", () => {
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({ ok: true, model: "anthropic/claude-sonnet-4-6" });
     expect(hermesModelsPOST).not.toHaveBeenCalled();
+  });
+
+  it("still promotes a provider the picker hides because it can run no model", async () => {
+    // TASK-668 drops such a provider from the picker's OPTIONS, which is about
+    // what is offered. Naming it here is an explicit instruction, and answering
+    // "provider_unconfigured" over a provider that holds a working credential
+    // would be a false failure — so the promote resolves against the unfiltered
+    // state and the write is judged by the catalogue guards as it always was.
+    chatModelGET.mockResolvedValue(json({
+      options: [{ id: "a", provider: "clawai", model: "deepseek/deepseek-v4-flash", available: true }],
+    }));
+    chatModelStateUnfiltered.mockResolvedValue({
+      options: [
+        { id: "a", provider: "clawai", model: "deepseek/deepseek-v4-flash", available: true },
+        { id: "b", provider: "google", model: "google/gemini-2.5-pro", available: true },
+      ],
+    });
+    chatModelPOST.mockResolvedValue(json({ ok: true }));
+
+    const res = await call({ provider: "google" });
+
+    expect(res.status).toBe(200);
+    expect(await delegateBody(chatModelPOST)).toEqual({ model: "google/gemini-2.5-pro" });
   });
 
   it("refuses a provider this box holds no credential for", async () => {

@@ -647,7 +647,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     // the App Store and the OpenClaw Control UI off the shelf — the two apps
     // store-flow and installed-app-settings drive.
     if (path === "/setup-api/harness/active") {
-      await fulfillJson(route, { active: "openclaw", edition: "openclaw" });
+      await fulfillJson(route, { active: "openclaw", edition: "openclaw", activeKnown: true });
       return;
     }
 

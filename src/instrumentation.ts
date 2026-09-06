@@ -248,6 +248,17 @@ export async function register() {
     // Delayed past the boot rush so the health probe is not part of it; the
     // request path arms its own timer, so a search in the meantime loses
     // nothing. See armIdleStopIfRunning.
+    //
+    // Deliberately NOT extended to ollama (TASK-724). It looks like the same
+    // shape — a system unit with the same ten-minute standby, restarted by a
+    // root shell that cannot arm a timer living in this process — but the
+    // timing does not work: this fires once at boot + 15 s, while
+    // step_post_update's stop and restart of ollama happen minutes later, so
+    // the timer would either be armed for the WRONG ollama (and stop the one
+    // the update restarts, ten minutes in) or fire before that restart and
+    // leave it with no timer at all. Closing that loop needs the arm to happen
+    // at the moment of the start, which only the web server can do. Recorded
+    // rather than half-done.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { armIdleStopIfRunning } = require('./lib/local-ai-runtime')
     const rearm = setTimeout(() => {

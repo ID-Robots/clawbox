@@ -1,5 +1,11 @@
 import type { NextConfig } from "next";
 import { execSync } from "child_process";
+// A RELATIVE import, and of a module that imports nothing: this file is loaded
+// by Next's own config loader before any alias or bundler exists, so `@/…`
+// does not resolve here and a dependency of that module would have to load
+// the same way. The constant is derived from the iframe attribute both
+// framing pages use, so the header below and the attribute cannot drift.
+import { WEBAPP_DOCUMENT_CSP } from "./src/lib/webapp-sandbox";
 
 const isDev = process.env.NODE_ENV === "development";
 const GATEWAY_URL = process.env.GATEWAY_URL || "http://127.0.0.1:18789";
@@ -163,6 +169,52 @@ const nextConfig: NextConfig = {
       .filter(Boolean);
     const frameAncestors = ["'self'", ...portalEmbed].join(" ");
 
+    // The desktop policy, one directive per entry. Built once because the
+    // webapp document entry below is this policy PLUS a sandbox directive: a
+    // config header is a single value per path, so the second entry has to
+    // restate the whole thing rather than add to it.
+    const desktopPolicy = [
+      "default-src 'self'",
+      `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
+      "style-src 'self' 'unsafe-inline'",
+      // LOCAL_LAN_SOURCES in img-src: the WiFi/credentials handoff
+      // overlays detect the box at its new address with an <img> probe
+      // (fetch is CORS-blocked cross-origin), and without it the browser
+      // CSP-blocks the probe before it leaves the page — the
+      // auto-redirect never fires and users must follow the manual URL.
+      `img-src 'self' data: blob: ${LOCAL_LAN_SOURCES}`,
+      "font-src 'self'",
+      // media-src is not inherited from img-src: without it media
+      // falls back to default-src 'self', and a blob: <audio> — the
+      // Voice tab's sample clip, fetched as WAV and played from an
+      // object URL — is refused by every browser ("Media load rejected
+      // by URL safety check") while the request itself succeeded.
+      "media-src 'self' blob: data:",
+      // `data:` in connect-src: the OpenClaw Control UI, served on
+      // these paths through the gateway proxy, FETCHES its Font
+      // Awesome icons as `data:image/svg+xml,…` rather than assigning
+      // them to an <img>. connect-src is not covered by img-src's
+      // `data:`, so every load of /chat/* and of the OpenClaw window
+      // logged a pair of "Connecting to data:… violates the Content
+      // Security Policy" errors. A data: URL is inert as a network
+      // destination — it carries its own bytes and reaches nothing —
+      // so allowing it opens no channel out of the box.
+      `connect-src 'self' data: ws: wss: ${LOCAL_LAN_SOURCES}`,
+      // Frames: code-server and the sandboxed webapp iframes are
+      // same-origin, but an app the coding agent builds with its own
+      // server (a Next.js app on :4199, a game with pointer lock) is
+      // reached on the box's OWN HOST at that port — and that host is
+      // whatever the owner typed: a LAN IP, clawbox.local, 10.42.0.1,
+      // the tunnel. A static header cannot name it, and `'self'`
+      // excludes every other port, so the desktop window showed
+      // "This content is blocked" over a running app. The scheme
+      // sources let those frames load; what protects the desktop is
+      // the iframe sandbox (an opaque origin, no allow-same-origin —
+      // src/lib/webapp-sandbox.ts), not this list.
+      `frame-src 'self' blob: http: https:`,
+      `frame-ancestors ${frameAncestors}`,
+    ];
+
     return [
       {
         // Everything but /apps/<id>/…: a project's own server proxied there
@@ -194,47 +246,52 @@ const nextConfig: NextConfig = {
           },
           {
             key: "Content-Security-Policy",
-            value: [
-              "default-src 'self'",
-              `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
-              "style-src 'self' 'unsafe-inline'",
-              // LOCAL_LAN_SOURCES in img-src: the WiFi/credentials handoff
-              // overlays detect the box at its new address with an <img> probe
-              // (fetch is CORS-blocked cross-origin), and without it the browser
-              // CSP-blocks the probe before it leaves the page — the
-              // auto-redirect never fires and users must follow the manual URL.
-              `img-src 'self' data: blob: ${LOCAL_LAN_SOURCES}`,
-              "font-src 'self'",
-              // media-src is not inherited from img-src: without it media
-              // falls back to default-src 'self', and a blob: <audio> — the
-              // Voice tab's sample clip, fetched as WAV and played from an
-              // object URL — is refused by every browser ("Media load rejected
-              // by URL safety check") while the request itself succeeded.
-              "media-src 'self' blob: data:",
-              // `data:` in connect-src: the OpenClaw Control UI, served on
-              // these paths through the gateway proxy, FETCHES its Font
-              // Awesome icons as `data:image/svg+xml,…` rather than assigning
-              // them to an <img>. connect-src is not covered by img-src's
-              // `data:`, so every load of /chat/* and of the OpenClaw window
-              // logged a pair of "Connecting to data:… violates the Content
-              // Security Policy" errors. A data: URL is inert as a network
-              // destination — it carries its own bytes and reaches nothing —
-              // so allowing it opens no channel out of the box.
-              `connect-src 'self' data: ws: wss: ${LOCAL_LAN_SOURCES}`,
-              // Frames: code-server and the sandboxed webapp iframes are
-              // same-origin, but an app the coding agent builds with its own
-              // server (a Next.js app on :4199, a game with pointer lock) is
-              // reached on the box's OWN HOST at that port — and that host is
-              // whatever the owner typed: a LAN IP, clawbox.local, 10.42.0.1,
-              // the tunnel. A static header cannot name it, and `'self'`
-              // excludes every other port, so the desktop window showed
-              // "This content is blocked" over a running app. The scheme
-              // sources let those frames load; what protects the desktop is
-              // the iframe sandbox (an opaque origin, no allow-same-origin —
-              // src/lib/webapp-sandbox.ts), not this list.
-              `frame-src 'self' blob: http: https:`,
-              `frame-ancestors ${frameAncestors}`,
-            ].join("; "),
+            value: desktopPolicy.join("; "),
+          },
+        ],
+      },
+      {
+        // The webapp DOCUMENT — HTML the agent wrote, served by
+        // GET /setup-api/webapps?app=<id>[&file=…]. Framed, it is boxed by the
+        // iframe attribute (src/lib/webapp-sandbox.ts); opened top-level —
+        // `launch: "window"`, a chat link, a share link in a tab — it was a
+        // first-class document on the authenticated origin, running the
+        // agent's script with the owner's session cookie. The `sandbox`
+        // directive gives it the frame's opaque origin wherever it is opened.
+        //
+        // WHY HERE and not in the route: a Content-Security-Policy set by a
+        // route handler never reaches the wire in production. The entry above
+        // matches this path too and is written onto the response BEFORE the
+        // handler runs, and a handler's header for a key already present is
+        // not appended (only set-cookie and the auth challenges may repeat) —
+        // verified on a box against GET /setup-api/gateway, whose own CSP is
+        // dropped the same way. Header entries are applied in order and a
+        // later matching entry replaces the key, so this one, AFTER the
+        // general entry, is what the document actually carries. The route
+        // sets the same header for the record (src/app/setup-api/webapps/route.ts).
+        //
+        // On EVERY response of the path, not only text/html: the directive is
+        // inert on a stylesheet or a picture, and an `&file=x.svg` navigated
+        // top-level runs script too. nosniff is restated so this entry stays
+        // whole on its own; frame-ancestors is inside the policy.
+        //
+        // `{/}?` — BOTH `/setup-api/webapps` and `/setup-api/webapps/`, and
+        // nothing deeper. Next compiles a headers() source with path-to-regexp
+        // `strict: true`, so the bare path would match only the slash-less
+        // form, and the route handler answers the other one too: the
+        // middleware's trailing-slash canonicaliser deliberately leaves an
+        // API path as typed (src/middleware.ts, step 0), so `…/webapps/?app=x`
+        // reached the handler under the desktop policy alone — the whole
+        // exploit back with one extra character. A double slash is
+        // 308-normalised and an encoded or re-cased path is a 404, so the
+        // trailing slash is the one variant that has to be named here.
+        // Pinned through Next's own matcher in desktop-csp-header.test.ts.
+        source: "/setup-api/webapps{/}?",
+        headers: [
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          {
+            key: "Content-Security-Policy",
+            value: [...desktopPolicy, WEBAPP_DOCUMENT_CSP].join("; "),
           },
         ],
       },

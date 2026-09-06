@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { translations } from "@/lib/translations";
 import { desktopTranslations } from "@/lib/desktop-translations";
 import { clawkeepTranslations } from "@/lib/clawkeep-translations";
-import { hermesEn } from "@/lib/hermes-translations";
-import { settingsSecurityEn } from "@/lib/hermes-translations/en-settings-security";
-import { bg } from "@/lib/hermes-translations/bg";
-import { de } from "@/lib/hermes-translations/de";
-import { es } from "@/lib/hermes-translations/es";
-import { fr } from "@/lib/hermes-translations/fr";
-import { it as itLocale } from "@/lib/hermes-translations/it";
-import { ja } from "@/lib/hermes-translations/ja";
-import { nl } from "@/lib/hermes-translations/nl";
-import { sv } from "@/lib/hermes-translations/sv";
-import { zh } from "@/lib/hermes-translations/zh";
+import { editionEn } from "@/lib/edition-translations";
+import { settingsSecurityEn } from "@/lib/edition-translations/en-settings-security";
+import { bg } from "@/lib/edition-translations/bg";
+import { de } from "@/lib/edition-translations/de";
+import { es } from "@/lib/edition-translations/es";
+import { fr } from "@/lib/edition-translations/fr";
+import { it as itLocale } from "@/lib/edition-translations/it";
+import { ja } from "@/lib/edition-translations/ja";
+import { nl } from "@/lib/edition-translations/nl";
+import { sv } from "@/lib/edition-translations/sv";
+import { zh } from "@/lib/edition-translations/zh";
 import type { Locale } from "@/lib/i18n";
 
 /**
@@ -21,7 +21,7 @@ import type { Locale } from "@/lib/i18n";
  * "Switched off" state, "Make default", the locked-switch hint and the empty
  * line — on a Settings page where every neighbouring card was translated.
  *
- * `hermes-translations.test.ts` holds each namespace of that catalogue to one
+ * `edition-translations.test.ts` holds each namespace of that catalogue to one
  * bar: every locale carries copy of its OWN, checked against the per-locale
  * module rather than the merged table (the merge layers English underneath as
  * a runtime safety net, which would mask exactly this regression). This file
@@ -29,9 +29,9 @@ import type { Locale } from "@/lib/i18n";
  *
  * One string on the card is NOT this catalogue's: the "Default" badge reads
  * `settings.providers.default`, which desktop-translations already carries for
- * ProviderDefaultHero's badge. The hermes catalogue merges last in
+ * ProviderDefaultHero's badge. The edition catalogue merges last in
  * translations.ts, so a second copy here would silently shadow the hero's and
- * the two would drift — the last block below keeps every hermes key out of
+ * the two would drift — the last block below keeps every edition key out of
  * the other catalogues for exactly that reason.
  */
 
@@ -40,7 +40,7 @@ const OVERRIDES: Record<Exclude<Locale, "en">, Record<string, string>> = {
 };
 const NON_EN = Object.keys(OVERRIDES) as Exclude<Locale, "en">[];
 
-const KEYS = Object.keys(hermesEn).filter((k) => k.startsWith("settings.providers."));
+const KEYS = Object.keys(editionEn).filter((k) => k.startsWith("settings.providers."));
 
 /** Every string the component renders through THIS catalogue, by key. */
 const RENDERED = [
@@ -65,7 +65,7 @@ describe("the cloud-provider list is translated everywhere", () => {
   });
 
   it("the switch's name carries the provider's own label", () => {
-    expect(hermesEn["settings.providers.enable"]).toContain("{name}");
+    expect(editionEn["settings.providers.enable"]).toContain("{name}");
   });
 
   for (const locale of NON_EN) {
@@ -73,7 +73,7 @@ describe("the cloud-provider list is translated everywhere", () => {
       const table = OVERRIDES[locale];
       const missing = KEYS.filter((k) => typeof table[k] !== "string" || table[k].length === 0);
       expect(missing, `${locale} is missing ${missing.length} key(s)`).toEqual([]);
-      const english = KEYS.filter((k) => table[k] === hermesEn[k]);
+      const english = KEYS.filter((k) => table[k] === editionEn[k]);
       expect(english, `${locale} still renders English for ${english.length} key(s)`).toEqual([]);
     });
 
@@ -86,7 +86,7 @@ describe("the cloud-provider list is translated everywhere", () => {
   // so both surfaces can never disagree on what "Default" is called.
   it("the Default badge is the desktop catalogue's, in every locale", () => {
     const key = "settings.providers.default";
-    expect(hermesEn[key]).toBeUndefined();
+    expect(editionEn[key]).toBeUndefined();
     for (const locale of Object.keys(translations) as Locale[]) {
       expect(desktopTranslations[locale][key], `desktop.${locale}["${key}"]`).toBeTruthy();
       expect(translations[locale][key]).toBe(desktopTranslations[locale][key]);
@@ -94,16 +94,16 @@ describe("the cloud-provider list is translated everywhere", () => {
   });
 });
 
-describe("the hermes catalogue shadows nothing", () => {
-  // translations.ts merges hermes LAST, so a hermes key that also exists in
-  // desktop or clawkeep silently wins for EVERY consumer of that key — the
-  // per-catalogue parity suites only compare locales within one catalogue and
-  // would never notice. Keep the collision set empty.
-  it("no hermes key also exists in the desktop or clawkeep catalogue", () => {
-    const hermesKeys = Object.keys(hermesEn);
-    const inDesktop = hermesKeys.filter((k) => k in desktopTranslations.en);
-    const inClawkeep = hermesKeys.filter((k) => k in clawkeepTranslations.en);
-    expect(inDesktop, "hermes keys shadowing desktop-translations").toEqual([]);
-    expect(inClawkeep, "hermes keys shadowing clawkeep-translations").toEqual([]);
+describe("the edition catalogue shadows nothing", () => {
+  // translations.ts merges the edition catalogue LAST, so an edition key that
+  // also exists in desktop or clawkeep silently wins for EVERY consumer of
+  // that key — the per-catalogue parity suites only compare locales within one
+  // catalogue and would never notice. Keep the collision set empty.
+  it("no edition key also exists in the desktop or clawkeep catalogue", () => {
+    const editionKeys = Object.keys(editionEn);
+    const inDesktop = editionKeys.filter((k) => k in desktopTranslations.en);
+    const inClawkeep = editionKeys.filter((k) => k in clawkeepTranslations.en);
+    expect(inDesktop, "edition keys shadowing desktop-translations").toEqual([]);
+    expect(inClawkeep, "edition keys shadowing clawkeep-translations").toEqual([]);
   });
 });

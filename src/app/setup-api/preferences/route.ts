@@ -19,6 +19,21 @@ function isAllowed(key: string) {
   return ALLOWED_PREFIXES.some((p) => key.startsWith(p));
 }
 
+// The prefix whose WRITES need the person, not the agent. `installed_apps` and
+// `installed_meta` are the desktop's list of apps and, per entry, where each
+// one opens and how: `webappUrl` is what a click navigates to and
+// `launch: "window"` makes that navigation a top-level `window.open`. The
+// middleware admits the MCP bearer to this route like any other, and the
+// bearer is a file anything running as the box's user can read — a
+// prompt-injected turn or a delegated coding run — so with only the shape
+// check a bearer holder could plant an entry that opens its own page as a
+// first-class document. install/uninstall and webapp-registry.ts are the
+// contracted writers of these keys and write the store directly; the one
+// legitimate caller through THIS route is a browser with the owner's cookie.
+// The read side keeps serving the prefix: `ui_list_apps` and the desktop both
+// read it, and reading is not the door.
+const OWNER_ONLY_WRITE_PREFIX = "installed_";
+
 // Most keys one read may name, so the work and the response a request can ask
 // for do not follow the length of its query string.
 //
@@ -89,6 +104,29 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
+    // Refused WHOLE, with a code, rather than the key silently dropped: a
+    // caller that lands here without a cookie is off-contract and should
+    // learn why, and a partial write would leave it believing the entry took.
+    // Asked only when the body names such a key, so the ordinary desktop
+    // write (wallpaper, window state) never pays for a cookie verification.
+    //
+    // Loaded here rather than imported at the top, unlike the sibling routes
+    // that use the same helper (email/pending, coding-agent/enable): a static
+    // import would pull auth.ts into this module's load, and auth.ts builds
+    // its secret path from config-store's DATA_DIR at import time. The
+    // language suite for this route (src/tests/routes/preferences-language.test.ts)
+    // mocks @/lib/config-store with the four functions it uses and no
+    // DATA_DIR, so the static chain broke that suite at import. Deferring the
+    // load to the one branch that needs it keeps the module's imports what
+    // that suite expects; it is not a per-request saving — a module import is
+    // paid once per process either way.
+    const writesInstalled = Object.keys(body).some((key) => key.startsWith(OWNER_ONLY_WRITE_PREFIX));
+    if (writesInstalled && !(await (await import("@/lib/owner-session")).hasOwnerSession(req))) {
+      return NextResponse.json(
+        { error: "Installed apps can only be changed from the owner's own session", code: "owner_only" },
+        { status: 403 },
+      );
+    }
     const entries: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(body)) {
       if (!isAllowed(key)) continue;

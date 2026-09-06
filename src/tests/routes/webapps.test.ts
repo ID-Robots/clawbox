@@ -41,6 +41,7 @@ vi.mock("@/lib/code-projects", () => ({
 
 import fs from "fs/promises";
 import { deployWebapp } from "@/lib/code-projects";
+import { WEBAPP_DOCUMENT_CSP } from "@/lib/webapp-sandbox";
 const mockReadFile = vi.mocked(fs.readFile);
 const mockMkdir = vi.mocked(fs.mkdir);
 const mockWriteFile = vi.mocked(fs.writeFile);
@@ -87,6 +88,41 @@ describe("/setup-api/webapps", () => {
       const req = new NextRequest(new URL("http://localhost/setup-api/webapps"));
       const res = await GET(req);
       expect(res.status).toBe(400);
+    });
+
+    // The agent's HTML opened TOP-LEVEL (launch:"window", a chat link, a
+    // share link in a tab) must have the same opaque origin the framed copy
+    // has, or its script runs with the owner's session cookie. The route sets
+    // the header on every answer; the one that actually ships is the
+    // next.config.ts entry pinned in src/tests/unit/desktop-csp-header.test.ts,
+    // since a handler's CSP is dropped in production when the config already
+    // sets one — this pins the route's own half.
+    it("serves index.html under a CSP sandbox without allow-same-origin", async () => {
+      mockReadFile.mockResolvedValue(Buffer.from("<html><script>fetch('/setup-api/preferences?all=1')</script></html>") as never);
+      const res = await GET(new NextRequest(new URL("http://localhost/setup-api/webapps?app=myapp")));
+      expect(res.status).toBe(200);
+      const csp = res.headers.get("Content-Security-Policy") ?? "";
+      expect(csp.startsWith("sandbox")).toBe(true);
+      expect(csp).toBe(WEBAPP_DOCUMENT_CSP);
+      expect(csp.split(/\s+/)).toContain("allow-scripts");
+      expect(csp.split(/\s+/)).not.toContain("allow-same-origin");
+    });
+
+    it("serves a second page (&file=page.html) under the same sandbox", async () => {
+      mockReadFile.mockResolvedValue(Buffer.from("<html>page</html>") as never);
+      const res = await GET(new NextRequest(new URL("http://localhost/setup-api/webapps?app=myapp&file=page.html")));
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toContain("text/html");
+      expect(res.headers.get("Content-Security-Policy")).toBe(WEBAPP_DOCUMENT_CSP);
+    });
+
+    it("serves an asset under the same sandbox too", async () => {
+      // Inert on a stylesheet, load-bearing on an `&file=x.svg` navigated
+      // top-level — so it is on every answer rather than on text/html alone.
+      mockReadFile.mockResolvedValue(Buffer.from("body{}") as never);
+      const res = await GET(new NextRequest(new URL("http://localhost/setup-api/webapps?app=myapp&file=style.css")));
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Security-Policy")).toBe(WEBAPP_DOCUMENT_CSP);
     });
 
     it("returns 404 for missing file", async () => {

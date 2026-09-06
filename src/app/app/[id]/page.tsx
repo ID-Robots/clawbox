@@ -6,6 +6,13 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
+import { customWallpaperId, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import {
+  brandingHarness,
+  brandWallpaperId,
+  builtinWallpapers,
+  renderedWallpaperId as resolveRenderedWallpaperId,
+} from "@/lib/builtin-wallpapers";
 import { apps } from "@/lib/desktop-apps";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
@@ -45,17 +52,15 @@ const APP_TITLES: Record<string, string> = {
 type WpFit = "fill" | "fit" | "center";
 
 /**
- * The wallpapers the desktop offers, and the localStorage key it keeps the
- * uploaded ones under. Both are mirrored from src/app/page.tsx, whose copies
- * are locals inside that page component and cannot be imported — keep the two
- * lists in step. The storage key MUST be the same string: the desktop and this
- * page are one origin, so a wallpaper added on either is the same list.
+ * The localStorage key the uploaded wallpapers live under. It MUST be the same
+ * string the desktop uses: the desktop and this page are one origin, so a
+ * wallpaper added on either is the same list.
+ *
+ * The BUILT-IN list used to be mirrored here too, with a comment asking for the
+ * two copies to be kept in step by hand. It is `builtinWallpapers()` on both
+ * surfaces now — the list is edition-scoped, and a rule applied in two places
+ * is a rule that will be applied in one.
  */
-const WALLPAPERS: { id: string; name: string; image?: string }[] = [
-  { id: "clawbox", name: "ClawBox", image: "/clawbox-wallpaper.jpeg" },
-  { id: "hermes", name: "Hermes", image: "/hermes-wallpaper.jpeg" },
-  { id: "deep-space", name: "Deep Space" },
-];
 const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
 
 /** The wallpapers this browser was given by hand. Read where the state is
@@ -88,9 +93,11 @@ function usePreferenceSaver(loadedRef: { current: boolean }) {
       map.clear();
     };
   }, []);
-  return useCallback((body: Record<string, unknown>) => {
+  return useCallback((body: Record<string, unknown>, slotKey?: string) => {
     if (!loadedRef.current) return;
-    const slot = Object.keys(body).join(",");
+    // An explicit slot where the body's SHAPE changes over the life of the page
+    // — see the desktop's copy.
+    const slot = slotKey ?? Object.keys(body).join(",");
     const pending = timers.current.get(slot);
     if (pending) clearTimeout(pending);
     timers.current.set(slot, setTimeout(() => {
@@ -115,8 +122,15 @@ function usePreferenceSaver(loadedRef: { current: boolean }) {
  * `ui_mascot_hidden`) and the same uploaded-wallpaper list, so a change made
  * from a phone is the change the desktop would have made.
  */
-function useAppearance(enabled: boolean) {
-  const [wallpaperId, setWallpaperId] = useState("clawbox");
+function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
+  // The built-ins this EDITION offers, and — painted vs persisted, exactly as
+  // on the desktop — what a box with nothing showable selected falls back to.
+  // `wallpaperHarness` is null until the device has named an edition, and then
+  // there is no brand to fall back to and none to write.
+  const wallpapers = builtinWallpapers(wallpaperHarness);
+  const persistableFallbackWallpaperId = brandWallpaperId(wallpaperHarness);
+  // Null until something has chosen one — see the desktop's copy of this.
+  const [wallpaperId, setWallpaperId] = useState<string | null>(null);
   const [wpFit, setWpFit] = useState<WpFit>("fill");
   const [wpBgColor, setWpBgColor] = useState("#000000");
   const [wpOpacity, setWpOpacity] = useState(50);
@@ -136,8 +150,23 @@ function useAppearance(enabled: boolean) {
   const applyCustomWallpapers = useCallback((next: string[]) => {
     customRef.current = next;
     setCustomWallpapers(next);
-    try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
   }, []);
+  // The STORED list is the OUTCOME of an upload or a delete, so it is written
+  // first and its failure is the whole operation's — the desktop's rule, and
+  // the same reasoning: it is what the next load paints and `wp_id` is a
+  // box-wide position into it, so moving the card over a list that never
+  // changed leaves a DIFFERENT picture on screen after a reload. There is no
+  // toast surface on this route (ToastHost is the desktop's), and the picture
+  // staying put is the honest answer: the operation did not happen.
+  const storeCustomWallpapers = useCallback((next: string[]) => {
+    try {
+      localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next));
+    } catch {
+      return false;
+    }
+    applyCustomWallpapers(next);
+    return true;
+  }, [applyCustomWallpapers]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -161,9 +190,22 @@ function useAppearance(enabled: boolean) {
     return () => { alive = false; };
   }, [enabled]);
 
+  // This browser's list is read synchronously into the state above, so it is
+  // never "not read yet" here — the desktop's third argument is what carries
+  // that case.
+  const renderedWallpaperId = resolveRenderedWallpaperId(
+    wallpaperId,
+    wallpaperHarness,
+    customWallpapers.length,
+  );
+
   const save = usePreferenceSaver(loaded);
   useEffect(() => {
-    save({ wp_id: wallpaperId, wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity });
+    // `wp_id` is left out while nothing has chosen one — the desktop's rule and
+    // for the same reason: this page must not pick a wallpaper box-wide for a
+    // box whose edition it could not read. One slot for both shapes.
+    const appearance = { wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity };
+    save(wallpaperId === null ? appearance : { ...appearance, wp_id: wallpaperId }, "appearance");
   }, [wallpaperId, wpFit, wpBgColor, wpOpacity, save]);
   useEffect(() => { save({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, save]);
   // Declared AFTER both save effects, deliberately. `loaded.current = true`
@@ -184,24 +226,30 @@ function useAppearance(enabled: boolean) {
     const reader = new FileReader();
     reader.onload = () => {
       const next = [...customRef.current, reader.result as string];
-      applyCustomWallpapers(next);
-      setWallpaperId(`custom-${next.length - 1}`);
+      // The picture is not there to be selected unless it was stored.
+      if (!storeCustomWallpapers(next)) return;
+      setWallpaperId(customWallpaperId(next.length - 1));
       setWpOpacity(100);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
-  }, [applyCustomWallpapers]);
+  }, [storeCustomWallpapers]);
 
   return {
     uploadRef,
     onUploadFile,
     ui: {
-      wallpaperId,
+      // What is on screen, not what the box holds. `wp_id` is box-wide and the
+      // pictures are this browser's, so a `custom-<n>` a phone cannot answer
+      // is the laptop's selection, still valid there — the card shows the
+      // fallback and leaves the box's own value alone. Only an explicit choice
+      // below ever writes it.
+      wallpaperId: renderedWallpaperId,
       wpFit,
       wpBgColor,
       wpOpacity,
       mascotHidden,
-      wallpapers: WALLPAPERS,
+      wallpapers,
       customWallpapers,
       onWallpaperChange: setWallpaperId,
       onWpFitChange: setWpFit,
@@ -210,19 +258,24 @@ function useAppearance(enabled: boolean) {
       onMascotToggle: setMascotHidden,
       onWallpaperUpload: () => uploadRef.current?.click(),
       onCustomWallpaperDelete: (idx: number) => {
-        const next = customRef.current.filter((_, i) => i !== idx);
-        applyCustomWallpapers(next);
+        const before = customRef.current;
+        const next = before.filter((_, i) => i !== idx);
+        // Nothing was removed, so nothing is renumbered.
+        if (!storeCustomWallpapers(next)) return;
         // `custom-<n>` is an INDEX into that list, so deleting one renumbers
-        // every picture after it. Clearing only the exact match left a
-        // selection past the hole pointing at its neighbour — the wallpaper
-        // silently became a different picture, or none once the last entry
-        // went. The same rule is in src/app/page.tsx's own handler; keep the
-        // two in step, as with the list above it.
-        const selected = wallpaperId.startsWith("custom-")
-          ? Number.parseInt(wallpaperId.slice("custom-".length), 10)
-          : NaN;
-        if (selected === idx) setWallpaperId("clawbox");
-        else if (Number.isInteger(selected) && selected > idx) setWallpaperId(`custom-${selected - 1}`);
+        // every picture after it. Through the SHARED rule, not a fourth
+        // spelling of it: this handler and the desktop's write the same
+        // box-wide `wp_id`, and the fallback is the harness's own art — a
+        // Hermes box whose only custom wallpaper is deleted must not land on
+        // the ClawBox one (TASK-719).
+        // `before` is the list as it stood immediately ahead of THIS delete,
+        // captured before the store above advances the ref to the shortened
+        // one — not the list the saved id was originally chosen against, which
+        // may have been another browser's entirely.
+        //
+        // Nothing chosen yet is nothing to renumber (the desktop's rule).
+        if (wallpaperId === null) return;
+        setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, persistableFallbackWallpaperId));
       },
     },
   };
@@ -263,17 +316,25 @@ export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
   // Only /app/settings reads the appearance preferences — every other page
   // here would be paying for a request it never renders.
-  const appearance = useAppearance(id === "settings");
   // null while unresolved — a harness-only app must not paint before we know
   // which harness this device actually runs.
   const [harness, setHarness] = useState<string | null>(null);
+  // Which harness's BRANDING this device wears — null while that is unknown,
+  // which is not the same question as the app gate's `harness` above. See the
+  // desktop's copy of this pair.
+  const [wallpaperHarness, setWallpaperHarness] = useState<string | null>(null);
+  const appearance = useAppearance(id === "settings", wallpaperHarness);
 
   useEffect(() => {
     let alive = true;
     // "unknown" rather than a guess: this route is reachable directly (a
     // bookmark, "Open in new tab"), so falling back to "openclaw" rendered the
     // whole OpenClaw App Store on a Hermes box whenever the probe failed.
-    void fetchHarness().then((d) => { if (alive) setHarness(d?.active || "unknown"); });
+    void fetchHarness().then((d) => {
+      if (!alive) return;
+      setHarness(d?.active || "unknown");
+      setWallpaperHarness(brandingHarness(d));
+    });
     return () => { alive = false; };
   }, []);
 

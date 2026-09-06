@@ -28,10 +28,12 @@ const FAILED_STATE = {
 describe("SystemUpdateApp — a failure that was already on the server", () => {
   let statusBody: unknown;
   let dismissCalls: number;
+  let dismissResponse: Response;
 
   beforeEach(() => {
     statusBody = FAILED_STATE;
     dismissCalls = 0;
+    dismissResponse = jsonResponse({ dismissed: true });
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -47,7 +49,7 @@ describe("SystemUpdateApp — a failure that was already on the server", () => {
         if (url.includes("/setup-api/system/update-branch")) return jsonResponse({ branch: "beta" });
         if (url.includes("/setup-api/update/dismiss")) {
           if (init?.method === "POST") dismissCalls++;
-          return jsonResponse({ dismissed: true });
+          return dismissResponse;
         }
         if (url.includes("/setup-api/update/status")) return jsonResponse(statusBody);
         return jsonResponse({});
@@ -75,6 +77,32 @@ describe("SystemUpdateApp — a failure that was already on the server", () => {
     await waitFor(() => expect(queryByText("Update failed")).toBeNull());
     // With the run forgotten, the page is back to what it can offer.
     await findByText("1 update available");
+  });
+
+  it("puts the panel back, and says so, when the server could not clear the result", async () => {
+    // The record lives on disk, so a store that refuses the write leaves the
+    // failure exactly where it was — and this component cleared the panel
+    // BEFORE the POST. Discarding the answer would move the false success up a
+    // layer: the panel vanishes, and the same failure is back on the next
+    // reload with nothing said. A 409 is different and keeps its own path —
+    // that one means another surface started a run.
+    dismissResponse = jsonResponse(
+      { dismissed: false, reason: "not-written", error: "The device could not save that change — see the server log." },
+      false,
+      500,
+    );
+
+    const { findByText, findAllByText, findByRole } = render(<SystemUpdateApp />);
+
+    await findByText("Update failed");
+    fireEvent.click(await findByRole("button", { name: "Dismiss" }));
+
+    await waitFor(() => expect(dismissCalls).toBe(1));
+    // The hero subhead and the progress card both say it.
+    expect(
+      await findAllByText("The device could not clear that result. Try again in a moment."),
+    ).not.toHaveLength(0);
+    await findByText("Update failed");
   });
 
   it("leaves a box with nothing wrong alone", async () => {

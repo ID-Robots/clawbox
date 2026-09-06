@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import path from "node:path";
+import vm from "node:vm";
 
 import { splitEmailRefs } from "@/lib/chat-email-refs";
+import { CONTROL_UI_DIRECTIVE_PARSER_JS } from "@/lib/control-ui-email-directives";
 import { stripEmailDirectives } from "../../../scripts/openclaw-plugins/clawbox-email-directives/email-directives.mjs";
 import { EMAIL_DIRECTIVE_CASES } from "@/tests/fixtures/email-directive-cases";
 
@@ -11,11 +13,13 @@ import { EMAIL_DIRECTIVE_CASES } from "@/tests/fixtures/email-directive-cases";
 // src/tests/unit/test-timeout-hygiene.test.ts.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-// THE PIN. `EMAIL:<uid>` is understood in three places by three languages:
+// THE PIN. `EMAIL:<uid>` is understood in four places:
 //
 //   src/lib/chat-email-refs.ts                    the chat window's cards (TS)
 //   scripts/hermes-plugins/…/email_directives.py    the Hermes plugin (Py)
 //   scripts/openclaw-plugins/…/email-directives.mjs   the OpenClaw plugin (JS)
+//   src/lib/control-ui-email-directives.ts        the Control UI page (browser JS,
+//                                                 shipped as a string — TASK-700)
 //
 // They cannot share a file — each is loaded by a different runtime, two of them
 // inside a harness's own process — so the risk is drift: a rule tightened in
@@ -32,6 +36,21 @@ const REPO = path.resolve(__dirname, "../../..");
 const PY_PLUGIN_DIR = path.join(REPO, "scripts/hermes-plugins/clawbox_email_directives");
 
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
+
+/**
+ * The FOURTH copy, evaluated exactly as the browser evaluates it.
+ *
+ * Not a TypeScript twin: `CONTROL_UI_DIRECTIVE_PARSER_JS` is the string that
+ * ships inside the `<script>` element, so running anything else here would pin
+ * nothing. It takes an optional per-caller budget the other three do not have
+ * (the Control UI renders one reply into several text nodes); called without
+ * one it must behave exactly like them, which is what everything below asserts.
+ */
+const browserSplit = vm.runInNewContext(
+  `${CONTROL_UI_DIRECTIVE_PARSER_JS}\nsplitEmailRefs;`,
+) as (raw: string) => { text: string; uids: number[] };
+
+const browserStrip = (raw: string): string => browserSplit(raw).text;
 
 /**
  * Every case through the Python module in ONE interpreter start: a spawn per
@@ -51,7 +70,7 @@ function pythonAnswers(inputs: string[]): string[] {
   return JSON.parse(out);
 }
 
-describe("EMAIL: directive grammar — one rule, three implementations", () => {
+describe("EMAIL: directive grammar — one rule, four implementations", () => {
   // ASSERTED, NOT SKIPPED ON. `describe.skip`/`it.skip` on a missing `python3`
   // turned the only thing standing between the three grammars into a green
   // no-op: the guard would leave the build with nothing saying so. That is the
@@ -68,6 +87,10 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
 
   it.each(EMAIL_DIRECTIVE_CASES)("JavaScript (the OpenClaw plugin): $name", ({ input, stripped }) => {
     expect(stripEmailDirectives(input)).toBe(stripped);
+  });
+
+  it.each(EMAIL_DIRECTIVE_CASES)("browser JS (the Control UI page): $name", ({ input, stripped }) => {
+    expect(browserStrip(input)).toBe(stripped);
   });
 
   it("Python (the Hermes plugin) answers the whole table identically", () => {
@@ -93,7 +116,7 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
     0x200b, 0x200c, 0x200d, 0x2060, 0x180e,
   ];
 
-  it("the three agree on every whitespace-boundary character", () => {
+  it("all four agree on every whitespace-boundary character", () => {
     const inputs: string[] = [];
     for (const cp of BOUNDARY_CODE_POINTS) {
       const c = String.fromCodePoint(cp);
@@ -115,12 +138,13 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
     }
     const ts = inputs.map((raw) => splitEmailRefs(raw).text);
     const js = inputs.map((raw) => stripEmailDirectives(raw));
+    const ui = inputs.map((raw) => browserStrip(raw));
     const py = pythonAnswers(inputs);
     // Reported as a list of disagreements rather than a first-mismatch throw, so
     // a drift shows every character it affects in one run.
     const disagreements = inputs
-      .map((raw, i) => ({ raw, ts: ts[i], js: js[i], py: py[i] }))
-      .filter((row) => row.ts !== row.js || row.ts !== row.py)
+      .map((raw, i) => ({ raw, ts: ts[i], js: js[i], ui: ui[i], py: py[i] }))
+      .filter((row) => row.ts !== row.js || row.ts !== row.py || row.ts !== row.ui)
       .map((row) => JSON.stringify(row));
     expect(disagreements).toEqual([]);
   });
@@ -193,7 +217,7 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
     );
   }
 
-  it("the three agree on every code point any of them folds onto the keyword", () => {
+  it("all four agree on every code point any of them folds onto the keyword", () => {
     const js = jsCaseFoldCandidates();
     const py = pythonCaseFoldCandidates();
 
@@ -221,10 +245,11 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
 
     const tsOut = inputs.map((raw) => splitEmailRefs(raw).text);
     const jsOut = inputs.map((raw) => stripEmailDirectives(raw));
+    const uiOut = inputs.map((raw) => browserStrip(raw));
     const pyOut = pythonAnswers(inputs);
     const disagreements = inputs
-      .map((raw, i) => ({ raw, ts: tsOut[i], js: jsOut[i], py: pyOut[i] }))
-      .filter((row) => row.ts !== row.js || row.ts !== row.py)
+      .map((raw, i) => ({ raw, ts: tsOut[i], js: jsOut[i], ui: uiOut[i], py: pyOut[i] }))
+      .filter((row) => row.ts !== row.js || row.ts !== row.py || row.ts !== row.ui)
       .map((row) => JSON.stringify(row));
     expect(disagreements).toEqual([]);
   }, 60_000);
@@ -277,6 +302,9 @@ describe("EMAIL: directive grammar — one rule, three implementations", () => {
     const PARSERS: [string, (raw: string) => string][] = [
       ["TypeScript (the chat's own parser)", (raw) => splitEmailRefs(raw).text],
       ["JavaScript (the OpenClaw plugin)", (raw) => stripEmailDirectives(raw)],
+      // The browser copy runs on the OWNER'S machine over text a stranger's
+      // email can shape, so it is the one that must not be quadratic.
+      ["browser JS (the Control UI page)", browserStrip],
     ];
 
     /**

@@ -31,7 +31,13 @@ import {
   isValidModelId,
   parseModelSlug,
 } from "@/lib/provider-models";
-import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
+import {
+  DISABLED_PROVIDERS_KEY,
+  normalizeProviderId,
+  parseDisabledProviders,
+  providerRowRunnable,
+} from "@/lib/provider-status";
+import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
@@ -830,12 +836,72 @@ const WRONG_STORE = {
   code: "wrong_store",
 } as const;
 
+/**
+ * Drop the options for a provider this box can run NO model from (TASK-668).
+ *
+ * The same verdict the Providers page hides its row on, read from the same
+ * recorded enumeration — one file read, no probe, no fork — so the two surfaces
+ * cannot disagree about who is offered. Nothing recorded is `unknown`, and an
+ * unknown provider keeps its option exactly as on beta.
+ *
+ * OFFERED, not accepted, and only on the picker's own read: a POST naming such
+ * a model is judged by the catalogue guards it always was, so a verdict that is
+ * somehow wrong costs a row in a dropdown and never a refusal over a model the
+ * gateway would have routed. `/setup-api/providers/default` resolves its target
+ * through this same handler, which is why the filter is applied to the RESPONSE
+ * in `GET` rather than inside `loadChatModelState` — that route reads the
+ * unfiltered state and a hidden row stays promotable.
+ *
+ * Two exemptions, both matching the Providers page's:
+ *  * the provider the box is pointed at — a broken default must stay visible;
+ *  * the model the chat is running — the header pill names it, and an option
+ *    list without it shows a model that is in no list.
+ *
+ * And one refusal to act: if every cloud option would go, none does. A picker
+ * holding only "Local AI" and no way into provider setup is worse than one
+ * offering a row the gateway may refuse.
+ */
+function withoutUnrunnableProviders(
+  state: Awaited<ReturnType<typeof loadChatModelState>>,
+  verdicts: Map<string, ProviderRunnable>,
+): Awaited<ReturnType<typeof loadChatModelState>> {
+  if (verdicts.size === 0) return state;
+  const defaultProvider = normalizeProviderId(state.primary.provider);
+  const options = state.options.filter((option) => {
+    if (option.model && option.model === state.activeModel) return true;
+    const canonical = normalizeProviderId(option.provider);
+    if (!canonical) return true;
+    if (canonical === defaultProvider) return true;
+    return providerRowRunnable(canonical, verdicts) !== "none";
+  });
+  if (options.length === state.options.length) return state;
+  if (!options.some((option) => !option.isLocal && option.model)) return state;
+  return { ...state, options };
+}
+
+/**
+ * The picker state BEFORE the unrunnable filter above.
+ *
+ * For `/setup-api/providers/default`, which resolves "make this one the
+ * default" through the same state the header reads. Hiding a row is about what
+ * is OFFERED; promoting a provider the owner names is an explicit instruction,
+ * and answering it "provider_unconfigured" over a provider that is connected
+ * would be a false failure of exactly the kind this repo keeps producing. The
+ * write it goes on to make is judged by the catalogue guards either way.
+ */
+export function readChatModelStateUnfiltered(): ReturnType<typeof loadChatModelState> {
+  return loadChatModelState();
+}
+
 export async function GET() {
   if (!(await chatModelLivesHere())) {
     return NextResponse.json(WRONG_STORE, { status: 409, headers: { "Cache-Control": "no-store" } });
   }
   try {
-    const state = await loadChatModelState();
+    const verdicts = await readProviderRunnable().catch(
+      () => new Map<string, ProviderRunnable>(),
+    );
+    const state = withoutUnrunnableProviders(await loadChatModelState(), verdicts);
     return NextResponse.json(state, {
       headers: { "Cache-Control": "no-store" },
     });

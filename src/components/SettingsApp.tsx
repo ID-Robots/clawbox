@@ -43,6 +43,7 @@ import BackgroundJobsPanel from "./BackgroundJobsPanel";
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
 import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
+import { customWallpaperId, customWallpaperIndex } from "@/lib/custom-wallpapers";
 
 /* ── Types ── */
 
@@ -52,7 +53,8 @@ export interface UISettings {
   wpBgColor: string;
   wpOpacity: number;
   mascotHidden: boolean;
-  wallpapers: { id: string; name: string; image?: string }[];
+  /** Readonly: the shared built-in list is frozen per edition and never mutated here. */
+  wallpapers: readonly { id: string; name: string; image?: string }[];
   customWallpapers: string[];
   onWallpaperChange: (id: string) => void;
   onWpFitChange: (fit: "fill" | "fit" | "center") => void;
@@ -1193,7 +1195,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
-  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
+  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiTokenRejected?: boolean } | null>(null);
   useEffect(() => {
     if (section !== "ai" && !isMobile) return;
     const load = () => {
@@ -3266,6 +3268,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <button
                       key={wp.id}
                       type="button"
+                      data-testid="wallpaper-tile"
+                      data-wallpaper-id={wp.id}
                       aria-pressed={selected}
                       aria-label={wp.name}
                       onClick={() => ui.onWallpaperChange(wp.id)}
@@ -3291,7 +3295,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   );
                 })}
                 {ui.customWallpapers.map((dataUrl, i) => {
-                  const selected = ui.wallpaperId === `custom-${i}`;
+                  const selected = ui.wallpaperId === customWallpaperId(i);
                   // The last two names on this card that never followed the UI
                   // language: an uploaded wallpaper announced itself as
                   // "Custom 1" beside tiles whose names were translated.
@@ -3305,7 +3309,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         type="button"
                         aria-pressed={selected}
                         aria-label={customName}
-                        onClick={() => ui.onWallpaperChange(`custom-${i}`)}
+                        onClick={() => ui.onWallpaperChange(customWallpaperId(i))}
                         className={`relative w-full h-full rounded-xl overflow-hidden transition-all cursor-pointer border-none p-0 ${
                           selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
                         }`}
@@ -6221,9 +6225,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return { subtitle: null };
       }
       case "appearance": {
-        const sub = ui.wallpaperId.startsWith("custom-")
-          ? `Custom ${parseInt(ui.wallpaperId.split("-")[1] || "0") + 1}`
-          : ui.wallpaperId;
+        // `ui.wallpaperId` is what the page is PAINTING, so a slot named here
+        // is one the grid below can highlight — the row used to print
+        // "Custom 3" over a grid of two with nothing selected. Through `t()`,
+        // like the tile it names: this was the last name on the card that
+        // never followed the UI language.
+        const customIdx = customWallpaperIndex(ui.wallpaperId);
+        const sub = customIdx === null
+          // A built-in's NAME, not its id — the row printed the raw slug
+          // `deep-space` beside a tile labelled "Deep Space".
+          ? (ui.wallpapers.find((w) => w.id === ui.wallpaperId)?.name ?? ui.wallpaperId)
+          : t("settings.customWallpaper", { n: customIdx + 1 });
         return { subtitle: sub };
       }
       case "wifi":
@@ -6233,6 +6245,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       case "ai": {
         if (aiProvider === null) return { subtitle: null };
         if (!aiProvider.connected) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        // The portal has told this box its ClawBox AI credential is refused, so
+        // the provider's NAME is no longer the useful thing to print here: it
+        // reads as health, and every turn is about to fail (TASK-419). Optional
+        // on the type because an older /status response does not carry it, and
+        // absent must mean "nobody said", never "rejected". `needsReauth` is
+        // the catalogue's existing "Needs sign-in", already in all ten locales.
+        // Scoped to the ACTIVE provider, the way the route scopes `clawaiTier`
+        // one field above and for the same reason: `clawaiTokenRejected` is an
+        // ACCOUNT fact (it also breaks images, cloud voice and ClawKeep), while
+        // this line names the provider driving the chat. A box that moved its
+        // chat to Anthropic months ago must keep reading "Anthropic Claude"
+        // here, not "Needs sign-in" over a provider that answers every turn.
+        if (aiProvider.provider === "clawai" && aiProvider.clawaiTokenRejected) {
+          return { subtitle: t("settings.providers.needsReauth") };
+        }
         return { subtitle: aiProvider.providerLabel || (aiProvider.model ? aiProvider.model.split("/").pop() ?? null : null) };
       }
       case "localAi": {

@@ -16,9 +16,9 @@
 // decision is a different one.
 
 import { spawn } from "child_process";
-import { realpathSync } from "fs";
-import { basename, dirname, join, resolve, isAbsolute, normalize } from "path";
-import { isProtectedFilePath } from "../../src/lib/file-guard";
+import { statSync } from "fs";
+import { resolve, isAbsolute, normalize, join } from "path";
+import { canonicalPath, isProtectedResolvedPath } from "../../src/lib/file-guard";
 // TASK-605's protected-path rule, from the module the OpenClaw hook plugin
 // carries into ~/.openclaw/extensions. It lives there because a plugin copied
 // out of the checkout has to take its rule with it; it is imported HERE
@@ -95,11 +95,35 @@ export function resolveUserPath(input: string): string {
   return normalize(isAbsolute(p) ? p : resolve(DEFAULT_CWD, p));
 }
 
-/** True when this path may be read, listed, searched or written by a tool. */
-export function isAllowedPath(abs: string): boolean {
-  if (isDevicePath(abs)) return false;
-  if (isDotenvPath(abs)) return false;
-  return !isProtectedFilePath(abs);
+/** The whole read-side denylist, applied to ONE spelling of a path. */
+function deniedAsSpelled(abs: string): boolean {
+  return isDevicePath(abs) || isDotenvPath(abs) || isProtectedResolvedPath(abs);
+}
+
+/**
+ * True when this path may be read, listed, searched or written by a tool.
+ *
+ * Judged on the path AS TYPED and on its CANONICAL form, and every rule on
+ * both. It used to be that only file-guard's inventory saw the resolved
+ * target — the device-node and dotenv rules here looked at the typed name
+ * alone — so `notes.txt -> <root>/.env` and `readme.md -> /proc/self/environ`
+ * passed: a benign name, a target in neither list file-guard keeps. Both must
+ * pass because they answer different questions: a typed `.env` that links
+ * somewhere harmless is still a dotenv file to the agent that wrote it, and
+ * `/dev/stdin` resolves to `/dev/pts/N`, which only the resolved side sees.
+ *
+ * ONE realpath per call, shared by all three rules — this runs once per entry
+ * of a listing, a glob or a grep, up to 20k of them. A caller that has already
+ * resolved the path passes `real` in, so the path it judges is the path it
+ * goes on to open: `resolveGuardedPath` resolves once and hands THAT to the
+ * assertions and to the sink, because two resolves of one spelling are two
+ * walks of the tree, and a link swapped between them would have the sink open
+ * a target nobody vetted.
+ */
+export function isAllowedPath(abs: string, real: string | null = canonicalPath(abs)): boolean {
+  if (deniedAsSpelled(abs)) return false;
+  // A resolve that fails is not evidence of anything; the typed verdict stands.
+  return real === null || real === abs || !deniedAsSpelled(real);
 }
 
 /**
@@ -115,8 +139,8 @@ export const SECRET_NAME_RE =
  * and "blocked because it is ~/.hermes/.env" is itself a map of where the
  * secrets live.
  */
-export function assertPathAllowed(abs: string): void {
-  if (isAllowedPath(abs)) return;
+export function assertPathAllowed(abs: string, real: string | null = canonicalPath(abs)): void {
+  if (isAllowedPath(abs, real)) return;
   throw new ToolError(
     "BLOCKED_PATH",
     "That path holds device credentials or a device node and is not accessible to tools.",
@@ -139,31 +163,44 @@ export function assertPathAllowed(abs: string): void {
  * code, and an agent told WHY it was refused can tell the owner instead of
  * trying the path again by another spelling.
  */
-export function assertWritePathAllowed(abs: string): void {
-  assertPathAllowed(abs);
-  // THE REALPATH'D PARENT AS WELL AS THE PATH AS TYPED. `resolveUserPath`
+export function assertWritePathAllowed(abs: string, real: string | null = canonicalPath(abs)): void {
+  assertPathAllowed(abs, real);
+  // THE CANONICAL PATH AS WELL AS THE PATH AS TYPED. `resolveUserPath`
   // normalises `..` and `~` but does not follow links, so a symlink the agent
   // planted earlier — `~/notes/models -> ~/clawbox/data/llamacpp/models` — would
-  // reach this as a path with no protected root in it. Only the parent is
-  // resolved, never the leaf: the file being written may not exist yet, and a
-  // dangling name is not a reason to refuse. Same two-stage shape as
-  // `coding-agent-media.ts`, and a resolve that fails is not evidence of
+  // reach this as a path with no protected root in it. `canonicalPath` resolves
+  // the LEAF when it exists, a dangling leaf to where the kernel would create
+  // it, and the nearest existing ancestor otherwise: the earlier parent-only
+  // resolve let a leaf link into the tree (`pkg.json -> ~/clawbox/package.json`)
+  // and a deep new path under a link into it (`~/tree/newdir/x.ts`, `~/tree ->
+  // ~/clawbox`) both through. A resolve that fails is not evidence of
   // anything, so the typed path's verdict stands.
-  let resolvedParent: string | null = null;
-  try {
-    resolvedParent = realpathSync(dirname(abs));
-  } catch {
-    resolvedParent = null;
-  }
-  if (resolvedParent) {
-    const viaLink = pathDenyReason(join(resolvedParent, basename(abs)), HOME);
-    if (viaLink) throw protectedWriteError();
-  }
+  if (real && real !== abs && pathDenyReason(real, HOME)) throw protectedWriteError();
   // The PATH predicate, not the tool-shaped one: `toolCallDenyReason` drops any
   // string containing a newline, because a tool PARAMETER may be a file body —
   // and a filename may legally contain one, so routing a resolved path through
   // it let `…/models/a\nb.gguf` through.
   if (pathDenyReason(abs, HOME)) throw protectedWriteError();
+}
+
+/**
+ * The path a file tool should OPEN, once the guard has passed: the canonical
+ * form of `abs` (the typed path when nothing resolves). The sinks in
+ * mcp/tools/coding.ts stat, read and write THIS, never the typed path — a
+ * guard that vetted the target of a link and then opened the link is a guard
+ * that judged one file and touched another, and the link can be swapped
+ * between the two. Resolved ONCE here and handed to the assertions, so what
+ * comes back is the very string they judged — a second resolve after the
+ * check would be the same window again, opened by this function itself.
+ * Opening the canonical path with O_NOFOLLOW closes the remaining window on
+ * the leaf; a link swapped on a directory component needs a rename this guard
+ * re-vets on the next call.
+ */
+export function resolveGuardedPath(abs: string, mode: "read" | "write"): string {
+  const real = canonicalPath(abs);
+  if (mode === "write") assertWritePathAllowed(abs, real);
+  else assertPathAllowed(abs, real);
+  return real ?? abs;
 }
 
 function protectedWriteError(): ToolError {
@@ -217,6 +254,12 @@ const DRAIN_MS = 250;
 export interface SpawnOptions {
   timeoutMs?: number;
   maxBytes?: number;
+  /**
+   * Run the child HERE. Omit it and the child runs in the project root, or in
+   * `/` when that root cannot be entered — so an argument that is not an
+   * absolute path does not name a fixed file. A directory named here is used
+   * exactly as given and is never substituted.
+   */
   cwd?: string;
   input?: string;
   /** Extra environment for this child only (e.g. DISPLAY for a screen grab). */
@@ -224,21 +267,103 @@ export interface SpawnOptions {
 }
 
 /**
+ * Where a child runs when the caller named no directory.
+ *
+ * `DEFAULT_CWD` is the project root, and it is the right answer for RESOLVING
+ * a relative path (see resolveUserPath). It is NOT a precondition of running a
+ * program: when that directory cannot be entered, `spawn` fails before the
+ * binary is ever reached and `spawnArgv` settles at 127 — which `hasBinary()`
+ * reads as "not installed" and `probeJournal()` as "no journal". The whole
+ * capability sweep then answers false at once and the MCP server drops
+ * disk_usage, disk_cleanup, logs_tail and screen_capture from its tool list
+ * with nothing said (TASK-722, the false-failure class). On a box the tree is
+ * normally there; this bites exactly when it briefly is not — mid-update, a
+ * failed mount, a mis-set CLAWBOX_ROOT — which is when those tools are wanted.
+ *
+ * `/` is the fallback because it is the one directory that cannot be missing
+ * and cannot be a surprise. It is safe only because every argument these tools
+ * pass is already an ABSOLUTE path — the rule is restated on `spawnArgv` and on
+ * `SpawnOptions.cwd`, where a caller adding an argument will read it.
+ *
+ * Asked per spawn rather than once at import: the tree comes BACK after an
+ * update, and a capability answered once and kept for the process lifetime is
+ * the probe-once class this codebase keeps producing.
+ */
+const FALLBACK_CWD = "/";
+
+/**
+ * The directory a `spawnArgv` call with no `cwd` will actually use.
+ *
+ * Exported because `check-tools.ts` PRINTS it when a probe answers false: a
+ * note that named `DEFAULT_CWD` there would attach the old, wrong cause ("your
+ * tree is missing") to a probe that failed for a real reason ("scrot is not
+ * installed") — the very misdiagnosis this fix removes.
+ */
+export function defaultSpawnCwd(): string {
+  try {
+    return statSync(DEFAULT_CWD).isDirectory() ? DEFAULT_CWD : FALLBACK_CWD;
+  } catch {
+    return FALLBACK_CWD;
+  }
+}
+
+/** The spawn failed on the DIRECTORY, before the program was reached. */
+function isCwdRefusal(code: string | undefined): boolean {
+  return code === "ENOENT" || code === "EACCES" || code === "ENOTDIR";
+}
+
+interface Attempt {
+  result: SpawnResult;
+  /** Set when the child never started and the reason could be the directory. */
+  refusedCode?: string;
+}
+
+/**
  * The ONLY process entry point outside the `bash` tool. Argv array, never a
  * shell string — so no argument, however hostile, can be re-parsed as a
  * command. Output is capped and the child is killed at the cap so a runaway
  * producer cannot OOM the stdio server and take every tool down with it.
+ *
+ * EVERY PATH IN `args` MUST BE ABSOLUTE. With no `cwd` the child runs in the
+ * project root, or in `/` when that root cannot be entered, so a relative
+ * argument does not name a fixed file. `resolveUserPath` is what every caller
+ * uses to satisfy this, and `rm -rf --` is one of the callers.
  */
 export function spawnArgv(
   bin: string,
   args: string[],
   options: SpawnOptions = {},
 ): Promise<SpawnResult> {
-  const { timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024, cwd = DEFAULT_CWD, input, extraEnv } = options;
-  return new Promise((resolveP) => {
+  const { cwd } = options;
+  // A cwd the CALLER named is honoured exactly as given, missing or not: that
+  // directory is the caller's meaning, and running somewhere else instead
+  // would be the false-success mirror of the bug the fallback above fixes.
+  if (cwd !== undefined) return spawnAttempt(bin, args, options, cwd).then((a) => a.result);
+  const chosen = defaultSpawnCwd();
+  return spawnAttempt(bin, args, options, chosen).then((a) => {
+    // The stat above answers "does this exist", which is not the same question
+    // as "can this process chdir into it" — a root-owned tree part-way through
+    // an install answers yes and then refuses EACCES — and the two syscalls are
+    // far enough apart for the tree to vanish between them, which is precisely
+    // the mid-update window this fix is about. So the refusal itself, not a
+    // prediction of it, is what selects the fallback.
+    if (chosen === FALLBACK_CWD || !isCwdRefusal(a.refusedCode)) return a.result;
+    return spawnAttempt(bin, args, options, FALLBACK_CWD).then((retry) => retry.result);
+  });
+}
+
+function spawnAttempt(
+  bin: string,
+  args: string[],
+  options: SpawnOptions,
+  effectiveCwd: string,
+): Promise<Attempt> {
+  const { timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024, input, extraEnv } = options;
+  return new Promise((resolveA) => {
+    const resolveP = (result: SpawnResult, refusedCode?: string) => resolveA({ result, refusedCode });
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(bin, args, { cwd, env: { ...process.env, HOME, ...extraEnv }, shell: false });
+      child = spawn(bin, args, { cwd: effectiveCwd, env: { ...process.env, HOME, ...extraEnv }, shell: false });
     } catch (err) {
       resolveP({
         stdout: "",
@@ -246,7 +371,7 @@ export function spawnArgv(
         exitCode: 127,
         timedOut: false,
         truncated: false,
-      });
+      }, (err as NodeJS.ErrnoException | undefined)?.code);
       return;
     }
     let stdout = "";
@@ -255,6 +380,8 @@ export function spawnArgv(
     let timedOut = false;
     let settled = false;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+    let refusedCode: string | undefined;
 
     const finish = (exitCode: number) => {
       if (settled) return;
@@ -265,7 +392,7 @@ export function spawnArgv(
       // does not accumulate open handles once per hung call.
       child.stdout?.destroy();
       child.stderr?.destroy();
-      resolveP({ stdout, stderr, exitCode, timedOut, truncated });
+      resolveP({ stdout, stderr, exitCode, timedOut, truncated }, refusedCode);
     };
 
     // Kill, then settle on OUR schedule. Killing the direct child does not
@@ -308,6 +435,10 @@ export function spawnArgv(
     });
     child.on("error", (err: Error) => {
       stderr += err.message;
+      // The code travels with the result so the caller above can tell "the
+      // directory refused us" from "the program is not there" — the same
+      // message text serves both.
+      refusedCode = (err as NodeJS.ErrnoException).code;
       finish(127);
     });
 

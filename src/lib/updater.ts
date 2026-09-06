@@ -3,7 +3,7 @@ import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
-import { get, set, setMany } from "./config-store";
+import { get, getKnown, set, setMany } from "./config-store";
 import {
   findOpenclawBin,
   GATEWAY_PORT,
@@ -17,7 +17,23 @@ import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
-import { setUpdateLock, clearUpdateLock } from "./update-lock";
+import { setUpdateLock, clearUpdateLock, isUpdateLocked } from "./update-lock";
+
+/**
+ * "An update was accepted and then lost its process" — written where the lock
+ * is released, so the verdict outlives the process that reached it.
+ *
+ * The fault this records is a web server being replaced, so a verdict kept only
+ * in memory is one the next replacement erases; the box has to remember. It is
+ * cleared when a new run starts and when the owner dismisses the result.
+ */
+const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
+
+// The sentence an interrupted run is reported with, from the client-safe
+// module: it is the IDENTITY of that verdict, and the route and the tests have
+// to be able to name it without pulling this file's Node built-ins in with it.
+export { INTERRUPTED_MESSAGE } from "./update-constants";
+import { INTERRUPTED_MESSAGE } from "./update-constants";
 import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
@@ -1134,6 +1150,7 @@ const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || 
 // tunable: a pre-start still running at this point is killed by systemd
 // itself, so the wait below never outlives the thing it waits for.
 const GATEWAY_PRE_START_TIMEOUT_MS = 600_000;
+const DOCTOR_FIX_TIMEOUT_MS = 90_000;
 const ROOT_STEP_SETTLE_TIMEOUT_MS = Number(process.env.ROOT_STEP_SETTLE_TIMEOUT_MS || "7200000");
 const LEGACY_GATEWAY_BLOCKER_RE =
   /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
@@ -1178,18 +1195,149 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
   });
 }
 
+/**
+ * The environment that pins an `openclaw` child to THIS device's real config.
+ *
+ * Same rule as `runCurrentGatewayPreStart`: the CLI reads `OPENCLAW_HOME` as
+ * the ACCOUNT home and builds its tree at `$OPENCLAW_HOME/.openclaw`, while
+ * ClawBox uses that name for the `.openclaw` directory itself — so an
+ * inherited one makes the core answer about a second, empty config. That does
+ * not matter for a command whose answer is thrown away; it matters a great
+ * deal for one whose answer is printed to the owner as the reason his gateway
+ * is dead.
+ */
+function openclawChildEnv(): NodeJS.ProcessEnv {
+  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(home, ".openclaw");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    OPENCLAW_STATE_DIR: openclawHome,
+    OPENCLAW_CONFIG_PATH: path.join(openclawHome, "openclaw.json"),
+  };
+  delete env.OPENCLAW_HOME;
+  return env;
+}
+
+/** Everything a failed child said, whichever stream it said it on. */
+function commandOutput(err: unknown): string {
+  const detail = err as { stdout?: unknown; stderr?: unknown; message?: unknown };
+  return [detail.stdout, detail.stderr, detail.message]
+    .map((part) => (typeof part === "string" ? part : ""))
+    .join("\n");
+}
+
+/**
+ * Run the core's own repair, and RECORD whether it worked.
+ *
+ * Still non-fatal, and that is load-bearing: doctor exiting non-zero because
+ * the gateway holds its state directory is the gateway proving it is alive
+ * (install.sh:step_gateway_legacy_state_recovery, measured 2026-09-06), so the
+ * restart + positive port probe that follows remains the verdict, not the exit
+ * code — which is why neither caller branches on this, and it returns nothing.
+ * What changed is that the exit code is no longer DISCARDED: a doctor that
+ * could not finish is the single most useful fact about an update that then
+ * finds no gateway, and swallowing it silently is what left a customer box
+ * dark for 25 hours with "Applying system fixups — completed" on screen
+ * (TASK-737).
+ */
 async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
   try {
     await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
-      timeout: 90_000,
+      timeout: DOCTOR_FIX_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
+      env: openclawChildEnv(),
     });
-  } catch {
-    // Doctor can still repair some state before exiting non-zero. Continue
-    // into a restart + positive gateway probe rather than trusting exit code.
+  } catch (err) {
+    warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` did not complete. `
+      + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err)}`);
   }
+}
+
+/**
+ * Why doctor did not finish, in words worth reading.
+ *
+ * NOT `err.message`: node sets it to `Command failed: <the whole argv>`, so a
+ * warning built from its first line would name the command back at the owner
+ * and nothing else. Doctor states its own blocker — `Legacy exec approvals
+ * exist at …` is the one this card is about — and it states it in the output,
+ * so that is what is quoted. A killed child is called killed, because a 90 s
+ * timeout and a refusal are not the same problem.
+ */
+function describeDoctorFailure(err: unknown): string {
+  if ((err as { killed?: boolean } | null)?.killed) {
+    return `it was still running after ${Math.round(DOCTOR_FIX_TIMEOUT_MS / 1000)}s and was stopped`;
+  }
+  const said = commandOutput(err)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    // Its own summary frame is drawn with box-drawing characters and says
+    // nothing; the sentence that names the blocker is plain text.
+    .filter((line) => !/^[\u2500-\u257f\u25c6\u2502]/.test(line) && !line.startsWith("Command failed:"));
+  return said.at(-1) ?? "it gave no reason";
+}
+
+/**
+ * Ask the CORE whether it will accept this device's configuration.
+ *
+ * HARNESS FIRST. `openclaw config validate --json` is the core's own answer to
+ * "would the gateway start?" — `{valid, path, issues[]}` — and until TASK-737
+ * nothing in ClawBox ever asked it: not the updater, not install.sh, not the
+ * boot script. That gap is the whole of the incident: OpenClaw 2026.8 REFUSES
+ * a 2026.7-layout config instead of migrating it on load (`Unrecognized
+ * keys`, gateway exit 78), so a box whose migration did not run has a gateway
+ * that provably cannot start — and ClawBox reported "not listening on port
+ * 18789", which is true, unactionable, and indistinguishable from a dozen
+ * other causes.
+ *
+ * `--json`, not the human output: that goes to stderr and marks each issue
+ * with a themed `×` glyph any `FORCE_COLOR` in the environment repaints, so
+ * scraping it would be reading presentation as a contract.
+ *
+ * Returns the core's own reasons when it refuses, and null when it accepts,
+ * when there is no core to ask (Hermes), or when the validator could not be
+ * run at all. Null is deliberately the "say nothing" answer: this is a
+ * DIAGNOSIS of an update that has already failed, so a validator we could not
+ * reach must never invent a cause of its own — a half-installed core whose
+ * node engine is wrong exits non-zero here too, and calling that a bad config
+ * would be a false failure over a config that is fine.
+ */
+async function getOpenclawConfigRefusal(): Promise<string | null> {
+  if (openclawIsAbsent()) return null;
+  let payload: string;
+  try {
+    await execFile(OPENCLAW_BIN, ["config", "validate", "--json"], {
+      timeout: 60_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: openclawChildEnv(),
+    });
+    return null;
+  } catch (err) {
+    // The core prints the verdict as JSON on stdout and exits 1 when it
+    // refuses. Any other non-zero exit carries no verdict at all.
+    payload = commandOutput(err);
+  }
+  let verdict: unknown;
+  try {
+    verdict = JSON.parse(payload.slice(payload.indexOf("{"), payload.lastIndexOf("}") + 1));
+  } catch {
+    return null;
+  }
+  if (typeof verdict !== "object" || verdict === null) return null;
+  const { valid, issues } = verdict as { valid?: unknown; issues?: unknown };
+  if (valid !== false) return null;
+  const reasons = (Array.isArray(issues) ? issues : [])
+    .map((issue) => {
+      const { path: at, message } = (issue ?? {}) as { path?: unknown; message?: unknown };
+      return [at, message].filter((part) => typeof part === "string" && part).join(": ");
+    })
+    .filter(Boolean);
+  return reasons.length > 0 ? reasons.join("; ") : "the core gave no reason";
 }
 
 async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
@@ -2067,12 +2215,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
-    const lastLog = getGatewayFailureDetail(beforeRecoveryLog);
-    throw new Error(
-      lastLog
-        ? `OpenClaw gateway is not listening on port ${GATEWAY_PORT}: ${lastLog}`
-        : `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
-    );
+    throw new Error(await describeDeadGateway(beforeRecoveryLog));
   }
 
   await withGatewayQuiesced(async () => {
@@ -2083,12 +2226,36 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
-  const lastLog = getGatewayFailureDetail(afterRecoveryLog);
   throw new Error(
-    lastLog
-      ? `OpenClaw gateway still offline after legacy state recovery: ${lastLog}`
-      : "OpenClaw gateway still offline after legacy state recovery",
+    await describeDeadGateway(afterRecoveryLog, "OpenClaw gateway still offline after legacy state recovery"),
   );
+}
+
+/**
+ * Say WHY the gateway is not there, in the order of what the owner can act on.
+ *
+ * A configuration the core refuses outranks anything in the journal, because
+ * it is a cause rather than a symptom and it is the one the journal states
+ * worst. On a 2026.7 → 2026.8 core upgrade whose migration did not run, the
+ * gateway's own last line is `Run "openclaw doctor --fix" to repair the
+ * config, then retry.` — advice for a command ClawBox has just run and that
+ * has just failed — and `getGatewayFailureDetail` hands exactly that line back
+ * as the cause (measured against 2026.8.1 on 2026-09-06). The keys the core
+ * actually named are three lines further up and were never reported at all.
+ *
+ * Asked only here, on a path where the update has already failed: a healthy
+ * update never pays for the extra CLI call.
+ */
+async function describeDeadGateway(
+  journal: string,
+  prefix = `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
+): Promise<string> {
+  const refusal = await getOpenclawConfigRefusal();
+  if (refusal) {
+    return `${prefix}: OpenClaw refuses this device's configuration — ${refusal}`;
+  }
+  const lastLog = getGatewayFailureDetail(journal);
+  return lastLog ? `${prefix}: ${lastLog}` : prefix;
 }
 
 const UPDATE_STEPS: UpdateStepDef[] = [
@@ -2456,10 +2623,21 @@ async function readClawboxVersion(): Promise<string> {
  * the venv the shim execs) should report an unknown version for a few
  * seconds, not fail the whole version endpoint that ClawBox's own update
  * tile also depends on.
+ *
+ * TASK-613: remove once hermes-agent#104275 lands (HERMES_DISABLE_UPDATE_CHECK
+ * / updates.check). `hermes --version` is the one hermes call that runs the
+ * agent's passive update check, and every six hours the first probe pays for a
+ * `git fetch` plus a GitHub compare inside the 10 s allowed for the whole call
+ * — after which this reads a timeout and answers null over an agent that is
+ * running perfectly. `silenceUpdateCheck` asks for the same banner without it,
+ * and falls back to the plain call if it cannot.
  */
 async function readHermesVersion(): Promise<string | null> {
   try {
-    const { code, stdout } = await runHermesCli(["--version"], { timeoutMs: 10_000 });
+    const { code, stdout } = await runHermesCli(["--version"], {
+      timeoutMs: 10_000,
+      silenceUpdateCheck: true,
+    });
     if (code !== 0) return null;
     return parseHermesVersion(stdout);
   } catch {
@@ -2705,6 +2883,10 @@ export function resetUpdateState(): void {
   continuationInFlight = null;
 }
 
+export type DismissOutcome =
+  | { dismissed: true }
+  | { dismissed: false; reason: "in-progress" | "not-written"; error: string };
+
 /**
  * Forget a run that has already settled, at the owner's request.
  *
@@ -2717,13 +2899,146 @@ export function resetUpdateState(): void {
  *
  * Refuses while an update owns the box: this clears no `running` flag on
  * purpose — `resetUpdateState` does, and doing that here would let a second
- * run start beside the one still going. Answers whether it cleared anything so
- * the route can say 409 rather than pretend.
+ * run start beside the one still going. Answers WHY it refused, so the route
+ * can say 409 over a live run and 500 over a store that would not take the
+ * write, rather than one answer for two different things.
+ *
+ * The write is AWAITED. It used to be `void set(...)` with an unconditional
+ * `true` beside it: the route answered 200, the owner's Dismiss looked like it
+ * took, and the record was still on disk for the next poll to raise the same
+ * failure from — the false-success class, on the one button whose whole job is
+ * to make something go away.
  */
-export function dismissSettledUpdate(): boolean {
-  if (updateOwned() || state.phase === "running") return false;
+export async function dismissSettledUpdate(): Promise<DismissOutcome> {
+  if (updateOwned() || state.phase === "running") {
+    return { dismissed: false, reason: "in-progress", error: "An update is in progress" };
+  }
+  // The interrupted-run record is part of the result being dismissed. Without
+  // this the next idle poll re-reads it and raises the same failure again,
+  // which would make it undismissable — so the record goes FIRST, and the
+  // in-memory state is only cleared once the disk agrees.
+  //
+  // …but only when there IS one. Most settled failures carry no record at all —
+  // the rebuild-evidence verdict, any failed step, "No internet connection" —
+  // and for those the write is a no-op deletion whose failure says nothing
+  // about the thing being dismissed. Letting it refuse would make a failed
+  // update UNDISMISSABLE on a box whose disk is full: the panel is re-adopted
+  // on every reload, and the owner cannot reach the button that retries the
+  // update. `getKnown` because "the store could not be read" is not evidence
+  // that the key is unset — that store may well hold a record.
+  const record = await getKnown(UPDATE_INTERRUPTED_KEY);
+  if (!record.known || record.value !== undefined) {
+    try {
+      await set(UPDATE_INTERRUPTED_KEY, undefined);
+    } catch (err) {
+      console.warn(
+        "[Updater] Could not forget the settled run:",
+        err instanceof Error ? err.message : err,
+      );
+      // The reason travels; the store's own words do NOT. A write that failed
+      // on the READ half is a JSON.parse error, and its message quotes a window
+      // of data/config.json — which holds both bot tokens and the mailbox
+      // password. That belongs in the log, not in an HTTP response body.
+      return {
+        dismissed: false,
+        reason: "not-written",
+        error: "The device could not save that change — see the server log.",
+      };
+    }
+  }
+  // Re-asked after the await: a run can claim the box while the write is in
+  // flight, and resetting the state under it would show an empty step list
+  // over an update that is going. Through `getUpdateState()` because the
+  // compiler holds its narrowing of this module-level binding across the await
+  // and would call the second read impossible — which is the whole race.
+  if (updateOwned() || getUpdateState().phase === "running") {
+    return { dismissed: false, reason: "in-progress", error: "An update is in progress" };
+  }
   state = createInitialState(applicableSteps());
-  return true;
+  return { dismissed: true };
+}
+
+/**
+ * Is this state the remembered-interruption verdict, rather than a failure with
+ * a cause of its own?
+ *
+ * Only that verdict may be taken back by a completion: a rebuild that failed is
+ * a different finding, decided from evidence the markers say nothing about.
+ */
+export function isInterruptedVerdict(reported: UpdateState): boolean {
+  return reported.phase === "failed" && reported.error === INTERRUPTED_MESSAGE;
+}
+
+/** The two durable records of how the last run ended. */
+interface SettledMarkers {
+  interruptedAt: string | null;
+  completed: boolean;
+  completedAt: string | null;
+}
+
+/**
+ * …or `null` when the store could not be read.
+ *
+ * Through `getKnown`, not `get`: the forgiving reader answers `{}` to an
+ * EACCES, a half-written file and a non-object JSON alike, and "we could not
+ * read the file" is not evidence that a key is unset (config-store.ts says so
+ * in as many words). Read the other way, an unreadable store would look like a
+ * box with no interruption on it — and the caller would retract a verdict it
+ * still has every reason to hold. `data/config.json` being briefly unreadable
+ * is exactly what `post_update` can do to it.
+ */
+async function readSettledMarkers(): Promise<SettledMarkers | null> {
+  const [interruptedAt, completed, completedAt] = await Promise.all([
+    getKnown(UPDATE_INTERRUPTED_KEY),
+    getKnown("update_completed"),
+    getKnown("update_completed_at"),
+  ]);
+  if (!interruptedAt.known || !completed.known || !completedAt.known) return null;
+  return {
+    interruptedAt: typeof interruptedAt.value === "string" ? interruptedAt.value : null,
+    completed: Boolean(completed.value),
+    completedAt: typeof completedAt.value === "string" ? completedAt.value : null,
+  };
+}
+
+/**
+ * Drop the record, reporting a store that would not take the write.
+ *
+ * Never fatal to the reader: failing to FORGET a verdict that has already been
+ * suppressed in memory must not turn a status poll into a 500, on a box whose
+ * config.json is the thing that is broken.
+ */
+async function forgetInterruption(): Promise<void> {
+  try {
+    await set(UPDATE_INTERRUPTED_KEY, undefined);
+  } catch (err) {
+    console.warn(
+      "[Updater] Could not clear the interruption a later update overtook:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * Did a completion come AFTER the interruption the box remembers?
+ *
+ * Both records carry a time, so the newer one is the true one. Strictly newer,
+ * and only with a date on both sides: older boxes carried `update_completed =
+ * true` for ever with no `update_completed_at` beside it, and "some completion
+ * happened at some point" cannot prove it came after this interruption —
+ * guessing that it did would be the silence TASK-731 exists to end.
+ *
+ * Every uncertain answer is `false`, which KEEPS the failure showing: an
+ * unparseable date, an undated completion, equal times. The clock is the one
+ * assumption left — a box whose time is stepped BACKWARDS between the two
+ * writes reads its own completion as older — and that is the direction to fail
+ * in, since the next run's prologue clears both markers anyway.
+ */
+function completionOutranksInterruption(markers: SettledMarkers): boolean {
+  if (!markers.interruptedAt || !markers.completed || !markers.completedAt) return false;
+  const completedAt = Date.parse(markers.completedAt);
+  const interruptedAt = Date.parse(markers.interruptedAt);
+  return Number.isFinite(completedAt) && Number.isFinite(interruptedAt) && completedAt > interruptedAt;
 }
 
 export async function isUpdateCompleted(): Promise<boolean> {
@@ -2793,11 +3108,88 @@ async function resumeContinuation(): Promise<boolean> {
     // continuation flag would otherwise leave the desktop locked with nothing
     // left to unlock it — there is no update to resume, so there is no lock to
     // hold. This is the one release path that does not follow a finished run.
-    await clearUpdateLock();
+    //
+    // But releasing the lock is only half an answer, and the missing half is
+    // TASK-731. The lock is on disk and the step list is not: an update whose
+    // web server was replaced between `runUpdate`'s `setUpdateLock()` and the
+    // rebuild step (which writes the continuation flag) leaves the lock held
+    // and nothing to resume. This branch then cleared it and answered IDLE —
+    // indistinguishable from a box nobody ever asked to update, over a run the
+    // route had already accepted with `{ started: true }`. The e2e-install
+    // upgrade spec then polls a state machine that cannot move for its whole
+    // 45-minute budget.
+    //
+    // Two things are needed and neither is enough alone. The lock IS the
+    // evidence, so it is read before it is cleared — and the verdict is
+    // WRITTEN BACK, because the fault being detected is "the web server keeps
+    // being replaced": a process that reports it in memory and then dies takes
+    // the only record with it, and the next one finds a clean disk and answers
+    // idle again, for good. `update_interrupted_at` is that record; it is
+    // cleared by the next `startUpdate()` and by a Dismiss.
+    //
+    // An update that FINISHED and then failed its release is not an
+    // interruption. `clearUpdateLock` is documented to fail softly, and
+    // `launchUpdate` fires it unawaited, so a leftover flag is a real state —
+    // and `update_completed` with no continuation flag is what tells the two
+    // apart. Reporting there would tell an owner to re-run a ten-minute update
+    // that already worked.
+    //
+    // …and the record is judged AGAINST that completion by time, which is the
+    // 2026-09-06 follow-up. The state this branch reads — locked, nothing to
+    // resume, not completed — is also what the SECOND HALF of an ordinary
+    // update looks like to a reader that is not the process running it, so an
+    // interruption gets stamped on the normal path of every update. Measured on
+    // the Hermes box: `update_interrupted_at` 71 seconds BEFORE
+    // `update_completed_at`, on an update that worked, and the box answered
+    // "Update failed" with every step pending from then on. A completion newer
+    // than the record voids it, here and on disk.
+    // The release only when the lock was actually HELD. `set` is a
+    // read-modify-write of the whole of data/config.json and this branch now
+    // runs on every status poll, so an unconditional clear would rewrite that
+    // file every two seconds — beside install.sh and the gateway, which have it
+    // open by their own paths.
+    const released = (await isUpdateLocked()) && (await clearUpdateLock());
+    const markers = await readSettledMarkers();
+    // A store that could not be read decides NOTHING — it neither stamps a
+    // record nor retracts the verdict this process is already holding.
+    if (!markers) return false;
+    const overtaken = completionOutranksInterruption(markers);
+    if (overtaken) await forgetInterruption();
+    const remembered = Boolean(markers.interruptedAt) && !overtaken;
+    if ((released && !markers.completed) || remembered) {
+      if (!remembered) {
+        // Asked once more, immediately before the stamp. The run can finish
+        // between the read above and this line, and a record dated after the
+        // completion it describes would outrank it for ever — the very defect
+        // this branch is being fixed for, through a window of milliseconds.
+        const now = await readSettledMarkers();
+        if (!now || now.completed) return false;
+        // Only on the transition, so the record keeps the time it happened.
+        await set(UPDATE_INTERRUPTED_KEY, new Date().toISOString());
+      }
+      state = createInitialState(applicableSteps());
+      state.warnings = await restoreWarnings();
+      state.phase = "failed";
+      state.error = INTERRUPTED_MESSAGE;
+      console.error(`[Updater] ${INTERRUPTED_MESSAGE}`);
+    } else if (isInterruptedVerdict(state)) {
+      // This process is still holding a verdict whose record is gone — cleared
+      // by the completion above, by the next run's prologue, or by a Dismiss in
+      // another copy of this module. A failure the box has no evidence for is
+      // not one to keep showing.
+      state = createInitialState(applicableSteps());
+    }
     return false;
   }
 
-  await set("update_needs_continuation", undefined);
+  // The restart this is resuming is the one the update ASKED FOR: the flag is
+  // written by the rebuild step itself. So anything a reader stamped while that
+  // replacement was under way describes the update's own normal path, and goes
+  // with the flag rather than outliving it.
+  await setMany({
+    update_needs_continuation: undefined,
+    [UPDATE_INTERRUPTED_KEY]: undefined,
+  });
 
   // Resolve the list ONCE and reuse it for the state, the resume index and the
   // runner. The edition is stable across the reboot (post_update re-bakes the
@@ -2949,10 +3341,65 @@ async function checkInternet(): Promise<boolean> {
 }
 
 async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): Promise<void> {
+  // Lock the desktop FIRST, AWAITED, before anything that can take time.
+  //
+  // It used to sit below the internet check and the drift baseline — up to two
+  // 10 s ICMP attempts, an 8 s HTTPS HEAD and a `git` shell-out — and the
+  // update was already accepted (`{started:true}`) for that whole window. A web
+  // server replaced in it left NO trace on disk, so the run was lost and the
+  // box reported "nothing is running" (TASK-731). The lock is the only durable
+  // record that a run exists, so it goes on disk before the run can be lost.
+  //
+  // Scoped to the flow that contains the RESTART step: that is the one that
+  // runs `git reset --hard` and `git clean -fd` over the project. The
+  // OpenClaw-only flow reinstalls a package and bounces the gateway, and
+  // locking the owner's desktop for that would be over-reach. It also covers
+  // the continuation, whose flag survived the reboot but may not have on a box
+  // that was power-cycled instead.
+  const ownsTheDesktop = steps.some((s) => s.id === RESTART_STEP_ID);
+  if (ownsTheDesktop) {
+    await setUpdateLock();
+    // AND clear what the last run left behind, in the same awaited prologue.
+    //
+    // `update_completed` is the discriminator resumeContinuation uses to tell
+    // "an update was interrupted" from "one finished and only failed to release
+    // its lock". Left standing, a FORCED run started after a successful one
+    // (exactly what e2e-install's upgrade spec does, twice) would take the
+    // lock, die before the rebuild writes its continuation flag, and be read as
+    // the finished one — swallowing the very report the branch exists to make.
+    // The box is not "completed" while it is updating, and the run writes both
+    // again when it is.
+    //
+    // HERE rather than in startUpdate, and awaited: the window this whole
+    // change is about begins when the first step runs, and by then the markers
+    // are gone. A restart in the microseconds before this line finds no lock
+    // either — both are written in the same prologue — so resumeContinuation
+    // correctly says nothing.
+    //
+    // Reported and not fatal, the same rule setUpdateLock follows: refusing to
+    // update a box because a marker could not be cleared is the worse outcome
+    // by some way, and a config store that cannot be written is exactly the
+    // state an update exists to repair. What it costs, said out loud, is that a
+    // later interrupted run may be read as this one having finished.
+    try {
+      await setMany({
+        [UPDATE_INTERRUPTED_KEY]: undefined,
+        update_completed: undefined,
+        update_completed_at: undefined,
+      });
+    } catch (err) {
+      console.warn(
+        "[Updater] Could not clear the previous run's markers - an interruption of THIS run may be reported as a completed update:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   if (startFrom === 0 && !(await checkInternet())) {
     state.phase = "failed";
     state.error = "No internet connection. Check your WiFi and try again.";
     state.currentStepIndex = -1;
+    await clearUpdateLock();
     return;
   }
 
@@ -2962,24 +3409,6 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // the repo, so there is nothing for it to observe.
   if (startFrom === 0 && steps.some((s) => s.id === RESTART_STEP_ID)) {
     await captureDriftBaseline();
-  }
-
-  // Lock the desktop, AWAITED, before the first step runs.
-  //
-  // Here rather than in startUpdate/resumeContinuation, and awaited rather than
-  // fired and forgotten, so the flag is on disk before anything else happens —
-  // config-store.set is synchronous inside today, but nothing about this should
-  // depend on that staying true. It also covers the continuation, whose flag
-  // survived the reboot but may not have on a box that was power-cycled instead.
-  //
-  // Scoped to the flow that contains the RESTART step, the same test the drift
-  // baseline above uses: that is the one that runs `git reset --hard` and
-  // `git clean -fd` over the project. The OpenClaw-only flow reinstalls a
-  // package and bounces the gateway, and locking the owner's desktop for that
-  // would be over-reach.
-  const ownsTheDesktop = steps.some((s) => s.id === RESTART_STEP_ID);
-  if (ownsTheDesktop) {
-    await setUpdateLock();
   }
 
   let failed = false;
@@ -3060,6 +3489,12 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     await setMany({
       update_completed: true,
       update_completed_at: new Date().toISOString(),
+      // In the SAME write, so the two records can never disagree: an
+      // interruption stamped while this run was going describes this run, and
+      // this run finished. Left standing it is read as the newer fact for ever
+      // — "Update failed", every step pending, over an update that worked
+      // (measured on the Hermes box, 2026-09-06).
+      [UPDATE_INTERRUPTED_KEY]: undefined,
     });
   }
   // The warnings have been carried across the reboot and are now in the live

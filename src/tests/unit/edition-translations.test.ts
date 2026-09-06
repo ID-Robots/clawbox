@@ -1,22 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { translations } from "@/lib/translations";
-import { hermesEn } from "@/lib/hermes-translations";
-import { settingsSecurityEn } from "@/lib/hermes-translations/en-settings-security";
-import { providerEn } from "@/lib/hermes-translations/en-provider";
-import { skillsEn } from "@/lib/hermes-translations/en-skills";
-import { localModelsEn } from "@/lib/hermes-translations/en-local-models";
-import { systemProfileEn } from "@/lib/hermes-translations/en-system-profile";
-import { codingAgentEn } from "@/lib/hermes-translations/en-coding-agent";
-import { shellScanEn } from "@/lib/hermes-translations/en-shell-scan";
-import { bg } from "@/lib/hermes-translations/bg";
-import { de } from "@/lib/hermes-translations/de";
-import { es } from "@/lib/hermes-translations/es";
-import { fr } from "@/lib/hermes-translations/fr";
-import { it as itLocale } from "@/lib/hermes-translations/it";
-import { ja } from "@/lib/hermes-translations/ja";
-import { nl } from "@/lib/hermes-translations/nl";
-import { sv } from "@/lib/hermes-translations/sv";
-import { zh } from "@/lib/hermes-translations/zh";
+import { editionEn } from "@/lib/edition-translations";
+import { settingsSecurityEn } from "@/lib/edition-translations/en-settings-security";
+import { providerEn } from "@/lib/edition-translations/en-provider";
+import { skillsEn } from "@/lib/edition-translations/en-skills";
+import { localModelsEn } from "@/lib/edition-translations/en-local-models";
+import { systemProfileEn } from "@/lib/edition-translations/en-system-profile";
+import { codingAgentEn } from "@/lib/edition-translations/en-coding-agent";
+import { shellScanEn } from "@/lib/edition-translations/en-shell-scan";
+import { bg } from "@/lib/edition-translations/bg";
+import { de } from "@/lib/edition-translations/de";
+import { es } from "@/lib/edition-translations/es";
+import { fr } from "@/lib/edition-translations/fr";
+import { it as itLocale } from "@/lib/edition-translations/it";
+import { ja } from "@/lib/edition-translations/ja";
+import { nl } from "@/lib/edition-translations/nl";
+import { sv } from "@/lib/edition-translations/sv";
+import { zh } from "@/lib/edition-translations/zh";
 import type { Locale } from "@/lib/i18n";
 
 /**
@@ -87,7 +87,7 @@ function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {
   return keys.filter((key) => {
     const value = table[key];
     if (value === undefined) return false; // reported by the completeness test
-    if (value !== hermesEn[key]) return false;
+    if (value !== editionEn[key]) return false;
     // A value that is nothing but placeholders ("{model}") has no words to
     // translate, so it is identical in every locale by construction.
     if (/^(\s*\{\w+\}\s*)+$/.test(value)) return false;
@@ -95,7 +95,7 @@ function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {
   });
 }
 
-describe("hermes-translations (TASK-458)", () => {
+describe("edition-translations (TASK-458)", () => {
   describe("the English catalogue covers every surface", () => {
     const surfaces: [string, Record<string, string>, (k: string) => boolean][] = [
       ["settingsSecurityEn", settingsSecurityEn, (k) => k.startsWith("settings.")],
@@ -117,18 +117,18 @@ describe("hermes-translations (TASK-458)", () => {
 
     it("the surface modules do not collide", () => {
       const counts = surfaces.reduce((n, [, table]) => n + Object.keys(table).length, 0);
-      expect(Object.keys(hermesEn).length).toBe(counts);
+      expect(Object.keys(editionEn).length).toBe(counts);
     });
 
     it("is reachable through the merged catalogue the UI actually reads", () => {
-      for (const key of Object.keys(hermesEn)) {
-        expect(translations.en[key], `en["${key}"] missing from the merged table`).toBe(hermesEn[key]);
+      for (const key of Object.keys(editionEn)) {
+        expect(translations.en[key], `en["${key}"] missing from the merged table`).toBe(editionEn[key]);
       }
     });
   });
 
   describe.each(NAMESPACES)("$name", ({ matches }) => {
-    const keys = Object.keys(hermesEn).filter(matches);
+    const keys = Object.keys(editionEn).filter(matches);
 
     it("has English copy", () => {
       expect(keys.length).toBeGreaterThan(5);
@@ -157,7 +157,7 @@ describe("hermes-translations (TASK-458)", () => {
   describe("locale tables carry no keys English does not have", () => {
     for (const locale of NON_EN) {
       it(`'${locale}' has no orphan keys`, () => {
-        const orphans = Object.keys(OVERRIDES[locale]).filter((k) => !(k in hermesEn));
+        const orphans = Object.keys(OVERRIDES[locale]).filter((k) => !(k in editionEn));
         expect(orphans, `${locale} has keys with no English source`).toEqual([]);
       });
     }
@@ -168,7 +168,7 @@ describe("hermes-translations (TASK-458)", () => {
 
     for (const locale of NON_EN) {
       it(`'${locale}' preserves every {placeholder}`, () => {
-        for (const [key, source] of Object.entries(hermesEn)) {
+        for (const [key, source] of Object.entries(editionEn)) {
           const expected = placeholders(source);
           if (expected.length === 0) continue;
           const value = OVERRIDES[locale][key];

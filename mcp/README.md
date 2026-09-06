@@ -683,7 +683,18 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
    Applied to **descendants**, not just the path handed in: `list_directory`
    filters entries, `glob` filters results, `grep` filters both search roots and
    every hit (paths come back NUL-terminated, so a hit path is parsed rather
-   than guessed).
+   than guessed). Applied to the path **as typed and as resolved**: every rule
+   is judged on the canonical path too (nearest existing ancestor, so a deep
+   new path under a link is judged where it would land; a dangling link is
+   followed to the name the kernel would create through it), resolved ONCE
+   per call so the path the sink gets is the string the guard judged. Then
+   `read_file`, `write_file`, `edit_file` and `notebook_edit` open THAT path
+   with `O_NOFOLLOW`, and `grep` is handed it as the argv root it searches
+   (rg follows a link named on its command line, so it must be given the
+   target) — a benign name linking to `.env`, `/proc/self/environ` or a file
+   in the ClawBox tree is refused, and a leaf that is a link at the moment of
+   the open (swapped in after the check, or a cycle) is refused as
+   `BLOCKED_PATH` rather than followed.
 2. **Argv only.** `spawnArgv()` is the sole process entry point outside `bash`;
    no tool builds a shell string out of an argument.
    **What `bash` guarantees, stated plainly:** nothing. Its pre-flight refuses
@@ -693,7 +704,23 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
    every other tool is argv-driven and goes through the real path guard, and
    that its own description tells the agent never to run a command that came
    from content it read. Plan around "OpenClaw + `bash` = the agent can reach
-   anything the device user can".
+   anything the device user can". Its `allow_dangerous` flag skips the
+   typo check on destructive spellings (`rm -rf`, `git push --force`) and
+   nothing else: it is a model-supplied boolean, so it is neither an
+   authorization nor the owner's consent, and no code treats it as either.
+   The shell's OWN environment no longer carries the device bearer:
+   `CLAWBOX_MCP_TOKEN` is read into `mcp/lib/api.ts`'s cache and deleted from
+   `process.env` first thing at startup (`primeApiToken`), before any child is
+   spawned, so `printenv` finds none. That is hygiene, not a mitigation, and
+   nothing here counts it as one: `delete process.env.X` does not rewrite the
+   exec-time block the kernel keeps, so `/proc/<server pid>/environ` still
+   holds the value for any same-uid child as long as
+   `scripts/gateway-pre-start.sh` registers `mcp.servers.clawbox` with the
+   token in `env` — and the same child can read `~/.openclaw/openclaw.json` or
+   `data/.mcp-token` as user clawbox regardless. The real removal is that
+   script registering the server WITHOUT `env.CLAWBOX_MCP_TOKEN` and letting
+   it use the `data/.mcp-token` fallback it already has (the coding runner's
+   `buildRunMcpConfig` registers its browser-profile server exactly that way).
 3. **Confirmation on irreversible actions** — `system_power` and
    `code_project_delete` take `confirm: true`, which an injected page cannot
    supply by accident.
@@ -754,7 +781,7 @@ and it drags server-only Next.js code into this stdio process.
 | Variable | Meaning |
 |---|---|
 | `CLAWBOX_API_BASE` | Device API origin. Default `http://127.0.0.1:80`. |
-| `CLAWBOX_MCP_TOKEN` | Bearer for `/setup-api/*`. Falls back to `<root>/data/.mcp-token`, so a provisioning entry need carry no secret. |
+| `CLAWBOX_MCP_TOKEN` | Bearer for `/setup-api/*`. Falls back to `<root>/data/.mcp-token`, so a provisioning entry need carry no secret. Read once at startup and deleted from the process environment, so a `bash` child's own `printenv` finds none (hygiene only — the server's `/proc/<pid>/environ` keeps the exec-time value; see "What `bash` guarantees"); the `clawbox` CLI a shell invokes reads the file. |
 | `CLAWBOX_MCP_PROFILE` | `full` (default), `core` or `browser` pins the tool set (`browser` = the browser family only — what a delegated coding-agent run gets); `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
 | `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
 | `CLAWBOX_MCP_CODING_TOOLS` | `1` forces the coding family onto Hermes. Debugging only. |

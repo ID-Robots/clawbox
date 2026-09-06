@@ -356,6 +356,7 @@ clear_provision_failure() {
 provision_repair_step() {
   case "$1" in
     root_exec_manifest) printf 'systemd_services' ;;
+    root_libexec) printf 'systemd_services' ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -1300,6 +1301,180 @@ llamacpp_pid_if_running() {
   printf '%s' "$pid"
 }
 
+# The engines this run stopped, and that were RUNNING when it stopped them.
+#
+# Only these come back. An engine the owner had already stopped — or that the
+# runtime's own ten-minute idle standby (src/lib/local-ai-runtime.ts) had put
+# away — must stay stopped, or an update would be starting services nobody
+# asked for and holding memory nobody wanted held.
+PAUSED_ENGINE_UNITS=()
+PAUSED_ENGINE_USER_UNITS=()
+PAUSED_ENGINE_UID=""
+
+# Stop an engine, remembering whether it was running.
+#
+# Best-effort in the register of its caller: a box that cannot stop one of its
+# engines should still attempt the build it was asked for, and the log says
+# what happened.
+pause_engine_unit() {
+  local unit="$1"
+  systemctl cat "$unit" >/dev/null 2>&1 || return 0
+  # Asked BEFORE the stop, because after it the answer is always "inactive" and
+  # the pair would have nothing left to be symmetric about.
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    PAUSED_ENGINE_UNITS+=("$unit")
+  fi
+  echo "  Stopping $unit..."
+  systemctl stop "$unit" 2>/dev/null \
+    || echo "  Warning: could not stop $unit" >&2
+}
+
+# The same, for a USER unit reached through the clawbox user's session bus.
+pause_engine_user_unit() {
+  local unit="$1" uid="$2"
+  sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user cat "$unit" >/dev/null 2>&1 || return 0
+  if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+      systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+    PAUSED_ENGINE_USER_UNITS+=("$unit")
+    PAUSED_ENGINE_UID="$uid"
+  fi
+  echo "  Stopping $unit..."
+  sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user stop "$unit" 2>/dev/null \
+    || echo "  Warning: could not stop $unit" >&2
+}
+
+# How long a Type=simple unit is given to prove it did not fork and die.
+#
+# systemd calls a Type=simple unit ACTIVE the instant it forks, and every unit
+# in this pair is Type=simple (config/clawbox-embed.service, the kokoro and
+# whisper units scripts/install-voice.sh writes, and ollama's upstream unit).
+# So `is-active` asked immediately after `start` says no more than the exit
+# status does; asked again after a settle it separates a server that came up
+# from one that exited two seconds later — which clawbox-embed.service, with
+# `Restart=no`, will not retry.
+ENGINE_SETTLE_S="${CLAWBOX_ENGINE_SETTLE_S:-3}"
+# A settle that is not a plain number is not a settle: `sleep abc` FAILS, and
+# under errexit that would abort resume_paused_engines after the starts and
+# before the record is cleared — taking do_rebuild or step_post_update with it.
+# Same guard, same reason, as the gateway budget below.
+case "$ENGINE_SETTLE_S" in ''|*[!0-9]*) ENGINE_SETTLE_S=3 ;; esac
+
+# Start back every engine this run stopped, and check each one after a settle.
+#
+# The stop half of this pair has existed since TASK-709; the start half did
+# not. Measured on the OpenClaw box 2026-09-05 and on the Hermes box 2026-09-06:
+# step_post_update stopped ollama.service at 07:44:02, one second before the
+# step finished, and the updater reported the update complete; three hours later
+# the unit was still inactive because nothing had happened to ask for it. These
+# engines are on-demand — the local-AI proxy wakes ollama and the embedder,
+# `tts/warm` and the speak path wake the voice — so what the update leaves
+# behind is not a dead box but a box in a state it was not in before, whose
+# next use pays a cold start it did not have to. An update should hand the box
+# back as it found it, and saying "completed" over an engine it stopped and did
+# not restart is the false-success class (TASK-724).
+#
+# Never fails the update: refusing an otherwise-good update over one engine
+# would strand the box on the old build, which is strictly worse. What a failed
+# restart gets is a named [WARN] line on this step's stderr — the step's journal
+# — and nothing else. It deliberately does NOT go through
+# record_provision_failure: that channel turns the step's exit code non-zero,
+# which would paint a whole good update red over a voice engine, and there is no
+# quieter surface for it today. Whoever adds one should start here.
+#
+# RESIDUAL, stated rather than hidden: a shell SIGKILLed between the pause and
+# this call resumes nothing. That is not hypothetical — run_next_build's own
+# comment records this shell as a documented OOM-kill target (TASK-709) — and
+# nothing in bash can survive it. The box is then in exactly the pre-fix state
+# for those engines, and a reboot (which starts what is enabled) or the first
+# request through the proxy is what ends it.
+# Engines the RUNTIME wakes behind a memory guard, which a root `systemctl
+# start` would walk straight past.
+#
+# `ensureLocalAiReady("embed")` refuses to wake clawbox-embed.service below
+# EMBED_WAKE_MIN_AVAILABLE_MB (2,300) of MemAvailable, because the unit's own
+# cgroup cap cannot stop a wake from squeezing the gateway or a build. The
+# resume's whole failure arm is by definition the memory-starved path — an
+# OOM-killed build, seconds after restore_previous_build brought the dashboard
+# back — so asking for a ~2 GB embedder there is the one start in this pair that
+# can make things worse. Leave it to the proxy, which asks the guard: the first
+# memory search wakes it, exactly as it would have on a box that was never
+# updated. (This is the harness-first rule inside our own tree:
+# src/lib/local-ai-runtime.ts owns these lifecycles.)
+RUNTIME_WOKEN_UNITS="clawbox-embed.service"
+
+runtime_wakes_unit() {
+  case " $RUNTIME_WOKEN_UNITS " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+resume_paused_engines() {
+  local unit uid_dir
+  if [ "${#PAUSED_ENGINE_UNITS[@]}" -gt 0 ]; then
+    for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+      if runtime_wakes_unit "$unit"; then
+        echo "  Leaving $unit to the local-AI proxy's own guarded wake"
+        continue
+      fi
+      echo "  Starting $unit again (it was running before)..."
+      systemctl start "$unit" 2>/dev/null || true
+    done
+    # One settle for the whole set rather than one each: they are independent,
+    # and the update has already paid for the starts.
+    sleep "$ENGINE_SETTLE_S"
+    for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+      if runtime_wakes_unit "$unit"; then continue; fi
+      if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        echo "    [ok] $unit is back"
+      else
+        echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+      fi
+    done
+  fi
+  if [ "${#PAUSED_ENGINE_USER_UNITS[@]}" -gt 0 ] && [ -n "$PAUSED_ENGINE_UID" ]; then
+    uid_dir="/run/user/$PAUSED_ENGINE_UID"
+    # The same test the pause side applies. A session that ended during the
+    # build (no linger, the last login closed) leaves nothing to start into, and
+    # a [WARN] about that would be a false failure over a box that is fine.
+    if [ ! -d "$uid_dir" ]; then
+      echo "  The clawbox user has no session bus any more — leaving ${PAUSED_ENGINE_USER_UNITS[*]} to the next login"
+    else
+      for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+        echo "  Starting $unit again (it was running before)..."
+        sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="$uid_dir" \
+          systemctl --user start "$unit" 2>/dev/null || true
+      done
+      sleep "$ENGINE_SETTLE_S"
+      for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+        if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="$uid_dir" \
+            systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+          echo "    [ok] $unit is back"
+        else
+          echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+        fi
+      done
+    fi
+  fi
+  forget_paused_engines
+  return 0
+}
+
+# Drop the record without acting on it — for the one caller that hands the
+# engines to something else (a reboot).
+forget_paused_engines() {
+  PAUSED_ENGINE_UNITS=()
+  PAUSED_ENGINE_USER_UNITS=()
+  PAUSED_ENGINE_UID=""
+}
+
+# The llama.cpp server is deliberately NOT in that pair. It has no unit: the
+# web server spawns it, holds the child handle and records the pid
+# (src/lib/local-ai-runtime.ts, src/instrumentation-node.ts), and wakes it on
+# the next request that needs it. A root shell starting a second llama-server
+# behind the app's back would be a process the app has no handle on, fighting
+# it over the same pidfile — a new defect in place of the one being fixed.
+
 # Give `bun run build` the board to itself.
 #
 # The rebuild is the most memory-hungry thing this appliance ever does, and on
@@ -1316,10 +1491,18 @@ llamacpp_pid_if_running() {
 # server down nothing can pull a model back in behind us.
 #
 # "With the web server down" is best-effort, not a guarantee, and it is worth
-# knowing which: clawbox-gateway.service carries `Wants=clawbox-setup.service`,
-# so a gateway (re)start during the build starts the unit do_rebuild had just
-# stopped and the proxy is reachable again. The stop still removes the common
-# case; it does not fence the window.
+# knowing which. The routine breaker was clawbox-gateway.service's
+# `Wants=clawbox-setup.service`, which started the unit do_rebuild had just
+# stopped on every gateway (re)start; that line is gone (TASK-728), so a
+# crash-looping gateway no longer reopens the proxy behind the build — including
+# on the update that DELIVERS the change, because the new unit file is installed
+# and daemon-reloaded before this function runs (step_rebuild_reboot calls
+# step_systemd_services seven lines above do_rebuild, and the updater's
+# gateway_setup step, which cps the same file, is the step immediately before
+# the rebuild). What is still not fenced: `install.sh --step rebuild` run by
+# hand, a box where gateway_setup was skipped (the unit is absent on the hermes
+# SKU) or step_systemd_services failed non-fatally, and an operator or the
+# sudoers grant restarting clawbox-setup inside the window.
 #
 # Stop, never disable — the same rule the idle standby follows, and the reason
 # it is safe: every engine here is meant to come back on demand. An update that
@@ -1334,31 +1517,18 @@ free_memory_for_build() {
   before=$(available_mb)
   echo "Freeing memory for the build (${before} MB available)..."
 
-  if systemctl cat ollama.service >/dev/null 2>&1; then
-    echo "  Stopping ollama.service..."
-    systemctl stop ollama.service 2>/dev/null \
-      || echo "  Warning: could not stop ollama.service" >&2
-  fi
+  pause_engine_unit ollama.service
   # The memory embedder is a system unit of its own (~2 GB on the GPU while
   # awake) and outlives the web server whose idle timer would otherwise stop
   # it, so the build has to ask for its memory back explicitly.
-  if systemctl cat clawbox-embed.service >/dev/null 2>&1; then
-    echo "  Stopping clawbox-embed.service..."
-    systemctl stop clawbox-embed.service 2>/dev/null \
-      || echo "  Warning: could not stop clawbox-embed.service" >&2
-  fi
+  pause_engine_unit clawbox-embed.service
 
   # The voice engines are USER units, so they need the clawbox user's session
   # bus; with no /run/user/<uid> there is no session and nothing to stop.
   uid=$(id -u "$CLAWBOX_USER" 2>/dev/null || echo "")
   if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
     for unit in kokoro-server.service whisper-server.service; do
-      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
-        systemctl --user cat "$unit" >/dev/null 2>&1 || continue
-      echo "  Stopping $unit..."
-      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
-        systemctl --user stop "$unit" 2>/dev/null \
-        || echo "  Warning: could not stop $unit" >&2
+      pause_engine_user_unit "$unit" "$uid"
     done
   fi
 
@@ -1391,7 +1561,10 @@ free_memory_for_build() {
       echo "  llama.cpp did not exit on SIGTERM — killing it"
       kill -KILL "$pid" 2>/dev/null || true
     fi
-    rm -f "$PROJECT_DIR/data/llamacpp/server.pid"
+    # `|| true`: this sits between the engine pauses and the resume, and errexit
+    # is live in do_rebuild. A cosmetic cleanup that cannot be done (EACCES on
+    # the parent) must not kill the shell with every engine stopped.
+    rm -f "$PROJECT_DIR/data/llamacpp/server.pid" || true
   fi
 
   # Page cache last, once the engines have released their mappings. It is
@@ -1465,8 +1638,88 @@ verify_build_present() {
 # Ctrl-C leaves no `.next` at all and the good build under a gitignored
 # directory nothing else in the tree reads. Reclaim it before anything else
 # runs, or the next rename would delete it.
+# Every transient this reclaim can leave behind, and what to do with each.
+#
+# TASK-729's claim is a rename, which is what makes it a mutex — but a rename
+# needs somewhere to move the tree TO, and a process killed mid-claim leaves the
+# box's only build under that name. There are two such names, and BOTH are
+# private per process (`.<pid>` suffixed) so no shared destination can be
+# occupied and latch the reclaim: a stray shared `.next-claim` beside an
+# existing `.next-old` made every later claim fail ENOTEMPTY, on both
+# reclaimers, for ever.
+#
+# So the recovery is one drain over both globs, run before either reclaimer
+# decides anything:
+#   - an orphan with no build entry is junk and goes (a discard is entry-less by
+#     construction — it is the `.next` both reclaimers only ever touch when it
+#     has no entry — so a LIVE one loses nothing here, and its owner already
+#     copes with a discard that is gone);
+#   - an orphan WITH a build is a build, and is adopted under the parked name a
+#     rename at a time. Adopting a live claimer's tree is safe by the same
+#     property the claim rests on: the victim's placement rename then fails, it
+#     stands down, and the build is under `.next-old` for whoever claims next.
+#   - an orphan with a build while `.next-old` already holds one is a duplicate
+#     of a fallback we already have. It is REPORTED and left, never destroyed:
+#     this cannot prove which of the two is wanted, and the next park clears
+#     `.next-old` and adopts it on the run after.
+drain_build_transients() {
+  local root="$1" kept_dir="$2" orphan aside
+  # The private name this function claims into. Same family as the reclaim's
+  # own discard, so it is already drained, gitignored and pruned from the
+  # standalone trace — and a different process has a different one.
+  aside="$root/.next-discard.$$"
+  for orphan in "$root"/.next-claim.* "$root"/.next-discard.*; do
+    [ -e "$orphan" ] || continue
+    if ! build_entry_present "$orphan"; then
+      rm -rf "$orphan" || true
+      continue
+    fi
+    if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
+      echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
+      continue
+    fi
+    # A rename onto a non-empty destination fails whatever is in it, so
+    # "it failed" is not "there is a build there". An entry-less but non-empty
+    # `.next-old` — an interrupted `rm -rf "$kept_dir"` in
+    # set_previous_build_aside leaves exactly that — is worth nothing and must
+    # not keep a real build stranded for ever.
+    #
+    # But it is CLAIMED before it is destroyed, never probed and then deleted:
+    # those are two syscalls apart, and a concurrent set_previous_build_aside
+    # can rename a real build into `$kept_dir` in between — which a
+    # check-then-delete would then destroy. The claim is a rename to a private
+    # name, the same mutex the whole reclaim rests on, and what was claimed is
+    # asked again before anything is removed.
+    if ! build_entry_present "$kept_dir"; then
+      if mv -T "$kept_dir" "$aside" 2>/dev/null; then
+        if build_entry_present "$aside"; then
+          # It gained a build between the probe and the claim. Put it back and
+          # leave the orphan; the next run has a clear destination.
+          mv -T "$aside" "$kept_dir" 2>/dev/null || true
+          echo "  Note: $(basename "$orphan") holds a build and $kept_dir gained one — leaving it for the next run" >&2
+          continue
+        fi
+        rm -rf "$aside" || true
+      fi
+      if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
+        echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
+        continue
+      fi
+      echo "  Warning: could not adopt $(basename "$orphan") into $kept_dir" >&2
+      continue
+    fi
+    echo "  Note: $(basename "$orphan") holds a build and $kept_dir already does — leaving it for the next run" >&2
+  done
+}
+
 promote_parked_build() {
   local build_dir="${1:-$PROJECT_DIR/.next}" kept_dir="${2:-$PROJECT_DIR/.next-old}"
+  local root="${build_dir%/.next}" claim_dir discard_dir
+  claim_dir="$root/.next-claim.$$"
+  discard_dir="$root/.next-discard.$$"
+
+  drain_build_transients "$root" "$kept_dir"
+
   # `-e`, and `-L` beside it: for the nested standalone layout `postbuild`
   # supports, `.next/standalone/server.js` is a SYMLINK to an absolute path
   # inside `.next` — which dangles for as long as the tree is parked, so `-f`
@@ -1474,8 +1727,56 @@ promote_parked_build() {
   build_entry_present "$kept_dir" || return 0
   build_entry_present "$build_dir" && return 0
   echo "  Found a build parked by an interrupted rebuild — putting it back" >&2
-  rm -rf "$build_dir"
-  mv "$kept_dir" "$build_dir"
+
+  # THE CLAIM, and the whole of TASK-729's fix. There are two reclaimers of
+  # these directories — this one and the boot-time block in
+  # production-server.js — with no lock between them, and both used to run the
+  # same non-atomic pair: `rm -rf .next` then `mv .next-old .next`. Whichever
+  # arrived second destroyed what the first had just restored and then failed
+  # its own rename into a best-effort catch, leaving the box with NEITHER tree
+  # — the exact outcome the park exists to prevent.
+  #
+  # A rename of the SOURCE is atomic and has exactly one winner, so the claim
+  # goes first and nothing is destroyed before it: the loser gets a failed `mv`
+  # and returns having touched nothing. The destination is private, so it can
+  # never be occupied by somebody else's leftovers.
+  if ! mv -T "$kept_dir" "$claim_dir" 2>/dev/null; then
+    # A tree that is no longer there was taken by the other reclaimer — a normal
+    # outcome. One that IS still there could not be moved, which is a real
+    # failure (a read-only rootfs, EACCES, ENOSPC) and reads differently to an
+    # operator. Saying "someone else got there first" over a box that cannot
+    # move its own directories would be a false cause in the line they triage
+    # from.
+    if [ -e "$kept_dir" ]; then
+      echo "  Warning: could not claim the parked build at $kept_dir — leaving it where it is" >&2
+    fi
+    return 0
+  fi
+
+  # Everything from here destroys only PRIVATE names. `.next` is moved aside
+  # rather than deleted, so even if the "it has no build entry" judgement above
+  # was raced by the other reclaimer placing a good one, nothing is lost: the
+  # branch below puts it back, and a kill in between leaves it for the drain.
+  # The move-aside's result is the difference between "somebody took our claim"
+  # and "this filesystem will not let us move a directory". Discarded, an
+  # EACCES/EROFS/EBUSY here left `.next` in place, made the placement fail
+  # ENOTEMPTY, and was then reported as a lost race while the build stayed under
+  # the claim — a false cause on a box that is about to crash-loop for want of
+  # an entry.
+  if ! mv -T "$build_dir" "$discard_dir" 2>/dev/null && [ -e "$build_dir" ]; then
+    echo "  Warning: could not move $build_dir aside, so the parked build stays claimed at $claim_dir" >&2
+    return 0
+  fi
+  if mv -T "$claim_dir" "$build_dir" 2>/dev/null; then
+    rm -rf "$discard_dir" || true
+  else
+    # Our claim was adopted by the other reclaimer's drain, which means it is
+    # placing this same build. Return what we moved aside and get out of its
+    # way; the tree we were carrying is not lost, it is in its hands.
+    mv -T "$discard_dir" "$build_dir" 2>/dev/null || rm -rf "$discard_dir" || true
+    return 0
+  fi
+
   # The stamp names the run that died (see set_previous_build_aside); it must
   # not ride into the tree the box is about to serve. `|| true` because a
   # cosmetic cleanup must never be what aborts a recovery under `set -e`.
@@ -1536,7 +1837,18 @@ promote_parked_build() {
 # entry of its own in .gitignore (`.next-old/` is already there).
 set_previous_build_aside() {
   local build_dir="$1" kept_dir="$2" need avail
-  rm -rf "$kept_dir"
+  # ANSWERS FOR ITSELF, because its caller is now a condition (`elif !`) and a
+  # condition suspends errexit for this whole body. Without these two returns a
+  # failing `rm -rf` fell through to the `mv` below, which with $kept_dir still
+  # present moves the box's only build INSIDE it (`.next-old/.next`) and exits
+  # 0 — a park that did not happen, reported as one, and a dashboard that stays
+  # down when the build then fails and restore_previous_build finds nothing.
+  # On beta the same failure aborted the shell: loud, and the parked tree was
+  # still where promote_parked_build would reclaim it.
+  if ! rm -rf "$kept_dir"; then
+    echo "  Error: could not clear $kept_dir before parking the build" >&2
+    return 1
+  fi
   [ -d "$build_dir" ] || return 0
   need="$(du -sk "$build_dir" 2>/dev/null | awk '{print $1}')"
   avail="$(df -Pk "$build_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
@@ -1549,6 +1861,10 @@ set_previous_build_aside() {
     echo "  Only ${avail}K free for a ${need}K build — clearing the old one instead of keeping it" >&2
     rm -rf "$build_dir"
     return 0
+  fi
+  if [ -e "$kept_dir" ]; then
+    echo "  Error: $kept_dir is still there — refusing to park the build inside it" >&2
+    return 1
   fi
   echo "Setting the current build aside..."
   # Before the rename, not after: the stamp and the park then arrive together,
@@ -1575,7 +1891,10 @@ set_previous_build_aside() {
      || ! printf '%s %s %s\n' "$$" "$boot_id" "$start_time" > "$build_dir/.rebuild-pid"; then
     echo "  Warning: could not record this rebuild as the owner of the build it is parking — a dashboard restarting mid-build may reclaim it" >&2
   fi
-  mv "$build_dir" "$kept_dir"
+  # `-T`, never a bare `mv`: with $kept_dir present a bare `mv` moves the build
+  # INSIDE it and reports success. The guard above makes that unreachable; this
+  # makes it unrepresentable.
+  mv -T "$build_dir" "$kept_dir"
 }
 
 # Bring the dashboard back up, and say exactly which build it came up on.
@@ -1618,13 +1937,21 @@ restore_previous_build() {
   fi
 
   # `restart`, not `start`: `start` on a unit that is already active is a no-op,
-  # and the unit CAN be active here. do_rebuild stopped it, but
-  # clawbox-gateway.service carries `Wants=clawbox-setup.service`, so any
-  # gateway (re)start pulls it back up mid-rebuild — and once `next build` has
-  # written the standalone entry, the restart loop latches onto whatever tree is
-  # in place. A `start` would then be a no-op over a process serving the build
-  # that just FAILED verification, curl would answer 200 from it, and the line
-  # below would report a rollback that never happened.
+  # and the unit CAN be active here. do_rebuild stopped it, and once anything
+  # brings it back the restart loop latches onto whatever tree is in place from
+  # the moment `next build` writes the standalone entry. A `start` would then be
+  # a no-op over a process serving the build that just FAILED verification, curl
+  # would answer 200 from it, and the line below would report a rollback that
+  # never happened.
+  #
+  # What used to bring it back routinely was clawbox-gateway.service's
+  # `Wants=clawbox-setup.service`, removed in TASK-728. This stays `restart`
+  # regardless, because the ways in are fewer rather than none: `install.sh
+  # --step rebuild` by hand, a box where gateway_setup was skipped or
+  # step_systemd_services failed non-fatally, and an operator or the sudoers
+  # grant restarting clawbox-setup inside the window. A rollback that reports
+  # itself wrongly is the expensive failure here; a redundant restart costs
+  # nothing.
   # `reset-failed` first, as both gateway recovery paths do. The reclaim in
   # production-server.js is now correctly refused for the length of the build,
   # so clawbox-setup crash-loops on `require`ing a build that is not there yet;
@@ -1759,10 +2086,14 @@ run_next_build() {
 
 # Stop the setup service, free memory, reinstall, and rebuild — without ever
 # leaving the box with no build at all.
+# `do_rebuild [--reboot-follows]`. The flag is the caller telling this function
+# that a reboot comes next, which decides one thing only: whether the engines
+# freed for the build are started again here or left to systemd.
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
-  local rc=0 built=0
+  local rc=0 built=0 reboot_follows=0
+  if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
 
   echo "Stopping clawbox-setup.service for rebuild..."
   systemctl stop clawbox-setup.service 2>/dev/null || true
@@ -1772,11 +2103,15 @@ do_rebuild() {
   # back before the rename below would delete it. After the stop, never before
   # it: the rename moves the tree the running server is loading from.
   #
-  # The stop is what makes that ordering worth having, but it does not keep the
-  # dashboard down for the length of the rebuild — clawbox-gateway.service's
-  # `Wants=clawbox-setup.service` starts it again on any gateway (re)start. That
-  # is why the park stamps the tree it sets aside, and why the two `systemctl`
-  # calls that end a rebuild use `restart` rather than `start`.
+  # The stop is what makes that ordering worth having. It did not keep the
+  # dashboard down for the length of the rebuild, because clawbox-gateway.service
+  # carried `Wants=clawbox-setup.service` and started it again on any gateway
+  # (re)start; that line is gone (TASK-728), and it is already gone for THIS
+  # rebuild — step_systemd_services runs seven lines above the do_rebuild in
+  # step_rebuild_reboot. The park still stamps the tree it sets aside and the two
+  # `systemctl` calls that end a rebuild still use `restart` rather than `start`:
+  # a hand-run `--step rebuild`, a skipped gateway_setup and an operator restart
+  # all still land in the window, and neither guard costs anything.
   promote_parked_build "$build_dir" "$kept_dir"
 
   # After the stop, never before it — see free_memory_for_build.
@@ -1794,8 +2129,17 @@ do_rebuild() {
     rc=1
   elif ! ensure_node_pty; then
     rc=1
+  # A CONDITION, like its two neighbours above, and for a reason the neighbours
+  # did not have: errexit is live in this function (both callers invoke it
+  # bare), and set_previous_build_aside's `rm -rf` and `mv` can legitimately
+  # fail on a full or busy filesystem. A bare call there killed the shell
+  # between the engine pause and the resume below — leaving every engine
+  # stopped, which is the state this pair exists to prevent, on exactly the
+  # pressured box where it is most likely.
+  elif ! set_previous_build_aside "$build_dir" "$kept_dir"; then
+    echo "Error: could not set the current build aside" >&2
+    rc=1
   else
-    set_previous_build_aside "$build_dir" "$kept_dir"
     echo "Running bun build..."
     built=1
     run_next_build || rc=$?
@@ -1807,10 +2151,39 @@ do_rebuild() {
   if [ "$rc" -ne 0 ]; then
     echo "Error: rebuild failed (exit $rc)" >&2
     restore_previous_build "$build_dir" "$kept_dir" "$built" || true
+    # AFTER the restore, not before it: restore_previous_build gives the
+    # dashboard a fixed twenty seconds to answer on :80 before it reports the
+    # box DOWN, and this arm is by definition the memory-starved one. Four
+    # model servers asked for at the same moment would make a dashboard that is
+    # merely slow look dead — a false failure on the recovery path.
+    #
+    # Reached on this arm whichever caller we have: `reboot` in
+    # step_rebuild_reboot is BELOW its `do_rebuild`, and errexit ends the step
+    # before it.
+    resume_paused_engines
     return "$rc"
   fi
 
-  rm -rf "$kept_dir"
+  # `|| echo`, not bare: errexit is live in this function and this is the last
+  # statement between the engine pause and the resume below. An `rm -rf` that
+  # cannot remove the parked tree (EACCES, EBUSY, a mount in the way) would
+  # otherwise kill the shell with every engine stopped and neither the resume
+  # nor the hand-over reached — the exact state this pair exists to remove.
+  # A parked tree left behind is harmless: the next rebuild's
+  # promote_parked_build or set_previous_build_aside deals with it.
+  rm -rf "$kept_dir" || echo "  Warning: could not remove the parked build at $kept_dir" >&2
+  if [ "$reboot_follows" = "1" ]; then
+    # The caller reboots in a moment. Starting ollama, the ~2 GB embedder and
+    # both voice engines seconds before shutdown restores nothing that survives
+    # it, and it lengthens the very shutdown the updater is waiting through
+    # (REBUILD_TAKEOVER_TIMEOUT_MS). systemd starts what is enabled on the way
+    # back up, and the rest are on-demand — which is what the reboot leaves
+    # them as either way.
+    echo "  Leaving the paused engines to the reboot that follows this step"
+    forget_paused_engines
+  else
+    resume_paused_engines
+  fi
   echo "  Build complete"
 }
 
@@ -2775,8 +3148,38 @@ step_hermes_install() {
     # right here — before the reachability check, before any repair, printing
     # nothing — taking `install.sh --step hermes_install` (the documented
     # repair command) and every later step of a full install down with it.
-    installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-      "$shim" --version 2>/dev/null | head -1) || installed=""
+    #
+    # Runnability stays THE SHIM'S to prove, and is asked first. `--help` goes
+    # through the same shim -> `<agent_dir>/hermes` -> `hermes_cli.main` path
+    # `--version` does, so a shim whose interpreter or entry script is gone
+    # still fails it — but unlike `--version` it runs no update check
+    # (`banner.check_for_updates()` has two call sites in 0.20.5:
+    # `print_fast_version_info` and the interactive welcome banner). Asking the
+    # venv interpreter directly instead would only prove the PACKAGE IMPORTS,
+    # which is not the question this guard exists to answer: a box whose
+    # `hermes` command is dead would read as "already installed" and the
+    # documented repair would do nothing. Measured on a Hermes box: 0.82 s.
+    if runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      "$shim" --help >/dev/null 2>&1; then
+      # The agent runs; this is only the version STRING for the log line.
+      # TASK-613: remove once hermes-agent#104275 lands
+      # (HERMES_DISABLE_UPDATE_CHECK / updates.check). `hermes --version` also
+      # runs that update check — `git fetch origin main` plus an
+      # unauthenticated GitHub compare, 10 s each — and on a box being
+      # installed or repaired the six-hour cache is always cold, so this step
+      # paid for a network round trip whose only output `head -1` throws away.
+      # Upstream's own printer takes `check_updates=False`
+      # (hermes_cli/_startup_fast.py) and no CLI flag or env var reaches it, so
+      # ask the interpreter the shim just proved it execs. Fails OPEN: anything
+      # wrong here leaves `installed` empty and the `--version` probe below
+      # answers exactly as it always did.
+      installed=$(runuser -u "$CLAWBOX_USER" -- env -u PYTHONHOME HOME="$CLAWBOX_HOME" \
+        PYTHONSAFEPATH=1 PYTHONPATH="$agent_dir" "$venv_python" -c \
+        'from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)' \
+        2>/dev/null | head -1) || installed=""
+      [ -n "$installed" ] || installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+        "$shim" --version 2>/dev/null | head -1) || installed=""
+    fi
   fi
 
   # A version string cannot answer "is this the pinned build?": upstream prints
@@ -2898,8 +3301,22 @@ step_hermes_install() {
   # the owner as a crash-looping dashboard. `|| installed=""` for the same
   # errexit reason as the first probe: when the install laid down nothing, this
   # runs a shim that does not exist and exits 127.
-  installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-    "$shim" --version 2>/dev/null | head -1) || installed=""
+  #
+  # Shaped like the probe above and for the same reasons: the SHIM answers
+  # whether the agent this install just laid down actually runs, and only then
+  # is the version string read without the update check — which here has
+  # nothing cached and everything to fetch. TASK-613: remove once
+  # hermes-agent#104275 lands (HERMES_DISABLE_UPDATE_CHECK / updates.check).
+  installed=""
+  if runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+    "$shim" --help >/dev/null 2>&1; then
+    installed=$(runuser -u "$CLAWBOX_USER" -- env -u PYTHONHOME HOME="$CLAWBOX_HOME" \
+      PYTHONSAFEPATH=1 PYTHONPATH="$agent_dir" "$venv_python" -c \
+      'from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)' \
+      2>/dev/null | head -1) || installed=""
+    [ -n "$installed" ] || installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      "$shim" --version 2>/dev/null | head -1) || installed=""
+  fi
   if [ -n "$installed" ]; then
     at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
       git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
@@ -3350,8 +3767,23 @@ step_openclaw_install() {
     # The sessions-to-SQLite move must not race a still-running v1 gateway
     # writing the very files being migrated; gateway_setup restarts it later.
     systemctl stop clawbox-gateway.service 2>/dev/null || true
-    as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null \
-      || echo "  WARN: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
+    # Say WHICH failure this was. `|| echo WARN` over a doctor that migrated
+    # nothing is the false-success shape this repo keeps producing, and the
+    # commonest reason it exits non-zero here is a legacy exec-approvals file
+    # whose mere presence makes it refuse every migration before starting one
+    # (measured against 2026.8.1, 2026-09-06). The gateway's own ExecStartPre
+    # clears that and re-runs the migration, so this stays non-fatal — but the
+    # install log has to name it rather than imply doctor merely stumbled.
+    if ! _oc_doctor_out="$(as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)"; then
+      printf '%s\n' "$_oc_doctor_out"
+      if printf '%s\n' "$_oc_doctor_out" | grep -q 'Legacy exec approvals exist at'; then
+        echo "  WARN: openclaw doctor --fix migrated NOTHING — a legacy exec-approvals file blocks it. The gateway's pre-start moves an empty one aside and re-runs the migration on the next start."
+      else
+        echo "  WARN: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
+      fi
+    else
+      printf '%s\n' "$_oc_doctor_out"
+    fi
     # The stop above was for doctor's benefit. A FULL install restarts the
     # gateway later (gateway_setup), but this step is also on the standalone
     # run-step allow-list, where nothing follows — leaving it down would turn
@@ -4936,15 +5368,32 @@ install_root_file() {
   fi
 }
 
+# Returns non-zero when ANY root-owned copy did not land, and records
+# `root_libexec` in the run's verdict. Every copy is still attempted — the
+# failures are COLLECTED rather than returned at the first one — because
+# install_root_file is atomic (a failed copy leaves the previous file untouched)
+# so the copies are independent of each other, and a return before the manifest
+# block below would leave a stale manifest behind, and the dispatcher then
+# refuses every pinned root step: a wider outage than one missing copy.
+#
+# The check matters on the update path specifically. step_post_update runs its
+# fixups as `step_x || echo "(non-fatal)"`, and bash switches errexit OFF for
+# the whole body of a function called in an OR-list, so without it a copy that
+# failed here was followed by successful commands, the function returned 0, and
+# the units and grants installed after it pointed at a copy that was not there
+# (a fresh libexec on the first update carrying it) or was stale.
 install_root_libexec() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
-  local src
+  local src failed=0
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
   for src in clawbox-root-manifest.sh clawbox-run-root-step.sh; do
     if [ -f "$PROJECT_DIR/config/$src" ]; then
-      install_root_file "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
+      install_root_file "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
+        failed=1
+      }
     fi
   done
   # Everything the web server may invoke as root via a NOPASSWD grant. Same
@@ -4953,17 +5402,42 @@ install_root_libexec() {
   # dispatcher on every network event, so it belongs here for exactly the reason
   # this block exists: the copy that runs must not be the one clawbox can
   # rewrite. See scripts/nm-dispatcher-failover.sh.
+  #
+  # start-ap.sh, stop-ap.sh and ap-watchdog.sh are what clawbox-ap.service and
+  # clawbox-ap-watchdog.service ExecStart as ROOT (neither has a User=), the
+  # watchdog on a 20-second timer for the life of the box; and
+  # ensure-vnc-on-first-boot.sh is what clawbox-firstboot-vnc.service runs as
+  # root after the first reboot. The units used to name the tree copies, which
+  # `chown -R clawbox` above makes clawbox-writable after every git reset — so
+  # a clawbox-level foothold was root inside twenty seconds, with no grant and
+  # no manifest check on the path (the manifest is consulted only inside the
+  # root-step dispatcher, never before systemd's own ExecStart). The tree
+  # copies STAY, executable, for the unprivileged callers: src/lib/network.ts
+  # and the hotspot route run them as clawbox through NetworkManager's polkit
+  # grants. Security scan #21 (the TASK-445 follow-up clawbox-root-step.sh's
+  # "residual" note pointed at). On the first in-app update carrying the
+  # change there is a window between the updater's git reset (new units and
+  # scripts in the tree) and post_update's first call here (the copies in
+  # libexec): the old unit runs the new ap-watchdog.sh and it stands down
+  # rather than fall back to the tree — written down in that script.
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
-             clawbox-resource-limits.sh gateway-restart-when-online.sh; do
+             clawbox-resource-limits.sh gateway-restart-when-online.sh \
+             start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
     if [ -f "$PROJECT_DIR/scripts/$src" ]; then
-      install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
+      install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
+        failed=1
+      }
     fi
   done
   # The limits the scripts above read. Root-owned for the same reason they are.
   install -d -o root -g root -m 0755 /etc/clawbox
   if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
     install_root_file "$PROJECT_DIR/config/clawbox-resource-limits.env" \
-      /etc/clawbox/resource-limits.env 0644
+      /etc/clawbox/resource-limits.env 0644 || {
+      echo "  Error: could not install /etc/clawbox/resource-limits.env (the copy already there, if any, is untouched)" >&2
+      failed=1
+    }
   fi
 
   # Manifest, THEN dispatcher — never the other way round. The dispatcher fails
@@ -4976,11 +5450,22 @@ install_root_libexec() {
   if write_root_exec_manifest; then
     if [ -f "$PROJECT_DIR/config/clawbox-root-step.sh" ]; then
       install_root_file "$PROJECT_DIR/config/clawbox-root-step.sh" \
-        "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh"
+        "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/clawbox-root-step.sh (the dispatcher already there, if any, is untouched)" >&2
+        failed=1
+      }
     fi
   else
     echo "  Warning: could not record the root-exec manifest; leaving the existing root dispatcher in place" >&2
     record_provision_failure "root_exec_manifest"
+  fi
+  # A copy that did not land is a fact about the box (a full or read-only /usr),
+  # not about this step, so it goes in the verdict like the manifest failure
+  # above; provision_repair_step names step_systemd_services as its repair,
+  # the step that installs these copies and everything that points at them.
+  if [ "$failed" -ne 0 ]; then
+    record_provision_failure "root_libexec"
+    return 1
   fi
 }
 
@@ -5275,6 +5760,26 @@ step_systemd_services() {
     fi
   done
 
+  # Root-owned copies of everything root executes on clawbox's behalf — and of
+  # everything the units copied BELOW ExecStart as root. This has to come first:
+  # clawbox-ap.service and clawbox-ap-watchdog.service name
+  # /usr/local/libexec/clawbox/{start-ap,stop-ap,ap-watchdog}.sh, and on the
+  # first in-app update carrying that change the watchdog timer (already live,
+  # firing every 20 s) would otherwise run the new unit against a copy that is
+  # not there yet. It must also run before the sudoers drop-in further down,
+  # which points at these copies. Security scan #21.
+  #
+  # And it must SUCCEED first: the units copied below and the sudoers drop-in
+  # name these copies, so installing them over a copy that did not land is a
+  # unit that points at nothing. On a fresh install errexit stops here anyway;
+  # on the update path, where step_post_update tolerates this step's failure,
+  # the return leaves the units and grants already on the box in place —
+  # still working, still pointing at the copies that ARE there.
+  install_root_libexec || {
+    echo "  Error: the root-owned copies under $ROOT_LIBEXEC_DIR are not all current; not installing the units and grants that point at them" >&2
+    return 1
+  }
+
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
     local src="$PROJECT_DIR/config/$svc"
@@ -5336,9 +5841,8 @@ step_systemd_services() {
   if [ ! -x /usr/local/bin/cloudflared ]; then
     systemctl disable --now clawbox-tunnel.service >/dev/null 2>&1 || true
   fi
-  # Root-owned copies of everything root executes on clawbox's behalf. Must run
-  # BEFORE the sudoers drop-in, which points at them.
-  install_root_libexec
+  # (install_root_libexec ran at the top of this step, before the unit copies —
+  # the sudoers drop-in below points at the same root-owned copies.)
   # Install the narrow allow-list FIRST, then remove any blanket grant. In that
   # order the device is never, even briefly, without the rules the web server
   # needs: if the drop-in fails to validate we keep the old one and skip the
@@ -5640,9 +6144,13 @@ step_post_update() {
   # old copy (2.8 GB). `stop`, never `disable`: the runtime's own standby
   # convention, and the chat path can still wake it on demand. After the
   # helper, so nothing re-embeds through ollama on the way out.
-  if systemctl cat ollama.service >/dev/null 2>&1; then
-    systemctl stop ollama.service 2>/dev/null || true
-  fi
+  #
+  # Through the pause helper so this stop has a start too (TASK-724). It is the
+  # SECOND of the two an update performs — free_memory_for_build owns the
+  # first, in the rebuild step, and pairs it there — and it is the one whose
+  # missing start left local AI dead under a `completed` update, because
+  # nothing runs after post_update that would have woken it.
+  pause_engine_unit ollama.service
   step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a
@@ -5655,11 +6163,88 @@ step_post_update() {
   # the re-baked lock above is live immediately — while restarting the server
   # mid-update would kill the very process the updater is polling for progress.
   step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
+  # LAST, and after the smokes: ollama was stopped above to make it drop the
+  # stale embedder copy, and the memory stays free for step_llamacpp_model's
+  # download until here. A stopped-then-started ollama holds no model, so the
+  # 2.8 GB the stop was for is still released — what comes back is the idle
+  # server the box had before the update, which is the whole point of the pair.
+  resume_paused_engines
 }
 
 gateway_port_listening() {
   local gw_port="${GATEWAY_PORT:-18789}"
   ss -ltn 2>/dev/null | grep -qE "[:.]${gw_port}[[:space:]]"
+}
+
+# Is the gateway RUNNING, or at least still trying to be?
+#
+# Under `Restart=always` a crash loop spends most of its time in `activating`,
+# so this deliberately does not separate "starting for the first time" from
+# "restarting again". What it DOES separate is a unit that is not trying at all
+# — stopped, masked, or past its start limit — which is the case the recovery
+# below exists for and the one that must not be made to wait.
+gateway_unit_running_or_starting() {
+  case "$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null || echo unknown)" in
+    activating|active|reloading) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The same question as gateway_port_listening, asked with a budget.
+#
+# `gateway_port_listening` asks ONCE. That is the right question for
+# step_validate_services' Hermes probe, which asserts that nothing is listening;
+# it is the wrong question for "is this gateway broken", because the listener
+# arrives long after systemd says the unit started. Measured on the OpenClaw box
+# 2026-09-06: `Started ClawBox OpenClaw Gateway` at 07:53:43 and
+# `[gateway] http server listening (18 plugins; 7.2s)` at 07:53:57, with the
+# ExecStartPre ahead of it taking 31 s, 86 s and 120 s across the same boot's
+# three restarts. The recovery fired in the same second as `Started`; the
+# `openclaw doctor --fix` it then ran FAILED — "the Gateway or another SQLite
+# maintenance command owns this state directory", which is the gateway proving
+# it was alive — and the box paid a full extra cold start on every update.
+# Probe-once, and a false failure on top of it.
+#
+# Returns as soon as the port answers, and as soon as the unit stops trying, so
+# a healthy box costs a second or two and a genuinely dead one costs nothing.
+# Seconds this STEP has already spent waiting. The budget is the step's, not
+# each call's: the recovery asks up to four times, and four independent
+# 180-second budgets would turn a genuinely broken gateway from an 8-second
+# path into a six-minute one inside post_update's 900 s advisory budget — where
+# an overrun is reported `completed`, which is the false-success class at the
+# report level.
+GATEWAY_READY_SPENT=0
+
+wait_for_gateway_port() {
+  local budget="${CLAWBOX_GATEWAY_READY_BUDGET_S:-180}" waited=0 restarts_before restarts_now
+  # A budget that is not a plain number is not a budget; fall back rather than
+  # letting arithmetic below fail the update over an operator's typo.
+  case "$budget" in ''|*[!0-9]*) budget=180 ;; esac
+  budget=$(( budget > GATEWAY_READY_SPENT ? budget - GATEWAY_READY_SPENT : 0 ))
+  # A unit that RESTARTS while we wait is looping, not starting. Under
+  # `Restart=always` a crash loop spends most of its time `activating`, so the
+  # state alone cannot tell the two apart and the wait would run its whole
+  # budget over a gateway that is failing every few seconds.
+  restarts_before="$(systemctl show clawbox-gateway.service -p NRestarts --value 2>/dev/null || echo "")"
+  while :; do
+    if gateway_port_listening; then
+      return 0
+    fi
+    if ! gateway_unit_running_or_starting; then
+      return 1
+    fi
+    if [ "$waited" -ge "$budget" ]; then
+      return 1
+    fi
+    sleep 3
+    waited=$((waited + 3))
+    GATEWAY_READY_SPENT=$((GATEWAY_READY_SPENT + 3))
+    restarts_now="$(systemctl show clawbox-gateway.service -p NRestarts --value 2>/dev/null || echo "")"
+    if [ -n "$restarts_before" ] && [ -n "$restarts_now" ] && [ "$restarts_now" != "$restarts_before" ]; then
+      echo "  The gateway restarted while we waited for it ($restarts_before -> $restarts_now) — it is looping, not starting" >&2
+      return 1
+    fi
+  done
 }
 
 step_gateway_legacy_state_recovery() {
@@ -5668,17 +6253,39 @@ step_gateway_legacy_state_recovery() {
   # just churn (and, before the mask, resurrect it).
   is_hermes_edition && { echo "  [hermes edition] skipping gateway recovery"; return 0; }
   local gw_port="${GATEWAY_PORT:-18789}"
-  if gateway_port_listening; then
+  # WITH the budget, not a single `ss`: see wait_for_gateway_port. A gateway
+  # still in its ExecStartPre is not a gateway in legacy state.
+  if wait_for_gateway_port; then
     echo "  Gateway is listening on ${gw_port}, skipping legacy state recovery"
     return 0
   fi
 
   echo "  Gateway is not listening on ${gw_port}; running OpenClaw doctor recovery"
-  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  local doctor_out=""
+  doctor_out=$(as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive 2>&1) || true
+  printf '%s\n' "$doctor_out"
+  # `doctor` refusing BECAUSE the gateway holds its own state directory is
+  # positive evidence that the gateway is alive — it is the loser of a lock the
+  # gateway owns. Restarting on the strength of that is restarting over a
+  # working gateway, which is what cost a cold start per update. Wait for the
+  # listener instead and report honestly if it never comes.
+  if printf '%s\n' "$doctor_out" | grep -qiE 'owns this state directory|another (Gateway|SQLite maintenance command)'; then
+    echo "  openclaw doctor could not take the state directory because the gateway holds it — the gateway is alive, not in legacy state"
+    if wait_for_gateway_port; then
+      echo "  Gateway is listening on ${gw_port}"
+      return 0
+    fi
+    # The same observable state as the tail of this function — alive and not
+    # listening — so the same status. `step_post_update` calls this step as
+    # `… || echo "Warning: …"`, so a non-zero return is a warning in the update
+    # log and not a failed update; returning 0 here made a gateway that never
+    # binds its port produce a clean step.
+    echo "  Warning: the gateway holds its state directory but is not listening on ${gw_port}; not restarting over a live gateway" >&2
+    return 1
+  fi
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   systemctl restart clawbox-gateway.service || true
-  sleep 8
-  if gateway_port_listening; then
+  if wait_for_gateway_port; then
     echo "  Gateway recovered after doctor --fix"
     return 0
   fi
@@ -5721,9 +6328,11 @@ step_gateway_legacy_state_recovery() {
   # quarantined are never re-read, and the port check below reports a failure
   # over a recovery that was never attempted.
   systemctl restart clawbox-gateway.service || true
-  sleep 12
 
-  if gateway_port_listening; then
+  # Budgeted, for the same reason as the probe at the top: a `sleep 12` and one
+  # `ss` reported a healthy box as still offline whenever the pre-start took
+  # longer than twelve seconds, which on this hardware is the normal case.
+  if wait_for_gateway_port; then
     echo "  Gateway recovered after legacy state quarantine"
     return 0
   fi
@@ -6520,13 +7129,27 @@ step_restart() {
 }
 
 step_restart_ap() {
+  # The unit ExecStarts the root-owned libexec copy of start-ap.sh, so this
+  # restart never opens the tree copy as root — the manifest --verify the
+  # dispatcher ran before this step covers the tree, and a rewrite of
+  # scripts/start-ap.sh between that check and the restart changes nothing
+  # root runs. Security scan #21.
   echo "Restarting clawbox-ap.service..."
   systemctl restart clawbox-ap.service
 }
 
 step_recover() {
   echo "Running ClawBox recovery..."
-  bash "$PROJECT_DIR/scripts/start-ap.sh"
+  # The root-owned copy, with the tree copy as the fallback ONLY when the
+  # libexec one is absent: recovery is the operator's last resort and must work
+  # on a box mid-migration (new tree, root step not yet run). Same rule as
+  # scripts/recover.sh. Security scan #21.
+  local start_ap="$ROOT_LIBEXEC_DIR/start-ap.sh"
+  if [ ! -x "$start_ap" ]; then
+    echo "  $start_ap missing — falling back to the tree copy (run --step systemd_services to install it)"
+    start_ap="$PROJECT_DIR/scripts/start-ap.sh"
+  fi
+  bash "$start_ap"
   systemctl restart clawbox-setup.service
   echo "Recovery complete"
 }
@@ -6923,8 +7546,24 @@ step_vnc_install() {
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
+  # ensure-vnc-on-first-boot.sh runs as ROOT from clawbox-firstboot-vnc.service
+  # below, so the unit names the root-owned libexec copy. The `chown root:root`
+  # of the tree file that used to sit here protected nothing: `chown -R clawbox`
+  # undid it after every git reset, and the directory is clawbox-writable so a
+  # rename replaced the file regardless. Security scan #21.
   chmod +x "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
-  chown root:root "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
+  if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    install_root_libexec || return 1
+  fi
+  # The firstboot unit written below names this copy, and a root unit pointing
+  # at nothing is exactly the failure to avoid — so the gate is the FILE, not
+  # the function's word. Not `[ -x ] || install_root_libexec`: in an OR-list a
+  # failed copy inside the function was followed by successful commands and
+  # came back as 0, and the unit was written regardless.
+  if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    echo "  Error: $ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh is not installed; not writing clawbox-firstboot-vnc.service to point at it" >&2
+    return 1
+  fi
 
   # Systemd service for VNC — force virtual display mode. On headless
   # Jetsons, :0 is GDM's greeter; apps launched into it are covered by
@@ -6985,7 +7624,7 @@ ConditionPathExists=/var/lib/clawbox/ensure-vnc-on-first-boot.pending
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 10
-ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh
+ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh
 
 [Install]
 WantedBy=multi-user.target
@@ -7025,6 +7664,46 @@ step_vnc_refresh() {
     echo "  Warning: autocutsel install failed (non-fatal; continuing with unit refresh)"
   fi
 
+  # A box installed before security scan #21 has a clawbox-firstboot-vnc.service
+  # whose ExecStart is the TREE copy of ensure-vnc-on-first-boot.sh, and on a box
+  # whose first-boot marker never cleared that unit still runs as root at every
+  # boot. Repoint just that line at the root-owned libexec copy. The copy is
+  # made sure of HERE (the same guard step_vnc_install uses) rather than relied
+  # on from post_update's ordering — step_resource_limits happens to run
+  # install_root_libexec before this step today, but a reorder would otherwise
+  # leave the `[ -x ]` below silently skipping the repoint for another update
+  # cycle, with root still running the tree copy at every boot. Only the
+  # ExecStart line, nothing else in the unit: the marker and the enable state
+  # are deliberately left alone, as the comment above says.
+  #
+  # A copy that does not land is not swallowed and not fatal either: the
+  # repoint below is gated on the copy being THERE, so the unit keeps running
+  # the tree copy it ran before (the pre-fix state, which works) rather than
+  # pointing at nothing; the clawbox-vnc.service refresh further down has
+  # nothing to do with the copy and still happens; and the step returns
+  # non-zero at its end so step_post_update's warning line and the
+  # `root_libexec` record install_root_libexec leaves both say what happened.
+  # The `[ -x ] || install_root_libexec` this replaces reported nothing: an
+  # OR-list runs the function with errexit off, so a failed copy came back 0.
+  local firstboot_unit=/etc/systemd/system/clawbox-firstboot-vnc.service
+  local firstboot_rc=0
+  if [ -f "$firstboot_unit" ] \
+     && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit" \
+     && [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    install_root_libexec || firstboot_rc=1
+  fi
+  if [ -f "$firstboot_unit" ] \
+     && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit"; then
+    if [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+      sed -i "s#^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$#ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh#" "$firstboot_unit"
+      systemctl daemon-reload
+      echo "  clawbox-firstboot-vnc.service repointed at $ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh"
+    else
+      echo "  Warning: clawbox-firstboot-vnc.service still runs the tree copy of ensure-vnc-on-first-boot.sh as root; the repoint waits for the next update" >&2
+      firstboot_rc=1
+    fi
+  fi
+
   local unit_path=/etc/systemd/system/clawbox-vnc.service
   local unit_tmp
   unit_tmp="$(mktemp)"
@@ -7060,6 +7739,7 @@ VNCSVC
     echo "  VNC service already up-to-date, skipping restart"
   fi
   rm -f "$unit_tmp"
+  return "$firstboot_rc"
 }
 
 step_desktop_theme() {
@@ -7138,9 +7818,26 @@ step_rebuild_reboot() {
   # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
   # sees the new restore.py / scheduler logic.
   step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
-  do_rebuild
+  # The flag, on the arm that really reboots: see do_rebuild. In test mode
+  # nothing reboots, so the engines this rebuild stopped are this function's to
+  # give back and do_rebuild is called without it.
+  if is_test_mode; then
+    do_rebuild
+  else
+    do_rebuild --reboot-follows
+  fi
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
+    # `reset-failed` first, as the other two rebuild-ending restarts already do
+    # (step_rebuild, restore_previous_build). With no start dependency left,
+    # nothing starts clawbox-setup DURING a rebuild any more, so it can no
+    # longer crash-loop on the missing standalone entry from that source — but a
+    # hand restart or the sudoers grant can still land in the window and latch
+    # the unit's inherited 5-in-10 s start limit, and a latched limit would turn
+    # this restart into a failure over a build that is fine. This is the branch
+    # e2e-install takes, and it is bare under `set -euo pipefail`, so that
+    # failure would end the step.
+    systemctl reset-failed clawbox-setup.service 2>/dev/null || true
     systemctl restart clawbox-setup.service
     return 0
   fi

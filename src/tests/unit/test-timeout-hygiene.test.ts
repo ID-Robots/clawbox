@@ -264,6 +264,14 @@ const MIN_TIMEOUT_MS = 15_000;
  */
 const ALSO_REQUIRED = [
   "src/tests/routes/chat/capabilities-parallel.test.ts",
+  // Starts no process either: it mounts the whole desktop shell — the
+  // preference load, the harness probe, the app grid and a full SettingsApp
+  // render — once per case, and then waits on a 500 ms debounced preference
+  // POST. ~0.9 s per case on an idle dev machine; under four workers that is
+  // several sub-5 s waits in series, which is exactly what `testTimeout`
+  // governs. Seen taking the whole components project's other files down with
+  // it before the mascot and the chat popup were mocked out of the mount.
+  "src/tests/components/desktop-wallpaper-delete.test.tsx",
   "src/tests/components/hermes-oauth-inline.test.tsx",
   "src/tests/components/chat-spoken-reply.test.tsx",
   // Starts its processes through @/lib/coding-agent rather than importing

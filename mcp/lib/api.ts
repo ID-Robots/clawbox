@@ -53,6 +53,30 @@ export function apiToken(): { token: string; source: TokenSource } {
   return { token: "", source: "none" };
 }
 
+/**
+ * Read the bearer into the cache and take it OUT of this process's environment.
+ *
+ * Called once, first thing in the server's `main()`, before any probe or tool
+ * can spawn a child: `bash` (mcp/lib/jobs.ts) and `spawnArgv` hand every child
+ * `{ ...process.env }`, so a `printenv CLAWBOX_MCP_TOKEN` — from a page the
+ * agent was told to summarise, say — used to yield the device bearer the
+ * middleware admits on every /setup-api/* route. The cache keeps this process
+ * working; the file fallback stays for the `clawbox` CLI a shell may invoke.
+ * Deleted even when the value was too short to cache: a value this process
+ * will not use is still one a child should not see.
+ *
+ * Hygiene, not a boundary. `delete process.env.X` does not rewrite the
+ * exec-time block the kernel keeps, so /proc/<this pid>/environ still holds
+ * the value for any same-uid child as long as the registration in
+ * openclaw.json passes the token in `env`; the real removal is registering
+ * the server without it and letting this file fallback carry the bearer.
+ */
+export function primeApiToken(): { token: string; source: TokenSource } {
+  const resolved = apiToken();
+  delete process.env.CLAWBOX_MCP_TOKEN;
+  return resolved;
+}
+
 export function authHeader(): string | null {
   const { token } = apiToken();
   return token ? `Bearer ${token}` : null;
@@ -65,6 +89,20 @@ export interface ApiOptions {
   timeoutMs?: number;
   /** Per-route failure → instruction mappings. */
   rules?: ErrorRule[];
+  /**
+   * What to tell the model when the call ABORTS on `timeoutMs`.
+   *
+   * `rules` cannot cover this: `matchRule` is only ever consulted against an
+   * HTTP response, and a client-side abort never produces one. The generic
+   * answer is "Retry once", which is right for a read and actively harmful for
+   * a call that started something long — the work is still going, and a retry
+   * starts a second one.
+   *
+   * `mcp/tools/email.ts` catches the same class by hand around `email_send`,
+   * under a comment making the same argument. This is that idea as an option,
+   * so the next route does not have to wrap its own call to say it.
+   */
+  onTimeout?: { message: string; next: string };
 }
 
 function buildUrl(path: string, query?: ApiOptions["query"]): string {
@@ -80,7 +118,7 @@ function buildUrl(path: string, query?: ApiOptions["query"]): string {
 
 /** Call /setup-api/*. Throws a ToolError the register() wrapper can render. */
 export async function api<T = unknown>(path: string, options: ApiOptions = {}): Promise<T> {
-  const { method = "GET", body, query, timeoutMs = DEFAULT_TIMEOUT_MS, rules } = options;
+  const { method = "GET", body, query, timeoutMs = DEFAULT_TIMEOUT_MS, rules, onTimeout } = options;
   const headers: Record<string, string> = { accept: "application/json" };
   const auth = authHeader();
   if (auth) headers.authorization = auth;
@@ -102,8 +140,8 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     if (err instanceof Error && /abort|timeout/i.test(err.message)) {
       throw new ToolError(
         "TIMEOUT",
-        "The ClawBox service did not answer in time.",
-        "Retry once. If it times out again, call clawbox_health and tell the user.",
+        onTimeout?.message ?? "The ClawBox service did not answer in time.",
+        onTimeout?.next ?? "Retry once. If it times out again, call clawbox_health and tell the user.",
       );
     }
     throw new ToolError(

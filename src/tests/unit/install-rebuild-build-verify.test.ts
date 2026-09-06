@@ -133,6 +133,8 @@ interface Scenario {
   nodePty?: "succeeds" | "fails";
   /** Which shipped function to run. */
   entry?: "do_rebuild" | "step_build";
+  /** Call `do_rebuild --reboot-follows`, as step_rebuild_reboot's real arm does. */
+  rebootFollows?: boolean;
 }
 
 interface Run {
@@ -148,8 +150,10 @@ interface Run {
    * "live <pid>", "stale <pid>" or "none". The reclaim in production-server.js
    * has nothing else to go on: from the park until the standalone entry is
    * written there is no `.next/standalone/server.js`, which is the only thing
-   * it looks at, and clawbox-setup is pulled back up inside that window by
-   * `clawbox-gateway.service`'s `Wants=`.
+   * it looks at, and clawbox-setup can be up inside that window — routinely so
+   * before TASK-728 removed `clawbox-gateway.service`'s `Wants=`, and still
+   * through a hand-run `--step rebuild`, a box where gateway_setup is skipped,
+   * or an operator restarting the web server.
    */
   buildSawOwner: string;
   /** Did a stamp survive into the tree the box is left serving? */
@@ -184,7 +188,14 @@ function run(scenario: Scenario = {}): Run {
     nodePty = "succeeds",
     buildLog = "writable",
     entry = "do_rebuild",
+    rebootFollows = false,
   } = scenario;
+  // `step_build` calls run_next_build directly and ignores its arguments, so
+  // pairing it with the flag would silently omit the behaviour and read as
+  // coverage of it.
+  if (rebootFollows && entry !== "do_rebuild") {
+    throw new Error("rebootFollows only means anything for do_rebuild");
+  }
 
   // Per RUN, not per test: a case that calls this twice must not read the
   // first build's attempts as the second's.
@@ -361,13 +372,23 @@ function run(scenario: Scenario = {}): Run {
     "  fi",
     "}",
     "",
-    "# beta's own memory reclaim, which do_rebuild calls. Its behaviour has its",
-    "# own suite; here it only has to be present and harmless.",
+    "# beta's own memory reclaim, and the two verbs that account for what it",
+    "# took — do_rebuild ends in one or the other on every exit. Their",
+    "# behaviour has its own suite; here they only have to be present,",
+    "# harmless and OBSERVABLE, so the arm that hands the engines to a reboot",
+    "# can be told from the arm that starts them. Both are stubbed",
+    "# unconditionally: an unstubbed one would be a 127 inside the updater's",
+    "# own rebuild step with every suite still green.",
     "free_memory_for_build() { :; }",
+    'resume_paused_engines() { echo "RESUMED"; }',
+    'forget_paused_engines() { echo "FORGOT"; }',
     "",
     shellFunctions(
       "build_entry_present",
       "verify_build_present",
+      // The drain promote_parked_build calls before it decides anything
+      // (TASK-729). Unsourced it is a 127 inside do_rebuild's first statement.
+      "drain_build_transients",
       "promote_parked_build",
       "set_previous_build_aside",
       "restore_previous_build",
@@ -376,7 +397,7 @@ function run(scenario: Scenario = {}): Run {
     "",
     shellFunction(entry),
     "",
-    entry,
+    rebootFollows ? `${entry} --reboot-follows` : entry,
     "",
   ];
 
@@ -605,13 +626,43 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     expect(r.stderr).not.toMatch(/answers on :80/);
   });
 
+  it("hands the paused engines to the reboot, and starts them itself when there is none", () => {
+    // The in-app updater's arm is `do_rebuild --reboot-follows`, and there the
+    // engines are systemd's to bring back — starting four model servers seconds
+    // before shutdown restores nothing that survives and lengthens the very
+    // shutdown the updater is waiting through. Every other caller starts them.
+    const withReboot = run({ build: "succeeds", rebootFollows: true });
+    expect(withReboot.status).toBe(0);
+    expect(withReboot.stdout + withReboot.stderr).toMatch(/FORGOT/);
+    expect(withReboot.stdout + withReboot.stderr).not.toMatch(/RESUMED/);
+
+    const withoutReboot = run({ build: "succeeds" });
+    expect(withoutReboot.status).toBe(0);
+    expect(withoutReboot.stdout + withoutReboot.stderr).toMatch(/RESUMED/);
+  });
+
+  it("starts them back on the failure arm even when a reboot was announced", () => {
+    // errexit ends step_rebuild_reboot before its `reboot` when do_rebuild
+    // fails, so that arm is the one caller whose engines nothing else will
+    // bring back.
+    const r = run({ build: "oom-killed", rebootFollows: true });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout + r.stderr).toMatch(/RESUMED/);
+    expect(r.stdout + r.stderr).not.toMatch(/FORGOT/);
+  });
+
   it("restarts clawbox-setup rather than starting it, so a latched unit is replaced", () => {
     // `start` on an already-active unit is a no-op, and the unit CAN be active
-    // here: clawbox-gateway.service's `Wants=clawbox-setup.service` pulls it
-    // back up mid-rebuild, and its own `Restart=always` latches it onto
-    // whatever tree exists once `next build` writes the standalone entry. A
-    // `start` would then leave the box serving the build that just failed
-    // verification while this function reported a rollback.
+    // here: once anything brings it back, its own `Restart=always` latches it
+    // onto whatever tree exists from the moment `next build` writes the
+    // standalone entry. A `start` would then leave the box serving the build
+    // that just failed verification while this function reported a rollback.
+    //
+    // What brought it back routinely was clawbox-gateway.service's
+    // `Wants=clawbox-setup.service`, removed in TASK-728 — which removes the
+    // routine trigger and not the case: a hand-run `--step rebuild`, a box where
+    // gateway_setup is skipped, and an operator (or the sudoers grant)
+    // restarting clawbox-setup all still land inside the window.
     const r = run({ build: "succeeds", identity: "drift" });
 
     expect(r.status).not.toBe(0);
@@ -723,11 +774,15 @@ describe.skipIf(process.platform !== "linux")("do_rebuild says who owns the buil
    * to `.next-old` and only then runs `bun run build`, so for the whole length
    * of the build there is no `.next/standalone/server.js` and there is a parked
    * one — the exact condition production-server.js's boot-time reclaim fires
-   * on. And clawbox-setup comes back up inside that window as a matter of
-   * routine: `config/clawbox-gateway.service` carries
-   * `Wants=clawbox-setup.service`, so every gateway (re)start starts the
+   * on. And clawbox-setup used to come back up inside that window as a matter
+   * of routine: `config/clawbox-gateway.service` carried
+   * `Wants=clawbox-setup.service`, so every gateway (re)start started the
    * service `do_rebuild` had just stopped (e2e-install run 33971129750: four
-   * seconds after the stop, while `bun install` was still running).
+   * seconds after the stop, while `bun install` was still running). TASK-728
+   * removed that line — including for the update that carries it, since
+   * step_systemd_services runs above do_rebuild in step_rebuild_reboot. The
+   * stamp stays for the ways in that are left: a hand-run `--step rebuild`, a
+   * skipped gateway_setup, and an operator restarting the web server.
    *
    * Nothing in the tree said "a rebuild is in flight", so the reclaim could not
    * tell that state from the one it exists for — a rebuild whose shell was

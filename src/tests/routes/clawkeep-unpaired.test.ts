@@ -32,6 +32,14 @@ const daemon = vi.hoisted(() => ({
   stderr: "",
 }));
 
+// restore / label / lock / delete are OWNER-ONLY and same-origin (the MCP
+// bearer reaches every /setup-api route through middleware, and no tool exists
+// for any of them). These cases are about what the OWNER gets on an unpaired
+// box, so the session answers yes; the refusal itself is pinned in
+// clawkeep-owner-only.test.ts and clawkeep-restore-restart.test.ts.
+vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
+vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn(() => true) }));
+
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   const spawn = (bin: string, args: string[]) => {

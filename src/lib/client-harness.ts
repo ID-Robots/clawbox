@@ -22,11 +22,26 @@
  * Concurrent callers share one in-flight request instead of firing five.
  */
 
-export type HarnessInfo = { active: string; edition: string };
+export type HarnessInfo = {
+  active: string;
+  edition: string;
+  /**
+   * Whether `active` is the device's own answer, or the default it falls back
+   * to when nothing could answer — an unreadable edition lock, or an unreadable
+   * config store on the one SKU whose harness is a runtime choice. The server
+   * owns the distinction (`getActiveHarnessSource`); this only carries it.
+   *
+   * A caller that must not guess — anything that BRANDS the box — reads this
+   * before believing `active`. False for a server that predates the field,
+   * which is the honest reading: it did not say.
+   */
+  activeKnown: boolean;
+};
 
 const ACTIVE_TTL_MS = 5_000;
 
 let editionCache: string | null = null;
+let activeKnownCache: boolean | null = null;
 let activeCache: { value: string; at: number } | null = null;
 let inFlight: Promise<HarnessInfo | null> | null = null;
 
@@ -44,12 +59,14 @@ export function cachedActiveHarness(): string | null {
 /** Drop the cached active harness — call after switching harnesses. */
 export function invalidateActiveHarness(): void {
   activeCache = null;
+  activeKnownCache = null;
 }
 
 /** Test seam: forget everything, including the immutable edition. */
 export function resetHarnessCache(): void {
   editionCache = null;
   activeCache = null;
+  activeKnownCache = null;
   inFlight = null;
 }
 
@@ -64,8 +81,8 @@ export function fetchHarness(options?: {
   force?: boolean;
 }): Promise<HarnessInfo | null> {
   const active = options?.force ? null : cachedActiveHarness();
-  if (active !== null && editionCache !== null) {
-    return Promise.resolve({ active, edition: editionCache });
+  if (active !== null && editionCache !== null && activeKnownCache !== null) {
+    return Promise.resolve({ active, edition: editionCache, activeKnown: activeKnownCache });
   }
   if (inFlight && !options?.force) return inFlight;
 
@@ -75,13 +92,20 @@ export function fetchHarness(options?: {
   })
     .then((r) => (r.ok ? r.json() : null))
     .then((d: unknown) => {
-      const data = (d ?? {}) as { active?: unknown; edition?: unknown };
+      const data = (d ?? {}) as { active?: unknown; edition?: unknown; activeKnown?: unknown };
       if (typeof data.edition === "string") editionCache = data.edition;
-      if (typeof data.active === "string") activeCache = { value: data.active, at: Date.now() };
+      if (typeof data.active === "string") {
+        activeCache = { value: data.active, at: Date.now() };
+        // Cached beside `active`, not beside `edition`: it certifies THAT
+        // value, and a cached answer that dropped it would turn a fact into a
+        // doubt on the second mount.
+        activeKnownCache = data.activeKnown === true;
+      }
       if (typeof data.active !== "string" && typeof data.edition !== "string") return null;
       return {
         active: typeof data.active === "string" ? data.active : "",
         edition: typeof data.edition === "string" ? data.edition : "",
+        activeKnown: data.activeKnown === true,
       };
     })
     .catch(() => null)

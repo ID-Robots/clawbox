@@ -11,6 +11,7 @@ import {
   normalizeOrigin,
   resolveOriginsPath,
 } from "./control-ui-origins";
+import { controlUiEmailDirectiveScript, controlUiLocale } from "./control-ui-email-directives";
 
 const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 const OPENCLAW_CONFIG_PATH = `${
@@ -218,8 +219,10 @@ export async function getOrGenerateGatewayToken(): Promise<string | null> {
 }
 
 /**
- * Fetches the gateway SPA HTML and injects the ClawBox bar + auth token.
- * Used by both the root route and the catch-all gateway route.
+ * Fetches the gateway SPA HTML and injects the ClawBox bar, the auth token and
+ * the `EMAIL:` directive handling. Its one caller is the catch-all gateway
+ * route (`src/app/[...gateway]/route.ts`), which reaches it only for a
+ * NAVIGATION — a script `fetch()` for the same path is proxied as bytes.
  */
 export async function serveGatewayHTML(
   request: NextRequest
@@ -289,7 +292,21 @@ export async function serveGatewayHTML(
   }catch(e){}
 })();
 </script>`;
-    html = html.replace(/<body\b[^>]*>/i, `$&${CLAWBOX_BAR}${wsScript}`);
+    // TASK-700: the gateway's own Control UI chat is a third `webchat` surface
+    // and showed `EMAIL:<uid>` as a bare internal id. No outbound hook can
+    // separate it from ClawBox's own two chats, so the directive handling rides
+    // in with the bar — on the page ClawBox already serves and already injects
+    // into. Not gated on the owner session: the shell is served without one and
+    // an id on screen is not a credential.
+    const emailDirectives = controlUiEmailDirectiveScript(await controlUiLocale());
+    // A replacer FUNCTION, not a string: `$&`, `` $` ``, `$'` and `$1` are
+    // substitutions inside a replacement string, and the injected script now
+    // carries a translated label — one `$'` from a translator would otherwise
+    // duplicate the rest of the document into the page.
+    html = html.replace(
+      /<body\b[^>]*>/i,
+      (match) => `${match}${CLAWBOX_BAR}${wsScript}${emailDirectives}`,
+    );
     return new NextResponse(html, {
       status: 200,
       headers: {

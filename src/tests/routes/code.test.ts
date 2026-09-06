@@ -157,6 +157,55 @@ describe("/setup-api/code", () => {
     expect(body.total).toBe(1);
   });
 
+  it("search: forwards caseSensitive and maxResults, and no regex option", async () => {
+    await POST(req({ action: "search", projectId: "test", pattern: "x", caseSensitive: true, maxResults: 5, regex: false }));
+    expect(mockSearchFiles).toHaveBeenCalledWith("test", "x", { caseSensitive: true, maxResults: 5 });
+    expect(mockSearchFiles.mock.calls[0][2]).not.toHaveProperty("regex");
+  });
+
+  it("search: refuses regex:true with 400 regex_unsupported rather than quietly matching text", async () => {
+    // The regex branch was the ReDoS: "(a+)+$" pinned the whole web server.
+    // An old caller that still asks gets an honest refusal, never a search
+    // that silently means something else.
+    const res = await POST(req({ action: "search", projectId: "test", pattern: "(a+)+$", regex: true }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "Regex search is not supported — use a plain-text pattern",
+      code: "regex_unsupported",
+    });
+    expect(mockSearchFiles).not.toHaveBeenCalled();
+  });
+
+  it("search: a non-string pattern is 400 invalid_pattern, not a 500 from searchFiles", async () => {
+    // `!pattern` let `{}` and `42` through, and searchFiles' `.toLowerCase()`
+    // turned the caller's typo into a server error.
+    for (const pattern of [{}, 42, ["a"], true]) {
+      const res = await POST(req({ action: "search", projectId: "test", pattern }));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: "Search pattern must be a string",
+        code: "invalid_pattern",
+      });
+    }
+    expect(mockSearchFiles).not.toHaveBeenCalled();
+  });
+
+  it("search: a missing or empty pattern is still the plain 400 it always was", async () => {
+    for (const body of [{ action: "search", projectId: "test" }, { action: "search", projectId: "test", pattern: "" }]) {
+      const res = await POST(req(body));
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Search pattern required");
+    }
+    expect(mockSearchFiles).not.toHaveBeenCalled();
+  });
+
+  it("search: any truthy regex value is refused — the string \"false\" switched the old branch on", async () => {
+    const res = await POST(req({ action: "search", projectId: "test", pattern: "x", regex: "false" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("regex_unsupported");
+    expect(mockSearchFiles).not.toHaveBeenCalled();
+  });
+
   it("build: builds project", async () => {
     const res = await POST(req({ action: "build", projectId: "test" }));
     const body = await res.json();

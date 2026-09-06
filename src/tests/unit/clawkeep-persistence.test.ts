@@ -3,6 +3,8 @@ import os from "os";
 import path from "path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { RESTORE_RUN_CAP_MS } from "@/lib/clawkeep-protection";
+
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-clawkeep-persistence-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEST_ROOT, "clawkeep");
 const CONFIG_PATH = path.join(DATA_DIR, "config.toml");
@@ -30,15 +32,15 @@ beforeEach(async () => {
   }
 });
 
-describe("readSchedule / writeSchedule", () => {
+describe("readScheduleSnapshot / writeSchedule", () => {
   it("returns DEFAULT_SCHEDULE when no file exists", async () => {
-    const s = await clawkeep.readSchedule();
+    const s = (await clawkeep.readScheduleSnapshot()).schedule;
     expect(s).toEqual(clawkeep.DEFAULT_SCHEDULE);
   });
 
   it("returns DEFAULT_SCHEDULE when the file is corrupt", async () => {
     await fs.writeFile(path.join(DATA_DIR, "schedule.json"), "{not-json", { mode: 0o600 });
-    const s = await clawkeep.readSchedule();
+    const s = (await clawkeep.readScheduleSnapshot()).schedule;
     expect(s).toEqual(clawkeep.DEFAULT_SCHEDULE);
   });
 
@@ -57,7 +59,7 @@ describe("readSchedule / writeSchedule", () => {
       weekday: 3,
       retentionKeepLast: 5,
     });
-    const reread = await clawkeep.readSchedule();
+    const reread = (await clawkeep.readScheduleSnapshot()).schedule;
     expect(reread).toEqual(written);
   });
 
@@ -290,11 +292,26 @@ describe("restoring flag (via getStatus.restoring)", () => {
     expect(status.restoring).toBe(true);
   });
 
-  it("auto-clears a stale flag (older than the 30 m window)", async () => {
+  it("keeps the flag of a restore that is merely slow", async () => {
+    // The window IS the restore's kill timer, so nothing inside it may be
+    // read as abandoned. A 12 GB restore legitimately runs for hours, and
+    // `isRestoring()` does not merely report false — it DELETES the flag, so
+    // clearing one early takes the only signal that survives a page reload
+    // and drops the shelf's restoring shield to a calm green verdict while
+    // the box's state directory is being replaced.
     const flag = path.join(DATA_DIR, "restoring.flag");
     await fs.writeFile(flag, "", { mode: 0o600 });
-    // Backdate mtime by 31 minutes.
     const past = new Date(Date.now() - 31 * 60 * 1000);
+    await fs.utimes(flag, past, past);
+    const status = await clawkeep.getStatus();
+    expect(status.restoring).toBe(true);
+    await expect(fs.access(flag)).resolves.toBeUndefined();
+  });
+
+  it("auto-clears a flag older than the restore can possibly have been", async () => {
+    const flag = path.join(DATA_DIR, "restoring.flag");
+    await fs.writeFile(flag, "", { mode: 0o600 });
+    const past = new Date(Date.now() - (RESTORE_RUN_CAP_MS + 60_000));
     await fs.utimes(flag, past, past);
     const status = await clawkeep.getStatus();
     expect(status.restoring).toBe(false);

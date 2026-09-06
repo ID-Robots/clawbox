@@ -5,13 +5,17 @@ import path from "path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-const TEST_ROOT = path.join(os.tmpdir(), `clawbox-files-path-tests-${process.pid}-${Date.now()}`);
+// realpath'd, so that on a machine whose tmpdir is itself a link (macOS's
+// /var -> /private/var) the symlink cases below compare like with like: the
+// guard resolves a path and compares it with DATA_DIR, which is lexical.
+const TEST_ROOT = path.join(fs.realpathSync(os.tmpdir()), `clawbox-files-path-tests-${process.pid}-${Date.now()}`);
 
 type RouteHandler = (req: NextRequest, context: { params: Promise<{ path: string[] }> }) => Promise<Response>;
 
 let filesPathGet: RouteHandler;
 let filesPathPut: RouteHandler;
 let filesPathDelete: RouteHandler;
+let filesList: (req: NextRequest) => Promise<Response>;
 
 function createRequest(
   pathname: string,
@@ -35,6 +39,7 @@ beforeAll(async () => {
   await fsp.mkdir(TEST_ROOT, { recursive: true });
   vi.resetModules();
   ({ GET: filesPathGet, PUT: filesPathPut, DELETE: filesPathDelete } = await import("@/app/setup-api/files/[...path]/route"));
+  ({ GET: filesList } = await import("@/app/setup-api/files/route"));
 });
 
 beforeEach(async () => {
@@ -331,6 +336,157 @@ describe("the ClawBox data directory through the files route", () => {
       createParams(["notes.txt"]),
     );
     expect(res.status).toBe(200);
+  });
+});
+
+// The container is a different question from its contents. `data` itself is
+// openable on purpose — the listing filters entry by entry and the public
+// subtrees have to be reachable — and the rename/delete handlers reused that
+// openability as permission to MOVE it: `data` → `data-copy` took every store
+// inside out from under the containment rule, and a recursive delete removed
+// the box's state in one request. The same for `~/.config` (only `.config/gh`
+// is a protected segment) and for the browse root.
+describe("the folders that HOLD the box's state, through the files route", () => {
+  const rename = (segments: string[], newName: string) =>
+    filesPathPut(
+      createRequest(`/setup-api/files/${segments.join("/")}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newName }),
+      }),
+      createParams([...segments]),
+    );
+  const remove = (segments: string[]) =>
+    filesPathDelete(
+      createRequest(`/setup-api/files/${segments.join("/")}`, { method: "DELETE" }),
+      createParams([...segments]),
+    );
+
+  beforeEach(async () => {
+    await fsp.mkdir(DATA_DIR, { recursive: true });
+    await fsp.writeFile(path.join(DATA_DIR, "config.json"), "{}");
+    await fsp.writeFile(path.join(DATA_DIR, ".session-secret"), "s3cret");
+    await fsp.mkdir(path.join(DATA_DIR, "webapps", "demo"), { recursive: true });
+    await fsp.writeFile(path.join(DATA_DIR, "webapps", "demo", "index.html"), "<p>public</p>");
+    await fsp.mkdir(path.join(TEST_ROOT, ".config", "gh"), { recursive: true });
+    await fsp.writeFile(path.join(TEST_ROOT, ".config", "gh", "hosts.yml"), "oauth_token: ghp_x");
+  });
+
+  it("does not rename the data dir itself", async () => {
+    const res = await rename(["data"], "data-copy");
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("protected_container");
+    // The folder is visible in the listing, so the answer says what it is
+    // rather than pretending the path is invalid.
+    expect(body.error).toContain("cannot be moved or deleted");
+    expect(fs.existsSync(path.join(DATA_DIR, "config.json"))).toBe(true);
+    expect(fs.existsSync(path.join(TEST_ROOT, "data-copy"))).toBe(false);
+    // …and the store cannot be read under a new name.
+    const get = await filesPathGet(
+      createRequest("/setup-api/files/data-copy/config.json"),
+      createParams(["data-copy", "config.json"]),
+    );
+    expect(get.status).not.toBe(200);
+  });
+
+  it("does not delete the data dir itself", async () => {
+    const res = await remove(["data"]);
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("protected_container");
+    expect(fs.existsSync(path.join(DATA_DIR, "config.json"))).toBe(true);
+    expect(fs.existsSync(path.join(DATA_DIR, ".session-secret"))).toBe(true);
+  });
+
+  it("does not move or delete a folder that holds a credential store", async () => {
+    const hosts = path.join(TEST_ROOT, ".config", "gh", "hosts.yml");
+    const renamed = await rename([".config"], "cfg");
+    expect(renamed.status).toBe(400);
+    expect((await renamed.json()).code).toBe("protected_container");
+    expect(fs.existsSync(hosts)).toBe(true);
+    expect(fs.existsSync(path.join(TEST_ROOT, "cfg"))).toBe(false);
+
+    const removed = await remove([".config"]);
+    expect(removed.status).toBe(400);
+    expect((await removed.json()).code).toBe("protected_container");
+    expect(fs.existsSync(hosts)).toBe(true);
+  });
+
+  it("does not delete or rename the browse root itself", async () => {
+    // `x/..` resolves to the root, which safePath accepts as-is.
+    const removed = await remove(["data", ".."]);
+    expect(removed.status).toBe(400);
+    expect((await removed.json()).code).toBe("protected_container");
+    expect(fs.existsSync(path.join(DATA_DIR, "config.json"))).toBe(true);
+
+    const renamed = await rename(["data", ".."], "elsewhere");
+    expect(renamed.status).toBe(400);
+    expect((await renamed.json()).code).toBe("protected_container");
+    expect(fs.existsSync(TEST_ROOT)).toBe(true);
+  });
+
+  it("does not let a sibling take the data dir's own path", async () => {
+    await fsp.mkdir(path.join(TEST_ROOT, "data-copy"));
+    await fsp.rm(DATA_DIR, { recursive: true, force: true });
+    const res = await rename(["data-copy"], "data");
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("protected_container");
+    expect(fs.existsSync(path.join(TEST_ROOT, "data-copy"))).toBe(true);
+    expect(fs.existsSync(DATA_DIR)).toBe(false);
+  });
+
+  it("recognises the data dir through a symlink to the checkout", async () => {
+    // `~/link -> ~/clawbox` (here the checkout IS the browse root), then
+    // `link/data`: as typed it is nobody's store; resolved, it is the data dir.
+    const link = path.join(TEST_ROOT, "link");
+    try {
+      fs.symlinkSync(TEST_ROOT, link, "dir");
+    } catch {
+      return; // a filesystem that refuses symlinks has nothing to test here
+    }
+    const renamed = await rename(["link", "data"], "data-copy");
+    expect(renamed.status).toBe(400);
+    expect((await renamed.json()).code).toBe("protected_container");
+    expect(fs.existsSync(path.join(DATA_DIR, "config.json"))).toBe(true);
+    expect(fs.existsSync(path.join(TEST_ROOT, "data-copy"))).toBe(false);
+
+    const removed = await remove(["link", "data"]);
+    expect(removed.status).toBe(400);
+    expect(fs.existsSync(path.join(DATA_DIR, "config.json"))).toBe(true);
+  });
+
+  it("still renames and deletes an ordinary sibling of the data dir", async () => {
+    // The rule is about the containers, not about the name `data`.
+    await fsp.mkdir(path.join(TEST_ROOT, "data-backup"));
+    await fsp.writeFile(path.join(TEST_ROOT, "data-backup", "notes.txt"), "mine");
+    const renamed = await rename(["data-backup"], "data-archive");
+    expect(renamed.status).toBe(200);
+    expect(fs.existsSync(path.join(TEST_ROOT, "data-archive", "notes.txt"))).toBe(true);
+
+    const removed = await remove(["data-archive"]);
+    expect(removed.status).toBe(200);
+    expect(fs.existsSync(path.join(TEST_ROOT, "data-archive"))).toBe(false);
+
+    // …and a `.config-old` is not `.config`.
+    await fsp.mkdir(path.join(TEST_ROOT, ".config-old"));
+    expect((await remove([".config-old"])).status).toBe(200);
+  });
+
+  it("keeps the data dir listable and its public subtree downloadable", async () => {
+    // Listability is exactly what the container rule must NOT touch: the
+    // Files app reaches the webapps through it.
+    const list = await filesList(createRequest("/setup-api/files?dir=data&hidden=1"));
+    expect(list.status).toBe(200);
+    const names = ((await list.json()).files as { name: string }[]).map((f) => f.name);
+    expect(names).toContain("webapps");
+    expect(names).not.toContain("config.json");
+
+    const get = await filesPathGet(
+      createRequest("/setup-api/files/data/webapps/demo/index.html"),
+      createParams(["data", "webapps", "demo", "index.html"]),
+    );
+    expect(get.status).toBe(200);
+    expect(new TextDecoder().decode(await get.arrayBuffer())).toBe("<p>public</p>");
   });
 });
 

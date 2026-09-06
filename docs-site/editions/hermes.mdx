@@ -46,6 +46,7 @@ not exist on the box. Everything that depended on it is gone with it:
 | Apps previously installed from the App Store | Hidden from the desktop. ClawBox webapps you or the agent built stay visible. |
 | **ClawKeep** cloud backups | Not available. ClawKeep archives the OpenClaw agent through the `openclaw` CLI, which this edition does not ship — the app opens and says so. |
 | The CLI update path (`clawbox-cli.ts update`) | **Refused.** It is an OpenClaw-edition tool. Update from **Settings → System Update** instead, which runs the edition-correct installer steps. |
+| The **ClawBox wallpaper** in Settings → Appearance | Not offered. This edition ships the Hermes artwork and Deep Space; the standard product's wallpaper is another product's branding and is not one of the choices. Wallpapers you upload yourself are unaffected. |
 
 <Warning>
 Do not try to start `clawbox-gateway.service` on a Hermes device. The unit is
@@ -57,9 +58,11 @@ the box in a state that support cannot reason about. Update through
 ## The desktop
 
 Everything else on the desktop is unchanged — Chat, Terminal, Files, Browser,
-Coding, Remote Desktop, System Update, Settings and any webapps. The ClawKeep
-icon is present but the feature is not available on this edition (see the table
-above). Two icons are specific to this edition:
+Coding, Remote Desktop, System Update, Settings and any webapps — with one
+edition difference inside Settings: **Appearance** offers the Hermes wallpaper
+and Deep Space, not the standard product's ClawBox artwork (see the table
+above). The ClawKeep icon is present but the feature is not available on this
+edition. Two icons are specific to this edition:
 
 - **Skills** — the [Hermes Skills](/editions/hermes-skills) store.
 - **Hermes** — the Hermes dashboard. It opens through an authenticated proxy on

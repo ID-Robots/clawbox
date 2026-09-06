@@ -472,7 +472,7 @@ describe("middleware", () => {
       expect(response.headers.get("location")).toContain("/login");
     });
 
-    it.each(["/login", "/setup", "/setup-api/setup/status", "/_next/chunk.js", "/fonts/test.woff", "/images/logo.png", "/manifest.json", "/sw.js", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
+    it.each(["/login", "/setup", "/setup-api/setup/status", "/_next/chunk.js", "/fonts/test.woff", "/fonts/JetBrainsMono-Regular.woff2", "/manifest.json", "/sw.js", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
       const mod = await import("@/middleware");
@@ -480,6 +480,42 @@ describe("middleware", () => {
       const req = createRequest(p);
       const response = await mod.middleware(req);
       expect(response.status).toBe(200);
+    });
+
+    // `/fonts/` and `/images/` used to be public PREFIXES — and skipped by the
+    // matcher outright — so a path nobody serves under either name went to the
+    // gateway catch-all, which answered the Control UI shell to an anonymous
+    // caller (and, before that route gated it, the shell carried the gateway
+    // token). A font FILE is still admitted, by step 2a's extension allow-list
+    // above; a bare name under those trees is an unknown page and gets /login.
+    it.each(["/images/logo.png", "/images/nope", "/fonts/nope", "/fonts"])(
+      "sends %s to /login rather than treating the tree as public",
+      async (p) => {
+        process.env.SESSION_SECRET = "test-secret";
+        vi.resetModules();
+        const mod = await import("@/middleware");
+
+        const response = await mod.middleware(createRequest(p));
+        expect(response.status).toBe(307);
+        expect(response.headers.get("location")).toContain("/login");
+      },
+    );
+
+    it("runs for the /fonts and /images trees — the matcher no longer skips them", async () => {
+      // The gates above are only worth anything if this file is ENTERED for
+      // those paths. The matcher is compiled into the build's middleware
+      // manifest, so the regex itself is the thing to pin: Next's own build
+      // output stays excluded, nothing else does.
+      const { config } = await import("@/middleware");
+      const [pattern] = config.matcher;
+      expect(pattern).toContain("_next/static");
+      expect(pattern).toContain("_next/image");
+      expect(pattern).not.toContain("fonts");
+      expect(pattern).not.toContain("images");
+      const re = new RegExp(`^${pattern}$`);
+      expect(re.test("/fonts/JetBrainsMono-Regular.woff2")).toBe(true);
+      expect(re.test("/images/nope")).toBe(true);
+      expect(re.test("/_next/static/chunk.js")).toBe(false);
     });
 
     it.each(["/setup-api/wifi/scan", "/setup-api/system/power", "/setup-api/setup/reset", "/setup-api/clawkeep/backup"])("shields %s once setup is complete and auth is active", async (p) => {
@@ -556,6 +592,12 @@ describe("middleware", () => {
       "/setup-api/kv",
       "/setup-api/ai-models/status",
       "/setup-api/telegram/status",
+      // The route that mints a 24 h owner session. The wizard posts it only
+      // after CredentialsStep, holding the cookie that step was handed, so it
+      // has no business in the bootstrap allow-list — and it is the one path a
+      // scan of the old deny-list named, so it is pinned here by name rather
+      // than by the list's default alone.
+      "/setup-api/setup/complete",
     ])("gates %s even during setup wizard bootstrap", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
@@ -575,6 +617,7 @@ describe("middleware", () => {
       "/setup-api/update/run",
       "/setup-api/system/credentials",
       "/setup-api/harness/active",
+      "/setup-api/setup/complete",
     ])("closes the bootstrap window for %s once a password is configured", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       writeConfig({ password_configured: true }); // setup_complete still absent

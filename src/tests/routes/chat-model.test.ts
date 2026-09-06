@@ -66,10 +66,18 @@ vi.mock("@/lib/sqlite-store", () => ({
   sqliteSet: vi.fn(),
 }));
 
+// TASK-668. The recorded per-provider model counts the catalog route writes
+// after each enumeration. Empty by default — nothing recorded is UNKNOWN, and
+// unknown changes nothing about the list this route serves.
+vi.mock("@/lib/provider-runnable", () => ({
+  readProviderRunnable: vi.fn(async () => new Map<string, string>()),
+}));
+
 import { getAll } from "@/lib/config-store";
 import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
+import { readProviderRunnable } from "@/lib/provider-runnable";
 import { promisify } from "util";
 
 describe("/setup-api/chat/model", () => {
@@ -225,6 +233,64 @@ describe("/setup-api/chat/model", () => {
       "anthropic/claude-opus-5",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
+  });
+
+  describe("a provider the box can run no model from", () => {
+    /** The three-profile box of the test above: ClawBox AI, OpenAI, Anthropic. */
+    function threeProviderBox(primary: string) {
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "openai:default": { provider: "openai", mode: "token" },
+            "anthropic:default": { provider: "anthropic", mode: "token" },
+          },
+        },
+        models: { mode: "replace", providers: {} },
+        agents: { defaults: { model: { primary } } },
+      } as never);
+    }
+
+    it("is not offered, even though its credential is right there", async () => {
+      // Under `models.mode: "replace"` the core answers `openclaw models list
+      // --provider anthropic` with nothing, so every Anthropic row in this
+      // dropdown is a button whose only outcome is a refusal from the gateway.
+      threeProviderBox("deepseek/deepseek-v4-flash");
+      vi.mocked(readProviderRunnable).mockResolvedValue(
+        new Map([["anthropic", "none"], ["openai", "some"]]) as never,
+      );
+
+      const body = await (await GET()).json();
+
+      const labels = body.options.map((option: { label: string }) => option.label);
+      expect(labels).not.toContain("Anthropic Claude");
+      expect(labels).toEqual(expect.arrayContaining(["ClawBox AI", "OpenAI GPT"]));
+    });
+
+    it("keeps the row when the model in question is the one the box is running", async () => {
+      // The header pill names it. A dropdown that omits the active model shows
+      // the customer a model that is in no list.
+      threeProviderBox("anthropic/claude-opus-5");
+      vi.mocked(readProviderRunnable).mockResolvedValue(
+        new Map([["anthropic", "none"]]) as never,
+      );
+
+      const body = await (await GET()).json();
+
+      expect(body.options.map((option: { model: string | null }) => option.model))
+        .toContain("anthropic/claude-opus-5");
+    });
+
+    it("keeps every row when nothing has been recorded", async () => {
+      // The false-failure guard: an empty record is "nobody has asked", and
+      // beta's list is what it must produce.
+      threeProviderBox("deepseek/deepseek-v4-flash");
+
+      const body = await (await GET()).json();
+
+      expect(body.options.map((option: { label: string }) => option.label))
+        .toEqual(expect.arrayContaining(["ClawBox AI", "OpenAI GPT", "Anthropic Claude"]));
+    });
   });
 
   it("switches the active chat model to Local AI and restarts the gateway", async () => {

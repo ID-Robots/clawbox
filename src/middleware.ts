@@ -161,12 +161,19 @@ const APPLE_PATHS = new Set([
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
+// `/fonts/` and `/images/` are deliberately NOT here any more. `/fonts/` is
+// admitted by step 2a below (`isPublicGatewayAsset`: GET/HEAD, and only a file
+// with a static extension — which every file in public/fonts/ and the Control
+// UI's own /fonts tree has), so a bare prefix here only widened that to
+// `/fonts/anything`, and `/images/` was a prefix for a tree that has never
+// existed on this box. Either one let an unauthenticated navigation fall
+// through the router to the gateway catch-all, which is the route that owns
+// the gateway token; that route gates the token on its own now, but a path
+// nobody serves should reach /login, not the SPA shell.
 const PUBLIC_PREFIXES = [
   "/login",
   "/login-api",
   "/_next/",
-  "/fonts/",
-  "/images/",
 ];
 
 // The wizard PAGE. Public only while the device has no owner credential — the
@@ -635,7 +642,22 @@ export const config = {
   // setup wizard has finished, which the Edge runtime can't do (no fs).
   runtime: "nodejs",
   matcher: [
-    // Match all paths except static assets
-    "/((?!_next/static|_next/image|fonts/|images/).*)",
+    // Every path but Next's own build output. `fonts/` and `images/` used to be
+    // skipped here too, which meant this file never ran for them at all: a
+    // request for `/fonts/nope` or `/images/nope` — nothing under either name
+    // exists on the box (there is no public/images/ tree) — went straight to
+    // the gateway catch-all and was answered with the Control UI shell rather
+    // than the session gate. Both trees go through the pipeline now: the real
+    // font files are let in credential-less by step 2a (GET/HEAD + a static
+    // extension, the same gate the Control UI's own `crossorigin` font loads
+    // already rely on, and ahead of the SESSION_SECRET, bootstrap and session
+    // steps so the captive-portal wizard and the /updating page keep their
+    // fonts), and anything else under them reaches /login like any other
+    // unknown page. Nothing before 2a looks at a /fonts/ path: the trailing-
+    // slash canonicaliser, the captive-portal probe URLs, the Hermes gate
+    // (/api, /assets, the two favicons) and the update lock (desktop pages,
+    // after the session check) all leave it alone. The cost is one mtime-cached
+    // config read per font request, which /login already pays.
+    "/((?!_next/static|_next/image).*)",
   ],
 };

