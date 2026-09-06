@@ -1011,7 +1011,10 @@ describe("a run", () => {
       }) as typeof fs.statSync);
       try {
         expect(() => fs.statSync(lockedDir)).toThrow(/EACCES/);
+        stat.mockClear();
         expect(lib.clearFinishedRuns()).toBe(0);
+        // The decision went through the refused stat — not around it.
+        expect(stat.mock.calls.some(([target]) => path.resolve(String(target)) === path.resolve(lockedDir))).toBe(true);
         expect(lib.getRun(draft.id)?.status).toBe("draft");
       } finally {
         stat.mockRestore();
