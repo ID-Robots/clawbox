@@ -98,6 +98,8 @@ function run(opts: RunOptions): {
   stdout: string;
   stderr: string;
   marker: Record<string, { disabled?: boolean; stage?: string }>;
+  /** `plugins.entries` as the boot left it — what the NEXT boot's loop selects on. */
+  entries: Record<string, { enabled?: boolean }>;
 } {
   const config = path.join(dir, "openclaw.json");
   writeFileSync(config, JSON.stringify({ plugins: { entries: opts.entries } }));
@@ -172,7 +174,10 @@ function run(opts: RunOptions): {
   } catch {
     /* no marker was written */
   }
-  return { argv, stdout: result.stdout, stderr: result.stderr, marker };
+  const entries = (JSON.parse(readFileSync(config, "utf-8")) as {
+    plugins?: { entries?: Record<string, { enabled?: boolean }> };
+  }).plugins?.entries ?? {};
+  return { argv, stdout: result.stdout, stderr: result.stderr, marker, entries };
 }
 
 describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin payload repair", () => {
@@ -304,6 +309,28 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     expect(argv.some((line) => line.includes("enabled false"))).toBe(false);
     // The marker it started with is still there: not cleared, and not replaced.
     expect(marker.deepseek?.stage).toBe("install");
+  });
+
+  it("has the next boot ask again about a plugin it could not tell about", () => {
+    // The device lane measured the 60 s kill hitting 4 of 4 managed plugins on
+    // ONE boot, at an exact 60 s cadence — this is the common path, not an
+    // edge, so "cannot tell" has to heal itself without an owner. It does, by
+    // construction and only by construction: the loop selects on
+    // `enabled: true`, so leaving the entry alone IS the retry. The two the
+    // lane found still off two boots later were switched off, which is what
+    // takes a plugin out of this loop's reach for good.
+    const opts = {
+      entries: { deepseek: { enabled: true } },
+      enableKilled: { deepseek: 124 },
+      inspectJson: inspectAllJson([{ id: "deepseek", installed: false }]),
+    } as const;
+    const first = run(opts);
+    expect(first.entries.deepseek?.enabled).toBe(true);
+    // The same directory, so this argv log carries BOTH boots.
+    const second = run(opts);
+    expect(second.argv.filter((line) => line === "plugins enable deepseek --accept-capabilities"))
+      .toHaveLength(2);
+    expect(second.entries.deepseek?.enabled).toBe(true);
   });
 
   it("still switches off when a killed verb had NOT recorded the consent", () => {
