@@ -368,6 +368,9 @@ function run(scenario: Scenario = {}): Run {
     shellFunctions(
       "build_entry_present",
       "verify_build_present",
+      // The drain promote_parked_build calls before it decides anything
+      // (TASK-729). Unsourced it is a 127 inside do_rebuild's first statement.
+      "drain_build_transients",
       "promote_parked_build",
       "set_previous_build_aside",
       "restore_previous_build",
