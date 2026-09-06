@@ -395,18 +395,44 @@ describe("code-projects", () => {
       expect(results).toHaveLength(1);
     });
 
-    it("supports regex search", async () => {
+    // The regex branch is gone: "(a+)+$" over a 30-character line held the
+    // box's one event loop for minutes, and no pattern-length cap or line
+    // slice bounds a cost that is exponential in the LINE. The pattern is a
+    // literal now, whatever it looks like.
+    it("matches a regex-shaped pattern as literal text", async () => {
       mockReaddir.mockResolvedValue([
         { name: "test.js", isDirectory: () => false },
       ] as never);
-      mockReadFile.mockResolvedValue("foo123bar");
-      const results = await searchFiles("myapp", "\\d+", { regex: true });
-      expect(results).toHaveLength(1);
+      mockReadFile.mockResolvedValue("foo123bar\nliteral (a+)+$ here\n\\d+ too");
+      expect(await searchFiles("myapp", "(a+)+$")).toEqual([
+        { file: "test.js", line: 2, content: "literal (a+)+$ here" },
+      ]);
+      // A pattern that WAS a regex once finds only itself, not the digits.
+      expect(await searchFiles("myapp", "\\d+")).toEqual([
+        { file: "test.js", line: 3, content: "\\d+ too" },
+      ]);
     });
 
-    it("rejects invalid regex", async () => {
-      mockReaddir.mockResolvedValue([] as never);
-      await expect(searchFiles("myapp", "[invalid", { regex: true })).rejects.toThrow(ValidationError);
+    it("settles at once on the line that made the regex branch a denial of service", async () => {
+      // 40 a's and a bang: as a regex "(a+)+$" would have backtracked over
+      // this for hours, synchronously, in the web server's process.
+      mockReaddir.mockResolvedValue([
+        { name: "x.txt", isDirectory: () => false },
+      ] as never);
+      mockReadFile.mockResolvedValue("a".repeat(40) + "!");
+      const started = performance.now();
+      const results = await searchFiles("myapp", "(a+)+$");
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect(results).toEqual([]);
+    });
+
+    it("never compiles the pattern — a bracket no regex would accept is just text", async () => {
+      mockReaddir.mockResolvedValue([
+        { name: "test.js", isDirectory: () => false },
+      ] as never);
+      mockReadFile.mockResolvedValue("see [invalid here");
+      const results = await searchFiles("myapp", "[invalid");
+      expect(results).toHaveLength(1);
     });
   });
 

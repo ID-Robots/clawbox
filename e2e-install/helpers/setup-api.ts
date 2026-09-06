@@ -188,9 +188,15 @@ export const systemPower = (action: "restart" | "shutdown") =>
 export const getPreferences = () =>
   request<Record<string, unknown>>("/setup-api/preferences?all=1");
 
-export const setPreferences = (patch: Record<string, unknown>) =>
+// `cookie`: the owner's session, needed for an `installed_*` write. The route's
+// gate on that prefix is cookie-only ON PURPOSE — it has no CLAWBOX_TEST_MODE
+// door, because the bearer holder it refuses (the agent) runs on the box the
+// same way in test mode — so a spec that changes the installed-app list logs
+// in first, exactly as the desktop does.
+export const setPreferences = (patch: Record<string, unknown>, cookie?: string) =>
   request<{ success: boolean }>("/setup-api/preferences", {
     method: "POST",
+    headers: cookie ? { cookie } : {},
     body: JSON.stringify(patch),
   });
 

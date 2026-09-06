@@ -266,6 +266,38 @@ d("root never evaluates a clawbox-writable data file", () => {
     }
   });
 
+  it("no root-run unit loads an EnvironmentFile under the clawbox-writable tree", () => {
+    // The residual of this audit's data/network.env finding (security scan #8):
+    // install.sh stopped sourcing the file, but clawbox-ap.service and
+    // clawbox-ap-watchdog.service — both root, both ExecStarting a bash script
+    // — still loaded it as EnvironmentFile=. systemd checks neither ownership
+    // nor variable names, so one `BASH_ENV=/home/clawbox/x.sh` line in that
+    // file ran as root before the script's first line, on the watchdog's next
+    // 20-second tick. The units load the root-owned /etc/clawbox/network.env
+    // now, which step_network_setup writes beside the data/ copy.
+    const configDir = path.join(REPO, "config");
+    const units = fs.readdirSync(configDir).filter((f) => /\.(service|timer)$/.test(f));
+    expect(units.length).toBeGreaterThan(0);
+    // No exemptions: clawbox-heartbeat.service, which loaded its credential
+    // from data/ into root's curl (ProtectHome does not stop an LD_PRELOAD
+    // line — it only forces the .so outside /home), runs as `User=clawbox`
+    // now and is skipped by the User= test below like every other user unit.
+    for (const unit of units) {
+      const text = fs.readFileSync(path.join(configDir, unit), "utf-8");
+      if (/^User=/m.test(text)) continue;
+      for (const m of text.matchAll(/^EnvironmentFile=-?(.+)$/gm)) {
+        expect(m[1].startsWith("/home/clawbox/"), `${unit} loads a clawbox-writable environment: ${m[0]}`)
+          .toBe(false);
+      }
+    }
+    for (const unit of ["clawbox-ap.service", "clawbox-ap-watchdog.service"]) {
+      const text = fs.readFileSync(path.join(configDir, unit), "utf-8");
+      expect(text).toMatch(/^EnvironmentFile=-\/etc\/clawbox\/network\.env$/m);
+    }
+    // ...and that file is really written, root-owned, by the network step.
+    expect(shellFunction("step_network_setup")).toContain("> /etc/clawbox/network.env");
+  });
+
   it("ap-watchdog.sh reads the disable flag without executing the file", () => {
     // It runs as ROOT on a timer (clawbox-ap-watchdog.service has no User=), so
     // `. "$HOTSPOT_ENV"` was arbitrary root code execution on a schedule: plant

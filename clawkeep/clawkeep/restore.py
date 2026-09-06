@@ -7,7 +7,10 @@ Pipeline:
        was corrupted in transit or signed with a different layout — we'd
        rather refuse to touch ~/.openclaw than half-restore it.
     4. Read the archive's manifest.json to discover which on-disk source
-       paths each asset wants to land at.
+       paths each asset wants to land at — and refuse the whole restore,
+       before anything is staged, unless EVERY one of them is a place this
+       box's own agent declares (`agent.restore_roots`). The manifest is
+       not trusted to choose destinations.
     5. For each asset: extract its sub-tree from `payload/posix/...` into a
        sibling staging directory next to the live target.
     6. Atomic-rename the live target to a `.bak-restore-<ts>` directory and
@@ -26,7 +29,6 @@ import json
 import logging
 import os
 import shutil
-import sys
 import tarfile
 import tempfile
 import time
@@ -45,6 +47,18 @@ class RestoredAsset:
     target_path: Path   # where the asset was placed on disk
     backup_path: Path   # where the previous content was moved aside
     bytes_restored: int
+
+
+@dataclass(frozen=True)
+class _VettedAsset:
+    """One manifest asset after the destination pre-pass: its target has been
+    matched against what this box declares, so the loop that extracts and
+    swaps never reads the manifest's `sourcePath` again."""
+    kind: str
+    target: Path
+    archive_subpath: str
+    entry: str
+    sqlite: bool
 
 
 @dataclass(frozen=True)
@@ -151,21 +165,6 @@ def _member_name_unsafe(member: tarfile.TarInfo, prefix: str) -> bool:
     return any(p == ".." for p in parts if p)
 
 
-# Python 3.12 warns about an unset extraction filter and 3.14 DEFAULTS to
-# `data`, which refuses absolute symlinks — exactly the ones
-# `_link_target_allowed` exists to permit, so a restore that works on the
-# device's 3.10 today would start silently dropping the identity bridge on a
-# newer interpreter. `fully_trusted` restores the historical behaviour, and it
-# is safe HERE specifically because this module does its own vetting first:
-# every member passes `_member_name_unsafe` (no absolute paths, no `..`) and
-# every link passes `_member_link_unsafe` / `_link_target_allowed`, on a
-# tarball whose integrity was already verified. The keyword does not exist
-# before 3.12, hence the version gate rather than passing it unconditionally.
-_EXTRACT_KWARGS: dict[str, str] = (
-    {"filter": "fully_trusted"} if sys.version_info >= (3, 12) else {}
-)
-
-
 def _link_target_allowed(link: str, allowed_roots: tuple[str, ...]) -> bool:
     """May an ABSOLUTE symlink target be recreated?
 
@@ -179,6 +178,11 @@ def _link_target_allowed(link: str, allowed_roots: tuple[str, ...]) -> bool:
 
     Everything else absolute stays refused. A link to /etc/shadow is not made
     safe by being inside a verified tarball.
+
+    `allowed_roots` are the VETTED destinations — the ones
+    `agent.assert_destination_allowed` has already matched against what this
+    box declares — never the manifest's raw `sourcePath` list, or a manifest
+    could declare `/etc` as an asset to make a link into it "owned".
     """
     target = os.path.normpath(link)
     return any(
@@ -188,17 +192,105 @@ def _link_target_allowed(link: str, allowed_roots: tuple[str, ...]) -> bool:
 
 
 def _member_link_unsafe(member: tarfile.TarInfo) -> bool:
-    """True for symlinks/hardlinks whose target is absolute. Relative `..`
-    targets are allowed: openclaw plugin-runtime-deps legitimately ship
-    symlinks with `..` in their target (e.g. `dist/.buildstamp`). The
-    archive itself is cryptographically verified upstream by
-    `openclaw backup verify`, so trusted symlinks are OK to extract; we
-    still reject absolute targets as a defence-in-depth catch.
+    """True for symlinks/hardlinks whose target is absolute. Whether such a
+    link may be recreated is `_link_target_allowed`'s question; a relative
+    target is `_link_escapes_root`'s. Relative `..` targets are legitimate in
+    themselves: openclaw plugin-runtime-deps ship symlinks with `..` in their
+    target (e.g. `dist/.buildstamp`), and they resolve INSIDE the asset.
     """
     if not (member.islnk() or member.issym()):
         return False
     link = member.linkname or ""
     return link.startswith("/")
+
+
+def _link_escapes_root(member: tarfile.TarInfo) -> bool:
+    """True for a RELATIVE link whose resolved target leaves the extraction
+    root. `member.name` must already be the name relative to that root.
+
+    A symlink is resolved against its own directory; a hardlink's target is
+    named from the archive root, so it is taken as is. Either way the test is
+    the same: once normalised, a target that starts with `..` points at
+    something outside the tree being built — and a later member named
+    `<link>/x` would then be written THROUGH it, wherever it points. A `..`
+    that stays inside (`dist/.buildstamp -> ../../shared/...`) is fine.
+    """
+    if not (member.islnk() or member.issym()):
+        return False
+    link = member.linkname or ""
+    if link.startswith("/"):
+        return False  # absolute — `_link_target_allowed` decides those
+    if member.issym():
+        resolved = os.path.normpath(os.path.join(os.path.dirname(member.name), link))
+    else:
+        resolved = os.path.normpath(link)
+    return resolved == ".." or resolved.startswith("../")
+
+
+def _parent_escapes_staging(relative_name: str, staging_root: Path) -> bool:
+    """Would writing `relative_name` under `staging_root` land outside it?
+
+    Asked of the REAL path of the member's parent directory, immediately
+    before the member is extracted: by then every earlier member is on disk,
+    and one of them may be a symlink this archive was allowed to create — an
+    absolute link into another vetted root, say. A member named through that
+    link would be written where the link points, not in the staging tree, and
+    the swap that follows would never move it back. tarfile itself does not
+    ask this question, on any Python version.
+    """
+    root = os.path.realpath(staging_root)
+    parent = os.path.realpath(os.path.join(root, os.path.dirname(relative_name)))
+    return not (parent == root or parent.startswith(root.rstrip("/") + "/"))
+
+
+def _member_is_special(member: tarfile.TarInfo) -> bool:
+    """Device nodes and fifos. No agent state contains one, and extracting a
+    device node is `mknod` — refused outright rather than skipped."""
+    return member.isdev()
+
+
+def _extraction_filter(member: tarfile.TarInfo, dest_path: str) -> tarfile.TarInfo:
+    """The same policy the extractors apply by hand, in the shape tarfile's
+    `filter=` parameter takes, so that on an interpreter which has the
+    parameter the library refuses a member this module would have refused —
+    a second gate on the same path, not a different rule.
+
+    `member.name` is the name relative to `dest_path` by the time this runs
+    (the extractors rewrite it). Every extractor below already vets a member
+    before calling `extract`, so under normal operation this never fires; it
+    exists so that a future call site that forgets cannot extract unvetted.
+    """
+    parts = [p for p in member.name.split("/") if p]
+    if member.name.startswith("/") or ".." in parts:
+        raise RestoreError(f"archive contains an unsafe member: {member.name!r}")
+    if _member_is_special(member):
+        raise RestoreError(f"archive contains a device or fifo member: {member.name!r}")
+    if _link_escapes_root(member):
+        raise RestoreError(
+            f"archive link {member.name!r} → {member.linkname!r} leaves the extraction root",
+        )
+    if _parent_escapes_staging(member.name, Path(dest_path)):
+        raise RestoreError(
+            f"archive member {member.name!r} would be written through a link that "
+            "leaves the extraction root",
+        )
+    return member
+
+
+# tarfile's `filter=` parameter and its `data_filter` were added in 3.12 AND
+# backported to 3.8.17, 3.9.17, 3.10.12 and 3.11.4 (CVE-2007-4559 / PEP 706) —
+# the device's 3.10.12 has them. `hasattr(tarfile, "data_filter")` is the
+# documented feature test; a version gate would be wrong in both directions.
+# Where the parameter exists our own filter is passed, never `data` (which
+# refuses the absolute identity links `_link_target_allowed` permits, so a
+# restore that works today would silently drop the identity bridge) and never
+# `fully_trusted` (which checks nothing). Where it does not exist the same
+# checks still run by hand in the extractors, so safety does not depend on
+# the interpreter: the manual pre-check is the rule and the filter is the
+# library applying it too.
+_EXTRACT_KWARGS: dict[str, object] = (
+    {"filter": _extraction_filter} if hasattr(tarfile, "data_filter") else {}
+)
 
 
 def _extract_file_from_open(
@@ -227,8 +319,18 @@ def _extract_file_from_open(
     (There is no `allowed_roots` here on purpose: a single-file asset is one
     regular file, checked below, so there is no link-target policy to apply.)
     """
-    staging_root.mkdir(parents=True, exist_ok=True)
     name = archive_subpath.rsplit("/", 1)[-1]
+    # The directory extractor runs every member's name through
+    # `_member_name_unsafe`; this one writes ONE member under the basename of
+    # the manifest's `archivePath`, so that basename is checked here, by this
+    # module's own rule — not left to tarfile's filter (a backport an
+    # interpreter may lack) or to the OS refusing to open a directory. `..`
+    # would name the staging root's parent; `.` and "" the root itself.
+    if name in ("", ".", "..") or "\0" in name:
+        raise RestoreError(
+            f"{archive_subpath!r} is not a name a file asset can be written under",
+        )
+    staging_root.mkdir(parents=True, exist_ok=True)
     try:
         for member in tf:
             if member.name != archive_subpath:
@@ -239,6 +341,14 @@ def _extract_file_from_open(
                     "not a regular file in the archive",
                 )
             member.name = name
+            # `staging_root` was just created empty, so nothing can be
+            # written through a link here — asked anyway, because the fresh
+            # directory is an assumption and this is the check that does not
+            # depend on it.
+            if _parent_escapes_staging(name, staging_root):
+                raise RestoreError(
+                    f"{archive_subpath!r} would be written outside its staging directory",
+                )
             tf.extract(member, path=staging_root, **_EXTRACT_KWARGS)
             return staging_root / name
     except (tarfile.TarError, OSError) as e:
@@ -281,21 +391,10 @@ def _extract_asset_from_open(
                     raise RestoreError(
                         f"archive contains an unsafe member: {member.name!r}"
                     )
-                if _member_link_unsafe(member) and not _link_target_allowed(
-                    member.linkname or "", allowed_roots,
-                ):
-                    # An absolute symlink pointing OUTSIDE anything this
-                    # archive owns. Skipped rather than aborting the whole
-                    # restore over one bad link — but RECORDED, so the caller
-                    # can say what did not come back. Dropping members and
-                    # then reporting success is the exact failure this file
-                    # is otherwise so careful about.
-                    log.warning(
-                        "skipping unsafe link %r → %r", member.name, member.linkname,
+                if _member_is_special(member):
+                    raise RestoreError(
+                        f"archive contains a device or fifo member: {member.name!r}"
                     )
-                    if skipped is not None:
-                        skipped.append(f"{member.name} → {member.linkname}")
-                    continue
                 relative = member.name[len(prefix):] if member.name != archive_subpath else ""
                 if not relative:
                     if not member.isdir():
@@ -322,7 +421,53 @@ def _extract_asset_from_open(
                     # data. Observed on the Hermes QA box, not theorised.
                     extracted_any = True
                     continue
+                # The name the member will have under `staging_root`. Every
+                # check from here on is asked of THAT name — a relative link is
+                # resolved against it, and the parent it lands in is looked up
+                # by it — because that is the tree being built.
+                original_name = member.name
                 member.name = relative
+                if _member_link_unsafe(member) and not _link_target_allowed(
+                    member.linkname or "", allowed_roots,
+                ):
+                    # An absolute symlink pointing OUTSIDE anything this
+                    # archive owns. Skipped rather than aborting the whole
+                    # restore over one bad link — but RECORDED, so the caller
+                    # can say what did not come back. Dropping members and
+                    # then reporting success is the exact failure this file
+                    # is otherwise so careful about.
+                    log.warning(
+                        "skipping unsafe link %r → %r", original_name, member.linkname,
+                    )
+                    if skipped is not None:
+                        skipped.append(f"{original_name} → {member.linkname}")
+                    continue
+                if _link_escapes_root(member):
+                    # A relative link that resolves ABOVE the staging root
+                    # (`evil -> ../../..`). Left out for the same reason and
+                    # recorded the same way: were it created, the next member
+                    # named `evil/x` would be written wherever it points.
+                    log.warning(
+                        "skipping link %r → %r: it leaves the asset",
+                        original_name, member.linkname,
+                    )
+                    if skipped is not None:
+                        skipped.append(f"{original_name} → {member.linkname}")
+                    continue
+                if _parent_escapes_staging(relative, staging_root):
+                    # The member's parent, on disk, resolves outside the
+                    # staging tree: an earlier member was a link this archive
+                    # WAS allowed to make (into another vetted root), and this
+                    # one is named through it. Writing it would modify the
+                    # link's target, not the tree that is about to be swapped
+                    # in.
+                    log.warning(
+                        "skipping %r: its parent resolves outside the staging tree",
+                        original_name,
+                    )
+                    if skipped is not None:
+                        skipped.append(f"{original_name} → written through a link")
+                    continue
                 tf.extract(member, path=staging_root, **_EXTRACT_KWARGS)
                 if member.isfile():
                     bytes_extracted += member.size
@@ -676,9 +821,6 @@ def restore_snapshot(
         except agent.ARCHIVE_ERRORS as e:
             raise RestoreError(f"archive verify failed: {e}") from e
 
-        ts = int(time.time())
-        results: list[RestoredAsset] = []
-
         archive_root = str(manifest.get("archiveRoot", "")).strip()
         if not archive_root:
             raise RestoreError("manifest is missing archiveRoot")
@@ -686,18 +828,26 @@ def restore_snapshot(
         if not isinstance(assets, list) or not assets:
             raise RestoreError("manifest declares no assets to restore")
 
-        # Everything this archive declares as its own. An absolute symlink may
-        # point inside these and nowhere else.
-        allowed_roots = tuple(
-            os.path.normpath(str(a.get("sourcePath")))
-            for a in assets
-            if isinstance(a, dict) and a.get("sourcePath")
-        )
-        skipped_members: list[str] = []
-        # sqlite targets whose stale `-wal`/`-shm` need retiring, applied after
-        # every asset has landed. See the note at the call site.
-        pending_sqlite: list[Path] = []
+        # WHERE EACH ASSET LANDS IS THIS BOX'S DECISION, NOT THE MANIFEST'S.
+        # The snapshot came out of a prefix every device paired to the account
+        # can write into, and a legacy plaintext `.tar.gz` needs no passphrase
+        # at all — so `sourcePath` is an attacker-controlled string until
+        # proven otherwise, and "proven" means equal to a place this box's own
+        # agent declares (`agent.restore_roots`: the Hermes allowlist by kind,
+        # or what `openclaw backup create --dry-run` says it would archive).
+        #
+        # A PRE-PASS over EVERY asset, before a timestamp is taken or a staging
+        # directory is made: an in-loop check would let a hostile third asset
+        # be refused only after two legitimate ones had been moved aside, and a
+        # rollback is not the same as never having moved.
+        try:
+            roots = agent.restore_roots(cfg)
+        except agent.ARCHIVE_ERRORS as e:
+            raise RestoreError(
+                f"could not learn where this box keeps its agent state: {e}",
+            ) from e
 
+        vetted: list[_VettedAsset] = []
         for asset in assets:
             if not isinstance(asset, dict):
                 raise RestoreError(f"manifest asset is not an object: {asset!r}")
@@ -715,22 +865,50 @@ def restore_snapshot(
             entry = str(asset.get("entry") or "dir")
             if entry not in ("dir", "file"):
                 raise RestoreError(f"manifest asset {kind!r} has unknown entry {entry!r}")
+            sqlite = bool(asset.get("sqlite"))
+            try:
+                agent.assert_destination_allowed(
+                    kind, entry, source_path, roots=roots, sqlite=sqlite,
+                )
+            except agent.DestinationRefusedError as e:
+                raise RestoreError(str(e)) from e
+            vetted.append(_VettedAsset(
+                kind=kind,
+                target=Path(source_path),
+                archive_subpath=archive_subpath,
+                entry=entry,
+                sqlite=sqlite,
+            ))
 
-            target = Path(source_path)
+        # Everything this archive is ALLOWED to own — the vetted destinations,
+        # never the raw `sourcePath` field. An absolute symlink may point
+        # inside these and nowhere else.
+        allowed_roots = tuple(str(v.target) for v in vetted)
+        skipped_members: list[str] = []
+        # sqlite targets whose stale `-wal`/`-shm` need retiring, applied after
+        # every asset has landed. See the note at the call site.
+        pending_sqlite: list[Path] = []
+
+        ts = int(time.time())
+        results: list[RestoredAsset] = []
+
+        for v in vetted:
+            kind = v.kind
+            target = v.target
             asset_staging = _staging_beside(target, kind=kind, ts=ts)
             sibling_stagings.append(asset_staging)
             log.info("extracting asset %s → %s", kind, asset_staging)
             try:
                 bytes_restored, swap_source = _extract_asset(
                     archive_path,
-                    archive_subpath=archive_subpath,
+                    archive_subpath=v.archive_subpath,
                     staging_root=asset_staging,
-                    entry=entry,
+                    entry=v.entry,
                     allowed_roots=allowed_roots,
                     skipped=skipped_members,
                 )
                 backup = _swap_into_place(swap_source, target, ts=ts)
-                if asset.get("sqlite"):
+                if v.sqlite:
                     # DEFERRED, not done here. Retiring the sidecars is the one
                     # step in this loop that `_rollback_swaps` cannot reverse,
                     # and the thing it would destroy is the newest data on the

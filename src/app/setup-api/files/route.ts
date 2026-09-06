@@ -5,6 +5,8 @@ import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
+import { boundedBody } from "@/lib/bounded-body";
+import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 
 function formatBytes(bytes: number): string {
@@ -14,13 +16,93 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
-function getAvailableDiskBytes(dir: string): number {
+// Once per process, not per request: a filesystem statfs cannot read is a
+// property of the box, and a line per upload would only bury the one that
+// says so.
+let warnedUnmeasurable = false;
+
+/**
+ * Bytes free on the disk `dir` sits on — the DESTINATION's disk, never the
+ * checkout's, or an NVMe/SD split box gets the wrong number — or null when
+ * statfs will not say. Null is deliberately not 0: "no room" and "could not
+ * look" have different answers below, and the old 0 refused every declared
+ * upload on a box whose statfs failed, with a message that said the disk was
+ * full.
+ */
+function measureAvailableDiskBytes(dir: string): number | null {
   try {
     const stat = fs.statfsSync(dir);
     return stat.bavail * stat.bsize;
   } catch {
-    return 0;
+    if (!warnedUnmeasurable) {
+      warnedUnmeasurable = true;
+      console.warn("[files] could not measure free space; uploads proceed without the disk reserve");
+    }
+    return null;
   }
+}
+
+/** The listing's `availableSpace`, which has always said 0 when nothing could be measured. */
+function getAvailableDiskBytes(dir: string): number {
+  return measureAvailableDiskBytes(dir) ?? 0;
+}
+
+/** Bytes an upload into `dir` may add before the disk drops under the box's reserve; null when the disk will not say. */
+function uploadRoom(dir: string): number | null {
+  const available = measureAvailableDiskBytes(dir);
+  return available === null ? null : Math.max(0, available - DISK_FREE_RESERVE_BYTES);
+}
+
+// How often a running upload asks the disk again. A budget measured once at
+// request start is not a bound: two uploads at once (the owner's window and
+// the agent's bearer, or a script that never waits) are each granted the
+// whole room and together cross the reserve. 64 MiB is one statfs per few
+// hundred milliseconds of a LAN upload — cheap — and far under the reserve,
+// so nothing can slip a reserve's worth past between two measurements.
+const REMEASURE_EVERY_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The ceiling `boundedBody` asks on every chunk: the bytes already through
+ * plus the room the disk reports NOW, re-read every `REMEASURE_EVERY_BYTES`.
+ * The bytes through are near enough on disk — what the write stream still
+ * holds is tens of kilobytes against a half-gigabyte reserve. A disk statfs
+ * cannot read gets no ceiling at all (Infinity), the way a project import
+ * proceeds when `freeBytes` answers null: refusing every upload on such a
+ * box would make the Files app unusable to fix a problem it did not cause.
+ */
+function uploadBudget(dir: string): (bytesPassed: number) => number {
+  let ceiling = Infinity;
+  let measuredAt = -Infinity;
+  return (bytesPassed) => {
+    if (bytesPassed - measuredAt >= REMEASURE_EVERY_BYTES) {
+      measuredAt = bytesPassed;
+      const room = uploadRoom(dir);
+      ceiling = room === null ? Infinity : bytesPassed + room;
+    }
+    return ceiling;
+  };
+}
+
+// What a multipart body carries beyond the file itself: boundaries, part
+// headers, the two fields the limits allow. The body meter grants it on top of
+// the disk's room so a file that fits exactly is not refused for its framing.
+const MULTIPART_HEADROOM_BYTES = 1024 * 1024;
+
+// An upload the route turned away, with the status the caller reads and a
+// code a screen can act on. Anything else that escapes the promise below is
+// ours — a permission problem, a genuine write error — and stays a 500.
+class UploadRefused extends Error {
+  constructor(message: string, readonly status: number, readonly code: string) {
+    super(message);
+    this.name = "UploadRefused";
+  }
+}
+
+const DISK_FULL = `Not enough disk space: the upload would leave the disk under its ${formatBytes(DISK_FREE_RESERVE_BYTES)} reserve.`;
+
+function refusal(err: unknown): { status: number; body: { error: string; code: string } } {
+  if (err instanceof UploadRefused) return { status: err.status, body: { error: err.message, code: err.code } };
+  return { status: 500, body: { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}`, code: "upload_failed" } };
 }
 
 export const dynamic = "force-dynamic";
@@ -215,18 +297,84 @@ export async function POST(req: NextRequest) {
     if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
     if (!fs.existsSync(abs)) fs.mkdirSync(abs, { recursive: true });
 
+    // Two bounds, because the finding was two holes. Busboy's `limits` count
+    // the parts, files and fields (a thousand-part body used to open a
+    // thousand write streams and report the last), and the body meter holds
+    // the bytes to the disk's room, re-measured as it goes. The file limit is
+    // the room measured ONCE plus busboy's one sentinel byte, so a file that
+    // fits exactly is accepted whole and only a larger one trips `limit`; the
+    // meter around the source carries the framing's headroom and is what
+    // notices a disk that filled from elsewhere while this upload ran.
+    const room = uploadRoom(abs);
+    const bounded = boundedBody(req.body, {
+      limit: (() => {
+        const budget = uploadBudget(abs);
+        return (passed: number) => {
+          const ceiling = budget(passed);
+          return ceiling === Infinity ? Infinity : ceiling + MULTIPART_HEADROOM_BYTES;
+        };
+      })(),
+      message: DISK_FULL,
+    });
+
+    // Every path a write was opened on, so a failure — at any part, from any
+    // cause — unlinks all of them and not only the last. Hoisted with the
+    // writes so the cleanup can wait for each stream to stop before unlinking:
+    // an unlink that races a write just gets the bytes written back under it.
+    const written: string[] = [];
+    const pendingWrites: Promise<unknown>[] = [];
     try {
       const result = await new Promise<{ name: string; path: string }>((resolve, reject) => {
-        const busboy = Busboy({ headers: { "content-type": contentType } });
+        const busboy = Busboy({
+          headers: { "content-type": contentType },
+          limits: {
+            files: 1,
+            parts: 4,
+            fields: 2,
+            fieldSize: 1024,
+            fileSize: room === null ? Infinity : room + 1,
+          },
+        });
         let fileName = "";
         let absPath = "";
         const fileWrites: Promise<void>[] = [];
         let settled = false;
+        let activeFileStream: Readable | null = null;
+        let activeWrite: fs.WriteStream | null = null;
+        // Assigned once the body is adapted, below; nothing can emit before
+        // `pipe`, so it is never still null by the time an abort can fire.
+        let nodeStream: Readable | null = null;
 
-        const rejectOnce = (error: unknown) => {
+        /**
+         * The single way this upload fails. Rejecting alone stops nothing —
+         * busboy's `fileSize` limit TRUNCATES: it raises `limit` on the part,
+         * ends the stream, and the pipeline then resolves on a cut file that
+         * this route would have answered `ok: true` for. And a source that
+         * dies mid-part leaves busboy and the write alive, the write never
+         * settles, and the route answers nothing at all (the attachments
+         * route's documented hang). So every limit, parser, part, write and
+         * source error comes through here and tears down all three stages
+         * before rejecting. Idempotent, because the teardown makes the other
+         * handlers fire in turn.
+         */
+        const fail = (error: unknown) => {
           if (settled) return;
           settled = true;
-          reject(error);
+          const cause = error instanceof Error ? error : new Error(String(error));
+          // The claim is synchronous, the teardown one tick later: busboy
+          // emits `limit` from inside its own write loop and touches the part
+          // it just emitted on right after (busboy 1.6.0, multipart.js:480),
+          // so destroying it from within the handler throws inside the parser
+          // — an unhandled rejection, with the caller still answered. Nothing
+          // can resolve in the gap, because `settled` is already taken.
+          process.nextTick(() => {
+            nodeStream?.unpipe(busboy);
+            nodeStream?.destroy();
+            activeFileStream?.destroy(cause);
+            activeWrite?.destroy(cause);
+            busboy.destroy();
+            reject(error);
+          });
         };
 
         const resolveOnce = () => {
@@ -235,31 +383,59 @@ export async function POST(req: NextRequest) {
           resolve({ name: fileName, path: absPath });
         };
 
+        const tooMany = (what: string) => () => fail(new UploadRefused(`Too many multipart parts: ${what}`, 413, "too_many_parts"));
+        busboy.on("filesLimit", tooMany("one file per request"));
+        busboy.on("partsLimit", tooMany("at most four parts"));
+        busboy.on("fieldsLimit", tooMany("at most two fields"));
+
         busboy.on("file", (_field, fileStream, info) => {
+          activeFileStream = fileStream as unknown as Readable;
+          fileStream.on("error", fail);
           fileName = info.filename;
           const destPath = safePath(path.join(dir, fileName));
           if (!destPath) {
             fileStream.resume();
-            rejectOnce(new Error("Invalid destination"));
+            fail(new UploadRefused("Invalid destination", 400, "invalid_destination"));
             return;
           }
           absPath = destPath;
+          // The truncation trap: without this, an oversize part is cut at
+          // the limit, the pipeline resolves, and the caller is told the
+          // upload worked.
+          fileStream.on("limit", () => fail(new UploadRefused(DISK_FULL, 507, "disk_full")));
           const ws = fs.createWriteStream(destPath);
+          activeWrite = ws;
+          written.push(destPath);
           const writePromise = pipeline(fileStream, ws).then(() => {});
           fileWrites.push(writePromise);
-          writePromise.catch(rejectOnce);
+          pendingWrites.push(writePromise);
+          writePromise.catch(fail);
         });
+        // No file part is not an error here and never was: the answer is
+        // `ok: true` with an empty name, and callers read it that way.
         busboy.on("finish", () => {
-          void Promise.all(fileWrites).then(resolveOnce).catch(rejectOnce);
+          void Promise.all(fileWrites).then(resolveOnce).catch(fail);
         });
-        busboy.on("error", rejectOnce);
+        busboy.on("error", fail);
 
-        const nodeStream = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
-        nodeStream.pipe(busboy);
+        const source = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
+        nodeStream = source;
+        source.on("error", (err) => {
+          fail(bounded.overflowed() ? new UploadRefused(DISK_FULL, 507, "disk_full") : err);
+        });
+        source.pipe(busboy);
       });
       return NextResponse.json({ ok: true, name: result.name, path: result.path });
     } catch (err) {
-      return NextResponse.json({ error: `Upload failed: ${err instanceof Error ? err.message : err}` }, { status: 500 });
+      // A refused upload must not leave a partial file behind: the caller is
+      // told nothing landed, and a later upload of the same name would
+      // silently inherit whatever bytes did.
+      await Promise.allSettled(pendingWrites);
+      for (const p of written) {
+        try { await fsp.unlink(p); } catch { /* best effort */ }
+      }
+      const { status, body } = refusal(err);
+      return NextResponse.json(body, { status });
     }
   }
 
@@ -305,21 +481,34 @@ export async function PUT(req: NextRequest) {
 
   if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
 
-  // Check disk space before writing
+  // Content-Length is worth believing when it is offered — an honest client
+  // is turned away before a byte is read — but it is a courtesy, not a bound:
+  // a chunked body declares nothing, and a dishonest one declares whatever
+  // gets it past this line. The metered write below is what actually holds,
+  // and it measures against the box's reserve, not the raw free space.
   const contentLength = parseInt(req.headers.get("content-length") ?? "0", 10);
-  const available = getAvailableDiskBytes(abs);
-  if (contentLength > 0 && contentLength > available) {
-    const avail = formatBytes(available);
+  const room = uploadRoom(abs);
+  if (contentLength > 0 && room !== null && contentLength > room) {
+    const avail = formatBytes(room);
     const need = formatBytes(contentLength);
-    return NextResponse.json({ error: `Not enough disk space. Need ${need}, only ${avail} available.` }, { status: 507 });
+    return NextResponse.json(
+      { error: `Not enough disk space. Need ${need}, only ${avail} available.`, code: "disk_full" },
+      { status: 507 },
+    );
   }
 
+  const bounded = boundedBody(req.body, { limit: uploadBudget(abs), message: DISK_FULL });
   try {
-    const nodeReadable = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
+    const nodeReadable = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
     await pipeline(nodeReadable, fs.createWriteStream(destPath));
   } catch (err) {
+    // Whatever landed comes off the disk either way; only the STATUS differs,
+    // and it is decided by the meter's flag, never by the error's text — the
+    // pipeline surfaces the cut-off as a plain rejection indistinguishable
+    // from a genuine write error.
     try { fs.unlinkSync(destPath); } catch { /* cleanup best-effort */ }
-    return NextResponse.json({ error: `Upload failed: ${err instanceof Error ? err.message : err}` }, { status: 500 });
+    const { status, body } = refusal(bounded.overflowed() ? new UploadRefused(DISK_FULL, 507, "disk_full") : err);
+    return NextResponse.json(body, { status });
   }
   return NextResponse.json({ ok: true, name });
 }

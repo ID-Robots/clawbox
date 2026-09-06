@@ -6,9 +6,19 @@ Wants=NetworkManager.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-EnvironmentFile=-/home/clawbox/clawbox/data/network.env
-ExecStart=/home/clawbox/clawbox/scripts/start-ap.sh
-ExecStop=/home/clawbox/clawbox/scripts/stop-ap.sh
+# ROOT-OWNED inputs only. This unit has no User=, so everything named below
+# runs as root — and /home/clawbox/clawbox is clawbox-owned and clawbox-writable
+# (install.sh chowns the whole tree after every git reset). The scripts are the
+# copies install_root_libexec puts under /usr/local/libexec/clawbox, and the
+# environment is /etc/clawbox/network.env, the root-owned twin step_network_setup
+# writes beside data/network.env (the same file clawbox-root-update@.service
+# reads). Loading the data/ copy let a clawbox-level foothold hand root a
+# BASH_ENV or LD_PRELOAD line; ExecStart on the tree copy let it hand root the
+# whole script. In test mode the /etc copy also carries CLAWBOX_TEST_MODE=1,
+# which neither script reads — harmless. TASK-445 follow-up (security scan #21).
+EnvironmentFile=-/etc/clawbox/network.env
+ExecStart=/usr/local/libexec/clawbox/start-ap.sh
+ExecStop=/usr/local/libexec/clawbox/stop-ap.sh
 
 [Install]
 WantedBy=multi-user.target

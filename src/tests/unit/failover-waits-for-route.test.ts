@@ -865,6 +865,61 @@ describe("the dispatcher hands the restart to the waiter rather than firing it",
     expect(deferred()).toHaveLength(0);
   });
 
+  it("raises the recovery hotspot from the root-owned copy, never from the tree", async () => {
+    // Security scan #21. This hook runs as ROOT from NetworkManager's
+    // dispatcher.d, and when no saved WiFi profile will connect it starts the
+    // setup hotspot as a last resort. START_AP used to be derived from
+    // $CLAWBOX_ROOT/scripts — the clawbox-owned tree — so a planted start-ap.sh
+    // there was root code on the next failed failover. The copy it runs now is
+    // the libexec one (the sandbox stands in through CLAWBOX_START_AP, exactly
+    // as it does for the waiter), and a start-ap.sh planted where the old
+    // derivation looked must stay untouched.
+    makeBox({ connectivity: ["none"], defaultRoute: false });
+    // A saved profile that will not come up: the only way to the recovery arm.
+    writeFileSync(path.join(bin, "nmcli"), `#!/usr/bin/env bash
+echo "nmcli $*" >> ${JSON.stringify(path.join(root, "calls.log"))}
+case "$*" in
+  *"networking connectivity"*) echo none ;;
+  *"NAME,TYPE,AUTOCONNECT-PRIORITY"*) echo "Home:802-11-wireless:10" ;;
+  *"connection up"*) exit 1 ;;
+  *) exit 0 ;;
+esac`, { mode: 0o755 });
+    const witness = path.join(root, "libexec", "start-ap.sh");
+    writeFileSync(witness, `#!/usr/bin/env bash\ntouch ${JSON.stringify(path.join(root, "AP-STARTED"))}\n`, { mode: 0o755 });
+    writeFileSync(path.join(root, "scripts", "start-ap.sh"),
+      `#!/usr/bin/env bash\ntouch ${JSON.stringify(path.join(root, "TREE-AP-STARTED"))}\n`, { mode: 0o755 });
+
+    runDispatcher("eth0", "down", { CLAWBOX_START_AP: witness });
+
+    // The launch is backgrounded, so allow the child a moment to land.
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(path.join(root, "AP-STARTED")) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(existsSync(path.join(root, "AP-STARTED")), "the recovery hotspot was not started").toBe(true);
+    expect(existsSync(path.join(root, "TREE-AP-STARTED")), "root ran the clawbox-writable tree copy").toBe(false);
+    expect(journalLines("Recovery AP launch dispatched")).toHaveLength(1);
+  });
+
+  it("says so, rather than reaching for the tree copy, when the root-owned start-ap.sh is missing", async () => {
+    makeBox({ connectivity: ["none"], defaultRoute: false });
+    writeFileSync(path.join(bin, "nmcli"), `#!/usr/bin/env bash
+case "$*" in
+  *"networking connectivity"*) echo none ;;
+  *"NAME,TYPE,AUTOCONNECT-PRIORITY"*) echo "Home:802-11-wireless:10" ;;
+  *"connection up"*) exit 1 ;;
+  *) exit 0 ;;
+esac`, { mode: 0o755 });
+    writeFileSync(path.join(root, "scripts", "start-ap.sh"),
+      `#!/usr/bin/env bash\ntouch ${JSON.stringify(path.join(root, "TREE-AP-STARTED"))}\n`, { mode: 0o755 });
+
+    runDispatcher("eth0", "down", { CLAWBOX_START_AP: path.join(root, "libexec", "not-installed.sh") });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(existsSync(path.join(root, "TREE-AP-STARTED"))).toBe(false);
+    expect(journalLines("not-installed.sh missing")).toHaveLength(1);
+  });
+
   it("ignores every transition of the box's own recovery AP", async () => {
     // The AP is not a network this box got onto — it is the one it is
     // offering, with no default route. ap-watchdog.sh re-raises it every ~20 s

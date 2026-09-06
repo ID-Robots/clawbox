@@ -14,6 +14,7 @@ import {
   getPreferences,
   getSystemInfo,
   getSystemStats,
+  loginSessionCookie,
   setHotspot,
   setPreferences,
 } from "./helpers/setup-api";
@@ -196,12 +197,16 @@ test.describe("settings actions", () => {
   });
 
   test("Preferences — persist installed apps list across writes", async () => {
+    // installed_* writes need the OWNER's cookie even under CLAWBOX_TEST_MODE:
+    // the route refuses the MCP bearer on that prefix and has no test-mode
+    // path, on purpose (the bearer is what a prompt-injected turn holds).
+    const cookie = await loginSessionCookie();
     const initial = (await getPreferences()) as { installed_apps?: string[] };
     const previous = initial.installed_apps ?? [];
-    await setPreferences({ installed_apps: [...previous, "settings-test-app"] });
+    await setPreferences({ installed_apps: [...previous, "settings-test-app"] }, cookie);
     const after = (await getPreferences()) as { installed_apps?: string[] };
     expect(after.installed_apps).toContain("settings-test-app");
     // Restore.
-    await setPreferences({ installed_apps: previous });
+    await setPreferences({ installed_apps: previous }, cookie);
   });
 });

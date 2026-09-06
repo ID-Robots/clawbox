@@ -160,6 +160,12 @@ ASSETS: tuple[HermesAsset, ...] = (
     HermesAsset("identity", "agent-identity", root="clawbox"),
 )
 
+#: The same allowlist keyed by kind, for RESTORE: a manifest asset's `kind` is
+#: looked up here and its destination, entry shape and sqlite flag are pinned
+#: to what THIS module would have written for that kind — the manifest never
+#: gets to say where a kind lands (`clawkeep.agent.assert_destination_allowed`).
+ASSETS_BY_KIND: dict[str, HermesAsset] = {a.kind: a for a in ASSETS}
+
 #: Only these assets survive `only_config=True` — the "just the settings"
 #: backup the config flag promises. Credentials are NOT among them: a
 #: config-only snapshot is the one a customer is most likely to hand to

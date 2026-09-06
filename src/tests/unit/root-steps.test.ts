@@ -201,6 +201,114 @@ describe("root-executed paths are outside clawbox's write access", () => {
       .toBeLessThan(grantAt);
   });
 
+  it("never lets a root unit exec or source the clawbox-writable tree", () => {
+    // Security scan #21 / the #8 residual. The rule above covered ONE unit and
+    // the sudoers grants; clawbox-ap.service, clawbox-ap-watchdog.service (root,
+    // ExecStart on scripts/ the tree, fired every 20 s by its timer) and their
+    // EnvironmentFile= on data/network.env were never looked at, which is how a
+    // zero-privilege clawbox → root path survived TASK-445. Generic now: every
+    // config/*.service and *.timer WITHOUT a User= runs as root, and nothing it
+    // executes or loads may live under /home/clawbox.
+    const configDir = path.join(REPO, "config");
+    const units = fs.readdirSync(configDir).filter((f) => /\.(service|timer)$/.test(f));
+    expect(units.length).toBeGreaterThan(0);
+    // No exemptions. clawbox-heartbeat.service used to be the one: it loaded
+    // its own credential from data/ into root's curl under ProtectHome=yes,
+    // which is the same class (systemd filters neither ownership nor variable
+    // names, so an LD_PRELOAD line in that file would have reached root's
+    // curl on the timer's next tick); it runs as `User=clawbox` now, which
+    // this loop verifies by skipping it.
+    const DIRECTIVES = /^(ExecStart|ExecStartPre|ExecStartPost|ExecStop|ExecStopPost|ExecReload|EnvironmentFile)=(.+)$/gm;
+    let rootUnits = 0;
+    for (const unit of units) {
+      const text = read(path.join(configDir, unit));
+      if (/^User=/m.test(text) || /^DynamicUser=yes$/m.test(text)) continue;
+      rootUnits += 1;
+      for (const m of text.matchAll(DIRECTIVES)) {
+        const [, , raw] = m;
+        // systemd's own prefixes: `-` (optional), `+`/`!`/`!!` (privilege), `@`
+        // (argv[0]), `:` (no env expansion).
+        const value = raw.trim().replace(/^[-+!@:]+/, "");
+        expect(value.startsWith("/home/clawbox"), `${unit} runs root over a clawbox-writable path: ${m[0]}`)
+          .toBe(false);
+        expect(value, `${unit}: ${m[0]}`).not.toContain("$PROJECT_DIR");
+      }
+    }
+    expect(rootUnits, "the two AP units and the root-step template at least").toBeGreaterThanOrEqual(3);
+  });
+
+  it("installs, root-owned, every libexec script a root unit names", () => {
+    // A unit pointing at /usr/local/libexec/clawbox/x.sh that install.sh never
+    // puts there is a hotspot that cannot start — the failure the ordering pin
+    // in install-post-update-units.test.ts is about, in its permanent form.
+    const configDir = path.join(REPO, "config");
+    const sh = read(INSTALL_SH);
+    const libexecFn = sh.slice(sh.indexOf("install_root_libexec() {"));
+    const body = libexecFn.slice(0, libexecFn.indexOf("\n}"));
+    for (const unit of fs.readdirSync(configDir).filter((f) => /\.service$/.test(f))) {
+      const text = read(path.join(configDir, unit));
+      if (/^User=/m.test(text)) continue;
+      for (const m of text.matchAll(/^Exec(?:Start|Stop|StartPre)=(?:[-+!@:]+)?(\/usr\/local\/libexec\/clawbox\/(\S+))/gm)) {
+        expect(body, `${unit} names ${m[1]} but install_root_libexec does not install it`).toContain(m[2]);
+      }
+    }
+  });
+
+  it("keeps the AP units' environment on the root-owned twin of data/network.env", () => {
+    // Moving the scripts alone would not have been enough: ap-watchdog.sh takes
+    // CLAWBOX_START_AP from its environment (for the tests' witness), so an
+    // EnvironmentFile clawbox can write would have been the same hole by
+    // another name. /etc/clawbox/network.env is root 0644, written by
+    // step_network_setup beside the data/ copy, and already what
+    // clawbox-root-update@.service loads.
+    for (const unit of ["clawbox-ap.service", "clawbox-ap-watchdog.service"]) {
+      const text = read(path.join(REPO, "config", unit));
+      const envFiles = [...text.matchAll(/^EnvironmentFile=(.+)$/gm)].map((m) => m[1]);
+      expect(envFiles, unit).toEqual(["-/etc/clawbox/network.env"]);
+    }
+    expect(read(INSTALL_SH)).toContain("> /etc/clawbox/network.env");
+  });
+
+  it("points the other root readers of start-ap.sh at the root-owned copy", () => {
+    // The NetworkManager dispatcher hook (root, from dispatcher.d) and the
+    // watchdog both used to derive START_AP from $CLAWBOX_ROOT/scripts.
+    for (const name of ["nm-dispatcher-failover.sh", "ap-watchdog.sh"]) {
+      const src = read(path.join(REPO, "scripts", name));
+      const m = /^START_AP="([^"]*)"$/m.exec(src);
+      expect(m, `${name}: START_AP assignment`).not.toBeNull();
+      expect(m![1], name).toBe("${CLAWBOX_START_AP:-/usr/local/libexec/clawbox/start-ap.sh}");
+    }
+    // scripts/recover.sh and step_recover fall back to the tree copy ONLY when
+    // the libexec one is absent (recovery must work mid-migration); the libexec
+    // copy is the one tried first.
+    const recover = read(path.join(REPO, "scripts", "recover.sh"));
+    expect(recover.indexOf("/usr/local/libexec/clawbox/start-ap.sh"))
+      .toBeLessThan(recover.indexOf("/home/clawbox/clawbox/scripts/start-ap.sh"));
+    const sh = read(INSTALL_SH);
+    const stepRecover = sh.slice(sh.indexOf("step_recover() {"));
+    const recoverBody = stepRecover.slice(0, stepRecover.indexOf("\n}"));
+    expect(recoverBody).toContain('"$ROOT_LIBEXEC_DIR/start-ap.sh"');
+    expect(recoverBody.indexOf("$ROOT_LIBEXEC_DIR/start-ap.sh"))
+      .toBeLessThan(recoverBody.indexOf("$PROJECT_DIR/scripts/start-ap.sh"));
+  });
+
+  it("writes the first-boot VNC unit against the root-owned copy, not the tree", () => {
+    // install.sh writes clawbox-firstboot-vnc.service from a heredoc (root, no
+    // User=). It used to name $PROJECT_DIR/scripts/… and `chown root:root` that
+    // file, which the tree-wide chown undid after every git reset.
+    const sh = read(INSTALL_SH);
+    const start = sh.indexOf("<<FIRSTBOOTVNC");
+    expect(start).toBeGreaterThan(-1);
+    const heredoc = sh.slice(start, sh.indexOf("\nFIRSTBOOTVNC", start));
+    expect(heredoc).not.toMatch(/^User=/m);
+    for (const m of heredoc.matchAll(/^Exec(?:Start|StartPre|Stop)=(.+)$/gm)) {
+      expect(m[1], `firstboot-vnc: ${m[0]}`).not.toContain("$PROJECT_DIR");
+      expect(m[1], `firstboot-vnc: ${m[0]}`).not.toContain("/home/clawbox");
+    }
+    expect(heredoc).toContain("ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh");
+    expect(sh).not.toContain('chown root:root "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"');
+  });
+
   it("gates install.sh's self-update on an explicit opt-in", () => {
     const sh = read(INSTALL_SH);
     expect(sh).toContain("CLAWBOX_ALLOW_SELF_UPDATE");

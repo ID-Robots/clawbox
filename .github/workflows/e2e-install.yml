@@ -98,12 +98,25 @@ jobs:
           platforms: arm64
 
       # Real AI-provider credentials are injected via repo secrets. The test
-      # steps that need them skip gracefully when the env var is empty, so
+      # steps that need them skip gracefully when the file is absent, so
       # forks without secrets still get meaningful coverage. Values are
       # passed through env vars and written via printf so a secret that
       # happens to contain the EOF token or other heredoc-breaking bytes
       # can't truncate the resulting .env file.
+      #
+      # Never on a pull_request run: this job checks out the PR HEAD and then
+      # runs its playwright.config.ts, global-setup.ts and specs on the host
+      # with this file beside them, so a same-repo PR branch could read the
+      # file and send it anywhere. A same-repo PR now behaves exactly like a
+      # fork PR; the credentialed specs run on the schedule and on dispatch.
+      # (A gate in this file is only hygiene — the PR head supplies the
+      # workflow too — which is why these secrets also belong in a GitHub
+      # Environment restricted to beta/main, not at repository scope.)
+      # Nothing reads CLAWBOX_UPGRADE_TARGET_BRANCH from the file — the
+      # updater spec reads process.env, set by the job-level env above — so
+      # the whole step is skipped rather than split.
       - name: Write .env.test
+        if: ${{ github.event_name != 'pull_request' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

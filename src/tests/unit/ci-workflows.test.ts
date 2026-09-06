@@ -545,3 +545,67 @@ describe("what the PR-comment jobs render", () => {
     expect(s.icon, "a skipped run carries the failure icon").not.toBe("❌");
   });
 });
+
+/**
+ * Repository secrets on a pull_request run.
+ *
+ * e2e-install.yml checks out the PR HEAD on a `pull_request` event and then
+ * runs that head's playwright.config.ts, global-setup.ts and specs on the
+ * host. Its "Write .env.test" step used to run unconditionally, putting
+ * `secrets.CLAWBOX_AI_API_KEY` and `secrets.TELEGRAM_BOT_TOKEN` in a file
+ * beside code the PR controls — so a same-repo branch (a fork never gets the
+ * secrets on this trigger) could read the file and send it anywhere. The
+ * updater spec reads CLAWBOX_UPGRADE_TARGET_BRANCH from process.env, and
+ * both `loadEnvTest()` helpers answer `{}` when the file is absent, so the
+ * whole step is gated rather than split.
+ *
+ * This is hygiene, not the fence: the PR head supplies the workflow file too,
+ * so the secrets also have to leave repository scope (a GitHub Environment
+ * restricted to beta/main) — a settings change no test here can see.
+ */
+describe("secrets never reach a pull_request run", () => {
+  const yml = read(".github/workflows/e2e-install.yml");
+  // Comments removed first — the step's own doc comment quotes `secrets` and
+  // the pattern, and must satisfy nothing. Then the file cut into steps, the
+  // PREAMBLE kept: the workflow-level and job-level `env:` blocks sit before
+  // the first step, and a `secrets.X` moved into the job's env would be
+  // inherited by the suite step — the exact regression a step-only walk
+  // could not see.
+  const text = yml.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  const [preamble, ...steps] = text.split(/^ *- (?=name:|uses:|run:)/m);
+  const stepName = (step: string) => /^name: (.*)$/m.exec(step)?.[1] ?? step.split("\n")[0];
+  // `secrets.GITHUB_TOKEN` is the per-run token GitHub scopes itself — read-
+  // only on a fork PR, harmless on any pull_request — and not the class this
+  // guard is about. (Convention in this file is `github.token`; a step that
+  // names it through `secrets.` is exempt here rather than failed over it.)
+  const SECRET = /secrets\.(?!GITHUB_TOKEN\b)/;
+  const gated = (step: string) => /^\s+if:.*github\.event_name != 'pull_request'/m.test(step);
+  const count = (s: string) => (s.match(new RegExp(SECRET.source, "g")) ?? []).length;
+
+  it("gates every step that reads a secret on the event not being a pull_request", () => {
+    const withSecrets = steps.filter((step) => SECRET.test(step));
+    expect(withSecrets.length, "no step reads a secret — the guard has nothing to guard").toBeGreaterThan(0);
+    for (const step of withSecrets) {
+      expect(gated(step), `step "${stepName(step)}" reads a secret and can run on a pull_request`).toBe(true);
+    }
+  });
+
+  it("keeps every secret inside a gated step — none in the workflow or job env", () => {
+    expect(preamble, "a secret is read outside every step (a workflow- or job-level env), where the suite step inherits it")
+      .not.toMatch(SECRET);
+    // Every occurrence in the file is accounted for by a gated step: a secret
+    // that reached a step this splitter does not recognise would show here.
+    const inGatedSteps = steps.filter(gated).reduce((n, step) => n + count(step), 0);
+    expect(count(text), "a secret is read somewhere no gated step covers").toBe(inGatedSteps);
+  });
+
+  it("runs the PR head's playwright suite in a step that reads no secret", () => {
+    const suite = steps.filter((step) => step.includes("playwright test --config e2e-install/playwright.config.ts"));
+    expect(suite.length, "the e2e-install suite step is gone").toBe(1);
+    expect(suite[0], "the suite step, which executes PR-controlled code, reads a secret").not.toMatch(SECRET);
+  });
+
+  it("does not hand a fork's PR the secrets through pull_request_target either", () => {
+    expect(yml).not.toMatch(/^\s+pull_request_target:/m);
+  });
+});

@@ -3,8 +3,22 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { setMany } from "@/lib/config-store";
 import { getSessionSigningSecret, createSessionCookie, getSessionGeneration } from "@/lib/auth";
+import { requireSession } from "@/lib/route-auth";
 
-export async function POST() {
+export async function POST(request: Request) {
+  // Second line of defence, the same one setup/reset carries. Middleware's
+  // bootstrap allow-list (src/lib/setup-api-gate.ts) already keeps this route
+  // shut to an anonymous caller — but a handler that mints a 24 h owner
+  // session on the strength of that list alone falls open the day the list is
+  // loosened or a path reaches it around the matcher. `allowBootstrap` stays
+  // false on purpose: a box with no owner must never be marked complete, and
+  // the wizard always holds the cookie CredentialsStep minted by the time it
+  // posts here. `requireSession` (not `hasOwnerSession`) because it honours
+  // CLAWBOX_TEST_MODE, which the e2e-install harness — driving the wizard with
+  // no cookie jar, and later posting here to harvest a fresh session — relies on.
+  const unauthorized = await requireSession(request);
+  if (unauthorized) return unauthorized;
+
   try {
     const timestamp = new Date().toISOString();
     await setMany({

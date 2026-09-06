@@ -12,6 +12,7 @@ type RouteHandler = (req: NextRequest) => Promise<Response>;
 
 let filesGet: RouteHandler;
 let filesPost: RouteHandler;
+let filesPut: RouteHandler;
 
 /**
  * Build a NextRequest whose `.body` is a proper ReadableStream of multipart
@@ -69,11 +70,64 @@ function createRequest(
   return new NextRequest(new URL(`http://localhost${pathname}`), options);
 }
 
+/**
+ * A multipart body of `count` plain fields and no file — the shape that used
+ * to open nothing but cost the parser a FormData per field.
+ */
+function createMultipartFieldsRequest(pathname: string, count: number): NextRequest {
+  const boundary = "----TestBoundary" + Date.now();
+  const parts: string[] = [];
+  for (let i = 0; i < count; i++) {
+    parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="f${i}"\r\n\r\nx\r\n`);
+  }
+  parts.push(`--${boundary}--\r\n`);
+  return new NextRequest(new URL(`http://localhost${pathname}`), {
+    method: "POST",
+    headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+    body: Buffer.from(parts.join("")),
+  });
+}
+
+/**
+ * A PUT whose body is a stream, delivered in `chunk`-sized pieces, with no
+ * Content-Length at all — the chunked upload the header check never sees.
+ */
+function createChunkedPut(pathname: string, total: number, chunk = 1024, headers: Record<string, string> = {}): NextRequest {
+  let sent = 0;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent >= total) {
+        controller.close();
+        return;
+      }
+      const n = Math.min(chunk, total - sent);
+      controller.enqueue(new Uint8Array(n).fill(0x61));
+      sent += n;
+    },
+  });
+  return new NextRequest(new URL(`http://localhost${pathname}`), {
+    method: "PUT",
+    headers: { "Content-Type": "application/octet-stream", ...headers },
+    body,
+    // Node's Request needs `duplex` for a stream body; NextRequest's own
+    // RequestInit does not declare it, hence the cast.
+    duplex: "half",
+  } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+}
+
+const MiB = 1024 * 1024;
+const RESERVE = 512 * MiB;
+
+/** Make the destination disk report `room` bytes above the box's reserve. */
+function giveDiskRoom(room: number) {
+  vi.spyOn(fs, "statfsSync").mockReturnValue({ bavail: RESERVE + room, bsize: 1 } as unknown as fs.StatsFs);
+}
+
 beforeAll(async () => {
   process.env.FILES_ROOT = TEST_ROOT;
   await fsp.mkdir(TEST_ROOT, { recursive: true });
   vi.resetModules();
-  ({ GET: filesGet, POST: filesPost } = await import("@/app/setup-api/files/route"));
+  ({ GET: filesGet, POST: filesPost, PUT: filesPut } = await import("@/app/setup-api/files/route"));
 });
 
 beforeEach(async () => {
@@ -492,6 +546,135 @@ describe("POST /setup-api/files", () => {
 
       expect(res.status).toBe(400);
       expect(body.error).toBe("Invalid path");
+    });
+  });
+});
+
+// The upload sinks are bounded by the disk's FREE-SPACE RESERVE, not by a
+// fixed cap — a big file is the whole point of streaming through PUT — and the
+// reserve is measured on the destination with `statfsSync`, which these tests
+// pin to a few kilobytes above the 512 MiB the box keeps for itself.
+describe("uploads and the disk reserve", () => {
+  const room = 4096;
+
+  describe("PUT /setup-api/files", () => {
+    it("writes a body that is exactly the budget, whole", async () => {
+      giveDiskRoom(room);
+      const res = await filesPut(createChunkedPut("/setup-api/files?name=exact.bin", room, 1000));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, name: "exact.bin" });
+      expect(fs.statSync(path.join(TEST_ROOT, "exact.bin")).size).toBe(room);
+    });
+
+    it("refuses a chunked body (no Content-Length) that crosses the budget with 507 disk_full and leaves no file", async () => {
+      giveDiskRoom(room);
+      const res = await filesPut(createChunkedPut("/setup-api/files?name=big.bin", room * 4, 1000));
+      expect(res.status).toBe(507);
+      const body = await res.json();
+      expect(body.code).toBe("disk_full");
+      expect(body.error).toMatch(/Not enough disk space/);
+      expect(fs.existsSync(path.join(TEST_ROOT, "big.bin"))).toBe(false);
+    });
+
+    it("refuses a body that understates its Content-Length — the meter holds, not the header", async () => {
+      giveDiskRoom(room);
+      const res = await filesPut(createChunkedPut("/setup-api/files?name=liar.bin", room * 4, 1000, { "Content-Length": "1" }));
+      expect(res.status).toBe(507);
+      expect((await res.json()).code).toBe("disk_full");
+      expect(fs.existsSync(path.join(TEST_ROOT, "liar.bin"))).toBe(false);
+    });
+
+    it("turns an honest Content-Length over the budget away before reading a byte", async () => {
+      giveDiskRoom(room);
+      const res = await filesPut(createRequest("/setup-api/files?name=declared.bin", {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream", "Content-Length": String(room * 4) },
+        body: Buffer.alloc(room * 4),
+      }));
+      expect(res.status).toBe(507);
+      const body = await res.json();
+      expect(body.code).toBe("disk_full");
+      expect(body.error).toMatch(/Not enough disk space/);
+      expect(fs.existsSync(path.join(TEST_ROOT, "declared.bin"))).toBe(false);
+    });
+
+    it("measures the reserve on the destination and refuses when the disk is already under it", async () => {
+      vi.spyOn(fs, "statfsSync").mockReturnValue({ bavail: RESERVE - 1, bsize: 1 } as unknown as fs.StatsFs);
+      const res = await filesPut(createChunkedPut("/setup-api/files?name=one.bin", 1, 1));
+      expect(res.status).toBe(507);
+      expect(fs.existsSync(path.join(TEST_ROOT, "one.bin"))).toBe(false);
+    });
+
+    it("does not refuse every upload when statfs cannot be read — the reserve check is skipped, not failed", async () => {
+      vi.spyOn(fs, "statfsSync").mockImplementation(() => { throw new Error("ENOSYS"); });
+      const res = await filesPut(createChunkedPut("/setup-api/files?name=blind.bin", 3000, 1000, { "Content-Length": "3000" }));
+      expect(res.status).toBe(200);
+      expect(fs.statSync(path.join(TEST_ROOT, "blind.bin")).size).toBe(3000);
+    });
+  });
+
+  describe("POST /setup-api/files (multipart)", () => {
+    it("still answers ok with an empty name for a body with no file part", async () => {
+      giveDiskRoom(room);
+      const res = await filesPost(createEmptyMultipartRequest("/setup-api/files"));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, name: "", path: "" });
+    });
+
+    it("writes a part that fits the budget exactly", async () => {
+      giveDiskRoom(room);
+      const res = await filesPost(createMultipartRequest("/setup-api/files", [
+        { fieldName: "file", fileName: "fits.bin", content: Buffer.alloc(room, 0x62) },
+      ]));
+      expect(res.status).toBe(200);
+      expect(fs.statSync(path.join(TEST_ROOT, "fits.bin")).size).toBe(room);
+    });
+
+    it("refuses a part over the budget with 507 disk_full and leaves NO partial file — busboy's truncation never answers ok", async () => {
+      // busboy's fileSize limit CUTS the part and ends it; a route that forgot
+      // the `limit` event would resolve its pipeline on the cut file and say
+      // `ok: true`. That is the regression this test exists to catch.
+      giveDiskRoom(room);
+      const res = await filesPost(createMultipartRequest("/setup-api/files", [
+        { fieldName: "file", fileName: "cut.bin", content: Buffer.alloc(room * 4, 0x63) },
+      ]));
+      expect(res.status).toBe(507);
+      const body = await res.json();
+      expect(body.ok).toBeUndefined();
+      expect(body.code).toBe("disk_full");
+      expect(fs.existsSync(path.join(TEST_ROOT, "cut.bin"))).toBe(false);
+    });
+
+    it("refuses two file parts with 413 too_many_parts and writes neither", async () => {
+      giveDiskRoom(room);
+      const res = await filesPost(createMultipartRequest("/setup-api/files", [
+        { fieldName: "file", fileName: "first.txt", content: "one" },
+        { fieldName: "file", fileName: "second.txt", content: "two" },
+      ]));
+      expect(res.status).toBe(413);
+      expect((await res.json()).code).toBe("too_many_parts");
+      expect(fs.existsSync(path.join(TEST_ROOT, "second.txt"))).toBe(false);
+      expect(fs.existsSync(path.join(TEST_ROOT, "first.txt"))).toBe(false);
+    });
+
+    it("answers 413 for ten thousand tiny fields without hanging", async () => {
+      giveDiskRoom(room);
+      const started = performance.now();
+      const res = await filesPost(createMultipartFieldsRequest("/setup-api/files", 10_000));
+      expect(res.status).toBe(413);
+      expect((await res.json()).code).toBe("too_many_parts");
+      expect(performance.now() - started).toBeLessThan(5000);
+    });
+
+    it("uploads when statfs cannot be read, with no reserve applied", async () => {
+      vi.spyOn(fs, "statfsSync").mockImplementation(() => { throw new Error("ENOSYS"); });
+      const res = await filesPost(createMultipartRequest("/setup-api/files", [
+        { fieldName: "file", fileName: "blind.txt", content: Buffer.alloc(3000, 0x64) },
+      ]));
+      expect(res.status).toBe(200);
+      await vi.waitFor(() => {
+        expect(fs.statSync(path.join(TEST_ROOT, "blind.txt")).size).toBe(3000);
+      }, { timeout: 2000, interval: 50 });
     });
   });
 });

@@ -381,3 +381,15 @@ def test_restore_refuses_a_non_directory_asset_root(tmp_path: Path) -> None:
         restore_mod._extract_asset(
             archive, archive_subpath=sub, staging_root=tmp_path / "staged",
         )
+
+
+def test_every_asset_kind_is_unique_so_restore_can_pin_a_destination_by_it() -> None:
+    """`ASSETS_BY_KIND` is how restore turns a manifest's `kind` into the ONE
+    place, shape and sqlite flag this module would have archived it with. Two
+    assets sharing a kind would make that lookup ambiguous — and the manifest
+    would get to pick."""
+    kinds = [a.kind for a in hermes.ASSETS]
+    assert len(kinds) == len(set(kinds))
+    assert set(hermes.ASSETS_BY_KIND) == set(kinds)
+    for asset in hermes.ASSETS:
+        assert hermes.ASSETS_BY_KIND[asset.kind] is asset

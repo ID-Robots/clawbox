@@ -4953,8 +4953,27 @@ install_root_libexec() {
   # dispatcher on every network event, so it belongs here for exactly the reason
   # this block exists: the copy that runs must not be the one clawbox can
   # rewrite. See scripts/nm-dispatcher-failover.sh.
+  #
+  # start-ap.sh, stop-ap.sh and ap-watchdog.sh are what clawbox-ap.service and
+  # clawbox-ap-watchdog.service ExecStart as ROOT (neither has a User=), the
+  # watchdog on a 20-second timer for the life of the box; and
+  # ensure-vnc-on-first-boot.sh is what clawbox-firstboot-vnc.service runs as
+  # root after the first reboot. The units used to name the tree copies, which
+  # `chown -R clawbox` above makes clawbox-writable after every git reset — so
+  # a clawbox-level foothold was root inside twenty seconds, with no grant and
+  # no manifest check on the path (the manifest is consulted only inside the
+  # root-step dispatcher, never before systemd's own ExecStart). The tree
+  # copies STAY, executable, for the unprivileged callers: src/lib/network.ts
+  # and the hotspot route run them as clawbox through NetworkManager's polkit
+  # grants. Security scan #21 (the TASK-445 follow-up clawbox-root-step.sh's
+  # "residual" note pointed at). On the first in-app update carrying the
+  # change there is a window between the updater's git reset (new units and
+  # scripts in the tree) and post_update's first call here (the copies in
+  # libexec): the old unit runs the new ap-watchdog.sh and it stands down
+  # rather than fall back to the tree — written down in that script.
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
-             clawbox-resource-limits.sh gateway-restart-when-online.sh; do
+             clawbox-resource-limits.sh gateway-restart-when-online.sh \
+             start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
     if [ -f "$PROJECT_DIR/scripts/$src" ]; then
       install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
@@ -5275,6 +5294,16 @@ step_systemd_services() {
     fi
   done
 
+  # Root-owned copies of everything root executes on clawbox's behalf — and of
+  # everything the units copied BELOW ExecStart as root. This has to come first:
+  # clawbox-ap.service and clawbox-ap-watchdog.service name
+  # /usr/local/libexec/clawbox/{start-ap,stop-ap,ap-watchdog}.sh, and on the
+  # first in-app update carrying that change the watchdog timer (already live,
+  # firing every 20 s) would otherwise run the new unit against a copy that is
+  # not there yet. It must also run before the sudoers drop-in further down,
+  # which points at these copies. Security scan #21.
+  install_root_libexec
+
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
     local src="$PROJECT_DIR/config/$svc"
@@ -5336,9 +5365,8 @@ step_systemd_services() {
   if [ ! -x /usr/local/bin/cloudflared ]; then
     systemctl disable --now clawbox-tunnel.service >/dev/null 2>&1 || true
   fi
-  # Root-owned copies of everything root executes on clawbox's behalf. Must run
-  # BEFORE the sudoers drop-in, which points at them.
-  install_root_libexec
+  # (install_root_libexec ran at the top of this step, before the unit copies —
+  # the sudoers drop-in below points at the same root-owned copies.)
   # Install the narrow allow-list FIRST, then remove any blanket grant. In that
   # order the device is never, even briefly, without the rules the web server
   # needs: if the drop-in fails to validate we keep the old one and skip the
@@ -6520,13 +6548,27 @@ step_restart() {
 }
 
 step_restart_ap() {
+  # The unit ExecStarts the root-owned libexec copy of start-ap.sh, so this
+  # restart never opens the tree copy as root — the manifest --verify the
+  # dispatcher ran before this step covers the tree, and a rewrite of
+  # scripts/start-ap.sh between that check and the restart changes nothing
+  # root runs. Security scan #21.
   echo "Restarting clawbox-ap.service..."
   systemctl restart clawbox-ap.service
 }
 
 step_recover() {
   echo "Running ClawBox recovery..."
-  bash "$PROJECT_DIR/scripts/start-ap.sh"
+  # The root-owned copy, with the tree copy as the fallback ONLY when the
+  # libexec one is absent: recovery is the operator's last resort and must work
+  # on a box mid-migration (new tree, root step not yet run). Same rule as
+  # scripts/recover.sh. Security scan #21.
+  local start_ap="$ROOT_LIBEXEC_DIR/start-ap.sh"
+  if [ ! -x "$start_ap" ]; then
+    echo "  $start_ap missing — falling back to the tree copy (run --step systemd_services to install it)"
+    start_ap="$PROJECT_DIR/scripts/start-ap.sh"
+  fi
+  bash "$start_ap"
   systemctl restart clawbox-setup.service
   echo "Recovery complete"
 }
@@ -6923,8 +6965,13 @@ step_vnc_install() {
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
+  # ensure-vnc-on-first-boot.sh runs as ROOT from clawbox-firstboot-vnc.service
+  # below, so the unit names the root-owned libexec copy. The `chown root:root`
+  # of the tree file that used to sit here protected nothing: `chown -R clawbox`
+  # undid it after every git reset, and the directory is clawbox-writable so a
+  # rename replaced the file regardless. Security scan #21.
   chmod +x "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
-  chown root:root "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
+  [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ] || install_root_libexec
 
   # Systemd service for VNC — force virtual display mode. On headless
   # Jetsons, :0 is GDM's greeter; apps launched into it are covered by
@@ -6985,7 +7032,7 @@ ConditionPathExists=/var/lib/clawbox/ensure-vnc-on-first-boot.pending
 [Service]
 Type=oneshot
 ExecStartPre=/bin/sleep 10
-ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh
+ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh
 
 [Install]
 WantedBy=multi-user.target
@@ -7023,6 +7070,30 @@ step_vnc_refresh() {
   wait_for_apt
   if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autocutsel; then
     echo "  Warning: autocutsel install failed (non-fatal; continuing with unit refresh)"
+  fi
+
+  # A box installed before security scan #21 has a clawbox-firstboot-vnc.service
+  # whose ExecStart is the TREE copy of ensure-vnc-on-first-boot.sh, and on a box
+  # whose first-boot marker never cleared that unit still runs as root at every
+  # boot. Repoint just that line at the root-owned libexec copy. The copy is
+  # made sure of HERE (the same guard step_vnc_install uses) rather than relied
+  # on from post_update's ordering — step_resource_limits happens to run
+  # install_root_libexec before this step today, but a reorder would otherwise
+  # leave the `[ -x ]` below silently skipping the repoint for another update
+  # cycle, with root still running the tree copy at every boot. Only the
+  # ExecStart line, nothing else in the unit: the marker and the enable state
+  # are deliberately left alone, as the comment above says.
+  local firstboot_unit=/etc/systemd/system/clawbox-firstboot-vnc.service
+  if [ -f "$firstboot_unit" ] \
+     && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit"; then
+    [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ] || install_root_libexec
+  fi
+  if [ -f "$firstboot_unit" ] \
+     && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit" \
+     && [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    sed -i "s#^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$#ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh#" "$firstboot_unit"
+    systemctl daemon-reload
+    echo "  clawbox-firstboot-vnc.service repointed at $ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh"
   fi
 
   local unit_path=/etc/systemd/system/clawbox-vnc.service

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import hermes, openclaw
@@ -45,6 +46,20 @@ _EDITION_RE = re.compile(r"^\s*(?:export\s+)?CLAWBOX_EDITION\s*=\s*(.*)$")
 
 class AgentMismatchError(Exception):
     """The snapshot belongs to a different agent than this device runs."""
+
+
+class DestinationRefusedError(Exception):
+    """The manifest wants to land an asset somewhere this box's agent keeps no
+    state — or in a shape (file vs directory, sqlite) the agent never writes.
+
+    Restore's destinations used to be READ from the manifest: `sourcePath` was
+    checked to be a non-empty string and then renamed over. A snapshot is not
+    a trustworthy document — every device paired to the account can write
+    into the same prefix, and a legacy plaintext `.tar.gz` needs no passphrase
+    at all — so a manifest naming `/home/clawbox/.ssh` would have had the
+    owner's `authorized_keys` swapped out by clicking Restore. Every
+    destination is now derived LOCALLY and the manifest may only agree.
+    """
 
 
 def _parse_edition_file(raw: str) -> str | None:
@@ -155,6 +170,185 @@ def assert_archive_matches_device(manifest: dict) -> None:
         f"onto this {ours} device. Your account's backups from every paired "
         "device appear in one list — pick one made by this device.",
     )
+
+
+# ── where a restore may land ─────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class RestoreRoot:
+    """One place this box's agent keeps state, as restore may accept it."""
+
+    #: Normalised absolute path.
+    path: str
+    #: The agent's own word for it: a Hermes `ASSETS` kind, or an OpenClaw
+    #: plan kind (`state`, `config`, `credentials`, `workspace`, `agent`).
+    kind: str
+    #: `"dir"` | `"file"` — what a manifest asset landing here must declare.
+    entry: str
+    #: Whether a manifest asset landing here may carry `sqlite: true`.
+    sqlite: bool
+    #: Hermes: the manifest's kind must be THIS root's kind (exact set, keyed
+    #: by kind). OpenClaw: matched by path, kind unpinned.
+    pin_kind: bool
+
+
+@dataclass(frozen=True)
+class RestoreRoots:
+    agent: str
+    roots: tuple[RestoreRoot, ...]
+
+
+#: OpenClaw kinds whose destination may lie INSIDE a declared root rather
+#: than equal one: a per-agent root or a workspace the owner has since moved
+#: or removed from openclaw.json still sits under the state dir.
+OPENCLAW_NESTED_KINDS = frozenset({"agent", "workspace"})
+
+#: The one OpenClaw asset kind that is a single file (`openclaw.json`, when it
+#: lives outside the state dir or in a config-only snapshot).
+_OPENCLAW_FILE_KINDS = frozenset({"config"})
+
+
+def restore_roots(cfg: Config) -> RestoreRoots:
+    """Everywhere a restore on THIS box is allowed to land, derived locally.
+
+    Hermes: exactly `{source_path(a) for a in hermes.ASSETS}` — this package is
+    the only writer of a Hermes archive, so the set is closed and each root
+    carries the entry shape and sqlite flag its kind was archived with.
+
+    OpenClaw: what `openclaw backup create --dry-run --json` declares it would
+    archive today (`openclaw.plan_roots`) — resolved by the CLI under the same
+    environment it is spawned with here, so the list is by construction the
+    one a snapshot of this box was written from. Raises `OpenclawError` when
+    the CLI cannot answer; a restore then refuses rather than guessing.
+    """
+    if device_agent() == AGENT_HERMES:
+        return RestoreRoots(
+            agent=AGENT_HERMES,
+            roots=tuple(
+                RestoreRoot(
+                    path=os.path.normpath(str(hermes.source_path(a))),
+                    kind=a.kind,
+                    entry=a.entry,
+                    sqlite=a.sqlite,
+                    pin_kind=True,
+                )
+                for a in hermes.ASSETS
+            ),
+        )
+    planned = openclaw.plan_roots(cfg.openclaw.binary)
+    return RestoreRoots(
+        agent=AGENT_OPENCLAW,
+        roots=tuple(
+            RestoreRoot(
+                path=os.path.normpath(root.path),
+                kind=root.kind,
+                entry="file" if root.kind in _OPENCLAW_FILE_KINDS else "dir",
+                sqlite=False,
+                pin_kind=False,
+            )
+            for root in planned
+        ),
+    )
+
+
+def _inside(target: str, root: str) -> bool:
+    return target != root and target.startswith(root.rstrip("/") + "/")
+
+
+def assert_destination_allowed(
+    kind: str,
+    entry: str,
+    target: str,
+    *,
+    roots: RestoreRoots,
+    sqlite: bool = False,
+) -> str:
+    """Vet ONE manifest asset's destination against the local roots.
+
+    Returns the path restore may use — the manifest's own string, which by
+    then has been proven to be an absolute, already-normalised path equal to
+    (or, for the OpenClaw nested kinds, inside) a root this box declared.
+    Raises `DestinationRefusedError` naming the kind and the path otherwise.
+
+    The shape rule first, whoever the agent is: `os.path.isabs(target)` and
+    `os.path.normpath(target) == target`. That refuses a relative path (which
+    would land wherever the daemon's cwd is — the ClawBox checkout, when the
+    web server spawns it), `~`, any `..` or `.` segment, a doubled slash and a
+    trailing slash — the CLI writes none of those, so a manifest carrying one
+    was not written by the CLI.
+    """
+    where = f"{kind!r} asset at {target!r}"
+    # `//x` is the one spelling POSIX `normpath` keeps as is (an
+    # implementation-defined prefix), so it is named on its own.
+    if (
+        not os.path.isabs(target)
+        or target.startswith("//")
+        or os.path.normpath(target) != target
+    ):
+        raise DestinationRefusedError(
+            f"refusing to restore the {where}: a destination must be an absolute, "
+            "normalised path (no relative path, no '~', no '..', no doubled or "
+            "trailing slash)",
+        )
+
+    if roots.agent == AGENT_HERMES:
+        matched = next(
+            (r for r in roots.roots if r.kind == kind and r.path == target), None,
+        )
+        if matched is None:
+            known = next((r for r in roots.roots if r.kind == kind), None)
+            if known is None:
+                raise DestinationRefusedError(
+                    f"refusing to restore the {where}: {kind!r} is not something "
+                    "a Hermes backup contains",
+                )
+            raise DestinationRefusedError(
+                f"refusing to restore the {where}: on this box the {kind!r} asset "
+                f"lives at {known.path!r}, and a snapshot does not get to choose "
+                "where it lands",
+            )
+    else:
+        exact = next((r for r in roots.roots if r.path == target), None)
+        if exact is not None:
+            matched = exact
+        elif kind in OPENCLAW_NESTED_KINDS and any(_inside(target, r.path) for r in roots.roots):
+            # An agent root or workspace that sits under a declared root — the
+            # box may have dropped that agent from openclaw.json since, and the
+            # directory is still the agent's own.
+            matched = RestoreRoot(path=target, kind=kind, entry="dir", sqlite=False, pin_kind=False)
+        else:
+            declared = ", ".join(sorted({r.path for r in roots.roots}))
+            raise DestinationRefusedError(
+                f"refusing to restore the {where}: it is not a place this box's "
+                f"OpenClaw keeps state (declared: {declared}). A snapshot does not "
+                "get to choose where it lands; if the state directory was moved "
+                "since this backup, restore it by hand",
+            )
+
+    if entry != matched.entry:
+        if roots.agent == AGENT_OPENCLAW and matched.entry == "file":
+            # The CLI writes no `entry` key, so a manifest is not LYING when
+            # it says nothing about a `config` asset: ClawKeep restores
+            # OpenClaw state as directories only, and a single-file asset —
+            # a config-only snapshot, or an openclaw.json kept outside the
+            # state directory — is a limitation of this restore, not a fault
+            # of the snapshot. Said as one, so the owner is not told to
+            # distrust a backup that is fine.
+            raise DestinationRefusedError(
+                f"refusing to restore the {where}: on this box that is a single "
+                "file, and ClawKeep restores OpenClaw state as directories only — "
+                "a config-only snapshot, or an openclaw.json kept outside the "
+                "state directory, has to be put back by hand",
+            )
+        raise DestinationRefusedError(
+            f"refusing to restore the {where}: this box archives it as a "
+            f"{matched.entry!r}, the manifest says {entry!r}",
+        )
+    if sqlite and not matched.sqlite:
+        raise DestinationRefusedError(
+            f"refusing to restore the {where}: it is not a sqlite database on this box",
+        )
+    return target
 
 
 def verify_archive(cfg: Config, archive: Path, *, agent: str) -> None:

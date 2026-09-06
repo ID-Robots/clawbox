@@ -336,11 +336,21 @@ export async function POST(req: NextRequest) {
         if (settled) return;
         settled = true;
         const cause = error instanceof Error ? error : new Error(String(error));
-        nodeStream?.unpipe(busboy);
-        nodeStream?.destroy();
-        activeFileStream?.destroy(cause);
-        busboy.destroy();
-        reject(error);
+        // The claim is synchronous, the teardown one tick later: busboy emits
+        // `limit` from inside its own write loop and dereferences the part it
+        // just emitted on right after (busboy 1.6.0, multipart.js:480), so
+        // destroying it from within the handler throws inside the parser —
+        // an uncaught error with the caller already answered, which is a
+        // web-server crash under Node's default rejection handling. Nothing
+        // can resolve in the gap, because `settled` is already taken. The
+        // files route's upload path carries the same shape for the same reason.
+        process.nextTick(() => {
+          nodeStream?.unpipe(busboy);
+          nodeStream?.destroy();
+          activeFileStream?.destroy(cause);
+          busboy.destroy();
+          reject(error);
+        });
       };
 
       // busboy stops emitting past a limit rather than failing, so a request

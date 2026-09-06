@@ -53,6 +53,30 @@ export function apiToken(): { token: string; source: TokenSource } {
   return { token: "", source: "none" };
 }
 
+/**
+ * Read the bearer into the cache and take it OUT of this process's environment.
+ *
+ * Called once, first thing in the server's `main()`, before any probe or tool
+ * can spawn a child: `bash` (mcp/lib/jobs.ts) and `spawnArgv` hand every child
+ * `{ ...process.env }`, so a `printenv CLAWBOX_MCP_TOKEN` — from a page the
+ * agent was told to summarise, say — used to yield the device bearer the
+ * middleware admits on every /setup-api/* route. The cache keeps this process
+ * working; the file fallback stays for the `clawbox` CLI a shell may invoke.
+ * Deleted even when the value was too short to cache: a value this process
+ * will not use is still one a child should not see.
+ *
+ * Hygiene, not a boundary. `delete process.env.X` does not rewrite the
+ * exec-time block the kernel keeps, so /proc/<this pid>/environ still holds
+ * the value for any same-uid child as long as the registration in
+ * openclaw.json passes the token in `env`; the real removal is registering
+ * the server without it and letting this file fallback carry the bearer.
+ */
+export function primeApiToken(): { token: string; source: TokenSource } {
+  const resolved = apiToken();
+  delete process.env.CLAWBOX_MCP_TOKEN;
+  return resolved;
+}
+
 export function authHeader(): string | null {
   const { token } = apiToken();
   return token ? `Bearer ${token}` : null;

@@ -180,24 +180,140 @@ export function filesBrowseRoot(): string {
 }
 
 /**
+ * How many links `canonicalPath` will step through before calling the path a
+ * loop. Linux itself gives up at 40 (its own ELOOP threshold), so a path the
+ * kernel would open never hits this; only a cycle does.
+ */
+const MAX_LINK_HOPS = 40;
+
+/**
+ * The path with every symlink resolved, for a path that need not exist yet.
+ *
+ * `realpathSync` refuses a path whose leaf is missing, so the earlier guard
+ * fell back to resolving the PARENT and re-joining the basename — and stopped
+ * there. A path two or more segments past the last existing directory
+ * (`~/link/newdir/x`, with `~/link -> ~/.ssh`) failed both resolves and was
+ * judged by its typed spelling, which names no store at all. This walks up
+ * `dirname` until something resolves and re-joins what it walked past, so the
+ * verdict is about where the write would actually LAND.
+ *
+ * A DANGLING link is followed too, not re-joined as a name. `realpathSync`
+ * refuses `~/proj/keys.txt -> ~/.ssh/authorized_keys` while the target is
+ * absent exactly as it refuses a missing file, and answering the link's own
+ * spelling there judged the write as landing in `~/proj` — where nothing
+ * lands: `open(2)` follows the link and CREATES `~/.ssh/authorized_keys`. So a
+ * component that fails to resolve is `lstat`ed, and a link among them is
+ * read and the walk carried on from its target, relative targets resolved
+ * against the link's own directory the way the kernel does. Null only when
+ * nothing on the way up resolves or the links form a cycle, which a resolver
+ * cannot say anything about.
+ */
+export function canonicalPath(abs: string): string | null {
+  let dir = abs;
+  const rest: string[] = [];
+  let hops = 0;
+  for (;;) {
+    try {
+      const real = fs.realpathSync(dir);
+      return rest.length ? path.join(real, ...rest) : real;
+    } catch {
+      const target = danglingLinkTarget(dir);
+      if (target !== null) {
+        if (++hops > MAX_LINK_HOPS) return null;
+        dir = target;
+        continue;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) return null;
+      rest.unshift(path.basename(dir));
+      dir = parent;
+    }
+  }
+}
+
+/**
+ * Where a link points, resolved against its own directory, when `p` IS a link
+ * (the only way a path that exists can fail `realpathSync`, short of EACCES).
+ * Null for anything else — a missing name, an ordinary file, a directory this
+ * user cannot look at — so the caller walks up the way it always did.
+ */
+function danglingLinkTarget(p: string): string | null {
+  try {
+    if (!fs.lstatSync(p).isSymbolicLink()) return null;
+    return path.resolve(path.dirname(p), fs.readlinkSync(p));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The inventory alone, applied to a path the CALLER has already resolved —
+ * no realpath here. For a caller that already paid one resolve for its own
+ * rules (mcp/lib/guard.ts judges device nodes and dotenv files on the same
+ * canonical path) and runs once per entry of a 20k-entry listing, a second
+ * lstat walk per entry is the whole cost of the guard again.
+ */
+export function isProtectedResolvedPath(abs: string): boolean {
+  return isProtected(abs);
+}
+
+/**
  * True if `abs` — or, after resolving symlinks, its real target — is a protected
  * secret store. Callers should treat a `true` result as "not found / forbidden".
+ *
+ * This answers "may this be READ, LISTED or WRITTEN", and DATA_DIR itself
+ * answers false to it on purpose (see the note above `DATA_DIR_PUBLIC_SUBTREES`).
+ * Whether a directory may be MOVED or REMOVED is `isProtectedContainer`'s
+ * question, and the two do not agree about the data directory.
  */
 export function isProtectedFilePath(abs: string): boolean {
   if (isProtected(abs)) return true;
-  try {
-    const real = fs.realpathSync(abs);
-    return real !== abs && isProtected(real);
-  } catch {
-    // Path (or leaf) doesn't exist yet, e.g. an upload target — resolve the
-    // parent so a symlinked ancestor can't smuggle a write into a secret dir.
-    try {
-      const real = path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs));
-      return real !== abs && isProtected(real);
-    } catch {
-      return false;
-    }
-  }
+  // The path (or its leaf) may not exist yet, e.g. an upload target — the
+  // resolve then lands on the nearest existing ancestor, so a symlinked
+  // ancestor cannot smuggle a write into a secret dir however deep the new
+  // path goes below it.
+  const real = canonicalPath(abs);
+  return real !== null && real !== abs && isProtected(real);
+}
+
+/**
+ * Whether `abs`, as typed or once its links are resolved, is a directory that
+ * HOLDS a protected store: the ClawBox data directory or any ancestor of it
+ * (the checkout, the home), any ancestor of a credential store named in
+ * `PROTECTED_HOME_DIRS` (so `~/.config` for `.config/gh`), or the browse root
+ * itself.
+ *
+ * A different question from `isProtectedFilePath`. That one keeps DATA_DIR
+ * openable so the Files app can list it and show the public subtrees; this one
+ * says the same directory may not be renamed or recursively deleted — a rename
+ * takes every store inside it out from under the containment rule (`data` →
+ * `data-copy`, then `data-copy/config.json` is nobody's business), and a delete
+ * removes the box's whole state in one request. Only mutation callers ask it;
+ * `safePath`, the listing and the download must not, or `data/` would vanish
+ * from the desktop — the regression the note above warns about.
+ *
+ * Judged on the path as typed AND on `canonicalPath(abs)`, because `~/link ->
+ * ~/clawbox` then `link/data` names the real directory without spelling it.
+ */
+export function isProtectedContainer(abs: string): boolean {
+  if (holdsProtectedStore(abs)) return true;
+  const real = canonicalPath(abs);
+  return real !== null && real !== abs && holdsProtectedStore(real);
+}
+
+function holdsProtectedStore(abs: string): boolean {
+  const root = path.resolve(filesBrowseRoot());
+  if (abs === root) return true;
+  // isInside(child, parent): is DATA_DIR at or under `abs` — i.e. `abs` IS the
+  // data directory or an ancestor of it.
+  if (isInside(DATA_DIR, abs)) return true;
+  // Only the stores rooted at the browse root: a single-segment store carries
+  // its name wherever it is moved and stays protected by name, so the ancestor
+  // rule matters for the two-segment `.config/*` entries, whose classification
+  // is lost when `.config` is renamed. A `.config/gh` nested somewhere else
+  // (`~/projects/x/.config/gh`) is not covered — gh reads only `~/.config` or
+  // `$XDG_CONFIG_HOME`, and the residual is data loss, not disclosure.
+  return PROTECTED_HOME_DIRS.some((dir) => isInside(path.join(root, dir), abs));
 }
 
 /**

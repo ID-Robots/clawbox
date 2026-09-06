@@ -16,9 +16,8 @@
 // decision is a different one.
 
 import { spawn } from "child_process";
-import { realpathSync } from "fs";
-import { basename, dirname, join, resolve, isAbsolute, normalize } from "path";
-import { isProtectedFilePath } from "../../src/lib/file-guard";
+import { resolve, isAbsolute, normalize, join } from "path";
+import { canonicalPath, isProtectedResolvedPath } from "../../src/lib/file-guard";
 // TASK-605's protected-path rule, from the module the OpenClaw hook plugin
 // carries into ~/.openclaw/extensions. It lives there because a plugin copied
 // out of the checkout has to take its rule with it; it is imported HERE
@@ -95,11 +94,35 @@ export function resolveUserPath(input: string): string {
   return normalize(isAbsolute(p) ? p : resolve(DEFAULT_CWD, p));
 }
 
-/** True when this path may be read, listed, searched or written by a tool. */
-export function isAllowedPath(abs: string): boolean {
-  if (isDevicePath(abs)) return false;
-  if (isDotenvPath(abs)) return false;
-  return !isProtectedFilePath(abs);
+/** The whole read-side denylist, applied to ONE spelling of a path. */
+function deniedAsSpelled(abs: string): boolean {
+  return isDevicePath(abs) || isDotenvPath(abs) || isProtectedResolvedPath(abs);
+}
+
+/**
+ * True when this path may be read, listed, searched or written by a tool.
+ *
+ * Judged on the path AS TYPED and on its CANONICAL form, and every rule on
+ * both. It used to be that only file-guard's inventory saw the resolved
+ * target — the device-node and dotenv rules here looked at the typed name
+ * alone — so `notes.txt -> <root>/.env` and `readme.md -> /proc/self/environ`
+ * passed: a benign name, a target in neither list file-guard keeps. Both must
+ * pass because they answer different questions: a typed `.env` that links
+ * somewhere harmless is still a dotenv file to the agent that wrote it, and
+ * `/dev/stdin` resolves to `/dev/pts/N`, which only the resolved side sees.
+ *
+ * ONE realpath per call, shared by all three rules — this runs once per entry
+ * of a listing, a glob or a grep, up to 20k of them. A caller that has already
+ * resolved the path passes `real` in, so the path it judges is the path it
+ * goes on to open: `resolveGuardedPath` resolves once and hands THAT to the
+ * assertions and to the sink, because two resolves of one spelling are two
+ * walks of the tree, and a link swapped between them would have the sink open
+ * a target nobody vetted.
+ */
+export function isAllowedPath(abs: string, real: string | null = canonicalPath(abs)): boolean {
+  if (deniedAsSpelled(abs)) return false;
+  // A resolve that fails is not evidence of anything; the typed verdict stands.
+  return real === null || real === abs || !deniedAsSpelled(real);
 }
 
 /**
@@ -115,8 +138,8 @@ export const SECRET_NAME_RE =
  * and "blocked because it is ~/.hermes/.env" is itself a map of where the
  * secrets live.
  */
-export function assertPathAllowed(abs: string): void {
-  if (isAllowedPath(abs)) return;
+export function assertPathAllowed(abs: string, real: string | null = canonicalPath(abs)): void {
+  if (isAllowedPath(abs, real)) return;
   throw new ToolError(
     "BLOCKED_PATH",
     "That path holds device credentials or a device node and is not accessible to tools.",
@@ -139,31 +162,44 @@ export function assertPathAllowed(abs: string): void {
  * code, and an agent told WHY it was refused can tell the owner instead of
  * trying the path again by another spelling.
  */
-export function assertWritePathAllowed(abs: string): void {
-  assertPathAllowed(abs);
-  // THE REALPATH'D PARENT AS WELL AS THE PATH AS TYPED. `resolveUserPath`
+export function assertWritePathAllowed(abs: string, real: string | null = canonicalPath(abs)): void {
+  assertPathAllowed(abs, real);
+  // THE CANONICAL PATH AS WELL AS THE PATH AS TYPED. `resolveUserPath`
   // normalises `..` and `~` but does not follow links, so a symlink the agent
   // planted earlier — `~/notes/models -> ~/clawbox/data/llamacpp/models` — would
-  // reach this as a path with no protected root in it. Only the parent is
-  // resolved, never the leaf: the file being written may not exist yet, and a
-  // dangling name is not a reason to refuse. Same two-stage shape as
-  // `coding-agent-media.ts`, and a resolve that fails is not evidence of
+  // reach this as a path with no protected root in it. `canonicalPath` resolves
+  // the LEAF when it exists, a dangling leaf to where the kernel would create
+  // it, and the nearest existing ancestor otherwise: the earlier parent-only
+  // resolve let a leaf link into the tree (`pkg.json -> ~/clawbox/package.json`)
+  // and a deep new path under a link into it (`~/tree/newdir/x.ts`, `~/tree ->
+  // ~/clawbox`) both through. A resolve that fails is not evidence of
   // anything, so the typed path's verdict stands.
-  let resolvedParent: string | null = null;
-  try {
-    resolvedParent = realpathSync(dirname(abs));
-  } catch {
-    resolvedParent = null;
-  }
-  if (resolvedParent) {
-    const viaLink = pathDenyReason(join(resolvedParent, basename(abs)), HOME);
-    if (viaLink) throw protectedWriteError();
-  }
+  if (real && real !== abs && pathDenyReason(real, HOME)) throw protectedWriteError();
   // The PATH predicate, not the tool-shaped one: `toolCallDenyReason` drops any
   // string containing a newline, because a tool PARAMETER may be a file body —
   // and a filename may legally contain one, so routing a resolved path through
   // it let `…/models/a\nb.gguf` through.
   if (pathDenyReason(abs, HOME)) throw protectedWriteError();
+}
+
+/**
+ * The path a file tool should OPEN, once the guard has passed: the canonical
+ * form of `abs` (the typed path when nothing resolves). The sinks in
+ * mcp/tools/coding.ts stat, read and write THIS, never the typed path — a
+ * guard that vetted the target of a link and then opened the link is a guard
+ * that judged one file and touched another, and the link can be swapped
+ * between the two. Resolved ONCE here and handed to the assertions, so what
+ * comes back is the very string they judged — a second resolve after the
+ * check would be the same window again, opened by this function itself.
+ * Opening the canonical path with O_NOFOLLOW closes the remaining window on
+ * the leaf; a link swapped on a directory component needs a rename this guard
+ * re-vets on the next call.
+ */
+export function resolveGuardedPath(abs: string, mode: "read" | "write"): string {
+  const real = canonicalPath(abs);
+  if (mode === "write") assertWritePathAllowed(abs, real);
+  else assertPathAllowed(abs, real);
+  return real ?? abs;
 }
 
 function protectedWriteError(): ToolError {

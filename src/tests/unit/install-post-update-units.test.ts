@@ -60,6 +60,85 @@ describe("in-app update delivers unit-file changes", () => {
   });
 });
 
+describe("root units execute root-owned copies, and updates deliver them", () => {
+  // Security scan #21. clawbox-ap.service, clawbox-ap-watchdog.service and
+  // clawbox-firstboot-vnc.service run as root (no User=) and used to ExecStart
+  // the tree copies under /home/clawbox/clawbox/scripts — clawbox-owned after
+  // every `chown -R`, so a clawbox foothold was root inside the watchdog's
+  // twenty-second tick. The fix is the TASK-445 mechanism: install_root_libexec
+  // copies them under /usr/local/libexec/clawbox and the units name the copies.
+  // Both halves are pinned here, plus the order that keeps a live timer from
+  // running the new unit against a copy that is not there yet.
+
+  /** The `for src in …; do` lists of a function, backslash continuations joined. */
+  function forLists(fn: string): string[] {
+    const joined = fn.replace(/\\\n\s*/g, " ");
+    return [...joined.matchAll(/for src in ([^;]*); do/g)].map((m) => m[1]);
+  }
+
+  const ROOT_RUN_SCRIPTS = ["start-ap.sh", "stop-ap.sh", "ap-watchdog.sh", "ensure-vnc-on-first-boot.sh"];
+
+  it("install_root_libexec copies every script a root unit ExecStarts", () => {
+    const lists = forLists(extractShellFunction("install_root_libexec"));
+    expect(lists.length).toBeGreaterThan(0);
+    const scriptsList = lists.find((l) => l.includes("gateway-restart-when-online.sh"));
+    expect(scriptsList, "the scripts/ copy loop of install_root_libexec").toBeDefined();
+    for (const name of ROOT_RUN_SCRIPTS) {
+      expect(scriptsList!.split(/\s+/), `${name} is not installed root-owned`).toContain(name);
+    }
+  });
+
+  it("installs the root-owned copies BEFORE the unit files that name them", () => {
+    // On the first in-app update carrying the new units the watchdog timer is
+    // already firing every 20 s; cp + daemon-reload ahead of the copy would run
+    // the new ExecStart against a path that does not exist yet.
+    const step = extractShellFunction("step_systemd_services");
+    const libexecAt = step.indexOf("install_root_libexec");
+    const cpAt = step.indexOf('cp "$src" /etc/systemd/system/');
+    const reloadAt = step.indexOf("systemctl daemon-reload");
+    expect(libexecAt, "install_root_libexec must be called by step_systemd_services").toBeGreaterThan(-1);
+    expect(cpAt, "step_systemd_services must copy the unit files").toBeGreaterThan(-1);
+    expect(reloadAt).toBeGreaterThan(-1);
+    expect(libexecAt, "install_root_libexec must run before the unit cp loop").toBeLessThan(cpAt);
+    expect(libexecAt, "install_root_libexec must run before daemon-reload").toBeLessThan(reloadAt);
+  });
+
+  it("delivers the copies to an updated box through post_update", () => {
+    // step_systemd_services is on post_update's list (pinned above), and it is
+    // now the step that installs the copies — so an updated box gets both the
+    // new units and the files they name in the same run.
+    expect(extractShellFunction("step_post_update")).toContain("step_systemd_services");
+    expect(extractShellFunction("step_systemd_services")).toContain("install_root_libexec");
+  });
+
+  it("points the AP units at the copies it installs, not at the tree", () => {
+    for (const unit of ["clawbox-ap.service", "clawbox-ap-watchdog.service"]) {
+      const text = readFileSync(path.join(REPO, "config", unit), "utf-8");
+      expect(text).not.toMatch(/^User=/m);
+      for (const m of text.matchAll(/^Exec(?:Start|Stop)=(.+)$/gm)) {
+        expect(m[1].startsWith("/usr/local/libexec/clawbox/"), `${unit}: ${m[0]}`).toBe(true);
+        expect(ROOT_RUN_SCRIPTS, `${unit} names a script install_root_libexec does not install`)
+          .toContain(path.basename(m[1]));
+      }
+    }
+  });
+
+  it("repoints an already-installed first-boot VNC unit on update", () => {
+    // step_vnc_refresh is the update-path subset of step_vnc_install. A box
+    // whose first-boot marker never cleared still runs that unit as root at
+    // every boot, and it names the tree copy; only an update can fix it.
+    const refresh = extractShellFunction("step_vnc_refresh");
+    expect(refresh).toContain("clawbox-firstboot-vnc.service");
+    expect(refresh).toContain("$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh");
+    expect(extractShellFunction("step_post_update")).toContain("step_vnc_refresh");
+    // The repoint must not depend on post_update's ordering: the step makes
+    // sure of the libexec copy itself, the way step_vnc_install does, or a
+    // reorder would leave its `[ -x ]` guard skipping the repoint for another
+    // update cycle with root still running the tree copy at every boot.
+    expect(refresh).toMatch(/\[ -x "\$ROOT_LIBEXEC_DIR\/ensure-vnc-on-first-boot\.sh" \] \|\| install_root_libexec/);
+  });
+});
+
 describe("gateway restart breaker", () => {
   const intervalSec = Number(/^StartLimitIntervalSec=(\d+)$/m.exec(GATEWAY_UNIT)?.[1]);
   const burst = Number(/^StartLimitBurst=(\d+)$/m.exec(GATEWAY_UNIT)?.[1]);

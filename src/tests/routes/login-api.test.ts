@@ -120,6 +120,43 @@ describe("/login-api", () => {
     expect(res.headers.get("Retry-After")).toBe("600");
   });
 
+  // TASK-444c, pinned here for the first time. Main's rateLimitKey() returned
+  // ONLY `cf:<ip>` when the header was present, so a header-carrying request
+  // never touched the global bucket and every fresh value minted an empty,
+  // un-capped one — the scanner's "unlimited fresh buckets" path. The two
+  // cases below fail against that shape; the earlier cf cases do not.
+  it("a request carrying cf-connecting-ip is also charged to global", async () => {
+    mockVerifyPassword.mockResolvedValue(false);
+    const req = new Request("http://localhost/login-api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.5" },
+      body: JSON.stringify({ password: "wrong", duration: 43200 }),
+    });
+    await POST(req);
+    expect(mockRecordFailure).toHaveBeenCalledWith("cf:1.2.3.5", { maxLockMs: undefined });
+    expect(mockRecordFailure).toHaveBeenCalledWith("global", { maxLockMs: 300000 });
+    expect(mockRecordFailure).toHaveBeenCalledTimes(2);
+  });
+
+  it("a locked global bucket refuses a request with a fresh cf header before verifyPassword", async () => {
+    // The cf bucket is brand new and clear; only the shared one is locked.
+    // Rotating the header must buy nothing: no unix_chkpwd call, a 429.
+    mockCheckLockout.mockImplementation(async (key: string) =>
+      key === "global" ? { locked: true, retryAfterSeconds: 300 } : { locked: false, retryAfterSeconds: 0 },
+    );
+    const req = new Request("http://localhost/login-api", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "198.51.100.77" },
+      body: JSON.stringify({ password: "anything", duration: 43200 }),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(mockCheckLockout).toHaveBeenCalledWith("global");
+    expect(mockVerifyPassword).not.toHaveBeenCalled();
+    expect(mockRecordFailure).not.toHaveBeenCalled();
+  });
+
   it("buckets requests with no proxy header into a global counter", async () => {
     mockVerifyPassword.mockResolvedValue(false);
     const req = new Request("http://localhost/login-api", {
