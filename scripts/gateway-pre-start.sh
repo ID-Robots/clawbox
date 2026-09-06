@@ -2550,10 +2550,16 @@ import json, os, sys
 # path -> the value ClawBox seeds when the owner has expressed no opinion.
 # `0m` rather than removing the key: the core reads an absent `every` as its own
 # default, so silence is not an opt-out (docs/gateway/heartbeat.md).
+# The third field is whether the OWNER'S "on" is the ABSENCE of the key, which is
+# what makes one of these three impossible to re-offer safely without the record:
+# switching check-ins on REMOVES `heartbeat.every`, so an absent value there means
+# either "never seeded" or "he turned it on". The other two are written
+# explicitly in both directions, so an absent value can only mean "no opinion
+# expressed" and is always safe to seed.
 WANTED = [
-    (("agents", "defaults", "heartbeat", "every"), "0m"),
-    (("plugins", "entries", "memory-core", "config", "dreaming", "enabled"), False),
-    (("skills", "workshop", "autonomous", "mode"), "off"),
+    (("agents", "defaults", "heartbeat", "every"), "0m", True),
+    (("plugins", "entries", "memory-core", "config", "dreaming", "enabled"), False, False),
+    (("skills", "workshop", "autonomous", "mode"), "off", False),
 ]
 
 try:
@@ -2590,7 +2596,12 @@ def read_seeded(path):
             record = json.load(fh)
     except FileNotFoundError:
         return set()
-    except (OSError, json.JSONDecodeError):
+    # ValueError covers json.JSONDecodeError AND UnicodeDecodeError — a record
+    # written in another encoding is unusable, not absent — and RecursionError
+    # covers a document nested past the decoder's limit. Nothing may escape:
+    # the caller's `|| true` swallows it and the box then neither seeds nor
+    # explains itself.
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(record, dict):
         return None
@@ -2599,13 +2610,13 @@ def read_seeded(path):
         return None
     return set(rows)
 
-seeded = read_seeded(os.environ["CLAWBOX_OPTOUT_STATE"])
-if seeded is None:
-    print("")
-    print("  WARN: the background-job opt-out record exists but cannot be read; leaving the"
-          " harness keys exactly as they are rather than risking a re-seed over a switch the"
-          " owner has turned on", file=sys.stderr)
-    raise SystemExit(0)
+record = read_seeded(os.environ["CLAWBOX_OPTOUT_STATE"])
+unusable = record is None
+seeded = set() if unusable else record
+if unusable:
+    print("  WARN: the background-job opt-out record exists but cannot be read; the check-ins"
+          " opt-out is being left alone rather than risking a re-seed over a switch the owner"
+          " has turned on", file=sys.stderr)
 
 def present(path):
     node = cfg
@@ -2623,11 +2634,18 @@ batch = []
 # it is the same statement the batch makes: ClawBox has had its say about this
 # key.
 settled = []
-for path, value in WANTED:
+for path, value, absence_is_on in WANTED:
     key = ".".join(path)
     if key in seeded:
         continue
     settled.append(key)
+    if unusable and absence_is_on:
+        # The record is there and cannot be read, and for THIS key an absent
+        # value is also what the owner's "on" looks like. Recorded as settled so
+        # it is never offered again — writing `0m` here could revert his choice,
+        # and giving up one opt-out on a box whose record is corrupt is the
+        # cheaper of the two mistakes. The WARN above says so.
+        continue
     if not present(path):
         batch.append({"path": key, "value": value})
 print(json.dumps({"batch": batch, "settled": settled}) if settled else "")

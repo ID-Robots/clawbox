@@ -284,18 +284,26 @@ export async function setBackgroundJob(
  * `null` is the third answer: no restart was needed at all.
  */
 export async function applyBackgroundJobRestart(harness: Harness): Promise<boolean | null> {
-  // HERMES NEEDS NO RESTART, and that is checked rather than assumed. Its
-  // config cache is keyed on the file's own `(mtime_ns, size)`
-  // (`hermes_cli/config.py`, "Cached tuple is (user_mtime_ns, user_size, …)"),
-  // and `is_background_review_enabled()` is asked at each spawn from
-  // `agent/background_review.py` — so a ClawBox write invalidates the cache and
-  // the next turn already obeys it. Read read-only off the installed 0.20.5
-  // package on the Hermes box.
+  // THERE IS NO GATEWAY TO RESTART ON HERMES. `restartGateway` restarts
+  // `clawbox-gateway.service`, which is the OpenClaw half; on a Hermes box this
+  // function has nothing to act on, so `null` — "no restart was applicable" —
+  // is the only true answer it can give.
   //
-  // `null`, NOT `false`: "no restart was needed" and "the restart did not
+  // `null`, NOT `false`: "none was needed" and "it was tried and did not
   // happen" are different facts, and the panel renders the second as "it takes
-  // effect when the assistant next restarts" — which on Hermes is untrue of a
-  // write that is already in force.
+  // effect when the assistant next restarts". Reporting `false` here put that
+  // sentence under every successful Hermes write.
+  //
+  // WHAT WAS ACTUALLY VERIFIED, read-only off the installed 0.20.5 package:
+  // the config cache is keyed on the file's own `(mtime_ns, size)`
+  // (`hermes_cli/config.py`), and `is_background_review_enabled()` is asked at
+  // each spawn (`agent/background_review.py`) — so the `background_review` row
+  // is in force on the next turn with no restart at all. The `curator` row was
+  // NOT traced that far: its `enabled` flag is read from the same cached config,
+  // but whether the curator's own scheduler re-reads it between runs is
+  // unconfirmed. If it does not, that row takes effect at the next Hermes start
+  // and the owner is told nothing — a residual worth a device check rather than
+  // a guess, and it is the one thing this function's answer does not cover.
   if (harness === "hermes") return null;
   try {
     await restartGateway();

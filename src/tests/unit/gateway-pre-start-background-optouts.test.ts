@@ -270,33 +270,49 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     ["rows that are not strings", JSON.stringify({ seeded: [1, 2] })],
     ["rows that are not even hashable", JSON.stringify({ seeded: [[1]] })],
     ["a file that is not JSON at all", "{ broken"],
-  ])("says so and changes nothing when the record is there but unusable: %s", (_name, body) => {
+    ["a file that is not even UTF-8", "\uFFFD\uFFFD binary"],
+  ])("leaves the AMBIGUOUS key alone when the record is there but unusable: %s", (_name, body) => {
     // Only STATEPY writes this file and it always writes `{"seeded": [...]}`,
     // so this needs a hand edit or a corrupted filesystem — but every one of
     // these shapes used to raise out of the Python, which `|| true` swallowed:
     // the box neither seeded nor said why.
     //
-    // "THERE AND UNUSABLE" IS NOT "ABSENT". Re-seeding on it would write `0m`
-    // back over check-ins the owner has switched ON — switching them on REMOVES
-    // the key, so `present()` is false for exactly the key he just changed.
-    // Leaving the harness keys alone and saying so is the only answer that
-    // cannot undo his choice.
+    // "THERE AND UNUSABLE" IS NOT "ABSENT", for ONE of the three keys. Switching
+    // check-ins on REMOVES `heartbeat.every`, so an absent value there is also
+    // what his "on" looks like and a re-seed would write `0m` back over it.
+    // The other two are written explicitly in both directions, so an absent
+    // value can only mean "no opinion" and is always safe to seed.
     writeFileSync(statePath, body);
     const r = run();
     expect(r.status).toBe(0);
     expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
-    expect(at("skills.workshop.autonomous.mode")).toBeUndefined();
-    expect(calls()).toBe("");
     expect(r.stderr).toContain("cannot be read");
-    // …and it is left for a human to look at rather than overwritten.
-    expect(readFileSync(statePath, "utf-8")).toBe(body);
+
+    expect(at("plugins.entries.memory-core.config.dreaming.enabled")).toBe(false);
+    expect(at("skills.workshop.autonomous.mode")).toBe("off");
+
+    // All three are recorded as settled — including the one deliberately not
+    // written, so the next boot does not offer it either — and the record it
+    // replaces is one STATEPY had to read without raising over it.
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded).toEqual([
+      "agents.defaults.heartbeat.every",
+      "plugins.entries.memory-core.config.dreaming.enabled",
+      "skills.workshop.autonomous.mode",
+    ]);
   });
 
-  it("records a well-formed set even when the batch is recorded over a stale one", () => {
-    // STATEPY is reached only after a write that landed, so it must never raise
-    // over the record it is replacing: `sorted()` on a mixed list did, the `if
-    // !` turned that into a WARN, and the same seed was then offered at every
-    // boot for ever.
+  it("does not offer the ambiguous key again on the boot after an unusable record", () => {
+    writeFileSync(statePath, "[1, 2]");
+    run();
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    // The owner's "on" is still an absence, and the record is well-formed now.
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(calls()).toBe("");
+  });
+
+  it("records a well-formed set on a normal first boot", () => {
     run();
     expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded).toHaveLength(3);
   });
