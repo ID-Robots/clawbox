@@ -295,7 +295,9 @@ describe("listGitHubRepos", () => {
     expect(ghCalls).toHaveLength(asked);
 
     // …and another account is another listing, never this one's rows.
-    githubStatus.mockResolvedValueOnce({ installed: true, connected: true, login: "someone-else", loginCommand: "x" });
+    // Not `Once`: a listing probes the account at the start AND once more
+    // before it files anything, and on a real box both answer the same.
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "someone-else", loginCommand: "x" });
     expect(await lib.listGitHubRepos()).toMatchObject({ ok: true, login: "someone-else" });
     expect(ghCalls.length).toBeGreaterThan(asked);
   });
@@ -392,6 +394,32 @@ describe("listGitHubRepos", () => {
     expect(JSON.stringify(alice)).not.toContain("bob/todo");
     await forBob.catch(() => undefined);
     await backOnAlice.catch(() => undefined);
+  });
+
+  it("refuses rows collected under a credential that changed with nobody asking", async () => {
+    // The account can change without this module hearing a word: `gh auth
+    // login` typed into the Terminal, or the device flow finishing. Neither
+    // moves `activeLogin` or the epoch, so the last word has to belong to `gh`
+    // — one live probe before anything is filed. No intermediate listing here,
+    // which is the whole point.
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("alice/secret-plans", { private: true })]) });
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+
+    let release!: () => void;
+    ghHoldEarly.current = new Promise<void>((resolve) => { release = resolve; });
+    const forAlice = lib.listGitHubRepos();
+    await vi.waitFor(() => expect(ghCalls.length).toBeGreaterThanOrEqual(1));
+
+    // The credential is now bob's, and nothing on this box was told.
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "bob", loginCommand: "x" });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("bob/todo")]) });
+    ghHoldEarly.current = null;
+    release();
+
+    const alice = await forAlice;
+    expect(alice).toMatchObject({ ok: false, reason: "failed" });
+    expect(JSON.stringify(alice)).not.toContain("bob/todo");
   });
 
   it("never serves a failed listing from the cache", async () => {

@@ -244,6 +244,21 @@ function setActiveLogin(login: string | null): void {
   accountEpoch += 1;
 }
 
+/**
+ * "The GitHub credential just changed" — for the two doors that change it
+ * without asking for a listing: the device-flow login and the sign-out.
+ *
+ * Without this the counter only moves when somebody lists repositories, so a
+ * connect or a disconnect made while a listing is out would go unnoticed by
+ * it. The live re-probe at the end of `fetchGitHubRepos` is the belt to this
+ * pair of braces — it is what also catches a `gh auth login` typed into the
+ * Terminal, which no route here will ever hear about.
+ */
+export function noteGitHubAccountChanged(): void {
+  activeLogin = null;
+  accountEpoch += 1;
+}
+
 /** For the tests: forget the cached listing. */
 export function _resetGitHubReposCacheForTests(): void {
   reposCache = null;
@@ -293,6 +308,9 @@ function startRepoRefresh(login: string): Promise<GitHubReposOutcome> {
   return started;
 }
 
+/** Said by every guard below, so the owner reads one sentence for one cause. */
+const accountChangedDetail = "The GitHub account changed while this ClawBox was listing its repositories. Try again.";
+
 async function fetchGitHubRepos(login: string): Promise<GitHubReposOutcome> {
   // The account as it stands at the FIRST boot. Every `gh` below answers as
   // whoever is signed in at the moment it runs.
@@ -327,7 +345,17 @@ async function fetchGitHubRepos(login: string): Promise<GitHubReposOutcome> {
   // back on A and rows that are partly B's, which the name comparison alone
   // waves through.
   if (activeLogin !== login || accountEpoch !== startedAtEpoch) {
-    return { ok: false, reason: "failed", detail: "The GitHub account changed while this ClawBox was listing its repositories. Try again." };
+    return { ok: false, reason: "failed", detail: accountChangedDetail };
+  }
+  // And one live probe before any of it is filed. `activeLogin` is only ever
+  // as fresh as the last thing that told this module — a `gh auth login` typed
+  // into the Terminal tells it nothing — so the last word belongs to `gh`
+  // itself. One extra boot on a cold listing, against rows that would
+  // otherwise be cached and served under the wrong name.
+  const stillSignedIn = await githubStatus();
+  if (!stillSignedIn.connected || stillSignedIn.login !== login) {
+    setActiveLogin(stillSignedIn.connected ? stillSignedIn.login ?? null : null);
+    return { ok: false, reason: "failed", detail: accountChangedDetail };
   }
   reposCache = { login, repos, truncated, at: Date.now() };
   return { ok: true, login, repos, truncated };

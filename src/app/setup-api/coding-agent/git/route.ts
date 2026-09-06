@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { BACKUP_MESSAGE, backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
+import { noteGitHubAccountChanged } from "@/lib/project-import";
 import { openProjectPullRequest } from "@/lib/coding-pr";
 import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
 import { gitChanges, gitFileDiff, gitInfo, gitLog } from "@/lib/coding-git";
@@ -85,6 +86,9 @@ export async function DELETE(request: Request) {
       { status: 403 },
     );
   }
+  // Whatever gh answers, its credential may already be gone: a listing still
+  // out was started for an account this box may no longer be able to name.
+  noteGitHubAccountChanged();
   const out = await disconnectGitHub();
   if (!out.ok) {
     // A dead uplink is not a broken box: 503 says "transient, try again",
