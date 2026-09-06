@@ -70,6 +70,15 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
   setMany: vi.fn(),
+  // `get`/`set` are how the route reads and clears the persisted ClawBox AI
+  // credential refusal (@/lib/clawai-credential-refusal, TASK-727). Omit them
+  // and `clawaiCredentialRefusalOnRecord()` throws into its own catch and
+  // answers `false` for every case in this file — so the image-ops gate would
+  // never be exercised here, and nothing would say so. Backed by the same
+  // `store` the other two use, so a clear the route performs is visible to a
+  // read taken after it.
+  get: vi.fn(),
+  set: vi.fn(),
 }));
 
 vi.mock("@/lib/clawkeep", () => ({
@@ -181,7 +190,7 @@ vi.mock("@/lib/hermes-mcp-reload", () => ({
   reportMcpReloadRefused: vi.fn(),
 }));
 
-import { getAll, setMany } from "@/lib/config-store";
+import { getAll, setMany, get as configGet, set as configSet } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import {
   inferConfiguredLocalModel,
@@ -283,6 +292,12 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
         else store[key] = value;
       }
     });
+    // The same store, so the refusal gate reads what this request wrote.
+    vi.mocked(configGet).mockImplementation(async (key: string) => store[key]);
+    vi.mocked(configSet).mockImplementation(async (key: string, value: unknown) => {
+      if (value === undefined) delete store[key];
+      else store[key] = value;
+    });
     // Resolved from the SAME post-reset module registry the route imports, the
     // way configure-hermes.test.ts does: a handle captured at file scope is a
     // different `vi.fn()` after `vi.resetModules()`, so an implementation set on
@@ -321,6 +336,11 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     expect(res.status).toBe(200);
     expect(store.clawai_token).toBe(CLAWAI_TOKEN);
     expect(mockReloadMcpServers).toHaveBeenCalledTimes(1);
+    // And the refusal gate really ASKED the store, rather than throwing into
+    // its own catch over a `get` the factory did not provide. Without this the
+    // mock could be trimmed back to `getAll`/`setMany` and every case here
+    // would go on passing over an image-ops gate that never ran (TASK-727).
+    expect(vi.mocked(configGet)).toHaveBeenCalledWith("clawai_credential_refused_at");
   });
 
   it("does not charge a reload for a save that changed nothing about readiness", async () => {
