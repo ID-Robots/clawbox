@@ -733,7 +733,12 @@ describe("updater", () => {
       const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
       expect(postStep?.status).toBe("failed");
       expect(postStep?.error).toBe("post_update exited with status 1");
-      expect(mockSetMany).not.toHaveBeenCalled();
+      // No COMPLETION was persisted. `setMany` itself is called once per run
+      // now — the prologue clears the previous run's markers with it
+      // (TASK-731) — so the assertion is about the payload, not the call.
+      expect(mockSetMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ update_completed: true }),
+      );
     });
 
     it("fails the continuation when gateway verification still finds no known recovery path", async () => {
