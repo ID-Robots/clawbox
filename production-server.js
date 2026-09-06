@@ -815,9 +815,22 @@ try {
     }
     if (renameQuiet(orphan, parkedDir) === null) {
       console.warn(`[production-server] Adopted a build left behind by an interrupted reclaim (${name}).`);
-    } else {
-      console.warn(`[production-server] ${name} holds a build and .next-old already does — leaving it for the next run.`);
+      continue;
     }
+    // A rename onto a non-empty destination fails whatever is in it, so "it
+    // failed" is not "there is a build there". An entry-less but non-empty
+    // `.next-old` — an interrupted `rm -rf` in set_previous_build_aside leaves
+    // exactly that — is worth nothing and must not strand a real build for ever.
+    if (!hasEntry(parkedDir)) {
+      fs.rmSync(parkedDir, { recursive: true, force: true });
+      if (renameQuiet(orphan, parkedDir) === null) {
+        console.warn(`[production-server] Adopted a build left behind by an interrupted reclaim (${name}).`);
+      } else {
+        console.warn(`[production-server] Could not adopt ${name} into .next-old.`);
+      }
+      continue;
+    }
+    console.warn(`[production-server] ${name} holds a build and .next-old already does — leaving it for the next run.`);
   }
 
 
@@ -915,8 +928,18 @@ try {
         // Everything from here destroys only PRIVATE names. `.next` is moved
         // aside rather than deleted, so even if "it has no build entry" was
         // raced by the other reclaimer placing a good one, nothing is lost.
-        renameQuiet(nextDir, discardDir);
-        if (!renameQuiet(claimDir, nextDir)) {
+        // The move-aside's result is the difference between "somebody took our
+        // claim" and "this filesystem will not let us move a directory".
+        // Discarded, an EACCES/EROFS/EBUSY here left `.next` in place, made the
+        // placement fail ENOTEMPTY, and was then reported as a lost race while
+        // the build stayed under the claim — a false cause on a process that is
+        // about to crash-loop for want of an entry.
+        const asideErr = renameQuiet(nextDir, discardDir);
+        if (asideErr && present(nextDir)) {
+          console.warn(
+            `[production-server] Could not move .next aside (${asideErr.message}) — the parked build stays claimed at ${path.basename(claimDir)}.`,
+          );
+        } else if (!renameQuiet(claimDir, nextDir)) {
           fs.rmSync(discardDir, { recursive: true, force: true });
           console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
           // Its own try, deliberately: the reclaim is already done by the lines

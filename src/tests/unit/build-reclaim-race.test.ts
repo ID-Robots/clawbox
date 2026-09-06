@@ -228,6 +228,35 @@ describe("install.sh's reclaim cannot destroy a build the other reclaimer restor
     ).toBe("the-only-current-build");
   });
 
+  it("adopts an orphan over an entry-less .next-old rather than calling it a duplicate", () => {
+    // A rename onto a non-empty destination fails whatever is in it, so "it
+    // failed" is not "there is a build there". An interrupted `rm -rf` in
+    // set_previous_build_aside leaves exactly an entry-less but non-empty
+    // `.next-old`, and reading that as a duplicate stranded the real build for
+    // ever.
+    writeBuild(path.join(projectDir, ".next-claim.999995"), "the-stranded-build");
+    fs.mkdirSync(path.join(projectDir, ".next-old", "leftovers"), { recursive: true });
+
+    runReclaimAlone();
+
+    expect(buildIdAt(path.join(projectDir, ".next"))).toBe("the-stranded-build");
+  });
+
+  it("says a move-aside that FAILED is not a lost race", () => {
+    // Discarded, an EACCES/EROFS on `.next` left it in place, made the
+    // placement fail ENOTEMPTY, and was reported as "another reclaim took our
+    // claim" — a false cause on a box about to crash-loop for want of an entry.
+    const PROMOTE = INSTALL_SH.slice(
+      INSTALL_SH.indexOf("promote_parked_build() {"),
+      INSTALL_SH.indexOf(`${NL}}`, INSTALL_SH.indexOf("promote_parked_build() {")),
+    );
+    expect(PROMOTE).toMatch(/if ! mv -T "\$build_dir" "\$discard_dir"[^\n]*\[ -e "\$build_dir" \]/);
+    expect(PROMOTE).toContain("stays claimed at");
+    const block = SERVER_JS.slice(SERVER_JS.indexOf("// A build parked by an update that was killed OUTRIGHT"));
+    expect(block).toContain("const asideErr = renameQuiet(nextDir, discardDir);");
+    expect(block).toContain("Could not move .next aside");
+  });
+
   it("claims before it destroys, in the text as well as in the behaviour", () => {
     // The property in one line, so a refactor that keeps the tests green by
     // accident cannot lose it: nothing destructive may precede the claim.
@@ -333,6 +362,17 @@ describe("the transient names survive the update's own git clean", () => {
     const ignore = fs.readFileSync(path.join(REPO, ".gitignore"), "utf-8");
     expect(ignore).toMatch(/^\.next-claim\.\*\/$/m);
     expect(ignore).toMatch(/^\.next-discard\.\*\/$/m);
+  });
+
+  it("postbuild's entry search prunes them, not only .next-old", () => {
+    // The fallback `find` is what picks the standalone entry when the expected
+    // path is absent. Pruning only `.next-old*` let it choose `server.js`
+    // inside a traced claim or discard — the exact defect the `.next-old*`
+    // prune exists for (#632).
+    const postbuild = fs.readFileSync(path.join(REPO, "scripts", "postbuild.sh"), "utf-8");
+    const find = postbuild.slice(postbuild.indexOf('find "$STANDALONE" -maxdepth 3'));
+    expect(find.slice(0, 300)).toContain("'.next-claim.*'");
+    expect(find.slice(0, 300)).toContain("'.next-discard.*'");
   });
 
   it("postbuild sweeps them out of the standalone output like .next-old", () => {

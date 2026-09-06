@@ -1499,17 +1499,31 @@ drain_build_transients() {
     fi
     if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
       echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
-    else
-      echo "  Note: $(basename "$orphan") holds a build and $kept_dir already does — leaving it for the next run" >&2
+      continue
     fi
+    # A rename onto a non-empty destination fails whatever is in it, so
+    # "it failed" is not "there is a build there". An entry-less but non-empty
+    # `.next-old` — an interrupted `rm -rf "$kept_dir"` in
+    # set_previous_build_aside leaves exactly that — is worth nothing and must
+    # not keep a real build stranded for ever; clear it and adopt.
+    if ! build_entry_present "$kept_dir"; then
+      rm -rf "$kept_dir" || true
+      if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
+        echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
+        continue
+      fi
+      echo "  Warning: could not adopt $(basename "$orphan") into $kept_dir" >&2
+      continue
+    fi
+    echo "  Note: $(basename "$orphan") holds a build and $kept_dir already does — leaving it for the next run" >&2
   done
 }
 
 promote_parked_build() {
   local build_dir="${1:-$PROJECT_DIR/.next}" kept_dir="${2:-$PROJECT_DIR/.next-old}"
   local root="${build_dir%/.next}" claim_dir discard_dir
-  claim_dir="${build_dir%/.next}/.next-claim.$$"
-  discard_dir="${build_dir%/.next}/.next-discard.$$"
+  claim_dir="$root/.next-claim.$$"
+  discard_dir="$root/.next-discard.$$"
 
   drain_build_transients "$root" "$kept_dir"
 
@@ -1550,7 +1564,16 @@ promote_parked_build() {
   # rather than deleted, so even if the "it has no build entry" judgement above
   # was raced by the other reclaimer placing a good one, nothing is lost: the
   # branch below puts it back, and a kill in between leaves it for the drain.
-  mv -T "$build_dir" "$discard_dir" 2>/dev/null || true
+  # The move-aside's result is the difference between "somebody took our claim"
+  # and "this filesystem will not let us move a directory". Discarded, an
+  # EACCES/EROFS/EBUSY here left `.next` in place, made the placement fail
+  # ENOTEMPTY, and was then reported as a lost race while the build stayed under
+  # the claim — a false cause on a box that is about to crash-loop for want of
+  # an entry.
+  if ! mv -T "$build_dir" "$discard_dir" 2>/dev/null && [ -e "$build_dir" ]; then
+    echo "  Warning: could not move $build_dir aside, so the parked build stays claimed at $claim_dir" >&2
+    return 0
+  fi
   if mv -T "$claim_dir" "$build_dir" 2>/dev/null; then
     rm -rf "$discard_dir" || true
   else

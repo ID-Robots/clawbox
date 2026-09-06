@@ -102,8 +102,13 @@ if [ -f "$CANDIDATE" ] && [ ! -L "$CANDIDATE" ]; then
 elif [ -f "$STANDALONE/server.js" ] && [ ! -L "$STANDALONE/server.js" ]; then
   SRVJS="$STANDALONE/server.js"
 else
+  # Every parked-tree name is pruned, not just `.next-old*`: the atomic build
+  # reclaim (TASK-729) moves the tree through `.next-claim.*` and
+  # `.next-discard.*`, and a build that traced one of those would otherwise let
+  # this `find` pick the PARKED build's entry — the exact defect the `.next-old*`
+  # prune exists for.
   SRVJS="$(find "$STANDALONE" -maxdepth 3 \
-    \( -name node_modules -o -name '.next-old*' \) -prune \
+    \( -name node_modules -o -name '.next-old*' -o -name '.next-claim.*' -o -name '.next-discard.*' \) -prune \
     -o -type f -name server.js -print -quit)"
   [ -n "$SRVJS" ] || fail "no server.js under $STANDALONE — this build produced nothing the dashboard can load"
 fi
@@ -122,7 +127,7 @@ SDIR="$(dirname "$SRVJS")"
 # refuse a parked entry on its own (that is what its `-prune` is for), and in
 # the nested layout the copy lands beside the entry rather than at the top of
 # the standalone tree, so both places are swept.
-# `.next-claim*` and `.next-discard.*` beside `.next-old*`: the atomic build
+# `.next-claim.*` and `.next-discard.*` beside `.next-old*`: the atomic build
 # reclaim (TASK-729) moves the parked tree through those two names, and a build
 # that happened to run while one of them existed would trace it in exactly the
 # way it traces `.next-old`.
