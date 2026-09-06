@@ -996,20 +996,32 @@ describe("a run", () => {
     it("clear-history keeps a held run whose folder it cannot LOOK at — only absence drops one", async () => {
       // An EACCES on the stat is not "the folder is gone": deleting the
       // record and its evidence over a passing error would be the worse
-      // outcome, so such a run is kept and the next Clear asks again.
-      if (process.getuid?.() === 0) return; // root is never refused a stat
+      // outcome, so such a run is kept and the next Clear asks again. The
+      // refusal is staged on the stat itself rather than with a chmod, which
+      // root — and so a root-run CI — is never refused by.
       readyDevice();
       const lockedDir = makeProject("locked");
-      const parent = path.dirname(lockedDir);
       const draft = await lib.createDraftRun({ task: "behind a locked door", projectId: "locked", source: "owner" });
-      fs.chmodSync(parent, 0o000);
+      const realStat = fs.statSync;
+      const stat = vi.spyOn(fs, "statSync").mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+        if (path.resolve(String(target)) === path.resolve(lockedDir)) {
+          throw Object.assign(new Error(`EACCES: permission denied, stat '${lockedDir}'`), { code: "EACCES" });
+        }
+        return (realStat as (...args: unknown[]) => unknown)(target, ...rest);
+      }) as typeof fs.statSync);
       try {
         expect(() => fs.statSync(lockedDir)).toThrow(/EACCES/);
         expect(lib.clearFinishedRuns()).toBe(0);
         expect(lib.getRun(draft.id)?.status).toBe("draft");
       } finally {
-        fs.chmodSync(parent, 0o755);
+        stat.mockRestore();
       }
+      // Restored: the folder is there, so the draft is still held — and gone
+      // for real, it goes.
+      expect(lib.clearFinishedRuns()).toBe(0);
+      fs.rmSync(lockedDir, { recursive: true, force: true });
+      expect(lib.clearFinishedRuns()).toBe(1);
+      expect(lib.getRun(draft.id)).toBeNull();
     });
 
     it("deletes only drafts — finished runs are history", async () => {
