@@ -2652,10 +2652,13 @@ clawbox_plugin_boot_without() {
 # `clawbox` clears a start limit at boot.
 #
 # The one case that changes nothing either way is a plugin the core can see and
-# would load but keeps NO install record for — a directory-discovered
-# `~/.openclaw/extensions/` plugin, which is what `deepseek` and
-# `clawbox-email-directives` are on a box today. The core cannot emit a consent
-# diagnostic for one, so it can never refuse readiness over its consent either:
+# would load but keeps NO install record for — `clawbox-email-directives` is
+# exactly that on a box today: copied out of the checkout by the block below, so
+# it is in `~/.openclaw/extensions/` with nothing in the installed index to own
+# it. (`deepseek` lives in the same directory and is NOT this case — its ClawHub
+# install does write a record, and the box's own report says `consented`. The
+# directory is not the test; the install record is.) The core cannot emit a
+# consent diagnostic for one, so it can never refuse readiness over its consent:
 # switching it off would be a false failure over a plugin that is working, and
 # calling it accepted/current a false success. The boot says so in one line and
 # leaves the entry and any existing marker exactly as it found them, for the
@@ -2665,12 +2668,20 @@ clawbox_plugin_boot_without() {
 # the CLI start is the dominant cost and this runs inside a blocking
 # ExecStartPre. Empty until the first kill asks for it.
 #
-# ONE SNAPSHOT, TAKEN AT THE FIRST KILL OF THE BOOT. A consent recorded by a
-# LATER killed verb is not in it, so that plugin is still named and is switched
-# off — beta's behaviour, conservative, and the reason this reads as a fix for
-# the first killed verb of a boot. Re-reading per verb would add up to another
-# five 65 s CLI starts to a chain that already spends most of
-# `TimeoutStartSec=600` in the pathological case.
+# ONE SNAPSHOT, TAKEN AT THE FIRST KILL OF THE BOOT, and memoised. A consent
+# recorded by a LATER killed verb is not in it, so that plugin is still named
+# and is switched off — beta's behaviour, conservative, and the reason this
+# reads as a fix for a consent that was ALREADY current before the boot (the
+# common shape: `plugins enable` is idempotent, so it is a slow no-op that gets
+# killed) rather than for one written inside the verb that was then killed.
+#
+# The memoisation is not only cost. Measured on a box, this call is ~10 s
+# against its 60 s ceiling, so re-reading it per verb would be affordable on a
+# HEALTHY box — but the box that reaches this code is one loaded enough to kill
+# `plugins enable` at 60 s, and there the inspect can reach its own deadline
+# too. Per verb that costs 5 x 65 s to produce the same refusal five times;
+# memoised it costs one 65 s attempt and every later verb reuses the answer for
+# free. Bounding the damage on that box is what this is for.
 CLAWBOX_CONSENT_STATES=""
 CLAWBOX_CONSENT_STATES_READY=0
 
