@@ -269,3 +269,113 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh config write block", () => {
     expect(readdirSync(dir)).toEqual(["openclaw.json"]);
   });
 });
+
+/**
+ * Every OTHER `VAR="$(python3 … "$OPENCLAW_CONFIG" …)"` in the same script.
+ *
+ * Same class as the loader above and as the background-job batch reader: these
+ * are plain assignments in a BLOCKING `ExecStartPre` under `set -euo pipefail`,
+ * so a Python that exits non-zero does not produce a bad answer — it takes the
+ * gateway down. Each program has an `except` branch that prints a deliberate
+ * default, but the list is narrower than the failures a real box produces:
+ * `UnicodeDecodeError` is a `ValueError`, NOT a `json.JSONDecodeError`, so a
+ * config whose bytes are not UTF-8 — the shape a power cut mid-write leaves,
+ * and the shape `gateway-pre-start-background-optouts.test.ts` already fixtures
+ * — escapes every one of them.
+ *
+ * Pinned as a property of the SHIPPED assignments rather than of the Python, so
+ * the guard cannot be dropped without this failing.
+ */
+const READERS: [string, string, string][] = [
+  // [variable, the default its own except-branch prints, why it is that value]
+  ["LEGACY_CODEX_PRIMARY", "", "no legacy codex primary could be read"],
+  ["NEEDS_CODEX_PLUGIN", "0", "assume codex is not needed"],
+  ["CODEX_PLUGIN_ENABLED", "1", "assume it is enabled, so consent is still attempted"],
+  ["NEEDS_DEEPSEEK_PLUGIN", "0", "assume no deepseek key is configured"],
+];
+
+describe.skipIf(!hasPython3)("gateway-pre-start.sh — the other openclaw.json readers", () => {
+  /** One shipped assignment, verbatim, including its `)" || VAR=default` tail. */
+  function extractAssignment(variable: string): string {
+    const src = readFileSync(SCRIPT, "utf-8");
+    const marker = `${variable}="$(python3 - "$OPENCLAW_CONFIG" <<'PY'`;
+    const start = src.indexOf(marker);
+    if (start < 0) throw new Error(`${variable} assignment not found in gateway-pre-start.sh`);
+    const bodyEnd = src.indexOf('\nPY\n)"', start);
+    if (bodyEnd < 0) throw new Error(`${variable} assignment has no closing heredoc`);
+    const lineEnd = src.indexOf("\n", bodyEnd + '\nPY\n)"'.length);
+    return src.slice(start, lineEnd);
+  }
+
+  it.each(READERS)(
+    "%s survives a config whose bytes are not UTF-8 and answers its own default",
+    (variable, fallback) => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "prestart-readers-"));
+      try {
+        const cfg = path.join(dir, "openclaw.json");
+        // REAL BYTES, the same shape the background-job suite fixtures.
+        writeFileSync(cfg, Buffer.from([0xff, 0xfe, 0x00, 0x7b, 0x7d]));
+        const program = [
+          "set -euo pipefail",
+          `OPENCLAW_CONFIG=${JSON.stringify(cfg)}`,
+          extractAssignment(variable),
+          `printf '%s' "$${variable}"`,
+        ].join("\n");
+        const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", timeout: 30_000 });
+        // The gateway still starts. That is the whole point.
+        expect(r.status).toBe(0);
+        expect(r.stdout).toBe(fallback);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("CLAWBOX_WORKSPACE survives it too, and answers the harness's own default", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "prestart-readers-ws-"));
+    try {
+      const cfg = path.join(dir, "openclaw.json");
+      writeFileSync(cfg, Buffer.from([0xff, 0xfe, 0x00, 0x7b, 0x7d]));
+      const program = [
+        "set -euo pipefail",
+        `OPENCLAW_CONFIG=${JSON.stringify(cfg)}`,
+        extractAssignment("CLAWBOX_WORKSPACE"),
+        'printf %s "$CLAWBOX_WORKSPACE"',
+      ].join("\n");
+      const r = spawnSync("bash", ["-c", program], {
+        encoding: "utf-8",
+        timeout: 30_000,
+        env: { ...process.env, HOME: dir },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe(path.join(dir, ".openclaw", "workspace"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("also survives a config whose `agents` is null", () => {
+    // `cfg.get("agents", {}).get(...)` raises AttributeError on an explicit
+    // null, which no except list here mentions.
+    const dir = mkdtempSync(path.join(os.tmpdir(), "prestart-readers-null-"));
+    try {
+      const cfg = path.join(dir, "openclaw.json");
+      writeFileSync(cfg, JSON.stringify({ agents: null }));
+      const program = [
+        "set -euo pipefail",
+        `OPENCLAW_CONFIG=${JSON.stringify(cfg)}`,
+        extractAssignment("CLAWBOX_WORKSPACE"),
+        'printf %s "$CLAWBOX_WORKSPACE"',
+      ].join("\n");
+      const r = spawnSync("bash", ["-c", program], {
+        encoding: "utf-8",
+        timeout: 30_000,
+        env: { ...process.env, HOME: dir },
+      });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe(path.join(dir, ".openclaw", "workspace"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

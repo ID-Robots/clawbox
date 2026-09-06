@@ -2289,6 +2289,13 @@ fi
 # refused it, and the WARN below steered the owner at a namespace that no
 # longer exists.
 if [ "$CLAWBOX_OPENCLAW_V2" != "1" ]; then
+# TOTAL, like the reader in the background-job block below and the two
+# assignments above: this is a BLOCKING ExecStartPre under `set -euo
+# pipefail`, so an unhandled shape here is not a bad answer, it is NO
+# GATEWAY. The `except` list catches what was foreseen — and a config whose
+# bytes are not UTF-8 raises `UnicodeDecodeError`, a `ValueError` that is NOT
+# a `json.JSONDecodeError`, so it escapes. The fallback is this site's own
+# documented default, the one its except-branch already prints.
 LEGACY_CODEX_PRIMARY="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -2298,7 +2305,7 @@ except (OSError, json.JSONDecodeError):
 primary = (((cfg.get("agents") or {}).get("defaults") or {}).get("model") or {}).get("primary") or ""
 print(primary if isinstance(primary, str) and primary.lower().startswith("openai-codex/") else "")
 PY
-)"
+)" || LEGACY_CODEX_PRIMARY=""
 if [ -n "$LEGACY_CODEX_PRIMARY" ]; then
   NEW_CODEX_PRIMARY="codex/${LEGACY_CODEX_PRIMARY#*/}"
   if "$OPENCLAW_BIN" config set agents.defaults.model.primary "$NEW_CODEX_PRIMARY" >/dev/null 2>&1; then
@@ -2699,6 +2706,13 @@ else:
     print("0")'
   )" || CODEX_REGISTRY_DEPS_OK=0
 fi
+# TOTAL, like the reader in the background-job block below and the two
+# assignments above: this is a BLOCKING ExecStartPre under `set -euo
+# pipefail`, so an unhandled shape here is not a bad answer, it is NO
+# GATEWAY. The `except` list catches what was foreseen — and a config whose
+# bytes are not UTF-8 raises `UnicodeDecodeError`, a `ValueError` that is NOT
+# a `json.JSONDecodeError`, so it escapes. The fallback is this site's own
+# documented default, the one its except-branch already prints.
 NEEDS_CODEX_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -2736,13 +2750,20 @@ uses_codex = (
 )
 print("1" if uses_codex else "0")
 PY
-)"
+)" || NEEDS_CODEX_PLUGIN=0
 # OpenClaw 2 loads an installed plugin by default when its config entry is
 # absent. That default-enabled state must participate in BOTH the package
 # health/version checks and capability consent below; otherwise a migrated
 # 2026.7 package can be consented but remain broken against a 2026.8 core.
 CODEX_PLUGIN_ENABLED=0
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+  # TOTAL, like the reader in the background-job block below and the two
+  # assignments above: this is a BLOCKING ExecStartPre under `set -euo
+  # pipefail`, so an unhandled shape here is not a bad answer, it is NO
+  # GATEWAY. The `except` list catches what was foreseen — and a config whose
+  # bytes are not UTF-8 raises `UnicodeDecodeError`, a `ValueError` that is NOT
+  # a `json.JSONDecodeError`, so it escapes. The fallback is this site's own
+  # documented default, the one its except-branch already prints.
   CODEX_PLUGIN_ENABLED="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -2755,7 +2776,7 @@ entries = plugins.get("entries", {}) if isinstance(plugins, dict) else {}
 codex = entries.get("codex") if isinstance(entries, dict) else None
 print("0" if isinstance(codex, dict) and codex.get("enabled") is False else "1")
 PY
-)"
+)" || CODEX_PLUGIN_ENABLED=1
 fi
 # ── OpenClaw 2's three background jobs, opted out of ONCE ───────────────────
 #
@@ -2875,11 +2896,16 @@ record = read_seeded(os.environ["CLAWBOX_OPTOUT_STATE"])
 unusable = record is None
 seeded = set() if unusable else record
 if unusable:
+    # Says what happened on THIS boot. The "recorded as settled" half is
+    # downstream of a `config set` that may still fail, and a WARN that promises
+    # it would be a false success in an operator message: on the failing path
+    # nothing is recorded and every later boot repeats this.
     print("  WARN: the background-job opt-out record exists but cannot be read; the check-ins"
-          " opt-out is being SKIPPED and recorded as settled, so it will not be offered again"
-          " — an absent heartbeat cadence is also what 'switched on' looks like, and re-seeding"
-          " it could undo that. Switch check-ins off in Settings if that is what you want.",
-          file=sys.stderr)
+          " opt-out is being SKIPPED this boot — an absent heartbeat cadence is also what"
+          " 'switched on' looks like, and re-seeding it could undo that. It is recorded as"
+          " settled, and so stops being offered, once this boot's write and its record both"
+          " land; the messages below say whether they did. Switch check-ins off in Settings if"
+          " that is what you want.", file=sys.stderr)
 
 def present(path):
     node = cfg
@@ -2918,10 +2944,28 @@ SEEDPY
     # Non-fatal like every other CLI call here: this is a blocking ExecStartPre,
     # and a box that keeps its noisy defaults is far better than one with no
     # gateway. The next boot tries again, because the keys are still absent.
-    CLAWBOX_OPTOUT_WRITES="$(printf %s "$CLAWBOX_OPTOUT_BATCH" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["batch"]))')"
+    # GUARDED like every other Python call in this block (SEEDPY with `|| true`,
+    # STATEPY inside an `if !`), and for the reason stated just above: under
+    # `set -euo pipefail` a failing reader here aborted gateway-pre-start.sh
+    # outright, which as a blocking ExecStartPre means NO GATEWAY — the one
+    # outcome this block's own policy refuses.
+    #
+    # The `|| true` alone is not enough. It removes the invariant that this
+    # variable is `json.dumps` output, and a reader that fails can still have
+    # written to stdout — a `sitecustomize` that prints leaves the banner in the
+    # variable and an emptiness test does not fire. So the SHAPE is what is
+    # checked, not the length: anything that is not a JSON array is "cannot tell
+    # what to write", nothing is recorded, and the next boot tries again.
+    CLAWBOX_OPTOUT_WRITES="$(printf %s "$CLAWBOX_OPTOUT_BATCH" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["batch"]))' || true)"
+    case "$CLAWBOX_OPTOUT_WRITES" in
+      "["*"]") ;;
+      *) CLAWBOX_OPTOUT_WRITES="" ;;
+    esac
+    if [ -z "$CLAWBOX_OPTOUT_WRITES" ]; then
+      echo "  WARN: could not read the background-job opt-out batch; leaving the harness keys alone this boot" >&2
     # Nothing to write — every key was already the owner's — so record and move
     # on without paying a CLI start for it.
-    if [ "$CLAWBOX_OPTOUT_WRITES" = "[]" ] \
+    elif [ "$CLAWBOX_OPTOUT_WRITES" = "[]" ] \
       || timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_OPTOUT_WRITES" >/dev/null 2>&1; then
       [ "$CLAWBOX_OPTOUT_WRITES" = "[]" ] \
         || echo "  Seeded the OpenClaw 2 background-job opt-outs (heartbeat, memory dreaming, self-learning) — Settings can switch any of them back on"
@@ -4183,6 +4227,13 @@ fi
 # (the marker file check), consent given explicitly, non-fatal — a failed
 # install leaves the gateway refusing readiness with its own clear message.
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$OPENCLAW_HOME_DIR/extensions/deepseek/openclaw.plugin.json" ]; then
+  # TOTAL, like the reader in the background-job block below and the two
+  # assignments above: this is a BLOCKING ExecStartPre under `set -euo
+  # pipefail`, so an unhandled shape here is not a bad answer, it is NO
+  # GATEWAY. The `except` list catches what was foreseen — and a config whose
+  # bytes are not UTF-8 raises `UnicodeDecodeError`, a `ValueError` that is NOT
+  # a `json.JSONDecodeError`, so it escapes. The fallback is this site's own
+  # documented default, the one its except-branch already prints.
   NEEDS_DEEPSEEK_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, sys
 try:
@@ -4194,7 +4245,7 @@ deepseek = providers.get("deepseek")
 key = deepseek.get("apiKey") if isinstance(deepseek, dict) else None
 print("1" if isinstance(key, str) and key.strip() else "0")
 PY
-)"
+)" || NEEDS_DEEPSEEK_PLUGIN=0
   if [ "$NEEDS_DEEPSEEK_PLUGIN" = "1" ]; then
     # Pinned to the INSTALLED core, like @openclaw/codex above. The plugin is
     # cut from the openclaw/openclaw tree with the core's own version number
@@ -4240,6 +4291,13 @@ fi
 # falls back to ~/.openclaw/workspace when unset, handles absolute vs
 # tilde-relative vs bare-name values, and is safe when the file is
 # missing (fresh factory-reset state).
+# TOTAL, like the reader in the background-job block below and the two
+# assignments above: this is a BLOCKING ExecStartPre under `set -euo
+# pipefail`, so an unhandled shape here is not a bad answer, it is NO
+# GATEWAY. The `except` list catches what was foreseen — and a config whose
+# bytes are not UTF-8 raises `UnicodeDecodeError`, a `ValueError` that is NOT
+# a `json.JSONDecodeError`, so it escapes. The fallback is this site's own
+# documented default, the one its except-branch already prints.
 CLAWBOX_WORKSPACE="$(python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys
 default = os.path.expanduser("~/.openclaw/workspace")
@@ -4255,7 +4313,7 @@ if isinstance(ws, str) and ws.strip():
 else:
     print(default)
 PY
-)"
+)" || CLAWBOX_WORKSPACE="$HOME/.openclaw/workspace"
 # --- clawbox bootstrap seed ---
 # ClawBox's own first-conversation ritual.
 #
