@@ -1029,15 +1029,26 @@ fi
 # proxy publishes `modelTiers: {"gpt-image-1-mini": ["free","pro","max"]}`, so
 # the image backend has no tier to be downgraded from, and §"Re-arm the ClawAI
 # image backend" above already reconciles it every boot.
-# ONE binding, read by the decision below and by the writes after it, so the
-# endpoint we call ours and the endpoint we write cannot disagree — the same
-# staging override `hermes-clawai.ts` honours.
+# ONE binding each for the endpoint and the model, read by the decision below
+# and by the writes after it, so what we call ours and what we write cannot
+# disagree. Two literals would drift the day one of them moved: the verdict
+# would answer `refresh` on every boot and store the stale value for good.
+# `CLAWBOX_AI_PROXY_URL` is the same staging override `hermes-clawai.ts` honours,
+# and it is normalised the same way that binding normalises it — trimmed, and
+# with every trailing slash removed — so the endpoint compared here and the
+# endpoint every TypeScript consumer derives are the same string.
 CLAWBOX_VOICE_PROXY="${CLAWBOX_AI_PROXY_URL:-https://clawbox.com/api/ai}"
+CLAWBOX_VOICE_PROXY="$(printf '%s' "$CLAWBOX_VOICE_PROXY" | tr -d '[:space:]')"
+while [ "${CLAWBOX_VOICE_PROXY%/}" != "$CLAWBOX_VOICE_PROXY" ]; do
+  CLAWBOX_VOICE_PROXY="${CLAWBOX_VOICE_PROXY%/}"
+done
+CLAWBOX_VOICE_MODEL="gpt-4o-mini-tts"
 CLAWBOX_VOICE_PLAN=$(
   CLAWBOX_DEVICE_STORE="$PROJECT_DIR/data/config.json" \
   CLAWBOX_HERMES_CONFIG="$HERMES_CONFIG" \
   CLAWBOX_SPEECH_DEVICE_TIER="pro" \
   CLAWBOX_AI_PROXY_URL="$CLAWBOX_VOICE_PROXY" \
+  CLAWBOX_VOICE_MODEL="$CLAWBOX_VOICE_MODEL" \
   CLAWBOX_KOKORO_STAMP="$HOME_DIR/.cache/clawbox/kokoro-installed" \
   python3 - <<'PY' 2>/dev/null || echo "hold the voice plan could not be computed"
 import json, os
@@ -1078,8 +1089,9 @@ LOCAL_PROVIDER = "clawbox-local"
 CLOUD_PROVIDER = "openai"
 # The one speech model the proxy serves; the same constant `hermes-tts.ts` pins
 # as HERMES_CLOUD_TTS_MODEL, because a request that names anything else is
-# answered 400.
-CLOUD_MODEL = "gpt-4o-mini-tts"
+# answered 400. Bound by the shell above so the model compared here and the
+# model written below are one value.
+CLOUD_MODEL = os.environ["CLAWBOX_VOICE_MODEL"]
 
 
 def text(value):
@@ -1287,7 +1299,7 @@ TOKENPY
     # logged.
     elif ! hermes_voice_write config set tts.openai.api_key "$CLAWBOX_VOICE_TOKEN"; then
       log "could not write tts.openai.api_key (exit $CLAWBOX_VOICE_RC) — the cloud voice is NOT selected; the next start will try again"
-    elif ! hermes_voice_write config set tts.openai.model gpt-4o-mini-tts; then
+    elif ! hermes_voice_write config set tts.openai.model "$CLAWBOX_VOICE_MODEL"; then
       log "could not write tts.openai.model (exit $CLAWBOX_VOICE_RC) — the cloud voice is NOT selected; the next start will try again"
     elif [ "$CLAWBOX_VOICE_VERDICT" = refresh ]; then
       # The selection is already ours and is NOT rewritten: one writer of

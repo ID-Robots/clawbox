@@ -495,10 +495,17 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     const tts = await import("@/lib/hermes-tts");
     const models = await import("@/lib/local-models");
     const script = fs.readFileSync(SCRIPT, "utf-8");
-    const block = script.slice(script.indexOf("── 4a. The ClawBox AI cloud voice"));
+    // BOUNDED at §4b. An unbounded slice runs to the end of the file, so a
+    // constant deleted from §4a but named anywhere later would still satisfy
+    // every assertion below — a pin that cannot fail is not a pin.
+    const start = script.indexOf("── 4a. The ClawBox AI cloud voice");
+    expect(start).toBeGreaterThan(-1);
+    const end = script.indexOf("── 4b. Hermes' own background jobs", start);
+    expect(end).toBeGreaterThan(start);
+    const block = script.slice(start, end);
 
     expect(block).toContain(`CLAWBOX_SPEECH_DEVICE_TIER="${tts.CLAWBOX_AI_SPEECH_TIER}"`);
-    expect(block).toContain(`CLOUD_MODEL = "${tts.HERMES_CLOUD_TTS_MODEL}"`);
+    expect(block).toContain(`CLAWBOX_VOICE_MODEL="${tts.HERMES_CLOUD_TTS_MODEL}"`);
     expect(block).toContain(`LOCAL_PROVIDER = "${tts.HERMES_LOCAL_TTS_PROVIDER}"`);
     expect(block).toContain(`CLOUD_PROVIDER = "${tts.HERMES_CLOUD_TTS_PROVIDER}"`);
     expect(block).toContain(`FACTORY_PROVIDER = "${tts.HERMES_FACTORY_TTS_PROVIDER}"`);
@@ -511,6 +518,23 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     // And the tier constant is the DEVICE tier, not the plan name — the two are
     // off by one on purpose (CLAWBOX_AI_MODEL_BY_TIER).
     expect(tts.CLAWBOX_AI_SPEECH_TIER).toBe(ENTITLED_TIER);
+  });
+
+  it("normalises a proxy override so the endpoint compared is the endpoint written", () => {
+    // Two normalisations would drift. `CLAWBOX_AI_PROXY_URL` is trimmed and has
+    // every trailing slash removed, exactly as `hermes-clawai.ts`'s binding does
+    // it, so a staging override with a stray slash cannot make the verdict
+    // answer `refresh` on every boot against a value it just wrote.
+    writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
+
+    const first = run({ CLAWBOX_AI_PROXY_URL: " https://staging.example.invalid/api/ai// " });
+    expect(first.stdout).toContain("armed the ClawBox AI cloud voice");
+    expect(at("tts.openai.base_url")).toBe("https://staging.example.invalid/api/ai");
+
+    fs.writeFileSync(hermesLog, "");
+    const second = run({ CLAWBOX_AI_PROXY_URL: " https://staging.example.invalid/api/ai// " });
+    expect(second.stdout).toContain("the cloud voice is already armed");
+    expect(configCalls()).toEqual([]);
   });
 
   it("arms a dual box, and writes nothing into ~/.openclaw", () => {
