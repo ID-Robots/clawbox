@@ -75,6 +75,18 @@ export async function clawaiCredentialRefusalOnRecord(): Promise<boolean> {
  * identification of the credential as the problem may call this, never a bare
  * 401/403 off the wire.
  *
+ * ALWAYS refreshes the stamp, never write-once. An earlier revision returned
+ * early when anything was already recorded, and that left a stamp belonging to
+ * a RETIRED credential standing: a re-link whose clear could not be written,
+ * followed by a refusal of the NEW credential, kept the old timestamp — and a
+ * portal answer for the old token, asked before the re-link, then cleared it as
+ * "recorded before I asked". The stamp is therefore the time of the LAST
+ * confirmed refusal, which is exactly what `notRecordedSince` needs to compare
+ * against. The write cost is bounded by the callers, not by a rule here:
+ * `noteClawaiCredentialRefused` arms once per refusal window (and that window is
+ * reset by every credential write), and the portal poll runs on a 30-second
+ * cadence.
+ *
  * Best effort, and deliberately so. The store can be unwritable (a root-owned
  * `data/config.json` is a state this repo has seen), and a picture or a badge
  * poll must not fail because a HINT could not be saved. The caller's own
@@ -91,7 +103,6 @@ export async function clawaiCredentialRefusalOnRecord(): Promise<boolean> {
  */
 export async function persistClawaiCredentialRefusal(): Promise<void> {
   try {
-    if (isRecordedRefusal(await get(CLAWAI_CREDENTIAL_REFUSED_KEY))) return;
     await set(CLAWAI_CREDENTIAL_REFUSED_KEY, Date.now());
   } catch {
     // See the docblock: a hint that could not be written is not an outcome the

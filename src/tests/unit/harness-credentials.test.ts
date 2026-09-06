@@ -287,6 +287,22 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     expect(configStoreSet).toHaveBeenCalledTimes(1);
   });
 
+  it("refreshes the stamp rather than leaving one that belongs to a retired credential", async () => {
+    // A re-link whose persisted clear could not be written leaves the OLD
+    // credential's stamp standing. If the next refusal — of the NEW credential —
+    // did not move it, a portal answer for the old token, asked before the
+    // re-link, would clear it as "recorded before I asked" and the next gateway
+    // start would arm the image path over a credential the proxy refuses.
+    const mod = await memo();
+    configStoreGet.mockResolvedValue(1_788_000_000_000);
+
+    await mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+
+    const [key, value] = configStoreSet.mock.calls.at(-1) ?? [];
+    expect(key).toBe("clawai_credential_refused_at");
+    expect(value).toBeGreaterThan(1_788_000_000_000);
+  });
+
   it("takes the persisted refusal back out when the credential is rewritten", async () => {
     // The half that makes a re-link work: the configure route restarts the
     // gateway right after writing the new token, and the boot that follows must
