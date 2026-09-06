@@ -118,6 +118,19 @@ const portalUnreachableCache = new Map<string, { until: number; rejected: boolea
 const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
 
 /**
+ * How many times a lookup has PROVED a credential works.
+ *
+ * A plain counter, never anything derived from a token. Lookups for two
+ * credentials can overlap — a re-link starts one for the new token while the
+ * old token's is still in flight — and completion order is not arrival order.
+ * Without this, a delayed 403 for the RETIRED token lands after the new one's
+ * 200 and re-arms a rejection that `clawaiTokenRejectedByPortal` then reports
+ * against the credential the box actually holds: Settings says "Needs sign-in"
+ * about a device that was just successfully re-linked.
+ */
+let provenGeneration = 0;
+
+/**
  * Writes a token's resolved tier into the in-memory cache, sweeping
  * expired entries and enforcing the size cap before insertion. Map
  * iteration order is insertion order, so the first key returned by
@@ -245,12 +258,21 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
   const existing = inFlightPortalLookups.get(token);
   if (existing) return existing;
 
+  // Snapshotted before the request: what this lookup learns is about the state
+  // of the world when it was sent.
+  const startedAt = provenGeneration;
   const promise = (async (): Promise<PortalLookup> => {
     const markUnreachable = (rejected: boolean): PortalLookup => {
-      portalUnreachableCache.set(token, {
-        until: now + PORTAL_UNREACHABLE_TTL_MS,
-        rejected,
-      });
+      // A credential has been PROVEN good since this lookup was sent, so this
+      // verdict is about a token the box has moved on from. The caller still
+      // gets it — its own request asked about that token — but nothing is
+      // remembered, so no other reader can be misled by it.
+      if (provenGeneration === startedAt) {
+        portalUnreachableCache.set(token, {
+          until: now + PORTAL_UNREACHABLE_TTL_MS,
+          rejected,
+        });
+      }
       return { source: "unreachable", rejected };
     };
     try {
@@ -271,6 +293,7 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
         // scans, so leaving it would keep the Providers strip in "Needs
         // sign-in" for the rest of that entry's window after a re-link.
         portalUnreachableCache.clear();
+        provenGeneration += 1;
         return { source: "portal", tier, planTier, allowedModels };
       }
       // 401/403 is ambiguous AS A TIER: it can mean genuinely Free OR token
@@ -388,6 +411,7 @@ async function portalRefusedTheToken(res: Response): Promise<boolean> {
  * a clean module-state. Not for production use.
  */
 export function _resetPortalTierCache() {
+  provenGeneration = 0;
   portalUnreachableCache.clear();
   portalTierCache.clear();
   inFlightPortalLookups.clear();

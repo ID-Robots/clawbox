@@ -402,6 +402,39 @@ describe("/setup-api/ai-models/status", () => {
       expect(clawaiTokenRejectedByPortal()).toBe(false);
     });
 
+    it("ignores a rejection that lands after another token was proven good", async () => {
+      // Completion order is not arrival order. A re-link starts a lookup for
+      // the new token while the old one's is still in flight; if the old one
+      // comes back 403 afterwards, remembering it would make the Providers
+      // strip say "Needs sign-in" about a device that was just successfully
+      // re-linked.
+      const portal = await import("@/lib/clawbox-ai-portal-tier");
+      let releaseOld: () => void = () => {};
+      const oldPending = new Promise<void>((resolve) => { releaseOld = resolve; });
+
+      fetchSpy.mockImplementation(async (url: unknown, init?: unknown) => {
+        const auth = (init as { headers?: Record<string, string> } | undefined)?.headers?.Authorization;
+        if (auth?.endsWith("claw_old111")) {
+          await oldPending;
+          return new Response(
+            JSON.stringify({ error: { code: "invalid_token" } }),
+            { status: 403, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ tier: "max", deviceTier: "pro" }), { status: 200 });
+      });
+
+      const stale = portal.fetchPortalTier("claw_old111");
+      await portal.fetchPortalTier("claw_new222");
+      expect(portal.clawaiTokenRejectedByPortal()).toBe(false);
+
+      releaseOld();
+      await expect(stale).resolves.toMatchObject({ source: "unreachable", rejected: true });
+      // The caller that asked about the old token is told the truth; nothing
+      // else is.
+      expect(portal.clawaiTokenRejectedByPortal()).toBe(false);
+    });
+
     it("does not buffer an oversized refusal body looking for a code", async () => {
       // An interception appliance can answer 401/403 with a full HTML page, and
       // the 4 s fetch timeout bounds duration, not bytes.
