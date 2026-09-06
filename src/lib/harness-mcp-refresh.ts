@@ -38,11 +38,15 @@ import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reloa
 /**
  * Reload the MCP servers iff this request actually changed the active harness.
  *
- * Both directions. Switching TO Hermes gives its dashboard the reload directly;
- * switching AWAY leaves an OpenClaw box, where `reportMcpReloadRefused` says the
- * true sentence for that edition — OpenClaw spawns the ClawBox MCP server per
- * session and reaps it after ten idle minutes, so it self-heals and needs no
- * repair.
+ * Both directions, and the reload goes to HERMES either way — it is the only
+ * harness here with a dashboard to ask. On the licensed dual SKU that dashboard
+ * runs whichever harness is active (`install.sh` enables it for "hermes + dual"),
+ * so switching AWAY from Hermes normally succeeds too. What it respawns is
+ * Hermes' own MCP children, which is worth having: they answer truthfully for
+ * the next switch back. The OpenClaw side is not asked and does not need to be —
+ * it spawns the ClawBox MCP server per session and reaps it after ten idle
+ * minutes, so it self-heals. `reportMcpReloadRefused` is for the box where there
+ * is no dashboard up at all.
  *
  * Never throws and never reports to the caller: the selection is PERSISTED by
  * the time this runs, and a best-effort refresh must not turn a switch that
@@ -51,7 +55,8 @@ import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reloa
  *
  * @param before the harness this switch REPLACED, as answered by the write
  * @param after  the harness now active
- * @returns true when the box's MCP children were respawned for this change
+ * @returns true when HERMES' MCP children were respawned for this change — not
+ *          a claim about the OpenClaw child, which is never asked
  */
 export async function refreshHarnessToolsIfSwitched(
   before: string,
@@ -71,6 +76,11 @@ export async function refreshHarnessToolsIfSwitched(
     await reportMcpReloadRefused("harness/select", moved);
     return false;
   }
-  console.log(`[harness/select] ${moved}; asked the agent to reload its MCP servers`);
+  // Names WHO was asked. "the agent" read as "whichever harness now serves the
+  // owner", which is wrong in the away direction: on dual, Hermes answers this
+  // call after the box has moved to OpenClaw, and an operator reading the
+  // journal for "the agent still thinks it is on Hermes" must not be told the
+  // OpenClaw child was reloaded.
+  console.log(`[harness/select] ${moved}; asked Hermes to reload its MCP servers`);
   return true;
 }
