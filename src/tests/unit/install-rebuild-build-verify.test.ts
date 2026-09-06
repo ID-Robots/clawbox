@@ -409,8 +409,12 @@ beforeEach(() => {
   projectDir = path.join(sandbox, "clawbox");
   ownerProbe = path.join(sandbox, "parked-owner.txt");
   buildAttempts = path.join(sandbox, "build-attempts.txt");
+  // A regular FILE, not a 0500 directory: mode bits do not stop UID 0, so a
+  // suite running as root would create the log inside it and skip the very
+  // fallback these cases exist for. A file makes `mktemp -d` under it fail
+  // with ENOTDIR whoever runs the tests.
   unwritableTmp = path.join(sandbox, "no-write");
-  mkdirSync(unwritableTmp, { recursive: true, mode: 0o500 });
+  writeFileSync(unwritableTmp, "", "utf-8");
 });
 
 afterEach(() => {

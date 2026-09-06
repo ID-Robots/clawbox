@@ -432,9 +432,13 @@ step_build() {
   # is the only build path on x64 — for a fresh install and for the documented
   # `--step build` on a live box alike — and it parks no previous build, while
   # `next build` wipes `.next/standalone` before it copies anything.
-  local build_log build_rc build_attempt
-  build_log="${TMPDIR:-/tmp}/clawbox-x64-build.log"
-  : > "$build_log" 2>/dev/null || build_log=""
+  # A private `mktemp -d` directory, never a predictable path — this installer
+  # runs as root and a fixed name under TMPDIR is a symlink a local user can
+  # plant. See run_next_build in install.sh.
+  local build_log build_log_dir build_rc build_attempt
+  build_log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-x64-build-XXXXXX" 2>/dev/null || true)"
+  build_log=""
+  if [ -n "$build_log_dir" ]; then build_log="$build_log_dir/build.log"; fi
   build_rc=0
   for build_attempt in 1 2; do
     if [ -n "$build_log" ]; then
@@ -454,7 +458,7 @@ step_build() {
     awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$build_log" || break
     echo "  A file this build was tracing changed while it ran — building once more"
   done
-  if [ -n "$build_log" ]; then rm -f "$build_log"; fi
+  if [ -n "$build_log_dir" ]; then rm -rf "$build_log_dir"; fi
   if [ "$build_rc" -ne 0 ]; then
     echo "Error: Build failed (exit $build_rc)"
     exit "$build_rc"

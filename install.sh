@@ -1583,12 +1583,18 @@ restore_previous_build() {
 # so a failing pipeline or a false `[ … ] &&` test outside a condition would
 # kill the script on the first attempt in one caller and not the other.
 run_next_build() {
-  local log rc attempt
-  # A fixed path, overwritten rather than accumulated: this shell is a
-  # documented OOM-kill target (TASK-709), and the cleanup below is only
-  # reachable on a normal return.
-  log="${TMPDIR:-/tmp}/clawbox-next-build.log"
-  : > "$log" 2>/dev/null || log=""
+  local log log_dir rc attempt
+  # A PRIVATE directory from `mktemp -d`, never a predictable path. This script
+  # runs as root: `: > "$TMPDIR/<fixed name>"` follows a symlink a local user
+  # planted there, so root truncates and then `tee`s a build log into whatever
+  # it pointed at. `mktemp -d` creates a 0700 directory with an unguessable
+  # name atomically, so nothing can be waiting inside it. The cost is that an
+  # OOM kill — which this shell is a documented target of (TASK-709) — leaves an
+  # empty directory rather than nothing; a stale 0700 directory in /tmp is the
+  # cheaper of the two problems by a wide margin.
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-build-XXXXXX" 2>/dev/null || true)"
+  log=""
+  if [ -n "$log_dir" ]; then log="$log_dir/next-build.log"; fi
   if [ -z "$log" ]; then
     echo "  Note: could not open a build log; a mid-build trace race will not be retried"
   fi
@@ -1623,7 +1629,7 @@ run_next_build() {
     awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
     echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
   done
-  if [ -n "$log" ]; then rm -f "$log"; fi
+  if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
   return "$rc"
 }
 

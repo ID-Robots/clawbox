@@ -83,8 +83,12 @@ run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install"
 # a few lines above, `next build` wipes `.next/standalone` before it copies
 # anything, and this path parks NO previous build — so a mid-copy ENOENT
 # leaves the box with no standalone entry and nothing to fall back on.
-BUILD_LOG="${TMPDIR:-/tmp}/clawbox-force-update-build.log"
-: > "$BUILD_LOG" 2>/dev/null || BUILD_LOG=""
+# A private `mktemp -d` directory, never a predictable path — this script runs
+# as root and a fixed name under TMPDIR is a symlink a local user can plant.
+# See run_next_build in install.sh.
+BUILD_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-force-update-XXXXXX" 2>/dev/null || true)"
+BUILD_LOG=""
+if [ -n "$BUILD_LOG_DIR" ]; then BUILD_LOG="$BUILD_LOG_DIR/build.log"; fi
 BUILD_RC=0
 for BUILD_ATTEMPT in 1 2; do
   if [ -n "$BUILD_LOG" ]; then
@@ -105,7 +109,7 @@ for BUILD_ATTEMPT in 1 2; do
   awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$BUILD_LOG" || break
   echo "[force-update] A file the build was tracing changed while it ran — building once more"
 done
-if [ -n "$BUILD_LOG" ]; then rm -f "$BUILD_LOG"; fi
+if [ -n "$BUILD_LOG_DIR" ]; then rm -rf "$BUILD_LOG_DIR"; fi
 if [ "$BUILD_RC" -ne 0 ]; then
   echo "[force-update] Build failed (exit $BUILD_RC)." >&2
   exit "$BUILD_RC"
