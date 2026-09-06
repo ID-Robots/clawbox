@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyMemoryShardChanged } from "@/lib/ui-events";
 import HelpTip from "./HelpTip";
+import MemoryShardFolders from "./MemoryShardFolders";
 import StatusMessage from "./StatusMessage";
 import { BTN_DANGER, BTN_SECONDARY, CARD } from "./coding-agent-ui";
 
@@ -181,6 +182,24 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
         )}
 
         {error && <StatusMessage type="error" message={error} />}
+      </div>
+
+      {/* Which of the owner's own documents the box reads is the other half
+          of the consent the switch above gives, so it sits beside it — before
+          this card the folders lived only in the wizard's first step, and once
+          setup was over there was no way to see or change them. The list and
+          its picker are the wizard's own component, so the two cannot drift. */}
+      <div className={CARD} data-testid="memory-shard-folders-card">
+        <div className="flex items-center gap-2">
+          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">folder_open</span>
+          <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+            {t("clawkeep.memory.folders.title")}
+          </span>
+        </div>
+        <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">
+          {t("clawkeep.memory.folders.hint")}
+        </p>
+        <MemoryShardFolders />
       </div>
 
       {/* The one owner tool this app has, in the row the Coding Agent's three

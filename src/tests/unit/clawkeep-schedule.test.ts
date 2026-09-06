@@ -20,17 +20,23 @@ const baseSchedule: ClawKeepSchedule = {
  *
  * A contract test rather than one shared constant, deliberately. The natural
  * home would be `clawkeep-protection.ts` — the module that exists to be
- * imported by everything and to import nothing — but `MemoryShardApp.tsx` is a
- * client component that must never reach `clawkeep.ts` (it opens `fs` at
- * import), and the same codebase already settles this class the same way:
+ * imported by everything and to import nothing — but the client components
+ * must never reach `clawkeep.ts` (it opens `fs` at import), and the same
+ * codebase already settles this class the same way:
  * `voice-output-warning-agreement` asserts that the selector and the privacy
  * banner agree about which engines are local rather than merging them.
+ *
+ * The CLIENT copy lives in `memory-shard-state.ts` (`TIME_OF_DAY`), imported by
+ * both the home card and the setup wizard — two components carrying the same
+ * literal had already drifted once (the wizard saved a half-typed "" that the
+ * server turned into 03:00). This test reads that one module for the client
+ * side, and separately pins that neither component declares a copy of its own.
  */
 describe("the time-of-day validator", () => {
   const SOURCES = [
     "src/lib/clawkeep.ts",
     "src/lib/clawkeep-memory.ts",
-    "src/components/MemoryShardApp.tsx",
+    "src/lib/memory-shard-state.ts",
   ];
 
   it("is the same expression everywhere a schedule is validated", async () => {
@@ -54,6 +60,17 @@ describe("the time-of-day validator", () => {
     expect(new Set(all).size, `expressions differ: ${JSON.stringify(found, null, 2)}`).toBe(1);
     // And it must be the range-correct one, not merely a shared shape check.
     expect(all[0]).toBe("/^([01]\\d|2[0-3]):[0-5]\\d$/");
+  });
+
+  it("is imported by both client components rather than copied into them", async () => {
+    const fs = await import("fs/promises");
+    const path = await import("path");
+    for (const file of ["src/components/MemoryShardApp.tsx", "src/components/MemoryShardWizard.tsx"]) {
+      const src = await fs.readFile(path.join(process.cwd(), file), "utf8");
+      expect(src, `${file} must import TIME_OF_DAY from memory-shard-state`).toMatch(/import \{[^}]*\bTIME_OF_DAY\b[^}]*\} from "@\/lib\/memory-shard-state"/);
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, "").split("\n").map(line => (line.trimStart().startsWith("//") ? "" : line)).join("\n");
+      expect([...code.matchAll(/\/\^[^/\n]*:[^/\n]*\$\//g)], `${file} carries its own copy of the validator`).toHaveLength(0);
+    }
   });
 });
 

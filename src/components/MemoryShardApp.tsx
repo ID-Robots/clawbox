@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { TIME_OF_DAY } from "@/lib/memory-shard-state";
 import { onMemoryShardChanged } from "@/lib/ui-events";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardWizard from "./MemoryShardWizard";
@@ -76,9 +77,6 @@ function isRunState(value: unknown): value is MemoryRunState {
   return !!value && typeof value === "object" && typeof (value as Partial<MemoryRunState>).status === "string";
 }
 
-/** What the server accepts as a time; anything else is still being typed. */
-const TIME_OF_DAY = /^([01]\d|2[0-3]):[0-5]\d$/;
-
 /**
  * The route names its failures in snake_case (`index_identity_mismatched`);
  * a translation key may only carry alphanumeric segments (the naming rule
@@ -89,6 +87,18 @@ const TIME_OF_DAY = /^([01]\d|2[0-3]):[0-5]\d$/;
 function errorKeySuffix(code: string): string {
   return code.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
 }
+
+/**
+ * How many reads at the fast cadence the card keeps making after it SAW a run
+ * end: enough for the one reading the server may still answer stale (two
+ * passes settling under one probe, its bounded retry spent) to be corrected
+ * by the probe the next read waits on, ~8 s on a Jetson — and no more. A count
+ * of ticks rather than a window on the clock, because the run's end is
+ * stamped by the box and a phone's clock 12 s ahead of it would never have
+ * opened a window at all, while one behind would have kept it open for the
+ * whole skew.
+ */
+const SETTLE_READS = 3;
 
 function MemoryIndexCard({ initial, onError }: {
   /** The status the window already read on the way in, when it recognised one.
@@ -167,6 +177,30 @@ function MemoryIndexCard({ initial, onError }: {
     if (seeded.current) seeded.current = false;
     else void load();
     const id = setInterval(() => { void load(); }, running ? 3_000 : 30_000);
+    return () => clearInterval(id);
+  }, [load, running]);
+
+  // A few more fast reads after the card SEES a run end. The server waits for
+  // the settled reading before it answers the read that flips `running` off,
+  // so that read carries the rebuilt index — except when two passes settled
+  // under one probe, where its bounded retry is spent and the read after
+  // that pays the correcting probe; at the slow cadence alone, a wrong "Run a
+  // full reindex" banner would sit for 30 s over an index that had just been
+  // rebuilt. Kept apart from the poll above rather than folded into its
+  // cadence rule, so that effect stays as it is. Keyed on the transition this
+  // card observed, never on the run's stamped end: a run that finished before
+  // the card mounted pays nothing, and no clock is compared with the box's.
+  // The ticks are served from the server's cache once it has settled.
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    const ended = wasRunning.current && !running;
+    wasRunning.current = running;
+    if (!ended) return;
+    let left = SETTLE_READS;
+    const id = setInterval(() => {
+      void load();
+      if (--left <= 0) clearInterval(id);
+    }, 3_000);
     return () => clearInterval(id);
   }, [load, running]);
 

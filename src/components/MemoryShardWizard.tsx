@@ -1,14 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import MemoryShardArt from "./MemoryShardArt";
+import MemoryShardFolders from "./MemoryShardFolders";
 import StatusMessage from "./StatusMessage";
 import HelpTip from "./HelpTip";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
-import {
-  type ProvisionPhase,
-} from "@/lib/memory-shard-state";
+import { type ProvisionPhase, TIME_OF_DAY } from "@/lib/memory-shard-state";
 
 /**
  * Memory Shard's first-run wizard: what it is, which folders to read, when to
@@ -22,14 +21,7 @@ import {
 
 type Step = "intro" | "folders" | "schedule" | "provision";
 
-interface BrowseAnswer {
-  root: string;
-  path: string;
-  parent: string | null;
-  entries: { name: string; path: string }[];
-}
 
-/** One line of Ollama's pull stream. */
 /** One NDJSON line from /setup-api/embed/install: a status while the root step runs, then success or error. */
 interface PullLine { status?: string; success?: boolean; error?: string }
 
@@ -39,85 +31,24 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // ─── Step 2: the folders to read ───
-  const [sources, setSources] = useState<string[]>([]);
-  const [browse, setBrowse] = useState<BrowseAnswer | null>(null);
-  const browseAbort = useRef<AbortController | null>(null);
+  // ─── Step 2: the folders to read — MemoryShardFolders, shared with the
+  // settings page so the two cannot drift. Next waits while it writes, so the
+  // owner cannot leave the step before an add has been answered ───
+  const [foldersBusy, setFoldersBusy] = useState(false);
+
   // The provisioning flow's own signal. Closing the window mid-download must
   // stop the download: the pull route drops its Ollama connection when the
   // client goes away, precisely so a model is never fetched with nothing in
   // the UI showing it, and a fetch left running here would defeat that.
   const provisionAbort = useRef<AbortController | null>(null);
-
-  const loadSources = useCallback(async () => {
-    try {
-      const res = await fetch("/setup-api/clawkeep/memory/sources");
-      if (res.ok) setSources(((await res.json()) as { paths?: string[] }).paths ?? []);
-    } catch {
-      // An unreadable list is an empty one here; the step still works.
-    }
-  }, []);
-  useEffect(() => { void loadSources(); }, [loadSources]);
-  useEffect(() => () => {
-    browseAbort.current?.abort();
-    provisionAbort.current?.abort();
-  }, []);
-
-  const openBrowse = useCallback(async (dir?: string) => {
-    browseAbort.current?.abort();
-    const ctl = new AbortController();
-    browseAbort.current = ctl;
-    setError(null);
-    try {
-      const qs = dir ? `?dir=${encodeURIComponent(dir)}` : "";
-      let res = await fetch(`/setup-api/coding-agent/browse${qs}`, { signal: ctl.signal });
-      if (res.status === 404 && dir) res = await fetch("/setup-api/coding-agent/browse", { signal: ctl.signal });
-      if (!res.ok) throw new Error(t("clawkeep.memory.setup.browseFailed"));
-      setBrowse((await res.json()) as BrowseAnswer);
-    } catch (err) {
-      if ((err as Error)?.name === "AbortError") return;
-      setError(err instanceof Error ? err.message : t("clawkeep.memory.setup.browseFailed"));
-    }
-  }, [t]);
-
-  const addSource = async (folder: string) => {
-    setBusy("add");
-    setError(null);
-    try {
-      const res = await fetch("/setup-api/clawkeep/memory/sources", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: folder }),
-      });
-      const out = (await res.json().catch(() => null)) as { paths?: string[]; error?: string } | null;
-      if (!res.ok) throw new Error(out?.error || t("clawkeep.memory.setup.addFolderFailed"));
-      setSources(out?.paths ?? []);
-      setBrowse(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("clawkeep.memory.setup.addFolderFailed"));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const removeSource = async (folder: string) => {
-    setBusy(`remove:${folder}`);
-    try {
-      const res = await fetch("/setup-api/clawkeep/memory/sources", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path: folder }),
-      });
-      const out = (await res.json().catch(() => null)) as { paths?: string[] } | null;
-      if (res.ok) setSources(out?.paths ?? []);
-    } finally {
-      setBusy(null);
-    }
-  };
+  useEffect(() => () => provisionAbort.current?.abort(), []);
 
   // ─── Step 3: when it runs ───
   const [frequency, setFrequency] = useState<"daily" | "weekly">("daily");
   const [time, setTime] = useState("03:00");
+  // What the field shows while what it holds is not yet a time; `time` is
+  // the last VALID value and the only one that is ever saved.
+  const [timeText, setTimeText] = useState<string | null>(null);
   const [dayOfWeek, setDayOfWeek] = useState(0);
 
   const saveSchedule = async (signal: AbortSignal) => {
@@ -328,69 +259,10 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
           <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("clawkeep.memory.setup.foldersTitle")}</h2>
           <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">{t("clawkeep.memory.setup.foldersBody")}</p>
 
-          <ul className="mt-3 space-y-1.5" data-testid="memory-shard-sources">
-            {sources.map((folder) => (
-              <li key={folder} className="flex items-center gap-2 rounded-lg bg-[var(--fill-1)] border border-[var(--border-subtle)] px-3 py-2">
-                <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 15 }} aria-hidden="true">folder</span>
-                <span className="flex-1 truncate font-mono text-[11px] text-[var(--text-secondary)]">{folder}</span>
-                <button
-                  type="button"
-                  onClick={() => void removeSource(folder)}
-                  disabled={busy === `remove:${folder}`}
-                  className={BTN_SECONDARY}
-                >
-                  {t("clawkeep.memory.setup.removeFolder")}
-                </button>
-              </li>
-            ))}
-            {sources.length === 0 && (
-              <li className="text-[11px] text-[var(--text-muted)]">{t("clawkeep.memory.setup.noFolders")}</li>
-            )}
-          </ul>
-
-          <button type="button" onClick={() => void openBrowse()} className={`${BTN_SECONDARY} mt-3`} data-testid="memory-shard-browse">
-            <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">create_new_folder</span>
-            {t("clawkeep.memory.setup.addFolder")}
-          </button>
-
-          {browse && (
-            <div className="mt-2 rounded-xl bg-[var(--fill-1)] border border-[var(--border-subtle)] p-2" data-testid="memory-shard-picker">
-              <div className="flex items-center justify-between gap-2 px-1 pb-1">
-                <span className="font-mono text-[11px] text-[var(--text-muted)] truncate">{browse.path}</span>
-                <button type="button" onClick={() => setBrowse(null)} className={BTN_SECONDARY}>{t("clawkeep.memory.setup.close")}</button>
-              </div>
-              <ul className="max-h-48 overflow-y-auto">
-                {browse.parent && (
-                  <li>
-                    <button type="button" onClick={() => void openBrowse(browse.parent as string)}
-                      className="w-full text-left px-2 py-1 rounded-lg text-xs text-[var(--text-secondary)] hover:bg-white/5">
-                      {t("clawkeep.memory.setup.up")}
-                    </button>
-                  </li>
-                )}
-                {browse.entries.map((entry) => (
-                  <li key={entry.path}>
-                    <button type="button" onClick={() => void openBrowse(entry.path)}
-                      className="w-full text-left px-2 py-1 rounded-lg text-xs text-[var(--text-primary)] hover:bg-white/5">
-                      {entry.name}
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <button
-                type="button"
-                onClick={() => void addSource(browse.path)}
-                disabled={busy === "add"}
-                data-testid="memory-shard-pick"
-                className={`${BTN_SECONDARY} mt-1 w-full`}
-              >
-                {t("clawkeep.memory.setup.useFolder")}
-              </button>
-            </div>
-          )}
+          <MemoryShardFolders onBusyChange={setFoldersBusy} />
 
           <div className="mt-5 flex items-center gap-2">
-            <button type="button" onClick={() => setStep("schedule")} className={BTN_PRIMARY} data-testid="memory-shard-next-schedule">
+            <button type="button" onClick={() => setStep("schedule")} disabled={foldersBusy} className={BTN_PRIMARY} data-testid="memory-shard-next-schedule">
               {t("clawkeep.memory.setup.next")}
             </button>
             <span className="text-[11px] text-[var(--text-muted)]">{t("clawkeep.memory.setup.foldersOptional")}</span>
@@ -419,8 +291,13 @@ export default function MemoryShardWizard({ onDone }: { onDone: () => void }) {
             <input
               id="ms-time"
               type="time"
-              value={time}
-              onChange={(e) => setTime(e.target.value)}
+              value={timeText ?? time}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (TIME_OF_DAY.test(next)) { setTime(next); setTimeText(null); }
+                else setTimeText(next);
+              }}
+              onBlur={() => setTimeText(null)}
               data-testid="memory-shard-time"
               className={`${FIELD} font-mono`}
             />

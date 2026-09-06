@@ -78,3 +78,12 @@ export const EXTRACTABLE_EXTENSIONS = [".pdf", ".docx", ".odt", ".rtf", ".txt"] 
 /** What OpenClaw's indexer reads on its own. Everything else has to be
  *  extracted into one of these first — it accepts `.md` and nothing else. */
 export const INDEXABLE_EXTENSIONS = [".md"] as const;
+
+/**
+ * What the schedule routes accept as a time of day. The ONE copy: the home
+ * card and the setup wizard both keep a half-typed value in the field and
+ * save only a value this accepts — two regexes for one rule had already
+ * drifted apart once (the wizard saved "" and the server quietly made it
+ * 03:00).
+ */
+export const TIME_OF_DAY = /^([01]\d|2[0-3]):[0-5]\d$/;

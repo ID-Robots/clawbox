@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import MemoryShardApp from "@/components/MemoryShardApp";
 import { I18nProvider } from "@/lib/i18n";
 
@@ -114,6 +114,7 @@ describe("the Memory Shard app", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
@@ -471,6 +472,57 @@ describe("the Memory Shard app", () => {
     const announced = help.getAttribute("aria-label") ?? "";
     expect(announced).toBe("Start over");
     expect(screen.getByTestId("memory-shard-reset-card").textContent).toContain(announced);
+  });
+
+  it("keeps reading at the fast cadence for a few ticks after it sees a run end — so a stale reading cannot sit for 30 s", async () => {
+    // F-C of the real-browser sweep: the read that flipped `running` off
+    // carried the mid-rebuild reading (identity "mismatched") and the poll
+    // then slowed to 30 s, leaving the amber "Run a full reindex" banner over
+    // an index that had just been rebuilt. The server now waits for the
+    // settled reading before answering that read; for the one case it still
+    // answers stale (two passes settling under one probe), a few more 3 s
+    // reads after the card SEES the run end are what pay the correcting
+    // probe — counted in ticks, never measured against the box's clock —
+    // and then the slow cadence alone remains.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const statusReads = () => (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .filter(([input]) => String(input) === "/setup-api/clawkeep/memory").length;
+    const startedAtMs = Date.now() - 4_000;
+    memory = {
+      ...LOCAL_MEMORY,
+      run: { ...LOCAL_MEMORY.run, status: "running", mode: "full", trigger: "manual", startedAtMs },
+    };
+    mount();
+    await screen.findByRole("button", { name: "Indexing…" });
+    const before = statusReads();
+
+    // The run ends; the fast poll's next tick is the read that flips `running` off.
+    memory = {
+      ...LOCAL_MEMORY,
+      run: {
+        ...LOCAL_MEMORY.run, status: "succeeded", mode: "full", trigger: "manual",
+        startedAtMs, finishedAtMs: Date.now(), durationMs: 4_000,
+      },
+    };
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+    await screen.findByRole("button", { name: "Index now" });
+    // Two: the tick that flipped it, and the poll's own immediate re-read on
+    // a change of cadence, which it has always done.
+    expect(statusReads()).toBe(before + 2);
+
+    // ...then three more fast reads, where the slow cadence alone would have
+    // waited 30 s for the next one.
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+    expect(statusReads()).toBe(before + 3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+    expect(statusReads()).toBe(before + 4);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+    expect(statusReads()).toBe(before + 5);
+    // ...and no more: the next read is the slow poll's, 30 s after the flip.
+    await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
+    expect(statusReads()).toBe(before + 5);
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000); });
+    expect(statusReads()).toBe(before + 6);
   });
 
   it("surfaces a mismatched index as something to fix, not as a healthy box", async () => {
