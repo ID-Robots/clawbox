@@ -20,8 +20,11 @@ and the validated 12 GiB run took ~86 minutes end to end. Those defaults, not
 the TS bridge's kill timer, were the first walls a large backup hit.
 
 The encrypt and decrypt steps run OUTSIDE any edition branch
-(`runner.py`, `restore.py`), so this bound applies on the Hermes edition too —
-only the archive step differs between the two backends.
+(`runner.py`, `restore.py`), so this bound applies on the Hermes edition too.
+The archive and verify steps are the ones that differ between the backends:
+`hermes.py` shells out for neither — it tars with `tarfile` and verifies the
+manifest in process — so on that edition these two subprocesses are all there
+is to cap.
 """
 
 from __future__ import annotations

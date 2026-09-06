@@ -33,17 +33,21 @@ const repoFile = (rel: string) => readFile(path.join(process.cwd(), rel), "utf8"
  * what happened here, a wording fix recorded in a commit subject, an in-thread
  * reply and a resolved review thread while the source kept the old sentence.
  *
- * The `onTimeout` match is anchored inside `backup_now` and demands `message`
- * and `next` adjacent within the braces, so it cannot run past the block and
- * pick up the `ENDPOINT_DOWN` handler below, which names `backup_status` for
- * its own good reasons.
+ * The search window is `backup_now`'s OWN registration — from its `reg.tool(`
+ * to the next one — for two reasons. It must not run on to the
+ * `ENDPOINT_DOWN` handler below, which names `backup_status` for its own good
+ * reasons; and `ApiOptions.onTimeout` exists so other routes can adopt it, so
+ * a second tool taking it must not silently become what this test asserts
+ * about while `backup_now` quietly ships none.
  */
 async function shippedBackupNowAdvice(): Promise<{ description: string; message: string; next: string }> {
   const src = await repoFile("mcp/tools/system.ts");
   const tool = /reg\.tool\(\s*"backup_now",\s*"([^"]+)"/.exec(src);
   expect(tool, "system.ts must register backup_now with a description").not.toBeNull();
-  const block = /onTimeout: \{\s*message: "([^"]+)",\s*next: "([^"]+)",\s*\}/.exec(src.slice(tool!.index));
-  expect(block, "backup_now must pass onTimeout, with a message and a next").not.toBeNull();
+  const nextTool = src.indexOf("\n  reg.tool(", tool!.index + 1);
+  const scope = src.slice(tool!.index, nextTool === -1 ? undefined : nextTool);
+  const block = /onTimeout:\s*\{\s*message:\s*"([^"]+)"\s*,\s*next:\s*"([^"]+)"\s*,?\s*\}/.exec(scope);
+  expect(block, "backup_now itself must pass onTimeout, with a message and a next").not.toBeNull();
   return { description: tool![1], message: block![1], next: block![2] };
 }
 

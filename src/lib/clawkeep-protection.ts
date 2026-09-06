@@ -113,14 +113,18 @@ export const MAX_BACKUP_WINDOW_MS = 7 * DAY_MS + BACKUP_GRACE_MS;
  *
  * It is not the only ceiling that EXISTS. The daemon shells out for four steps
  * and carries a cap on each: `backup create` and `backup verify` in
- * `openclaw.py`, and `openssl enc` / `enc -d` in `crypto.py`. Those bind
- * first, whatever this constant allows. They were 30, 5, 30 and 30 minutes and
- * all now take one `limits.SUBPROCESS_TIMEOUT_S`, the same four hours;
+ * `openclaw.py`, and `openssl enc` / `enc -d` in `crypto.py`. They were 30, 5,
+ * 30 and 30 minutes — tighter than this constant, so they, not it, were the
+ * walls a 12 GB backup hit — and all now take one
+ * `limits.SUBPROCESS_TIMEOUT_S`, the same four hours;
  * `clawkeep-backup-run-cap.test.ts` reads them back out of the Python and pins
- * them against this value. Only the ARCHIVE step differs by edition — the
- * Hermes backend builds its tarball in-process with `tarfile` — while the
- * encrypt and decrypt steps run outside any edition branch, so both SKUs carry
- * the openssl cap.
+ * them against this value. At equal values this timer fires first, since it
+ * starts at spawn and a step's does not; the per-step caps bind
+ * INDEPENDENTLY, and are the only ceiling left when the Next worker holding
+ * this one is replaced mid-run. The archive and verify steps differ by
+ * edition — the Hermes backend does both in-process, with `tarfile` and a
+ * manifest check — while encrypt and decrypt shell out outside any edition
+ * branch, so both SKUs carry the openssl cap.
  *
  * It was 60 minutes, written when a Jetson backup took 2-5 minutes. TASK-675
  * made 10 GB+ archives the supported case and the validated 12 GiB run took
