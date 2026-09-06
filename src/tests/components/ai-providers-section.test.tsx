@@ -63,6 +63,7 @@ vi.mock("@/hooks/useHermesModelOptions", () => ({
 const summary = (overrides: Partial<ProviderStatusSummary> = {}): ProviderStatusSummary => ({
   harness: "hermes",
   defaultProvider: "clawai",
+  unrunnable: [],
   degraded: false,
   providers: [
     { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },

@@ -70,10 +70,16 @@ export async function setProviderEnabled(id: string, enabled: boolean): Promise<
   const status = await readProviderStatus();
   const canonical = canonicalProviderId(status.harness, id);
   const row = canonical ? status.providers.find((candidate) => candidate.id === canonical) : undefined;
-  if (!row || !canonical) {
+  // A provider dropped from the rows because this box can run no model from it
+  // (TASK-668) is still perfectly well known here, and its switch still has to
+  // flip: the strip hides the row, it does not forget the provider. Answering
+  // "not known to this box" for one would be a false failure — and would leave
+  // whatever the switch was last set to stuck for good.
+  const hidden = !row && !!canonical && status.unrunnable.includes(canonical);
+  if ((!row && !hidden) || !canonical) {
     return { ok: false, kind: "unknown_provider", error: "That AI provider is not known to this box." };
   }
-  if (!enabled && row.isDefault) {
+  if (!enabled && row?.isDefault) {
     return { ok: false, kind: "is_default", error: "Make another provider the default first." };
   }
 

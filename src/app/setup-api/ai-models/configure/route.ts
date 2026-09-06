@@ -94,6 +94,7 @@ import {
 import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
+import { forgetProviderEnumerations } from "@/lib/provider-runnable";
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
@@ -386,6 +387,23 @@ async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
  * v2 — and updates the openclaw.json metadata itself. The key rides stdin,
  * never argv.
  */
+/**
+ * `models.mode` as openclaw.json carries it, or null when there is none to read.
+ *
+ * Null on the Hermes SKU (no OpenClaw config at all) and on an unreadable one,
+ * which is why the caller compares two reads rather than testing a value: two
+ * nulls are "nothing changed", the honest answer in both cases.
+ */
+async function readModelsMode(): Promise<string | null> {
+  if (openclawIsAbsent()) return null;
+  try {
+    const mode = (await readOpenClawConfig())?.models?.mode;
+    return typeof mode === "string" ? mode : null;
+  } catch {
+    return null;
+  }
+}
+
 async function pasteAuthApiKey(provider: string, profileId: string, key: string): Promise<void> {
   // The sign-in guard is NOT here, deliberately: see `assertNoSignInAt`. By
   // the time this runs the request has already written its own
@@ -1940,6 +1958,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // key; the auth mode is what tells the two apart from here on.
     const isChatgptSubscription = authMode === "subscription" && ocProvider === CHATGPT_PROVIDER;
 
+    // `models.mode` as it was BEFORE this save. Six branches below write it —
+    // the ClawBox AI pass, the two local-model passes, the cloud-transport
+    // paths — and under `replace` the core skips the authenticated catalogue
+    // for EVERY provider, so a flip changes what the gateway will route far
+    // beyond the provider being saved. Captured once here and compared once at
+    // step 8d rather than threaded through each branch, so a branch added
+    // later cannot forget it (TASK-668).
+    const modelsModeBefore = await readModelsMode();
+
     // BEFORE anything is written, and before this request has put anything of
     // its own in the store — a refusal is not a failure and must not leave a
     // trail, and by the time the save reaches the paste it has unpaired
@@ -3081,6 +3108,17 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //     backoff it recorded describe a box that no longer exists. A client's
     //     `?refresh=1` cannot count it; only a write can.
     notifyProviderSetChanged(ocProvider);
+
+    // 8d. Did this save flip `models.mode`? Then every recorded model COUNT was
+    //     taken under a rule that no longer holds — under `replace` the core
+    //     serves the configured rows alone, which is how google goes from ten
+    //     models to none — so none of them may keep a Providers row hidden.
+    //     Forgetting them shows every row again at once, at the cost of one
+    //     small file write and no enumeration at all; each provider records the
+    //     new truth on the next refresh that happens for its own reasons.
+    //     Compared against the config as it is NOW, so a write that did not
+    //     land counts for nothing.
+    if ((await readModelsMode()) !== modelsModeBefore) await forgetProviderEnumerations();
 
     // Codex 2026.6.x reads its ChatGPT session from the Codex CLI's own
     // ~/.codex/auth.json, which gateway-pre-start.sh synthesizes from this

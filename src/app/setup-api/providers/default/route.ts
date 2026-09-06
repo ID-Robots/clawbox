@@ -7,6 +7,7 @@ import { isProviderEnabled } from "@/lib/provider-enablement";
 import { POST as setHermesPairing } from "@/app/setup-api/hermes/models/route";
 import {
   GET as readChatModelState,
+  readChatModelStateUnfiltered,
   POST as setChatModel,
 } from "@/app/setup-api/chat/model/route";
 
@@ -92,9 +93,19 @@ export async function POST(request: Request) {
   const state = (await stateRes.json().catch(() => ({}))) as {
     options?: { provider?: string; model?: string | null; available?: boolean }[];
   };
-  const option = (state.options ?? []).find(
-    (candidate) => candidate.provider === provider && candidate.available && candidate.model,
-  );
+  const matches = (
+    candidate: { provider?: string | null; model?: string | null; available?: boolean },
+  ): boolean => candidate.provider === provider && !!candidate.available && !!candidate.model;
+  let option: { model?: string | null } | undefined = (state.options ?? []).find(matches);
+  if (!option?.model) {
+    // The picker drops a provider this box can run no model from (TASK-668).
+    // That is about what is OFFERED — the owner naming one here is an explicit
+    // instruction, and "provider_unconfigured" over a provider that holds a
+    // working credential would be a false failure. The write below is judged by
+    // the same catalogue guards either way.
+    const unfiltered = await readChatModelStateUnfiltered();
+    option = unfiltered.options.find(matches);
+  }
   if (!option?.model) {
     // Not "unknown provider" — the provider is known, it just has no credential
     // on this box yet, and the fix is to connect it rather than to retry.
