@@ -202,18 +202,29 @@ const REMOTE_ADVISORY_ATTEMPTS = 1;
  * An override that is not a non-negative number of milliseconds is replaced
  * with the default, and said out loud.
  *
- * `Number("garbage")` is NaN and a negative value stays negative; `setTimeout`
- * treats both as 0, so the retries would still run but back-to-back — removing
- * the one thing the policy depends on, and sending the anonymous requests in a
- * burst, which is the condition the refusal is caused by. The shell knobs are
- * clamped the same way, in install.sh and scripts/force-update.sh.
+ * `Number("garbage")` is NaN, `Number(" ")` is 0, and a negative value stays
+ * negative; `setTimeout` treats all three as 0, so the retries would still run
+ * but back-to-back — removing the one thing the policy depends on, and sending
+ * the anonymous requests in the burst that causes the refusal being retried.
+ *
+ * The upper bound is here for the opposite reason, and it is why this clamps a
+ * RANGE where the shell knobs deliberately do not: `setTimeout` above
+ * 2^31 - 1 ms does not wait longer, it fires on the next tick with a
+ * `TimeoutOverflowWarning`. A huge value would therefore be INVERTED into no
+ * delay at all rather than honoured, and `reachOrigin` multiplies by the
+ * attempt number on top. Ten minutes is far past any sane version-check
+ * backoff and leaves the product three orders of magnitude clear of the limit.
  */
+const MAX_RETRY_DELAY_MS = 600_000;
+
 function retryDelayMsFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) {
-    console.warn(`[Updater] ${name}="${raw}" is not a number of milliseconds, using ${fallback}`);
+  if (raw === undefined) return fallback;
+  const trimmed = raw.trim();
+  const parsed = trimmed === "" ? Number.NaN : Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_RETRY_DELAY_MS) {
+    console.warn(`[Updater] ${name}="${raw}" is not a number of milliseconds `
+      + `between 0 and ${MAX_RETRY_DELAY_MS}, using ${fallback}`);
     return fallback;
   }
   return parsed;

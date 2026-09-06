@@ -277,6 +277,34 @@ describe("a retry delay an operator got wrong", () => {
     warn.mockRestore();
   });
 
+  it("refuses a blank value, which Number() reads as zero", async () => {
+    // `Number(" ")` is 0, not NaN — so whitespace slipped past a plain
+    // finite/negative check and became exactly the no-delay burst the guard
+    // exists to prevent.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS = "  ";
+
+    await import("@/lib/updater");
+
+    expect(warn.mock.calls.map((c) => c.join(" ")).join("\n"))
+      .toMatch(/UPDATER_REMOTE_CHECK_RETRY_DELAY_MS.*using 1200/);
+    warn.mockRestore();
+  });
+
+  it("refuses a value so large the timer would invert it into no delay", async () => {
+    // `setTimeout` above 2^31-1 ms does not wait longer, it fires on the next
+    // tick with a TimeoutOverflowWarning — and reachOrigin multiplies by the
+    // attempt number on top, so the ceiling has to leave room for that.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.UPDATER_REMOTE_RETRY_DELAY_MS = "800000000";
+
+    await import("@/lib/updater");
+
+    expect(warn.mock.calls.map((c) => c.join(" ")).join("\n"))
+      .toMatch(/UPDATER_REMOTE_RETRY_DELAY_MS="800000000".*using 4000/);
+    warn.mockRestore();
+  });
+
   it("keeps a deliberate override", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     process.env.UPDATER_REMOTE_CHECK_RETRY_DELAY_MS = "0";
