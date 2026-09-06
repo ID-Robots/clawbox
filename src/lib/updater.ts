@@ -1268,12 +1268,23 @@ async function repairPluginsBlockingReadiness(
     // as a project declaration with no `node_modules`, where `enable` says
     // "Plugin not found".
     if (normalizeManagedPluginId(pluginId) === "codex") {
+      // Codex has its own opt-out test, which also asks whether Codex is in
+      // use at all.
+      if (!(await codexCapabilityRepairIsAllowed())) continue;
+      if (options.consentOnly) {
+        // After a FAILED pre-start, the local verb — like every other managed
+        // plugin here. Codex's pinned reinstall exists because a migrated v1
+        // project can leave the declaration without `node_modules`, where
+        // `enable` answers "Plugin not found"; that is worth minutes of npm on
+        // the path that can restart the gateway afterwards, and not on the one
+        // that is about to report the pre-start's failure either way.
+        await recordPluginCapabilityConsent(pluginId);
+        continue;
+      }
       // One spec, not two: the unpinned fallback exists for a payload that is
       // GONE and may not be published under the pin's build suffix. Here the
-      // package is on disk — only its consent record is stale — and this path
-      // also runs after a FAILED pre-start, where every extra npm minute is
-      // spent on an update that is going to report that failure anyway.
-      await repairManagedPluginPayload(pluginId, { fallbackToUnpinned: false });
+      // package is on disk and only its consent record is stale.
+      await reinstallManagedPluginPayload("@openclaw/codex", false);
       continue;
     }
     if (!(await pluginConsentRepairIsAllowed(pluginId))) continue;

@@ -1445,9 +1445,13 @@ describe("updater", () => {
         `${cmd} ${(args as string[]).join(" ")}`,
       );
       const preStartIndex = calls.findIndex((call) => call.includes("scripts/gateway-pre-start.sh"));
+      // The LOCAL consent verb, not the pinned reinstall: after a pre-start
+      // that just died, minutes of npm buy nothing on an update that is about
+      // to report that failure.
       const consentIndex = calls.findIndex((call) =>
-        call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
+        call.includes("plugins enable codex --accept-capabilities"),
       );
+      expect(calls.some((call) => call.includes("plugins install @openclaw/codex"))).toBe(false);
       const finalUnmaskIndex = calls
         .map((call, index) => call.includes("systemctl --runtime unmask clawbox-gateway.service") ? index : -1)
         .filter((index) => index >= 0)
