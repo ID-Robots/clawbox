@@ -1300,6 +1300,111 @@ llamacpp_pid_if_running() {
   printf '%s' "$pid"
 }
 
+# The engines this run stopped, and that were RUNNING when it stopped them.
+#
+# Only these come back. An engine the owner had already stopped — or that the
+# runtime's own ten-minute idle standby (src/lib/local-ai-runtime.ts) had put
+# away — must stay stopped, or an update would be starting services nobody
+# asked for and holding memory nobody wanted held.
+PAUSED_ENGINE_UNITS=()
+PAUSED_ENGINE_USER_UNITS=()
+PAUSED_ENGINE_UID=""
+
+# Stop an engine, remembering whether it was running.
+#
+# Best-effort in the register of its caller: a box that cannot stop one of its
+# engines should still attempt the build it was asked for, and the log says
+# what happened.
+pause_engine_unit() {
+  local unit="$1"
+  systemctl cat "$unit" >/dev/null 2>&1 || return 0
+  # Asked BEFORE the stop, because after it the answer is always "inactive" and
+  # the pair would have nothing left to be symmetric about.
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    PAUSED_ENGINE_UNITS+=("$unit")
+  fi
+  echo "  Stopping $unit..."
+  systemctl stop "$unit" 2>/dev/null \
+    || echo "  Warning: could not stop $unit" >&2
+}
+
+# The same, for a USER unit reached through the clawbox user's session bus.
+pause_engine_user_unit() {
+  local unit="$1" uid="$2"
+  sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user cat "$unit" >/dev/null 2>&1 || return 0
+  if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+      systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+    PAUSED_ENGINE_USER_UNITS+=("$unit")
+    PAUSED_ENGINE_UID="$uid"
+  fi
+  echo "  Stopping $unit..."
+  sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user stop "$unit" 2>/dev/null \
+    || echo "  Warning: could not stop $unit" >&2
+}
+
+# Start back every engine this run stopped, and PROVE each one came back.
+#
+# The stop half of this pair has existed since TASK-709; the start half did
+# not. Measured on the OpenClaw box 2026-09-05 and again on every deploy of the
+# 2026-09-06 run: the update stopped ollama.service so `next build` would fit,
+# the build succeeded, the updater reported `phase=completed` — and the box was
+# left with local AI dead until somebody noticed and started it by hand. The
+# update's own report said the box was fine while a service the update had
+# stopped was still down, which is the false-success class this codebase keeps
+# producing (TASK-724).
+#
+# `is-active` AFTER the start, never the exit status of `systemctl start`:
+# systemd answers 0 for a unit whose ExecStart forked and then died, so taking
+# the exit code as the outcome would be the same false success one level down.
+#
+# Never fails the update. An engine that refuses to come back is reported in
+# the register of the post-update smokes and left to the owner: refusing an
+# otherwise-good update over it would strand the box on the old build, which is
+# strictly worse than a named warning about one engine.
+resume_paused_engines() {
+  local unit
+  if [ "${#PAUSED_ENGINE_UNITS[@]}" -gt 0 ]; then
+    for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+      echo "  Starting $unit again (it was running before)..."
+      systemctl start "$unit" 2>/dev/null || true
+      if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        echo "    [ok] $unit is back"
+      else
+        echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+      fi
+    done
+  fi
+  if [ "${#PAUSED_ENGINE_USER_UNITS[@]}" -gt 0 ] && [ -n "$PAUSED_ENGINE_UID" ]; then
+    for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+      echo "  Starting $unit again (it was running before)..."
+      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$PAUSED_ENGINE_UID" \
+        systemctl --user start "$unit" 2>/dev/null || true
+      if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$PAUSED_ENGINE_UID" \
+          systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+        echo "    [ok] $unit is back"
+      else
+        echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+      fi
+    done
+  fi
+  # Emptied so a second call cannot start an engine the box has since stopped
+  # on purpose, and so the pair below (step_post_update) accounts only for what
+  # IT paused.
+  PAUSED_ENGINE_UNITS=()
+  PAUSED_ENGINE_USER_UNITS=()
+  PAUSED_ENGINE_UID=""
+  return 0
+}
+
+# The llama.cpp server is deliberately NOT in that pair. It has no unit: the
+# web server spawns it, holds the child handle and records the pid
+# (src/lib/local-ai-runtime.ts, src/instrumentation-node.ts), and wakes it on
+# the next request that needs it. A root shell starting a second llama-server
+# behind the app's back would be a process the app has no handle on, fighting
+# it over the same pidfile — a new defect in place of the one being fixed.
+
 # Give `bun run build` the board to itself.
 #
 # The rebuild is the most memory-hungry thing this appliance ever does, and on
@@ -1334,31 +1439,18 @@ free_memory_for_build() {
   before=$(available_mb)
   echo "Freeing memory for the build (${before} MB available)..."
 
-  if systemctl cat ollama.service >/dev/null 2>&1; then
-    echo "  Stopping ollama.service..."
-    systemctl stop ollama.service 2>/dev/null \
-      || echo "  Warning: could not stop ollama.service" >&2
-  fi
+  pause_engine_unit ollama.service
   # The memory embedder is a system unit of its own (~2 GB on the GPU while
   # awake) and outlives the web server whose idle timer would otherwise stop
   # it, so the build has to ask for its memory back explicitly.
-  if systemctl cat clawbox-embed.service >/dev/null 2>&1; then
-    echo "  Stopping clawbox-embed.service..."
-    systemctl stop clawbox-embed.service 2>/dev/null \
-      || echo "  Warning: could not stop clawbox-embed.service" >&2
-  fi
+  pause_engine_unit clawbox-embed.service
 
   # The voice engines are USER units, so they need the clawbox user's session
   # bus; with no /run/user/<uid> there is no session and nothing to stop.
   uid=$(id -u "$CLAWBOX_USER" 2>/dev/null || echo "")
   if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
     for unit in kokoro-server.service whisper-server.service; do
-      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
-        systemctl --user cat "$unit" >/dev/null 2>&1 || continue
-      echo "  Stopping $unit..."
-      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
-        systemctl --user stop "$unit" 2>/dev/null \
-        || echo "  Warning: could not stop $unit" >&2
+      pause_engine_user_unit "$unit" "$uid"
     done
   fi
 
@@ -1803,6 +1895,13 @@ do_rebuild() {
       rc=1
     fi
   fi
+
+  # The build is over either way, so the engines it borrowed the memory from
+  # come back HERE — on the success path and on the failure path alike. Placed
+  # ABOVE the branch rather than inside both of its arms so that an exit added
+  # to either arm later cannot skip it, which is how the stop came to have no
+  # start in the first place.
+  resume_paused_engines
 
   if [ "$rc" -ne 0 ]; then
     echo "Error: rebuild failed (exit $rc)" >&2
@@ -5640,9 +5739,13 @@ step_post_update() {
   # old copy (2.8 GB). `stop`, never `disable`: the runtime's own standby
   # convention, and the chat path can still wake it on demand. After the
   # helper, so nothing re-embeds through ollama on the way out.
-  if systemctl cat ollama.service >/dev/null 2>&1; then
-    systemctl stop ollama.service 2>/dev/null || true
-  fi
+  #
+  # Through the pause helper so this stop has a start too (TASK-724). It is the
+  # SECOND of the two an update performs — free_memory_for_build owns the
+  # first, in the rebuild step, and pairs it there — and it is the one whose
+  # missing start left local AI dead under a `completed` update, because
+  # nothing runs after post_update that would have woken it.
+  pause_engine_unit ollama.service
   step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a
@@ -5655,6 +5758,12 @@ step_post_update() {
   # the re-baked lock above is live immediately — while restarting the server
   # mid-update would kill the very process the updater is polling for progress.
   step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
+  # LAST, and after the smokes: ollama was stopped above to make it drop the
+  # stale embedder copy, and the memory stays free for step_llamacpp_model's
+  # download until here. A stopped-then-started ollama holds no model, so the
+  # 2.8 GB the stop was for is still released — what comes back is the idle
+  # server the box had before the update, which is the whole point of the pair.
+  resume_paused_engines
 }
 
 gateway_port_listening() {

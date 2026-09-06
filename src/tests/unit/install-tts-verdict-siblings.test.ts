@@ -583,6 +583,12 @@ function runPostUpdate(ttsExit: number) {
   const program = [
     "set -uo pipefail",
     ...[...called].map((fn) => `${fn}() { :; }`),
+    // Not step_-prefixed, so the sweep above does not find them: the engine
+    // pause/resume pair step_post_update performs around its ollama stop.
+    // Undefined they exit 127, and the resume is the function's LAST statement,
+    // so post_update would return 127 over a step that succeeded.
+    "pause_engine_unit() { :; }",
+    "resume_paused_engines() { :; }",
     `step_openclaw_tts() { return ${ttsExit}; }`,
     body,
     "step_post_update",

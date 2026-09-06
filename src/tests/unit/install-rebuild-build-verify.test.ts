@@ -361,9 +361,11 @@ function run(scenario: Scenario = {}): Run {
     "  fi",
     "}",
     "",
-    "# beta's own memory reclaim, which do_rebuild calls. Its behaviour has its",
-    "# own suite; here it only has to be present and harmless.",
+    "# beta's own memory reclaim, and the start half that gives back what it",
+    "# took, which do_rebuild calls on both exits. Their behaviour has its own",
+    "# suite; here they only have to be present and harmless.",
     "free_memory_for_build() { :; }",
+    "resume_paused_engines() { :; }",
     "",
     shellFunctions(
       "build_entry_present",
