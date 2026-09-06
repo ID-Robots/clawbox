@@ -26,11 +26,26 @@ export interface SessionPage {
   close(): Promise<void>;
 }
 
+/**
+ * Which Chromium a page lives in: the desktop window the owner can watch, or
+ * the headless one the web server launches for itself.
+ *
+ * It belongs to the SESSION rather than to the device, because the owner's
+ * switch (CODING_AGENT_REAL_BROWSER_CONFIG_KEY) is read per session and the
+ * answer can differ from what was asked for — a foreign Chromium on the CDP
+ * port, or a desktop launch that failed, both land a run in the headless one.
+ * A run that asked for the screen has no other way to find that out, so every
+ * answer the route sends names the browser that served it.
+ */
+export type BrowserKind = "desktop" | "headless";
+
 export interface BrowserSession<P extends SessionPage = SessionPage> {
   page: P;
   lastActivity: number;
   /** The coding run that opened this page, or null for the owner/assistant. */
   runId: string | null;
+  /** The browser this page is actually in — see BrowserKind. */
+  browser: BrowserKind;
 }
 
 const sessions = new Map<string, BrowserSession>();
@@ -44,9 +59,16 @@ let sessionCounter = 0;
 export const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Register a page and answer the id every later action names it by. */
-export function openSession<P extends SessionPage>(page: P, runId: string | null): string {
+// `browser` is required, with no default: the one answer worth refusing to
+// guess at is this one. A caller that forgot would claim the owner's screen
+// for a page nobody can see, which is the lie this field exists to prevent.
+export function openSession<P extends SessionPage>(
+  page: P,
+  runId: string | null,
+  browser: BrowserKind,
+): string {
   const id = `browser-${++sessionCounter}`;
-  sessions.set(id, { page, lastActivity: Date.now(), runId });
+  sessions.set(id, { page, lastActivity: Date.now(), runId, browser });
   return id;
 }
 
@@ -96,9 +118,17 @@ export function sweepIdle(now = Date.now()): string[] {
   return stale;
 }
 
-/** How many pages are open. The owned headless Chromium is closed at zero. */
-export function sessionCount(): number {
-  return sessions.size;
+/**
+ * How many pages are open, all of them or only those in one browser. The
+ * headless Chromium of our own is closed when ITS count reaches zero — a page
+ * on the desktop browser says nothing about whether ours is still needed, and
+ * both can be in use at once when the owner's switch moves between sessions.
+ */
+export function sessionCount(browser?: BrowserKind): number {
+  if (!browser) return sessions.size;
+  let n = 0;
+  for (const session of sessions.values()) if (session.browser === browser) n += 1;
+  return n;
 }
 
 /** Test hook: forget every session without touching the (mocked) pages. */

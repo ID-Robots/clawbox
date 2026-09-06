@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 
 import plugin, { onReplyPayloadSending } from "../../../scripts/openclaw-plugins/clawbox-email-directives/index.mjs";
+import { onBeforeDispatch } from "../../../scripts/openclaw-plugins/clawbox-email-directives/email-approvals.mjs";
 
 // The OpenClaw half of TASK-697: the `reply_payload_sending` plugin that takes
 // `EMAIL:<uid>` card directives out of a reply on its way to a channel.
@@ -206,7 +207,9 @@ describe("OpenClaw reply_payload_sending plugin — EMAIL: directives", () => {
   it("registers reply_payload_sending under the id its manifest declares", () => {
     const registered: string[] = [];
     plugin.register({ on: (name: string) => registered.push(name) });
-    expect(registered).toEqual(["reply_payload_sending"]);
+    // BOTH, and in this order: the outbound strip this plugin was built for,
+    // and the inbound approval claim that now rides on it.
+    expect(registered).toEqual(["reply_payload_sending", "before_dispatch"]);
 
     const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "openclaw.plugin.json"), "utf-8"));
     expect(manifest.id).toBe(plugin.id);
@@ -238,5 +241,149 @@ describe("OpenClaw reply_payload_sending plugin — EMAIL: directives", () => {
         expect(specifier, `${file} imports ${specifier}`).toMatch(/^\.{1,2}\//);
       }
     }
+  });
+});
+
+// ── The inbound half: what the hook actually asks ClawBox, and what it returns ─
+
+describe("before_dispatch — the owner's approval reply", () => {
+  const TOKEN = "t".repeat(32);
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.CLAWBOX_MCP_TOKEN;
+    delete process.env.CLAWBOX_API_BASE;
+  });
+
+  /** A fetch that records the one request and answers with `body`. */
+  function stubClawbox(body: unknown, status = 200) {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    return calls;
+  }
+
+  it("asks nothing at all about an ordinary message", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    const calls = stubClawbox({ handled: true, reply: "Sent." });
+    // The hook runs on EVERY inbound message on every channel, so a message
+    // that is not exactly a verb and a code must cost no I/O whatsoever.
+    expect(
+      await onBeforeDispatch({ content: "can you email Ivan?" }, { senderId: "6001", channelId: "telegram" }),
+    ).toBeUndefined();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("hands ClawBox the sender, the surface and the harness", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    process.env.CLAWBOX_API_BASE = "http://127.0.0.1:80";
+    const calls = stubClawbox({ handled: true, reply: "Sent to 1 recipient(s)." });
+
+    const result = await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://127.0.0.1:80/setup-api/email/chat-reply");
+    expect(calls[0].init.headers).toMatchObject({ authorization: `Bearer ${TOKEN}` });
+    // The surface and the harness travel with it: the allowlist ClawBox weighs
+    // the sender against is Telegram's, and on a dual box it is THIS harness's.
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({
+      senderId: "6001",
+      text: "send AB2CD",
+      channel: "telegram",
+      harness: "openclaw",
+    });
+    // The claim carries NO text even though this hook could: ClawBox posts the
+    // verdict itself, and a second copy here would be two messages for one
+    // approval — on the fast path only, which is worse than either.
+    expect(result).toEqual({ handled: true });
+  });
+
+  it("refuses a token that is not token-shaped rather than putting it in a header", async () => {
+    // The bearer is read off disk and interpolated into an Authorization
+    // header, so a stray CR would be header injection.
+    //
+    // A FRESH MODULE, because the plugin caches the first token it reads for
+    // the life of the gateway process — which is the behaviour, and which every
+    // test above has already primed.
+    process.env.CLAWBOX_MCP_TOKEN = `${"t".repeat(20)}\r\nX-Evil: 1`;
+    const calls = stubClawbox({ handled: true });
+    vi.resetModules();
+    const fresh = (await import("../../../scripts/openclaw-plugins/clawbox-email-directives/email-approvals.mjs")) as {
+      onBeforeDispatch: typeof onBeforeDispatch;
+    };
+    expect(
+      await fresh.onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+    ).toBeUndefined();
+    expect(calls).toHaveLength(0);
+
+    // And it was not CACHED either: a token that can never be sent must not pin
+    // this process to itself for the life of the gateway. Put a good one where
+    // it can be re-read and the very next message goes through.
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    expect(
+      await fresh.onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+    ).toEqual({ handled: true });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("leaves the message to the agent on every not-ours answer", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    for (const [body, status] of [
+      [{ handled: false }, 200],
+      [{ handled: false }, 403],
+      [{}, 200],
+    ] as [unknown, number][]) {
+      stubClawbox(body, status);
+      expect(
+        await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+      ).toBeUndefined();
+    }
+  });
+
+  it("fails OPEN when ClawBox cannot be reached at all", async () => {
+    // A box mid-rebuild must not swallow the owner's message. This is the one
+    // failure mode a hook can turn into "the box has stopped listening".
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
+    expect(
+      await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+    ).toBeUndefined();
+  });
+
+  it("CLAIMS on a timeout, because the mail may already have gone", () => {
+    // ClawBox answers only once the whole send has finished. Failing open here
+    // would hand the model a "send <code>" it can only answer by queueing the
+    // same mail a second time; ClawBox posts the verdict itself.
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const err = new Error("timed out");
+      err.name = "TimeoutError";
+      throw err;
+    }));
+    return expect(
+      onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+    ).resolves.toEqual({ handled: true });
+  });
+
+  it("does not offer a message it cannot place on a surface", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    const calls = stubClawbox({ handled: true });
+    expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" })).toBeUndefined();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not invent a sender, and does not ask without one", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    const calls = stubClawbox({ handled: true, reply: "Sent." });
+    expect(await onBeforeDispatch({ content: "send AB2CD" }, { channelId: "telegram" })).toBeUndefined();
+    expect(calls).toHaveLength(0);
   });
 });

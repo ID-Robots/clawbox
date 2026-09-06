@@ -166,7 +166,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
   it("installs the shipped plugin and enables it by name", () => {
     const r = run();
     expect(r.status).toBe(0);
-    expect(installedFiles()).toEqual(["__init__.py", "email_directives.py", "plugin.yaml"]);
+    expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml"]);
     expect(enabledPlugins()).toEqual([PLUGIN]);
   });
 
@@ -326,14 +326,14 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     // "the box keeps stripping with what it already had" into "no plugin, and a
     // config that names one".
     run();
-    expect(installedFiles()).toEqual(["__init__.py", "email_directives.py", "plugin.yaml"]);
+    expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml"]);
     const bare = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-unreadable-src-"));
     try {
       fs.mkdirSync(path.join(bare, "mcp"), { recursive: true });
       fs.writeFileSync(path.join(bare, "mcp", "clawbox-mcp.ts"), "// stand-in\n");
       const src = path.join(bare, "scripts", "hermes-plugins", PLUGIN);
       fs.mkdirSync(src, { recursive: true });
-      for (const f of ["__init__.py", "plugin.yaml", "email_directives.py"]) {
+      for (const f of ["__init__.py", "plugin.yaml", "email_directives.py", "approvals.py"]) {
         fs.writeFileSync(path.join(src, f), "x");
         fs.chmodSync(path.join(src, f), 0o000);
       }
@@ -341,7 +341,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
       expect(r.status).toBe(0);
       expect(r.stdout).toMatch(/WARNING: could not read/);
       expect(r.stdout).toContain("leaving whatever is already installed in place");
-      expect(installedFiles()).toEqual(["__init__.py", "email_directives.py", "plugin.yaml"]);
+      expect(installedFiles()).toEqual(["__init__.py", "approvals.py", "email_directives.py", "plugin.yaml"]);
     } finally {
       fs.rmSync(bare, { recursive: true, force: true });
     }
@@ -389,7 +389,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     doctorOutput = "  OK: registration passed\n  registrations: 0 tool(s), 0 hook(s)\n";
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toMatch(/WARNING.*did not register (its hook|one of its hooks)/);
     expect(r.stdout).toContain("0 hook(s)");
   });
 
@@ -429,7 +429,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     doctorStderr = "ERROR:hermes_cli.telemetry:could not reach the catalog index\n";
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain("loaded and registered its outbound hook");
+    expect(r.stdout).toContain("loaded and registered its outbound and inbound hooks");
     expect(r.stdout).not.toMatch(/WARNING/);
   });
 
@@ -449,7 +449,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     ].join("\n");
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain("loaded and registered its outbound hook");
+    expect(r.stdout).toContain("loaded and registered its outbound and inbound hooks");
     expect(r.stdout).not.toMatch(/WARNING/);
   });
 
@@ -461,7 +461,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     doctorOutput = "  OK: registration passed\n  registrations: 0 tool(s), 11 hook(s)\n";
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain("loaded and registered its outbound hook");
+    expect(r.stdout).toContain("loaded and registered its outbound and inbound hooks");
     expect(r.stdout).not.toMatch(/WARNING/);
   });
 
@@ -477,7 +477,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
       doctorOutput = `  OK: registration passed\n${line}\n`;
       const r = run();
       expect(r.status).toBe(0);
-      expect(r.stdout).toContain("loaded and registered its outbound hook");
+      expect(r.stdout).toContain("loaded and registered its outbound and inbound hooks");
     }
   });
 
@@ -505,9 +505,9 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     ].join("\n");
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toMatch(/WARNING.*did not register (its hook|one of its hooks)/);
     expect(r.stdout).toContain("transform_llm_output");
-    expect(r.stdout).not.toContain("loaded and registered its outbound hook");
+    expect(r.stdout).not.toContain("loaded and registered its outbound and inbound hooks");
   });
 
   it("quotes the doctor's own finding, not a flush-left logging line", () => {
@@ -532,7 +532,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     ].join("\n");
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toMatch(/WARNING.*did not register (its hook|one of its hooks)/);
     expect(r.stdout).toContain("transform_llm_output");
     expect(r.stdout).not.toContain("hermes_cli.telemetry");
   });
@@ -551,7 +551,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     ].join("\n");
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toMatch(/WARNING.*did not register (its hook|one of its hooks)/);
   });
 
   it("does not call a healthy report a refusal over an unrelated exit code", () => {
@@ -611,7 +611,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
       doctorOutput = output;
       const r = run();
       expect(r.status).toBe(0);
-      expect(r.stdout).toContain("loaded and registered its outbound hook");
+      expect(r.stdout).toContain("loaded and registered its outbound and inbound hooks");
       expect(r.stdout).not.toMatch(/WARNING/);
     }
   });
@@ -620,7 +620,7 @@ d("register-mcp.sh — the outbound EMAIL: directive hook", () => {
     doctorOutput = "Plugin registration failed: No __init__.py in /home/x/.hermes/plugins/clawbox_email_directives\n";
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/WARNING.*did not register its hook/);
+    expect(r.stdout).toMatch(/WARNING.*did not register (its hook|one of its hooks)/);
     expect(r.stdout).toContain("No __init__.py");
   });
 

@@ -802,12 +802,25 @@ export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesG
  * without needing the gateway up, so the notice survives the gap.
  * Best-effort: never fails the approval.
  */
-export async function notifyHermesTelegramUser(userId: string, message: string): Promise<boolean> {
+export async function notifyHermesTelegramUser(
+  userId: string,
+  message: string,
+  /**
+   * A tighter ceiling than this file's own, for a caller that is itself inside
+   * somebody's budget. `SEND_TIMEOUT_MS` is 90 s — right for a notice nothing
+   * is waiting on, and far too long inside a request whose caller gives up at
+   * 60 (the email approval offer, src/lib/email-approval-reply.ts). Only ever
+   * used to SHORTEN: a caller cannot buy more time than this file allows.
+   */
+  timeoutMs?: number,
+): Promise<boolean> {
   if (!TELEGRAM_USER_ID_RE.test(userId)) return false;
+  const budget =
+    typeof timeoutMs === "number" && timeoutMs > 0 ? Math.min(timeoutMs, SEND_TIMEOUT_MS) : SEND_TIMEOUT_MS;
   try {
     const res = await runHermesCli(
       ["send", "--to", `${PLATFORM}:${userId}`, "--quiet", "--", message],
-      { timeoutMs: SEND_TIMEOUT_MS },
+      { timeoutMs: budget },
     );
     return res.code === 0;
   } catch {

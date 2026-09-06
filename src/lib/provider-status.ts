@@ -25,6 +25,7 @@ import {
   hermesProviderLabel,
 } from "@/lib/hermes-providers";
 import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
+import { readPluginRepairs, repairFor, type PluginRepairStage } from "@/lib/plugin-repair";
 
 /**
  * What the strip paints, and the only five things it may say.
@@ -80,6 +81,19 @@ export interface ProviderStatusRow {
    * change them.
    */
   section: "ai" | "localAi";
+  /**
+   * Present only when the boot script could not install or consent the plugin
+   * this row runs on and switched it off so the gateway could start (TASK-606).
+   * A row in this state is `disconnected` because it genuinely is — what this
+   * adds is WHY, and something the owner can press.
+   */
+  needsRepair?: {
+    /** What `openclaw plugins install` / `enable` takes, for the Retry. */
+    pluginId: string;
+    stage: PluginRepairStage;
+    reason: string;
+    atMs: number;
+  };
 }
 
 export interface ProviderStatusSummary {
@@ -388,9 +402,30 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
     const disabled = parseDisabledProviders(
       await getConfigValue(DISABLED_PROVIDERS_KEY).catch(() => null),
     );
+    // Same reason, same place: what the boot script could not make loadable is
+    // one fact about the box, and stamping it here keeps the two harness
+    // readers from having to know about it at all. On Hermes the file never
+    // exists and this is an empty map, so the badge is absent by construction.
+    const repairs = await readPluginRepairs();
     return {
       ...summary,
-      providers: summary.providers.map((row) => ({ ...row, enabled: !disabled.has(row.id) })),
+      providers: summary.providers.map((row) => {
+        const repair = repairFor(repairs, row.id);
+        return {
+          ...row,
+          enabled: !disabled.has(row.id),
+          ...(repair
+            ? {
+              needsRepair: {
+                pluginId: repair.id,
+                stage: repair.stage,
+                reason: repair.reason,
+                atMs: repair.atMs,
+              },
+            }
+            : {}),
+        };
+      }),
     };
   } catch {
     return { harness, providers: [], defaultProvider: null, degraded: true };

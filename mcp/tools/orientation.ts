@@ -115,6 +115,31 @@ use its PID (the one \`node …\` printed, or \`$!\`) — never pkill, killall o
 ClawBox's own web server is a Next.js server too, and \`pkill -f next-server\`
 takes the box down with your run.`;
 
+/**
+ * The browser half of the same orientation. It is short and it is here rather
+ * than in Clawbox.md because it is a fact about the DEVICE'S CURRENT SETTING,
+ * not about the appliance: the browser tools drive the Chromium on the owner's
+ * own screen while the Coding Agent's real-browser switch is on (absent means
+ * on), and an invisible one when it is off or the window cannot be brought up.
+ *
+ * An agent that assumed the first was always true told owners to "look at the
+ * screen" for a page no window ever showed. Every browser reply names the one
+ * that answered; this says what the two mean and who decides.
+ */
+export const BROWSER_GUIDE = `## The browser you drive
+
+browser_open and the other browser_* tools drive the Chromium ON THE DEVICE'S
+OWN SCREEN: the owner can watch the page, and a delegated coding-agent run
+verifies its work in front of them. The owner can switch that off in the Coding
+Agent's settings (its first-run wizard offers the choice too, and the setting is
+on unless they said otherwise); the same tools then drive an invisible browser —
+the page is still loaded, screenshot and described, but nothing of it reaches
+the screen.
+
+Every browser reply says which one answered. Say which one you used when you
+report what you checked, and never send the owner to look at the screen for a
+page an invisible browser loaded.`;
+
 function loadFieldGuide(): string | null {
   try {
     return readFileSync(FIELD_GUIDE_PATH, "utf8");
@@ -499,7 +524,7 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
 
   reg.tool(
     "clawbox_context",
-    "Load the ClawBox field guide: what this device is, its mascot, its architecture, the house rules, and how to store data in a webapp you build. Call it once at the start of a session, and always before answering \"what is this\" or \"what can you do\".",
+    "Load the ClawBox field guide: what this device is, its mascot, its architecture, the house rules, how to store data in a webapp you build, and whose screen the browser tools drive. Call it once at the start of a session, and always before answering \"what is this\" or \"what can you do\".",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: 24_000 },
     async () => {
@@ -509,6 +534,7 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
       if (guide && guide.trim()) parts.push(guide);
       else parts.push(`(The device field guide is not installed on this ClawBox.)`);
       parts.push(WEBAPP_STORAGE_GUIDE);
+      parts.push(BROWSER_GUIDE);
       return text(parts.join("\n\n---\n\n"));
     },
   );

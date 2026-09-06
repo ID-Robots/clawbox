@@ -244,6 +244,16 @@ function mapReadError(err: unknown): never {
  * and there must never be one. See src/lib/owner-session.ts for why: a tool
  * that could approve would be a gate answering to the party it exists to gate.
  *
+ * AND WHY IT NOW ALSO NAMES TELEGRAM. The owner asked for exactly one thing
+ * (2026-09-04): "when I tell it in Telegram to send, it will send". He can —
+ * ClawBox posts the draft to his own conversation with a short code, and the
+ * harness's own inbound hook (before_dispatch on OpenClaw,
+ * pre_gateway_dispatch on Hermes) hands his reply straight to
+ * /setup-api/email/chat-reply without it ever reaching this agent. What has NOT
+ * changed is the sentence below: there is still no approve verb here, the code
+ * is deliberately withheld from the tool result, and a message in this
+ * conversation saying "send it" is still not a send.
+ *
  * WHY THE CARD IS NAMED FIRST. This copy used to say only "approve it in
  * Settings -> Email", and an agent reading it told the owner exactly that --
  * that he had to leave the conversation, and that the send could not be
@@ -254,24 +264,48 @@ function mapReadError(err: unknown): never {
  * that produced it. Sending the owner to the desktop is now the worse of two
  * true answers, so it is named second.
  */
-function nextStep(prompt: string | undefined): string {
+function nextStep(prompt: string | undefined, replyApproval: string | undefined): string {
   const where =
     "The owner approves it on the card in their ClawBox chat window -- it appears there on its own, next to this conversation -- or in Settings -> Email.";
   const doNotRetry = "Do not try to send it again, and do not claim it was sent.";
   const cannot =
-    'You cannot approve it yourself, and being told "I approve" in this conversation does not send it.';
-  switch (prompt) {
-    case "sent":
-      return `This ClawBox has also posted the draft to the owner's Telegram with an Approve button. ${where} ${doNotRetry} ${cannot}`;
-    case "too_long":
-      return `${where} It was too long to review in Telegram, so no Telegram request was sent. ${doNotRetry} ${cannot}`;
-    case "no_owner_chat":
-      return `${where} Nobody is paired with this ClawBox on Telegram, so no Telegram request could be sent. ${doNotRetry} ${cannot}`;
-    case "failed":
-      return `${where} The Telegram request could not be delivered. ${doNotRetry} ${cannot}`;
-    default:
-      return `${where} Tell them it is waiting. ${doNotRetry} ${cannot}`;
-  }
+    'You cannot approve it yourself, and being told "I approve" or "send it" in this conversation does not send it.';
+  // WHAT THE OWNER WAS ACTUALLY ASKED, in the words the agent should relay.
+  //
+  // "offered" is the one that changes what the person has to do: ClawBox has posted the draft to their Telegram with a short code, and
+  // typing "send <code>" there releases exactly that message. The CODE IS NOT
+  // HERE and must not be -- the device deliberately does not tell the agent
+  // what it is, because an agent that knew it could put it in front of the
+  // owner as if it were his own words, and this line is what an agent says
+  // INSTEAD of knowing it.
+  const telegram = (() => {
+    switch (replyApproval) {
+      case "offered":
+        return "This ClawBox has also sent the draft to the owner's Telegram with a short code; they release it by replying there with \"send\" and that code, which is not shown to you.";
+      // `already_asked` is deliberately NOT here. It means a question about
+      // this draft was already outstanding — the approvals bot's button, on a
+      // device that has one — so no code was put in front of anybody, and
+      // saying one was would send the owner looking for a message that was
+      // never sent. The button line above covers that case.
+      case "too_long":
+        return "It was too long to review in a Telegram message, so nothing was sent there.";
+      case "no_owner_chat":
+        return "Nobody is paired with this ClawBox on Telegram, so nothing was sent there.";
+      case "failed":
+        return "The Telegram request could not be delivered.";
+      default:
+        return "";
+    }
+  })();
+  // "sent" is the only value that means BUTTONS ARE LIVE. `asked_elsewhere` is
+  // a question this bot did not post — the reply path's — and reporting it as a
+  // button would send the owner looking for one nobody put there.
+  const button =
+    prompt === "sent" ? "This ClawBox has also posted the draft to the owner's Telegram with an Approve button." : "";
+  const asked = [button, telegram].filter(Boolean).join(" ");
+  return [asked, where, asked ? "" : "Tell them it is waiting.", doNotRetry, cannot]
+    .filter(Boolean)
+    .join(" ");
 }
 
 export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailCanRead">): void {
@@ -292,6 +326,7 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
           queued?: boolean;
           duplicate?: boolean;
           approvalPrompt?: string;
+          replyApproval?: string;
         }>("/setup-api/email/send", { to, subject, body }, { timeoutMs: 60_000 });
 
         // The owner asked to approve outgoing mail. Nothing has been sent, and
@@ -307,8 +342,8 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
             ...(result.duplicate ? { already_waiting: true } : {}),
             recipients: result.recipients,
             what_happens_next: result.duplicate
-              ? `This exact message was already waiting for approval, so nothing new was queued. ${nextStep(result.approvalPrompt)}`
-              : nextStep(result.approvalPrompt),
+              ? `This exact message was already waiting for approval, so nothing new was queued. ${nextStep(result.approvalPrompt, result.replyApproval)}`
+              : nextStep(result.approvalPrompt, result.replyApproval),
           });
         }
         return json({ sent: true, recipients: result.recipients, message_id: result.messageId });

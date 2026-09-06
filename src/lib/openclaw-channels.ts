@@ -39,6 +39,7 @@ import {
   spawnOpenclawCli,
 } from "@/lib/openclaw-config";
 import { installedOpenclawRelease } from "@/lib/openclaw-deepseek-plugin";
+import { clearPluginRepair } from "@/lib/plugin-repair";
 
 /**
  * The official channel plugins ClawBox knows how to install.
@@ -327,7 +328,9 @@ export async function ensureChannelPlugin(
   // skipped when the entry is already there, so the common path pays a file
   // read rather than a CLI cold start.
   const pluginId = typeof owner?.id === "string" ? owner.id : channelId;
+  let enabledHere = false;
   if (!(await pluginEnabledInConfig(pluginId))) {
+    enabledHere = true;
     try {
       await spawnOpenclawCli(["plugins", "enable", pluginId, ...capArgs], {
         timeoutMs: PLUGIN_QUERY_TIMEOUT_MS,
@@ -356,6 +359,29 @@ export async function ensureChannelPlugin(
     }
   }
 
+  // The channel's plugin is installed and enabled, whoever asked for it. A
+  // marker only the boot script cleared would leave a "Needs repair" badge on
+  // the Discord row of a box the owner has just reconnected (TASK-606).
+  //
+  // ONLY WHEN THIS CALL ACTUALLY DID SOMETHING. Both steps above are skipped on
+  // a box where the package is present and the entry is already `true` — which
+  // is precisely the boot script's `disabled: false` row, the one that says "we
+  // could not switch it off and recorded the failure". Clearing there would
+  // drop the badge having installed nothing and consented nothing: the row is
+  // still true and the owner would lose the only sign of it.
+  //
+  // NO RE-ENABLE STEP HERE, unlike the other post-install clears: the block
+  // above ends in `plugins enable`, which flips an entry that is explicitly
+  // `false` — whereas `plugins install` leaves one alone, which is why the
+  // updater and the AI-models route have to put the entry back themselves
+  // before they clear (see `clawboxDisabledEntryId`).
+  if (!installed && !enabledHere) return { ok: true, installed };
+  await clearPluginRepair(channelId).catch((err: unknown) => {
+    console.warn(
+      `[openclaw-channels] the ${channelId} repair marker could not be cleared; Settings may still show a Retry:`,
+      err instanceof Error ? err.message : err,
+    );
+  });
   return { ok: true, installed };
 }
 

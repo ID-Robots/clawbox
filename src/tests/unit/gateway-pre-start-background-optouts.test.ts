@@ -141,6 +141,20 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+const UNUSABLE: [string, string | Buffer][] = [
+  ["a document that is not an object", "[1, 2]"],
+  ["a `seeded` that is not a list", JSON.stringify({ seeded: 5 })],
+  ["rows that are not strings", JSON.stringify({ seeded: [1, 2] })],
+  ["rows that are not even hashable", JSON.stringify({ seeded: [[1]] })],
+  ["a file that is not JSON at all", "{ broken"],
+  // REAL BYTES. `"\uFFFD"` in a source file is written out as EF BF BD, which
+  // is valid UTF-8 and decodes fine — so a case named for the decode guard was
+  // passing through `JSONDecodeError`, the branch that was already there.
+  // These are the shapes a power cut mid-write actually leaves.
+  ["a file that is not even UTF-8", Buffer.from([0xff, 0xfe, 0x00, 0x67, 0x61, 0x72, 0x62])],
+  ["a document nested past the decoder's limit", "[".repeat(200_000)],
+];
+
 d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
   it("seeds all three on a box that has never expressed an opinion", () => {
     const r = run();
@@ -264,19 +278,7 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     expect(readFileSync(configPath, "utf-8")).toBe("{ broken");
     expect(calls()).toBe("");
   });
-  it.each<[string, string | Buffer]>([
-    ["a document that is not an object", "[1, 2]"],
-    ["a `seeded` that is not a list", JSON.stringify({ seeded: 5 })],
-    ["rows that are not strings", JSON.stringify({ seeded: [1, 2] })],
-    ["rows that are not even hashable", JSON.stringify({ seeded: [[1]] })],
-    ["a file that is not JSON at all", "{ broken"],
-    // REAL BYTES. `"\uFFFD"` in a source file is written out as EF BF BD, which
-    // is valid UTF-8 and decodes fine — so a case named for the decode guard
-    // was passing through `JSONDecodeError`, the branch that was already there.
-    // These are the shapes a power cut mid-write actually leaves.
-    ["a file that is not even UTF-8", Buffer.from([0xff, 0xfe, 0x00, 0x67, 0x61, 0x72, 0x62])],
-    ["a document nested past the decoder's limit", "[".repeat(200_000)],
-  ])("leaves the AMBIGUOUS key alone when the record is there but unusable: %s", (_name, body) => {
+  it.each(UNUSABLE)("leaves the AMBIGUOUS key alone when the record is there but unusable: %s", (_name, body) => {
     // Only STATEPY writes this file and it always writes `{"seeded": [...]}`,
     // so this needs a hand edit or a corrupted filesystem — but every one of
     // these shapes used to raise out of the Python, which `|| true` swallowed:
@@ -313,8 +315,12 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     ]);
   });
 
-  it("does not offer the ambiguous key again on the boot after an unusable record", () => {
-    writeFileSync(statePath, "[1, 2]");
+  it.each(UNUSABLE)("does not offer the ambiguous key again on the boot after: %s", (_name, body) => {
+    // THE PROPERTY THE WHOLE ROUND IS ABOUT. Boot 1 replaces the unusable record
+    // with a well-formed one; boot 2 must then be silent — otherwise the revert
+    // this guards against simply arrives one boot later, which is the shape the
+    // recorder's own narrow guard used to produce for ever.
+    writeFileSync(statePath, body);
     run();
     rmSync(path.join(dir, "calls.log"), { force: true });
     // The owner's "on" is still an absence, and the record is well-formed now.
@@ -322,6 +328,95 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     expect(r.status).toBe(0);
     expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
     expect(calls()).toBe("");
+    expect(r.stderr).not.toContain("cannot be read");
+  });
+
+  it("does not promise the check-ins opt-out is settled when the write has not happened", () => {
+    // FALSE SUCCESS IN AN OPERATOR MESSAGE. The recording is downstream of the
+    // `config set` below, so on the failing path NOTHING is written to the
+    // record and every later boot repeats this — while the WARN has already
+    // told the operator the key was "recorded as settled, so it will not be
+    // offered again". Its own boot contradicts it two lines down.
+    writeFileSync(statePath, "[1, 2]");
+    const r = run({ OC_EXIT: "1" });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("cannot be read");
+    // The same boot says the seed did not happen.
+    expect(r.stderr).toContain("could not seed");
+    expect(r.stderr).not.toContain("recorded as settled, so it will not be offered again");
+    // THE PROPERTY, not just the absence of the old sentence: the message has
+    // to scope itself to the boot it is describing, and make the settling
+    // conditional on the write that earns it.
+    expect(r.stderr).toContain("SKIPPED this boot");
+    expect(r.stderr).toContain("once this boot's write and its record both land");
+    // And nothing was recorded, which is what makes the promise false.
+    expect(readFileSync(statePath, "utf-8")).toBe("[1, 2]");
+  });
+
+  it("keeps the gateway starting when the batch reader fails", () => {
+    // NO GATEWAY, the one outcome this block's own comment says its design
+    // refuses. The batch reader was the one Python call in the block that was
+    // not guarded at all — SEEDPY carries `|| true`, STATEPY runs inside an
+    // `if !` — so under `set -euo pipefail` a failure here aborted
+    // gateway-pre-start.sh outright, and this runs as a BLOCKING ExecStartPre:
+    // the box comes up with no gateway at all rather than with noisy defaults.
+    //
+    // The realistic trigger is stdout pollution from a `sitecustomize`, which
+    // leaves the reader an unparseable stdin. (NOT PYTHONSTARTUP: CPython reads
+    // that only for an interactive interpreter, never for `-c` or `-`.) The
+    // failure is injected AT the guarded call rather than modelled through its
+    // cause — `python3 -c` is the reader's shape and nothing else in this block
+    // uses it — so this pins the guard, not one way of reaching it. The
+    // polluted-but-NON-EMPTY shape, which an emptiness test would miss, is
+    // pinned by the case below.
+    const real = spawnSync("bash", ["-c", "command -v python3"], { encoding: "utf-8" })
+      .stdout.trim();
+    const py = path.join(binDir, "python3");
+    writeFileSync(
+      py,
+      "#!/usr/bin/env bash\n"
+      + 'if [ "$1" = "-c" ]; then exit 1; fi\n'
+      + `exec ${JSON.stringify(real)} "$@"\n`,
+    );
+    chmodSync(py, 0o755);
+
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("could not read the background-job opt-out batch");
+    // Nothing guessed at either: no CLI start, no config write, and no record,
+    // so the next boot tries the whole thing again.
+    expect(calls()).toBe("");
+    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(existsSync(statePath)).toBe(false);
+  });
+
+  it("never hands the CLI what a FAILED batch reader left on stdout", () => {
+    // The shape an emptiness test cannot catch, and the one the realistic cause
+    // actually produces. A `sitecustomize` that prints pollutes EVERY python3 in
+    // the block: SEEDPY's stdout is then unparseable, so the reader raises — but
+    // the reader's own banner is already on ITS stdout, so the variable is
+    // non-empty garbage. `|| true` alone would walk that straight into
+    // `openclaw config set --batch-json "sitecustomize: hello"`, which is the
+    // harness's own config writer being handed unvalidated text. So the SHAPE is
+    // what is checked, not the length.
+    const real = spawnSync("bash", ["-c", "command -v python3"], { encoding: "utf-8" })
+      .stdout.trim();
+    const py = path.join(binDir, "python3");
+    writeFileSync(
+      py,
+      "#!/usr/bin/env bash\n"
+      + 'echo "sitecustomize: hello"\n'
+      + `exec ${JSON.stringify(real)} "$@"\n`,
+    );
+    chmodSync(py, 0o755);
+
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("could not read the background-job opt-out batch");
+    // Nothing was handed to the config writer at all.
+    expect(calls()).toBe("");
+    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(existsSync(statePath)).toBe(false);
   });
 
   it("records a well-formed set on a normal first boot", () => {

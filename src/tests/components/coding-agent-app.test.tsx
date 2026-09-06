@@ -314,6 +314,9 @@ describe("CodingAgentApp", () => {
         enabled: true,
         setupComplete: false,
       });
+      // The browser question stands between this save and the last step, and
+      // is a post of its own — the settings above are one post, not four.
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       expect(await screen.findByTestId("coding-agent-wizard-harness-run")).toBeInTheDocument();
     });
 
@@ -323,10 +326,12 @@ describe("CodingAgentApp", () => {
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-skip"));
+      // Three writes: the settings, the browser answer, then the flag.
       await waitFor(() => expect(
         posts.filter((p) => p.url === "/setup-api/coding-agent/enable").length,
-      ).toBe(2));
+      ).toBe(3));
       // The test is an offer, not a gate: skipping completes setup and starts
       // nothing.
       expect(posts.find((p) => p.url === "/setup-api/coding-agent/run")).toBeUndefined();
@@ -340,6 +345,7 @@ describe("CodingAgentApp", () => {
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-enable"));
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next"));
       fireEvent.click(screen.getByTestId("coding-agent-wizard-next-harness"));
+      fireEvent.click(await screen.findByTestId("coding-agent-wizard-browser-skip"));
       fireEvent.click(await screen.findByTestId("coding-agent-wizard-harness-run"));
       await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
       const run = posts.find((p) => p.url === "/setup-api/coding-agent/run");

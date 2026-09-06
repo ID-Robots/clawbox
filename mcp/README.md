@@ -92,7 +92,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 |---|---|
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default` — a chat may run a per-session override, and `ai.current_chat` says the tool cannot see it), configured context/output limits, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
 | `clawbox_health` | Is the device API reachable and is our token accepted. Separates auth from connectivity. |
-| `clawbox_context` | The device field guide plus the webapp storage/styling rules. The guide is one file, `Clawbox.md`, filtered before it is served: `<!-- edition:… -->` blocks follow the ACTIVE HARNESS (tool sets) and `<!-- ships:… -->` blocks follow the INSTALL (what the device has), so a `dual` box is told about both harnesses and a Hermes agent is never handed the OpenClaw toolbelt. |
+| `clawbox_context` | The device field guide, the webapp storage/styling rules, and whose screen the browser tools drive (`BROWSER_GUIDE` — the desktop's window while the owner's real-browser setting is on, an invisible one when it is off). The guide is one file, `Clawbox.md`, filtered before it is served: `<!-- edition:… -->` blocks follow the ACTIVE HARNESS (tool sets) and `<!-- ships:… -->` blocks follow the INSTALL (what the device has), so a `dual` box is told about both harnesses and a Hermes agent is never handed the OpenClaw toolbelt. |
 
 ### Hermes skills (Hermes only)
 `skill_search` · `skill_info` · `skill_install` · `skill_list` · `skill_uninstall`
@@ -341,11 +341,25 @@ Discord). The spoken reply is covered at its own entry point,
 before any outbound hook runs — a cloud voice there is out of reach of both
 halves.
 
+**The same two plugins now carry an INBOUND hook, and it is what lets the owner
+approve a queued email from his own Telegram conversation.** The harness is the
+single consumer of the main bot's `getUpdates` long poll, so ClawBox cannot read
+that stream — but both harnesses hand a plugin the message before the model sees
+it, and both take a claim: OpenClaw's `before_dispatch` (`{ handled: true, text }`,
+which answers on the originating route with no model call; it is NOT in the core's
+`conversationHookNameSet`, so no conversation-access grant is needed) and Hermes'
+`pre_gateway_dispatch` (`{"action": "skip"}`; it fires BEFORE the harness's own
+auth, so ClawBox does its own). Each plugin matches one strict shape locally — a
+verb and a short code, nothing else — and posts to `/setup-api/email/chat-reply`;
+every gate is on the ClawBox side, and `src/lib/email-approval-reply.ts` says why
+there is still no approve verb on the tool surface. `email_send` tells the agent
+that the owner has a code and deliberately does NOT tell it what the code is.
+
 Every claim in the paragraph above about the harness's own internals —
 `transform_llm_output`, `PLATFORM_HINTS`, `reply_payload_sending`,
-`message_sending`'s "legacy" label, the hook context fields and the
-`### Message Context` field list — was read off the running core, not from this
-repository. Nothing here can check them: there is no vendored core and no
+`message_sending`'s "legacy" label, `before_dispatch`, `pre_gateway_dispatch`,
+the hook context fields and the `### Message Context` field list — was read off
+the running core, not from this repository. Nothing here can check them: there is no vendored core and no
 `node_modules/@openclaw`, and `config/openclaw-target.txt` holds a version
 string and nothing else. Treat them as a note of where to look, not as verified
 fact, and re-read them against the core before building on them — TASK-697 did
@@ -468,6 +482,27 @@ is not linked.
 
 `browser_type` reports a character count, never the text — it is the tool that
 types passwords.
+
+**Which Chromium answers is the OWNER's choice, not the agent's.** The route
+drives the desktop's own window — the one on the screen the owner is looking
+at — while the Coding Agent's real-browser setting is on
+(`coding_agent_real_browser` in the config store, ABSENT MEANS ON, written by
+`POST /setup-api/coding-agent/enable { realBrowser }` from the settings panel
+and from the Enable/Skip step of the app's first-run wizard), and an invisible
+Chromium of its own when the setting is off or that window cannot be used
+(another program holding CDP port 18800, a launch that failed). A screenshot
+from the two is identical, so every reply carries
+`browser: "desktop" | "headless"` and the tools relay it in the header line:
+ONCE per session, and again when a fresh session lands on the other browser — a
+property of the browser behind the session is not worth repeating on every
+click, which is the spend `briefResult` exists to avoid. Inside a run the line
+asks the run to say which one it verified on; outside one it stops the
+assistant sending the owner to look at a window that was never opened. A server
+that predates the field sends nothing and nothing is claimed.
+
+There is deliberately **no tool for the switch**: putting a browser on the
+owner's screen is a consent, and a tool that could turn it back on would make
+the owner's "no" temporary — the same reason `browser_auto_open` has none.
 
 **Inside a coding-agent run** (the runner spawns this server with
 `CLAWBOX_MCP_PROFILE=browser`, which registers ONLY the browser family): the

@@ -106,6 +106,7 @@ import {
 // src/lib/log-safe.ts.
 import { logSafe } from "@/lib/log-safe";
 import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
+import { clawboxDisabledEntryId, clearPluginRepair } from "@/lib/plugin-repair";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -2613,6 +2614,51 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         const plugin = await installDeepseekProviderPlugin();
         if (plugin.installed) {
           console.log(`[AI Config] deepseek provider plugin installed (${plugin.installed})`);
+          // The plugin the boot script may have marked for repair is on disk
+          // again, and this route goes on to write the provider itself — so
+          // this IS the outcome, and the "Needs repair" badge on the ClawBox AI
+          // row has to go with it. Deliberately here rather than inside
+          // `installDeepseekProviderPlugin`: the Retry route calls that same
+          // helper and clears the marker only after `plugins inspect --runtime`
+          // says the plugin actually loaded, and a clear inside the installer
+          // would have thrown the badge away before that question was asked.
+          // PUT THE ENTRY BACK FIRST. `plugins install` leaves an entry that
+          // is explicitly `false` alone, and the boot script's boot-without
+          // wrote exactly that — so clearing here on the install alone would
+          // take the badge off a plugin still switched off, and this route's
+          // installer is a bare `plugins install` with no enable step of its
+          // own. Only for a row that says CLAWBOX disabled it.
+          const switchedOff = await clawboxDisabledEntryId("deepseek").catch(() => null);
+          let backOn = true;
+          if (switchedOff) {
+            try {
+              await runOpenclawConfigSet(
+                [`plugins.entries["${switchedOff}"].enabled`, "true", "--strict-json"],
+                { uid: CLAWBOX_UID, gid: CLAWBOX_GID },
+              );
+            } catch (err) {
+              // The badge STAYS: it is the only true thing left on screen, and
+              // the Retry it offers runs the same write again.
+              backOn = false;
+              console.warn(
+                "[AI Config] the deepseek plugin was installed but could not be switched back on;"
+                + " leaving its repair record in place:",
+                err instanceof Error ? err.message : err,
+              );
+            }
+          }
+          // SAID, not swallowed. The install succeeded and this route's own
+          // answer is about the provider, so a failed clear must not fail it —
+          // but a badge left on a row that works is a false failure the owner
+          // cannot act on, and the log is where it is looked for.
+          if (backOn) {
+            await clearPluginRepair("deepseek").catch((err: unknown) => {
+              console.warn(
+                "[AI Config] the deepseek repair marker could not be cleared; Settings may still show a Retry:",
+                err instanceof Error ? err.message : err,
+              );
+            });
+          }
         } else {
           console.warn(
             "[AI Config] deepseek provider plugin install did not complete:",

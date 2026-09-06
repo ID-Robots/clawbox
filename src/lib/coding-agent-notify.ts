@@ -35,6 +35,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
+import { isTelegramBotToken, sendTelegramBotMessage } from "@/lib/telegram-owner-send";
 import type { CodingRun } from "@/lib/coding-agent";
 
 const MAX_TOAST_CHARS = 280;
@@ -42,17 +43,7 @@ const MAX_TOAST_CHARS = 280;
 const MAX_TELEGRAM_CHARS = 1_000;
 /** Approved senders are the household, not a mailing list. */
 const MAX_TELEGRAM_RECIPIENTS = 5;
-const TELEGRAM_TIMEOUT_MS = 8_000;
 const CHAT_ID_RE = /^-?\d{1,20}$/;
-// The bot token is interpolated into the request path, so constrain it to the
-// shape Telegram issues (`<bot_id>:<secret>`) before it is ever used. The
-// charset is the part that matters: no "/", "?", "#" or "@" means a config
-// value cannot reshape the path or the request, and the host is a literal
-// either way. No length floor — that would only reject valid tokens if Telegram
-// changes format, and adds nothing the charset does not already give.
-// This is also the check CodeQL wants for its "file data in outbound network
-// request" alerts.
-const BOT_TOKEN_RE = /^(\d{1,20}):([A-Za-z0-9_-]{1,200})$/;
 
 function duration(run: CodingRun): string {
   const ms = (run.completedAt ?? Date.now()) - run.startedAt;
@@ -110,26 +101,6 @@ async function notifyDesktop(run: CodingRun, message: string): Promise<void> {
     );
   } catch (err) {
     console.error("[coding-agent] desktop notice failed:", err instanceof Error ? err.message : err);
-  }
-}
-
-async function sendTelegramDirect(token: string, chatId: string, text: string): Promise<boolean> {
-  try {
-    // Interpolated raw, not encoded: Telegram wants the literal "<id>:<secret>",
-    // and encodeURIComponent turns the colon into %3A, which the API rejects.
-    // BOT_TOKEN_RE is what makes this safe — the caller has already proved the
-    // value holds nothing that could reshape the URL.
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      // No parse_mode: the text is plain, and a stray underscore must not turn
-      // into a Markdown error that swallows the whole notice.
-      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
-      signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS),
-    });
-    return res.ok;
-  } catch {
-    return false;
   }
 }
 
@@ -193,17 +164,13 @@ async function notifyTelegram(message: string): Promise<void> {
     }
     return;
   }
-  // Rebuild the token from the match rather than testing and reusing the
-  // original. Same value either way, but the one that reaches the URL is now
-  // constructed here out of characters the pattern allows, which is what lets
-  // CodeQL see the check as a sanitizer instead of an unrelated branch.
-  const matched = BOT_TOKEN_RE.exec(token.trim());
-  if (!matched) {
+  // Said ONCE, before the fan-out, and not five times as "not delivered": a
+  // token that is not a token is a different problem from a Telegram that would
+  // not answer, and the second reading sends support to the wrong place.
+  if (!isTelegramBotToken(token)) {
     console.error("[coding-agent] telegram bot token is not a valid token; notice not sent");
     return;
   }
-  const botToken = `${matched[1]}:${matched[2]}`;
-
   const ids = (await readTelegramAllowFrom())
     .filter((id) => CHAT_ID_RE.test(id))
     .slice(0, MAX_TELEGRAM_RECIPIENTS);
@@ -212,7 +179,9 @@ async function notifyTelegram(message: string): Promise<void> {
     return;
   }
   for (const id of ids) {
-    const ok = await sendTelegramDirect(botToken, id, text);
+    // The token guard, the request and its timeout are the shared sender's:
+    // this leg and the email approval question post to the same bot.
+    const ok = await sendTelegramBotMessage(token, id, text);
     if (!ok) console.error(`[coding-agent] telegram notice to ${id} was not delivered`);
   }
 }

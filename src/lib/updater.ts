@@ -409,6 +409,11 @@ export interface UpdateState {
 
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
+import { clawboxDisabledEntryId, clearPluginRepair, readPluginRepairs } from "./plugin-repair";
+// The id rule, from the PURE module rather than through `plugin-repair`: it is
+// string work with no `fs` behind it, and taking it from the reader would tie a
+// pure helper to that module's surface for no reason.
+import { canonicalPluginId } from "./plugin-repair-id";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -1491,12 +1496,48 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
   // the alias would read an owner's explicit `enabled: false` as "no opinion"
   // and switch his channel back on.
   const wanted = normalizeManagedPluginId(pluginId);
-  return !Object.entries(entries).some(([key, entry]) =>
+  const switchedOff = Object.entries(entries).some(([key, entry]) =>
     normalizeManagedPluginId(key) === wanted
     && !!entry
     && typeof entry === "object"
     && (entry as Record<string, unknown>).enabled === false,
   );
+  if (!switchedOff) return true;
+  // …UNLESS CLAWBOX SWITCHED IT OFF ITSELF (TASK-606). The boot script now
+  // writes the same `enabled: false` when it cannot consent a plugin, so the
+  // gateway can start — and from here that is indistinguishable from a person
+  // running `openclaw plugins disable discord`. Without this the repair TASK-603
+  // built for exactly the 2026-09-01 Discord outage would skip the plugin for
+  // ever, on the grounds that the box had disabled it a boot earlier.
+  //
+  // `plugin-repair.json` is the only thing on the device that knows the
+  // difference: a row with `disabled: true` for this plugin is ClawBox's own
+  // switch-off, and the repair must still run.
+  return await clawboxSwitchedPluginOff(wanted);
+}
+
+/**
+ * True when `data/plugin-repair.json` says ClawBox switched this plugin off.
+ *
+ * `canonicalPluginId` on BOTH sides, which is the same rule `clawboxDisabledEntryId`
+ * and `clearPluginRepair` use. `normalizeManagedPluginId` strips only the two
+ * prefixes, so a row filed as `@openclaw/deepseek-provider` was found by one
+ * marker reader and not the other. Not reachable with ClawBox's own writers —
+ * the deepseek block marks the literal `deepseek` — but two ids for one file is
+ * how the alias bug this card already fixed got in.
+ */
+async function clawboxSwitchedPluginOff(pluginId: string): Promise<boolean> {
+  try {
+    const wanted = canonicalPluginId(pluginId);
+    const repairs = await readPluginRepairs();
+    return Object.values(repairs).some(
+      (row) => canonicalPluginId(row.id) === wanted && row.disabled,
+    );
+  } catch {
+    // An unreadable marker is not consent: fall back to respecting the config,
+    // which is the pre-TASK-606 behaviour.
+    return false;
+  }
 }
 
 /**
@@ -1606,11 +1647,93 @@ async function repairPluginsBlockingReadiness(
       // One spec, not two: the unpinned fallback exists for a payload that is
       // GONE and may not be published under the pin's build suffix. Here the
       // package is on disk and only its consent record is stale.
-      await reinstallManagedPluginPayload("@openclaw/codex", false);
+      //
+      // AND CLEAR THE MARKER, the same statement `recordPluginCapabilityConsent`
+      // makes after its own `enable`: the boot script's row is the only thing
+      // telling Settings this plugin needs repair, and one that only the boot
+      // script ever cleared is a permanent badge on a plugin this update has
+      // just put back (TASK-606).
+      if (await reinstallManagedPluginPayload("@openclaw/codex", false)) {
+        await clearRepairMarkerAfterPayloadRepair(pluginId);
+      }
       continue;
     }
     if (!(await pluginConsentRepairIsAllowed(pluginId))) continue;
     await recordPluginCapabilityConsent(pluginId);
+  }
+}
+
+/**
+ * Put the entry back and THEN clear the marker, after a payload reinstall.
+ *
+ * `openclaw plugins install` deliberately leaves an entry whose
+ * `plugins.entries.<id>.enabled` is explicitly `false` alone — and that is what
+ * the boot script's own boot-without wrote when it could not install the plugin.
+ * So a successful reinstall is not yet a plugin that loads: clearing the badge
+ * on it alone takes the only visible sign off a plugin that is still switched
+ * off. `plugins enable` is the harness's own verb for the pair, and it
+ * re-records the consent surface at the same time.
+ *
+ * Only for a row that says CLAWBOX switched it off. `disabled: false` means a
+ * failure was recorded and nothing was changed, and an entry the owner turned
+ * off is his.
+ *
+ * If the re-enable fails the marker STAYS: the badge is then the only true
+ * thing on the owner's screen, and the Retry it offers is his way to try again.
+ */
+async function clearRepairMarkerAfterPayloadRepair(pluginId: string): Promise<void> {
+  // `clawboxDisabledEntryId` matches on the canonical id and answers the key the
+  // row was written under, so an alias (`@openclaw/discord`) is enabled under
+  // the spelling the registry knows.
+  const switchedOff = await clawboxDisabledEntryId(pluginId).catch(() => null);
+  if (switchedOff) {
+    try {
+      await execFile(
+        OPENCLAW_BIN,
+        ["plugins", "enable", switchedOff, "--accept-capabilities"],
+        { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
+      );
+    } catch (err) {
+      console.warn(
+        `[Updater] "${switchedOff}" was reinstalled but could not be switched back on; `
+        + "leaving its repair record in place:",
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
+    // PROVED AGAINST THE FILE, not against the exit code — the same read-back
+    // the boot script's own re-enable does. This whole card exists because an
+    // exit code was read as an outcome, and a `plugins enable` that returns 0
+    // without writing would otherwise clear the badge over an entry still off.
+    if (!(await pluginEntryEnabled(switchedOff))) {
+      console.warn(
+        `[Updater] "${switchedOff}" still reads as switched off after \`plugins enable\`; `
+        + "leaving its repair record in place",
+      );
+      return;
+    }
+  }
+  await clearRepairMarker(pluginId);
+}
+
+/**
+ * Clear a TASK-606 repair marker after a repair that actually worked — and SAY
+ * so when the clear itself fails.
+ *
+ * Never fatal: the repair happened, and failing an update over the bookkeeping
+ * would be a false failure. But a marker left behind is a "Needs repair" badge
+ * on a plugin that is now fine, which the owner cannot act on because the Retry
+ * it offers will succeed and change nothing he can see — so it goes in the
+ * update log, where that is looked for.
+ */
+async function clearRepairMarker(pluginId: string): Promise<void> {
+  try {
+    await clearPluginRepair(pluginId);
+  } catch (err) {
+    console.warn(
+      `[Updater] the "${pluginId}" repair marker could not be cleared; Settings may still offer a Retry:`,
+      err instanceof Error ? err.message : err,
+    );
   }
 }
 
@@ -1644,7 +1767,11 @@ async function repairManagedPluginPayload(
     ? await codexCapabilityRepairIsAllowed()
     : await pluginConsentRepairIsAllowed(pluginId);
   if (!allowed) return false;
-  return reinstallManagedPluginPayload(npmPackage, options.fallbackToUnpinned !== false);
+  const installed = await reinstallManagedPluginPayload(npmPackage, options.fallbackToUnpinned !== false);
+  // Same reason as the Codex arm above: a payload this update put back is not
+  // a plugin Settings should go on offering a Retry for.
+  if (installed) await clearRepairMarkerAfterPayloadRepair(pluginId);
+  return installed;
 }
 
 /**
@@ -1725,6 +1852,11 @@ async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
       ["plugins", "enable", pluginId, "--accept-capabilities"],
       { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
     );
+    // The OTHER repair path for the same state (TASK-606). A marker the boot
+    // script wrote and only the boot script cleared would leave a permanent
+    // "Needs repair" badge on a plugin this update just consented — the false
+    // failure that costs a support ticket over a box that is now fine.
+    await clearRepairMarker(pluginId);
   } catch (err) {
     // Best effort, like the Codex branch above: the clean restart and the
     // positive port probe decide the result, and this must not replace a
@@ -1755,6 +1887,27 @@ async function readOpenclawConfigForRepair(): Promise<Record<string, unknown> | 
   }
 }
 
+/**
+ * Does openclaw.json now say this plugin's entry is enabled?
+ *
+ * False for a config that cannot be read: an unverifiable write is not a
+ * verified one, and the caller's answer to that is to keep the repair record —
+ * a badge that is one boot stale beats a badge removed over a plugin still off.
+ */
+async function pluginEntryEnabled(pluginId: string): Promise<boolean> {
+  const cfg = await readOpenclawConfigForRepair();
+  if (!cfg) return false;
+  const plugins = cfg.plugins && typeof cfg.plugins === "object"
+    ? cfg.plugins as Record<string, unknown>
+    : {};
+  const entries = plugins.entries && typeof plugins.entries === "object"
+    ? plugins.entries as Record<string, unknown>
+    : {};
+  const entry = entries[pluginId];
+  return !!entry && typeof entry === "object"
+    && (entry as Record<string, unknown>).enabled === true;
+}
+
 /** Respect an owner-disabled unused Codex plugin even if old logs mention it. */
 async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
   try {
@@ -1770,6 +1923,10 @@ async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
       ? entries.codex as Record<string, unknown>
       : null;
     if (codex?.enabled !== false) return true;
+    // The same TASK-606 caveat as `pluginConsentRepairIsAllowed`: a `false`
+    // ClawBox wrote at boot so the gateway could start is not the owner's veto,
+    // and reading it as one would leave Codex permanently unrepairable.
+    if (await clawboxSwitchedPluginOff("codex")) return true;
 
     const agents = cfg.agents && typeof cfg.agents === "object"
       ? cfg.agents as Record<string, unknown>

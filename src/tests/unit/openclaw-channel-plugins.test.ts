@@ -38,12 +38,19 @@ vi.mock("@/lib/openclaw-deepseek-plugin", () => ({
   installedOpenclawRelease: vi.fn(async () => "2026.8.1"),
 }));
 
+// TASK-606's marker. Mocked so the clear can be observed: this helper is one of
+// the paths that may drop a "Needs repair" badge, and the case below is about
+// when it must NOT.
+vi.mock("@/lib/plugin-repair", () => ({ clearPluginRepair: vi.fn(async () => true) }));
+
 import { OpenclawSpawnTimeoutError, readConfig, spawnOpenclawCli } from "@/lib/openclaw-config";
 import { installedOpenclawRelease } from "@/lib/openclaw-deepseek-plugin";
+import { clearPluginRepair } from "@/lib/plugin-repair";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
 const mockRelease = vi.mocked(installedOpenclawRelease);
 const mockReadConfig = vi.mocked(readConfig);
+const mockClearPluginRepair = vi.mocked(clearPluginRepair);
 
 /** openclaw.json with the given plugin ids switched on in `plugins.entries`. */
 function configWithEnabled(...ids: string[]) {
@@ -92,6 +99,26 @@ describe("ensureChannelPlugin", () => {
     // One call — the probe. Nothing was installed and nothing was enabled.
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     expect(mockSpawn.mock.calls[0][0]).toEqual(["plugins", "list", "--json"]);
+    // AND THE BADGE IS NOT TOUCHED (TASK-606). Reaching the end having done
+    // nothing is exactly the boot script's `disabled: false` row — "we could
+    // not switch it off and recorded the failure" — which is still true, and
+    // the row is the only sign of it. Only a call that actually installed or
+    // enabled something has the standing to clear it.
+    expect(mockClearPluginRepair).not.toHaveBeenCalled();
+  });
+
+  it("clears the repair badge when it DID enable the plugin", async () => {
+    // The other half: this call did the thing the badge was about, so the row
+    // goes rather than waiting for the next boot to notice.
+    mockReadConfig.mockResolvedValue({ plugins: { entries: {} } });
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "discord" }]))
+      .mockResolvedValueOnce("");
+
+    const result = await lib.ensureChannelPlugin("discord");
+
+    expect(result).toEqual({ ok: true, installed: false });
+    expect(mockClearPluginRepair).toHaveBeenCalledWith("discord");
   });
 
   it("enables a plugin the GATEWAY CONFIG does not carry, however `plugins list` describes it", async () => {

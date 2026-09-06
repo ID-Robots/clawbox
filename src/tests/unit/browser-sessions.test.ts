@@ -35,10 +35,10 @@ describe("browser sessions", () => {
     const runFirst = page();
     const runSecond = page();
     const otherRun = page();
-    const ownerId = openSession(owner, null);
-    openSession(runFirst, "run-abc12345");
-    openSession(runSecond, "run-abc12345");
-    openSession(otherRun, "run-zzz99999");
+    const ownerId = openSession(owner, null, "desktop");
+    openSession(runFirst, "run-abc12345", "desktop");
+    openSession(runSecond, "run-abc12345", "desktop");
+    openSession(otherRun, "run-zzz99999", "desktop");
 
     expect(await closeSessionsForRun("run-abc12345")).toBe(2);
     expect(runFirst.close).toHaveBeenCalled();
@@ -59,7 +59,7 @@ describe("browser sessions", () => {
     // A page whose window is already gone must not stay in the registry, or
     // the owned Chromium is never judged idle and never closed.
     const dead = { close: vi.fn().mockRejectedValue(new Error("target closed")) };
-    openSession(dead, "run-abc12345");
+    openSession(dead, "run-abc12345", "desktop");
     await closeSessionsForRun("run-abc12345");
     expect(sessionCount()).toBe(0);
   });
@@ -67,8 +67,8 @@ describe("browser sessions", () => {
   it("sweeps only what nobody has touched, and an action is a touch", () => {
     const idle = page();
     const busy = page();
-    const idleId = openSession(idle, null);
-    const busyId = openSession(busy, "run-abc12345");
+    const idleId = openSession(idle, null, "desktop");
+    const busyId = openSession(busy, "run-abc12345", "desktop");
     const later = Date.now() + SESSION_TIMEOUT_MS + 1;
     touchSession(busyId);
     // `busy` was touched at "now"; only the clock has moved past the timeout
@@ -83,9 +83,34 @@ describe("browser sessions", () => {
     expect(getSession(busyId)).not.toBeNull();
   });
 
+  it("counts the pages in one browser apart from the pages in the other", async () => {
+    // The route closes its headless Chromium when nothing needs it any more,
+    // and "nothing" is ITS pages: a tab open in the desktop window says
+    // nothing about whether ours is still in use, and both are live at once
+    // whenever the owner's switch moves between two sessions.
+    openSession(page(), null, "desktop");
+    const mine = openSession(page(), "run-abc12345", "headless");
+    expect(sessionCount()).toBe(2);
+    expect(sessionCount("headless")).toBe(1);
+    expect(sessionCount("desktop")).toBe(1);
+
+    await closeSession(mine);
+    expect(sessionCount("headless")).toBe(0);
+    expect(sessionCount("desktop")).toBe(1);
+  });
+
+  it("remembers which browser a page is in, so the answer can say", () => {
+    // A run that asked for the owner's screen and was given the headless one
+    // has no other way to find out.
+    const desktop = openSession(page(), "run-abc12345", "desktop");
+    const headless = openSession(page(), "run-abc12345", "headless");
+    expect(getSession(desktop)?.browser).toBe("desktop");
+    expect(getSession(headless)?.browser).toBe("headless");
+  });
+
   it("hands out an id per page and takes it back on close", async () => {
-    const first = openSession(page(), null);
-    const second = openSession(page(), null);
+    const first = openSession(page(), null, "desktop");
+    const second = openSession(page(), null, "desktop");
     expect(first).not.toBe(second);
     expect(await closeSession(first)).toBe(true);
     // Idempotent: closing a session that is gone is the state the caller wanted.
