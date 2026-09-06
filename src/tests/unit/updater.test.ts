@@ -2536,6 +2536,32 @@ describe("updater", () => {
       expect(state.warnings?.map((w) => w.code)).toContain("openclaw-doctor-fix-failed");
     });
 
+    it("says nothing when the validator itself could not run", async () => {
+      // A half-finished core install leaves a binary that exits non-zero on
+      // everything. Reporting its stack as "OpenClaw refuses this device's
+      // configuration" would be a false failure over a config that is fine.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        "openclaw doctor --fix": new Error("Command failed: openclaw doctor --fix"),
+        "openclaw config validate": Object.assign(new Error("Command failed"), {
+          stdout: "",
+          stderr: "node: bad option: --experimental-strip-types\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.error).not.toContain("refuses this device's configuration");
+      expect(state.error).toContain("gateway crashed for an unrelated reason");
+    });
+
     it("still blames the journal when the core ACCEPTS the config", async () => {
       // The load-bearing half: doctor exiting non-zero is not by itself proof
       // of anything — it is what a doctor that lost a lock to a LIVE gateway

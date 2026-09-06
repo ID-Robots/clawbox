@@ -1276,10 +1276,15 @@ async function getOpenclawConfigRefusal(): Promise<string | null> {
       .filter((line) => line.startsWith("\u00d7"))
       .map((line) => line.replace(/^\u00d7\s*/, ""));
     if (offending.length === 0) {
-      // Non-zero for a reason the validator did not phrase as a key: keep the
-      // first line rather than claiming to know more than it said.
-      const first = text.split(/\r?\n/).map((l) => l.trim()).find(Boolean);
-      return first ?? null;
+      // Non-zero WITHOUT the validator's own verdict in the output is not a
+      // refusal — it is a validator that could not be run. A broken node
+      // engine after a half-finished core install exits non-zero here too,
+      // and reporting its stack as "OpenClaw refuses this configuration"
+      // would be a false failure over a config that is fine. Say nothing and
+      // let the journal answer.
+      return /config is invalid|Invalid config/i.test(text)
+        ? (text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) ?? null)
+        : null;
     }
     return offending.join("; ");
   }
