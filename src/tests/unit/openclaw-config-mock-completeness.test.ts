@@ -200,17 +200,109 @@ const SILENT_STORE_READER = "@/lib/clawai-credential-refusal";
 const STORE_EXPORTS = ["get", "set"] as const;
 
 /**
- * Does this factory name that export, in any of the forms a factory writes one?
+ * The names a mock factory actually EXPORTS — the members of the object it
+ * returns, at that object's own level and nowhere else.
  *
- * `get: vi.fn()`, `get,` (shorthand), `get)` (last entry) — and `get()` /
- * `async get()`, the object-METHOD form. The last one is why the opening paren
- * is in the class: without it a perfectly complete factory written with methods
- * would be reported as missing, and a gate whose failure mode is a false
- * positive is one nobody trusts. `\b` anchors the start, so `getAll:` and
- * `getKnown:` — both live in this repo's factories — never match `get`.
+ * A regex over the factory text cannot answer this, and both of its failure
+ * modes were real (found in review): `({ get: vi.fn(), set })` ends its last
+ * member at a `}` rather than a `,` or `)`, so a name-followed-by-punctuation
+ * test reports a COMPLETE factory as missing one; and `({ set() { get(); } })`
+ * contains the text `get(`, so the same test reports an export the factory does
+ * not have. A gate that fails correct code is worse than no gate, and one that
+ * passes the hole it exists to catch is pointless.
+ *
+ * So this walks instead: strings and template literals are skipped whole,
+ * bracket depth is counted, and a name is taken only where a member may begin —
+ * straight after the object's `{` or after a `,` at that same depth. `async`,
+ * and the `get`/`set` accessor keywords, are read as modifiers when another
+ * identifier follows them, so `async get() {}` is the member `get` and
+ * `get value() {}` is the member `value`.
+ *
+ * Returns null when the factory's returned object cannot be found, and the
+ * caller REPORTS such a factory rather than skipping it: a shape this cannot
+ * read is a shape nobody has checked.
  */
-function storeExportNamed(name: string): RegExp {
-  return new RegExp(`\\b${name}\\s*[:,)(]`);
+function factoryExports(factory: string): Set<string> | null {
+  // `() => ({ … })` is the form every factory in this repo uses; `return {`
+  // covers a block-bodied one. Anything else is unparseable here by design.
+  const arrow = factory.indexOf("=>");
+  if (arrow < 0) return null;
+  const parenObject = factory.indexOf("({", arrow);
+  const returned = factory.indexOf("return", arrow);
+  const start = parenObject >= 0
+    ? parenObject + 1
+    : returned >= 0
+      ? factory.indexOf("{", returned)
+      : -1;
+  if (start < 0 || factory[start] !== "{") return null;
+
+  const names = new Set<string>();
+  let depth = 0;
+  let expectKey = false;
+  for (let i = start; i < factory.length; i += 1) {
+    const ch = factory[i];
+    // COMMENTS FIRST, and this is not a nicety: every factory in this repo
+    // explains itself between its members, and a comment carrying an
+    // apostrophe ("the owner's picks") or a bare word after a comma was read
+    // as a string opener and as the next member's name. Both were measured —
+    // seven complete factories reported as missing an export, one as
+    // unparseable — before this branch existed.
+    if (ch === "/" && factory[i + 1] === "/") {
+      const nl = factory.indexOf(String.fromCharCode(10), i);
+      i = nl < 0 ? factory.length : nl;
+      continue;
+    }
+    if (ch === "/" && factory[i + 1] === "*") {
+      const close = factory.indexOf("*/", i + 2);
+      i = close < 0 ? factory.length : close + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      // Skip the literal whole, escapes included. A `{` or a member name inside
+      // a string is text, not structure.
+      const quote = ch;
+      i += 1;
+      while (i < factory.length && factory[i] !== quote) {
+        if (factory[i] === "\\") i += 1;
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "{" || ch === "[" || ch === "(") {
+      depth += 1;
+      if (ch === "{" && depth === 1) expectKey = true;
+      continue;
+    }
+    if (ch === "}" || ch === "]" || ch === ")") {
+      depth -= 1;
+      if (depth === 0) return names;
+      continue;
+    }
+    if (depth === 1 && ch === ",") {
+      expectKey = true;
+      continue;
+    }
+    if (!expectKey || depth !== 1) continue;
+    if (/\s/.test(ch)) continue;
+    const identifier = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(factory.slice(i));
+    if (!identifier) {
+      // A computed key, a spread, a string key — none of them names one of the
+      // exports this gate asks about.
+      expectKey = false;
+      continue;
+    }
+    const after = factory.slice(i + identifier[0].length).match(/^\s*([A-Za-z_$])?/);
+    // `async get()`, `get value()`: a bare identifier followed by another one
+    // is a modifier, so keep looking for the member on this same entry.
+    if (after?.[1]) {
+      i += identifier[0].length - 1;
+      continue;
+    }
+    names.add(identifier[0]);
+    i += identifier[0].length - 1;
+    expectKey = false;
+  }
+  return null;
 }
 
 describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller carries its store functions`, () => {
@@ -233,7 +325,14 @@ describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller
     const factory = mockCall(read.get(file)!, STORE_MODULE);
     if (!factory) continue;
     if (factory.includes("importActual") || factory.includes("importOriginal")) continue;
-    const missing = STORE_EXPORTS.filter((name) => !storeExportNamed(name).test(factory));
+    const exported = factoryExports(factory);
+    // A factory this cannot read is REPORTED, not skipped: an unreadable shape
+    // is one nobody has checked, and the sibling gate above learned the hard
+    // way that a mock the scanner cannot see is the one failure a gate must
+    // not have.
+    const missing = exported === null
+      ? ["unparseable factory"]
+      : STORE_EXPORTS.filter((name) => !exported.has(name));
     if (missing.length > 0) offenders.push(`${path.relative(SRC, file)} (${missing.join(", ")})`);
   }
 
@@ -258,23 +357,55 @@ describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller
     ).toBeGreaterThan(3);
   });
 
-  it("reports a factory that omits them, in either quote form", () => {
-    // The predicate itself, over the two shapes: the sibling above learned the
-    // hard way that a mock the scanner cannot SEE is skipped rather than
-    // reported.
-    const omits = `vi.mock('${STORE_MODULE}', () => ({ getAll: vi.fn(), setMany: vi.fn() }));`;
-    const carries = `vi.mock("${STORE_MODULE}", () => ({ get: vi.fn(), set: vi.fn() }));`;
-    // The object-METHOD form of the same complete factory: a gate that reported
-    // this as missing would fail a PR over correct code.
-    const methods = `vi.mock("${STORE_MODULE}", () => ({ async get() {}, async set() {} }));`;
-    const seen = mockCall(omits, STORE_MODULE);
-    expect(seen).not.toBeNull();
-    expect(STORE_EXPORTS.filter((n) => !storeExportNamed(n).test(seen!))).toEqual(["get", "set"]);
-    expect(STORE_EXPORTS.filter((n) => !storeExportNamed(n).test(mockCall(carries, STORE_MODULE)!))).toEqual([]);
-    expect(STORE_EXPORTS.filter((n) => !storeExportNamed(n).test(mockCall(methods, STORE_MODULE)!))).toEqual([]);
-    // …and the two neighbours that share the prefix are still not it.
-    const prefixes = `vi.mock("${STORE_MODULE}", () => ({ getAll: vi.fn(), getKnown: vi.fn(), setMany: vi.fn() }));`;
-    expect(STORE_EXPORTS.filter((n) => !storeExportNamed(n).test(mockCall(prefixes, STORE_MODULE)!)))
-      .toEqual(["get", "set"]);
+  it("reads the members a factory exports, in every shape one is written", () => {
+    // The predicate itself. Both of the shapes below were false answers from
+    // the regex this replaced, and both came out of review rather than out of
+    // this file — which is why they are pinned here.
+    const exportsOf = (body: string) => factoryExports(mockCall(`vi.mock("${STORE_MODULE}", ${body});`, STORE_MODULE)!);
+
+    // The plain form, and either quote around the module id.
+    expect([...exportsOf("() => ({ get: vi.fn(), set: vi.fn() })")!].sort()).toEqual(["get", "set"]);
+    expect(factoryExports(mockCall(`vi.mock('${STORE_MODULE}', () => ({ get: vi.fn() }));`, STORE_MODULE)!)!.has("get"))
+      .toBe(true);
+
+    // TRAILING SHORTHAND: the last member ends at a `}`, not at a `,` or a `)`.
+    expect([...exportsOf("() => ({ get: vi.fn(), set })")!].sort()).toEqual(["get", "set"]);
+
+    // A NESTED CALL is not an export. `get(` appears in the text and the
+    // factory does not export it.
+    expect([...exportsOf("() => ({ set() { get(); } })")!]).toEqual(["set"]);
+
+    // The object-METHOD form, with and without `async`.
+    expect([...exportsOf("() => ({ async get() {}, set() {} })")!].sort()).toEqual(["get", "set"]);
+
+    // An ACCESSOR names the property after the keyword, not the keyword.
+    expect([...exportsOf("() => ({ get DATA_DIR() { return d; } })")!]).toEqual(["DATA_DIR"]);
+
+    // The two neighbours that share the prefix are still not it.
+    expect([...exportsOf("() => ({ getAll: vi.fn(), getKnown: vi.fn(), setMany: vi.fn() })")!].sort())
+      .toEqual(["getAll", "getKnown", "setMany"]);
+
+    // A block body, and a factory shape this cannot read at all.
+    expect([...exportsOf("() => { return { get: vi.fn(), set: vi.fn() }; }")!].sort()).toEqual(["get", "set"]);
+    expect(factoryExports('vi.mock("x", someHelper)')).toBeNull();
+
+    // And the omission the gate exists for.
+    expect([...exportsOf("() => ({ getAll: vi.fn(), setMany: vi.fn() })")!].sort()).toEqual(["getAll", "setMany"]);
+
+    // COMMENTS between members, which every factory in this repo has: an
+    // apostrophe in one used to open a "string" that swallowed the rest, and a
+    // word after a comma used to be read as the next member's name. Seven
+    // complete factories were reported as missing an export before the walker
+    // consumed comments.
+    const commented = [
+      "() => ({",
+      "  getAll: vi.fn(),",
+      "  // the owner's picks are read through the tri-state reader",
+      "  get: vi.fn(),",
+      "  /* block form too */",
+      "  set: vi.fn(),",
+      "})",
+    ].join(String.fromCharCode(10));
+    expect([...exportsOf(commented)!].sort()).toEqual(["get", "getAll", "set"]);
   });
 });
