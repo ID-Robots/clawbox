@@ -199,6 +199,20 @@ const SILENT_STORE_READER = "@/lib/clawai-credential-refusal";
 /** What that reader takes off the store, and therefore what a factory must name. */
 const STORE_EXPORTS = ["get", "set"] as const;
 
+/**
+ * Does this factory name that export, in any of the forms a factory writes one?
+ *
+ * `get: vi.fn()`, `get,` (shorthand), `get)` (last entry) — and `get()` /
+ * `async get()`, the object-METHOD form. The last one is why the opening paren
+ * is in the class: without it a perfectly complete factory written with methods
+ * would be reported as missing, and a gate whose failure mode is a false
+ * positive is one nobody trusts. `\b` anchors the start, so `getAll:` and
+ * `getKnown:` — both live in this repo's factories — never match `get`.
+ */
+function storeExportNamed(name: string): RegExp {
+  return new RegExp(`\\b${name}\\s*[:,)(]`);
+}
+
 describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller carries its store functions`, () => {
   const readerFile = resolveAlias(SILENT_STORE_READER);
 
@@ -219,7 +233,7 @@ describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller
     const factory = mockCall(read.get(file)!, STORE_MODULE);
     if (!factory) continue;
     if (factory.includes("importActual") || factory.includes("importOriginal")) continue;
-    const missing = STORE_EXPORTS.filter((name) => !new RegExp(`\\b${name}\\s*[:,)]`).test(factory));
+    const missing = STORE_EXPORTS.filter((name) => !storeExportNamed(name).test(factory));
     if (missing.length > 0) offenders.push(`${path.relative(SRC, file)} (${missing.join(", ")})`);
   }
 
@@ -250,10 +264,17 @@ describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller
     // reported.
     const omits = `vi.mock('${STORE_MODULE}', () => ({ getAll: vi.fn(), setMany: vi.fn() }));`;
     const carries = `vi.mock("${STORE_MODULE}", () => ({ get: vi.fn(), set: vi.fn() }));`;
+    // The object-METHOD form of the same complete factory: a gate that reported
+    // this as missing would fail a PR over correct code.
+    const methods = `vi.mock("${STORE_MODULE}", () => ({ async get() {}, async set() {} }));`;
     const seen = mockCall(omits, STORE_MODULE);
     expect(seen).not.toBeNull();
-    expect(STORE_EXPORTS.filter((n) => !new RegExp(`\\b${n}\\s*[:,)]`).test(seen!))).toEqual(["get", "set"]);
-    expect(STORE_EXPORTS.filter((n) => !new RegExp(`\\b${n}\\s*[:,)]`).test(mockCall(carries, STORE_MODULE)!)))
-      .toEqual([]);
+    expect(STORE_EXPORTS.filter((n) => !storeExportNamed(n).test(seen!))).toEqual(["get", "set"]);
+    expect(STORE_EXPORTS.filter((n) => !storeExportNamed(n).test(mockCall(carries, STORE_MODULE)!))).toEqual([]);
+    expect(STORE_EXPORTS.filter((n) => !storeExportNamed(n).test(mockCall(methods, STORE_MODULE)!))).toEqual([]);
+    // …and the two neighbours that share the prefix are still not it.
+    const prefixes = `vi.mock("${STORE_MODULE}", () => ({ getAll: vi.fn(), getKnown: vi.fn(), setMany: vi.fn() }));`;
+    expect(STORE_EXPORTS.filter((n) => !storeExportNamed(n).test(mockCall(prefixes, STORE_MODULE)!)))
+      .toEqual(["get", "set"]);
   });
 });
