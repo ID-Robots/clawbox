@@ -26,7 +26,13 @@ vi.mock("next/link", () => ({
 vi.mock("next/image", () => ({ default: () => null }));
 // Hoisted so a case can decide what the probe answers — including answering
 // without an `active`, which is what a failed probe looks like to this route.
-const harnessMock = vi.hoisted(() => vi.fn(async (): Promise<{ active?: string }> => ({ active: "openclaw" })));
+const harnessMock = vi.hoisted(() =>
+  vi.fn(async (): Promise<{ active?: string; edition?: string; activeKnown?: boolean }> => ({
+    active: "openclaw",
+    edition: "openclaw",
+    activeKnown: true,
+  })),
+);
 vi.mock("@/lib/client-harness", () => ({ fetchHarness: harnessMock }));
 
 interface StubUi {
@@ -57,6 +63,7 @@ vi.mock("@/components/SettingsApp", () => ({
         <span data-testid="ui-wallpapers">{ui.wallpapers.map((w) => w.id).join(",")}</span>
         <span data-testid="ui-custom">{ui.customWallpapers.length}</span>
         <button data-testid="pick-deep-space" onClick={() => ui.onWallpaperChange("deep-space")}>wp</button>
+        <button data-testid="pick-clawbox" onClick={() => ui.onWallpaperChange("clawbox")}>brand</button>
         <button data-testid="pick-center" onClick={() => ui.onWpFitChange("center")}>fit</button>
         <button data-testid="pick-opacity" onClick={() => ui.onWpOpacityChange(80)}>opacity</button>
         <button data-testid="show-mascot" onClick={() => ui.onMascotToggle(false)}>mascot</button>
@@ -70,7 +77,7 @@ vi.mock("@/components/SettingsApp", () => ({
 }));
 
 const SAVED = {
-  wp_id: "hermes",
+  wp_id: "deep-space",
   wp_fit: "center",
   wp_bg_color: "#000000",
   wp_opacity: 50,
@@ -82,7 +89,7 @@ let posts: Record<string, unknown>[];
 beforeEach(() => {
   posts = [];
   localStorage.clear();
-  harnessMock.mockResolvedValue({ active: "openclaw" });
+  harnessMock.mockResolvedValue({ active: "openclaw", edition: "openclaw", activeKnown: true });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -108,29 +115,31 @@ const SAVED_SOON = { timeout: 4000 };
 describe("/app/settings — Appearance", () => {
   it("shows the appearance this box actually has, and the wallpapers it can choose between", async () => {
     render(<StandaloneAppPage />);
-    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("hermes"));
+    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("deep-space"));
     expect(screen.getByTestId("ui-fit").textContent).toBe("center");
     expect(screen.getByTestId("ui-opacity").textContent).toBe("50");
     expect(screen.getByTestId("ui-bg").textContent).toBe("#000000");
     expect(screen.getByTestId("ui-mascot").textContent).toBe("hidden");
     // The card used to be handed an empty list, so it drew nothing but the
-    // Upload tile — three wallpapers exist and every one is pickable here.
-    expect(screen.getByTestId("ui-wallpapers").textContent).toBe("clawbox,hermes,deep-space");
+    // Upload tile. It is now handed the wallpapers THIS EDITION ships — its own
+    // brand and the neutral one — rather than both products' branding
+    // (owner ruling 2026-09-06).
+    expect(screen.getByTestId("ui-wallpapers").textContent).toBe("clawbox,deep-space");
   });
 
   it("saves a wallpaper, a fit and an opacity to the preferences the desktop reads", async () => {
     render(<StandaloneAppPage />);
-    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("hermes"));
+    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("deep-space"));
     posts.length = 0;
 
-    fireEvent.click(screen.getByTestId("pick-deep-space"));
-    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("deep-space");
-    await waitFor(() => expect(posts.at(-1)).toMatchObject({ wp_id: "deep-space" }), SAVED_SOON);
+    fireEvent.click(screen.getByTestId("pick-clawbox"));
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    await waitFor(() => expect(posts.at(-1)).toMatchObject({ wp_id: "clawbox" }), SAVED_SOON);
 
     fireEvent.click(screen.getByTestId("pick-center"));
     fireEvent.click(screen.getByTestId("pick-opacity"));
     await waitFor(
-      () => expect(posts.at(-1)).toMatchObject({ wp_id: "deep-space", wp_fit: "center", wp_opacity: 80 }),
+      () => expect(posts.at(-1)).toMatchObject({ wp_id: "clawbox", wp_fit: "center", wp_opacity: 80 }),
       SAVED_SOON,
     );
   });
@@ -163,13 +172,13 @@ describe("/app/settings — Appearance", () => {
           posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
           return { ok: true, json: async () => ({ ok: true }) };
         }
-        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ wp_id: "hermes" }) };
+        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ wp_id: "deep-space" }) };
         return { ok: true, json: async () => ({}) };
       }),
     );
 
     render(<StandaloneAppPage />);
-    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("hermes"));
+    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("deep-space"));
     // Well past the 500 ms debounce: anything the hydration commit queued has
     // had its chance to land.
     await new Promise((resolve) => setTimeout(resolve, 900));
@@ -315,11 +324,13 @@ describe("/app/settings — Appearance", () => {
     // The delete is not blocked — a local operation must not wait on a probe.
     fireEvent.click(screen.getByTestId("delete-custom-0"));
     expect(screen.getByTestId("ui-custom").textContent).toBe("0");
-    // Painted locally…
-    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    // Painted locally, and painted NEUTRAL: with no edition there is no brand
+    // to fall back to, and picking one would put the other product's artwork on
+    // the customer's screen.
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("deep-space");
     // …and not written. Well past the 500 ms debounce.
     await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(posts.some((body) => body.wp_id === "clawbox")).toBe(false);
+    expect(posts.some((body) => "wp_id" in body)).toBe(false);
   });
 
   it("offers the wallpapers this browser already uploaded, and asks the file input for a new one", async () => {
@@ -333,5 +344,51 @@ describe("/app/settings — Appearance", () => {
     input.addEventListener("click", clicked);
     fireEvent.click(screen.getByTestId("ask-upload"));
     expect(clicked).toHaveBeenCalled();
+  });
+
+  it("offers the HERMES branding and no ClawBox one on a Hermes box", async () => {
+    // The built-in list is edition-scoped (owner ruling 2026-09-06). This route
+    // is the phone's Settings, so it must scope it the same way the desktop
+    // does — one source of truth, not a second copy that drifts.
+    harnessMock.mockResolvedValue({ active: "hermes", edition: "hermes", activeKnown: true });
+    render(<StandaloneAppPage />);
+    // `wp_fit` proves the box's answer landed, as elsewhere in this file.
+    await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
+    expect(screen.getByTestId("ui-wallpapers").textContent).toBe("hermes,deep-space");
+  });
+
+  it("offers only the neutral wallpaper while no edition could be read", async () => {
+    // An unreadable edition lock — or, on the dual SKU, an unreadable config
+    // store — resolves to OpenClaw, and the route reports that as a guess.
+    // Neither brand may be offered on a guess: one of the two answers is
+    // another product's artwork.
+    harnessMock.mockResolvedValue({ active: "openclaw", edition: "openclaw", activeKnown: false });
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
+    expect(screen.getByTestId("ui-wallpapers").textContent).toBe("deep-space");
+  });
+
+  it("heals a stored other-edition brand for the card, and leaves the box's value alone", async () => {
+    // A `wp_id` naming the art this edition no longer ships — a box re-imaged
+    // onto the other edition, or a choice made before the ruling. The card
+    // shows this edition's own brand; the stored value is not rewritten, for
+    // the same reason an unanswerable `custom-<n>` is not (#728).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ ...SAVED, wp_id: "hermes" }) };
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox"));
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(posts.some((body) => "wp_id" in body)).toBe(false);
   });
 });

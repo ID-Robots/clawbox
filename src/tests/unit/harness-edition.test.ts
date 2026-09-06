@@ -5,6 +5,10 @@ const mockGet = vi.fn();
 const mockSwap = vi.fn();
 vi.mock("@/lib/config-store", () => ({
   get: (...a: unknown[]) => mockGet(...a),
+  // `getActiveHarnessSource` reads the store tri-state, so that "we could not
+  // read it" is not served as "the default harness" to anything that BRANDS
+  // the box. These cases are about the LOCK, so the store always answers.
+  getKnown: async (...a: unknown[]) => ({ value: await mockGet(...a), known: true }),
   swap: (...a: unknown[]) => mockSwap(...a),
 }));
 

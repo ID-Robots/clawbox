@@ -9,7 +9,7 @@
 
 import fs from "fs";
 import path from "path";
-import { get, swap } from "@/lib/config-store";
+import { getKnown, swap } from "@/lib/config-store";
 import { envPort } from "@/lib/port-probe";
 import { verifyDualLicense } from "@/lib/edition-license";
 import { readEdition, readEditionSource, type EditionSource } from "@/lib/edition-source";
@@ -119,18 +119,47 @@ export function isHarness(value: unknown): value is Harness {
   return value === "openclaw" || value === "hermes";
 }
 
-export async function getActiveHarness(): Promise<Harness> {
+/** {@link getActiveHarness}, plus whether the device actually RESOLVED it. */
+export interface ActiveHarnessSource {
+  active: Harness;
+  /**
+   * True when `active` is this module's `DEFAULT_HARNESS` because nothing on
+   * the device could answer — NOT because the device answered "openclaw".
+   *
+   * The two ways that happens are the two reads behind the value. An edition
+   * nobody named makes `lockedHarness()` itself a guess: it reads
+   * `getEdition()`, which is `readEditionSource()`'s own "openclaw" default
+   * there, so on a Hermes box with an unreadable lock this function can only
+   * say "openclaw". And on the one SKU the edition deliberately leaves open —
+   * an unlocked, licensed `dual` — the answer comes from `data/config.json`,
+   * which a `sudo` script can leave root-owned; the forgiving reader answers
+   * `undefined` to that exactly as it does to a box that has never switched.
+   *
+   * An ABSENT key is not a doubt: a `dual` box nobody has switched genuinely
+   * runs the default harness, which is why this asks `getKnown` rather than
+   * treating "no value" as "could not look". A stored value that is not a
+   * harness is the same case — `setActiveHarness` only ever writes a real one.
+   *
+   * Callers that BRAND the device read this; callers that merely route to a
+   * harness take `active` and are right either way.
+   */
+  defaulted: boolean;
+}
+
+export async function getActiveHarnessSource(): Promise<ActiveHarnessSource> {
+  if (readEditionSource().defaulted) return { active: DEFAULT_HARNESS, defaulted: true };
   // A locked (single-harness / unlicensed-dual) device ignores the stored value
   // entirely — the edition is the source of truth, so editing config.json can't
   // change which agent runs.
   const locked = lockedHarness();
-  if (locked) return locked;
-  try {
-    const value = await get(HARNESS_CONFIG_KEY);
-    return isHarness(value) ? value : DEFAULT_HARNESS;
-  } catch {
-    return DEFAULT_HARNESS;
-  }
+  if (locked) return { active: locked, defaulted: false };
+  const { value, known } = await getKnown(HARNESS_CONFIG_KEY);
+  if (!known) return { active: DEFAULT_HARNESS, defaulted: true };
+  return { active: isHarness(value) ? value : DEFAULT_HARNESS, defaulted: false };
+}
+
+export async function getActiveHarness(): Promise<Harness> {
+  return (await getActiveHarnessSource()).active;
 }
 
 /**

@@ -7,6 +7,9 @@ const mockGet = vi.fn();
 const mockSet = vi.fn();
 vi.mock("@/lib/config-store", () => ({
   get: (...a: unknown[]) => mockGet(...a),
+  // See harness-edition.test.ts: the harness read is tri-state now, and these
+  // cases are about the lock and the licence, so the store always answers.
+  getKnown: async (...a: unknown[]) => ({ value: await mockGet(...a), known: true }),
   set: (...a: unknown[]) => mockSet(...a),
 }));
 
