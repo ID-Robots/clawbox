@@ -11,7 +11,7 @@
  * the run so the caller can open its live view.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { codingAgentEn } from "@/lib/hermes-translations/en-coding-agent";
+import { codingAgentEn } from "@/lib/edition-translations/en-coding-agent";
 import { HARNESS_TEST_PROJECT, HARNESS_TEST_TASK, startHarnessTest } from "@/lib/coding-agent-harness-test";
 
 /** A translator whose output is unmistakably the KEY, so a literal cannot pass. */

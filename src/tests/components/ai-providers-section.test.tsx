@@ -19,7 +19,7 @@ import type { ProviderStatusSummary } from "@/lib/provider-status";
 // Hermes' (hermesProvider.*) and the connection vocabulary is the edition-
 // neutral one the removed strip already had translated (settings.providers.*).
 vi.mock("@/lib/i18n", async () => {
-  const { providerEn } = await import("@/lib/hermes-translations/en-provider");
+  const { providerEn } = await import("@/lib/edition-translations/en-provider");
   const { desktopTranslations } = await import("@/lib/desktop-translations");
   const table: Record<string, string> = { ...desktopTranslations.en, ...providerEn };
   return {

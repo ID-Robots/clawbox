@@ -1,9 +1,9 @@
 import type { Locale } from "./i18n";
 import { clawkeepTranslations } from "./clawkeep-translations";
 import { desktopTranslations } from "./desktop-translations";
-import { hermesTranslations } from "./hermes-translations";
+import { editionTranslations } from "./edition-translations";
 
-// Merge setup + desktop + clawkeep translations per locale.
+// Merge setup + desktop + clawkeep + edition translations per locale.
 // Order matters: later sources override earlier ones, so a clawkeep-specific
 // key shadows a same-named setup or desktop key. Today there are no
 // collisions, but the precedence is documented so future additions don't
@@ -12,7 +12,7 @@ function mergeTranslations(
   setup: Record<Locale, Record<string, string>>,
   desktop: Record<Locale, Record<string, string>>,
   clawkeep: Record<Locale, Record<string, string>>,
-  hermes: Record<Locale, Record<string, string>>,
+  edition: Record<Locale, Record<string, string>>,
 ): Record<Locale, Record<string, string>> {
   const merged = {} as Record<Locale, Record<string, string>>;
   for (const locale of Object.keys(setup) as Locale[]) {
@@ -20,7 +20,7 @@ function mergeTranslations(
       ...setup[locale],
       ...desktop[locale],
       ...clawkeep[locale],
-      ...hermes[locale],
+      ...edition[locale],
     };
   }
   return merged;
@@ -8127,5 +8127,5 @@ export const translations = mergeTranslations(
   setupTranslations,
   desktopTranslations,
   clawkeepTranslations,
-  hermesTranslations,
+  editionTranslations,
 );
