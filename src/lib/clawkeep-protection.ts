@@ -108,8 +108,18 @@ export const MAX_BACKUP_WINDOW_MS = 7 * DAY_MS + BACKUP_GRACE_MS;
  * It is ClawKeep's own number, not one ClawBox picked: `clawkeep/systemd/
  * clawkeepd.service` declares `TimeoutStartSec=4h` for this very binary, which
  * is the daemon's answer to "how long may one backup take". Because those
- * timers are not installed, this cap is the ONLY ceiling any run on a ClawBox
- * gets, so a shorter one here is the box overruling the daemon.
+ * timers are not installed, this is the only ceiling ClawBox itself imposes on
+ * a run, so a shorter one here is the box overruling the daemon.
+ *
+ * It is not the only ceiling that EXISTS. The daemon carries its own per-step
+ * caps on the OpenClaw edition — `openclaw.py`'s `SUBPROCESS_TIMEOUT_S`, which
+ * bounds `backup create` and `backup verify` — and those bind first, whatever
+ * this constant allows. They were 30 and 5 minutes and are raised to the same
+ * four hours in the same change; `clawkeep-backup-run-cap.test.ts` reads them
+ * back out of the Python and pins them against this value. The Hermes backend
+ * builds its archive in-process with `tarfile` and has no subprocess cap at
+ * all, so the two editions are bounded differently by construction — Hermes by
+ * this timer alone.
  *
  * It was 60 minutes, written when a Jetson backup took 2-5 minutes. TASK-675
  * made 10 GB+ archives the supported case and the validated 12 GiB run took
@@ -122,15 +132,19 @@ export const MAX_BACKUP_WINDOW_MS = 7 * DAY_MS + BACKUP_GRACE_MS;
 export const BACKUP_RUN_CAP_MS = 4 * HOUR_MS;
 
 /**
- * The hard cap on a single RESTORE. Declared beside the backup's for the same
- * reason the module gives above: the two are one number by construction.
+ * The hard cap on a single RESTORE, and on how long a `restoring.flag` may be
+ * believed. Declared beside the backup's for the reason the module gives
+ * above: these are one number by construction, not three that happen to agree.
  *
- * A restore does strictly more work than the backup that produced the archive
- * — multipart download, decrypt, extract, then `openclaw backup verify` — on
- * the same bytes, so a shorter cap is the same false failure with a worse
- * ending: a box SIGKILLed part-way through having its state replaced. It was
- * 30 minutes while the backup had 60, which put a 12 GB restore out of reach
- * before TASK-675's archives existed.
+ * It is the same four hours, and deliberately so — `TimeoutStartSec=4h` is a
+ * bound on one whole ClawKeep run, and a restore is one. What was wrong was
+ * not that the restore lacked a multiplier but that it had HALF the backup's
+ * budget, 30 minutes against 60, for work that is at least symmetric: the
+ * download mirrors the upload, and decrypt, extract and `openclaw backup
+ * verify` all come on top. That put a 12 GB restore out of reach before
+ * TASK-675's archives existed, and being SIGKILLed part-way through a restore
+ * is worse than being killed part-way through a backup, because what is being
+ * rewritten is the box's own state.
  */
 export const RESTORE_RUN_CAP_MS = BACKUP_RUN_CAP_MS;
 
@@ -159,11 +173,20 @@ export const RESTORE_RUN_CAP_MS = BACKUP_RUN_CAP_MS;
  * minutes the shelf went dark on a 12 GB upload that was still going.
  *
  * The remaining looseness is that the heartbeat measures DURATION, not
- * progress: a run SIGKILLed at the cap leaves `"running"` behind and the pulse
- * stays on until the window closes, now four hours rather than one. Measuring
- * it from real progress needs `_on_upload_progress` in `runner.py` to stamp a
- * liveness field — a daemon-side change that has to reach the boxes before
- * this side can read it, so it ships separately.
+ * progress: a run SIGKILLed at the cap — or orphaned by a Next restart, which
+ * takes the kill timer with it — leaves `"running"` behind and the pulse stays
+ * on until the window closes, now four hours rather than one.
+ *
+ * What is missing is NOT a daemon-side stamp. `runner.py`'s
+ * `_on_upload_progress` already persists `upload_bytes_done` on a 250 ms
+ * throttle, `getStatus()` already reads it into `uploadBytesDone`, and the
+ * card already draws a throughput figure from it: a counter that has not moved
+ * across several polls IS the liveness signal, on today's boxes. What is
+ * missing is a consumer — `isBackupRunning` is handed only the two heartbeat
+ * fields, so giving it progress means changing its inputs and every caller
+ * (the shelf, the card, the hook, `backup_status`), and the archive-build
+ * phase still has only `currentStepAtMs` to go on. That is a change with its
+ * own RED, not a line in this one.
  *
  * Two edges this leaves open, neither of which touches the protection verdict —
  * `lastBackupAtMs` stops moving either way, so the age term below still lapses

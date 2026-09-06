@@ -64,6 +64,25 @@ def _parse_json(stdout: str, what: str) -> dict:
     return obj
 
 
+#: The bound on any one `openclaw` subprocess this daemon runs.
+#:
+#: It is the daemon's own number: `clawkeep/systemd/clawkeepd.service` declares
+#: `TimeoutStartSec=4h` for one whole run, and no single step inside that run
+#: may be given less than the run itself — a per-step cap tighter than the run
+#: cap turns "this step is slow" into "this backup failed" for precisely the
+#: step that is slow.
+#:
+#: They WERE tighter: 30 minutes for `create_archive` ("tarballing ~1GB on
+#: Jetson takes minutes") and 5 minutes for `verify_archive`, both written when
+#: a ClawBox backup was ~1 GB. TASK-675 made 10 GB+ archives the supported
+#: case: `backup create --verify` tars and gzips the whole tree off eMMC and
+#: then reads it back, and the validated 12 GiB run took ~86 minutes end to
+#: end. Those two defaults, not the bridge's kill timer, were the FIRST wall a
+#: large backup hit — and being the daemon's own, they bound the archive step
+#: on the OpenClaw edition no matter what the caller allows.
+SUBPROCESS_TIMEOUT_S = 4 * 60 * 60
+
+
 def create_archive(
     binary: str,
     *,
@@ -71,7 +90,7 @@ def create_archive(
     include_workspace: bool = True,
     only_config: bool = False,
     verify: bool = True,
-    timeout: float = 30 * 60,  # tarballing ~1GB on Jetson takes minutes; 30m hard cap
+    timeout: float = SUBPROCESS_TIMEOUT_S,
 ) -> Archive:
     """Run `openclaw backup create --json --output <dir>`. Returns archive metadata.
 
@@ -117,7 +136,12 @@ def create_archive(
     )
 
 
-def verify_archive(binary: str, archive: Path, *, timeout: float = 5 * 60) -> None:
+def verify_archive(
+    binary: str,
+    archive: Path,
+    *,
+    timeout: float = SUBPROCESS_TIMEOUT_S,
+) -> None:
     """Run `openclaw backup verify --json <archive>`. Raises OpenclawError on failure.
 
     Useful as a defence-in-depth check before upload when the caller did

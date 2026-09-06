@@ -137,17 +137,41 @@ describe("the cap a ClawKeep backup run is given", () => {
     expect(protection.RESTORE_RUN_CAP_MS).toBeGreaterThan(MEASURED_12GIB_RUN_MS);
   });
 
-  it("is the cap runBackup actually arms, and no run is killed inside it", async () => {
-    const promise = clawkeep.runBackup({ idle: false });
-    for (let i = 0; i < 50 && !daemon.spawned; i++) {
-      await new Promise((r) => setTimeout(r, 1));
-    }
-    expect(daemon.spawned).toBe(true);
+  it("is not undercut by the daemon's own per-step caps on the OpenClaw edition", async () => {
+    // The bridge cap is the only ceiling CLAWBOX imposes; it is not the only
+    // one that exists. `agent.create_archive()` / `agent.verify_archive()`
+    // pass no timeout, so `openclaw.py`'s defaults bind the archive and the
+    // verify steps first — they were 30 and 5 minutes, so on OpenClaw a 12 GB
+    // backup died half an hour in and never reached the bridge's timer at all.
+    // Read out of the Python rather than restated here, so raising one and
+    // forgetting the other reddens this.
+    const py = await fs.readFile(
+      path.join(process.cwd(), "clawkeep/clawkeep/openclaw.py"),
+      "utf8",
+    );
+    const declared = /^SUBPROCESS_TIMEOUT_S = (.+)$/m.exec(py);
+    expect(declared, "openclaw.py must declare SUBPROCESS_TIMEOUT_S").not.toBeNull();
+    // The expression is a product of integer literals (`4 * 60 * 60`).
+    expect(declared![1]).toMatch(/^[\d\s*]+$/);
+    const seconds = declared![1].split("*").reduce((a, b) => a * Number(b.trim()), 1);
 
-    daemon.finish(0);
-    const result = await promise;
-    expect(daemon.killed).toEqual([]);
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).not.toContain("backup timed out");
+    expect(seconds * 1000).toBeGreaterThanOrEqual(protection.BACKUP_RUN_CAP_MS);
+    expect(seconds * 1000).toBeGreaterThanOrEqual(protection.RESTORE_RUN_CAP_MS);
+
+    // Both step functions must take that default, not a tighter literal.
+    for (const fn of ["create_archive", "verify_archive"]) {
+      const body = py.slice(py.indexOf(`def ${fn}(`), py.indexOf(`def ${fn}(`) + 400);
+      expect(body, `${fn} must use SUBPROCESS_TIMEOUT_S`).toContain(
+        "timeout: float = SUBPROCESS_TIMEOUT_S",
+      );
+    }
+  });
+
+  it("gives the restoring flag the same window as the restore it marks", () => {
+    // `isRestoring()` DELETES a flag it judges stale, and `restoring` is the
+    // only signal that survives a page reload, so a window shorter than the
+    // restore's own cap drops the shelf's orange shield back to a calm green
+    // verdict while the box's state is still being replaced.
+    expect(protection.RESTORE_RUN_CAP_MS).toBeGreaterThan(MEASURED_12GIB_RUN_MS);
   });
 });

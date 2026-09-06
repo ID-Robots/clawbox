@@ -222,7 +222,15 @@ async function ensureDataDir(): Promise<void> {
 // Stale-flag window: if the restoring marker is older than the restore
 // timeout it almost certainly means the Next.js process crashed mid-run
 // and never cleaned up. Treat as not-restoring so the shield stops glowing.
-const RESTORING_FLAG_MAX_AGE_MS = 30 * 60 * 1000;
+//
+// It has to BE the restore timeout, not a number that happens to equal it.
+// The two were both 30 minutes, so the flag could never go stale during a
+// live restore — the run was SIGKILLed at the same instant. Raising the
+// restore cap without this would have had `isRestoring()` DELETE the flag of
+// a restore still in flight (it removes the file, it does not merely report
+// false), dropping the shelf's orange restoring shield back to a calm green
+// verdict while the box's whole state directory was being replaced.
+const RESTORING_FLAG_MAX_AGE_MS = RESTORE_RUN_CAP_MS;
 
 /**
  * "HH:MM", 24-hour, and a time that exists. Kept in step with the memory
