@@ -2228,12 +2228,15 @@ export function clearFinishedRuns(): number {
   // since deleted, 2026-09-06. A LIVE run is kept whatever its folder says:
   // the record is the only handle on the process.
   const heldOn = (r: CodingRun) => isHeld(r.status) && (isLive(r.status) || folderPresent(r.directory));
-  const keep = list.filter((r) => heldOn(r) || isPrPending(r.pr));
-  const removed = list.length - keep.length;
+  // ONE decision per run, used for both the record and its evidence folder:
+  // judged twice, a folder that came or went between the two looks would
+  // drop a record and keep its artifacts, or the other way round.
+  const keep: CodingRun[] = [];
+  const dropped: CodingRun[] = [];
+  for (const r of list) (heldOn(r) || isPrPending(r.pr) ? keep : dropped).push(r);
+  const removed = dropped.length;
   if (removed === 0) return 0;
-  for (const r of list) {
-    if (!heldOn(r) && !isPrPending(r.pr)) removeArtifacts(r.id);
-  }
+  for (const r of dropped) removeArtifacts(r.id);
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
   list.length = 0;
@@ -4904,12 +4907,18 @@ function insertRun(list: CodingRun[], run: CodingRun): void {
   }
 }
 
-/** Whether a held run's folder is still there to resume or start into. */
+/**
+ * Whether a held run's folder is still there to resume or start into. Only
+ * ABSENCE answers no: an EACCES, an EIO or a descriptor shortage says nothing
+ * about the folder, and a held run must not be deleted — record and evidence
+ * — over a passing error. Such a run is kept, and the next Clear asks again.
+ */
 function folderPresent(directory: string): boolean {
   try {
     return fs.statSync(directory).isDirectory();
-  } catch {
-    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code !== "ENOENT" && code !== "ENOTDIR";
   }
 }
 

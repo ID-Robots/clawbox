@@ -993,6 +993,25 @@ describe("a run", () => {
       expect(lib.getRun(kept.id)?.status).toBe("draft");
     });
 
+    it("clear-history keeps a held run whose folder it cannot LOOK at — only absence drops one", async () => {
+      // An EACCES on the stat is not "the folder is gone": deleting the
+      // record and its evidence over a passing error would be the worse
+      // outcome, so such a run is kept and the next Clear asks again.
+      if (process.getuid?.() === 0) return; // root is never refused a stat
+      readyDevice();
+      const lockedDir = makeProject("locked");
+      const parent = path.dirname(lockedDir);
+      const draft = await lib.createDraftRun({ task: "behind a locked door", projectId: "locked", source: "owner" });
+      fs.chmodSync(parent, 0o000);
+      try {
+        expect(() => fs.statSync(lockedDir)).toThrow(/EACCES/);
+        expect(lib.clearFinishedRuns()).toBe(0);
+        expect(lib.getRun(draft.id)?.status).toBe("draft");
+      } finally {
+        fs.chmodSync(parent, 0o755);
+      }
+    });
+
     it("deletes only drafts — finished runs are history", async () => {
       readyDevice();
       makeProject("site");

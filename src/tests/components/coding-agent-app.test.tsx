@@ -813,12 +813,38 @@ describe("CodingAgentApp", () => {
         render(<CodingAgentApp />);
         const sidebar = await screen.findByTestId("coding-agent-sidebar");
         const buttons = within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button");
-        expect(buttons).toHaveLength(12);
+        // The paused run, then the twelve newest settled ones: the cap is theirs.
+        expect(buttons).toHaveLength(1 + 12);
         expect(buttons[0]).toHaveTextContent("Paused long ago");
         // …and opens its page, where Resume and Stop are.
         fireEvent.click(buttons[0]);
         expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-oldpause");
         expect(screen.getByTestId("coding-agent-resume-run-oldpause")).toBeInTheDocument();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("never hides a held run behind the rail's cap — the cap is the settled runs' alone", async () => {
+      const RO = class {
+        private cb: ResizeObserverCallback;
+        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+        unobserve() {}
+        disconnect() {}
+      };
+      vi.stubGlobal("ResizeObserver", RO);
+      try {
+        const held = Array.from({ length: 14 }, (_, i) => ({ ...RUN, id: `run-held${String(i).padStart(4, "0")}`, task: `Held task ${i}`, status: "draft", completedAt: null, startedAt: 5_000 + i }));
+        const settled = Array.from({ length: 15 }, (_, i) => ({ ...RUN, id: `run-done${String(i).padStart(4, "0")}`, task: `Done task ${i}`, startedAt: 1_000 + i }));
+        stubFetch({ enabled: true, readiness: READY }, [...held, ...settled], { projects: [SITE_PROJECT] });
+        render(<CodingAgentApp />);
+        const sidebar = await screen.findByTestId("coding-agent-sidebar");
+        const labels = within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button").map((b) => b.textContent);
+        // All fourteen held runs, then twelve settled ones.
+        expect(labels).toHaveLength(14 + 12);
+        expect(labels.slice(0, 14).every((l) => l?.includes("Held task"))).toBe(true);
+        expect(labels.slice(14).every((l) => l?.includes("Done task"))).toBe(true);
       } finally {
         vi.unstubAllGlobals();
       }

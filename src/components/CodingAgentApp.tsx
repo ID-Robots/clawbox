@@ -857,16 +857,18 @@ export default function CodingAgentApp() {
     openProject ? runs.filter((r) => runBelongsTo(r, openProject)) : []
   ), [runs, openProject]);
   /**
-   * The rail's recent runs: the newest SIDEBAR_RUNS, with every HELD run —
-   * running, paused, drafted — ahead of the settled ones whatever its age. A
-   * run waiting on the owner is never out of sight: a review pass paused one
+   * The rail's recent runs: EVERY held run — running, paused, drafted —
+   * whatever its age, ahead of the newest SIDEBAR_RUNS settled ones. A run
+   * waiting on the owner is never out of sight: a review pass paused one
    * evening was, a dozen newer runs later, listed nowhere (its folder gone,
-   * so no project row either), with its Resume and Stop unreachable.
+   * so no project row either), with its Resume and Stop unreachable. The
+   * cap is the settled runs' alone, so a thirteenth held run is not hidden
+   * by the twelve before it either.
    */
   const sidebarRuns = useMemo(() => {
     const held = runs.filter((r) => isHeld(r.status));
     const settled = runs.filter((r) => !isHeld(r.status));
-    return [...held, ...settled].slice(0, SIDEBAR_RUNS);
+    return [...held, ...settled.slice(0, SIDEBAR_RUNS)];
   }, [runs]);
   /**
    * Which face the window shows. Three, exclusive: the settings page sits
