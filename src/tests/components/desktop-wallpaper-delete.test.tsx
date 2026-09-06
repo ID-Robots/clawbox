@@ -44,6 +44,8 @@ const WP = [
 let savedWallpaperId = "custom-2";
 /** Which harness the box reports — the fallback wallpaper follows it. */
 let activeHarness = "openclaw";
+/** Whether anything on the device actually NAMED an edition (the lock, or the env). */
+let editionKnown = true;
 /** Milliseconds the harness probe takes to answer, so a case can run inside the window where it has not. */
 let harnessDelayMs = 0;
 /** Every preference body the desktop POSTed, in order. */
@@ -69,7 +71,7 @@ function installFetch() {
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) {
       if (harnessDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, harnessDelayMs));
-      return answer({ active: activeHarness, edition: activeHarness });
+      return answer({ active: activeHarness, edition: activeHarness, editionKnown });
     }
     if (url.includes("/setup-api/preferences?all=1")) {
       return answer({ wp_id: savedWallpaperId, wp_opacity: 100 });
@@ -92,6 +94,29 @@ function wallpaperUrls(): string[] {
     .map((el) => el.style.backgroundImage);
 }
 
+/** The built-in wallpaper tiles the Appearance card offers, in order. */
+function builtinWallpaperTiles(): string[] {
+  return Array.from(document.querySelectorAll<HTMLElement>("[data-testid='wallpaper-tile']"))
+    .map((el) => el.dataset.wallpaperId ?? "");
+}
+
+/**
+ * Every reference to a BRAND wallpaper image anywhere on screen — the painted
+ * background and the Appearance tiles both. The removed brand's picture must
+ * not be fetched on the other edition either, and a tile is an `<img src>`
+ * rather than a background-image, so the two are asked together.
+ */
+function deepSpacePainted(): boolean {
+  return document.querySelector(".bg-stars") !== null;
+}
+
+function brandWallpaperAssets(): string[] {
+  const painted = wallpaperUrls();
+  const tiles = Array.from(document.querySelectorAll<HTMLImageElement>("img"))
+    .map((el) => el.getAttribute("src") ?? "");
+  return [...painted, ...tiles].filter((url) => url.includes("-wallpaper.jpeg"));
+}
+
 async function mountDesktop(expected: string) {
   render(<ChromeDesktop />);
   await waitFor(() => expect(screen.getByTestId("desktop-root")).toBeTruthy());
@@ -108,47 +133,48 @@ async function openAppearanceSettings() {
   fireEvent.click(await screen.findByRole("button", { name: /appearance/i }));
 }
 
+beforeEach(() => {
+  window.localStorage.clear();
+  window.localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(WP));
+  savedWallpaperId = "custom-2";
+  activeHarness = "openclaw";
+  editionKnown = true;
+  harnessDelayMs = 0;
+  saved.length = 0;
+  resetHarnessCache();
+  // jsdom does not implement it at all, so `vi.spyOn` cannot be used and
+  // `restoreMocks` has nothing to restore — put it back by hand below.
+  Element.prototype.scrollIntoView = vi.fn();
+  // The shared `matchMedia` from `src/tests/setup.ts` is a `vi.fn()`, and
+  // `mockReset: true` (vitest.config.ts) empties every mock's implementation
+  // after each test — so from the SECOND case in any file it answers
+  // `undefined` and the mascot's reduced-motion effect throws on `.matches`.
+  // A plain function has no implementation to reset.
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    configurable: true,
+    value: (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false,
+    }),
+  });
+  installFetch();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  resetHarnessCache();
+  delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  window.localStorage.clear();
+});
+
 describe("deleting a custom wallpaper", () => {
-  beforeEach(() => {
-    window.localStorage.clear();
-    window.localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(WP));
-    savedWallpaperId = "custom-2";
-    activeHarness = "openclaw";
-    harnessDelayMs = 0;
-    saved.length = 0;
-    resetHarnessCache();
-    // jsdom does not implement it at all, so `vi.spyOn` cannot be used and
-    // `restoreMocks` has nothing to restore — put it back by hand below.
-    Element.prototype.scrollIntoView = vi.fn();
-    // The shared `matchMedia` from `src/tests/setup.ts` is a `vi.fn()`, and
-    // `mockReset: true` (vitest.config.ts) empties every mock's implementation
-    // after each test — so from the SECOND case in any file it answers
-    // `undefined` and the mascot's reduced-motion effect throws on `.matches`.
-    // A plain function has no implementation to reset.
-    Object.defineProperty(window, "matchMedia", {
-      writable: true,
-      configurable: true,
-      value: (query: string) => ({
-        matches: false,
-        media: query,
-        onchange: null,
-        addListener() {},
-        removeListener() {},
-        addEventListener() {},
-        removeEventListener() {},
-        dispatchEvent: () => false,
-      }),
-    });
-    installFetch();
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    resetHarnessCache();
-    delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
-    window.localStorage.clear();
-  });
-
   it("keeps the picture the owner is actually looking at", async () => {
     await mountDesktop(WP[2]);
 
@@ -267,13 +293,18 @@ describe("deleting a custom wallpaper", () => {
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
   });
 
-  it("writes nothing while the harness probe has not answered, and lands on the Hermes art", async () => {
+  it("shows no branding at all while the harness probe has not answered, and lands on the Hermes art", async () => {
     // The preferences call and the harness probe race, and until the probe
     // answers the desktop cannot know which edition's art the fallback is. The
     // repair this replaced ran in that window and PERSISTED "clawbox" — on a
     // Hermes box, box-wide and for good, since the later Hermes answer found a
     // selection already made. Nothing is written now, so the paint simply
     // catches up when the probe lands.
+    //
+    // And the paint inside that window is the NEUTRAL one. It used to be the
+    // ClawBox art — a guess, shown as a fact, on a device that had not yet said
+    // which product it is; on the Hermes box that is a competitor's picture
+    // flickering across the customer's screen on every load.
     activeHarness = "hermes";
     harnessDelayMs = 900;
     window.localStorage.removeItem("clawbox-custom-wallpapers");
@@ -282,7 +313,8 @@ describe("deleting a custom wallpaper", () => {
     render(<ChromeDesktop />);
     await waitFor(() => expect(screen.getByTestId("desktop-root")).toBeTruthy());
     // Inside the window: the preferences have landed, the probe has not.
-    await waitFor(() => expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(true));
+    await waitFor(() => expect(deepSpacePainted()).toBe(true));
+    expect(brandWallpaperAssets()).toEqual([]);
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
 
     // And once it does answer, the paint follows the edition.
@@ -334,5 +366,72 @@ describe("deleting a custom wallpaper", () => {
     await openAppearanceSettings();
     const tile = await screen.findByRole("button", { name: /^ClawBox$/i });
     expect(tile.getAttribute("aria-pressed")).toBe("true");
+  });
+});
+
+/**
+ * The built-in list is EDITION-SCOPED (owner ruling 2026-09-06): the OpenClaw
+ * edition offers ClawBox + Deep Space, the Hermes edition offers Hermes + Deep
+ * Space, and the uploads are on both. The other edition's branding is not
+ * something a customer can select, so it is not something the box ships.
+ *
+ * The edition is the device's own answer, and while nobody has given one the
+ * neutral Deep Space is the whole list: painting a brand there is a coin flip,
+ * and the wrong side of it is another product's artwork on the customer's
+ * screen.
+ */
+describe("the built-in wallpapers this edition offers", () => {
+  it("offers ClawBox and Deep Space on an OpenClaw box, and never the Hermes art", async () => {
+    savedWallpaperId = "clawbox";
+    await mountDesktop("clawbox-wallpaper");
+    await openAppearanceSettings();
+
+    // Not merely unselectable — not fetched. The tile is an <img src>, so a
+    // tile for the other edition would still pull the other product's picture.
+    expect(brandWallpaperAssets().some((url) => url.includes("hermes-wallpaper"))).toBe(false);
+    expect(builtinWallpaperTiles()).toEqual(["clawbox", "deep-space"]);
+  });
+
+  it("offers Hermes and Deep Space on a Hermes box, and never the ClawBox art", async () => {
+    activeHarness = "hermes";
+    savedWallpaperId = "hermes";
+    await mountDesktop("hermes-wallpaper");
+    await openAppearanceSettings();
+
+    expect(brandWallpaperAssets().some((url) => url.includes("clawbox-wallpaper"))).toBe(false);
+    expect(builtinWallpaperTiles()).toEqual(["hermes", "deep-space"]);
+  });
+
+  it("offers only Deep Space while no edition could be read, and writes nothing", async () => {
+    // The lock exists and says nothing this device could parse (a truncated
+    // write, a permission change, a partial reflash), so `readEditionSource`
+    // falls back to its own "openclaw" — which the route now reports as a
+    // GUESS. Taking the guess would put ClawBox branding on a Hermes box.
+    editionKnown = false;
+    savedWallpaperId = "clawbox";
+    render(<ChromeDesktop />);
+    await waitFor(() => expect(screen.getByTestId("desktop-root")).toBeTruthy());
+    await openAppearanceSettings();
+
+    expect(brandWallpaperAssets()).toEqual([]);
+    expect(builtinWallpaperTiles()).toEqual(["deep-space"]);
+    // The neutral paint is a paint. The box keeps the value it holds — a
+    // fallback this browser derived is never written back (TASK-719/#728).
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "clawbox")).toBe(false);
+  });
+
+  it("heals a stored OTHER-edition brand to this one for the paint, and persists nothing", async () => {
+    // A box re-imaged onto the other edition, or a `wp_id` chosen before this
+    // ruling: the id names an art this edition does not ship. It resolves to
+    // the local brand on screen and the stored value is left alone.
+    savedWallpaperId = "hermes";
+    await mountDesktop("clawbox-wallpaper");
+    await openAppearanceSettings();
+
+    expect(brandWallpaperAssets().some((url) => url.includes("hermes-wallpaper"))).toBe(false);
+    expect(builtinWallpaperTiles()).toEqual(["clawbox", "deep-space"]);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "hermes")).toBe(false);
   });
 });

@@ -22,17 +22,35 @@
  * Concurrent callers share one in-flight request instead of firing five.
  */
 
-export type HarnessInfo = { active: string; edition: string };
+export type HarnessInfo = {
+  active: string;
+  edition: string;
+  /**
+   * Whether anything on the device actually NAMED an edition, or `edition`
+   * above is `readEditionSource()`'s own "openclaw" default (no lock file, no
+   * `CLAWBOX_EDITION`, or a lock that could not be parsed).
+   *
+   * Cached with `edition` and for the same reason: both come from a root-owned
+   * file that only an edition switch rewrites. A caller that must not guess —
+   * anything that BRANDS the box — reads this before believing `active` either,
+   * since on an unreadable lock that field traces back through
+   * `lockedHarness()` to the very same file and can only echo "openclaw".
+   *
+   * False for a server that predates the field, which is the honest reading: it
+   * did not say.
+   */
+  editionKnown: boolean;
+};
 
 const ACTIVE_TTL_MS = 5_000;
 
-let editionCache: string | null = null;
+let editionCache: { value: string; known: boolean } | null = null;
 let activeCache: { value: string; at: number } | null = null;
 let inFlight: Promise<HarnessInfo | null> | null = null;
 
 /** The edition if it is already known, else null. Never triggers a fetch. */
 export function cachedEdition(): string | null {
-  return editionCache;
+  return editionCache?.value ?? null;
 }
 
 /** The active harness if a fresh value is cached, else null. Never fetches. */
@@ -65,7 +83,7 @@ export function fetchHarness(options?: {
 }): Promise<HarnessInfo | null> {
   const active = options?.force ? null : cachedActiveHarness();
   if (active !== null && editionCache !== null) {
-    return Promise.resolve({ active, edition: editionCache });
+    return Promise.resolve({ active, edition: editionCache.value, editionKnown: editionCache.known });
   }
   if (inFlight && !options?.force) return inFlight;
 
@@ -75,13 +93,16 @@ export function fetchHarness(options?: {
   })
     .then((r) => (r.ok ? r.json() : null))
     .then((d: unknown) => {
-      const data = (d ?? {}) as { active?: unknown; edition?: unknown };
-      if (typeof data.edition === "string") editionCache = data.edition;
+      const data = (d ?? {}) as { active?: unknown; edition?: unknown; editionKnown?: unknown };
+      if (typeof data.edition === "string") {
+        editionCache = { value: data.edition, known: data.editionKnown === true };
+      }
       if (typeof data.active === "string") activeCache = { value: data.active, at: Date.now() };
       if (typeof data.active !== "string" && typeof data.edition !== "string") return null;
       return {
         active: typeof data.active === "string" ? data.active : "",
         edition: typeof data.edition === "string" ? data.edition : "",
+        editionKnown: data.editionKnown === true,
       };
     })
     .catch(() => null)

@@ -53,7 +53,8 @@ export interface UISettings {
   wpBgColor: string;
   wpOpacity: number;
   mascotHidden: boolean;
-  wallpapers: { id: string; name: string; image?: string }[];
+  /** Readonly: the shared built-in list is frozen per edition and never mutated here. */
+  wallpapers: readonly { id: string; name: string; image?: string }[];
   customWallpapers: string[];
   onWallpaperChange: (id: string) => void;
   onWpFitChange: (fit: "fill" | "fit" | "center") => void;
@@ -3267,6 +3268,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <button
                       key={wp.id}
                       type="button"
+                      data-testid="wallpaper-tile"
+                      data-wallpaper-id={wp.id}
                       aria-pressed={selected}
                       aria-label={wp.name}
                       onClick={() => ui.onWallpaperChange(wp.id)}
