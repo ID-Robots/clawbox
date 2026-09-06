@@ -2010,7 +2010,8 @@ function ChromeDesktopInner() {
               onCustomWallpaperDelete: (idx: number) => {
                 // Same as the upload above: outside the updater, and off the
                 // ref rather than off `prev`.
-                const next = customWallpapersRef.current.filter((_, i) => i !== idx);
+                const before = customWallpapersRef.current;
+                const next = before.filter((_, i) => i !== idx);
                 // Nothing was removed, so nothing is renumbered.
                 if (!storeCustomWallpapers(next, "Could not remove that wallpaper — this browser is not letting the page store them.")) return;
                 // `custom-<n>` is an INDEX into that list, so deleting one
@@ -2021,8 +2022,12 @@ function ChromeDesktopInner() {
                 // ClawBox wallpaper.
                 // Off the STORED id, not the rendered one: this is the write
                 // that goes to the box, and it must renumber what the box
-                // actually holds.
-                setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, harnessDefaultWallpaperId));
+                // actually holds. `before` is the list as it stood immediately
+                // ahead of THIS delete — captured before the store above, which
+                // advances the ref to the shortened one — and it is what tells
+                // the rule whether the saved id was an index into this
+                // browser's list at all.
+                setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, harnessDefaultWallpaperId));
               },
             }} />
           </div>

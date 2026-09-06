@@ -231,6 +231,42 @@ describe("/app/settings — Appearance", () => {
     expect(posts.some((body) => "wp_id" in body)).toBe(false);
   });
 
+  it("does not renumber a selection that is not an index into this browser's list", async () => {
+    // The phone is the surface most likely to be holding a `wp_id` it did not
+    // choose. Two pictures of its own, the laptop's `custom-5` from the box:
+    // deleting one of ITS two must not shift that id down a slot and write it
+    // back — this handler is a second copy of the desktop's, and this is the
+    // case that catches the two drifting apart.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ ...SAVED, wp_id: "custom-5" }) };
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]));
+
+    render(<StandaloneAppPage />);
+    // `wp_fit` proves the box's answer landed, as above.
+    await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
+    expect(screen.getByTestId("ui-custom").textContent).toBe("2");
+    posts.length = 0;
+
+    fireEvent.click(screen.getByTestId("delete-custom-0"));
+    // This browser's own list did shrink — the delete is not being refused.
+    expect(screen.getByTestId("ui-custom").textContent).toBe("1");
+    // Rendered locally, persisted nowhere: the card shows the fallback and the
+    // box keeps the selection it holds. Well past the 500 ms debounce.
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(posts.some((body) => "wp_id" in body)).toBe(false);
+  });
+
   it("does not move the selection when the shortened list cannot be stored", async () => {
     // Site data blocked, or a locked-down profile. The list is what the next
     // load paints and `wp_id` is a position into it — moving the id over a

@@ -198,6 +198,32 @@ describe("deleting a custom wallpaper", () => {
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
   });
 
+  it("does not renumber a selection that is not this browser's to renumber", async () => {
+    // The same cross-browser numbering, on the DELETE path. `wp_id` is
+    // box-wide and the pictures are per-browser, so the laptop's `custom-5`
+    // can arrive at a browser holding three of its own — and deleting one of
+    // those three renumbers a list the saved id was never an index into. The
+    // handler would have written `custom-4` over the laptop's choice, from a
+    // list it has no standing to renumber, which is the very write the mount
+    // path above refuses to make.
+    savedWallpaperId = "custom-5";
+    await mountDesktop("clawbox-wallpaper");
+
+    await openAppearanceSettings();
+    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 1/i }));
+
+    // This browser's own list did shrink — the delete is not being refused.
+    await waitFor(() => {
+      expect(JSON.parse(window.localStorage.getItem("clawbox-custom-wallpapers") || "[]"))
+        .toEqual([WP[1], WP[2]]);
+    });
+    // Rendered locally, persisted nowhere: still the local fallback, and the
+    // box still holds the selection it held. Well past the 500 ms debounce.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(true);
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-5")).toBe(false);
+  });
+
   it("paints the HERMES art for a selection this browser cannot answer", async () => {
     // Same browser, Hermes box. The local fallback follows the edition, and it
     // is still only a local fallback — nothing about it reaches the box.

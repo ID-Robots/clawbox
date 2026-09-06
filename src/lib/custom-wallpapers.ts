@@ -50,15 +50,39 @@ export function isCustomWallpaperInRange(wallpaperId: string, count: number): bo
  * `fallbackId` is what to select when the deleted one WAS the selected one —
  * the harness's own art, the same default a box that has never chosen one
  * opens on, so a Hermes box does not land on the ClawBox wallpaper.
+ *
+ * `before` is the list as it stood BEFORE the removal, and it is what decides
+ * whether the rule applies at all: renumbering only makes sense for a selection
+ * that was an index into this very list. The range check lives here rather than
+ * at the two callers for the reason the whole module exists — a caller that
+ * forgets it writes the corruption box-wide. The list rather than its length
+ * for the same reason: `(id, deletedIndex, count, fallback)` is two adjacent
+ * numbers that transpose silently, and a caller that swapped them would disable
+ * the guard and renumber against the wrong pivot.
+ *
+ * In the other direction the check is a HEURISTIC, and knowingly so: an
+ * IN-range `custom-<n>` is ASSUMED to be this browser's, because a positional
+ * id carries nothing that could prove whose it is. A phone holding three of its
+ * own pictures and the laptop's `custom-2` still renumbers it. Only a
+ * non-positional id closes that half; the range check closes the half a
+ * position can actually answer.
  */
 export function wallpaperIdAfterDelete(
   wallpaperId: string,
   deletedIndex: number,
+  before: readonly string[],
   fallbackId: string,
 ): string {
   const active = customWallpaperIndex(wallpaperId);
   // A built-in is selected: a custom one going away cannot change it.
   if (active === null) return wallpaperId;
+  // A `custom-<n>` this list never held is not ours to renumber. `wp_id` is
+  // box-wide and the pictures are per-browser, so a selection past the end of
+  // the list being deleted from is almost always ANOTHER browser's, still
+  // resolving perfectly there. Shifting it down a slot would write this
+  // browser's shorter list over a choice it cannot even paint — the same write
+  // the mount path already refuses to make (TASK-719).
+  if (!isCustomWallpaperInRange(wallpaperId, before.length)) return wallpaperId;
   if (active === deletedIndex) return fallbackId;
   return active > deletedIndex ? customWallpaperId(active - 1) : wallpaperId;
 }

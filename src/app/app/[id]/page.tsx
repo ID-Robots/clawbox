@@ -249,7 +249,8 @@ function useAppearance(enabled: boolean, activeHarness: string | null) {
       onMascotToggle: setMascotHidden,
       onWallpaperUpload: () => uploadRef.current?.click(),
       onCustomWallpaperDelete: (idx: number) => {
-        const next = customRef.current.filter((_, i) => i !== idx);
+        const before = customRef.current;
+        const next = before.filter((_, i) => i !== idx);
         // Nothing was removed, so nothing is renumbered.
         if (!storeCustomWallpapers(next)) return;
         // `custom-<n>` is an INDEX into that list, so deleting one renumbers
@@ -258,7 +259,11 @@ function useAppearance(enabled: boolean, activeHarness: string | null) {
         // box-wide `wp_id`, and the fallback is the harness's own art — a
         // Hermes box whose only custom wallpaper is deleted must not land on
         // the ClawBox one (TASK-719).
-        setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, harnessDefaultWallpaperId));
+        // `before` is the list as it stood immediately ahead of THIS delete,
+        // captured before the store above advances the ref to the shortened
+        // one — not the list the saved id was originally chosen against, which
+        // may have been another browser's entirely.
+        setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, harnessDefaultWallpaperId));
       },
     },
   };
