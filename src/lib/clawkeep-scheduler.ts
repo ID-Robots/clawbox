@@ -179,6 +179,20 @@ function onUnreadableSchedule(): void {
 function applySchedule(schedule: ClawKeepSchedule): void {
   clear();
   arm(schedule);
+  // The one choke point every arm path goes through, and the last place this
+  // card's own symptom can still hide: `arm()` returns silently when the
+  // schedule is enabled and `computeNextRunMs()` answers 0. The range check on
+  // `timeOfDay` closes the way that used to happen, but two inputs still
+  // reach it — the weekly loop's 9-hop clock/DST guard, and any schedule
+  // handed to `refresh()` that did not come through `sanitiseSchedule()`.
+  // Auto-backup reading as on with no timer armed must never be silent again.
+  if (schedule.enabled && armedFor === 0) {
+    console.warn(
+      "[clawkeep-scheduler] auto-backup is on but the schedule computes no next run"
+        + ` (${schedule.frequency} ${schedule.timeOfDay} weekday ${schedule.weekday})`
+        + " — nothing is armed",
+    );
+  }
 }
 
 function arm(schedule: ClawKeepSchedule): void {

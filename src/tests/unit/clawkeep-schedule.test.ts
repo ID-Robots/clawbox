@@ -340,6 +340,32 @@ describe("the ClawKeep backup scheduler", () => {
     expect(runBackup).not.toHaveBeenCalled();
   });
 
+  it("says so when an enabled schedule computes no next run at all", async () => {
+    // The last silent path. `arm()` returns without a word when the schedule
+    // is enabled and `computeNextRunMs()` answers 0 — which after the range
+    // check is the weekly loop's 9-hop clock/DST guard, and anything handed
+    // to `refresh()` that did not come through `sanitiseSchedule()`. That is
+    // this card's symptom exactly: auto-backup on, no timer, nothing said.
+    const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockClawkeep(runBackup, { schedule: SCHEDULE, armedAtMs: Date.now(), unreadable: false });
+
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+    warn.mockClear();
+
+    await sched.refresh({ ...SCHEDULE, timeOfDay: "99:99" });
+
+    expect(sched.nextRunAtMs()).toBe(0);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("auto-backup is on but the schedule computes no next run"),
+    );
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(runBackup).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("says nothing when the scheduled backup actually ran", async () => {
     const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "uploaded", stderr: "" }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
