@@ -344,6 +344,23 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       expect(log).toContain("no longer includes it");
     });
 
+    it("leaves a pre-stamp entry alone on a downgrade, narrower than the adopt path on purpose", () => {
+      // A `claw_` token is enough to REFRESH an entry — the worst case is our
+      // own fields rewritten to our own values — and deliberately not enough to
+      // DELETE one: an owner can point our own token at our own proxy with a
+      // model of their choosing, and the case above pins that entry as theirs.
+      // The narrow residue is a box written before the stamp existed that is
+      // ALSO downgraded; it keeps a dead entry, as it did before this change.
+      const preStamp = { baseUrl: RETIRED, model: SPEECH_MODEL, apiKey: TOKEN };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: preStamp } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(preStamp);
+    });
+
     it("still refuses to take an UNSTAMPED entry on a moved address", () => {
       // The destructive path keeps its positive evidence: the stamp is the
       // authorisation, and an entry we did not write is somebody's own.
@@ -382,6 +399,38 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       // transcription migration applies, from the same helper.
       const own = { baseUrl: "https://clawbox.com/their-own-route", model: "tts-1" };
       const { cfg, changed } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+
+    it("is left alone when the owner has repointed OUR OWN stamped entry at their server", () => {
+      // `messages.tts.providers.openai` is the only generic OpenAI-compatible
+      // speech slot OpenClaw has, so an owner who runs their own has to edit
+      // the entry we wrote — and `openclaw config set` edits in place, leaving
+      // our `clawboxManaged` key behind on a route that is now theirs.
+      const own = {
+        baseUrl: "https://kokoro.local/v1",
+        model: "kokoro",
+        apiKey: "sk-owner",
+        voice: "af",
+        clawboxManaged: true,
+      };
+      const { cfg, changed, log } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+      expect(log).toContain("already names its own speech route");
+    });
+
+    it("does not delete that entry on a downgrade either", () => {
+      // The one irreversible action in the file, and a stale stamp must not be
+      // enough to fire it over live owner configuration.
+      const own = { baseUrl: "https://kokoro.local/v1", model: "kokoro", apiKey: "sk-owner", clawboxManaged: true };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: own } } } },
+        { deviceTier: "free" },
+      );
 
       expect(changed).toBe(false);
       expect(speech(cfg)).toEqual(own);
