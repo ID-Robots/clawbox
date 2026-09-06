@@ -4071,7 +4071,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Nothing is coming on either path, so the run ends here.
       sendingRef.current = false
       setSending(false)
+      // What the box managed to write is the OWNER'S, and it survives here for
+      // the same reason it survives on the gateway path's `aborted`/`error`
+      // branch: pressing Stop mid-answer keeps the fragment rather than wiping
+      // it. This path — the adapter's, i.e. the one a Hermes box and a dual
+      // box on Hermes run — used to clear the buffer and append nothing, so
+      // the same Stop lost the reply on one edition and kept it on the other
+      // (TASK-721). Read, clear, THEN append, all outside any updater, and
+      // before the failure line below so the answer stays above it.
+      const kept = dropUnfinishedDirective(streamingRef.current)
       applyStreaming('')
+      if (kept.trim() && !isSentinel(kept)) {
+        setMessages(prev => [...prev, { role: 'assistant', text: kept, timestamp: Date.now() }])
+      }
       clearToolCalls()
       // The agent is no longer parked on anything, so neither is the customer.
       // A card outliving its turn is a control with nowhere to post to.
