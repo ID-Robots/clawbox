@@ -125,6 +125,78 @@ describe("config-store", () => {
     });
   });
 
+  describe("swap", () => {
+    it("writes the new value and answers with the one it replaced", async () => {
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "openclaw", keep: "kept" }), "utf-8");
+
+      await expect(configStore.swap("active_harness", "hermes")).resolves.toBe("openclaw");
+      const content = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"));
+      expect(content.active_harness).toBe("hermes");
+      expect(content.keep).toBe("kept");
+    });
+
+    it("answers undefined for a key the store did not hold", async () => {
+      await expect(configStore.swap("neverSet", "first")).resolves.toBeUndefined();
+      expect(await configStore.get("neverSet")).toBe("first");
+    });
+
+    it("throws over a store it could not read, like `set`", async () => {
+      // The invariant this shares with `set`: `swap` is a second write path
+      // into the file holding the mailbox password and both bot tokens, and a
+      // forgiving read would rebuild it from `{}` and REPLACE it with the one
+      // key being written. Pinned here because the caller cannot see it.
+      await fs.writeFile(CONFIG_PATH, "{ half written", "utf-8");
+
+      await expect(configStore.swap("telegram_bot_token", "111:x")).rejects.toThrow();
+      expect(await fs.readFile(CONFIG_PATH, "utf-8")).toBe("{ half written");
+    });
+
+    it("refuses `undefined` instead of quietly REMOVING the key", async () => {
+      // `swap` replaces; it does not delete. `JSON.stringify` drops a key whose
+      // value is `undefined`, so the rename would have written a config without
+      // it — and the caller, handed the predecessor and no error, would read
+      // that as a successful switch. `setActiveHarness` losing `active_harness`
+      // that way leaves the box with no recorded harness while the route
+      // reports the change made.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "hermes", keep: "kept" }), "utf-8");
+
+      await expect(configStore.swap("active_harness", undefined)).rejects.toThrow(TypeError);
+      const content = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"));
+      expect(content).toEqual({ active_harness: "hermes", keep: "kept" });
+    });
+
+    it("refuses every OTHER value JSON drops the same way", async () => {
+      // `undefined` is not special — a function and a symbol are omitted by
+      // `JSON.stringify` identically, with the identical outcome: the key gone
+      // from the file, the predecessor returned, no error. The guard tests the
+      // property, so this list is what the property covers rather than a second
+      // enumeration to keep in step.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "hermes" }), "utf-8");
+
+      await expect(configStore.swap("active_harness", () => "hermes")).rejects.toThrow(TypeError);
+      await expect(configStore.swap("active_harness", Symbol("hermes"))).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ active_harness: "hermes" });
+    });
+
+    it("lets neither of two overlapping swaps read a predecessor the other replaced", async () => {
+      // The property the whole fix rests on, and the one nothing else pins: the
+      // read and the write are in the SAME event-loop turn, so the second call
+      // cannot see the value the first one started from. Move this module to
+      // `fs/promises` — a natural cleanup, since it is already `async` — and an
+      // `await` appears between them, both swaps answer "openclaw", the route
+      // concludes nothing moved and skips the reload. That is TASK-715 exactly.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "openclaw" }), "utf-8");
+
+      // Deliberately NOT awaited in between.
+      const first = configStore.swap("active_harness", "hermes");
+      const second = configStore.swap("active_harness", "openclaw");
+
+      expect(await first).toBe("openclaw");
+      expect(await second).toBe("hermes");
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8")).active_harness).toBe("openclaw");
+    });
+  });
+
   describe("setMany", () => {
     it("sets multiple keys atomically", async () => {
       await configStore.setMany({ x: 1, y: 2, z: 3 });

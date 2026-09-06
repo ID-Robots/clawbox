@@ -119,6 +119,49 @@ export async function set(key: string, value: unknown): Promise<void> {
   writeConfig(config);
 }
 
+/**
+ * Set `key` and return what it held — read and written in ONE synchronous step.
+ *
+ * `get` then `set` is not the same thing. The `await` between them is a point
+ * where another request can land its own write, and the caller then reasons
+ * about a predecessor its call never actually replaced. Here the read and the
+ * write are in the same event-loop turn, so no other caller IN THIS PROCESS can
+ * land a config write between them. It says nothing about another process
+ * writing the same file — the rename in `writeConfig` is what covers that.
+ *
+ * Replaces only, and REFUSES a value JSON would drop rather than treating it as
+ * `set` does. `JSON.stringify` omits a key whose value is `undefined`, and a
+ * function or a symbol identically, so accepting one would rename a config
+ * WITHOUT the key over the one that had it — and the caller, handed the
+ * predecessor and no error, would read that as the switch having been made.
+ * The test is `JSON.stringify(value) === undefined`, which is the property that
+ * actually matters, rather than an enumeration of the values that have it. To
+ * delete a key, `set` it to `undefined`.
+ *
+ * The VALUE half only. A `__proto__` KEY produces the same outcome by a
+ * different mechanism — `config[key] = value` hits `Object.prototype`'s setter,
+ * so the key never lands — and is NOT covered here, because it is identical in
+ * `set` and `setMany` and belongs with a store-wide fix rather than a third
+ * copy of one. Unreachable from the only caller, which passes a module
+ * constant.
+ *
+ * Same strict read as `set`, for the same reason: a write over a store nobody
+ * can read must throw rather than replace it with the one key being saved.
+ */
+export async function swap(key: string, value: unknown): Promise<unknown> {
+  // Ahead of the read, so a value that cannot be stored costs no file access.
+  // `JSON.stringify` throws on a BigInt or a cycle, which `writeConfig` would
+  // have done anyway — here it happens before anything is opened.
+  if (JSON.stringify(value) === undefined) {
+    throw new TypeError(`config-store: swap(${key}) replaces, it cannot delete — use set()`);
+  }
+  const config = readConfigStrict();
+  const previous = config[key];
+  config[key] = value;
+  writeConfig(config);
+  return previous;
+}
+
 export async function setMany(entries: Record<string, unknown>): Promise<void> {
   const config = readConfigStrict();
   for (const [key, value] of Object.entries(entries)) {
