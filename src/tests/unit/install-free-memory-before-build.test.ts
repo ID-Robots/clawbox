@@ -60,11 +60,17 @@ const FREE_MEMORY = shellCode(extractShellFunction("free_memory_for_build"));
 
 describe("do_rebuild frees memory in the one place it can hold", () => {
   it("frees memory before the build", () => {
+    // `run_next_build` IS the build here — it is the only caller of
+    // `$BUN run build` in do_rebuild's path, and it exists because Next's
+    // standalone copy can die on a file that changed mid-build (TASK-670).
+    // Both halves are asserted, so neither the call nor the command can move
+    // ahead of the free without this failing.
     const freeIdx = DO_REBUILD.indexOf("free_memory_for_build");
-    const buildIdx = DO_REBUILD.indexOf("$BUN run build");
+    const buildIdx = DO_REBUILD.indexOf("run_next_build");
     expect(freeIdx).toBeGreaterThan(-1);
     expect(buildIdx).toBeGreaterThan(-1);
     expect(freeIdx).toBeLessThan(buildIdx);
+    expect(shellCode(extractShellFunction("run_next_build"))).toContain("$BUN run build");
   });
 
   it("frees memory AFTER the web server is stopped, not before", () => {

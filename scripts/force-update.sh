@@ -151,7 +151,48 @@ if [ ! -x "$BUN_BIN" ]; then
   BUN_BIN="$(command -v bun || echo bun)"
 fi
 run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install"
-run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build"
+
+# ONE retry, and only for the mid-build file-trace race — the same guard
+# `run_next_build` carries in install.sh, copied rather than shared because
+# this script is standalone by design (it is what an operator runs when the
+# in-app updater is already broken) and has its own helper names. See that
+# function for why the race exists and why one rebuild is the whole repair.
+#
+# It matters MORE here than there: `git reset --hard` and `git clean -fd` run
+# a few lines above, `next build` wipes `.next/standalone` before it copies
+# anything, and this path parks NO previous build — so a mid-copy ENOENT
+# leaves the box with no standalone entry and nothing to fall back on.
+# A private `mktemp -d` directory, never a predictable path — this script runs
+# as root and a fixed name under TMPDIR is a symlink a local user can plant.
+# See run_next_build in install.sh.
+BUILD_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-force-update-XXXXXX" 2>/dev/null || true)"
+BUILD_LOG=""
+if [ -n "$BUILD_LOG_DIR" ]; then BUILD_LOG="$BUILD_LOG_DIR/build.log"; fi
+BUILD_RC=0
+for BUILD_ATTEMPT in 1 2; do
+  if [ -n "$BUILD_LOG" ]; then
+    if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build" 2>&1 | tee "$BUILD_LOG"; then
+      BUILD_RC=0
+      break
+    fi
+    # The BUILD's status, never the pipeline's: a log this script could not
+    # write must not turn a build that worked into a failed recovery.
+    BUILD_RC=${PIPESTATUS[0]}
+    if [ "$BUILD_RC" -eq 0 ]; then break; fi
+  else
+    if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build"; then BUILD_RC=0; else BUILD_RC=$?; fi
+    break
+  fi
+  if [ "$BUILD_ATTEMPT" -eq 2 ]; then break; fi
+  # One awk, not two greps in a pipe — see run_next_build in install.sh.
+  awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$BUILD_LOG" || break
+  echo "[force-update] A file the build was tracing changed while it ran — building once more"
+done
+if [ -n "$BUILD_LOG_DIR" ]; then rm -rf "$BUILD_LOG_DIR"; fi
+if [ "$BUILD_RC" -ne 0 ]; then
+  echo "[force-update] Build failed (exit $BUILD_RC)." >&2
+  exit "$BUILD_RC"
+fi
 
 echo "[force-update] Restarting clawbox-setup..."
 sudo systemctl restart clawbox-setup

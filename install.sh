@@ -1638,6 +1638,101 @@ restore_previous_build() {
   return 1
 }
 
+# `bun run build`, with ONE retry and only for the mid-build file-trace race.
+#
+# WHAT RACES. Next writes a `.nft.json` beside every server entry and then
+# copies every file it lists into `.next/standalone` — after wiping that
+# directory first. The page and app-page copies are `.catch`-wrapped; the
+# MIDDLEWARE and INSTRUMENTATION ones are not (node_modules/next/dist/build/
+# utils.js, still true on 16.3.3), so one `fs.copyFile` ENOENT there aborts
+# `next build` outright. And those two traces carry the project root as an
+# asset directory — measured on the OpenClaw box, beta build of 2026-09-05:
+# every ROUTE trace has 0 entries under data/ and .git/, while
+# middleware.js.nft.json has 27 under data/ and instrumentation.js.nft.json has
+# 32 under data/ plus 701 under .git/. So a web app the agent creates or
+# removes, a coding run writing a screenshot, or the update's own
+# `git reset --hard` between the trace and the copy kills the build over a file
+# the dashboard never needed.
+#
+# WHY NOT A CONFIG. `outputFileTracingExcludes` reaches route entries only — the
+# same measurement is what proves it, and it is why next.config.ts's own
+# `.git/**` key is inoperative for the instrumentation trace. Next exposes no
+# other tracing knob: `outputFileTracingRoot`, `-Excludes` and `-Includes` are
+# the whole surface in its config schema.
+#
+# WHY A RETRY IS THE RIGHT ANSWER. The failure is transient by construction: the
+# next trace cannot list a file that is gone. One retry, gated on the ENOENT the
+# copy throws, so a build that is broken for any other reason still fails on the
+# first attempt and is reported as such rather than hidden behind a second
+# five-minute build. `REBUILD_TAKEOVER_TIMEOUT_MS` in src/lib/updater.ts carries
+# the budget for that second build.
+#
+# The log copy exists ONLY so the gate can read what was printed, and it is
+# best-effort: a `/tmp` that is full or unwritable — a Jetson tmpfs under the
+# memory pressure `free_memory_for_build` exists for — must cost the retry, not
+# the build. The build's own status is the verdict, never the pipeline's, so
+# `tee` can never turn a build that worked into a failed update;
+# `verify_build_present` in both callers is what catches a build that exited 0
+# without producing anything. Output now carries the build's stderr on stdout so
+# the gate can see it, which is the one thing about the step log that changed.
+#
+# Every branch is written the long way — `if`, never `[ … ] && …` — and the
+# build runs as an `if` CONDITION. Both are about errexit: this file is
+# `set -euo pipefail`, `do_rebuild` calls this in a `||` context (errexit
+# suspended for the whole body) and `step_build` calls it bare (errexit live),
+# so a failing pipeline or a false `[ … ] &&` test outside a condition would
+# kill the script on the first attempt in one caller and not the other.
+run_next_build() {
+  local log log_dir rc attempt
+  # A PRIVATE directory from `mktemp -d`, never a predictable path. This script
+  # runs as root: `: > "$TMPDIR/<fixed name>"` follows a symlink a local user
+  # planted there, so root truncates and then `tee`s a build log into whatever
+  # it pointed at. `mktemp -d` creates a 0700 directory with an unguessable
+  # name atomically, so nothing can be waiting inside it. The cost is that an
+  # OOM kill — which this shell is a documented target of (TASK-709) — leaves an
+  # empty directory rather than nothing; a stale 0700 directory in /tmp is the
+  # cheaper of the two problems by a wide margin.
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-build-XXXXXX" 2>/dev/null || true)"
+  log=""
+  if [ -n "$log_dir" ]; then log="$log_dir/next-build.log"; fi
+  if [ -z "$log" ]; then
+    echo "  Note: could not open a build log; a mid-build trace race will not be retried"
+  fi
+  rc=0
+  for attempt in 1 2; do
+    if [ -n "$log" ]; then
+      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
+        rc=0
+        break
+      fi
+      # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
+      # for a tee that could not write too, and a log this function could not
+      # keep must never be the reason an update is reported failed.
+      rc=${PIPESTATUS[0]}
+      if [ "$rc" -eq 0 ]; then break; fi
+    else
+      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      break
+    fi
+    if [ "$attempt" -eq 2 ]; then break; fi
+    # The FATAL shape only. Next prints the identical `ENOENT … copyfile` node
+    # message inside the `.catch` it wraps the page and app-page copies in,
+    # prefixed with `Failed to copy traced files for` — a warning over a build
+    # that carried on, and no reason to spend a second build. ONE awk rather
+    # than two greps in a pipe: `grep -q` exits on its first match and can
+    # SIGPIPE the producer, which under `pipefail` reads as "no match" and
+    # would silently drop the retry this whole function exists for.
+    awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
+    echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
+  done
+  if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+  return "$rc"
+}
+
 # Stop the setup service, free memory, reinstall, and rebuild — without ever
 # leaving the box with no build at all.
 do_rebuild() {
@@ -1679,7 +1774,7 @@ do_rebuild() {
     set_previous_build_aside "$build_dir" "$kept_dir"
     echo "Running bun build..."
     built=1
-    as_clawbox_login "cd $PROJECT_DIR && $BUN run build" || rc=$?
+    run_next_build || rc=$?
     if [ "$rc" -eq 0 ] && ! verify_build_present "$PROJECT_DIR"; then
       rc=1
     fi
@@ -2537,7 +2632,10 @@ step_build() {
   promote_parked_build
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
   ensure_node_pty
-  as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
+  # Through do_rebuild's helper, for do_rebuild's reason: `--step build` is
+  # dispatchable on a live box, where the agent can create or remove a web app
+  # while the trace is being copied.
+  run_next_build
   # The same two questions do_rebuild asks, through the same helper: an install
   # that leaves a box unable to load the server is the defect this file already
   # tested for, and the identity half is the one the box already owns.
