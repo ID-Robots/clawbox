@@ -290,7 +290,7 @@ export function readApprovalReplay(raw: unknown): ApprovalReplay {
  * failure this feature exists to remove. Terminal cards are kept either way:
  * they are what the owner reads to learn what happened.
  */
-export function applyApprovalReplay(
+export function approvalsAfterReplay(
   prev: readonly ApprovalCard[],
   replay: ApprovalReplay,
 ): ApprovalCard[] {
@@ -337,7 +337,7 @@ export function markApprovalBusy(
  * that is not the documented shape leaves the card pending and says so: a
  * decision this could not read is not a decision that was taken.
  */
-export function applyResolveResult(
+export function approvalsAfterResolve(
   cards: readonly ApprovalCard[],
   id: string,
   result: unknown,

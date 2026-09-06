@@ -336,6 +336,26 @@ describe("a pending operator approval in the ClawBox chat", () => {
     ).toEqual([]);
   });
 
+  it("stops offering a button the moment the window closes", async () => {
+    // Not at the next render that happens to occur. A button that cannot work
+    // is the UI's own false success, and pressing it would come back as "that
+    // did not reach the box" over a gateway that answered perfectly well.
+    replay = [pendingExec({ expiresAtMs: Date.now() + 120 })];
+    await mountReady();
+
+    const card = await screen.findByTestId("chat-approval");
+    expect(card.getAttribute("data-approval-status")).toBe("pending");
+    expect(screen.queryAllByTestId("chat-approval-decision")).toHaveLength(2);
+
+    await waitFor(
+      () => expect(screen.getByTestId("chat-approval").getAttribute("data-approval-status")).toBe("expired"),
+      { timeout: 2_000 },
+    );
+    expect(screen.queryAllByTestId("chat-approval-decision")).toHaveLength(0);
+    // Nothing was asked of the gateway to learn that.
+    expect(framesFor("approval.resolve")).toHaveLength(0);
+  });
+
   it("costs nothing for an ordinary turn", async () => {
     // `hello there` must not touch the approval surface at all: no resolve, no
     // extra subscribe, and no card.

@@ -19,8 +19,8 @@ import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardSt
 import { ApprovalPrompt } from '@/lib/chat-approvals'
 import {
   APPROVAL_SESSION_EVENT,
-  applyApprovalReplay,
-  applyResolveResult,
+  approvalsAfterReplay,
+  approvalsAfterResolve,
   markApprovalBusy,
   mergeApprovalCard,
   readApproval,
@@ -1034,6 +1034,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // our own: the harness owns the queue, its expiry and its first-answer-wins
   // resolution, and the next subscribe replays whatever is still open.
   const [approvals, setApprovals] = useState<ApprovalCard[]>([])
+  // The clock the cards judge their own window against.
+  //
+  // A pending approval's window closes on its own, and the card has to stop
+  // offering a button AT THAT MOMENT rather than at the next render that
+  // happens to occur — a button that cannot work is the UI's own false
+  // success, and pressing it would come back as "that did not reach the box"
+  // over a gateway that answered perfectly well. One timeout at the earliest
+  // expiry still ahead of this clock, never a ticker: an idle chat with a card
+  // on screen must not re-render once a second on a Jetson.
+  const [approvalNow, setApprovalNow] = useState(() => Date.now())
+  useEffect(() => {
+    const soonest = approvals.reduce(
+      (min, card) => (card.status === 'pending' && card.expiresAtMs > approvalNow
+        ? Math.min(min, card.expiresAtMs)
+        : min),
+      Number.POSITIVE_INFINITY,
+    )
+    if (!Number.isFinite(soonest)) return
+    const timer = window.setTimeout(() => setApprovalNow(Date.now()), Math.max(0, soonest - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [approvals, approvalNow])
   /**
    * Which read of the approval queue is the current one.
    *
@@ -2084,7 +2105,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // frame already is — so an approve/deny card costs one flag on a call
           // that was being made anyway, and no poll.
           void subscribeSessionWithApprovals(wsRequest, boundKey, replay => {
-            setApprovals(prev => applyApprovalReplay(prev, replay))
+            setApprovals(prev => approvalsAfterReplay(prev, replay))
           })
           // Only a provider change or a plain gateway restart gets here: those
           // are the two things that still bounce the gateway and drop this
@@ -2886,7 +2907,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // greet itself with an unasked-for "hi".
     clearTranscript()
     void subscribeSessionWithApprovals(wsRequest, key, replay => {
-      setApprovals(prev => applyApprovalReplay(prev, replay))
+      setApprovals(prev => approvalsAfterReplay(prev, replay))
     })
     lastSentThinkingRef.current = undefined
     setSessionEpoch(e => e + 1)
@@ -3953,9 +3974,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         kind: card.kind,
         decision,
       })
-      setApprovals(prev => applyResolveResult(prev, card.id, result))
+      setApprovals(prev => approvalsAfterResolve(prev, card.id, result))
     } catch (err) {
-      setApprovals(prev => applyResolveResult(prev, card.id, err instanceof Error ? err : new Error('failed')))
+      setApprovals(prev => approvalsAfterResolve(prev, card.id, err instanceof Error ? err : new Error('failed')))
     }
   }, [wsRequest])
 
@@ -5960,7 +5981,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <ApprovalPrompt
             key={card.id}
             card={card}
-            nowMs={Date.now()}
+            nowMs={approvalNow}
             onDecide={decideApproval}
           />
         ))}

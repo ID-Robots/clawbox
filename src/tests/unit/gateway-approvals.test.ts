@@ -18,8 +18,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   APPROVAL_SESSION_EVENT,
-  applyApprovalReplay,
-  applyResolveResult,
+  approvalsAfterReplay,
+  approvalsAfterResolve,
   approvalIsActionable,
   markApprovalBusy,
   mergeApprovalCard,
@@ -193,7 +193,7 @@ describe("the authoritative pending set the subscribe answers with", () => {
 describe("what an authoritative replay is allowed to do", () => {
   it("drops a pending card the whole set no longer mentions", () => {
     const before = [readApproval(pendingExec())!, readApproval(pendingSystemAgent())!];
-    const after = applyApprovalReplay(before, {
+    const after = approvalsAfterReplay(before, {
       cards: [readApproval(pendingSystemAgent())!],
       truncated: false,
     });
@@ -206,7 +206,7 @@ describe("what an authoritative replay is allowed to do", () => {
     // question vanish with no end state — the failure this whole card exists
     // to remove.
     const before = [readApproval(pendingExec())!, readApproval(pendingSystemAgent())!];
-    const after = applyApprovalReplay(before, { cards: [], truncated: true });
+    const after = approvalsAfterReplay(before, { cards: [], truncated: true });
     expect(after.map((c) => c.id)).toEqual(before.map((c) => c.id));
   });
 
@@ -214,7 +214,7 @@ describe("what an authoritative replay is allowed to do", () => {
     // A terminal card is what the owner READS to learn what happened; the
     // replay only ever carries pending rows.
     const denied = readApproval({ ...pendingExec(), status: "denied", reason: "user" })!;
-    const after = applyApprovalReplay([denied], { cards: [], truncated: false });
+    const after = approvalsAfterReplay([denied], { cards: [], truncated: false });
     expect(after.map((c) => c.id)).toEqual([denied.id]);
     expect(after[0].status).toBe("denied");
   });
@@ -248,7 +248,7 @@ describe("what the gateway records is what the card shows", () => {
       "exec:3f1c",
       "allow-once",
     );
-    const after = applyResolveResult(cards, "exec:3f1c", {
+    const after = approvalsAfterResolve(cards, "exec:3f1c", {
       applied: true,
       approval: { status: "allowed", decision: "allow-once", reason: "user", resolvedAtMs: NOW },
     });
@@ -267,7 +267,7 @@ describe("what the gateway records is what the card shows", () => {
       "exec:3f1c",
       "deny",
     );
-    const after = applyResolveResult(cards, "exec:3f1c", {
+    const after = approvalsAfterResolve(cards, "exec:3f1c", {
       applied: false,
       approval: { status: "allowed", decision: "allow-once", reason: "user", resolvedAtMs: NOW },
     });
@@ -281,7 +281,7 @@ describe("what the gateway records is what the card shows", () => {
       "exec:3f1c",
       "allow-once",
     );
-    const after = applyResolveResult(cards, "exec:3f1c", new Error("Not connected"));
+    const after = approvalsAfterResolve(cards, "exec:3f1c", new Error("Not connected"));
     expect(after[0].status).toBe("pending");
     expect(after[0].busy).toBeUndefined();
     expect(after[0].error).toContain("Not connected");
@@ -297,7 +297,7 @@ describe("what the gateway records is what the card shows", () => {
       "allow-once",
     );
     for (const bad of [undefined, null, {}, { applied: true }, { applied: true, approval: {} }]) {
-      const after = applyResolveResult(cards, "exec:3f1c", bad);
+      const after = approvalsAfterResolve(cards, "exec:3f1c", bad);
       expect(after[0].status).toBe("pending");
       expect(after[0].error).toBeTruthy();
     }
