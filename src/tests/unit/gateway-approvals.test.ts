@@ -17,6 +17,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  APPROVAL_NO_DECISION_RECORDED,
   APPROVAL_SESSION_EVENT,
   approvalsAfterReplay,
   approvalsAfterResolve,
@@ -407,7 +408,10 @@ describe("what the gateway records is what the card shows", () => {
     for (const bad of [undefined, null, {}, { applied: true }, { applied: true, approval: {} }]) {
       const after = approvalsAfterResolve(cards, "exec:3f1c", bad);
       expect(after[0].status).toBe("pending");
-      expect(after[0].error).toBeTruthy();
+      // A MARKER, not a sentence: `error` otherwise carries the gateway's own
+      // words, and a line this module wrote would be the one English sentence
+      // on a card whose every other word is in the owner's language.
+      expect(after[0].error).toBe(APPROVAL_NO_DECISION_RECORDED);
     }
   });
 });

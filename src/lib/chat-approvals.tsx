@@ -12,6 +12,7 @@
 
 import { useT } from "@/lib/i18n";
 import {
+  APPROVAL_NO_DECISION_RECORDED,
   approvalIsActionable,
   type ApprovalCard,
   type ApprovalDecision,
@@ -199,7 +200,9 @@ export function ApprovalPrompt({ card, nowMs, onDecide }: ApprovalPromptProps) {
         >
           <div>{t("chat.approval.failed")}</div>
           <div data-testid="chat-approval-error-reason" style={{ color: MUTED_FG, marginTop: 2 }}>
-            {card.error}
+            {card.error === APPROVAL_NO_DECISION_RECORDED
+              ? t("chat.approval.unreadable")
+              : card.error}
           </div>
         </div>
       ) : null}

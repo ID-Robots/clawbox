@@ -59,6 +59,17 @@ export type ApprovalStatus = "pending" | "allowed" | "denied" | "expired";
 
 export type ApprovalSeverity = "info" | "warning" | "critical";
 
+/**
+ * The box's own "that answer was not readable" marker, in `ApprovalCard.error`.
+ *
+ * A MARKER and not a sentence: `error` otherwise carries the GATEWAY's words,
+ * which the card renders verbatim because they are the truth about why a
+ * decision was refused. A sentence this module wrote would be the one English
+ * line on a card whose every other word is in the owner's language, so the
+ * card recognises this value and says it in ten.
+ */
+export const APPROVAL_NO_DECISION_RECORDED = "clawbox:no-decision-recorded";
+
 /** The event the opt-in subscribes to. */
 export const APPROVAL_SESSION_EVENT = "session.approval";
 
@@ -429,7 +440,7 @@ export function approvalsAfterResolve(
   if (!approval || !status || status === "pending") {
     return cards.map((card) =>
       card.id === id
-        ? { ...card, busy: undefined, error: "the gateway recorded no decision" }
+        ? { ...card, busy: undefined, error: APPROVAL_NO_DECISION_RECORDED }
         : card,
     );
   }
