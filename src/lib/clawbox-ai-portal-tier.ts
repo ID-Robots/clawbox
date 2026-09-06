@@ -1,6 +1,8 @@
 import {
+  CLAWBOX_AI_PLAN_UNPAID,
   normalizeAllowedModelIds,
   normalizeClawboxAiTier,
+  type ClawboxAiPlanTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 
@@ -82,6 +84,16 @@ export type PortalLookup =
        * for (TASK-691).
        */
       planTier: ClawboxAiTier | null;
+      /**
+       * The same plan as a THREE-valued answer — see {@link mapPortalPlanVerdict}.
+       *
+       * `planTier` above answers `null` to a genuinely unpaid account, to an
+       * absent `tier` and to a plan word this build does not know alike, and
+       * only the first of those is a downgrade. Anything that records a plan —
+       * and therefore anything that later DELETES on one — must read this
+       * field; `planTier` is for callers to whom only the paid tiers matter.
+       */
+      planVerdict: ClawboxAiPlanTier | null;
       /** Entitled model ids, or null when the portal published none. */
       allowedModels: string[] | null;
     }
@@ -105,6 +117,7 @@ export type PortalLookup =
 interface PortalCacheEntry {
   tier: ClawboxAiTier | null;
   planTier: ClawboxAiTier | null;
+  planVerdict: ClawboxAiPlanTier | null;
   allowedModels: string[] | null;
   expiresAt: number;
 }
@@ -145,6 +158,7 @@ function rememberTier(
   token: string,
   tier: ClawboxAiTier | null,
   planTier: ClawboxAiTier | null,
+  planVerdict: ClawboxAiPlanTier | null,
   allowedModels: string[] | null,
   now: number,
 ) {
@@ -159,6 +173,7 @@ function rememberTier(
   portalTierCache.set(token, {
     tier,
     planTier,
+    planVerdict,
     allowedModels,
     expiresAt: now + PORTAL_TIER_CACHE_TTL_MS,
   });
@@ -216,6 +231,49 @@ export function mapPortalPlanTier(body: DeviceInfoResponse): ClawboxAiTier | nul
 }
 
 /**
+ * Plan words this build positively recognises as "no active paid plan".
+ *
+ * EVERY WORD IN HERE AUTHORISES A DELETE — the one irreversible act in both boot
+ * scripts — so it holds exactly what this repository has evidence for and
+ * nothing that merely sounds right. `"free"` is what every `device-info` fixture
+ * in the tree spells and what `mapPortalTier` above has always read as unpaid.
+ *
+ * A word may be added only after the portal's own handler has been read, and a
+ * near-miss is the reason: `"canceled"` is the obvious rendering of Stripe's
+ * `cancel_at_period_end`, which leaves the subscription ACTIVE and the customer
+ * served to the end of the period — admitting it would delete a Max
+ * subscriber's cloud voice with 25 paid days left. `"expired"` has the same
+ * shape over a dunning state. The error the other way costs one refused round
+ * trip per spoken reply until the portal says something we recognise, and it is
+ * paid only by an account that is genuinely unpaid.
+ */
+const UNPAID_PLAN_WORDS = new Set(["free"]);
+
+/**
+ * The PLAN as a three-valued answer: a paid tier, positively unpaid, or `null`
+ * for "we cannot tell".
+ *
+ * {@link mapPortalPlanTier}'s `null` is three different facts and only one of
+ * them is a downgrade — that account genuinely pays for nothing. The other two
+ * are an ABSENT `tier` (the field is optional in our own type, and
+ * `allowedModelsForCompat` exists because older portal builds answer with less
+ * than the current ones do) and a plan word this build has never heard of (a
+ * new SKU, a rename, a localised string). Anything that DESTROYS configuration
+ * on the strength of "not paid" has to be able to tell the three apart, or a
+ * response shape we did not anticipate deletes a Max subscriber's cloud voice
+ * (TASK-744).
+ *
+ * Read this one before recording a plan; read {@link mapPortalPlanTier} where
+ * only the paid tiers matter.
+ */
+export function mapPortalPlanVerdict(body: DeviceInfoResponse): ClawboxAiPlanTier | null {
+  const paid = mapPortalPlanTier(body);
+  if (paid) return paid;
+  const plan = (body.tier ?? "").trim().toLowerCase();
+  return UNPAID_PLAN_WORDS.has(plan) ? CLAWBOX_AI_PLAN_UNPAID : null;
+}
+
+/**
  * Resolves a `claw_*` token's current tier against the portal, with
  * a short in-memory cache and concurrent-request de-duplication.
  *
@@ -246,6 +304,7 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
       source: "portal",
       tier: cached.tier,
       planTier: cached.planTier,
+      planVerdict: cached.planVerdict,
       allowedModels: cached.allowedModels,
     };
   }
@@ -284,8 +343,11 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
         const body = await res.json() as DeviceInfoResponse;
         const tier = mapPortalTier(body);
         const planTier = mapPortalPlanTier(body);
+        // The three-valued reading, for the callers that RECORD the plan — and
+        // therefore for the boot scripts that later delete on it.
+        const planVerdict = mapPortalPlanVerdict(body);
         const allowedModels = mapPortalAllowedModels(body);
-        rememberTier(token, tier, planTier, allowedModels, now);
+        rememberTier(token, tier, planTier, planVerdict, allowedModels, now);
         // Every negative verdict, not just this token's. A device holds ONE
         // ClawBox AI credential at a time, so a 200 for the one it holds now
         // says the rejection recorded against the one it held a minute ago is
@@ -294,7 +356,7 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
         // sign-in" for the rest of that entry's window after a re-link.
         portalUnreachableCache.clear();
         provenGeneration += 1;
-        return { source: "portal", tier, planTier, allowedModels };
+        return { source: "portal", tier, planTier, planVerdict, allowedModels };
       }
       // 401/403 is ambiguous AS A TIER: it can mean genuinely Free OR token
       // revoked / migrated / corrupted on a still-paid account. We

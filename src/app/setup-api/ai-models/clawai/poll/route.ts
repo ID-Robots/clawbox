@@ -3,6 +3,7 @@ import { POST as configureAiModelsPost } from "@/app/setup-api/ai-models/configu
 import { getActiveHarness } from "@/lib/harness";
 import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
+import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
   type ClawAiConnectSession,
   clearClawAiSession,
@@ -87,8 +88,27 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
     // device, so the OpenClaw path below is untouched.
     if ((await getActiveHarness()) === "hermes") {
       const uiTier = normalizeClawaiUiTier(session.tier) ?? "flash";
+      // THE PLAN, asked here as well, because this is the primary link path on
+      // this edition and nothing else on it holds a portal answer. The OpenClaw
+      // branch below reaches `/setup-api/ai-models/configure`, which records
+      // the plan itself; without this the two editions' own device-code flows
+      // would disagree, and a Hermes box would finish the link with no plan on
+      // record — so no withdrawal would be reachable at all until a BROWSER
+      // happened to poll `/setup-api/ai-models/status` (TASK-744).
+      //
+      // ONE cold round trip, bounded at `PORTAL_FETCH_TIMEOUT_MS` (4 s) — the
+      // cache is keyed by token and the box has never held this one — against a
+      // finaliser the UI gives three minutes. It cannot fail the pairing:
+      // `fetchPortalTier` reports every failure as `unreachable` rather than
+      // throwing. The wizard's next status poll then lands on the entry this
+      // call warmed.
+      const lookup = await fetchPortalTier(accessToken).catch(() => null);
       try {
-        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier));
+        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier), {
+          // Absent unless the portal ANSWERED — an unreachable lookup or a
+          // probe that threw retires the plan rather than recording a guess.
+          portalPlan: lookup?.source === "portal" ? { verdict: lookup.planVerdict } : undefined,
+        });
       } catch (err) {
         // Only our own message is safe to store/show — a raw spawn failure can
         // carry the hermes binary path.

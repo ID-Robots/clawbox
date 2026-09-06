@@ -9,6 +9,12 @@ import {
   clearPersistedClawaiCredentialRefusal,
   persistClawaiCredentialRefusal,
 } from "@/lib/clawai-credential-refusal";
+// The other mark about a credential this box holds — the PLAN the portal
+// reported for it. Nothing is CLEARED here: its writers record or delete it in
+// the same store write as `clawai_tier`, so the two always describe the same
+// account. What the funnel below owes it is that an answer already IN FLIGHT
+// for the retired credential cannot land afterwards.
+import { noteClawaiCredentialReplaced } from "@/lib/clawai-plan-tier";
 
 export {
   CLAWAI_CREDENTIAL_REFUSED_KEY,
@@ -199,6 +205,16 @@ export async function forgetClawaiCredentialRefusal(): Promise<void> {
   // would leave a freshly re-linked box standing its image path down at the
   // very restart the re-link triggers.
   await clearPersistedClawaiCredentialRefusal();
+  // The recorded PLAN is a fact about the ACCOUNT behind the credential that
+  // has just been replaced, and a portal lookup for the OLD token can still be
+  // in flight — up to four seconds, the same window `notRecordedSince` above
+  // exists for. Landing after this point it would write a retired account's
+  // plan, and the next boot would decide this box's entitlement from it: a
+  // retired Pro plan withdrawing a Max subscriber's voice, which is TASK-744
+  // again. Bumping the counter is all this owes; the plan itself is rewritten
+  // or deleted by whoever writes the credential, in the same store write as the
+  // badge, so it never outlives the account it describes.
+  noteClawaiCredentialReplaced();
 }
 
 /** Test seam: forget every remembered refusal. */

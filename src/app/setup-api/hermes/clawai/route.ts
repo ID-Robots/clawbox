@@ -9,6 +9,9 @@ import {
 } from "@/lib/explicit-model-pick";
 import { get, setMany } from "@/lib/config-store";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
+// The recorded PLAN. This route writes the credential in a batch of its own, so
+// it owes the plan the same treatment the model picks get — see TASK-744.
+import { CLAWAI_PLAN_TIER_KEY } from "@/lib/clawai-plan-tier";
 import { hermesConfigGet } from "@/lib/hermes-config-cache";
 import { getActiveHarness } from "@/lib/harness";
 import { getCodingAgentStatus } from "@/lib/coding-agent";
@@ -165,6 +168,17 @@ export async function POST(request: Request) {
     await setMany({
       clawai_token: suppliedToken,
       ...(picksWithoutClawai ? { [EXPLICIT_MODEL_PICKS_KEY]: picksWithoutClawai } : {}),
+      // The recorded PLAN goes in THIS batch too, for the reason the picks do:
+      // `applyClawaiToHermes` retires it in its own final `setMany`, and that
+      // one sits behind a step loop that is fatal on any failing
+      // `hermes config set`. A step that failed after this line would leave
+      // account B's token beside account A's plan — and both boot scripts read
+      // that plan as this box's entitlement, so a Free box would go on arming
+      // and keeping a cloud voice its credential is answered 403 for
+      // (TASK-744). Only on an account CHANGE — and the apply's own batch keeps
+      // the same rule, so a re-paste of the same token or a tier-pill change
+      // leaves a plan that is still true exactly where it is.
+      ...(replacedAccount ? { [CLAWAI_PLAN_TIER_KEY]: undefined } : {}),
     });
     // A refusal the proxy gave the token being replaced is about that token,
     // not this one. Dropped here as well as in `applyClawaiToHermes`, because a

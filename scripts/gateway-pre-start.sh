@@ -1900,7 +1900,7 @@ def _clawai_credential_refused():
     """Has the proxy refused this box's ClawBox AI credential?
 
     Unreadable, absent, malformed and non-numeric all collapse to False on
-    purpose, exactly as `_clawai_device_tier()` collapses them to None: every
+    purpose, exactly as `_clawai_tier_stamps()` collapses them to None: every
     one of them means "nobody has told us this credential is dead", and a box
     we have not been told about is left armed. Failing the other way would take
     the picture button off every box whose Next app has never written a
@@ -2169,9 +2169,10 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             #
             # SCOPE, stated plainly rather than implied: this arm covers the
             # IMAGE path only. Neither of those two migrations reads the
-            # refusal — the cloud voice gates on `clawai_tier`, which a box with
-            # a dead credential can never refresh because only a portal-ANSWERED
-            # poll writes it — so a refused Max box still buys one refused round
+            # refusal — the cloud voice gates on the tier stamps
+            # (`clawai_plan_tier`, then `clawai_tier`), which a box with a dead
+            # credential can never refresh because only a portal-ANSWERED poll
+            # writes them — so a refused Max box still buys one refused round
             # trip per spoken reply and per voice note. Lower volume than the
             # image storm by orders of magnitude, and its own change.
             def _slot_is_ours(_cfg):
@@ -2625,13 +2626,15 @@ if _clawai_openai_route_is_ours:
 # than leaving it alone: the panel would call the cloud voice configured, Auto
 # would move the primary onto it, and every spoken reply would pay a failed
 # round trip before falling back to the voice the box already had. So the
-# stamp the status route persists from a live portal answer is the gate.
-# `clawai_tier` is a DEVICE tier, and "pro" is the device tier of the MAX
-# plan — the two names are off by one on purpose (see CLAWBOX_AI_MODEL_BY_TIER
-# in src/lib/clawbox-ai-models.ts). Anything else, including a missing stamp,
-# means we have not been told this box is entitled, and an unentitled box is
-# left exactly as it was. A customer who upgrades gets the cloud voice at the
-# next gateway start, once the status route has refreshed the stamp.
+# stamp the status route persists from a live portal answer is the gate —
+# `clawai_plan_tier`, the PLAN, with `clawai_tier` behind it for a box the poll
+# has not answered for yet, and the PLAN alone for the delete below (see
+# `_clawai_speech_entitled` and `_clawai_speech_withdrawable`). "pro" is the
+# tier of the MAX plan; the two names are off by one on purpose (see
+# CLAWBOX_AI_MODEL_BY_TIER in src/lib/clawbox-ai-models.ts). Anything else means
+# we have not been told this box is entitled, and an unentitled box is left
+# exactly as it was. A customer who upgrades gets the cloud voice at the next
+# gateway start, once the status route has refreshed the stamp.
 #
 # The customer-facing "your plan speaks locally, Max speaks in the cloud" line
 # is TASK-486 and deliberately not written here.
@@ -2651,28 +2654,82 @@ CLAWBOX_SPEECH_MANAGED_KEY = "clawboxManaged"
 # via globals() because the unit tests run this block extracted from the file.
 _clawbox_v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
 
-def _clawai_device_tier():
-    """The portal-confirmed plan stamp, or None when the store cannot be read.
+# "The portal answered and this account has no paid plan" — the third value
+# `clawai_plan_tier` can hold, and it has to exist. `mapPortalTier` and
+# `mapPortalPlanTier` both answer null for an unpaid account, so without a
+# positive word for it a CANCELLED subscription would be indistinguishable from
+# a box nobody has ever asked about, and the withdrawal below could never fire
+# on the commoner of the two downgrade paths. `CLAWAI_PLAN_UNPAID` in
+# src/lib/clawai-plan-tier.ts is the same word; the suite pins the two.
+CLAWBOX_PLAN_UNPAID = "free"
+
+
+def _clawai_tier_stamps():
+    """(plan, device) out of the device store, normalised, or (None, None).
+
+    ONE read for the pair, because they are one fact about one account: the
+    status route writes them in the same store write, and a boot that read them
+    across two `open()`s could see a new badge beside an old plan.
 
     Unreadable, absent and malformed all collapse to None on purpose: every one
-    of them means "nobody has told us this box is on Max", and the gate below
-    treats not-knowing exactly like not-entitled.
+    of them means "nobody has told us", which is what the two gates below have
+    to be able to tell apart from "we were told, and the answer is no".
     """
     _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
     if not _store_path:
-        return None
+        return None, None
     try:
         with open(_store_path) as _fh:
             _store = json.load(_fh)
     except Exception:
-        return None
+        return None, None
     if not isinstance(_store, dict):
-        return None
-    _tier = _store.get("clawai_tier")
-    return _tier.strip() if isinstance(_tier, str) else None
+        return None, None
+
+    def _one(_key, _allowed):
+        _tier = _store.get(_key)
+        _tier = _tier.strip().lower() if isinstance(_tier, str) else ""
+        # `normalizeClawboxAiTier` admits exactly `flash` and `pro` and answers
+        # null to everything else, and `normalizeClawboxAiPlanTier` is that plus
+        # the unpaid word. A value outside the vocabulary is a store somebody
+        # edited or a build we have not seen: not evidence of anything, and
+        # least of all of a downgrade.
+        return _tier if _tier in _allowed else None
+
+    return (
+        _one("clawai_plan_tier", ("flash", CLAWBOX_SPEECH_DEVICE_TIER, CLAWBOX_PLAN_UNPAID)),
+        _one("clawai_tier", ("flash", CLAWBOX_SPEECH_DEVICE_TIER)),
+    )
 
 
-_clawai_speech_entitled = _clawai_device_tier() == CLAWBOX_SPEECH_DEVICE_TIER
+# THE ENTITLEMENT IS THE PLAN. `clawai_tier` is `mapPortalTier`'s answer, and
+# that function prefers the portal's `deviceTier` STAMP deliberately: it answers
+# "what should this box DEFAULT to", and a Max subscriber is allowed to run
+# Flash here. `clawai_plan_tier` is `mapPortalPlanTier`'s — "what does this
+# ACCOUNT pay for" — and `clawbox-ai-portal-tier.ts` states the rule in as many
+# words: "Read the first for a default to write; read this one before refusing
+# anything" (TASK-744).
+_clawai_plan_tier, _clawai_device_tier = _clawai_tier_stamps()
+
+# ARM: the plan when we have been told one, the badge only when we have not —
+# `clawaiEntitlementTier` in src/lib/clawai-plan-tier.ts, transcribed because a
+# shell cannot import it and the suite pins the two together. The fallback
+# belongs on THIS side alone: arming is recoverable (our own fields, our own
+# values, taken back by the next boot once the plan is on record), and every box
+# in the field has no plan recorded until its first successful status poll.
+_clawai_speech_entitled = (
+    _clawai_plan_tier or _clawai_device_tier
+) == CLAWBOX_SPEECH_DEVICE_TIER
+
+# WITHDRAW: the PLAN alone, and never the badge — `clawaiSpeechWithdrawable`.
+# This is the one irreversible act in this file, and the badge is a DEFAULT a
+# Max subscriber is allowed to have set to Flash: deleting on it is TASK-744
+# with the customer's configuration gone. A box whose plan is not on record
+# keeps what it has. The cost of holding is a refused round trip per spoken
+# reply until the next poll; the cost of deleting is a Max subscriber's voice.
+_clawai_speech_withdrawable = bool(
+    _clawai_plan_tier and _clawai_plan_tier != CLAWBOX_SPEECH_DEVICE_TIER
+)
 
 if _clawai_openai_route_is_ours and _clawai_speech_entitled:
     _messages = cfg.get("messages")
@@ -2773,7 +2830,19 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
                     cfg["messages"] = _messages
                 changed = True
 
-elif _clawai_openai_route_is_ours:
+elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
+    # ONLY OVER A PLAN WE HAVE ACTUALLY BEEN TOLD. This condition used to be
+    # `_clawai_openai_route_is_ours` alone, so every reading that was not a
+    # positive "pro" reached the delete: a device store that was absent, or
+    # unreadable, or carrying only the DEFAULT badge, took a working cloud voice
+    # away — not knowing read as a downgrade, and a Max subscriber running Flash
+    # on this box read as one too (TASK-744). Both are the false failure this
+    # file warns about everywhere else.
+    #
+    # A CANCELLED subscription still withdraws, and that is what the third plan
+    # value is for: the portal answering "no paid plan" is recorded as `free`,
+    # which is a plan we were told and is below the entitlement.
+    #
     # The other direction, and it has to exist or this migration is one-way.
     # A box that was Max and is not any more keeps an entry pointing at an
     # endpoint that now answers 403, so every spoken reply buys a refused round

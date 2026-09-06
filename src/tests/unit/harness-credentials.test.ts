@@ -324,6 +324,27 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     expect(configStoreSet).not.toHaveBeenCalled();
   });
 
+  it("retires an in-flight PLAN answer for the credential it replaced", async () => {
+    // TASK-744. Two boot scripts prefer `clawai_plan_tier` over the device
+    // badge and one of them DELETES the cloud voice over it, and a portal
+    // lookup for the OLD token can still be in flight — the same four-second
+    // window `notRecordedSince` above exists for. Landing afterwards it would
+    // write a retired account's plan, and the next boot would decide this box's
+    // entitlement from it.
+    //
+    // The plan itself is NOT cleared here: its writers record or delete it in
+    // the same store write as the badge, so it never outlives the account it
+    // describes. What this funnel owes it is the counter.
+    const mod = await memo();
+    const { clawaiPlanGeneration } = await import("@/lib/clawai-plan-tier");
+    const before = clawaiPlanGeneration();
+
+    await mod.forgetClawaiCredentialRefusal();
+
+    expect(clawaiPlanGeneration()).not.toBe(before);
+    expect(configStoreSet).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
+  });
+
   it("still forgets in memory when the store cannot be written", async () => {
     // A root-owned data/config.json is a state this repo has seen. Losing the
     // hint must not cost the caller its own answer.

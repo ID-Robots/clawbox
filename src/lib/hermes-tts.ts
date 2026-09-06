@@ -660,15 +660,23 @@ export const CLAWBOX_AI_SPEECH_TIER = "pro";
 /**
  * Does this box's plan include the cloud voice?
  *
- * Read from the tier the portal hand-off stamped (`clawai_tier`), the same
- * fact the gateway pre-start reads. Fails CLOSED: a tier that cannot be read
- * is not evidence of an entitlement, and claiming one would put the panel back
- * to calling a 403 a configured voice.
+ * The PLAN the portal reported (`clawai_plan_tier`), with the device stamp
+ * (`clawai_tier`) behind it for a box the status poll has not answered for yet
+ * — `clawaiEntitlementTier`, the same rule both boot scripts transcribe, so the
+ * panel and the two boots cannot disagree about who has a cloud voice. Reading
+ * the stamp alone told a Max subscriber whose box is stamped `deviceTier:
+ * "flash"` that his plan did not include the voice his boot script had just
+ * armed (TASK-744).
+ *
+ * Fails CLOSED: a pair that cannot be read is not evidence of an entitlement,
+ * and claiming one would put the panel back to calling a 403 a configured
+ * voice. That is the right direction HERE and not in the boot scripts' delete
+ * arms, which must be told before they destroy anything.
  */
 export async function speechEntitledTier(): Promise<boolean> {
   try {
-    const { get } = await import("@/lib/config-store");
-    return (await get("clawai_tier")) === CLAWBOX_AI_SPEECH_TIER;
+    const { readClawaiEntitlementTier } = await import("@/lib/clawai-plan-tier");
+    return (await readClawaiEntitlementTier()) === CLAWBOX_AI_SPEECH_TIER;
   } catch {
     return false;
   }

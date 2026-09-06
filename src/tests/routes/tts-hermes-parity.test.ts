@@ -79,7 +79,7 @@ vi.mock("@/lib/voice-output-store", () => ({
   writeLocalVoice: (...a: unknown[]) => writeLocalVoiceMock(...a),
 }));
 
-/** `pref:ui_language` and `clawai_tier`; the box is on the plan that has a voice. */
+/** `pref:ui_language` and the two tier stamps; the box is on the plan that has a voice. */
 let storeValues: Record<string, unknown> = {};
 // Partial: the route now reaches the store through the owner gate (auth.ts
 // reads DATA_DIR at import) and the spoken-replies switch; only the reads
@@ -412,6 +412,34 @@ describe("a Hermes box whose plan has no cloud voice", () => {
     // it back would keep the panel reporting a configured cloud voice whose
     // every utterance the proxy now answers 403.
     storeValues = { clawai_tier: "flash" };
+    hermesConfig["tts.openai.base_url"] = "https://clawbox.test/api/ai";
+    hermesConfig["tts.openai.api_key"] = "claw_a_linked_hermes_box";
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    const cloud = body.engines.find((e: { id: string }) => e.id === "cloud");
+    expect(cloud.configured).toBe(false);
+    expect(cloud.detail).toMatch(/Max/i);
+  });
+
+  // TASK-744. `clawai_tier` is the DEVICE default and a Max subscriber is
+  // allowed to have it set to Flash; `clawai_plan_tier` is what the account
+  // pays for, and it is the only one an entitlement may be read from. The panel
+  // has to answer this the same way both boot scripts do, or a box whose cloud
+  // voice `register-mcp.sh` has just armed is told its plan does not include it.
+  it("offers the cloud voice to a Max plan whose device is stamped flash", async () => {
+    storeValues = { clawai_tier: "flash", clawai_plan_tier: "pro" };
+    hermesConfig["tts.openai.base_url"] = "https://clawbox.test/api/ai";
+    hermesConfig["tts.openai.api_key"] = "claw_a_linked_hermes_box";
+    const { GET } = await route();
+    const body = await (await GET()).json();
+
+    const cloud = body.engines.find((e: { id: string }) => e.id === "cloud");
+    expect(cloud.configured).toBe(true);
+  });
+
+  it("still withholds it when the PLAN itself is below the entitlement", async () => {
+    storeValues = { clawai_tier: "pro", clawai_plan_tier: "flash" };
     hermesConfig["tts.openai.base_url"] = "https://clawbox.test/api/ai";
     hermesConfig["tts.openai.api_key"] = "claw_a_linked_hermes_box";
     const { GET } = await route();

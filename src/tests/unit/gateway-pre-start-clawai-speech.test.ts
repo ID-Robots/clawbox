@@ -72,6 +72,11 @@ interface Options {
   routeIsOurs?: boolean;
   /** `clawai_tier` in the device store, or `null` for a store without one. */
   deviceTier?: string | null;
+  /**
+   * `clawai_plan_tier` in the device store — the portal's PLAN, or `null` for a
+   * box whose plan the portal has never answered for.
+   */
+  planTier?: string | null;
   /** `false` writes no device store at all — a box the Next app has never run on. */
   storeExists?: boolean;
   /** A device store that is not an object, or not JSON. */
@@ -89,12 +94,25 @@ interface Options {
  * provider entry. `CLAWBOX_DEVICE_STORE` is the env var the shell exports.
  */
 function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boolean; log: string } {
-  const { routeIsOurs = true, deviceTier = MAX_DEVICE_TIER, storeExists = true, storeBody, v2 = false } = opts;
+  const {
+    routeIsOurs = true,
+    deviceTier = MAX_DEVICE_TIER,
+    planTier = null,
+    storeExists = true,
+    storeBody,
+    v2 = false,
+  } = opts;
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(cfg));
   const store = path.join(dir, "device-store.json");
   if (storeExists) {
-    writeFileSync(store, storeBody ?? JSON.stringify(deviceTier === null ? {} : { clawai_tier: deviceTier }));
+    writeFileSync(
+      store,
+      storeBody ?? JSON.stringify({
+        ...(deviceTier === null ? {} : { clawai_tier: deviceTier }),
+        ...(planTier === null ? {} : { clawai_plan_tier: planTier }),
+      }),
+    );
   }
   const program = [
     "import json, os, sys",
@@ -201,7 +219,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     it("removes the entry it wrote when the plan drops to Pro", () => {
       const { cfg, changed, log } = migrate(
         { messages: { tts: { providers: { openai: ours } } } },
-        { deviceTier: PRO_DEVICE_TIER },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       expect(changed).toBe(true);
@@ -219,7 +237,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
             },
           },
         },
-        { deviceTier: PRO_DEVICE_TIER },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       const tts = (cfg.messages as { tts: { provider: string; providers: Record<string, unknown> } }).tts;
@@ -238,7 +256,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       const unstamped = { baseUrl: PROXY, model: "some-other-tts", apiKey: "claw_theirs" };
       const { cfg, changed } = migrate(
         { messages: { tts: { providers: { openai: unstamped } } } },
-        { deviceTier: PRO_DEVICE_TIER },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       expect(changed).toBe(false);
@@ -249,7 +267,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       const own = { baseUrl: "https://api.openai.com/v1", model: "tts-1-hd", apiKey: "sk-owner" };
       const { cfg, changed } = migrate(
         { messages: { tts: { providers: { openai: own } } } },
-        { deviceTier: PRO_DEVICE_TIER },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       // Their voice is theirs whatever their ClawBox AI plan says.
@@ -258,7 +276,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     });
 
     it("does nothing on an unentitled box that never had one", () => {
-      const { cfg, changed } = migrate({}, { deviceTier: PRO_DEVICE_TIER });
+      const { cfg, changed } = migrate({}, { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
       expect(changed).toBe(false);
       expect(speech(cfg)).toBeUndefined();
     });
@@ -266,7 +284,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     it("stays out of a box whose openai slot belongs to its owner", () => {
       const { cfg, changed } = migrate(
         { messages: { tts: { providers: { openai: ours } } } },
-        { deviceTier: PRO_DEVICE_TIER, routeIsOurs: false },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER, routeIsOurs: false },
       );
 
       expect(changed).toBe(false);
@@ -280,7 +298,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     // cloud voice configured, move Auto onto it, and buy a failed round trip
     // before every spoken reply.
     it("leaves a Pro box alone", () => {
-      const { cfg, changed } = migrate({}, { deviceTier: PRO_DEVICE_TIER });
+      const { cfg, changed } = migrate({}, { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
       expect(changed).toBe(false);
       expect(speech(cfg)).toBeUndefined();
     });
@@ -307,6 +325,178 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       const { cfg, changed } = migrate({}, { storeBody: '["pro"]' });
       expect(changed).toBe(false);
       expect(speech(cfg)).toBeUndefined();
+    });
+  });
+
+  // TASK-744. `clawai_tier` is `mapPortalTier`'s answer, and that function
+  // prefers the portal's `deviceTier` STAMP on purpose — it answers "what
+  // should this box default to", and a Max subscriber is allowed to run Flash
+  // here. `clawbox-ai-portal-tier.ts` says the rule outright: "Read the first
+  // for a default to write; read this one [`mapPortalPlanTier`] before refusing
+  // anything." This block both refuses and DELETES on the device default, so a
+  // Max subscriber whose box is stamped `deviceTier: flash` had his cloud voice
+  // removed at every gateway start.
+  describe("the entitlement is the PLAN, and the device stamp only when the plan is unknown", () => {
+    const ours = { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED };
+
+    it("keeps the cloud voice of a Max subscriber whose device is stamped flash", () => {
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: ours } } } },
+        { deviceTier: PRO_DEVICE_TIER, planTier: MAX_DEVICE_TIER },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(ours);
+    });
+
+    it("arms one for that box in the first place", () => {
+      const { cfg, changed } = migrate({}, { deviceTier: PRO_DEVICE_TIER, planTier: MAX_DEVICE_TIER });
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toEqual(ours);
+    });
+
+    it("still takes the voice back when the PLAN itself has dropped", () => {
+      // The mirror case, and the one the withdrawal exists for: the plan is Pro,
+      // which the proxy answers 403 to, whatever this box's stamp says.
+      const { cfg, changed, log } = migrate(
+        { messages: { tts: { providers: { openai: ours } } } },
+        { deviceTier: MAX_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
+      );
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toBeUndefined();
+      expect(log).toContain("no longer includes it");
+    });
+
+    it("does not arm a Pro plan whose device stamp says otherwise", () => {
+      const { cfg, changed } = migrate({}, { deviceTier: MAX_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toBeUndefined();
+    });
+
+    it("takes the voice back from a CANCELLED subscription", () => {
+      // H1 of the review, and the commoner of the two downgrade paths. The
+      // portal answers "no paid plan" and BOTH `mapPortalTier` and
+      // `mapPortalPlanTier` map that to null, so without a positive word for it
+      // a cancellation is indistinguishable from a box nobody has asked about
+      // and the entry stays, 403-ing, for good. `free` is that word.
+      const { cfg, changed, log } = migrate(
+        { messages: { tts: { providers: { openai: ours } } } },
+        { deviceTier: null, planTier: "free" },
+      );
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toBeUndefined();
+      expect(log).toContain("no longer includes it");
+    });
+
+    it("does not arm a cancelled subscription either", () => {
+      const { cfg, changed } = migrate({}, { deviceTier: MAX_DEVICE_TIER, planTier: "free" });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toBeUndefined();
+    });
+
+    it("falls back to the device stamp when no plan has been recorded", () => {
+      // Every box in the field is in this state until the status poll has
+      // written the plan once, so the old rule has to keep answering there.
+      const { cfg, changed } = migrate({}, { deviceTier: MAX_DEVICE_TIER, planTier: null });
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toEqual(ours);
+    });
+
+    it("ignores a plan stamp that is not a tier we recognise", () => {
+      // NOT KNOWING IS NOT AN ANSWER. A junk value is not evidence that the
+      // plan has dropped, so it falls through to the stamp rather than
+      // withdrawing a working voice over it.
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: ours } } } },
+        { deviceTier: MAX_DEVICE_TIER, planTier: "enterprise" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(ours);
+    });
+
+    it("does not withdraw over a plan stamp alone when neither is recognisable", () => {
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: ours } } } },
+        { deviceTier: null, planTier: "enterprise" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(ours);
+    });
+
+    // NOT KNOWING IS NOT AN ANSWER, in the destructive direction too. On beta
+    // this edition's `elif` carried no tier test at all, so every reading that
+    // was not a positive "pro" — an absent store, an unreadable one, a store
+    // with no stamp yet — deleted a working cloud voice. The Hermes arm has
+    // required a tier it was actually TOLD since it was written; this is that
+    // rule, on the edition that shipped first.
+    describe("and a reading we could not make is never one of them", () => {
+      it("does not withdraw a working voice over a store with no tier in it", () => {
+        const { cfg, changed } = migrate(
+          { messages: { tts: { providers: { openai: ours } } } },
+          { deviceTier: null },
+        );
+
+        expect(changed).toBe(false);
+        expect(speech(cfg)).toEqual(ours);
+      });
+
+      it("does not withdraw a working voice over a device store it cannot read", () => {
+        const { cfg, changed } = migrate(
+          { messages: { tts: { providers: { openai: ours } } } },
+          { storeBody: "not json at all" },
+        );
+
+        expect(changed).toBe(false);
+        expect(speech(cfg)).toEqual(ours);
+      });
+
+      it("does not withdraw a working voice over a box with no device store", () => {
+        const { cfg, changed } = migrate(
+          { messages: { tts: { providers: { openai: ours } } } },
+          { storeExists: false },
+        );
+
+        expect(changed).toBe(false);
+        expect(speech(cfg)).toEqual(ours);
+      });
+
+      // H2 of the review: the badge may fill in for a missing plan when ARMING
+      // and never when DESTROYING. `mapPortalTier` prefers `deviceTier` on
+      // purpose, so a Max subscriber running Flash on this box carries exactly
+      // this pair — and until his first status poll there is no plan to correct
+      // it with. Deleting on the badge is TASK-744 with his configuration gone.
+      it("does not withdraw on the device badge alone, however low it reads", () => {
+        const { cfg, changed } = migrate(
+          { messages: { tts: { providers: { openai: ours } } } },
+          { deviceTier: PRO_DEVICE_TIER },
+        );
+
+        expect(changed).toBe(false);
+        expect(speech(cfg)).toEqual(ours);
+      });
+
+      it("does not withdraw over a device stamp that is not a tier we recognise", () => {
+        // `normalizeClawboxAiTier` admits `flash` and `pro` and nothing else, so
+        // every writer of these stamps produces one of the two. A third string
+        // is a store somebody edited or a build we have not seen, and reading it
+        // as "below the entitlement" would delete a working voice over a value
+        // we cannot interpret.
+        const { cfg, changed } = migrate(
+          { messages: { tts: { providers: { openai: ours } } } },
+          { deviceTier: "free" },
+        );
+
+        expect(changed).toBe(false);
+        expect(speech(cfg)).toEqual(ours);
+      });
     });
   });
 
@@ -348,7 +538,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       // while it did.
       const { cfg, changed, log } = migrate(
         { messages: { tts: { providers: { openai: { baseUrl: RETIRED, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED } } } } },
-        { deviceTier: "free" },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       expect(changed).toBe(true);
@@ -366,7 +556,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       const preStamp = { baseUrl: RETIRED, model: SPEECH_MODEL, apiKey: TOKEN };
       const { cfg, changed } = migrate(
         { messages: { tts: { providers: { openai: preStamp } } } },
-        { deviceTier: "free" },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       expect(changed).toBe(false);
@@ -379,7 +569,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       const own = { baseUrl: RETIRED, model: "tts-1", apiKey: "sk-owner" };
       const { cfg, changed } = migrate(
         { messages: { tts: { providers: { openai: own } } } },
-        { deviceTier: "free" },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       expect(changed).toBe(false);
@@ -441,7 +631,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       const own = { baseUrl: "https://kokoro.local/v1", model: "kokoro", apiKey: "sk-owner", clawboxManaged: true };
       const { cfg, changed } = migrate(
         { messages: { tts: { providers: { openai: own } } } },
-        { deviceTier: "free" },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       expect(changed).toBe(false);
@@ -469,7 +659,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       const own = { baseUrl: "https://kokoro.local/v1", model: "kokoro", clawboxManaged: true };
       const { cfg, changed } = migrate(
         { messages: { tts: { providers: { openai: own } } } },
-        { deviceTier: "free" },
+        { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER },
       );
 
       expect(changed).toBe(false);
@@ -571,7 +761,7 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
     const seeded = {
       tts: { providers: { openai: { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED } } },
     };
-    const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+    const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
     expect(changed).toBe(true);
     const tts = cfg.tts as { providers?: Record<string, SpeechEntry> };
     expect(tts.providers?.openai).toBeUndefined();
@@ -579,7 +769,7 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
 
   it("leaves an owner's own entry in the v2 home alone on a downgrade", () => {
     const seeded = { tts: { providers: { openai: { baseUrl: "https://their.own/voice", model: "x" } } } };
-    const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+    const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
     expect(changed).toBe(false);
     const tts = cfg.tts as { providers?: Record<string, SpeechEntry> };
     expect(tts.providers?.openai).toEqual({ baseUrl: "https://their.own/voice", model: "x" });
@@ -666,12 +856,18 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
    * over, and it leaves the core's own migration less to move rather than more.
    */
   describe("taking the cloud voice back from wherever the entry actually is", () => {
+    // The withdrawal reads the PLAN and never the device badge (TASK-744): the
+    // badge is `mapPortalTier`'s answer and prefers the portal's `deviceTier`
+    // stamp on purpose, so a Max subscriber running Flash carries a low badge
+    // and must not lose his voice over it. "A box that was Max and is not any
+    // more" — which is what every case here is about — is therefore a box whose
+    // PLAN is below the entitlement, and that is what these fixtures record.
     const OURS = { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED };
 
     it("takes back a stamped entry stranded in the legacy home", () => {
       const seeded = { messages: { tts: { providers: { openai: { ...OURS } } } } };
 
-      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
 
       expect(changed).toBe(true);
       const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
@@ -687,7 +883,7 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
         messages: { tts: { providers: { openai: { ...OURS } } } },
       };
 
-      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
 
       expect(changed).toBe(true);
       expect((cfg.tts as { providers: Record<string, SpeechEntry> }).providers.openai).toBeUndefined();
@@ -702,7 +898,7 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
       const theirs = { baseUrl: "https://their.own/voice", model: "x" };
       const seeded = { messages: { tts: { providers: { openai: { ...theirs } } } } };
 
-      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
 
       expect(changed).toBe(false);
       const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
@@ -717,7 +913,7 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
         messages: { tts: { providers: { openai: { ...OURS } } } },
       };
 
-      const { cfg } = migrate(seeded, { deviceTier: PRO_DEVICE_TIER });
+      const { cfg } = migrate(seeded, { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
 
       expect((cfg.tts as { providers: Record<string, SpeechEntry> }).providers.openai).toEqual(OURS);
       const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
@@ -740,5 +936,69 @@ describe("both editions gate cloud speech on the same tier", () => {
     const m = src.match(/^CLAWBOX_SPEECH_DEVICE_TIER\s*=\s*"([^"]+)"/m);
     expect(m, "gateway-pre-start.sh no longer names CLAWBOX_SPEECH_DEVICE_TIER").not.toBeNull();
     expect(m?.[1]).toBe(CLAWBOX_AI_SPEECH_TIER);
+  });
+
+  // TASK-744. The rule is "the PLAN, and the device stamp only when the plan is
+  // unknown", written once in TypeScript and transcribed into two shells that
+  // cannot import it. These pin the key name and the preference order in all
+  // three, so a rename or a reordering fails here rather than on a customer's
+  // box six weeks later.
+  it("both boot scripts read the plan key and the unpaid word the module names", async () => {
+    const { CLAWAI_PLAN_TIER_KEY, CLAWAI_PLAN_UNPAID } = await import("@/lib/clawai-plan-tier");
+    const pre = readFileSync(SCRIPT, "utf-8");
+    const hermes = readFileSync(path.resolve(process.cwd(), "scripts/register-mcp.sh"), "utf-8");
+
+    expect(pre).toContain(`_one("${CLAWAI_PLAN_TIER_KEY}"`);
+    expect(hermes).toContain(`stamped_tier("${CLAWAI_PLAN_TIER_KEY}"`);
+    // The third plan value, without which a CANCELLED subscription cannot be
+    // told apart from a box nobody has ever asked about.
+    expect(pre).toContain(`CLAWBOX_PLAN_UNPAID = "${CLAWAI_PLAN_UNPAID}"`);
+    expect(hermes).toContain(`PLAN_UNPAID = "${CLAWAI_PLAN_UNPAID}"`);
+  });
+
+  it("both boot scripts arm on the pair and withdraw on the plan alone", async () => {
+    // The whole of the card, and the half a key-name check would not catch: the
+    // badge may fill in for a missing plan when ARMING, and never when the
+    // question is whether to destroy an owner's configuration.
+    const pre = readFileSync(SCRIPT, "utf-8");
+    const hermes = readFileSync(path.resolve(process.cwd(), "scripts/register-mcp.sh"), "utf-8");
+
+    expect(pre).toContain("_clawai_plan_tier or _clawai_device_tier");
+    expect(pre).toContain(
+      "_clawai_plan_tier and _clawai_plan_tier != CLAWBOX_SPEECH_DEVICE_TIER",
+    );
+    expect(hermes).toContain("arm_tier = plan_tier or device_tier");
+    expect(hermes).toContain("if plan_tier and plan_tier != ENTITLED_TIER:");
+  });
+
+  it("the TypeScript arm rule prefers the plan and falls back to the badge", async () => {
+    const { clawaiEntitlementTier } = await import("@/lib/clawai-plan-tier");
+
+    expect(clawaiEntitlementTier("pro", "flash")).toBe("pro");
+    expect(clawaiEntitlementTier("flash", "pro")).toBe("flash");
+    expect(clawaiEntitlementTier("free", "pro")).toBe("free");
+    // Unknown is not an answer, in either slot: it falls through rather than
+    // deciding, and two unknowns decide nothing at all.
+    expect(clawaiEntitlementTier(null, "pro")).toBe("pro");
+    expect(clawaiEntitlementTier("enterprise", "pro")).toBe("pro");
+    expect(clawaiEntitlementTier(undefined, undefined)).toBeNull();
+    expect(clawaiEntitlementTier("enterprise", "enterprise")).toBeNull();
+  });
+
+  it("the TypeScript withdrawal rule reads the plan and NEVER the badge", async () => {
+    const { clawaiSpeechWithdrawable } = await import("@/lib/clawai-plan-tier");
+    const { CLAWBOX_AI_SPEECH_TIER } = await import("@/lib/hermes-tts");
+
+    // A plan below the entitlement, cancellation included, withdraws.
+    expect(clawaiSpeechWithdrawable("flash", CLAWBOX_AI_SPEECH_TIER)).toBe(true);
+    expect(clawaiSpeechWithdrawable("free", CLAWBOX_AI_SPEECH_TIER)).toBe(true);
+    // The entitled plan, and every shape of not-knowing, do not.
+    expect(clawaiSpeechWithdrawable("pro", CLAWBOX_AI_SPEECH_TIER)).toBe(false);
+    expect(clawaiSpeechWithdrawable(null, CLAWBOX_AI_SPEECH_TIER)).toBe(false);
+    expect(clawaiSpeechWithdrawable(undefined, CLAWBOX_AI_SPEECH_TIER)).toBe(false);
+    expect(clawaiSpeechWithdrawable("enterprise", CLAWBOX_AI_SPEECH_TIER)).toBe(false);
+    // And it takes ONE argument's worth of evidence: there is no device stamp
+    // in this signature to fall back to, which is the point.
+    expect(clawaiSpeechWithdrawable.length).toBe(2);
   });
 });
