@@ -5995,8 +5995,13 @@ step_gateway_legacy_state_recovery() {
       echo "  Gateway is listening on ${gw_port}"
       return 0
     fi
+    # The same observable state as the tail of this function — alive and not
+    # listening — so the same status. `step_post_update` calls this step as
+    # `… || echo "Warning: …"`, so a non-zero return is a warning in the update
+    # log and not a failed update; returning 0 here made a gateway that never
+    # binds its port produce a clean step.
     echo "  Warning: the gateway holds its state directory but is not listening on ${gw_port}; not restarting over a live gateway" >&2
-    return 0
+    return 1
   fi
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   systemctl restart clawbox-gateway.service || true

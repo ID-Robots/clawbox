@@ -188,6 +188,12 @@ function run(scenario: Scenario = {}): Run {
     entry = "do_rebuild",
     rebootFollows = false,
   } = scenario;
+  // `step_build` calls run_next_build directly and ignores its arguments, so
+  // pairing it with the flag would silently omit the behaviour and read as
+  // coverage of it.
+  if (rebootFollows && entry !== "do_rebuild") {
+    throw new Error("rebootFollows only means anything for do_rebuild");
+  }
 
   // Per RUN, not per test: a case that calls this twice must not read the
   // first build's attempts as the second's.

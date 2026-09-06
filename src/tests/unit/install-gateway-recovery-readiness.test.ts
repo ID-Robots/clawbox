@@ -168,8 +168,15 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
         "step_gateway_legacy_state_recovery",
       ].map((f) => `sed -n '/^${f}() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`),
       `. "${tmp}/fns.sh"`,
+      // errexit is on (install.sh's own options), so a non-zero return would
+      // end the script before `RC=` is printed and every failing case would
+      // look like a broken slice. Suspended for the CALL only, which is the one
+      // statement whose status this file is about.
+      "set +e",
       "step_gateway_legacy_state_recovery 2>&1",
-      'echo "RC=$?"',
+      'rc=$?',
+      "set -e",
+      'echo "RC=$rc"',
     ].join(NL);
     let out: string;
     let code = 0;
@@ -235,11 +242,20 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
   });
 
   it("says so instead of claiming a recovery, when a live gateway never listens", () => {
-    // Not restarting must not become "everything is fine": the operator gets
-    // the honest sentence and the step still does not fail the update.
+    // Not restarting must not become "everything is fine". The step reports the
+    // same status the tail of the function reports for the same observable
+    // state — alive and not listening — which post_update turns into a warning
+    // line, not a failed update.
     const r = run({ listenAfter: 999, unitState: "active", doctorOwned: "1" });
 
     expect(r.out).toMatch(/is not listening on 18789; not restarting over a live gateway/);
+    expect(r.out).toMatch(/RC=1/);
+  });
+
+  it("still reports a clean status when it does recover", () => {
+    // The mirror: a status the step could never return 0 for would make every
+    // update log a warning.
+    const r = run({ listenAfter: 4 });
     expect(r.out).toMatch(/RC=0/);
   });
 
