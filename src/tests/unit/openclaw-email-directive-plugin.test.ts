@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 
 import plugin, { onReplyPayloadSending } from "../../../scripts/openclaw-plugins/clawbox-email-directives/index.mjs";
+import { onBeforeDispatch } from "../../../scripts/openclaw-plugins/clawbox-email-directives/email-approvals.mjs";
 
 // The OpenClaw half of TASK-697: the `reply_payload_sending` plugin that takes
 // `EMAIL:<uid>` card directives out of a reply on its way to a channel.
@@ -240,5 +241,96 @@ describe("OpenClaw reply_payload_sending plugin — EMAIL: directives", () => {
         expect(specifier, `${file} imports ${specifier}`).toMatch(/^\.{1,2}\//);
       }
     }
+  });
+});
+
+// ── The inbound half: what the hook actually asks ClawBox, and what it returns ─
+
+describe("before_dispatch — the owner's approval reply", () => {
+  const TOKEN = "t".repeat(32);
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.CLAWBOX_MCP_TOKEN;
+    delete process.env.CLAWBOX_API_BASE;
+  });
+
+  /** A fetch that records the one request and answers with `body`. */
+  function stubClawbox(body: unknown, status = 200) {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        calls.push({ url: String(url), init: init ?? {} });
+        return new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    return calls;
+  }
+
+  it("asks nothing at all about an ordinary message", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    const calls = stubClawbox({ handled: true, reply: "Sent." });
+    // The hook runs on EVERY inbound message on every channel, so a message
+    // that is not exactly a verb and a code must cost no I/O whatsoever.
+    expect(await onBeforeDispatch({ content: "can you email Ivan?" }, { senderId: "6001" })).toBeUndefined();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("hands ClawBox the sender and the text, and asks it NOT to post the verdict", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    process.env.CLAWBOX_API_BASE = "http://127.0.0.1:80";
+    const calls = stubClawbox({ handled: true, reply: "Sent to 1 recipient(s)." });
+
+    const result = await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://127.0.0.1:80/setup-api/email/chat-reply");
+    expect(calls[0].init.headers).toMatchObject({ authorization: `Bearer ${TOKEN}` });
+    // deliverVerdict FALSE on this edition, and that is the whole difference
+    // from the Hermes twin: the claim below carries the text itself, so a
+    // second Telegram message would say the same thing twice.
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({
+      senderId: "6001",
+      text: "send AB2CD",
+      deliverVerdict: false,
+    });
+    expect(result).toEqual({ handled: true, text: "Sent to 1 recipient(s)." });
+  });
+
+  it("claims without text when ClawBox sent none", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    stubClawbox({ handled: true });
+    expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" })).toEqual({ handled: true });
+  });
+
+  it("leaves the message to the agent on every not-ours answer", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    for (const [body, status] of [
+      [{ handled: false }, 200],
+      [{ handled: false }, 403],
+      [{}, 200],
+    ] as [unknown, number][]) {
+      stubClawbox(body, status);
+      expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" })).toBeUndefined();
+    }
+  });
+
+  it("fails OPEN when ClawBox cannot be reached at all", async () => {
+    // A box mid-rebuild must not swallow the owner's message. This is the one
+    // failure mode a hook can turn into "the box has stopped listening".
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
+    expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" })).toBeUndefined();
+  });
+
+  it("does not invent a sender, and does not ask without one", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    const calls = stubClawbox({ handled: true, reply: "Sent." });
+    expect(await onBeforeDispatch({ content: "send AB2CD" }, {})).toBeUndefined();
+    expect(calls).toHaveLength(0);
   });
 });

@@ -209,3 +209,88 @@ d("Hermes transform_llm_output plugin — EMAIL: directives", () => {
     expect(files).toEqual({ "__init__.py": true, "plugin.yaml": true, "email_directives.py": true });
   });
 });
+
+// ── The inbound half: what the hook actually asks ClawBox, and what it returns ─
+
+d("pre_gateway_dispatch — the owner's approval reply", () => {
+  /**
+   * Drive the SHIPPED module with `urlopen` replaced, so what is asserted is
+   * the request the box would really make and the dict the gateway would
+   * really read — not a restatement of either.
+   */
+  function drive(text: string, senderId: string | null, answer: unknown, fail = false): {
+    result: unknown;
+    calls: { url: string; body: unknown; auth: string }[];
+  } {
+    return py(
+      [
+        "import json, io, urllib.request",
+        "import clawbox_email_directives.approvals as approvals",
+        "approvals.CLAWBOX_ROOT = '/nonexistent'",
+        "approvals._cached_token = 't' * 32",
+        "approvals.API_BASE = 'http://127.0.0.1:80'",
+        "calls = []",
+        "def fake_urlopen(req, timeout=None):",
+        "    calls.append({'url': req.full_url, 'body': json.loads(req.data.decode()), 'auth': req.get_header('Authorization') or ''})",
+        // OSError, not urllib.error.URLError: the plugin's own `except` names
+        // both, and an exception the fake raised by mistake (an AttributeError
+        // from a module it never imported) would be swallowed by the broad
+        // catch one level up and make this assertion vacuous.
+        "    if stdin['fail']: raise OSError('refused')",
+        "    class R:",
+        "        status = 200",
+        "        def read(self): return json.dumps(stdin['answer']).encode()",
+        "        def __enter__(self): return self",
+        "        def __exit__(self, *a): return False",
+        "    return R()",
+        "urllib.request.urlopen = fake_urlopen",
+        "class E: pass",
+        "e = E(); e.text = stdin['text']; e.user_id = stdin['senderId']; e.source = None",
+        "print(json.dumps({'result': approvals.pre_gateway_dispatch(event=e), 'calls': calls}))",
+      ].join("\n"),
+      { text, senderId, answer, fail },
+    );
+  }
+
+  it("asks nothing at all about an ordinary message", () => {
+    // The hook is SYNCHRONOUS and fires on every inbound message, so anything
+    // that is not exactly a verb and a code must cost no I/O whatsoever.
+    const { result, calls } = drive("can you email Ivan?", "6001", { handled: true });
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("hands ClawBox the sender and the text, and asks it TO post the verdict", () => {
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true, reply: "Sent." });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://127.0.0.1:80/setup-api/email/chat-reply");
+    expect(calls[0].auth).toBe(`Bearer ${"t".repeat(32)}`);
+    // deliverVerdict TRUE on this edition, and that is the whole difference
+    // from the OpenClaw twin: a `skip` carries no text, so without this the
+    // owner would type his code and hear nothing back at all.
+    expect(calls[0].body).toEqual({ senderId: "6001", text: "send AB2CD", deliverVerdict: true });
+    // `skip` and not `allow`: `allow` BREAKS the call site's loop over the
+    // other plugins' results.
+    expect(result).toEqual({ action: "skip", reason: "clawbox_email_approval" });
+  });
+
+  it("leaves the message to the agent when ClawBox did not claim it", () => {
+    expect(drive("send AB2CD", "6001", { handled: false }).result).toBeNull();
+    expect(drive("send AB2CD", "6001", {}).result).toBeNull();
+  });
+
+  it("fails OPEN when ClawBox cannot be reached at all", () => {
+    // A box mid-rebuild must not swallow the owner's message.
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true }, true);
+    expect(result).toBeNull();
+    // ...and it really did try, so this is the fail-open path and not the
+    // shape test quietly refusing the message earlier.
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not invent a sender, and does not ask without one", () => {
+    const { result, calls } = drive("send AB2CD", null, { handled: true });
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+});
