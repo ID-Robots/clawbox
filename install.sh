@@ -7550,7 +7550,12 @@ codex_pin_field() {
 codex_native_is_current() {
   local want="$1" reported
   [ -x "$CODEX_NATIVE_BIN" ] || return 1
-  reported="$(as_clawbox_login "'$CODEX_NATIVE_BIN' --version" 2>/dev/null | tr -d '\r' | tail -n1)"
+  # `|| true` because `set -euo pipefail` is in force and this may be reached
+  # from a PLAIN call (`--step codex_cli` runs "step_${name}" unguarded): a
+  # binary that will not exec makes the pipeline fail, the assignment fail, and
+  # errexit end the run silently — over the very case this line is here to
+  # detect and report.
+  reported="$(as_clawbox_login "'$CODEX_NATIVE_BIN' --version" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
   # A whole token, so 0.153.40 is not read as 0.153.4, and tolerant of whatever
   # else the vendor puts on that line.
   case " $reported " in *" $want "*) return 0 ;; esac
@@ -7646,7 +7651,9 @@ ensure_codex_cli() {
     return 1
   fi
 
-  actual="$(sha256sum "$installer" 2>/dev/null | cut -d' ' -f1)"
+  # `|| true` for the same reason: an unusable sha256sum must reach the
+  # refusal below (which already words an empty digest), not end the run.
+  actual="$(sha256sum "$installer" 2>/dev/null | cut -d' ' -f1 || true)"
   if [ "$actual" != "$sha" ]; then
     echo "  WARN: the Codex installer for rust-v$version does not match its pinned sha256 — not running it" >&2
     echo "  expected $sha, got ${actual:-<none>}" >&2
@@ -7696,7 +7703,7 @@ ensure_codex_cli() {
   # The acceptance this card is about: what the owner gets when they type
   # `codex` in the box's own terminal, which is PATH order and not the presence
   # of a file.
-  resolved="$(as_clawbox_login "command -v codex" 2>/dev/null | tr -d '\r' | tail -n1)"
+  resolved="$(as_clawbox_login "command -v codex" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
   if [ "$resolved" != "$CODEX_NATIVE_BIN" ]; then
     echo "  WARN: \`codex\` still resolves to ${resolved:-nothing}, not $CODEX_NATIVE_BIN" >&2
     rc=1

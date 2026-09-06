@@ -1040,7 +1040,10 @@ codex_pin_field() {
 codex_native_is_current() {
   local want="$1" reported
   [ -x "$CODEX_NATIVE_BIN" ] || return 1
-  reported="$(as_user_login "'$CODEX_NATIVE_BIN' --version" 2>/dev/null | tr -d '\r' | tail -n1)"
+  # `|| true`: under `set -euo pipefail` a binary that will not exec would fail
+  # the pipeline, fail the assignment and end the whole run, over the very case
+  # this line exists to detect.
+  reported="$(as_user_login "'$CODEX_NATIVE_BIN' --version" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
   case " $reported " in *" $want "*) return 0 ;; esac
   return 1
 }
@@ -1090,7 +1093,9 @@ ensure_codex_cli() {
     return 1
   fi
 
-  actual="$(sha256sum "$installer" 2>/dev/null | cut -d' ' -f1)"
+  # `|| true` for the same reason: an unusable sha256sum must reach the
+  # refusal below (which already words an empty digest), not end the run.
+  actual="$(sha256sum "$installer" 2>/dev/null | cut -d' ' -f1 || true)"
   if [ "$actual" != "$sha" ]; then
     echo "  WARN: the Codex installer for rust-v$version does not match its pinned sha256 — not running it" >&2
     rm -f "$installer"

@@ -275,12 +275,18 @@ function runEnsure(opts: {
   npmPresent?: boolean;
   /** Pin file contents; defaults to the repo's real pin. */
   pin?: string;
+  /** Can the box compute a digest at all? */
+  sha256sumWorks?: boolean;
+  /** Call it the way `--step codex_cli` does: plainly, under `set -e`. */
+  plainCall?: boolean;
 }): Run {
   const {
     payload = "",
     installerWorks = true,
     npmUninstallWorks = true,
     npmPresent = true,
+    sha256sumWorks = true,
+    plainCall = false,
   } = opts;
   const pinned = readPin();
   const home = path.join(tmp, "home");
@@ -325,6 +331,7 @@ function runEnsure(opts: {
     '  [ -s "$PAYLOAD" ] || return 22',
     '  cat "$PAYLOAD" > "$out"',
     "}",
+    ...(sha256sumWorks ? [] : ["sha256sum() { return 127; }"]),
     "chown() {",
     '  printf "chown %s\\n" "$*" >> "$CALLS"',
     "}",
@@ -356,7 +363,7 @@ function runEnsure(opts: {
     extractShellFunction("remove_npm_codex"),
     extractShellFunction("codex_left_as_is"),
     extractShellFunction("ensure_codex_cli"),
-    'ensure_codex_cli || echo "rc=$?"',
+    plainCall ? "ensure_codex_cli" : 'ensure_codex_cli || echo "rc=$?"',
   ].join("\n");
 
   const r = spawnSync("bash", ["-c", script], {
@@ -402,6 +409,21 @@ d("a download that did not happen never deletes the working Codex", () => {
     expect(r.status).not.toBe(0);
     expect(r.npmExists).toBe(true);
     expect(r.output).toMatch(/does not report/i);
+  });
+});
+
+d("errexit must not swallow the refusal it is meant to print", () => {
+  it("says why it will not run an installer it could not hash, called the way --step does", () => {
+    // `--step codex_cli` runs "step_${name}" PLAINLY under `set -euo pipefail`,
+    // so an unguarded `x="$(a | b)"` whose pipeline fails ends the whole run at
+    // that line. That would kill install.sh over exactly the case these lines
+    // exist to report, and with nothing said.
+    const r = runEnsure({ payload: "#!/bin/sh\ntrue\n", sha256sumWorks: false, plainCall: true });
+    expect(r.status).not.toBe(0);
+    expect(r.output).toMatch(/does not match its pinned sha256/);
+    expect(r.output).toMatch(/Keeping the npm-installed Codex/);
+    expect(r.calls.filter((c) => c.includes("sh '"))).toHaveLength(0);
+    expect(r.npmExists).toBe(true);
   });
 });
 
