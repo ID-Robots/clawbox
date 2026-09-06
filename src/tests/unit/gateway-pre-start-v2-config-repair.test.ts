@@ -197,12 +197,28 @@ d("gateway pre-start: making a bumped core's config loadable", () => {
     expect(seen.filter((c) => c === "config validate")).toHaveLength(2);
     expect(seen.indexOf("doctor --fix --non-interactive")).toBeGreaterThan(0);
     expect(readFileSync(stampPath, "utf-8").trim()).toBe("2026.8.1");
-    // A backup of the pre-migration file is kept next to it.
+    // A backup of the pre-migration file is kept next to it, named for the
+    // core and taken once — not one per boot on a box that keeps failing.
+    expect(existsSync(path.join(stateDir, "openclaw.json.pre-2026.8.1-migration"))).toBe(true);
+  });
+
+  it("keeps the FIRST pre-migration backup when the repair fails and the next boot retries", () => {
+    writeFileSync(path.join(stateDir, "openclaw.json.pre-2026.8.1-migration"), '{"first":true}');
+    writeFileSync(configPath, JSON.stringify({ agents: { defaults: { memorySearch: { second: true } } } }));
+    writeFileSync(
+      path.join(stateDir, "exec-approvals.json"),
+      JSON.stringify({ version: 1, defaults: { "rm -rf": "deny" } }),
+    );
+
+    run();
+
+    expect(readFileSync(path.join(stateDir, "openclaw.json.pre-2026.8.1-migration"), "utf-8"))
+      .toBe('{"first":true}');
     expect(
       spawnSync("bash", ["-c", `ls ${JSON.stringify(stateDir)}`], { encoding: "utf-8" })
         .stdout.split("\n")
-        .some((n) => n.startsWith("openclaw.json.pre-v2-migration-")),
-    ).toBe(true);
+        .filter((n) => n.includes("pre-") && n.includes("-migration")),
+    ).toHaveLength(1);
   });
 
   it("costs a steady box nothing: the stamp already names the installed core", () => {

@@ -230,10 +230,6 @@ export CLAWBOX_OPENCLAW_V2
 # so an overrun leaves the stamp unwritten and the next boot tries again.
 CLAWBOX_OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
 CLAWBOX_CONFIG_VALIDATED_STAMP="$CLAWBOX_ROOT/data/openclaw-config-validated"
-# Read by the plugin-entry pass further down, which reuses this run's warnings
-# rather than paying for a second `config validate`.
-CLAWBOX_CONFIG_VALIDATE_OUTPUT=""
-export CLAWBOX_CONFIG_VALIDATE_OUTPUT
 
 # Does this file hold any approval at all? Exit 0 = provably empty, 1 = holds
 # something, 2 = could not tell. Only 0 may lead to a move: an approval is an
@@ -307,17 +303,24 @@ then
   # "accepted". Time-boxed for the same reason as the version probe above — a
   # wedged CLI must cost this boot ten seconds of budget, not the unit's whole
   # TimeoutStartSec.
-  CLAWBOX_CONFIG_VALIDATE_OUTPUT="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate 2>&1)" \
+  _cfg_validate_out="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate 2>&1)" \
     && CLAWBOX_CONFIG_ACCEPTED=1 || CLAWBOX_CONFIG_ACCEPTED=0
   if [ "$CLAWBOX_CONFIG_ACCEPTED" = "0" ]; then
     echo "  The installed OpenClaw core ($CLAWBOX_OPENCLAW_EFFECTIVE) refuses this config; running its own migrations..."
-    printf '%s\n' "$CLAWBOX_CONFIG_VALIDATE_OUTPUT" | sed -n 's/^[[:space:]]*×[[:space:]]*/  refused: /p' >&2
-    cp -p "$OPENCLAW_CONFIG" "$OPENCLAW_CONFIG.pre-v2-migration-$(date +%Y%m%d-%H%M%S)" 2>/dev/null \
-      || echo "  WARN: could not back up $OPENCLAW_CONFIG before migrating it" >&2
+    printf '%s\n' "$_cfg_validate_out" | sed -n 's/^[[:space:]]*×[[:space:]]*/  refused: /p' >&2
+    # Named for the core, and never overwritten. A timestamped copy would
+    # leave one file per boot on a box whose repair keeps failing — and
+    # `Restart=always` means that is a lot of boots — while the copy anyone
+    # would want is the FIRST one, taken before anything touched the file.
+    _pre_migration_backup="$OPENCLAW_CONFIG.pre-$CLAWBOX_OPENCLAW_EFFECTIVE-migration"
+    if [ ! -e "$_pre_migration_backup" ]; then
+      cp -p "$OPENCLAW_CONFIG" "$_pre_migration_backup" 2>/dev/null \
+        || echo "  WARN: could not back up $OPENCLAW_CONFIG before migrating it" >&2
+    fi
     if ! timeout -k 10 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
       echo "  WARN: openclaw doctor --fix did not complete" >&2
     fi
-    CLAWBOX_CONFIG_VALIDATE_OUTPUT="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate 2>&1)" \
+    _cfg_validate_out="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate 2>&1)" \
       && CLAWBOX_CONFIG_ACCEPTED=1 || CLAWBOX_CONFIG_ACCEPTED=0
     if [ "$CLAWBOX_CONFIG_ACCEPTED" = "1" ]; then
       echo "  Config migrated to the $CLAWBOX_OPENCLAW_EFFECTIVE layout"
@@ -328,14 +331,13 @@ then
       # named HERE, in the boot log, instead of only in a gateway journal
       # nobody reads until an owner calls.
       echo "  ERROR: the core still refuses this config — the gateway will exit 78 until these keys are fixed:" >&2
-      printf '%s\n' "$CLAWBOX_CONFIG_VALIDATE_OUTPUT" | sed -n 's/^[[:space:]]*×[[:space:]]*/  refused: /p' >&2
+      printf '%s\n' "$_cfg_validate_out" | sed -n 's/^[[:space:]]*×[[:space:]]*/  refused: /p' >&2
     fi
   fi
   if [ "$CLAWBOX_CONFIG_ACCEPTED" = "1" ]; then
     mkdir -p "$(dirname "$CLAWBOX_CONFIG_VALIDATED_STAMP")" 2>/dev/null || true
     printf '%s\n' "$CLAWBOX_OPENCLAW_EFFECTIVE" > "$CLAWBOX_CONFIG_VALIDATED_STAMP" 2>/dev/null || true
   fi
-  export CLAWBOX_CONFIG_VALIDATE_OUTPUT
 fi
 
 # Resolve configured mDNS hostname (defaults to "clawbox" if unset/invalid)
