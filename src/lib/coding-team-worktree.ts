@@ -104,7 +104,55 @@ async function ensureTeamBranchNow(dir: string, teamId: string): Promise<{ ok: t
   return { ok: true, branch, base };
 }
 
-/** `.clawbox/` out of `git status`, once, without touching the project's own .gitignore. */
+/**
+ * Artifacts a build or an interpreter writes on its own. None of these is
+ * ever source, so a worker that produces one has not strayed and must not
+ * commit it.
+ *
+ * WHY THIS LIST IS SHORT. `dist/`, `build/`, `.next/` and `coverage/` are
+ * generated too, but a task can legitimately be asked to produce them, and
+ * excluding those would silently drop the very work the task was given. A
+ * false alert costs a retry; dropped work is not recoverable. Only names
+ * that are never a task's output are here.
+ */
+export const GENERATED_ARTIFACT_EXCLUDES = [
+  "__pycache__/",
+  "*.py[cod]",
+  ".pytest_cache/",
+  ".mypy_cache/",
+  ".ruff_cache/",
+  "node_modules/",
+  ".venv/",
+  "venv/",
+  ".DS_Store",
+  "*.tsbuildinfo",
+] as const;
+
+const ARTIFACT_MATCHERS: RegExp[] = [
+  /(^|\/)__pycache__(\/|$)/,
+  /\.py[cod]$/,
+  /(^|\/)\.pytest_cache(\/|$)/,
+  /(^|\/)\.mypy_cache(\/|$)/,
+  /(^|\/)\.ruff_cache(\/|$)/,
+  /(^|\/)node_modules(\/|$)/,
+  /(^|\/)\.?venv(\/|$)/,
+  /(^|\/)\.DS_Store$/,
+  /\.tsbuildinfo$/,
+];
+
+/** True for a path git should never have been handed in the first place. */
+export function isGeneratedArtifact(relPath: string): boolean {
+  const p = relPath.replace(/^\.\//, "").replace(/\\/g, "/");
+  return ARTIFACT_MATCHERS.some((re) => re.test(p));
+}
+
+/**
+ * `.clawbox/` and the generated artifacts out of `git status`, once, without
+ * touching the project's own .gitignore. Written to the repository's
+ * `info/exclude`, which every linked worktree shares, so a worker's
+ * `git add -A` cannot sweep a `.pyc` into its branch and make an
+ * unmergeable binary out of it (team-6rgz8cyx, 2026-09-06).
+ */
 async function excludeWorktrees(dir: string): Promise<void> {
   const gitDir = await git(dir, ["rev-parse", "--git-dir"]);
   if (!ok(gitDir)) return;
@@ -118,10 +166,13 @@ async function excludeWorktrees(dir: string): Promise<void> {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
-    if (!/^\/\.clawbox\/$/m.test(current)) {
-      fs.mkdirSync(path.dirname(exclude), { recursive: true });
-      fs.appendFileSync(exclude, `${current.endsWith("\n") || current === "" ? "" : "\n"}/.clawbox/\n`);
-    }
+    const lines = current.split("\n").map((l) => l.trim());
+    const wanted = ["/.clawbox/", ...GENERATED_ARTIFACT_EXCLUDES];
+    const missing = wanted.filter((w) => !lines.includes(w));
+    if (missing.length === 0) return;
+    fs.mkdirSync(path.dirname(exclude), { recursive: true });
+    const lead = current.endsWith("\n") || current === "" ? "" : "\n";
+    fs.appendFileSync(exclude, `${lead}${missing.join("\n")}\n`);
   } catch {
     // Best effort: a worktree that shows as untracked is untidy, not wrong.
   }
