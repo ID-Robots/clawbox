@@ -5357,8 +5357,9 @@ clawbox_guide_section() {
 # shape — therefore leaves the marker sitting on a fragment: every later gateway
 # start finds the heading, appends nothing, and the file stays cut mid-sentence
 # FOREVER, while the only warning is a journal line from a boot nobody is
-# watching. What is lost is the tail of the section, which is where TASK-612's
-# deliverable ("never queue an operator_approval proposal") lives.
+# watching. What is lost is the tail of the section, which is where the
+# operator-approval paragraph lives — TASK-612's "never queue one" until
+# TASK-704 built the card, and since then the rule about WHEN to raise one.
 #
 # Rolling the file back to the length it had removes the fragment AND the
 # marker, so the next boot retries. Rollback rather than build-a-copy-and-

@@ -180,7 +180,8 @@ function present(kind: ApprovalKind, raw: Record<string, unknown>): Presented | 
   if (kind === "exec") {
     const detail = asText(raw.commandText) || asText(raw.commandPreview);
     if (!detail) return null;
-    for (const key of ["host", "cwd", "nodeId", "agentId"]) context.push(asText(raw[key]));
+    // The exec presentation's own fields, and only those: it carries no `cwd`.
+    for (const key of ["host", "nodeId", "agentId"]) context.push(asText(raw[key]));
     context.push(...scopeFacts(asRecord(raw.scope)));
     return {
       headline: asText(raw.warningText) || "",
@@ -195,9 +196,14 @@ function present(kind: ApprovalKind, raw: Record<string, unknown>): Presented | 
     if (!headline) return null;
     for (const key of ["pluginId", "toolName", "agentId"]) context.push(asText(raw[key]));
     context.push(...scopeFacts(asRecord(raw.scope)));
+    // `description` is required and `detail` is the extra specifics, so
+    // `description || detail` would drop the more specific half of the text on
+    // the one card the owner authorises from. Both, in the order the schema
+    // puts them.
+    context.push(asText(raw.detail));
     return {
       headline,
-      detail: asText(raw.description) || asText(raw.detail),
+      detail: asText(raw.description),
       context: context.filter(Boolean),
       decisions,
       severity: asSeverity(raw.severity),
@@ -243,13 +249,22 @@ export function readApproval(raw: unknown): ApprovalCard | null {
   return {
     id,
     kind,
-    headline: presented.headline || presented.detail,
-    detail: presented.headline ? presented.detail : "",
+    // NEVER collapsed into one another. An exec approval's headline is its
+    // optional `warningText` and is usually absent, so folding the detail up
+    // when there is no headline put the COMMAND in the prose line — rendered
+    // in the UI font with its line breaks collapsed, on the one card whose
+    // whole job is showing exactly what will run. The card draws a headline
+    // only when there is one.
+    headline: presented.headline,
+    detail: presented.detail,
     context: presented.context,
     decisions: presented.decisions,
     severity: presented.severity,
     createdAtMs,
-    expiresAtMs: asMs(record.expiresAtMs, createdAtMs),
+    // No stated expiry means NO LOCAL EXPIRY. Falling back to `createdAtMs`
+    // put the card instantly past its window — greyed, buttons gone, "nobody
+    // answered in time" — over an approval the gateway is still holding open.
+    expiresAtMs: asMs(record.expiresAtMs, Number.POSITIVE_INFINITY),
     status,
     ...(asDecision(record.decision) ? { decision: asDecision(record.decision)! } : {}),
   };
@@ -353,7 +368,7 @@ export function approvalsAfterResolve(
 
   const record = asRecord(result);
   const approval = record ? asRecord(record.approval) : null;
-  const status = approval ? asStatus(approval.status === "allowed" ? "allowed" : approval.status) : null;
+  const status = approval ? asStatus(approval.status) : null;
   if (!approval || !status || status === "pending") {
     return cards.map((card) =>
       card.id === id

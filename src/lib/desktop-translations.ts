@@ -207,7 +207,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.approval.allowed": "Allowed.",
     "chat.approval.denied": "Denied.",
     "chat.approval.expired": "Nobody answered in time, so it was refused.",
-    "chat.approval.failed": "That answer did not reach the box. Try again.",
+    "chat.approval.failed": "The box could not record that answer.",
     "chat.fixMyError": "Fix My Error",
     "chat.attachImage": "Attach image",
     "chat.takePhoto": "Take photo",

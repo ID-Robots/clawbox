@@ -12,9 +12,15 @@ import path from "node:path";
  * an owner's or an agent's edits survive a gateway start. The consequence was
  * silent: a section added to the template after a box was set up never reached
  * that box, and every box in the field already has the file. TASK-612's rule
- * (system actions are the owner's; never queue an operator_approval) would have
- * shipped to new boxes only — including not to the box whose agent produced the
- * incident.
+ * (system actions are the owner's, and what to do about an operator_approval)
+ * would have shipped to new boxes only — including not to the box whose agent
+ * produced the incident.
+ *
+ * A CHANGED section is still not re-sent: the top-up appends what is MISSING
+ * and never overwrites, because these files carry the owner's and the agent's
+ * own edits. So TASK-704's rewrite of that paragraph — the card exists now, so
+ * the ban is gone — reaches new boxes; an existing one keeps the sentence it
+ * has until somebody replaces that section by hand.
  *
  * So an existing file is TOPPED UP with EVERY section it is missing, and never
  * overwritten — one hand-added marker per section did not scale, and the box

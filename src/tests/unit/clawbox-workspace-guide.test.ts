@@ -10,13 +10,19 @@ import { describe, expect, it } from "vitest";
  * TASK-612: asked "restart the gateway", the agent reached for OpenClaw's
  * operator-approval path — the native `approval.request` RPC behind the
  * `operator.approvals` scope, which is the right mechanism on a box whose
- * operator surface renders it. ClawBox's chat renders nothing of the kind
- * today, so the proposal sat unanswered until the run ended or a gateway
- * restart cancelled it (`operator_approval_cancelled_gateway_restart`), and
- * the owner was told the restart was waiting for an approval they had nowhere
- * to give. Until that card exists (TASK-704, under TASK-604), the guide has to
- * forbid the queue and name the owner's real path — the power menu in the
- * desktop tray, NOT Settings -> System, which carries no power control at all.
+ * operator surface renders it. ClawBox's chat rendered nothing of the kind, so
+ * the proposal sat unanswered until the run ended or a gateway restart
+ * cancelled it (`operator_approval_cancelled_gateway_restart`), and the owner
+ * was told the restart was waiting for an approval they had nowhere to give.
+ * The guide therefore forbade the queue outright.
+ *
+ * TASK-704 built the card, so the ban is gone and what replaced it is the pair
+ * of facts that are still true: the request's window is short, so a proposal
+ * raised while nobody is at the box still expires unanswered — the owner's real
+ * path is the power menu in the desktop tray, NOT Settings -> System, which
+ * carries no power control at all — and the parked-proposal escape through the
+ * CLI is still worth naming. What must NOT come back is a guide that tells the
+ * agent the chat renders no card, because it does.
  *
  * Asserted against the section, not the whole file, so a failure prints the
  * paragraph that is wrong rather than the entire guide.
@@ -106,12 +112,17 @@ describe("the ClawBox workspace guide (CLAWBOX.md)", () => {
     expect(section).not.toMatch(/Settings\s*→\s*AI\b/);
   });
 
-  it("forbids queueing an operator-approval proposal, and names the way to answer a parked one", () => {
+  it("says an operator-approval proposal is answerable, and still names the CLI escape", () => {
     const section = systemActionsSection();
     // The native id, so the instruction names what the agent would actually
     // reach for rather than a paraphrase of it.
     expect(section).toContain("operator_approval");
-    expect(section).toMatch(/never\s+(?:queue|propose|raise|open)|do not\s+queue|don't\s+queue/i);
+    // The ban is gone — TASK-704 built the card the ban existed for.
+    expect(section).not.toMatch(/never\s+(?:queue|propose|raise|open)\s+an?\s+`?operator_approval/i);
+    // And the guide must never tell the agent the chat renders nothing, which
+    // is the sentence that made the whole mechanism unusable.
+    expect(section).not.toMatch(/renders no card|shown\s+to\s+nobody/i);
+    expect(section).toMatch(/approve\/deny card|renders each\s+pending approval/i);
     // "nowhere to answer it" would be false: the CLI resolves one, and the
     // desktop ships a Terminal app.
     expect(section).toContain("openclaw approvals");

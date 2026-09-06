@@ -685,17 +685,6 @@ const MIN_CHAT_WIDTH = 340
 const VIEWPORT_MARGIN = 8
 
 /**
- * Is this tool call the one that queues outgoing mail?
- *
- * Matched on the SUFFIX rather than on equality because the name that reaches
- * this surface is the host's, not ours: the MCP tool is registered as
- * `email_send`, and a gateway is free to hand it over namespaced
- * (`clawbox_email_send`, `mcp__clawbox__email_send`). Anchored at the end and
- * fenced by a separator so a future `email_send_bulk` does not silently inherit
- * this behaviour — and getting it wrong is cheap in one direction only: a miss
- * means the owner approves in Settings → Email exactly as before.
- */
-export /**
  * Subscribe to one session's transcript AND its approvals, and take the
  * authoritative pending set the response carries.
  *
@@ -716,13 +705,42 @@ async function subscribeSessionWithApprovals(
   try {
     const payload = await request('sessions.messages.subscribe', sessionApprovalSubscribeParams(key))
     applyReplay(readApprovalReplay((payload as { approvalReplay?: unknown } | null)?.approvalReplay))
+    return
   } catch {
-    // A gateway without the RPC just means the backstop reconcile does the
-    // transcript and no approval card appears; the chat still works.
+    // THE OPT-IN IS NOT A SOFT ONE, and this is the whole reason for the second
+    // call below. The core refuses the ENTIRE `sessions.messages.subscribe` —
+    // and rolls the message subscription back — when the client may not review
+    // approvals (`operator.admin`, or `operator.approvals` on a paired device,
+    // and GRANTED scopes are emptied for a connect frame that carried no device
+    // identity) or when it cannot read the pending set. Before the opt-in the
+    // plain frame succeeded in every one of those cases.
+    //
+    // Losing the cards is a blemish. Losing the transcript subscription is the
+    // chat silently missing every `session.message` push — a reply that lands
+    // from Telegram, or a picture whose `MEDIA:` line only the stored
+    // transcript carries, would not appear until the owner reloads — and it
+    // would look exactly like a chat that works.
+  }
+  try {
+    await request('sessions.messages.subscribe', { key })
+  } catch {
+    // A gateway that refuses the plain frame too. The chat still sends and
+    // streams; the transcript reconciles on the next history read.
   }
 }
 
-function isEmailSendTool(name: string): boolean {
+/**
+ * Is this tool call the one that queues outgoing mail?
+ *
+ * Matched on the SUFFIX rather than on equality because the name that reaches
+ * this surface is the host's, not ours: the MCP tool is registered as
+ * `email_send`, and a gateway is free to hand it over namespaced
+ * (`clawbox_email_send`, `mcp__clawbox__email_send`). Anchored at the end and
+ * fenced by a separator so a future `email_send_bulk` does not silently inherit
+ * this behaviour — and getting it wrong is cheap in one direction only: a miss
+ * means the owner approves in Settings → Email exactly as before.
+ */
+export function isEmailSendTool(name: string): boolean {
   return /(?:^|[^A-Za-z0-9])email_send$/.test(name)
 }
 
@@ -2550,8 +2568,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // chat, by Telegram's own `/approve`, by the Control UI, or by the
         // clock. Every one of those has to reach the card, or it sits saying
         // "waiting" over something already decided.
+        //
+        // THE PAYLOAD IS AN ENVELOPE, not the approval:
+        // `{sessionKey, sourceSessionKey?, updatedAtMs, phase, approval}`
+        // (`PendingSessionApprovalEventSchema` / `TerminalSessionApprovalEventSchema`
+        // in the pinned core). Reading it as the approval answers `null` for
+        // every event, which looks exactly like a box with nothing waiting.
         if (eventName === APPROVAL_SESSION_EVENT) {
-          const card = readApproval(data.payload)
+          const envelope = data.payload as {
+            sessionKey?: unknown
+            sourceSessionKey?: unknown
+            approval?: unknown
+          } | undefined
+          // Every other session event here filters on the bound key; this one
+          // has to as well, or an approval still in flight for the conversation
+          // the owner has just left lands in the one they switched to.
+          // `sourceSessionKey` is the raising session when the event is
+          // projected into a reviewer surface, so either may name ours.
+          const forKey = typeof envelope?.sessionKey === 'string' ? envelope.sessionKey : ''
+          const fromKey = typeof envelope?.sourceSessionKey === 'string' ? envelope.sourceSessionKey : ''
+          if (forKey && fromKey && forKey !== sessionKeyRef.current && fromKey !== sessionKeyRef.current) return
+          if (forKey && !fromKey && forKey !== sessionKeyRef.current) return
+          const card = readApproval(envelope?.approval)
           if (card) setApprovals(prev => mergeApprovalCard(prev, card))
           return
         }
@@ -3948,21 +3986,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [isOpen, recoverEmailDrafts])
 
   /**
-   * Send the drafts the owner ticked — one request, whatever N is.
-   *
-   * `approval.entries` comes off the CARD's own frozen state, so what is posted
-   * is the set that was read. The route re-checks each fingerprint before it
-   * claims a draft, so the guarantee does not depend on this component being
-   * the only caller.
-   */
-  /**
    * Answer one approval through the gateway's own resolver.
    *
    * `approval.resolve` is first-answer-wins and hands every contender the
    * canonical recorded state, so this NEVER reports what it asked for: it shows
    * what the gateway wrote down. An owner who approved the same request in
    * Telegram a moment earlier sees "allowed" here rather than an error, and
-   * nothing is resolved twice — which is why there is no retry on this path.
+   * nothing is resolved twice. A call that never REACHED the gateway is a
+   * different thing: the card goes back to pending with the reason on it, and
+   * the owner may press again — `approval.resolve` is first-answer-wins, so a
+   * second press over a decision that did land is answered with that decision
+   * rather than taken as one.
    */
   const decideApproval = useCallback(async (card: ApprovalCard, decision: ApprovalDecision) => {
     setApprovals(prev => markApprovalBusy(prev, card.id, decision))
@@ -3980,6 +4014,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [wsRequest])
 
+  /**
+   * Send the drafts the owner ticked — one request, whatever N is.
+   *
+   * `approval.entries` comes off the CARD's own frozen state, so what is posted
+   * is the set that was read. The route re-checks each fingerprint before it
+   * claims a draft, so the guarantee does not depend on this component being
+   * the only caller.
+   */
   const approveEmailBatch = useCallback(async (approval: EmailBatchApproval) => {
     const { batchId, entries } = approval
     if (entries.length === 0) return

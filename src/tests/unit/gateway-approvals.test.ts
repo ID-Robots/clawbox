@@ -41,7 +41,7 @@ function pendingExec(overrides: Record<string, unknown> = {}) {
       kind: "exec",
       commandText: "systemctl restart clawbox-gateway",
       host: "local",
-      cwd: "/home/clawbox/clawbox",
+      nodeId: "node-1",
       warningText: "Restarts a service",
       allowedDecisions: ["allow-once", "deny"],
     },
@@ -94,7 +94,21 @@ describe("reading one approval", () => {
       expiresAtMs: NOW + 120_000,
     });
     expect(card?.context).toContain("local");
-    expect(card?.context).toContain("/home/clawbox/clawbox");
+    expect(card?.context).toContain("node-1");
+    // The warning is the headline; the command is never folded into it.
+    expect(card?.headline).toBe("Restarts a service");
+  });
+
+  it("keeps the command in the detail even when the request states no warning", () => {
+    // `warningText` is optional and usually absent, and folding the detail up
+    // into an empty headline put the COMMAND in the prose line — rendered in
+    // the UI font with its line breaks collapsed, on the one card whose whole
+    // job is showing exactly what will run.
+    const plain = pendingExec();
+    delete (plain.presentation as Record<string, unknown>).warningText;
+    const card = readApproval(plain);
+    expect(card?.headline).toBe("");
+    expect(card?.detail).toBe("systemctl restart clawbox-gateway");
   });
 
   it("reads the system-agent approval that TASK-612 watched expire", () => {
@@ -121,6 +135,7 @@ describe("reading one approval", () => {
         severity: "critical",
         pluginId: "mailer",
         toolName: "email_send",
+        detail: "three addresses, none of them yours",
         scope: { kind: "message-send", target: "email", recipientCount: 3, audience: "external" },
         allowedDecisions: ["allow-once", "allow-always", "deny"],
       },
@@ -132,6 +147,21 @@ describe("reading one approval", () => {
       decisions: ["allow-once", "allow-always", "deny"],
     });
     expect(card?.context.join(" ")).toContain("email");
+    // `description` is required and `detail` is the extra specifics: both are
+    // shown, because dropping the specific half of the text on the card the
+    // owner authorises from is exactly the wrong half to lose.
+    expect(card?.detail).toBe("Email three people outside the house");
+    expect(card?.context).toContain("three addresses, none of them yours");
+  });
+
+  it("keeps an approval with no stated expiry open", () => {
+    // No expiry stated is NO LOCAL EXPIRY. Falling back to the creation time
+    // put the card instantly past its window — "nobody answered in time" over
+    // an approval the gateway is still holding open.
+    const open = pendingExec();
+    delete (open as Record<string, unknown>).expiresAtMs;
+    const card = readApproval(open)!;
+    expect(approvalIsActionable(card, NOW + 86_400_000)).toBe(true);
   });
 
   it("keeps a terminal answer, so a card never sits unanswered", () => {

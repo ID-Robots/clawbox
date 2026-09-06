@@ -44,6 +44,22 @@ function pendingExec(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/**
+ * The event as the CORE publishes it, which is an ENVELOPE and not the
+ * projection: `{sessionKey, sourceSessionKey?, updatedAtMs, phase, approval}`
+ * (`PendingSessionApprovalEventSchema` / `TerminalSessionApprovalEventSchema`
+ * in the pinned 2026.8.1 build). Emitting the projection bare is what a fake
+ * gateway agreeing with the implementation instead of with the harness looks
+ * like, and it hid a defect that dropped every live event.
+ */
+function approvalEvent(approval: Record<string, unknown>, phase: "pending" | "terminal") {
+  return {
+    type: "event",
+    event: "session.approval",
+    payload: { sessionKey: SESSION, updatedAtMs: Date.now(), phase, approval },
+  };
+}
+
 const sent: Array<Record<string, unknown>> = [];
 const sockets: FakeGatewayWs[] = [];
 const socket = () => sockets[sockets.length - 1] ?? null;
@@ -58,6 +74,8 @@ let resolveAnswer: { ok: boolean; payload?: unknown; error?: string } = {
 };
 /** The pending set the subscribe replays. */
 let replay: unknown[] = [];
+/** Whether the gateway refuses a subscribe that carries the approval opt-in. */
+let refuseApprovalOptIn = false;
 
 class FakeGatewayWs {
   static readonly OPEN = 1;
@@ -86,9 +104,21 @@ class FakeGatewayWs {
       return;
     }
     if (frame.method === "sessions.messages.subscribe") {
-      this.respond(id, {
-        approvalReplay: { sessionKey: SESSION, updatedAtMs: Date.now(), approvals: replay, truncated: false },
-      });
+      const wantsApprovals =
+        (frame.params as { includeApprovals?: unknown } | undefined)?.includeApprovals === true;
+      if (wantsApprovals && refuseApprovalOptIn) {
+        // What the core really does: it refuses the WHOLE subscribe and rolls
+        // the message subscription back when the client may not review
+        // approvals or the pending set cannot be read.
+        setTimeout(
+          () => this.emit({ type: "res", id, ok: false, error: { message: "operator approvals not permitted" } }),
+          0,
+        );
+        return;
+      }
+      this.respond(id, wantsApprovals
+        ? { approvalReplay: { sessionKey: SESSION, updatedAtMs: Date.now(), approvals: replay, truncated: false } }
+        : { subscribed: true, key: (frame.params as { key?: unknown } | undefined)?.key });
       return;
     }
     if (frame.method === "approval.resolve") {
@@ -146,6 +176,11 @@ function decisionButton(decision: string): HTMLElement {
   return found;
 }
 
+/** One turn of the event loop, enough for an emitted frame to be handled. */
+function settleFrames(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 20));
+}
+
 async function mountReady() {
   render(<ChatPopup isOpen onClose={() => {}} />);
   await waitFor(() => expect(socket()).not.toBeNull());
@@ -157,6 +192,7 @@ describe("a pending operator approval in the ClawBox chat", () => {
     sent.length = 0;
     sockets.length = 0;
     replay = [];
+    refuseApprovalOptIn = false;
     resolveAnswer = {
       ok: true,
       payload: {
@@ -207,7 +243,7 @@ describe("a pending operator approval in the ClawBox chat", () => {
     expect(cards()).toHaveLength(0);
 
     act(() => {
-      socket()?.emit({ type: "event", event: "session.approval", payload: pendingExec() });
+      socket()?.emit(approvalEvent(pendingExec(), "pending"));
     });
 
     await screen.findByTestId("chat-approval");
@@ -246,16 +282,10 @@ describe("a pending operator approval in the ClawBox chat", () => {
     await screen.findByTestId("chat-approval");
 
     act(() => {
-      socket()?.emit({
-        type: "event",
-        event: "session.approval",
-        payload: {
-          ...pendingExec(),
-          status: "denied",
-          reason: "user",
-          resolvedAtMs: Date.now(),
-        },
-      });
+      socket()?.emit(approvalEvent(
+        { ...pendingExec(), status: "denied", reason: "user", resolvedAtMs: Date.now() },
+        "terminal",
+      ));
     });
 
     await waitFor(() =>
@@ -311,45 +341,46 @@ describe("a pending operator approval in the ClawBox chat", () => {
     expect(screen.getByTestId("chat-approval-result").textContent).toBeTruthy();
   });
 
-  it("keeps asking for approvals after the owner switches conversation", async () => {
-    // The sibling call site. The opt-in is per subscribe call and NOT sticky:
-    // the core removes an existing approval subscription when the same session
-    // is subscribed again without the flag — so a second subscribe that forgot
-    // it would turn the cards off on the next tab switch, with nothing on
-    // screen to say so.
+  it("sends no subscribe at all without the approval opt-in", async () => {
+    // The opt-in is per subscribe call and NOT sticky: the core removes an
+    // existing approval subscription when the same session is subscribed again
+    // without the flag, so a second call site that forgot it would turn the
+    // cards off with nothing on screen to say so. This is the invariant over
+    // EVERY frame this surface sends; the tab-switch call site itself is driven
+    // in `chat-tabs.test.tsx`, which opens a tab and switches back and asserts
+    // the flag on the second and third frames.
     await mountReady();
     await waitFor(() => expect(framesFor("sessions.messages.subscribe")).toHaveLength(1));
 
-    // Every subscribe this component makes carries the opt-in, whichever key.
-    const subscribes = framesFor("sessions.messages.subscribe");
-    for (const frame of subscribes) {
-      expect((frame.params as { includeApprovals?: unknown }).includeApprovals).toBe(true);
-    }
-    // And it is the only shape the helper can produce: there is one call site
-    // for both, so a subscribe without the flag cannot be written by accident.
     expect(
-      sent.filter(
-        (frame) =>
-          frame.method === "sessions.messages.subscribe" &&
-          (frame.params as { includeApprovals?: unknown }).includeApprovals !== true,
+      framesFor("sessions.messages.subscribe").filter(
+        (frame) => (frame.params as { includeApprovals?: unknown }).includeApprovals !== true,
       ),
     ).toEqual([]);
   });
 
   it("stops offering a button the moment the window closes", async () => {
     // Not at the next render that happens to occur. A button that cannot work
-    // is the UI's own false success, and pressing it would come back as "that
-    // did not reach the box" over a gateway that answered perfectly well.
-    // The window is a second and a half rather than a tenth: the first
-    // assertion is that the card is STILL offering buttons, and this file
-    // mounts React on a real clock, so a window shorter than a loaded runner's
-    // mount would fail for the machine's reason rather than the code's.
-    replay = [pendingExec({ expiresAtMs: Date.now() + 1_500 })];
+    // is the UI's own false success, and pressing it would come back as "the
+    // box could not record that answer" over a gateway that answered perfectly
+    // well.
+    //
+    // THE MOUNT IS OUT OF THE RACE. A short window measured from before the
+    // component exists is a bet on how fast a loaded runner mounts React, and
+    // it lost one: the first assertion here is that the card is STILL offering
+    // buttons. So the card arrives with a long window, that is asserted, and
+    // only THEN does the gateway restate the same approval with a window that
+    // closes in a moment — a clock started from a point this test controls.
+    replay = [pendingExec({ expiresAtMs: Date.now() + 600_000 })];
     await mountReady();
 
     const card = await screen.findByTestId("chat-approval");
     expect(card.getAttribute("data-approval-status")).toBe("pending");
     expect(screen.queryAllByTestId("chat-approval-decision")).toHaveLength(2);
+
+    act(() => {
+      socket()?.emit(approvalEvent(pendingExec({ expiresAtMs: Date.now() + 150 }), "pending"));
+    });
 
     await waitFor(
       () => expect(screen.getByTestId("chat-approval").getAttribute("data-approval-status")).toBe("expired"),
@@ -358,6 +389,45 @@ describe("a pending operator approval in the ClawBox chat", () => {
     expect(screen.queryAllByTestId("chat-approval-decision")).toHaveLength(0);
     // Nothing was asked of the gateway to learn that.
     expect(framesFor("approval.resolve")).toHaveLength(0);
+  });
+
+  it("keeps its transcript subscription when the box may not review approvals", async () => {
+    // The opt-in is not a soft one. The core refuses the ENTIRE
+    // `sessions.messages.subscribe` — and rolls the message subscription back —
+    // when the client may not review approvals (granted scopes are emptied for
+    // a connect frame that carried no device identity) or when it cannot read
+    // the pending set. Swallowing that would leave the chat with no
+    // `session.message` push at all: a reply that lands from Telegram would not
+    // appear until the owner reloads, and it would look like a chat that works.
+    refuseApprovalOptIn = true;
+    await mountReady();
+
+    await waitFor(() => expect(framesFor("sessions.messages.subscribe")).toHaveLength(2));
+    const [first, second] = framesFor("sessions.messages.subscribe");
+    expect((first.params as { includeApprovals?: unknown }).includeApprovals).toBe(true);
+    expect(second.params).toEqual({ key: SESSION });
+    // And no card is invented out of a refusal.
+    expect(cards()).toHaveLength(0);
+  });
+
+  it("ignores an approval raised for a conversation the owner has left", async () => {
+    await mountReady();
+
+    act(() => {
+      socket()?.emit({
+        type: "event",
+        event: "session.approval",
+        payload: {
+          sessionKey: "agent:main:someone-else",
+          updatedAtMs: Date.now(),
+          phase: "pending",
+          approval: pendingExec(),
+        },
+      });
+    });
+    await settleFrames();
+
+    expect(cards()).toHaveLength(0);
   });
 
   it("costs nothing for an ordinary turn", async () => {

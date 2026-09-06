@@ -95,9 +95,14 @@ export function ApprovalPrompt({ card, nowMs, onDecide }: ApprovalPromptProps) {
         <span>{t("chat.approval.title")}</span>
       </div>
 
-      <div style={{ color: BODY_FG, fontSize: 13, lineHeight: 1.4, wordBreak: "break-word" }}>
-        {card.headline}
-      </div>
+      {card.headline ? (
+        <div
+          data-testid="chat-approval-headline"
+          style={{ color: BODY_FG, fontSize: 13, lineHeight: 1.4, wordBreak: "break-word" }}
+        >
+          {card.headline}
+        </div>
+      ) : null}
 
       {card.detail ? (
         <div
@@ -173,12 +178,21 @@ export function ApprovalPrompt({ card, nowMs, onDecide }: ApprovalPromptProps) {
       )}
 
       {card.error ? (
+        // The gateway's OWN words beside the box's. It has permanent refusals
+        // on this path — an id it cannot see, a record bound to another
+        // reviewer's device, a window that closed — and a fixed "try again"
+        // over one of those is a false failure that invites a retry which can
+        // never work. The line the box owns says only what it knows; the
+        // reason underneath is the gateway's.
         <div
           data-testid="chat-approval-error"
           role="alert"
           style={{ color: CRITICAL_FG, fontSize: 12.5, wordBreak: "break-word" }}
         >
-          {t("chat.approval.failed")}
+          <div>{t("chat.approval.failed")}</div>
+          <div data-testid="chat-approval-error-reason" style={{ color: MUTED_FG, marginTop: 2 }}>
+            {card.error}
+          </div>
         </div>
       ) : null}
     </div>
