@@ -109,7 +109,11 @@ describe("a menu with no room below its pill", () => {
     // whatever they measure. The old code set `top` to 792 - 6 - 320 = 466 and
     // left a 180px hole between the list and the control it belongs to.
     expect(listbox.style.bottom).toBe(`${900 - triggerTop + GAP_PX}px`);
-    expect(listbox.style.top).toBe("");
+    // `auto`, not absent: the popover's class sets `top: calc(100% + 6px)` for
+    // the non-portaled case, and leaving that standing gives a fixed box two
+    // vertical constraints with an auto height — resolved to a NEGATIVE height,
+    // clamped to nothing, with the list a 10px strip below the fold.
+    expect(listbox.style.top).toBe("auto");
   });
 
   it("still anchors by the top when it opens downward", () => {
@@ -128,7 +132,8 @@ describe("a menu with no room below its pill", () => {
     fireEvent.click(trigger);
     const listbox = screen.getByRole("listbox", { name: "Reasoning effort" });
     expect(listbox.style.top).toBe(`${120 + 20 + GAP_PX}px`);
-    expect(listbox.style.bottom).toBe("");
+    // The mirror of the flip case: the edge this one does not use is stated.
+    expect(listbox.style.bottom).toBe("auto");
   });
 });
 

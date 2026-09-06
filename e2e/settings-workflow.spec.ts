@@ -204,9 +204,15 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
     input.dispatchEvent(new Event("input", { bubbles: true }));
     input.dispatchEvent(new Event("change", { bubbles: true }));
   });
+  // The picker's rows are `role="option"` inside the `role="listbox"` the
+  // trigger promises with aria-haspopup — they were plain buttons, so a screen
+  // reader was told to expect a list and found none. Escape closes it.
   await settingsWindow.getByRole("button", { name: /English/ }).first().click();
-  await expect(settingsWindow.getByRole("button", { name: "Deutsch" })).toBeVisible();
-  await settingsWindow.getByRole("button", { name: /English/ }).first().click();
+  const languageList = settingsWindow.getByRole("listbox");
+  await expect(languageList.getByRole("option", { name: /Deutsch/ })).toBeVisible();
+  await expect(languageList.getByRole("option", { name: /English/ })).toHaveAttribute("aria-selected", "true");
+  await page.keyboard.press("Escape");
+  await expect(languageList).toBeHidden();
 
   // ── System
   // "System" and not "System Update": the name also carries the icon glyph and a subtitle.

@@ -1306,12 +1306,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // rendering and none is passed to a memoised child, so a hook would allocate
   // a dependency array and a closure per render and save nothing.
   const hermesBinaryReasoning = providerHasBinaryReasoning(hermesProvider)
+  /* hermes-reasoning.ts is the vocabulary the CLI speaks and stays English —
+     a route imports it. The words on the CONTROL are worded here, with that
+     English as the floor, exactly as the effort pill below does: this dial is
+     the last one on the composer that still read "Thinking off" on a German
+     desktop. Two-state providers get their own pair of keys rather than the
+     effort scale's, because "Thinking on" and "High" are different sentences. */
   /** Full label for the open menu. */
-  const hermesReasoningLabel = (level: HermesReasoningLevel) =>
-    binaryReasoningLabel(hermesProvider, level) ?? HERMES_REASONING_LABELS[level]
+  const hermesReasoningLabel = (level: HermesReasoningLevel) => {
+    const binary = binaryReasoningLabel(hermesProvider, level)
+    if (binary !== null) {
+      const on = isThinkingOnLevel(hermesProvider, level)
+      return tr(on ? 'chat.thinkingOn' : 'chat.thinkingOff', binary)
+    }
+    return tr(`chat.effort.${level}`, HERMES_REASONING_LABELS[level])
+  }
   /** Compact label for the closed pill, which shares a tight width budget. */
-  const hermesReasoningTriggerLabel = (level: HermesReasoningLevel) =>
-    binaryReasoningTriggerLabel(hermesProvider, level) ?? HERMES_REASONING_LABELS[level]
+  const hermesReasoningTriggerLabel = (level: HermesReasoningLevel) => {
+    const binary = binaryReasoningTriggerLabel(hermesProvider, level)
+    if (binary !== null) {
+      const on = isThinkingOnLevel(hermesProvider, level)
+      return tr(on ? 'chat.thinkingPillOn' : 'chat.thinkingPillOff', binary)
+    }
+    return tr(`chat.effort.${level}`, HERMES_REASONING_LABELS[level])
+  }
 
   const hermesProviderName = useCallback(
     (id: string) => hermesProviderLabel(id, hermesProviders.find(p => p.id === id)?.name),
@@ -6339,8 +6357,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                          and the wire behaviour drift apart silently. */
                       hint: hermesBinaryReasoning
                         ? (isThinkingOnLevel(hermesProvider, level)
-                          ? 'Better at reasoning. Much slower.'
-                          : 'Fastest. Answers immediately.')
+                          ? tr('chat.thinkingOnHint', 'Better at reasoning. Much slower.')
+                          : tr('chat.thinkingOffHint', 'Fastest. Answers immediately.'))
                         : undefined,
                     }))}
                     onChange={changeHermesReasoning}

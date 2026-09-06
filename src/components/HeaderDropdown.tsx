@@ -452,7 +452,15 @@ export function HeaderDropdown({
           style={{
             position: 'fixed',
             left: coords.left,
-            ...(coords.top !== null ? { top: coords.top } : { bottom: coords.bottom ?? 0 }),
+            // BOTH edges every time, one of them `auto`. The class this
+            // popover wears sets `top: calc(100% + 6px)` for the non-portaled
+            // case; leaving it standing while only `bottom` is set gives a
+            // fixed box two vertical constraints and an auto height, which the
+            // browser resolves to `720 - 726 - bottom` — a negative height,
+            // clamped to nothing, with the list a strip below the fold.
+            ...(coords.top !== null
+              ? { top: coords.top, bottom: 'auto' as const }
+              : { top: 'auto' as const, bottom: coords.bottom ?? 0 }),
             width: coords.width,
             maxHeight: coords.maxHeight,
             // Above the chat popup (zIndex 10010) so it is never clipped.
