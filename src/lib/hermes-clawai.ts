@@ -443,7 +443,12 @@ export async function applyClawaiToHermes(
     // the Voice panel would tell a Max subscriber his plan has no cloud voice
     // while the box was speaking through one, and the boot script would stop
     // arming it until a browser next polled the status route.
-    ...(options.portalPlan || accountChanged
+    // `previousToken !== trimmed` rather than `accountChanged`, which is the
+    // PICKS' question and carries a `previousToken &&` guard so a first link is
+    // not treated as a switch. For the plan the safe direction is the other
+    // one: a box with no token on record is one we cannot vouch for, so a plan
+    // sitting there goes with the rest.
+    ...(options.portalPlan || previousToken !== trimmed
       ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(options.portalPlan) }
       : {}),
     ai_model_configured: true,

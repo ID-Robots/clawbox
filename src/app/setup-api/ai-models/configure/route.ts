@@ -3027,6 +3027,26 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // computed earlier so the value stored alongside the token always
     // matches the tier that drove `agents.defaults.model.primary` above.
     const clawboxAiTierForStore = resolvedClawboxTier;
+    // The PLAN entry for the batches below, and whether there is one at all.
+    //
+    // A writer with NO portal answer retires the plan only when the ACCOUNT
+    // changed. A save on the same token — the owner switching model, nudging
+    // the plan pill, re-saving anything on this page — is not a change, and a
+    // portal that happened to be unreachable during it is no reason to throw
+    // away a plan that is still that account's. Deleting there puts the box
+    // back on its device badge, which is the default TASK-744 exists to stop
+    // deciding things: the Voice panel would tell a Max subscriber his plan has
+    // no cloud voice while the box speaks through one, and `register-mcp.sh`
+    // would stop arming it, until the next successful poll. `applyClawaiToHermes`
+    // keeps the same rule for the batch it owns.
+    // NOT `previousClawaiToken && …`: a box with no token on record is one we
+    // cannot vouch for either, so a plan sitting there belongs to nobody this
+    // save knows about and goes with the rest. Deleting a key that is not there
+    // is a no-op; leaving one that outlived its account is not.
+    const clawaiPlanIsForAnotherAccount = isClawAI && previousClawaiToken !== clawboxAiToken;
+    const clawaiPlanForStore = isClawAI && (portalPlan || clawaiPlanIsForAnotherAccount)
+      ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) }
+      : {};
     // The coding agent's three tools — `coding_agent_run`, `_status`, `_stop` —
     // are registered CONDITIONALLY by the ClawBox MCP server, from a probe it
     // makes ONCE while it boots; it is then a long-lived stdio child of the
@@ -3069,12 +3089,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
         // The PLAN beside the badge, in the SAME batch so the pair the boot
-        // scripts read cannot come apart, and `undefined` — the store's DELETE
-        // — when the portal did not answer: this save has just rewritten the
-        // badge for whatever account the box now holds, and the previous
-        // account's plan may not be left standing beside it. Only on a ClawBox
-        // AI save; any other save leaves both keys exactly as they are.
-        ...(isClawAI ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) } : {}),
+        // scripts read cannot come apart — see `clawaiPlanForStore` above for
+        // when it is written, when it is retired, and when the key is left
+        // exactly as it is.
+        ...clawaiPlanForStore,
       });
       // Everything above configures OpenClaw. On a Hermes device that left the
       // model running and unreachable: Settings said "configured" while the
@@ -3110,12 +3128,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
         // The PLAN beside the badge, in the SAME batch so the pair the boot
-        // scripts read cannot come apart, and `undefined` — the store's DELETE
-        // — when the portal did not answer: this save has just rewritten the
-        // badge for whatever account the box now holds, and the previous
-        // account's plan may not be left standing beside it. Only on a ClawBox
-        // AI save; any other save leaves both keys exactly as they are.
-        ...(isClawAI ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) } : {}),
+        // scripts read cannot come apart — see `clawaiPlanForStore` above for
+        // when it is written, when it is retired, and when the key is left
+        // exactly as it is.
+        ...clawaiPlanForStore,
         // The owner named a model in this save (TASK-713), or this save linked a
         // different ClawBox AI account and the previous owner's pick goes with
         // it. Either way in the SAME batch as the other facts about the save, so

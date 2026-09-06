@@ -2417,6 +2417,43 @@ describe("POST /setup-api/ai-models/configure", () => {
         expect(plansWritten()).toEqual([undefined]);
       });
 
+      it("keeps a plan that is still true when the portal is unreachable on a SAME-token save", async () => {
+        // A save on the same token — a model switch, a nudge of the plan pill —
+        // is not an account change, and a portal that happened to be down
+        // during it is no reason to throw away a plan that is still that
+        // account's. Deleting there puts the box back on its device badge,
+        // which is the default this card exists to stop deciding things.
+        mockGetAll.mockResolvedValue({ clawai_token: "claw_same_account" });
+        vi.stubGlobal("fetch", vi.fn(async () => {
+          throw new Error("portal unreachable");
+        }));
+
+        const res = await configurePost(jsonRequest({
+          provider: "clawai",
+          apiKey: "claw_same_account",
+          clawaiTier: "pro",
+        }));
+
+        expect(res.status).toBe(200);
+        expect(plansWritten()).toEqual([]);
+      });
+
+      it("still retires it when a DIFFERENT account is saved and the portal is unreachable", async () => {
+        mockGetAll.mockResolvedValue({ clawai_token: "claw_previous_account" });
+        vi.stubGlobal("fetch", vi.fn(async () => {
+          throw new Error("portal unreachable");
+        }));
+
+        const res = await configurePost(jsonRequest({
+          provider: "clawai",
+          apiKey: "claw_a_different_account",
+          clawaiTier: "pro",
+        }));
+
+        expect(res.status).toBe(200);
+        expect(plansWritten()).toEqual([undefined]);
+      });
+
       it("leaves both keys alone on a save that is not about ClawBox AI", async () => {
         const res = await configurePost(jsonRequest({
           provider: "anthropic",
