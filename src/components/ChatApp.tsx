@@ -400,8 +400,13 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             // bubble was showing, since the streaming render strips the line
             // whatever its payload.
             const keptMedia = splitAssistantMedia(kept)
+            // `streamingEmailRefsText` first: `SENTINEL_RE` anchors the whole
+            // string, so a Stop landing between `NO_REPLY` and an `EMAIL:` line
+            // the reply had begun leaves a value that no longer looks like a
+            // sentinel and would be appended verbatim. The same question the
+            // bubble asks, and the same one the popup's two branches now ask.
             if ((keptMedia.text.trim() || keptMedia.images.length > 0 || keptMedia.audio.length > 0)
-                && !isSentinel(keptMedia.text)) {
+                && !isSentinel(streamingEmailRefsText(keptMedia.text))) {
               setMessages(msgs => [...msgs, {
                 role: 'assistant',
                 text: prettifyAssistantText(keptMedia.text),

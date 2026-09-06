@@ -2446,7 +2446,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // saw.
             const kept = dropUnfinishedDirective(streamingRef.current)
             applyStreaming('')
-            if (kept.trim() && !isSentinel(kept)) {
+            if (kept.trim() && !isSentinel(streamingEmailRefsText(kept))) {
               setMessages(msgs => [...msgs, { role: 'assistant', text: kept, timestamp: Date.now() }])
             }
             clearToolCalls()
@@ -4071,7 +4071,36 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Nothing is coming on either path, so the run ends here.
       sendingRef.current = false
       setSending(false)
+      // What the box managed to write is the OWNER'S, and it survives here for
+      // the same reason it survives on the gateway path's `aborted`/`error`
+      // branch: pressing Stop mid-answer keeps the fragment rather than wiping
+      // it. This catch serves BOTH adapters — the gateway one rejects here too
+      // when a `chat.send` ack fails — but only the Hermes one ever reaches it
+      // with a non-empty buffer, because on the gateway edition the socket's
+      // own terminal event owns that buffer and every entry to `dispatchTurn`
+      // clears it first. It used to clear and append nothing, so the same Stop
+      // lost the reply on one edition and kept it on the other (TASK-721).
+      // Read, clear, THEN append, all outside any updater, and before the
+      // failure line below so the answer stays above it.
+      //
+      // `streamingEmailRefsText` first, not the raw buffer: `SENTINEL_RE`
+      // anchors the whole string, so a Stop landing between `NO_REPLY` and an
+      // `EMAIL:` line the reply had begun leaves a value that is no longer
+      // recognisable as a sentinel — and it would be appended verbatim and
+      // minted into an email card off text the bubble never showed. The
+      // gateway path asks the same question the same way.
+      //
+      // Stored RAW, without the `splitAssistantMedia` the full-screen chat's
+      // abort branch applies: a `MEDIA:` line is something the Hermes route
+      // ADDS when it settles a turn, so an interrupted stream has not got one.
+      // What an interrupted Hermes answer can carry is prose naming a file it
+      // just wrote, which the settle path's own clean-up handles and which no
+      // split here would improve.
+      const kept = dropUnfinishedDirective(streamingRef.current)
       applyStreaming('')
+      if (kept.trim() && !isSentinel(streamingEmailRefsText(kept))) {
+        setMessages(prev => [...prev, { role: 'assistant', text: kept, timestamp: Date.now() }])
+      }
       clearToolCalls()
       // The agent is no longer parked on anything, so neither is the customer.
       // A card outliving its turn is a control with nowhere to post to.
