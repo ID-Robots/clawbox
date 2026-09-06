@@ -2434,8 +2434,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           const applied = await applyClawaiToHermes(
             clawboxAiToken,
             resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
-            // The apply owns the store write on this SKU, so the plan travels
-            // with the badge from there rather than being written twice.
+            // The apply writes the store on this SKU, so the plan travels with
+            // the badge from there. (The two batches below also carry it on any
+            // save that reaches them — the same value, harmlessly.)
             { portalPlan },
           );
           await forgetLocalWasDefault();

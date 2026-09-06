@@ -434,11 +434,18 @@ export async function applyClawaiToHermes(
   await setMany({
     clawai_token: trimmed,
     clawai_tier: tier,
-    // The PLAN, in the same write as the badge and the token it belongs to, and
-    // `undefined` — a DELETE — when this caller had no portal answer. That
-    // pairing is the whole invariant: the entitlement the boot scripts read can
-    // never describe an account this box has moved on from.
-    [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(options.portalPlan),
+    // The PLAN, in the same write as the badge and the token it belongs to.
+    // Written when this caller HAS a portal answer, retired when the ACCOUNT
+    // changed and the caller has none, and left exactly as it is otherwise —
+    // the same account re-applying, which is what the Settings tier pill and a
+    // re-pasted token are. Deleting there would put the box back on its badge,
+    // which is the default this whole change exists to stop deciding things:
+    // the Voice panel would tell a Max subscriber his plan has no cloud voice
+    // while the box was speaking through one, and the boot script would stop
+    // arming it until a browser next polled the status route.
+    ...(options.portalPlan || accountChanged
+      ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(options.portalPlan) }
+      : {}),
     ai_model_configured: true,
     ai_model_provider: CLAWAI_PROVIDER,
     ai_model_configured_at: new Date().toISOString(),

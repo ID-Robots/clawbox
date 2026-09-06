@@ -96,9 +96,12 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
       // record — so no withdrawal would be reachable at all until a BROWSER
       // happened to poll `/setup-api/ai-models/status` (TASK-744).
       //
-      // Costs nothing the wizard was not already paying: `fetchPortalTier`
-      // caches for 120 s and de-duplicates in flight, and the wizard polls the
-      // status route every 30 s while this runs.
+      // ONE cold round trip, bounded at `PORTAL_FETCH_TIMEOUT_MS` (4 s) — the
+      // cache is keyed by token and the box has never held this one — against a
+      // finaliser the UI gives three minutes. It cannot fail the pairing:
+      // `fetchPortalTier` reports every failure as `unreachable` rather than
+      // throwing. The wizard's next status poll then lands on the entry this
+      // call warmed.
       const lookup = await fetchPortalTier(accessToken).catch(() => null);
       try {
         await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier), {

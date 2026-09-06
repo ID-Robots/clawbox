@@ -233,12 +233,21 @@ export function mapPortalPlanTier(body: DeviceInfoResponse): ClawboxAiTier | nul
 /**
  * Plan words this build positively recognises as "no active paid plan".
  *
- * EVERY WORD IN HERE AUTHORISES A DELETE, so it is deliberately short and may
- * only grow with a word that can mean nothing else. Getting it too narrow costs
- * a refused round trip per spoken reply until the portal says something we
- * recognise; getting it too wide costs a paying customer his configuration.
+ * EVERY WORD IN HERE AUTHORISES A DELETE — the one irreversible act in both boot
+ * scripts — so it holds exactly what this repository has evidence for and
+ * nothing that merely sounds right. `"free"` is what every `device-info` fixture
+ * in the tree spells and what `mapPortalTier` above has always read as unpaid.
+ *
+ * A word may be added only after the portal's own handler has been read, and a
+ * near-miss is the reason: `"canceled"` is the obvious rendering of Stripe's
+ * `cancel_at_period_end`, which leaves the subscription ACTIVE and the customer
+ * served to the end of the period — admitting it would delete a Max
+ * subscriber's cloud voice with 25 paid days left. `"expired"` has the same
+ * shape over a dunning state. The error the other way costs one refused round
+ * trip per spoken reply until the portal says something we recognise, and it is
+ * paid only by an account that is genuinely unpaid.
  */
-const UNPAID_PLAN_WORDS = new Set(["free", "none", "unpaid", "canceled", "cancelled", "expired"]);
+const UNPAID_PLAN_WORDS = new Set(["free"]);
 
 /**
  * The PLAN as a three-valued answer: a paid tier, positively unpaid, or `null`

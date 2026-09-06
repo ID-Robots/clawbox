@@ -1,6 +1,5 @@
 import { get, set } from "@/lib/config-store";
 import {
-  CLAWBOX_AI_PLAN_UNPAID,
   normalizeClawboxAiPlanTier,
   normalizeClawboxAiTier,
   type ClawboxAiPlanTier,
@@ -36,11 +35,18 @@ import {
  * `deviceTier: "flash"` — a state `mapPortalTier` preserves deliberately — had
  * his cloud voice DELETED at every boot.
  *
- * ALWAYS WRITTEN BESIDE `clawai_tier`, in the same store write, and deleted in
- * that same write when the writer had no portal answer. The badge and the plan
- * therefore always describe the same account: a plan that outlived the
- * credential it was read for would be a fact about a retired account deciding
- * whether this box keeps its voice.
+ * ALWAYS WRITTEN BESIDE `clawai_tier`, in the same guarded pass, and deleted
+ * beside it when a writer that CHANGED the credential had no portal answer. The
+ * badge and the plan therefore always describe the same account: a plan that
+ * outlived the credential it was read for would be a fact about a retired
+ * account deciding whether this box keeps its voice.
+ *
+ * The credential writers put both in one `setMany`. The status poll writes them
+ * with two `set` calls under one generation snapshot, so they cannot describe
+ * different ACCOUNTS — but they are not atomic, and a boot landing between them
+ * can read a new badge beside an older plan. That costs at most one spurious
+ * verdict, which the next boot corrects; making it atomic would mean the poll
+ * writing the badge through this module too.
  */
 export const CLAWAI_PLAN_TIER_KEY = "clawai_plan_tier";
 
@@ -187,8 +193,10 @@ export function clawaiPlanGeneration(): number {
  * any credential WRITE, a re-paste of the identical token included, so the
  * counter moves more often than the credential really changes. That is the safe
  * direction and the reason it is not narrowed: bumping too often defers one
- * poll's plan write by 30 seconds, and bumping too seldom records a retired
- * account's plan and lets the next boot decide this box's entitlement from it.
+ * poll's stamp writes — the badge as well as the plan, since commit 3 gave them
+ * the same snapshot — by 30 seconds, and in that window the writer that bumped
+ * has itself written both. Bumping too seldom records a retired account's plan
+ * and lets the next boot decide this box's entitlement from it.
  */
 export function noteClawaiCredentialReplaced(): void {
   credentialGeneration += 1;
@@ -228,6 +236,12 @@ export async function persistClawaiPlanTier(
   askedAtGeneration?: number,
 ): Promise<void> {
   if (askedAtGeneration !== undefined && askedAtGeneration !== credentialGeneration) return;
+  // "WE CANNOT TELL" MAY NOT OVERWRITE "WE WERE TOLD", about the same account.
+  // The credential has not changed here — this is a poll, not a link — so a
+  // plan already on record is still that account's, and one unreadable response
+  // is no reason to forget it. The credential WRITERS delete on the same value,
+  // and must: there the account may have changed under it.
+  if (portalPlan.verdict === null) return;
   try {
     const next = clawaiPlanTierForStore(portalPlan);
     if (normalizeClawboxAiPlanTier(await get(CLAWAI_PLAN_TIER_KEY)) === (next ?? null)) return;

@@ -235,6 +235,13 @@ describe("/setup-api/ai-models/status", () => {
     // the cloud voice when it is not met, so the PLAN has to be written down
     // beside the badge; this poll is the only thing on the box that ever gets a
     // portal answer to write.
+    /**
+     * Every config-store key this poll actually wrote — a DELETE included.
+     * `expect.anything()` does not match `undefined`, so the "did not write"
+     * assertions below cannot be expressed with it.
+     */
+    const keysWritten = () => mockSetConfigValue.mock.calls.map(([key]) => key);
+
     it("records the PLAN beside the device badge", async () => {
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       // KEY-KEYED, not one answer for every key: a mock that answers the same
@@ -289,7 +296,23 @@ describe("/setup-api/ai-models/status", () => {
 
       await GET();
 
-      expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
+      expect(keysWritten()).not.toContain("clawai_plan_tier");
+    });
+
+    it("keeps a plan it was correctly told when one answer cannot be read", async () => {
+      // "We cannot tell" may not overwrite "we were told", about the same
+      // account: this is a poll, not a link, so a plan already on record still
+      // belongs to the credential this box holds. Deleting it would put the
+      // Voice panel back to telling a Max subscriber his plan has no cloud
+      // voice, and stop the boot script arming it, over one unreadable answer.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      const stamps: Record<string, unknown> = { clawai_tier: "flash", clawai_plan_tier: "pro" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key] ?? null);
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify({ tier: "enterprise" }), { status: 200 }));
+
+      await GET();
+
+      expect(keysWritten()).not.toContain("clawai_plan_tier");
     });
 
     it("does not write a plan for a credential the box no longer holds", async () => {
@@ -309,7 +332,13 @@ describe("/setup-api/ai-models/status", () => {
 
       await GET();
 
-      expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
+      expect(keysWritten()).not.toContain("clawai_plan_tier");
+      // AND THE BADGE BESIDE IT, which is the half a guard on the plan alone
+      // would miss: the two are read together by both boot scripts and one of
+      // them deletes on the pair, so writing the RETIRED account's badge while
+      // correctly skipping its plan leaves the ARM falling back to a badge
+      // belonging to a token this box no longer holds.
+      expect(keysWritten()).not.toContain("clawai_tier");
     });
 
     it("records no plan at all when the portal did not answer", async () => {
@@ -322,12 +351,7 @@ describe("/setup-api/ai-models/status", () => {
 
       await GET();
 
-      expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
-      // AND the badge beside it. The two are read together by both boot scripts
-      // and one of them deletes on the pair, so writing the RETIRED account's
-      // badge while correctly skipping its plan would leave the arm falling
-      // back to a badge belonging to a token this box no longer holds.
-      expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_tier", expect.anything());
+      expect(keysWritten()).not.toContain("clawai_plan_tier");
     });
 
     it("queries the portal even when local picker is unset so Free → Paid upgrades are visible without re-login", async () => {

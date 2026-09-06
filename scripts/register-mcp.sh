@@ -1149,7 +1149,7 @@ def stamped_tier(key, allowed):
     """One tier stamp out of the device store, normalised, or "" for unknown.
 
     `normalizeClawboxAiTier` admits exactly `flash` and `pro` and answers null
-    to everything else, and `normalizeClawaiPlanTier` is that plus the unpaid
+    to everything else, and `normalizeClawboxAiPlanTier` is that plus the unpaid
     word. A value outside the vocabulary is a store somebody edited or a build
     we have not seen: not evidence of anything, least of all of a downgrade, so
     it collapses to the same "" as an absent one.

@@ -2690,7 +2690,7 @@ def _clawai_tier_stamps():
         _tier = _store.get(_key)
         _tier = _tier.strip().lower() if isinstance(_tier, str) else ""
         # `normalizeClawboxAiTier` admits exactly `flash` and `pro` and answers
-        # null to everything else, and `normalizeClawaiPlanTier` is that plus
+        # null to everything else, and `normalizeClawboxAiPlanTier` is that plus
         # the unpaid word. A value outside the vocabulary is a store somebody
         # edited or a build we have not seen: not evidence of anything, and
         # least of all of a downgrade.

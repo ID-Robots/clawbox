@@ -175,8 +175,9 @@ export async function POST(request: Request) {
       // account B's token beside account A's plan — and both boot scripts read
       // that plan as this box's entitlement, so a Free box would go on arming
       // and keeping a cloud voice its credential is answered 403 for
-      // (TASK-744). Only on an account CHANGE, so a re-paste of the same token
-      // does not throw away a plan that is still true.
+      // (TASK-744). Only on an account CHANGE — and the apply's own batch keeps
+      // the same rule, so a re-paste of the same token or a tier-pill change
+      // leaves a plan that is still true exactly where it is.
       ...(replacedAccount ? { [CLAWAI_PLAN_TIER_KEY]: undefined } : {}),
     });
     // A refusal the proxy gave the token being replaced is about that token,
