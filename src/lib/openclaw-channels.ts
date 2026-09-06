@@ -33,6 +33,7 @@
 import {
   type SpawnOpenclawOptions,
   OpenclawSpawnTimeoutError,
+  gatewayRestartGeneration,
   openclawIsAbsent,
   readConfig,
   spawnOpenclawCli,
@@ -473,28 +474,56 @@ export interface ChannelRowResult {
   row: Record<string, unknown> | null;
 }
 
-async function readChannelRowResult(
-  channelId: string,
+/** One `channels status --json` payload, as much of it as this module reads. */
+interface ChannelStatusPayload {
+  channelAccounts?: Record<string, unknown>;
+  channels?: Record<string, unknown>;
+  /** The CLI's own word for "I could not reach the gateway". */
+  gatewayReachable?: unknown;
+  /** Set when the answer was assembled from the config file alone. */
+  configOnly?: unknown;
+}
+
+/**
+ * Run `channels status` and parse what came back.
+ *
+ * `channelId` narrows the read to ONE channel; `null` asks about every channel,
+ * which is what the memo below does. `--channel` is optional on this command —
+ * checked against the installed CLI, openclaw 2026.8.1 — and the un-filtered
+ * payload is keyed by channel id, so one process start answers about all of
+ * them. Measured on the OpenClaw box, three runs each: un-filtered 3.72/3.25/
+ * 3.19 s against 3.17/3.15/3.10 s for a filtered read. The whole cost is the
+ * CLI cold start; walking every channel adds about a quarter of a second, so
+ * one un-filtered read is far cheaper than two filtered ones.
+ *
+ * `null` back means "could not read the gateway" — a spawn failure, or output
+ * that is not a payload — and is deliberately kept apart from an EMPTY payload,
+ * which is a gateway answering about a box with nothing configured.
+ */
+async function readChannelStatusPayload(
+  channelId: string | null,
   // `captureStdout` is deliberately not offerable: this function's whole job is
   // to parse the CLI's `--json`, and a caller that turned stdout off would get
   // an empty string and a silent `null` — "the gateway said nothing" — for a
   // channel that is perfectly healthy.
   options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
-): Promise<ChannelRowResult> {
+): Promise<ChannelStatusPayload | null> {
   // No CLI to ask on a Hermes box. Not an answer: the edition is read per call,
   // so this must not be remembered as one.
-  if (openclawIsAbsent()) return { answered: false, row: null };
+  if (openclawIsAbsent()) return null;
   let parsed: unknown;
   try {
     const out = await spawnOpenclawCli(
       [
         "channels",
         "status",
-        "--channel",
-        channelId,
+        ...(channelId === null ? [] : ["--channel", channelId]),
         "--json",
         // Bounds the gateway round trip the command makes. Without it a wedged
         // gateway is only stopped by the spawn timeout, which is much longer.
+        // It bounds the un-filtered read too, which is what keeps one wedged
+        // channel from making the shared read slower than the per-channel ones
+        // it replaced.
         "--timeout",
         String(CHANNEL_STATUS_GATEWAY_TIMEOUT_MS),
       ],
@@ -503,10 +532,10 @@ async function readChannelRowResult(
     parsed = JSON.parse(out);
   } catch (err) {
     console.warn(
-      `[openclaw-channels] could not read ${channelId} status:`,
+      `[openclaw-channels] could not read ${channelId ?? "channel"} status:`,
       err instanceof Error ? err.message : err,
     );
-    return { answered: false, row: null };
+    return null;
   }
 
   // The CLI exited fine but what came back is not a payload — the same class of
@@ -519,33 +548,72 @@ async function readChannelRowResult(
   // `channels` key would be the same mistake inverted: a gateway with nothing
   // configured is entitled to answer `{}`, and calling that a failed read would
   // put exactly the box this change is for back on the 3 s window.
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { answered: false, row: null };
-  }
-  const payload = parsed as {
-    channelAccounts?: Record<string, unknown>;
-    channels?: Record<string, unknown>;
-  };
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const payload = parsed as ChannelStatusPayload;
+  // The CLI SAYS when it could not reach the gateway, and that is not an
+  // answer about any channel. Measured on the OpenClaw box with the unit
+  // stopped: `channels status --json` exits 0 and prints a perfectly valid
+  // object — `{ gatewayReachable: false, configOnly: true, error: "Gateway not
+  // reachable at ws://127.0.0.1:18789 (ECONNREFUSED)…", configuredChannels:
+  // [...] }` — with no `channelAccounts` and no `channels` key at all. Read as
+  // a payload it says "every channel was never set up", and that answer stood
+  // for the full 15 s window instead of the 3 s a failed read gets. A gateway
+  // restart is the commonest thing on this box, so the panel reported a paired,
+  // connected WhatsApp as "Not configured" for a quarter of a minute after
+  // every one of them. Ask the harness's own field rather than guessing from
+  // the absence of keys, which a box with nothing configured is entitled to.
+  if (payload.gatewayReachable === false || payload.configOnly === true) return null;
+  return payload;
+}
 
-  // Prefer the per-ACCOUNT row: it is the only one that carries `connected`
-  // and `tokenStatus`. The channel-level row — which has neither — is the
-  // fallback for a payload that has no accounts yet.
+/**
+ * One channel's row out of a payload, or `null` when the payload does not
+ * mention it — which, for a payload the gateway actually answered, means that
+ * channel was never set up.
+ *
+ * Prefer the per-ACCOUNT row: it is the only one that carries `connected` and
+ * `tokenStatus`. The channel-level row — which has neither — is the fallback
+ * for a payload that has no accounts yet.
+ *
+ * The un-filtered read does NOT change what this means. Captured on the
+ * OpenClaw box, gateway up, WhatsApp never linked and Discord never
+ * configured: `channels status --json` and `channels status --channel whatsapp
+ * --json` carry the SAME `channelAccounts.whatsapp[0]` and the SAME
+ * `channels.whatsapp` object, field for field. Only the SET of channels
+ * listed differs — the un-filtered form lists every channel the gateway knows,
+ * the filtered form lists the one it was asked about. So a channel absent from
+ * an un-filtered payload is one that would have been absent from its own
+ * filtered read too, and every memoised caller reads exactly the row it read
+ * before. Pinned from those captures in
+ * `src/tests/routes/channels/status-payload-shapes.test.ts`.
+ */
+function rowFromPayload(
+  payload: ChannelStatusPayload,
+  channelId: string,
+): Record<string, unknown> | null {
   const accounts = payload.channelAccounts?.[channelId];
   if (Array.isArray(accounts) && accounts.length > 0) {
     const first = accounts[0];
-    if (first && typeof first === "object") {
-      return { answered: true, row: first as Record<string, unknown> };
-    }
+    if (first && typeof first === "object") return first as Record<string, unknown>;
   }
 
   const channel = payload.channels?.[channelId];
-  if (channel && typeof channel === "object") {
-    return { answered: true, row: channel as Record<string, unknown> };
-  }
+  if (channel && typeof channel === "object") return channel as Record<string, unknown>;
 
-  // The gateway answered and this channel is simply not in the payload — it was
-  // never set up. A real answer, and it stands for a full window.
-  return { answered: true, row: null };
+  return null;
+}
+
+/** {@link ChannelRowResult} for one channel out of one payload read. */
+function resultFor(payload: ChannelStatusPayload | null, channelId: string): ChannelRowResult {
+  if (!payload) return { answered: false, row: null };
+  return { answered: true, row: rowFromPayload(payload, channelId) };
+}
+
+async function readChannelRowResult(
+  channelId: string,
+  options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
+): Promise<ChannelRowResult> {
+  return resultFor(await readChannelStatusPayload(channelId, options), channelId);
 }
 
 // ── One memo for `channels status`, shared by every channel ─────────────────
@@ -563,6 +631,15 @@ async function readChannelRowResult(
 // /discord/status grew the first one and /whatsapp/status never got it, which
 // is why one panel answered in 20 ms and the other in three and a half seconds
 // from the same command.
+//
+// One memo AND one CLI start (TASK-671). The first shape of this cache still
+// filled it one channel per start, so a cold Channels hub — or Settings on a
+// phone, which reads every channel on one mount — paid the cold start twice
+// over. `--channel` is optional and the un-filtered payload is keyed by channel
+// id, so one process start answers about all of them; measured on the box,
+// three runs each, 3.72/3.25/3.19 s un-filtered against 3.17/3.15/3.10 s
+// filtered. The whole cost is the CLI start, and one read now serves what two
+// used to.
 
 /**
  * How long one gateway ANSWER about a channel stands — including the answer
@@ -591,23 +668,121 @@ interface CachedRow {
   /** See {@link ChannelRowResult} — picks which of the two TTLs applies. */
   answered: boolean;
   at: number;
+  /** When the read that produced this row STARTED. Two shared reads can be out
+   *  at once, and the one that started first is free to finish last; without
+   *  this the older answer overwrites the newer one and is stamped fresh. */
+  startedAt: number;
+  /** {@link gatewayRestartGeneration} when that read started. */
+  restarts: number;
 }
-interface InFlightRow {
-  /** The channel's invalidation count when this read started. */
-  epoch: number;
-  promise: Promise<ChannelRowResult>;
+interface InFlightPayload {
+  /**
+   * Every channel's invalidation count when this read started — the whole map,
+   * not one channel's, because one read now answers about all of them and each
+   * has to be judged on its own.
+   */
+  epochs: Map<string, number>;
+  /** Wall clock when the spawn began; see {@link CachedRow.startedAt}. */
+  startedAt: number;
+  /** {@link gatewayRestartGeneration} when the spawn began. */
+  restarts: number;
+  promise: Promise<ChannelStatusPayload | null>;
 }
 
 const cachedRows = new Map<string, CachedRow>();
-const inFlightRows = new Map<string, InFlightRow>();
+/**
+ * The ONE read in flight. There is no per-channel variant: a read without
+ * `--channel` answers about every channel, so two of them would be the same
+ * CLI start twice.
+ */
+let inFlightPayload: InFlightPayload | null = null;
 /** Per channel, so one channel's mutation never discards another's fresh read. */
 const epochs = new Map<string, number>();
+/**
+ * The channels ClawBox has a status panel for.
+ *
+ * A payload the gateway answered lists the channels it knows; a channel it does
+ * NOT list was never set up, and a read that failed says nothing about any of
+ * them. Both are answers that have to be stored for every channel a panel will
+ * ask about, or the un-configured box — the common one — pays a CLI start per
+ * channel on the first cold open instead of one for all of them.
+ *
+ * Deliberately a short, explicit list rather than a scrape of the CLI's own
+ * `--channel` enumeration, for the same reason {@link OFFICIAL_CHANNEL_PLUGINS}
+ * is one: this is what the Settings panel can show, and a channel ClawBox has
+ * no UI for has no business occupying a memo slot. {@link askedChannelIds}
+ * covers anything asked for beyond it.
+ */
+const MEMOISED_CHANNEL_IDS = ["telegram", "whatsapp", "discord"] as const;
 
 /**
- * {@link readChannelRow}, but at most one CLI start per channel per window, with
- * concurrent callers sharing the one in flight. This is what a status route
- * should call; {@link readChannelRow} stays the uncached "ask right now" read
- * that {@link waitForChannelConnected} polls a transition with.
+ * Channel ids some caller has asked the memo about, beyond the list above.
+ *
+ * Kept so a channel ClawBox learns about later still gets its negative answer
+ * stored rather than re-asked on every poll, without that list having to be
+ * edited in two places.
+ */
+const askedChannelIds = new Set<string>(MEMOISED_CHANNEL_IDS);
+
+/**
+ * Store one payload read against every channel it can speak for.
+ *
+ * `startedEpochs` is the snapshot taken when the read began: a channel whose
+ * epoch moved since then had a change land mid-flight, so this answer predates
+ * it and is dropped — for THAT channel only, which is the whole reason the
+ * epochs are per channel rather than one counter.
+ */
+function storeChannelPayload(payload: ChannelStatusPayload | null, read: InFlightPayload): void {
+  const at = Date.now();
+  const answered = payload !== null;
+  const restarts = read.restarts;
+  const ids = new Set<string>(read.epochs.keys());
+  for (const id of askedChannelIds) ids.add(id);
+  if (payload) {
+    // `payload` is an unchecked cast of whatever the CLI printed, and
+    // `Object.keys("abc")` is `["0","1","2"]` — junk ids in the memo for a
+    // malformed answer. The same plain-object test `rowFromPayload` applies per
+    // value, applied once to the container.
+    for (const group of [payload.channelAccounts, payload.channels]) {
+      if (!group || typeof group !== "object" || Array.isArray(group)) continue;
+      for (const id of Object.keys(group)) ids.add(id);
+    }
+  }
+  for (const id of ids) {
+    // An invalidation that landed while this was in flight means the answer
+    // predates the change that caused it — for THAT channel only, which is the
+    // whole reason the epochs are per channel rather than one counter.
+    if ((epochs.get(id) ?? 0) !== (read.epochs.get(id) ?? 0)) continue;
+    const held = cachedRows.get(id);
+    if (held) {
+      // Two shared reads can overlap: whichever STARTED last owns the entry,
+      // whatever order they finish in. Without this the slower, older read
+      // lands second and its stale rows are stamped with a fresh `at`.
+      if (held.startedAt > read.startedAt) continue;
+      // A read that could not reach the gateway says nothing about a channel
+      // some other read has just answered for. Downgrading a live answer to a
+      // failure because a DIFFERENT channel's poll happened to fail is a false
+      // failure this memo did not have while each channel had its own read.
+      if (!answered && held.answered && held.restarts === restarts
+          && Date.now() - held.at < CHANNEL_STATUS_TTL_MS) continue;
+    }
+    cachedRows.set(id, {
+      row: payload ? rowFromPayload(payload, id) : null,
+      answered,
+      at,
+      startedAt: read.startedAt,
+      restarts,
+    });
+  }
+}
+
+/**
+ * {@link readChannelRow}, but at most one CLI start per WINDOW — for every
+ * channel at once, not one channel per start — with concurrent callers sharing
+ * the one in flight. This is what a status route should call;
+ * {@link readChannelRow} stays the uncached "ask right now" read that
+ * {@link waitForChannelConnected} polls a transition with, where filtering to
+ * one channel is right because that is what the caller is watching.
  *
  * The returned row is SHARED with every other caller in the window — read it,
  * never mutate it.
@@ -617,9 +792,19 @@ const epochs = new Map<string, number>();
  * disproved.
  */
 export function readCachedChannelRowResult(channelId: string): Promise<ChannelRowResult> {
+  askedChannelIds.add(channelId);
   const epoch = epochs.get(channelId) ?? 0;
+  const restarts = gatewayRestartGeneration();
   const cached = cachedRows.get(channelId);
-  if (cached) {
+  // A row from before a gateway restart is not an answer about the gateway that
+  // is up now. `restartGateway()` has ~14 callers — a model save, an STT
+  // change, a browser install, the updater, boot — and none of them knows what
+  // a channel is, so none can be taught to invalidate this. One poll of ANY
+  // channel now seeds every channel's entry, so without this the exposure
+  // covers channels the owner never even opened: the Telegram card would report
+  // a receiving bot from a row read before the restart that stopped it, which
+  // is the very thing that route says it exists to prevent.
+  if (cached && cached.restarts === restarts) {
     const age = Date.now() - cached.at;
     const ttl = cached.answered ? CHANNEL_STATUS_TTL_MS : CHANNEL_STATUS_FAILURE_TTL_MS;
     // `age >= 0` because the clock is wall-clock: a Jetson whose RTC is corrected
@@ -628,30 +813,45 @@ export function readCachedChannelRowResult(channelId: string): Promise<ChannelRo
       return Promise.resolve({ answered: cached.answered, row: cached.row });
     }
   }
-  // Join a read in flight — but only one started since the last invalidation.
-  // An older one is answering a question the owner has already changed the
-  // answer to: it is what would hand a poll made AFTER the QR was scanned the
-  // "not linked" row that a read started before it is about to return.
-  const existing = inFlightRows.get(channelId);
-  if (existing && existing.epoch === epoch) return existing.promise;
+  // Join a read in flight — but only one started since THIS channel's last
+  // invalidation. An older one is answering a question the owner has already
+  // changed the answer to: it is what would hand a poll made AFTER the QR was
+  // scanned the "not linked" row that a read started before it is about to
+  // return. Judged per channel, because the shared read is still perfectly
+  // current for every other channel in it.
+  const existing = inFlightPayload;
+  if (existing && (existing.epochs.get(channelId) ?? 0) === epoch
+      && existing.restarts === restarts) {
+    return existing.promise.then((payload) => resultFor(payload, channelId));
+  }
 
-  const promise = readChannelRowResult(channelId)
-    .then(({ answered, row }) => {
-      // Same rule for storing: an invalidation that landed while this was in
-      // flight means the answer predates the change that caused it.
-      if ((epochs.get(channelId) ?? 0) === epoch) {
-        cachedRows.set(channelId, { row, answered, at: Date.now() });
-      }
-      return { answered, row };
+  // Snapshot BOTH sets: a channel that has been invalidated but never read
+  // through this memo has an epoch and no entry in `askedChannelIds`, and
+  // missing it would make this read's own fresh answer look stale.
+  const startedEpochs = new Map<string, number>(epochs);
+  for (const id of askedChannelIds) {
+    if (!startedEpochs.has(id)) startedEpochs.set(id, 0);
+  }
+  const read: InFlightPayload = {
+    epochs: startedEpochs,
+    startedAt: Date.now(),
+    restarts,
+    // Assigned on the next line; the callbacks below cannot run before it is.
+    promise: null as unknown as Promise<ChannelStatusPayload | null>,
+  };
+  read.promise = readChannelStatusPayload(null)
+    .then((payload) => {
+      storeChannelPayload(payload, read);
+      return payload;
     })
     .finally(() => {
       // Only ever clear our OWN entry: an abandoned read must not evict the
       // replacement that an invalidation started, or the next caller pays for a
       // third CLI start.
-      if (inFlightRows.get(channelId)?.epoch === epoch) inFlightRows.delete(channelId);
+      if (inFlightPayload === read) inFlightPayload = null;
     });
-  inFlightRows.set(channelId, { epoch, promise });
-  return promise;
+  inFlightPayload = read;
+  return read.promise.then((payload) => resultFor(payload, channelId));
 }
 
 /**

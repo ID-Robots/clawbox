@@ -29,6 +29,7 @@ vi.mock("@/lib/hermes-whatsapp", () => ({ readHermesWhatsappStatus: vi.fn() }));
 vi.mock("@/lib/whatsapp-pairing", () => ({ getPairingManager: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: vi.fn(() => false),
+  gatewayRestartGeneration: vi.fn(() => 0),
   readConfig: vi.fn(async () => ({})),
   restartGateway: vi.fn(async () => {}),
   spawnOpenclawCli: vi.fn(),

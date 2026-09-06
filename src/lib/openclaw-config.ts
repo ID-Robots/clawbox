@@ -2730,8 +2730,46 @@ async function awaitGatewayReady(options: RestartGatewayOptions): Promise<void> 
   throw new GatewayNotReadyError();
 }
 
+/**
+ * How many times this process has bounced the gateway.
+ *
+ * A monotonic counter, exported so anything holding a memo of something the
+ * GATEWAY told us can tell whether its answer predates a restart. A restart
+ * takes every channel, every provider and every session down at once, while the
+ * ~14 callers of {@link restartGateway} — a model save, an STT change, a
+ * browser install, the updater, boot — know nothing about any of them and
+ * cannot each be taught to invalidate the right caches.
+ *
+ * Bumped TWICE per restart, at both ends, and one bump is not enough: with only
+ * the first, a read that STARTS after the bump and lands while the gateway is
+ * on its way down carries the new generation already, so the row it caches —
+ * read from the dying process — is accepted for a full window after the new one
+ * is up. The second bump makes every read that overlapped the restart older
+ * than the generation that follows it.
+ *
+ * What it cannot cover is the sub-second window between `systemctl restart`
+ * being issued and the old process actually closing its socket, on a caller
+ * that did not wait for readiness (`awaitReady: false`) and so has no "after"
+ * to bump at. A read landing exactly there is bounded instead by the memo's own
+ * short failure window, because the moment the socket is gone the CLI answers
+ * `gatewayReachable: false` and that is not stored as an answer at all.
+ *
+ * Deliberately in this direction: this module imports nothing from the memo
+ * holders, so they read the counter and there is no cycle. (A previous note
+ * claimed one; it was wrong.)
+ */
+let gatewayRestartCount = 0;
+
+/** @see gatewayRestartCount */
+export function gatewayRestartGeneration(): number {
+  return gatewayRestartCount;
+}
+
 export async function restartGateway(options: RestartGatewayOptions = {}): Promise<void> {
   if (gatewayIsAbsent()) return;
+  // The FIRST of the two bumps — see gatewayRestartCount. Before the restart,
+  // so a row read from the gateway that is about to go down is already stale.
+  gatewayRestartCount += 1;
   // Best effort, before the restart: a unit that crash-looped through its
   // StartLimitBurst (20/hour — one bad config during an update is enough)
   // refuses every restart for the rest of the window with "Start request
@@ -2749,6 +2787,9 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
       timeout: 60000,
     });
     await awaitGatewayReady(options);
+    // The SECOND bump: everything read while this restart was in flight belongs
+    // to the generation that is now behind us.
+    gatewayRestartCount += 1;
     return;
   } catch (err) {
     if (err instanceof GatewayNotReadyError) throw err;
@@ -2772,6 +2813,7 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
         });
         // The legacy user unit serves the same port, so it owes the same proof.
         await awaitGatewayReady(options);
+        gatewayRestartCount += 1;
         return;
       } catch (fallbackErr) {
         // A gateway that was restarted but never came back must not be reported
