@@ -156,7 +156,15 @@ import { RESTART_STEP_ID } from "./update-constants";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
-const REBUILD_TAKEOVER_TIMEOUT_MS = 900_000;
+//
+// 20 min, raised from 15 (TASK-670). `do_rebuild` may now run `next build` a
+// SECOND time when the first died on a file that changed under its own file
+// trace, and nothing extends this deadline once the wait has started: past it
+// `waitForRebuildToTakeOver` throws AND clears `update_needs_continuation`, so
+// a rebuild that actually worked would be reported red and post_update,
+// hermes_edition and gateway_verify would never run. One extra build is 2-4
+// min on a Jetson; this covers it with the same margin the original carried.
+const REBUILD_TAKEOVER_TIMEOUT_MS = 1_200_000;
 
 // The root unit that performs the rebuild + restart. Distinct from
 // RESTART_STEP_ID ("restart"), which is the UI step's identity — querying

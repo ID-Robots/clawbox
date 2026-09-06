@@ -75,28 +75,28 @@ const nextConfig: NextConfig = {
   // system-profile.ts resolves scripts/ from the process cwd).
   //
   // `.git` is in that 6186-file list too — 88 MB of it on the OpenClaw box,
-  // measured 2026-09-05 — and unlike the middleware half it CAN be excluded
-  // here. Read out of the installed next@16.3.3 in this checkout (TASK-692),
-  // because the paragraph above led a review to the opposite conclusion:
+  // measured 2026-09-05. TASK-692 read next@16.3.3's own source and concluded
+  // the `.git/**` key below reaches the instrumentation trace
+  // (next-trace-entrypoints-plugin.js keys `entryNameFilesMap` by
+  // `entrypoint.name` for every server-compiler entrypoint, collect-build-
+  // traces.js iterates that map, and `picomatch("*", {dot,contains})` matches
+  // "instrumentation"), while flagging that a real device build with the line
+  // in place was NOT measured.
   //
-  //   * next-trace-entrypoints-plugin.js keys `entryNameFilesMap` by
-  //     `entrypoint.name` for EVERY server-compiler entrypoint, not only route
-  //     entries, so `instrumentation` has an entry in it.
-  //   * collect-build-traces.js iterates that map and applies these globs to
-  //     each `.nft.json`, skipping only static pages and `edgeRuntimeRoutes` —
-  //     which is exactly why MIDDLEWARE keeps its `data/` entry and the
-  //     server-compiler traces do not.
-  //   * `picomatch("*", { dot: true, contains: true })("instrumentation")` is
-  //     `true`, and `.git/**` matches `.git/objects/...` under the same
-  //     options. Both checked with the vendored matcher.
-  //   * build/utils.js copies the standalone tree FROM those lists, so an
-  //     entry dropped here is a file never copied.
+  // It has been measured now (TASK-670), on a box building THIS branch's own
+  // beta head, with the key below already in the checked-out config:
   //
-  // So `.git` is excluded at the source rather than deleted afterwards. What
-  // is NOT measured: a real `next build` on a box with this line in place —
-  // that is device work. scripts/postbuild.sh therefore still sweeps `.git`
-  // and still FAILS the build if a copy survives, which is the post-condition
-  // the suites pin; this line is meant to make that sweep find nothing.
+  //   every `.next/server/app/**/*.nft.json`   data 0   .git 0
+  //   .next/server/middleware.js.nft.json      data 27  .git 0
+  //   .next/server/instrumentation.js.nft.json data 32  .git 701
+  //
+  // So the key reaches ROUTE entries and nothing else, exactly as the
+  // paragraph above says, and the source reading does not survive contact with
+  // a real build. `.git` is NOT excluded at the source: scripts/postbuild.sh
+  // sweeping it afterwards — and failing the build when a copy survives — is
+  // what actually keeps it out of the artifact, and is load-bearing rather
+  // than belt-and-braces. The key stays because it does its job for the route
+  // traces; do not read it as covering the other two.
   //
   // Its companion, the checkout's own `.env`, genuinely has no switch: Next
   // copies `.env` and `.env.production` ITSELF, AFTER the trace, in

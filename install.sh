@@ -1538,62 +1538,97 @@ restore_previous_build() {
   return 1
 }
 
-# Stop the setup service, free memory, reinstall, and rebuild — without ever
-# leaving the box with no build at all.
 # `bun run build`, with ONE retry and only for the mid-build file-trace race.
 #
 # WHAT RACES. Next writes a `.nft.json` beside every server entry and then
-# copies every file it lists into `.next/standalone`. The page and app-page
-# copies are `.catch`-wrapped; the MIDDLEWARE and INSTRUMENTATION ones are not
-# (node_modules/next/dist/build/utils.js, still true on 16.3.3), so one
-# `fs.copyFile` ENOENT there aborts `next build` outright. And those two traces
-# carry the project root as an asset directory — data/webapps,
-# data/code-projects, data/coding-agent-artifacts and .git among them, measured
-# on the OpenClaw box. So a web app the agent creates or removes, a coding run
-# writing a screenshot, or the update's own `git reset --hard` between the trace
-# and the copy kills the build over a file the dashboard never needed.
+# copies every file it lists into `.next/standalone` — after wiping that
+# directory first. The page and app-page copies are `.catch`-wrapped; the
+# MIDDLEWARE and INSTRUMENTATION ones are not (node_modules/next/dist/build/
+# utils.js, still true on 16.3.3), so one `fs.copyFile` ENOENT there aborts
+# `next build` outright. And those two traces carry the project root as an
+# asset directory — measured on the OpenClaw box, beta build of 2026-09-05:
+# every ROUTE trace has 0 entries under data/ and .git/, while
+# middleware.js.nft.json has 27 under data/ and instrumentation.js.nft.json has
+# 32 under data/ plus 701 under .git/. So a web app the agent creates or
+# removes, a coding run writing a screenshot, or the update's own
+# `git reset --hard` between the trace and the copy kills the build over a file
+# the dashboard never needed.
 #
-# WHY NOT A CONFIG. `outputFileTracingExcludes` is applied per ROUTE entry
-# (next/dist/build/collect-build-traces.js iterates the chunk trace's entry
-# map), which is why the `data/**` exclude in next.config.ts cleans the route
-# traces and leaves these two untouched — and Next exposes no other tracing
-# knob: `outputFileTracingRoot`, `-Excludes` and `-Includes` are the whole
-# surface in its config schema.
+# WHY NOT A CONFIG. `outputFileTracingExcludes` reaches route entries only — the
+# same measurement is what proves it, and it is why next.config.ts's own
+# `.git/**` key is inoperative for the instrumentation trace. Next exposes no
+# other tracing knob: `outputFileTracingRoot`, `-Excludes` and `-Includes` are
+# the whole surface in its config schema.
 #
 # WHY A RETRY IS THE RIGHT ANSWER. The failure is transient by construction: the
 # next trace cannot list a file that is gone. One retry, gated on the ENOENT the
 # copy throws, so a build that is broken for any other reason still fails on the
 # first attempt and is reported as such rather than hidden behind a second
-# five-minute build. Both attempts stream to the step log as before; the copy
-# here only exists so the gate can read what was printed.
+# five-minute build. `REBUILD_TAKEOVER_TIMEOUT_MS` in src/lib/updater.ts carries
+# the budget for that second build.
 #
-# Every branch below is written the long way — `if`, never `[ … ] && …` — and
-# the build runs as an `if` CONDITION. Both are about errexit: this file is
+# The log copy exists ONLY so the gate can read what was printed, and it is
+# best-effort: a `/tmp` that is full or unwritable — a Jetson tmpfs under the
+# memory pressure `free_memory_for_build` exists for — must cost the retry, not
+# the build. The build's own status is the verdict, never the pipeline's, so
+# `tee` can never turn a build that worked into a failed update;
+# `verify_build_present` in both callers is what catches a build that exited 0
+# without producing anything. Output now carries the build's stderr on stdout so
+# the gate can see it, which is the one thing about the step log that changed.
+#
+# Every branch is written the long way — `if`, never `[ … ] && …` — and the
+# build runs as an `if` CONDITION. Both are about errexit: this file is
 # `set -euo pipefail`, `do_rebuild` calls this in a `||` context (errexit
 # suspended for the whole body) and `step_build` calls it bare (errexit live),
 # so a failing pipeline or a false `[ … ] &&` test outside a condition would
 # kill the script on the first attempt in one caller and not the other.
 run_next_build() {
   local log rc attempt
-  log="$(mktemp "${TMPDIR:-/tmp}/clawbox-build-XXXXXX.log")"
+  # A fixed path, overwritten rather than accumulated: this shell is a
+  # documented OOM-kill target (TASK-709), and the cleanup below is only
+  # reachable on a normal return.
+  log="${TMPDIR:-/tmp}/clawbox-next-build.log"
+  : > "$log" 2>/dev/null || log=""
+  if [ -z "$log" ]; then
+    echo "  Note: could not open a build log; a mid-build trace race will not be retried"
+  fi
   rc=0
   for attempt in 1 2; do
-    if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
-      rc=0
+    if [ -n "$log" ]; then
+      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
+        rc=0
+        break
+      fi
+      # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
+      # for a tee that could not write too, and a log this function could not
+      # keep must never be the reason an update is reported failed.
+      rc=${PIPESTATUS[0]}
+      if [ "$rc" -eq 0 ]; then break; fi
+    else
+      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build"; then
+        rc=0
+      else
+        rc=$?
+      fi
       break
     fi
-    # The BUILD's status, not tee's. A pipeline that only failed in tee still
-    # has to be reported as a failure, or a full disk would pass for a build.
-    rc=${PIPESTATUS[0]}
-    if [ "$rc" -eq 0 ]; then rc=1; fi
     if [ "$attempt" -eq 2 ]; then break; fi
-    grep -Eq "ENOENT.*copyfile" "$log" || break
+    # The FATAL shape only. Next prints the identical `ENOENT … copyfile` node
+    # message inside the `.catch` it wraps the page and app-page copies in,
+    # prefixed with `Failed to copy traced files for` — a warning over a build
+    # that carried on, and no reason to spend a second build. ONE awk rather
+    # than two greps in a pipe: `grep -q` exits on its first match and can
+    # SIGPIPE the producer, which under `pipefail` reads as "no match" and
+    # would silently drop the retry this whole function exists for.
+    awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
     echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
   done
-  rm -f "$log"
+  if [ -n "$log" ]; then rm -f "$log"; fi
   return "$rc"
 }
 
+# Stop the setup service, free memory, reinstall, and rebuild — without ever
+# leaving the box with no build at all.
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"

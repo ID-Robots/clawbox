@@ -128,6 +128,8 @@ interface Scenario {
    */
   diskHeadroom?: "ample" | "tight";
   bunInstall?: "succeeds" | "fails";
+  /** Can `run_next_build` open its build log at all? */
+  buildLog?: "writable" | "unwritable";
   nodePty?: "succeeds" | "fails";
   /** Which shipped function to run. */
   entry?: "do_rebuild" | "step_build";
@@ -161,6 +163,7 @@ let systemctlLog: string;
 let projectDir: string;
 let ownerProbe: string;
 let buildAttempts: string;
+let unwritableTmp: string;
 
 function writeBuild(dir: string, buildId: string, withEntry = true): void {
   mkdirSync(path.join(dir, "standalone"), { recursive: true });
@@ -179,6 +182,7 @@ function run(scenario: Scenario = {}): Run {
     diskHeadroom = "ample",
     bunInstall = "succeeds",
     nodePty = "succeeds",
+    buildLog = "writable",
     entry = "do_rebuild",
   } = scenario;
 
@@ -279,6 +283,9 @@ function run(scenario: Scenario = {}): Run {
     "set -euo pipefail",
     "",
     "PROJECT_DIR=" + JSON.stringify(projectDir),
+    // A /tmp the box cannot write — a Jetson tmpfs under exactly the memory
+    // pressure free_memory_for_build exists for, or a full eMMC.
+    "TMPDIR=" + JSON.stringify(buildLog === "unwritable" ? unwritableTmp : sandbox),
     "CLAWBOX_USER=clawbox",
     "BUN=/nonexistent/bun",
     "FAKE_BUILD=" + JSON.stringify(fakeBuild),
@@ -402,6 +409,8 @@ beforeEach(() => {
   projectDir = path.join(sandbox, "clawbox");
   ownerProbe = path.join(sandbox, "parked-owner.txt");
   buildAttempts = path.join(sandbox, "build-attempts.txt");
+  unwritableTmp = path.join(sandbox, "no-write");
+  mkdirSync(unwritableTmp, { recursive: true, mode: 0o500 });
 });
 
 afterEach(() => {
@@ -496,6 +505,34 @@ describe("do_rebuild verifies the build it produced", () => {
     const r = run({ build: "trace-race-then-succeeds", entry: "step_build" });
     expect(r.status).toBe(0);
     expect(r.attempts).toBe(2);
+    expect(r.hasEntry).toBe(true);
+  });
+
+  it("runs the build exactly once when it works", () => {
+    // The other half of the retry cases: a loop that always ran twice would
+    // satisfy every one of them and double every healthy update.
+    expect(run({ build: "succeeds" }).attempts).toBe(1);
+  });
+
+  it("still succeeds when it cannot open a build log at all", () => {
+    // The log is a debugging convenience for the retry gate, not a
+    // precondition of building. A /tmp the box cannot write must cost the
+    // RETRY, never the build — `tee`'s status is not the build's, and
+    // verify_build_present is what catches a build that produced nothing.
+    const r = run({ build: "succeeds", buildLog: "unwritable" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(1);
+    expect(r.buildId).toBe("new-build-id");
+    expect(r.hasEntry).toBe(true);
+    expect(r.stdout).toContain("could not open a build log");
+  });
+
+  it("still runs the build at all when it cannot open a build log", () => {
+    // `step_build` calls the helper BARE, with errexit live: a failure while
+    // opening the log there would abort the script before the build ran.
+    const r = run({ build: "succeeds", buildLog: "unwritable", entry: "step_build" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(1);
     expect(r.hasEntry).toBe(true);
   });
 
