@@ -59,7 +59,7 @@ function mockList(json: unknown, stderr = ""): void {
 
 const RECORD = path.join(DATA_DIR, "catalog-cache", "_enumerations.json");
 
-function readRecord(): Record<string, { models: number; available?: number }> {
+function readRecord(): Record<string, { models: number }> {
   const parsed = JSON.parse(fs.readFileSync(RECORD, "utf8")) as {
     providers?: Record<string, { models: number }>;
   };
@@ -133,10 +133,11 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
     expect(recorded.google).toBeUndefined();
   });
 
-  it("records how many listed rows the harness said it cannot route", async () => {
-    // The second thing that hides a provider row: the CLI lists a full
-    // catalogue and marks every row `available: false`. Tristate, so only an
-    // explicit `false` counts — see the next case.
+  it("records zero when the CLI listed rows and marked every one unroutable", async () => {
+    // The second shape of the same answer, and the one that fires while the CLI
+    // still has a catalogue to print. Our own transform drops an `available:
+    // false` row, so the published count is zero either way — what makes this an
+    // ANSWER rather than a failure is that the command ran and refused nothing.
     mockList({
       count: 2,
       models: [
@@ -145,19 +146,16 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
       ],
     });
     await get("anthropic", "&refresh=1");
-    await settle();
 
-    await vi.waitFor(() => {
-      expect(readRecord().anthropic?.available).toBe(0);
-    }, { timeout: 4000, interval: 25 });
+    expect(await recordedCount("anthropic")).toBe(0);
   });
 
-  it("counts a row the harness did not judge as routable, never against it", async () => {
+  it("records the rows the harness did not JUDGE, never against them", async () => {
     // Measured on the OpenClaw box: with no Google credential all ten google
     // rows come back `available: null`, while every row of the LINKED deepseek
     // provider on the same box comes back `true`. `null` is "not determined",
     // and writing a provider off for it would hide every one a box has not
-    // finished setting up.
+    // finished setting up — so these two rows are published and counted.
     mockList({
       count: 2,
       models: [
@@ -167,9 +165,7 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
     });
     await get("openai", "&refresh=1");
 
-    await vi.waitFor(() => {
-      expect(readRecord().openai?.available).toBe(2);
-    }, { timeout: 4000, interval: 25 });
+    expect(await recordedCount("openai")).toBe(2);
   });
 
   it("records NOTHING when the CLI refused — an error is not an empty catalogue", async () => {

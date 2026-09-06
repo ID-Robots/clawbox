@@ -27,7 +27,7 @@ const ROWS = [
 let posts: { url: string; body: unknown }[] = [];
 
 /** The box's answers to every call this list makes, in one stub. */
-function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number }; unattachedRepairs?: unknown[] } = {}) {
+function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number }; unattachedRepairs?: unknown[]; unrunnable?: string[] } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -42,6 +42,7 @@ function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string
         harness: "openclaw",
         providers: rows,
         defaultProvider: "clawai",
+        unrunnable: opts.unrunnable ?? [],
         degraded: false,
         ...(opts.unattachedRepairs ? { unattachedRepairs: opts.unattachedRepairs } : {}),
       });
@@ -473,5 +474,36 @@ describe("AiProviderList — plugins with no row of their own", () => {
     renderList();
     expect(await screen.findByTestId("ai-provider-clawai")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-provider-plugin-repairs")).not.toBeInTheDocument();
+  });
+});
+
+describe("a provider the box can run no model from", () => {
+  /**
+   * TASK-668, the owner's ruling: a row whose every model the gateway would
+   * refuse is not part of "what is connected".
+   *
+   * The hiding is HERE rather than in the payload. The server names such
+   * providers in `unrunnable` and keeps their rows, so the Connect panel below
+   * can still offer one with its real connection label and its switch —
+   * dropping the row server-side took both away, and connecting is the way out
+   * of the state that hid it.
+   */
+  it("leaves it out of the list, and leaves the rest alone", async () => {
+    stubFetch(ROWS, { unrunnable: ["openai"] });
+
+    render(<I18nProvider><AiProviderList /></I18nProvider>);
+
+    await waitFor(() => expect(screen.getByTestId("ai-provider-clawai")).toBeInTheDocument());
+    expect(screen.queryByTestId("ai-provider-openai")).not.toBeInTheDocument();
+    expect(screen.getByTestId("ai-provider-anthropic")).toBeInTheDocument();
+  });
+
+  it("shows every row when the box has named none", async () => {
+    stubFetch(ROWS, { unrunnable: [] });
+
+    render(<I18nProvider><AiProviderList /></I18nProvider>);
+
+    await waitFor(() => expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument());
+    expect(screen.getByTestId("ai-provider-anthropic")).toBeInTheDocument();
   });
 });

@@ -78,22 +78,20 @@ export async function setProviderEnabled(id: string, enabled: boolean): Promise<
   const status = await readProviderStatus();
   const canonical = canonicalProviderId(status.harness, id);
   const row = canonical ? status.providers.find((candidate) => candidate.id === canonical) : undefined;
-  // A provider dropped from the rows because this box can run no model from it
-  // (TASK-668) is still perfectly well known here, and its switch still has to
-  // flip: the strip hides the row, it does not forget the provider. Answering
-  // "not known to this box" for one would be a false failure — and would leave
-  // whatever the switch was last set to stuck for good.
-  // Taken from the row (or from the unrunnable list) rather than re-stated
-  // from `canonical`, so what comes back is a string this box wrote — the
-  // caller's copy of the id never leaves this function.
-  const hiddenId = !row && canonical
-    ? status.unrunnable.find((candidate) => candidate === canonical)
-    : undefined;
-  const known = row?.id ?? hiddenId;
-  if (!known || !canonical) {
+  // No special case for a provider the box can run no model from any more: the
+  // status keeps every row and only NAMES such providers in `unrunnable`
+  // (TASK-668), so one is found here like any other and its switch is ordinary.
+  // The earlier shape had to exempt them because the rows were dropped, which
+  // also cost them their connection label in the Connect list.
+  //
+  // The id still comes off the ROW rather than from `canonical`, so what the
+  // answer carries is a string this box wrote and the caller's copy never
+  // leaves this function.
+  const known = row?.id;
+  if (!row || !known || !canonical) {
     return { ok: false, kind: "unknown_provider", error: "That AI provider is not known to this box." };
   }
-  if (!enabled && row?.isDefault) {
+  if (!enabled && row.isDefault) {
     return { ok: false, kind: "is_default", error: "Make another provider the default first." };
   }
 

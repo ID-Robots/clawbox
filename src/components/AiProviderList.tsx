@@ -59,8 +59,18 @@ export default function AiProviderList() {
   // about which of the owner's providers answer, in what order, and which are
   // switched off. Connecting a new one is the panel below. A provider whose
   // sign-in needs refreshing is still theirs and stays listed.
+  // ...and not a provider this box can run NO model from (TASK-668). That is
+  // the owner's ruling: a row whose every model the gateway would refuse is not
+  // part of "what is connected", and the answer comes from the count the
+  // catalog route's own enumeration already recorded — no probe, no fork. The
+  // server names them and keeps them (`unrunnable`), so the Connect list below
+  // can still offer one with its real connection label; the hiding is here,
+  // where this list already decides what belongs in it.
+  const unrunnable = new Set(summary?.unrunnable ?? []);
   const rows = (summary?.providers ?? []).filter((row) =>
-    (row.state === "connected" || row.state === "needs-reauth") && row.section !== "localAi",
+    (row.state === "connected" || row.state === "needs-reauth")
+    && row.section !== "localAi"
+    && !unrunnable.has(row.id),
   );
 
   // A row nobody has probed yet cannot be filtered INTO this list — it is not

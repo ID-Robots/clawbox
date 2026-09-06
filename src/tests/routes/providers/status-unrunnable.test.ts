@@ -27,16 +27,12 @@ let probeStillOwed: Mock;
 let clawaiTokenRejectedByPortal: Mock;
 
 /** What the catalog route records after an enumeration answers for a provider. */
-function recordEnumerations(
-  counts: Record<string, number | { models: number; available: number }>,
-) {
+function recordEnumerations(counts: Record<string, number>) {
   const dir = path.join(dataDir, "catalog-cache");
   mkdirSync(dir, { recursive: true });
-  const providers: Record<string, { models: number; available?: number; atMs: number }> = {};
-  for (const [provider, value] of Object.entries(counts)) {
-    providers[provider] = typeof value === "number"
-      ? { models: value, atMs: Date.now() }
-      : { ...value, atMs: Date.now() };
+  const providers: Record<string, { models: number; atMs: number }> = {};
+  for (const [provider, models] of Object.entries(counts)) {
+    providers[provider] = { models, atMs: Date.now() };
   }
   writeFileSync(path.join(dir, "_enumerations.json"), JSON.stringify({ providers }), "utf8");
 }
@@ -87,47 +83,11 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     recordEnumerations({ google: 0, anthropic: 9 });
     const body = await (await GET()).json();
 
-    expect(ids(body)).not.toContain("google");
+    // NAMED, and kept: the strip does the hiding, so the Connect list below it
+    // can still show this provider with its real connection label and its
+    // switch. Dropping the row server-side took both away.
     expect(body.unrunnable).toEqual(["google"]);
-    // Everything else is untouched.
-    expect(ids(body)).toEqual(expect.arrayContaining(["clawai", "openai", "anthropic", "openrouter"]));
-  });
-
-  it("drops the row when the box lists rows but can route NONE of them", async () => {
-    // The other way the harness says "this box can run nothing here", and the
-    // one that is true on a box with no Google credential: `openclaw models
-    // list --provider google --all --json` answers with the plugin's whole
-    // static catalogue and marks every row `available: false`. Ten rows and no
-    // route is the same fact as no rows at all — the owner's ruling covers
-    // both, and the count alone did not.
-    readConfig.mockResolvedValue({
-      auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
-      agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
-    });
-    recordEnumerations({ google: { models: 10, available: 0 } });
-    const body = await (await GET()).json();
-
-    expect(ids(body)).not.toContain("google");
-    expect(body.unrunnable).toEqual(["google"]);
-  });
-
-  it("keeps the row when even ONE listed row is routable", async () => {
-    boxWithGoogleKey();
-    recordEnumerations({ google: { models: 10, available: 1 } });
-    const body = await (await GET()).json();
-
-    expect(ids(body)).toContain("google");
-    expect(body.unrunnable).toEqual([]);
-  });
-
-  it("keeps the row when the enumeration said nothing about routability", async () => {
-    // An older record, or a catalogue whose rows carry no `available` field at
-    // all. Absent is not `false`.
-    boxWithGoogleKey();
-    recordEnumerations({ google: 10 });
-    const body = await (await GET()).json();
-
-    expect(ids(body)).toContain("google");
+    expect(ids(body)).toEqual(expect.arrayContaining(["clawai", "openai", "anthropic", "openrouter", "google"]));
   });
 
   it("keeps the row on a box that can run at least one of that provider's models", async () => {
@@ -137,6 +97,38 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
 
     expect(ids(body)).toContain("google");
     expect(body.unrunnable).toEqual([]);
+  });
+
+  it("names NONE of them when the answer would be every row but the default", async () => {
+    // One failure answers `count: 0` for several providers at once — a
+    // models.json the core cannot load, a config caught half-written, a gateway
+    // restart mid-refresh. Each is a clean zero per provider and none of them is
+    // a fact about what the box can run, so the strip declines to act on
+    // "everything" rather than guess which. A whole panel reduced to the default
+    // row is never the honest reading, and the owner's connected key would be
+    // nowhere on screen for the six hours a record lives.
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+    });
+    // `codex` too: the OpenAI ROW stands for both catalogues and is only
+    // written off when each of them has answered none.
+    recordEnumerations({ google: 0, anthropic: 0, openai: 0, codex: 0, openrouter: 0 });
+    const body = await (await GET()).json();
+
+    expect(body.unrunnable).toEqual([]);
+    expect(ids(body)).toEqual(expect.arrayContaining(["clawai", "openai", "anthropic", "google", "openrouter"]));
+  });
+
+  it("still names them when one row would survive", async () => {
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+    });
+    recordEnumerations({ google: 0, anthropic: 0 });
+    const body = await (await GET()).json();
+
+    expect(body.unrunnable.sort()).toEqual(["anthropic", "google"]);
   });
 
   it("keeps the row when no enumeration has answered yet — unknown is not empty", async () => {
@@ -150,7 +142,7 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     expect(body.unrunnable).toEqual([]);
   });
 
-  it("hides a provider the box can run nothing from even before it is connected", async () => {
+  it("names a provider the box can run nothing from even before it is connected", async () => {
     // The strip answers "what is this box set up with and can it run". A
     // provider it can run nothing from does not belong in that answer whether
     // or not a credential is sitting there — and the way OUT of that state is
@@ -164,7 +156,6 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     recordEnumerations({ google: 0 });
     const body = await (await GET()).json();
 
-    expect(ids(body)).not.toContain("google");
     expect(body.unrunnable).toEqual(["google"]);
   });
 

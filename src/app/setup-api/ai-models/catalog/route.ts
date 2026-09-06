@@ -575,7 +575,7 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
     // today — no `SUBSCRIPTION_SURFACE` entry names a separate provider — and
     // closed rather than left for the day one does, like every other rule this
     // function had to be taught twice.
-    await recordProviderEnumeration(surfaceProvider, payload.models.length, models.length);
+    await recordProviderEnumeration(surfaceProvider, payload.models.length);
     return new Set(payload.models.map((m) => m.id));
   } catch (err) {
     console.warn(
@@ -1010,18 +1010,6 @@ interface CatalogFetchResult {
    * zero is recorded, and only it stops the row being offered.
    */
   emptyIsAnswer: boolean;
-  /** How many rows the CLI listed, before any filter of ours. */
-  listedRows: number;
-  /**
-   * Of those, how many the harness did NOT say it cannot route — every row
-   * except the ones explicitly `available: false`.
-   *
-   * Zero WITH rows listed is the harness's own statement that this box can take
-   * no route here, and the second thing that hides a provider row. `null` and
-   * absent count as available on purpose: they mean "not determined", which is
-   * what an unconfigured provider answers on a live box.
-   */
-  availableRows: number;
 }
 
 function toFetchResult(
@@ -1097,7 +1085,7 @@ function toFetchResult(
     && parsed.ok !== false
     && !refusal
     && (noRowsAtAll || noRoutableRows);
-  return { models, diagnostic, emptyIsAnswer, listedRows: rows.length, availableRows };
+  return { models, diagnostic, emptyIsAnswer };
 }
 
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
@@ -1188,8 +1176,7 @@ async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
   // Never an authoritative empty: this is openrouter.ai's catalogue, not this
   // box's answer about what it can route, and an empty `data` from a REST
   // endpoint is far more likely to be a bad hour upstream than a fact.
-  const models = transformOpenRouterEntries(data.data ?? []);
-  return { models, diagnostic: "", emptyIsAnswer: false, listedRows: models.length, availableRows: models.length };
+  return { models: transformOpenRouterEntries(data.data ?? []), diagnostic: "", emptyIsAnswer: false };
 }
 
 // Refresh the catalog for `provider` in the background. Returns
@@ -1364,13 +1351,7 @@ export function refreshInBackground(
     // The only catalogue with no upstream to ask: Mike's gateway routes the
     // two device tiers and nothing else, so these two rows ARE the device's
     // answer rather than a stand-in for one.
-    fetcher = Promise.resolve({
-      models: CLAWAI_STATIC_MODELS,
-      diagnostic: "",
-      emptyIsAnswer: false,
-      listedRows: CLAWAI_STATIC_MODELS.length,
-      availableRows: CLAWAI_STATIC_MODELS.length,
-    });
+    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, diagnostic: "", emptyIsAnswer: false });
   } else {
     fetcher = fetchOpenclawCatalog(provider);
   }
@@ -1393,11 +1374,7 @@ export function refreshInBackground(
   // inside it is not itself inside a `try`.
   const surface = fetchSubscriptionSurfaceIds(provider).catch(() => null);
 
-  const publish = async (
-    models: CatalogModel[],
-    surfaceIds: Set<string> | null,
-    availableRows: number,
-  ) => {
+  const publish = async (models: CatalogModel[], surfaceIds: Set<string> | null) => {
     // The CLI answered, so the provider is enumerable — that much is true
     // whatever generation this is, and it is what the backoff tracks.
     recordSuccessfulRefresh(provider);
@@ -1430,7 +1407,7 @@ export function refreshInBackground(
     // the raw one, so the number and the catalogue the picker is offered cannot
     // disagree. Reached only past the generation guard above, so a fork from
     // before the box changed records nothing.
-    await recordProviderEnumeration(provider, payload.models.length, availableRows);
+    await recordProviderEnumeration(provider, payload.models.length);
     console.log(
       `[catalog] refreshed ${provider}: ${models.length} models`
       + (surfaceIds ? ` (${surfaceIds.size} on the subscription surface)` : ""),
@@ -1452,7 +1429,7 @@ export function refreshInBackground(
   };
 
   fetcher
-    .then(async ({ models, diagnostic, emptyIsAnswer, availableRows }) => {
+    .then(async ({ models, diagnostic, emptyIsAnswer }) => {
       if (models.length === 0) {
         // NOT a success, and every line of beta's handling stands: nothing is
         // published, the previous catalogue is kept, and `markStale` records
@@ -1473,7 +1450,7 @@ export function refreshInBackground(
         // no longer exists, and its zero would hide the provider the customer
         // just connected.
         if (emptyIsAnswer && forkSeq >= currentSeq(provider)) {
-          await recordProviderEnumeration(provider, 0, 0);
+          await recordProviderEnumeration(provider, 0);
         }
         console.warn(
           `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
@@ -1482,9 +1459,9 @@ export function refreshInBackground(
         markStale();
         return;
       }
-      await publish(models, null, availableRows);
+      await publish(models, null);
       const surfaceIds = await surface;
-      if (surfaceIds) await publish(models, surfaceIds, availableRows);
+      if (surfaceIds) await publish(models, surfaceIds);
     })
     .catch((err: unknown) => {
       console.error(`[catalog] refresh failed for ${provider}:`, err instanceof Error ? err.message : err);

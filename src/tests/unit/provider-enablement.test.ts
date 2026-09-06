@@ -85,15 +85,13 @@ describe("setProviderEnabled", () => {
   });
 
   it("still flips the switch for a provider the strip hides", async () => {
-    // A row dropped because the box can run no model from it (TASK-668) is not
-    // an unknown provider: the strip hides the row, it does not forget the
-    // provider, and answering "not known to this box" would leave the switch
-    // stuck at whatever it was last set to.
-    hiddenProviders = ["google"];
-    // …and it still reports WHICH provider it flipped: the hidden ones are the
-    // one branch with no row to read the id off, so the answer comes from the
-    // unrunnable list rather than being re-stated from the caller's string.
-    expect(await lib.setProviderEnabled("google", false)).toEqual({ ok: true, provider: "google" });
-    expect(store.values.ai_disabled_providers).toEqual(["google"]);
+    // A provider the box can run no model from (TASK-668) is named in
+    // `unrunnable` and KEPT in the rows, so its switch is an ordinary one: the
+    // strip does the hiding, nothing forgets the provider, and nothing here has
+    // to know about the ruling at all. The answer still names the provider from
+    // the row rather than re-stating the caller's string.
+    hiddenProviders = ["gemini"];
+    expect(await lib.setProviderEnabled("gemini", false)).toEqual({ ok: true, provider: "gemini" });
+    expect(store.values.ai_disabled_providers).toEqual(["gemini"]);
   });
 });
