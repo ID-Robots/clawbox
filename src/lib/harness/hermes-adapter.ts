@@ -459,10 +459,12 @@ export class HermesAdapter implements HarnessAdapter {
         ? await readStreamedTurn(res, onEvent)
         : await readJsonBody(res);
       // Reading the body is where a Stop most often lands — it is the long
-      // part of the turn on both paths. A failed parse and an abandoned stream
-      // both come back as an empty object, which would otherwise sail on and
-      // be returned as a successful turn with no text; the run has to end as
-      // the abort it was.
+      // part of the turn on both paths. On the JSON path a failed parse comes
+      // back as an empty object, which would otherwise sail on and be returned
+      // as a successful turn with no text; the run has to end as the abort it
+      // was. The STREAMED path never reaches here after a Stop — it throws out
+      // of `readStreamedTurn` — so the same question is asked again in the
+      // catch below, which is what covers both.
       if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       if (!res.ok) {
         throw new HarnessError(
@@ -498,6 +500,17 @@ export class HermesAdapter implements HarnessAdapter {
         ...(typeof data.provider === "string" && data.provider ? { provider: data.provider } : {}),
       };
     } catch (err) {
+      // A STOP IS NOT AN UPSTREAM FAILURE, whichever way the body ended.
+      //
+      // An abandoned stream does not come back as an empty object: it throws —
+      // on an `error` frame, and on a stream that ends without `done` — so the
+      // check above the parse is reached only on the JSON path. A Stop whose
+      // stream closed cleanly first (the route's own `controller.close()`
+      // racing the client's abort, a proxy dropping the SSE body) therefore
+      // arrived here as `upstream` + "The reply was cut off before it
+      // finished.", and the surface put a red error line under the answer the
+      // owner had just asked it to stop writing.
+      if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       throw asHarnessError(err, "upstream");
     } finally {
       req.signal?.removeEventListener("abort", abortFromCaller);
