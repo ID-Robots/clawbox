@@ -138,12 +138,16 @@ describe("AIModelsStep variants", () => {
       }));
     }
 
-    async function providerGroupText(unrunnable: string[]): Promise<string> {
+    async function providerGroupText(
+      unrunnable: string[],
+      selected?: string,
+    ): Promise<string> {
       stubStatus(unrunnable);
       const { getByRole, findByText } = render(
         <AIModelsStep
           embedded
           providerIds={["clawai", "anthropic", "google"]}
+          {...(selected ? { defaultProviderId: selected } : {})}
           testId="providers-test"
         />,
       );
@@ -159,6 +163,17 @@ describe("AIModelsStep variants", () => {
 
       expect(text).not.toContain("Google Gemini");
       expect(text).toContain("Anthropic");
+    });
+
+    it("keeps the row the panel is CURRENTLY on, whatever the box says about it", async () => {
+      // Everything else here that decides what to render — the "keep the
+      // selection valid" effect, the credential panel, the deep-link handler —
+      // resolves against the unfiltered list. Dropping the selected row would
+      // leave its form on screen with no radio above it and no "show more"
+      // toggle to get back.
+      const text = await providerGroupText(["google"], "google");
+
+      expect(text).toContain("Google Gemini");
     });
 
     it("is offered exactly as before when the box has said nothing about it", async () => {
