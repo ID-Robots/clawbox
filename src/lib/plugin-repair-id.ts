@@ -40,3 +40,23 @@ export const ROW_PLUGIN_IDS: Readonly<Record<string, string>> = {
   discord: "discord",
   whatsapp: "whatsapp",
 };
+
+/**
+ * Does a Settings row of its own already speak for this plugin?
+ *
+ * The map above answers "which plugin is behind this row"; this is the other
+ * direction, and it exists because of the plugins that are behind NO row
+ * (TASK-738). A core bump can leave an entry enabled for a plugin an older core
+ * bundled — `byteplus`, `vydra`, `xiaomi` on the incident box — and the gateway
+ * then refuses readiness over it. ClawBox switches such an entry off so the box
+ * comes back, and the owner has to be able to see that and put it back; but
+ * there is no Providers row and no Channels row for `vydra` to badge, so
+ * without this the record would exist with nothing on screen drawn from it.
+ *
+ * Answered on the CANONICAL id on both sides, the same rule the badge lookup
+ * uses: a row filed as `@openclaw/discord` is the `discord` row's plugin.
+ */
+export function pluginHasSettingsRow(pluginId: string): boolean {
+  const wanted = canonicalPluginId(pluginId);
+  return Object.values(ROW_PLUGIN_IDS).some((id) => canonicalPluginId(id) === wanted);
+}

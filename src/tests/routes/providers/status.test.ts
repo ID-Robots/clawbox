@@ -535,8 +535,58 @@ describe("providers/status — needs repair", () => {
   it("is inert on Hermes, where nothing writes the marker", async () => {
     getActiveHarness.mockResolvedValue("hermes");
     getModelOptions.mockResolvedValue(hermesPayload());
-    const body = await (await GET()).json() as { providers: Row[] };
+    // Written by the boot script or the updater, and a Hermes box runs
+    // neither — but a DUAL box carries the file with OpenClaw as the idle
+    // half, so the reader's own harness gate is what keeps this empty rather
+    // than the file being absent.
+    writeMarker({
+      vydra: { id: "vydra", stage: "not-installed", reason: "no package", atMs: 1, disabled: true, spec: "" },
+    });
+    const body = await (await GET()).json() as { providers: Row[] } & Record<string, unknown>;
     for (const row of body.providers) expect(row).not.toHaveProperty("needsRepair");
+    expect(body).not.toHaveProperty("unattachedRepairs");
+  });
+
+  it("lists a plugin with no Settings row of its own separately (TASK-738)", async () => {
+    // A core bump strands entries for plugins an older core bundled. The
+    // updater switches those off so the gateway can report ready — and there
+    // is no Providers row and no Channels row for `vydra` to badge, so without
+    // this the owner's provider silently stopped existing.
+    getActiveHarness.mockResolvedValue("openclaw");
+    readConfig.mockResolvedValue({});
+    writeMarker({
+      vydra: {
+        id: "vydra",
+        stage: "not-installed",
+        reason: "plugin not installed: vydra — install the official external plugin"
+          + " with: openclaw plugins install @openclaw/vydra-provider",
+        atMs: 1_700_000_000_000,
+        disabled: true,
+        spec: "@openclaw/vydra-provider",
+      },
+      // …while one that DOES have a row stays on its row and is not listed twice.
+      deepseek: {
+        id: "@openclaw/deepseek-provider", stage: "install", reason: "no", atMs: 1, disabled: true,
+      },
+    });
+
+    const body = await (await GET()).json() as {
+      providers: (Row & { needsRepair?: { pluginId: string } })[];
+      unattachedRepairs?: { pluginId: string; stage: string; reason: string }[];
+    };
+
+    expect(body.unattachedRepairs?.map((row) => row.pluginId)).toEqual(["vydra"]);
+    expect(body.unattachedRepairs?.[0].stage).toBe("not-installed");
+    expect(body.unattachedRepairs?.[0].reason).toMatch(/plugin not installed: vydra/);
+    expect(body.providers.find((r) => r.id === "clawai")?.needsRepair?.pluginId)
+      .toBe("@openclaw/deepseek-provider");
+  });
+
+  it("says nothing at all when every row is claimed", async () => {
+    getActiveHarness.mockResolvedValue("openclaw");
+    readConfig.mockResolvedValue({});
+    const body = await (await GET()).json() as Record<string, unknown>;
+    expect(body).not.toHaveProperty("unattachedRepairs");
   });
 });
 

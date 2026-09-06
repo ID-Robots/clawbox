@@ -1379,7 +1379,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return !!r && typeof r === "object"
           && typeof r.pluginId === "string"
           && typeof r.reason === "string"
-          && (r.stage === "install" || r.stage === "consent");
+          && (r.stage === "install" || r.stage === "consent" || r.stage === "not-installed");
       });
     } catch {
       // A box that cannot answer keeps the rows exactly as they were.

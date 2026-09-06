@@ -350,4 +350,41 @@ describe("plugins/repair — the Retry", () => {
       ['plugins.entries["@openclaw/discord"].enabled', "true", "--strict-json"],
     );
   });
+
+  it("INSTALLS a not-installed row rather than trying to enable a package that is not there", async () => {
+    // TASK-738. The third stage records an entry a core bump stranded: the
+    // core has no package for it at all, so `plugins enable` answers "Plugin
+    // not found" and the badge could never clear. The branch used to be
+    // `stage !== "install"`, which sent exactly this row to that verb.
+    //
+    // And this is the ONLY place the install happens: the updater switched the
+    // entry off and never fetched anything, because consenting to the declared
+    // capabilities of a plugin the owner did not choose is not the box's call.
+    // Here it is his press.
+    readPluginRepairs.mockResolvedValue({
+      byteplus: {
+        id: "byteplus",
+        stage: "not-installed",
+        reason: "plugin not installed: byteplus — install the official external plugin"
+          + " with: openclaw plugins install @openclaw/byteplus-provider",
+        atMs: 1,
+        disabled: true,
+        spec: "@openclaw/byteplus-provider",
+      },
+    });
+    stubExec(async () => ({ stdout: JSON.stringify({ plugin: { id: "byteplus", status: "loaded", activated: true } }) }));
+
+    const r = await post({ pluginId: "byteplus" });
+
+    expect(r.status).toBe(200);
+    expect(execCalls).toEqual([
+      ["plugins", "install", "@openclaw/byteplus-provider", "--force", "--accept-capabilities"],
+      ["plugins", "inspect", "byteplus", "--runtime", "--json"],
+    ]);
+    // And the entry ClawBox switched off is switched back on, or the package
+    // comes back to a plugin that still cannot load.
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith(
+      ['plugins.entries["byteplus"].enabled', "true", "--strict-json"],
+    );
+  });
 });

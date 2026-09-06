@@ -425,7 +425,12 @@ export interface UpdateState {
 
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
-import { clawboxDisabledEntryId, clearPluginRepair, readPluginRepairs } from "./plugin-repair";
+import {
+  clawboxDisabledEntryId,
+  clearPluginRepair,
+  readPluginRepairs,
+  recordPluginRepair,
+} from "./plugin-repair";
 // The id rule, from the PURE module rather than through `plugin-repair`: it is
 // string work with no `fs` behind it, and taking it from the reader would tie a
 // pure helper to that module's surface for no reason.
@@ -1307,29 +1312,63 @@ function describeDoctorFailure(err: unknown): string {
  * node engine is wrong exits non-zero here too, and calling that a bad config
  * would be a false failure over a config that is fine.
  */
-async function getOpenclawConfigRefusal(): Promise<string | null> {
+/**
+ * The core's own verdict object, or null when it could not be asked.
+ *
+ * One place, because the answer has two readers with opposite interests: the
+ * diagnosis below wants `issues[]` on a config the core REFUSES (exit 1), and
+ * the plugin repair wants `warnings[]` on one it ACCEPTS (exit 0) — measured on
+ * 2026.8.1, a config whose entries name plugins that are not installed is
+ * `{"valid":true,…,"warnings":[…]}` with exit 0. Reading the payload on both
+ * exits is what lets one CLI call answer either question.
+ *
+ * Null for "no answer", never an invented one: a half-installed core whose node
+ * engine is wrong exits non-zero here too, and treating that as a verdict would
+ * be a false failure over a config that is fine.
+ */
+interface CoreConfigVerdict {
+  /** The CLI exited 0 — the core's own "the gateway will load this". */
+  accepted: boolean;
+  /** Its JSON payload, or null when there was none to read. */
+  payload: Record<string, unknown> | null;
+}
+
+async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
   if (openclawIsAbsent()) return null;
-  let payload: string;
+  let accepted = true;
+  let text: string;
   try {
-    await execFile(OPENCLAW_BIN, ["config", "validate", "--json"], {
+    const { stdout } = await execFile(OPENCLAW_BIN, ["config", "validate", "--json"], {
       timeout: 60_000,
       maxBuffer: 2 * 1024 * 1024,
       env: openclawChildEnv(),
     });
-    return null;
+    text = stdout ?? "";
   } catch (err) {
     // The core prints the verdict as JSON on stdout and exits 1 when it
     // refuses. Any other non-zero exit carries no verdict at all.
-    payload = commandOutput(err);
+    accepted = false;
+    text = commandOutput(err);
   }
-  let verdict: unknown;
+  let parsed: unknown;
   try {
-    verdict = JSON.parse(payload.slice(payload.indexOf("{"), payload.lastIndexOf("}") + 1));
+    parsed = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
   } catch {
-    return null;
+    return { accepted, payload: null };
   }
-  if (typeof verdict !== "object" || verdict === null) return null;
-  const { valid, issues } = verdict as { valid?: unknown; issues?: unknown };
+  const payload = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : null;
+  return { accepted, payload };
+}
+
+async function getOpenclawConfigRefusal(): Promise<string | null> {
+  const verdict = await askCoreToValidateConfig();
+  // EXIT 0 IS ACCEPTANCE, and it is answered without reading the payload — the
+  // behaviour this function has had since TASK-737 and the one the boot script
+  // is being aligned to, not away from.
+  if (!verdict || verdict.accepted || !verdict.payload) return null;
+  const { valid, issues } = verdict.payload as { valid?: unknown; issues?: unknown };
   if (valid !== false) return null;
   const reasons = (Array.isArray(issues) ? issues : [])
     .map((issue) => {
@@ -1720,6 +1759,186 @@ async function clawboxSwitchedPluginOff(pluginId: string): Promise<boolean> {
  * callback it has no way to answer there; the installed bundle exposes no
  * config key and no environment variable for it, only the CLI flag.
  */
+/**
+ * `plugin not installed: <id>` — the core's own warning, and the only thing on
+ * the box that can tell "this plugin's package is not here" from "this
+ * plugin's reviewed capability surface is stale".
+ *
+ * Both states refuse gateway readiness, and the GATEWAY names them the same
+ * way: `Plugin "<id>" requires capability consent`. They need opposite repairs.
+ * `plugins enable` answers a stale surface; against a package that was never
+ * installed it answers "Plugin not found", which is how the incident box stayed
+ * dark through a repair that had already run.
+ */
+const CORE_PLUGIN_NOT_INSTALLED_RE = /plugin not installed\b/i;
+/** The package the core itself names in that warning, for the owner's Retry. */
+const CORE_PLUGIN_INSTALL_SPEC_RE = /openclaw\s+plugins\s+install\s+(\S+)/i;
+/** `plugins.entries.<id>` — the warning's `path`, which is the CONFIG's key. */
+const CORE_PLUGIN_WARNING_PATH_RE = /^plugins\.entries\.(.+)$/;
+
+interface CoreMissingPlugin {
+  /** The key as `plugins.entries` carries it — what `config set` addresses. */
+  configuredId: string;
+  /** The core's own sentence, shown to the owner unchanged. */
+  reason: string;
+  /** `@openclaw/<pkg>` when the core named one, else "". */
+  spec: string;
+}
+
+/**
+ * Which of these plugin ids the core says have no package on the box.
+ *
+ * HARNESS FIRST. `openclaw config validate --json` is the core's own detector
+ * and it already existed; nothing here re-derives it, and no list of "plugins
+ * OpenClaw 2 stopped bundling" is kept in this repo, which would be a second
+ * and staler copy of the core's bundle manifest. Measured on 2026.8.1
+ * (2026-09-06, throwaway OPENCLAW_HOME):
+ *
+ *     {"valid":true,"path":"…","warnings":[
+ *       {"path":"plugins.entries.byteplus",
+ *        "message":"plugin not installed: byteplus — install the official
+ *                   external plugin with: openclaw plugins install
+ *                   @openclaw/byteplus-provider"}]}
+ *
+ * Keyed by the NORMALISED id so the caller can match it against the id the
+ * gateway's refusal named, which need not be the config's spelling.
+ *
+ * Asked once, and only for a box whose gateway has already refused readiness
+ * over a plugin ClawBox does not manage — a healthy update never pays for it.
+ */
+async function coreReportedMissingPlugins(): Promise<Map<string, CoreMissingPlugin>> {
+  const found = new Map<string, CoreMissingPlugin>();
+  const payload = (await askCoreToValidateConfig())?.payload;
+  if (!payload) return found;
+  // Read on BOTH exits. The measured shape is `valid: true` with exit 0 — an
+  // entry with no package behind it is a warning, not a refusal — but a config
+  // that is refused for some other reason carries the same warnings, and a box
+  // in that state is exactly one that must not stay dark over a second cause.
+  const warnings = Array.isArray(payload.warnings) ? payload.warnings : [];
+  for (const warning of warnings) {
+    const { path: at, message } = (warning ?? {}) as { path?: unknown; message?: unknown };
+    if (typeof message !== "string" || !CORE_PLUGIN_NOT_INSTALLED_RE.test(message)) continue;
+    const configuredId = typeof at === "string"
+      ? (CORE_PLUGIN_WARNING_PATH_RE.exec(at)?.[1] ?? "")
+      : "";
+    if (!configuredId) continue;
+    found.set(normalizeManagedPluginId(configuredId), {
+      configuredId,
+      reason: message,
+      spec: CORE_PLUGIN_INSTALL_SPEC_RE.exec(message)?.[1] ?? "",
+    });
+  }
+  return found;
+}
+
+/**
+ * Switch one unusable entry off through the CORE's own config writer, and prove
+ * it landed.
+ *
+ * `openclaw config set plugins.entries["<id>"].enabled false` — the same verb
+ * and the same bracket-notation key `scripts/gateway-pre-start.sh` uses, not a
+ * hand-written JSON patch, and the entry itself is left exactly as the owner
+ * had it: only `enabled` moves, so everything he configured is still there for
+ * the Retry to switch back on.
+ *
+ * The exit code is not the answer. This is bounded, and a spawn killed at its
+ * deadline may still have written the file — reporting that as a failure would
+ * leave a row saying "still enabled" over a config that says otherwise. The
+ * read-back is the verdict, and it is never `|| true`: what it answers is
+ * recorded on the row the owner sees.
+ */
+async function switchOffUnusablePluginEntry(configuredId: string): Promise<boolean> {
+  try {
+    await execFile(
+      OPENCLAW_BIN,
+      ["config", "set", `plugins.entries["${configuredId}"].enabled`, "false", "--strict-json"],
+      { timeout: 60_000, maxBuffer: 4 * 1024 * 1024, env: openclawChildEnv() },
+    );
+  } catch (err) {
+    console.warn(
+      `[Updater] \`config set\` did not complete for "${configuredId}"; reading the config back anyway:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+  return !(await pluginEntryEnabled(configuredId));
+}
+
+/**
+ * The entries a core bump stranded: enabled, blocking readiness, and with no
+ * package behind them (TASK-738).
+ *
+ * WHY DISABLE RATHER THAN INSTALL. The core names an official package for each
+ * one, so installing is technically available — and it is the wrong move here.
+ * These entries are not the owner's choices: an older core BUNDLED these
+ * plugins, so the config carries an entry he never asked for, and the installed
+ * core does not. Fetching eleven npm packages onto a Jetson mid-update for
+ * providers nobody uses would cost minutes each, and `plugins install` without
+ * `--accept-capabilities` leaves the gateway refusing readiness for exactly the
+ * same entry — while consenting on his behalf for a plugin ClawBox neither
+ * chose nor pinned is precisely what `CLAWBOX_MANAGED_PLUGIN_IDS` exists to
+ * prevent. So the entry is switched off, the box comes back, and the install
+ * the core named is offered on a Settings row where the owner's press supplies
+ * the consent: `/setup-api/plugins/repair` runs `openclaw plugins install
+ * <spec> --force --accept-capabilities`, bounded, with the package the CORE
+ * named rather than one guessed from the id.
+ *
+ * Nothing of the owner's is deleted or overwritten: only `enabled` moves, and
+ * an entry that is already `enabled: false` is not touched at all — the core
+ * warns about those too (measured), and writing over one would be answering a
+ * question he has already answered.
+ */
+async function disableStrandedPluginEntries(blockingIds: Iterable<string>): Promise<void> {
+  const wanted = new Set<string>();
+  for (const id of blockingIds) wanted.add(normalizeManagedPluginId(id));
+  if (wanted.size === 0) return;
+  const missing = await coreReportedMissingPlugins();
+  for (const key of wanted) {
+    const entry = missing.get(key);
+    if (!entry) {
+      // The core knows this plugin's package. Whatever is wrong with it is a
+      // question about a plugin ClawBox did not install, and the owner is the
+      // one who can answer it. Said out loud rather than skipped in silence:
+      // the update log is where a support session looks for why nothing
+      // happened.
+      console.info(
+        `[Updater] "${key}" is blocking gateway readiness and is not a ClawBox-managed plugin — leaving it to its owner`,
+      );
+      continue;
+    }
+    if (!(await pluginEntryEnabled(entry.configuredId))) continue;
+    const disabled = await switchOffUnusablePluginEntry(entry.configuredId);
+    if (disabled) {
+      console.info(
+        `[Updater] "${entry.configuredId}" has no package on this core and was blocking gateway readiness; `
+        + "switched it off so the gateway can start — Settings shows it as needing repair",
+      );
+    } else {
+      console.warn(
+        `[Updater] "${entry.configuredId}" has no package on this core and could not be switched off; `
+        + "the gateway may go on refusing readiness until it is repaired",
+      );
+    }
+    // The row goes up either way, and says which of the two happened. A
+    // switch-off nobody can see is how an owner ends up with a provider that
+    // silently stopped existing; a failure nobody can see is worse.
+    try {
+      await recordPluginRepair({
+        id: entry.configuredId,
+        stage: "not-installed",
+        reason: entry.reason,
+        disabled,
+        spec: entry.spec,
+      });
+    } catch (err) {
+      console.warn(
+        `[Updater] the "${entry.configuredId}" repair record could not be written; `
+        + "Settings will show the row as simply not connected:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+}
+
 interface PluginRepairOptions {
   /**
    * Consent only — no npm install.
@@ -1744,14 +1963,11 @@ async function repairPluginsBlockingReadiness(
     ? { managed: [], unmanaged: [] }
     : pluginsNamedInRefusals(journal, PLUGIN_PAYLOAD_VERIFICATION_RE);
   const consent = pluginsNamedInRefusals(journal, PLUGIN_CAPABILITY_CONSENT_RE);
-  for (const pluginId of [...payload.unmanaged, ...consent.unmanaged]) {
-    // Said out loud rather than skipped in silence: this is the one case where
-    // the owner still has to run the CLI himself, and the update log is where
-    // he or a support session will look for why nothing happened.
-    console.info(
-      `[Updater] "${pluginId}" is blocking gateway readiness and is not a ClawBox-managed plugin — leaving it to its owner`,
-    );
-  }
+  // A plugin ClawBox does not manage is still not something a box may be left
+  // dark over. The core is asked which of them have no package at all, and
+  // those entries — and only those — are switched off; the rest are the
+  // owner's, and are logged and left (TASK-738).
+  await disableStrandedPluginEntries([...payload.unmanaged, ...consent.unmanaged]);
   // Payloads FIRST, and the plugins they repaired are then skipped by the
   // consent pass below: `plugins install --accept-capabilities` puts the
   // package back AND records the reviewed surface, so a following `enable`
