@@ -16,6 +16,18 @@ import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
+import { ApprovalPrompt } from '@/lib/chat-approvals'
+import {
+  APPROVAL_SESSION_EVENT,
+  applyResolveResult,
+  markApprovalBusy,
+  mergeApprovalCard,
+  readApproval,
+  readApprovalReplay,
+  sessionApprovalSubscribeParams,
+  type ApprovalCard,
+  type ApprovalDecision,
+} from '@/lib/gateway-approvals'
 import {
   EmailBatchCard,
   OWN_ENDING,
@@ -990,6 +1002,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // a draft still waiting is on disk and Settings → Email lists it, and one
   // that has been decided has a receipt there saying how.
   const [emailBatches, setEmailBatches] = useState<EmailBatchCardState[]>([])
+  // Pending operator approvals, as the gateway reports them. Never a store of
+  // our own: the harness owns the queue, its expiry and its first-answer-wins
+  // resolution, and the next subscribe replays whatever is still open.
+  const [approvals, setApprovals] = useState<ApprovalCard[]>([])
   /**
    * Which read of the approval queue is the current one.
    *
@@ -2032,7 +2048,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // so that stream alone can never show it — this event is how we learn
           // the transcript gained something the live turn could not render.
           // Same projection `chat.history` uses, so the directive is intact.
-          void wsRequest('sessions.messages.subscribe', { key: boundKey })
+          //
+          // `includeApprovals: true` is the whole of TASK-704's data path: the
+          // response then carries the authoritative pending `approvalReplay`
+          // and the socket carries `session.approval` from here on. The opt-in
+          // needs `operator.approvals` on a paired device, which this connect
+          // frame already is — so an approve/deny card costs one flag on a call
+          // that was being made anyway, and no poll.
+          void wsRequest('sessions.messages.subscribe', sessionApprovalSubscribeParams(boundKey))
+            .then((payload) => {
+              const replay = readApprovalReplay((payload as { approvalReplay?: unknown } | undefined)?.approvalReplay)
+              // The replay is authoritative only when it says so. A truncated
+              // one may not REMOVE a card we are already showing — the gateway
+              // is the truth for what is gone, and `session.approval` says so.
+              setApprovals(prev => replay.truncated
+                ? replay.cards.reduce(mergeApprovalCard, prev)
+                : replay.cards.reduce(mergeApprovalCard, prev.filter(card => card.status !== 'pending')))
+            })
             .catch(() => {
               // A gateway without the RPC just means we fall back to the
               // backstop reconcile below; the chat still works.
@@ -2474,6 +2506,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }
           }
         }
+
+        // The approval lifecycle for the session we opted in to: pending when
+        // one is raised, and the terminal truth when it is answered — by this
+        // chat, by Telegram's own `/approve`, by the Control UI, or by the
+        // clock. Every one of those has to reach the card, or it sits saying
+        // "waiting" over something already decided.
+        if (eventName === APPROVAL_SESSION_EVENT) {
+          const card = readApproval(data.payload)
+          if (card) setApprovals(prev => mergeApprovalCard(prev, card))
+          return
+        }
       }
     }
 
@@ -2727,6 +2770,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // but a card left under a blanked conversation refers to a turn that is no
     // longer on screen, which is a consent form with its context deleted.
     setEmailBatches([])
+    // The approvals belong to the session that is going away. The gateway
+    // still holds them; the next subscribe replays whatever is still open.
+    setApprovals([])
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
@@ -3869,6 +3915,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * claims a draft, so the guarantee does not depend on this component being
    * the only caller.
    */
+  /**
+   * Answer one approval through the gateway's own resolver.
+   *
+   * `approval.resolve` is first-answer-wins and hands every contender the
+   * canonical recorded state, so this NEVER reports what it asked for: it shows
+   * what the gateway wrote down. An owner who approved the same request in
+   * Telegram a moment earlier sees "allowed" here rather than an error, and
+   * nothing is resolved twice — which is why there is no retry on this path.
+   */
+  const decideApproval = useCallback(async (card: ApprovalCard, decision: ApprovalDecision) => {
+    setApprovals(prev => markApprovalBusy(prev, card.id, decision))
+    try {
+      const result = await wsRequest('approval.resolve', {
+        id: card.id,
+        // Explicitly, never inferred from the id's prefix: the core's own docs
+        // tell channel adapters not to read the kind out of the identifier.
+        kind: card.kind,
+        decision,
+      })
+      setApprovals(prev => applyResolveResult(prev, card.id, result))
+    } catch (err) {
+      setApprovals(prev => applyResolveResult(prev, card.id, err instanceof Error ? err : new Error('failed')))
+    }
+  }, [wsRequest])
+
   const approveEmailBatch = useCallback(async (approval: EmailBatchApproval) => {
     const { batchId, entries } = approval
     if (entries.length === 0) return
@@ -5858,6 +5929,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             hermes={harnessId === 'hermes'}
             onApprove={approveEmailBatch}
             onCancel={cancelEmailBatch}
+          />
+        ))}
+
+        {/* Operator approvals, one card each, beside the mail they resemble.
+            OpenClaw only, and not by a harness check here but by construction:
+            they arrive on the gateway socket, and a Hermes box has none — its
+            own approvals are answered by `hermes-dashboard-turn.ts` the moment
+            they are raised, so there is never one of these waiting there. */}
+        {!reloadingSkill && approvals.map(card => (
+          <ApprovalPrompt
+            key={card.id}
+            card={card}
+            nowMs={Date.now()}
+            onDecide={decideApproval}
           />
         ))}
 
