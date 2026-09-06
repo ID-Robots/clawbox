@@ -31,8 +31,12 @@
  * to fall back to the Hermes CLI on that signal: losing the comments is bad,
  * corrupting the config is worse.
  *
- * That contract belongs to the EDITING half. {@link getTopLevelScalar} is a
- * reader, and a reader may not raise on a construct somewhere else in the file:
+ * That contract belongs to the EDITING half. {@link readYamlPath} is a third
+ * category and does raise, on purpose: it is a reader whose CALLER turns the
+ * refusal into a state ("we could not look") and then asks Hermes' own reader,
+ * so giving up loudly is strictly better there than answering a shape it cannot
+ * index. {@link getTopLevelScalar} is a reader of the second kind, and a reader
+ * of that kind may not raise on a construct somewhere else in the file:
  * a sequence, a duplicate key or a nested block is not evidence about the key it
  * was asked for, and a caller would have to turn the refusal into one. It never
  * throws; it answers a third state (`readable: false`) for a value it cannot
@@ -147,9 +151,6 @@ function scanBlock(lines: string[], start: number, end: number, indent: number):
   return entries;
 }
 
-function findEntry(lines: string[], start: number, end: number, indent: number, key: string): Entry | null {
-  return scanBlock(lines, start, end, indent).find((e) => e.key === key) ?? null;
-}
 
 /**
  * Where a quoted scalar ends, scanning from `from`, or -1 when it does not
@@ -344,6 +345,14 @@ function assertPath(path: string[]): void {
   }
 }
 
+/** Is there anything but blank lines and comments in [start, end)? */
+function hasContent(lines: string[], start: number, end: number): boolean {
+  for (let i = start; i < end; i += 1) {
+    if (!isSkippable(lines[i])) return true;
+  }
+  return false;
+}
+
 /** Walk as far down `path` as the file already goes. */
 function descend(
   lines: string[],
@@ -360,8 +369,29 @@ function descend(
   let indent = 0;
 
   for (let depth = 0; depth < path.length; depth += 1) {
-    const entry = findEntry(lines, start, end, indent, path[depth]);
-    if (!entry) break;
+    const entries = scanBlock(lines, start, end, indent);
+    const entry = entries.find((e) => e.key === path[depth]) ?? null;
+    if (!entry) {
+      // "No entries at all, but there are lines here" is not "the key is not
+      // written" — it is a block this editor cannot INDEX. The walk descends
+      // exactly INDENT_STEP per level and `scanBlock` skips everything deeper,
+      // so a block at any other indent (a hand edit, a writer that dumps at
+      // `indent=4`) reads as empty. Breaking here made both writers silently
+      // wrong on such a file: `unsetYamlPath` removed nothing and returned the
+      // text unchanged, and `setYamlPath` APPENDED a second `clawlocal:` at two
+      // spaces — a duplicate key written into the file that holds the provider
+      // api_keys. Both then passed `patchText`'s verification, because it reads
+      // through the same blind spot.
+      //
+      // Refusing is what hands the job to `hermes config set/unset`, which
+      // loads the file with PyYAML and does not care how it is indented.
+      if (entries.length === 0 && hasContent(lines, start, end)) {
+        throw new YamlEditUnsupported(
+          `could not read the block at ${path.slice(0, depth).join(".") || "the document root"}`,
+        );
+      }
+      break;
+    }
     matched.push(entry);
     if (depth < path.length - 1 && entry.inline !== "") {
       // `providers: {}` / `model: null` / a block scalar — descending into it
@@ -394,6 +424,126 @@ export function getYamlPath(text: string, path: string[]): string | null {
     throw new YamlEditUnsupported(`${path.join(".")} holds an escape this reader cannot resolve`);
   }
   return value;
+}
+
+/** `{}` / `[ ]` — a collection written inline with no members in it. */
+const EMPTY_FLOW_RE = /^(?:\{\s*\}|\[\s*\])$/;
+
+/**
+ * Is the path THERE, and — when it is a scalar — what does it say?
+ *
+ *   "value"   — a scalar this reader can name.
+ *   "present" — the key is there in a shape this reader will not name: a block
+ *               or a sequence written underneath it, an empty flow collection,
+ *               a bare `key:`, a quoted value carrying an escape PyYAML
+ *               resolves and this reader does not. A NON-empty flow collection
+ *               on the leaf answers `value` with its literal text instead —
+ *               `models: [a, b]` is `"[a, b]"` — which is what `getYamlPath`
+ *               has always done and is a leftover either way here.
+ *   "absent"  — the key is not in the file. Line-scanned, never parsed, so
+ *               this is only an answer where the level it looked at could be
+ *               indexed; see the `scanBlock` note in the walk below.
+ *
+ * Separate from {@link getYamlPath} because that answers a different question
+ * — "give me the scalar to splice" — and gets THIS one wrong in both
+ * directions.
+ *
+ * It returns `null` for a key whose value is a block or a list, so a surviving
+ * `providers.clawlocal.models:` catalogue (the shape Hermes' own model
+ * discovery writes) reads as "not there". And it THROWS as soon as any segment
+ * on the way down carries an inline value — the empty flow mapping `{}`
+ * included, which is what PyYAML writes for ANY mapping with no members, and
+ * which Hermes' own shipped `cli-config.yaml.example` carries twice
+ * (`agent.reasoning_overrides`, `agent.personalities`). A `providers: {}` on
+ * the way to `providers.clawlocal.base_url` is a POSITIVE answer — the key
+ * cannot be there — and refusing over it reports "we could not look" about a
+ * file that just said so plainly.
+ *
+ * So an empty flow collection on the way down is an ANSWER here: a mapping
+ * with no members cannot hold a member by that name. Anything else inline is
+ * not — `clawlocal: {base_url: …}` may well hold the key, and this reader
+ * cannot say — and still raises, which the caller reads as "we could not
+ * look" rather than as a fact about the key.
+ */
+export type YamlPathRead =
+  | { state: "value"; value: string }
+  | { state: "present" }
+  | { state: "absent" };
+
+export function readYamlPath(text: string, path: string[]): YamlPathRead {
+  assertPath(path);
+  // The one WHOLE-FILE fact that is evidence about every key, and the doctrine
+  // this module already states: Hermes' bridge and `hermes config get` both
+  // load config.yaml with PyYAML, so a document PyYAML refuses is a file in
+  // which no line is in effect — a tab in some other provider's value, an
+  // unterminated quote, a second document. Answering a confident `absent` there
+  // is a 200 "the provider is gone" about a file nobody can load, which is the
+  // same false success from the whole-document side. `getTopLevelScalar` has
+  // read it this way all along; this reader now asks the same question.
+  const document = documentLines(text.split(/\r\n|\r|\n/));
+  if (document.unterminated || !document.loadable) {
+    throw new YamlEditUnsupported("document PyYAML will not load");
+  }
+  const { lines } = splitLines(text);
+  let start = 0;
+  let end = lines.length;
+  while (end > 0 && isSkippable(lines[end - 1])) end -= 1;
+  let indent = 0;
+
+  for (let depth = 0; depth < path.length; depth += 1) {
+    // The WHOLE level, rather than a lookup that answers only "is this key
+    // here": a key that is not among the entries and a LEVEL WITH NO ENTRIES AT
+    // ALL are different facts, and only the first is "absent". (The one-key
+    // helper that used to sit over `scanBlock` was removed with its last caller
+    // for exactly that reason — it could not tell them apart.)
+    //
+    // The walk descends exactly INDENT_STEP per level and `scanBlock` skips
+    // every line deeper than the level it is scanning, so a block written at
+    // any other indent — a hand-edited file, a `yaml.dump(indent=4)` by some
+    // other writer — yields no entries and no error. Answering `absent` there
+    // would be the worst possible direction, because it is the SAME blind spot
+    // that makes the WRITER a silent no-op on that file: `unsetYamlPath`
+    // changes nothing, `patchText`'s own verification passes on the same
+    // reader, no CLI fallback is entered, and a read-back sharing the blind
+    // spot could only ever confirm the write it cannot see.
+    //
+    // So: entries at this level and none of them ours → the key is absent.
+    // No entries but lines we skipped → we could not look, which the caller
+    // turns into "unreadable" and asks Hermes' own reader instead.
+    const entries = scanBlock(lines, start, end, indent);
+    const entry = entries.find((e) => e.key === path[depth]) ?? null;
+    if (!entry) {
+      if (entries.length === 0 && hasContent(lines, start, end)) {
+        throw new YamlEditUnsupported(
+          `could not read the block at ${path.slice(0, depth).join(".") || "the document root"}`,
+        );
+      }
+      return { state: "absent" };
+    }
+
+    if (depth === path.length - 1) {
+      // A key with no inline text opens a block, a sequence, or nothing at all;
+      // whichever it is, the key IS written in this file.
+      if (entry.inline === "" || EMPTY_FLOW_RE.test(entry.inline)) return { state: "present" };
+      const split = splitTrailingComment(entry.inline);
+      if (!split.closed) return { state: "present" };
+      const value = parseYamlScalar(split.value);
+      return value === null ? { state: "present" } : { state: "value", value };
+    }
+
+    if (entry.inline !== "") {
+      if (EMPTY_FLOW_RE.test(entry.inline)) return { state: "absent" };
+      throw new YamlEditUnsupported(`cannot descend into inline value at ${path.slice(0, depth + 1).join(".")}`);
+    }
+    start = entry.childStart;
+    end = entry.childEnd;
+    indent += INDENT_STEP.length;
+  }
+
+  // Unreachable — the last iteration always returns — and thrown rather than
+  // answered so a future edit that makes it reachable cannot invent an
+  // "absent" nobody proved.
+  throw new YamlEditUnsupported(`could not resolve ${path.join(".")}`);
 }
 
 /** One top-level entry as {@link getTopLevelScalar} reads it. */

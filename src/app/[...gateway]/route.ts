@@ -30,12 +30,20 @@ export async function GET(request: NextRequest) {
     // OpenClaw and a text one on Hermes — a shared surface answering two
     // shapes by edition.
     //
+    // A path in NOBODY's namespace is refused here too, and that is the one
+    // case this paragraph does not describe on its own: `"unreadable"` means
+    // the percent-decode ran out of passes before it settled, so the box
+    // cannot say whose the path is and does not hand it to the gateway on a
+    // guess. Deny-only, so the cost is a 404 on a spelling no client produces.
+    //
     // The list and the segment-boundary matching live in
     // src/lib/clawbox-namespaces.ts, beside the evidence.
     const owned = clawboxNamespaceKind(request.nextUrl.pathname);
     if (owned) {
       // Code asked, so code is answered: the endpoint namespaces get the same
-      // `{ error: "Not found" }` shape the real routes under them use.
+      // `{ error: "Not found" }` shape the real routes under them use. An
+      // `"unreadable"` path answers as text, because nothing here knows it was
+      // code that asked — that is precisely what could not be decoded.
       return owned === "api"
         ? NextResponse.json({ error: "Not found" }, { status: 404 })
         : new NextResponse("Not found", {

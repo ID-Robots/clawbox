@@ -332,11 +332,20 @@ describe("skill_info — a synthesised record is not a skill", () => {
     return h;
   }
 
-  /** Exactly what the live inspect route returns for an id nobody has heard of. */
+  /**
+   * What the live inspect route returns for an id nobody has heard of.
+   *
+   * `catalogMiss` is the route SAYING SO — nothing on this device backed the
+   * record, so every field below it is a placeholder whose name is the request
+   * echoed back. It was added after this test was written, and the fixture is
+   * updated with it rather than left describing a wire shape no build sends:
+   * the assertion is unchanged, and it is the assertion that matters.
+   */
   const FABRICATED = {
     skill: {
       id: "official/nonexistent-xyz",
       name: "nonexistent-xyz",
+      catalogMiss: true,
       provenance: { sourceUrlVerified: false },
       bodySource: "none",
       bodyTruncated: false,
@@ -345,8 +354,14 @@ describe("skill_info — a synthesised record is not a skill", () => {
   };
 
   it("reports NOT_FOUND rather than inventing a skill", async () => {
-    // Phase 1 fabricates; phase 2 (the CLI) adds nothing.
-    apiGet.mockResolvedValueOnce(FABRICATED).mockResolvedValueOnce({ delta: {} });
+    // Phase 1 fabricates; phase 2 is HERMES REFUSING the id — `hermes skills
+    // inspect` printed neither a skill panel nor a table, which the route
+    // answers 404 `not_found`. That refusal over an unbacked record is the one
+    // thing that settles "this does not exist"; a docs call that merely FAILED
+    // must never be read the same way.
+    apiGet
+      .mockResolvedValueOnce(FABRICATED)
+      .mockRejectedValueOnce(new ApiError(404, JSON.stringify({ error: "Skill not found", code: "not_found" })));
 
     const out = await skills().call("skill_info", { id: "official/nonexistent-xyz" });
     expect(out.isError).toBe(true);
@@ -768,23 +783,101 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(JSON.parse(out.text).paired).toBe(true);
   });
 
-  it("reports a failed backup as a failure, with the reason the route carried", async () => {
-    // A backup that RAN and failed still answers 200 with ok:false, so nothing
-    // throws. (The unpaired case is no longer one of these — the route refuses
-    // it with 409, which BACKUP_RULES maps to CONFLICT.)
-    apiPost.mockResolvedValue({
-      exitCode: 1,
-      ok: false,
-      stdoutTail: "",
-      stderrTail: "openclaw backup create failed: no space left on device",
-    });
+  it("reports a failed backup as a failure, from the status the route now answers", async () => {
+    // Since TASK-672 a backup that RAN and failed is a real status carrying one
+    // owner-facing sentence and a stable `code` — not a 200 with `ok:false` and
+    // the daemon's raw log line in `stderrTail`, which is what the agent used
+    // to relay to the owner, device paths and all.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        502,
+        JSON.stringify({ error: "The backup did not finish", code: "backup_failed" }),
+      ),
+    );
 
     const out = await system("openclaw").call("backup_now", {});
     expect(out.isError).toBe(true);
     if (!out.isError) return;
-    expect(out.error.message).toMatch(/did not run/i);
-    expect(out.error.message).toMatch(/no space left on device/);
+    expect(out.error.message).toMatch(/did not finish|did not run/i);
+    // Not merely truthy: a truthy `next` is also what the catch-all's "retry
+    // once" produces, which is the advice the rules exist to replace.
     expect(out.error.next).toMatch(/do not start another one/i);
+  });
+
+  it("tells the owner to re-pair when the portal revoked this device mid-backup", async () => {
+    // `EXIT_AUTH_REVOKED` (3) is the case no local check can see: the token
+    // file is still on disk, so the pre-flight passes and the daemon only
+    // learns of the revoke from the portal's 401. Retrying is pointless, so
+    // the rule has to say so.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        401,
+        JSON.stringify({
+          error: "ClawKeep authorisation was rejected — pair this device again",
+          code: "pairing_revoked",
+        }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/pairing/i);
+    expect(out.error.next).toMatch(/pair the device again/i);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("does not read the MCP's own stale bearer as a revoked ClawKeep pairing", async () => {
+    // `/setup-api/*` answers a JSON 401 whenever the bearer is missing or
+    // stale, and `matchRule` runs before `classifyError`. A BARE `status: 401`
+    // rule in BACKUP_RULES would therefore turn a local token problem into
+    // "ClawKeep removed this device at the portal — pair it again, do not
+    // retry": the owner is walked through tearing down a working pairing, and
+    // "do not retry" stops the agent reaching the tool that would have found
+    // the real fault. Every rule that names a status the middleware can also
+    // produce is gated on the route's own `code`.
+    apiPost.mockRejectedValue(new ApiError(401, JSON.stringify({ error: "Authentication required" })));
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("AUTH_FAILED");
+    expect(out.error.message).not.toMatch(/pairing/i);
+    expect(out.error.next).not.toMatch(/do not retry/i);
+  });
+
+  it("keeps a missing daemon out of the retry advice", async () => {
+    // 503 `daemon_missing` had no rule, so it fell to the catch-all's "retry
+    // once" — while the block's own comment says none of these is worth
+    // retrying. A daemon that is not installed will not install itself.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        503,
+        JSON.stringify({ error: "The ClawKeep daemon could not be started", code: "daemon_missing" }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.message).toMatch(/not installed/i);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("tells the owner the account is full rather than retrying into it", async () => {
+    apiPost.mockRejectedValue(
+      new ApiError(
+        507,
+        JSON.stringify({ error: "The ClawKeep account is out of space", code: "quota_full" }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.message).toMatch(/out of space/i);
+    expect(out.error.next).toMatch(/do not retry/i);
   });
 
   it("tells the agent to get the box paired when backup_now hits an unpaired one", async () => {

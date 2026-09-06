@@ -179,9 +179,11 @@ export async function GET() {
     const { token, known } = await readActiveTelegramBot(harness);
     if (!token) return NextResponse.json({ configured: false, unknown: !known });
     // Whether anything is LISTENING, asked of the harness's own answer rather
-    // than inferred: `openclaw channels status --channel telegram --json`
-    // through the ONE shared memo `readCachedChannelStatus` owns (15 s success
-    // / 3 s failure, in-flight coalesced, invalidated by every channel write) —
+    // than inferred: `openclaw channels status --json` through the ONE shared
+    // memo `readCachedChannelStatus` owns (15 s success / 3 s failure, in-flight
+    // coalesced, invalidated by every channel write and by a gateway restart) —
+    // one un-filtered read that answers for every channel, so opening the
+    // Channels hub costs one CLI start rather than one per card —
     // the same mechanism the Discord route one file over already uses, and the
     // reason this costs ~20 ms rather than a CLI boot.
     //

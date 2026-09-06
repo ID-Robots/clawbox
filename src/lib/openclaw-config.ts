@@ -16,6 +16,7 @@ import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-s
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
+import { getLocalAiToken } from "@/lib/local-ai-token";
 
 const exec = promisify(execFile);
 
@@ -1887,17 +1888,83 @@ export async function ensureLocalAiProxyUrls(): Promise<boolean> {
 
   let changed = false;
 
-  const llamaProvider = providers.llamacpp;
-  if (llamaProvider && llamaProvider.baseUrl !== getLlamaCppProxyBaseUrl()) {
-    llamaProvider.baseUrl = getLlamaCppProxyBaseUrl();
-    changed = true;
-  }
+  // The bearer travels WITH the URL. This repair points the entry at ClawBox's
+  // own local-AI proxy, and that proxy validates `Authorization` against
+  // data/.local-ai-token and answers 401 to anything else — so moving the
+  // baseUrl while leaving somebody else's apiKey beside it turns "the wrong
+  // endpoint" into "a refused request on every single turn", which is not an
+  // improvement. Only ever alongside a baseUrl WE just wrote: an entry already
+  // on the proxy is left exactly as the owner has it.
+  //
+  // And the bearer is PROVIDER-WIDE. OpenClaw resolves a row's endpoint as
+  // `model.baseUrl ?? provider.baseUrl` (see the `models.providers` type above)
+  // and has no per-model credential slot, so `providers.<p>.apiKey` is the
+  // bearer for every row under the entry. An entry carrying a row on ANOTHER
+  // HOST is therefore one we cannot re-point without mailing this box's local-AI
+  // token to that host on every turn of that row — so it is left exactly as its
+  // owner wrote it.
+  //
+  // Foreign, not merely present. The same principle as `foreignOpenAiRoute` in
+  // the configure route — a provider block we did not build is one to leave
+  // alone rather than half-configure — but the test there can be sharper,
+  // because ClawBox marks its own image rows and can recognise them. There is no
+  // such marker on a llamacpp row, so ownership is decided by HOST: loopback and
+  // the proxy's own authority are this box, and everything else (including a URL
+  // that will not parse — guessing permissively is the wrong way to be wrong
+  // about a credential) is not. Refusing over a row that points AT US would be a
+  // false failure, and its sibling in `scripts/gateway-pre-start.sh` pays for
+  // that one in a dead gateway: the entry it declines to complete has no
+  // provider `baseUrl`, which OpenClaw's schema requires for this provider.
+  //
+  // A row without an id is skipped: `ModelDefinitionSchema` requires a non-empty
+  // one, so such a row can never route a turn and its `baseUrl` can never
+  // receive anything.
+  const hostOf = (url: string): string | null => {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  };
 
-  const ollamaProvider = providers.ollama;
-  if (ollamaProvider && ollamaProvider.baseUrl !== getOllamaProxyBaseUrl()) {
-    ollamaProvider.baseUrl = getOllamaProxyBaseUrl();
-    changed = true;
-  }
+  const routesToAnotherHost = (provider: Record<string, unknown>, proxyUrl: string): boolean => {
+    const ours = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+    const proxyHost = hostOf(proxyUrl);
+    if (proxyHost) ours.add(proxyHost);
+    return (Array.isArray(provider.models) ? provider.models : []).some((row) => {
+      if (!isPlainObject(row)) return false;
+      if (typeof row.id !== "string" || row.id.trim() === "") return false;
+      const baseUrl = typeof row.baseUrl === "string" ? row.baseUrl.trim() : "";
+      if (!baseUrl) return false;
+      const host = hostOf(baseUrl);
+      return host === null || !ours.has(host);
+    });
+  };
+
+  const adoptProxy = (provider: unknown, proxyUrl: string, id: string): boolean => {
+    // `readConfig()` validates the ROOT object only, so anything at all can be
+    // sitting at `models.providers.<id>` in a hand-edited file. Module code is
+    // strict mode: the assignments below THROW on a primitive, and on an array
+    // they land on named properties that `JSON.stringify` then drops — a repair
+    // reported to the caller and never written. Neither is an entry. (The boot
+    // migration in `scripts/gateway-pre-start.sh` REPLACES such an entry with a
+    // fresh valid one; here we only decline to write into it, because this
+    // function repairs a URL and is not the place that rebuilds a provider.)
+    if (!isPlainObject(provider) || provider.baseUrl === proxyUrl) return false;
+    if (routesToAnotherHost(provider, proxyUrl)) {
+      // The URL is deliberately not logged: an owner-configured endpoint can
+      // carry user-info or query credentials, and the journal keeps what it is
+      // given.
+      console.warn(`[openclaw-config] ${id} has a model row on another host; leaving the entry as configured`);
+      return false;
+    }
+    provider.baseUrl = proxyUrl;
+    provider.apiKey = getLocalAiToken();
+    return true;
+  };
+
+  if (adoptProxy(providers.llamacpp, getLlamaCppProxyBaseUrl(), "llamacpp")) changed = true;
+  if (adoptProxy(providers.ollama, getOllamaProxyBaseUrl(), "ollama")) changed = true;
 
   if (changed) {
     await writeConfig(config);
@@ -2663,8 +2730,46 @@ async function awaitGatewayReady(options: RestartGatewayOptions): Promise<void> 
   throw new GatewayNotReadyError();
 }
 
+/**
+ * How many times this process has bounced the gateway.
+ *
+ * A monotonic counter, exported so anything holding a memo of something the
+ * GATEWAY told us can tell whether its answer predates a restart. A restart
+ * takes every channel, every provider and every session down at once, while the
+ * ~14 callers of {@link restartGateway} — a model save, an STT change, a
+ * browser install, the updater, boot — know nothing about any of them and
+ * cannot each be taught to invalidate the right caches.
+ *
+ * Bumped TWICE per restart, at both ends, and one bump is not enough: with only
+ * the first, a read that STARTS after the bump and lands while the gateway is
+ * on its way down carries the new generation already, so the row it caches —
+ * read from the dying process — is accepted for a full window after the new one
+ * is up. The second bump makes every read that overlapped the restart older
+ * than the generation that follows it.
+ *
+ * What it cannot cover is the sub-second window between `systemctl restart`
+ * being issued and the old process actually closing its socket, on a caller
+ * that did not wait for readiness (`awaitReady: false`) and so has no "after"
+ * to bump at. A read landing exactly there is bounded instead by the memo's own
+ * short failure window, because the moment the socket is gone the CLI answers
+ * `gatewayReachable: false` and that is not stored as an answer at all.
+ *
+ * Deliberately in this direction: this module imports nothing from the memo
+ * holders, so they read the counter and there is no cycle. (A previous note
+ * claimed one; it was wrong.)
+ */
+let gatewayRestartCount = 0;
+
+/** @see gatewayRestartCount */
+export function gatewayRestartGeneration(): number {
+  return gatewayRestartCount;
+}
+
 export async function restartGateway(options: RestartGatewayOptions = {}): Promise<void> {
   if (gatewayIsAbsent()) return;
+  // The FIRST of the two bumps — see gatewayRestartCount. Before the restart,
+  // so a row read from the gateway that is about to go down is already stale.
+  gatewayRestartCount += 1;
   // Best effort, before the restart: a unit that crash-looped through its
   // StartLimitBurst (20/hour — one bad config during an update is enough)
   // refuses every restart for the rest of the window with "Start request
@@ -2682,6 +2787,9 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
       timeout: 60000,
     });
     await awaitGatewayReady(options);
+    // The SECOND bump: everything read while this restart was in flight belongs
+    // to the generation that is now behind us.
+    gatewayRestartCount += 1;
     return;
   } catch (err) {
     if (err instanceof GatewayNotReadyError) throw err;
@@ -2705,6 +2813,7 @@ export async function restartGateway(options: RestartGatewayOptions = {}): Promi
         });
         // The legacy user unit serves the same port, so it owes the same proof.
         await awaitGatewayReady(options);
+        gatewayRestartCount += 1;
         return;
       } catch (fallbackErr) {
         // A gateway that was restarted but never came back must not be reported

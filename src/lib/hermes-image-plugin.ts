@@ -1,5 +1,6 @@
 import fsp from "fs/promises";
 import path from "path";
+import { resolveConfigRoot } from "@/lib/config-store";
 import { hermesHome } from "@/lib/hermes-env";
 
 /**
@@ -91,13 +92,19 @@ export const HERMES_IMAGE_TOKEN_ENV = "CLAWBOX_AI_TOKEN";
 /**
  * Where the plugin's source lives in THIS checkout.
  *
- * `CLAWBOX_ROOT` first for the same reason `config-store` and `system-profile`
- * read it: the production server runs from the repo root, but a test (and a dev
- * server) may not.
+ * The install, NOT the cwd. The production server does not run from the repo
+ * root: Next's standalone `server.js` does `process.chdir(__dirname)`, so in
+ * production the cwd is `.next/standalone`, and this read the plugin out of the
+ * build output. That worked only because @vercel/nft happened to trace
+ * `scripts/` into that tree — a copy that refreshes on a full rebuild and not
+ * before, so an update shipping a fixed plugin could install the stale one.
+ *
+ * `resolveConfigRoot()` rather than the `CONFIG_ROOT` constant: it is read per
+ * call, and the tests point `CLAWBOX_ROOT` at a temp tree after this module is
+ * imported.
  */
-function pluginSourceDir(): string {
-  const root = process.env.CLAWBOX_ROOT || process.cwd();
-  return path.join(root, "scripts", "hermes-plugins", "image_gen", HERMES_IMAGE_PLUGIN_NAME);
+export function hermesImagePluginSourceDir(): string {
+  return path.join(resolveConfigRoot(), "scripts", "hermes-plugins", "image_gen", HERMES_IMAGE_PLUGIN_NAME);
 }
 
 /** Where Hermes looks for a user-installed image backend. */
@@ -117,7 +124,7 @@ export function hermesImagePluginDir(): string {
  * Python will happily import a stale `.pyc` whose source no longer exists.
  */
 export async function installHermesImagePlugin(): Promise<void> {
-  const source = pluginSourceDir();
+  const source = hermesImagePluginSourceDir();
   const target = hermesImagePluginDir();
   await fsp.mkdir(target, { recursive: true, mode: 0o755 });
   for (const name of PLUGIN_FILES) {

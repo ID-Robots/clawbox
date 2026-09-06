@@ -5,6 +5,7 @@ import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { dashboardUnreachable, hermesGate, isValidProviderId, isValidSessionId, relayJson } from "../shared";
+import { forgetProviderVerified } from "@/lib/provider-verified";
 
 // Poll a device-code session until the user approves it on the provider's
 // verification page. Terminal statuses: "approved" | "error" | "expired";
@@ -84,6 +85,11 @@ export async function GET(request: Request) {
     // prompt cache, so a client that keeps polling a finished session must not be
     // able to charge the owner for one per tick.
     if (approved) {
+      // The device-code flow's terminal tick: a credential has just landed, so
+      // an older turn's mark describes one that no longer exists. Only on
+      // "approved", like everything else in this branch. See
+      // src/lib/provider-verified.ts.
+      await forgetProviderVerified(providerId);
       await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
     }
     return relayed;

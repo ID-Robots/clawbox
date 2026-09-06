@@ -255,6 +255,7 @@ export const skillsEn: Record<string, string> = {
   "skills.installUnknownOutcome": "The device’s answer was too long to read, so whether “{name}” was installed is not known. Check the Installed tab before trying again.",
   "skills.uninstallUnknownOutcome": "The device’s answer was too long to read, so whether “{name}” was removed is not known. Check the Installed tab before trying again.",
   "skills.detailFailed": "Couldn’t load this skill’s details. Try again.",
+  "skills.detailNotFound": "This skill isn’t on this device or in the skill store, so there’s nothing to show.",
   "skills.detailUnavailable": "Hermes is not installed on this device, so this skill’s details cannot be loaded.",
   "skills.detailDocsFailed": "Couldn’t load this skill’s full documentation. The details above come from the device.",
 

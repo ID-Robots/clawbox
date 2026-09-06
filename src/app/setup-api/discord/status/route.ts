@@ -250,9 +250,9 @@ export async function GET() {
     // `tokenStatus` and `lastError`, which is exactly the vocabulary the Hermes
     // branch above maps. So the card was blank on a box whose bot was
     // answering in Discord.
-    // Through the shared memo in openclaw-channels: one CLI cold start per
-    // channel per window, concurrent callers coalesced, failures remembered
-    // too. This route used to hold a private copy of that cache — which is why
+    // Through the shared memo in openclaw-channels: ONE CLI cold start per
+    // window for every channel at once (the read is un-filtered, TASK-671),
+    // concurrent callers coalesced, failures remembered too. This route used to hold a private copy of that cache — which is why
     // /whatsapp/status, reading the same command with no memo at all, cost 3.6 s
     // a poll where this one cost 20 ms.
     const channel = await readCachedChannelStatus(DISCORD_CHANNEL_ID);

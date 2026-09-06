@@ -142,6 +142,59 @@ if [ -e "$SDIR/data" ]; then
   fail "$SDIR/data survived removal - the standalone tree would ship a duplicate of the runtime data directory, including 0600 secrets (see next.config.ts)"
 fi
 
+# The checkout's own `.env` and `.git`, for the same reason and by the same
+# rule — but swept from the WHOLE tree, not just beside the entry.
+#
+# Two different routes put them there, and only one of them has a native
+# switch (the measurement for both is recorded in next.config.ts):
+#
+#   * `.env` and `.env.production` are copied by Next ITSELF, outside the
+#     trace: writeStandaloneDirectory() walks `loadedEnvFiles` and copyFile()s
+#     exactly those two names (next/dist/build/index.js), with no config switch.
+#     This sweep is the only thing that removes them.
+#   * `.git` rides in on the instrumentation trace — the same whole-project
+#     asset directory that brings `.next-old` in above. Read off the OpenClaw
+#     box on 2026-09-05: `.next/standalone/.git` was 88 MB. That trace IS
+#     reachable by `outputFileTracingExcludes` (only middleware's is not), so
+#     `.git/**` is excluded there now and this sweep should find nothing —
+#     kept because no real build has been measured with that line in place,
+#     and because a post-condition that fails the build is worth more than an
+#     exclude nobody would notice regressing.
+#
+# On a box the checkout `.env` is 0600 and holds GOOGLE_OAUTH_CLIENT_SECRET
+# and, where install.sh was given one, CLAWBOX_AI_API_KEY. Nothing reads the
+# copy: systemd hands the real file to clawbox-setup as an EnvironmentFile, and
+# @next/env never overwrites a variable that is already in the environment.
+#
+# Depth-unbounded because the trace copies whole project subdirectories:
+# `e2e-install/.env.test` (gitignored, and its tracked .example documents seven
+# provider keys) lands at `.next/standalone/e2e-install/.env.test`, two levels
+# down. `node_modules` is pruned — packages ship `.env` fixtures of their own,
+# and failing a build over one would be a false failure.
+# Every pattern quoted, including the three that need no quoting today: this
+# script runs with the project root as cwd, where `.env` and `.git` both exist,
+# so one added `*` in an unquoted word would be expanded by the shell against
+# the checkout before `find` ever saw it.
+env_and_git_copies() {
+  find "$STANDALONE" \
+    -name 'node_modules' -prune \
+    -o \( -name '.env' -o -name '.env.*' -o -name '.git' \) -prune "$@"
+}
+
+# `|| true` so the check below is what reports a failed removal, rather than
+# errexit killing the script on `rm` with nothing said — the same shape the
+# data/ removal above uses.
+env_and_git_copies -exec rm -rf {} + || true
+
+# `-quit` rather than a pipe to `head`: under `pipefail` a `find` that is still
+# writing when `head` exits dies of SIGPIPE, and errexit would then end the
+# build with no output at all.
+LEFT="$(env_and_git_copies -print -quit)" \
+  || fail "could not scan $STANDALONE for copied .env/.git files"
+if [ -n "$LEFT" ]; then
+  fail "$LEFT survived removal - the standalone tree would ship a copy of the checkout's environment files or of its .git (see next.config.ts)"
+fi
+
 rm -rf "$SDIR/.next/static" "$SDIR/public"
 cp -r .next/static "$SDIR/.next/static"
 cp -r public "$SDIR/public"

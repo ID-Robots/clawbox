@@ -156,16 +156,128 @@ async function deleteWifiConnections(): Promise<void> {
   }
 }
 
+/** ENOENT, the one errno every step of this wipe reads as "already gone". */
+function isEnoent(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
+}
+
+/**
+ * What `removeDirectoryContents` is allowed to do with `dir`.
+ *
+ * `directory` — it really is one; readdir it.
+ * `gone`      — there was nothing there, or what was there was not a directory
+ *               and has been removed. Nothing was hidden behind it.
+ * `failure`   — say so through the failure list. NEVER a throw: everything else
+ *               in this wipe returns its failures, and the handler's outer catch
+ *               is a 500 taken AFTER data/, ~/.openclaw, ~/.clawkeep and the
+ *               home paths are gone and BEFORE the password reset, the WiFi
+ *               clear and the reboot — the un-resettable box this whole guard
+ *               exists to prevent, reached by a different errno.
+ */
+type DirectoryGuard =
+  | { kind: "directory" }
+  | { kind: "gone" }
+  | { kind: "failure"; failure: string };
+
+/**
+ * Check what `dir` actually is before anything readdirs it.
+ *
+ * Nothing may `readdir` a path this wipe is about to empty entry-by-entry until
+ * this has answered `directory`. A previous owner with a shell (the Terminal
+ * app, or SSH before the key wipe — the adversary the keep-lists are written
+ * against) can leave two things in the way:
+ *
+ *   - A SYMLINK. `readdir` follows it and `fs.rm` then deletes THROUGH it:
+ *     `rm -rf ~/.hermes && ln -s /home/clawbox ~/.hermes` turned the next
+ *     owner's factory reset into a wipe of everything in the home directory
+ *     that is not a keep-list NAME — the checkout, `.bun`, `.local/bin`, the
+ *     `~/.cache/huggingface` voice models. A reflash, caused by pressing
+ *     Factory reset.
+ *   - A PLAIN FILE. `readdir` raises ENOTDIR, which used to escape to the
+ *     handler's outer catch and answer 500 half-way through the wipe,
+ *     identically on every retry.
+ *
+ * Both are answered by removing THAT PATH — `fs.rm` on a symlink removes the
+ * link, never its target — but they are not the same outcome and must not be
+ * reported as one:
+ *
+ *   - A plain file (or socket, or fifo) hid nothing: there is no directory of
+ *     owner state behind it, so removing it finishes the job (`gone`) and the
+ *     reset completes, which is the ENOTDIR half of the defect.
+ *   - A SYMLINK hid everything. Its target still holds whatever the wipe was
+ *     sent to erase — and it may not even be on this disk. Deleting through it
+ *     is the reflash above; keeping quiet about it would hand the next owner a
+ *     box that answered "factory reset complete" over a `~/Documents` still
+ *     full of the previous owner's files, browsable in the Files app. So the
+ *     link goes and the path is REPORTED: the handler's aggregate gate then
+ *     answers "factory reset incomplete" with the path named, WITHOUT clearing
+ *     the WiFi, resetting the password or rebooting, so the owner still has a
+ *     reachable box and something to act on.
+ *
+ * That also covers a directory that is a symlink for a good reason — a
+ * `data/llamacpp` moved to another disk, say. Its `keep` list (the 3.2 GB Gemma
+ * GGUF) is unreachable through a removed link, so "nothing inside a
+ * non-directory can be a keep-list member" is true of a plain file and NOT of a
+ * symlink; reporting is what stops that becoming a silent loss on a box that
+ * reboots into AP mode with no internet.
+ *
+ * Not TOCTOU-proof, deliberately: Node exposes no readdir-at-fd (`fs.opendir`
+ * takes a path, there is no `fdopendir`), so a shell racing this between the
+ * lstat and the readdir could still swap a directory for a link. That needs a
+ * live adversary on the box DURING the reset; the planted-link case closed here
+ * needs a shell once, at any time before it.
+ */
+async function guardDirectory(dir: string): Promise<DirectoryGuard> {
+  let stats;
+  try {
+    stats = await fs.lstat(dir);
+  } catch (err: unknown) {
+    if (isEnoent(err)) return { kind: "gone" };
+    return { kind: "failure", failure: `${dir}: ${err}` };
+  }
+  if (stats.isDirectory()) return { kind: "directory" };
+
+  const wasSymlink = stats.isSymbolicLink();
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+  } catch (err: unknown) {
+    return { kind: "failure", failure: `${dir}: ${err}` };
+  }
+  if (!wasSymlink) return { kind: "gone" };
+  return {
+    kind: "failure",
+    failure: `${dir}: a symlink, not a directory — the link was removed and whatever it pointed at was left untouched, so this factory reset did not erase it`,
+  };
+}
+
+/**
+ * Name a failure from `removeDirectoryContents` for the aggregate list.
+ *
+ * An ENTRY failure is a bare name (`auth.json: EACCES…`) and is read relative to
+ * the directory it came from; a WHOLE-DIRECTORY failure from `guardDirectory`
+ * already carries its absolute path, and prefixing that again would read as a
+ * child of itself.
+ */
+function labelFailure(rel: string, failure: string): string {
+  return failure.startsWith("/") ? failure : `${rel}/${failure}`;
+}
+
 async function removeDirectoryContents(dir: string, keep?: ReadonlySet<string>): Promise<string[]> {
   // Background processes (npm install, plugin runtimes) can recreate files
   // between readdir and rm; one retry catches that.
   for (let attempt = 0; attempt < 2; attempt++) {
+    // Re-asked on every attempt, not hoisted: the retry exists because things
+    // move under this wipe, and a path that became a link between the passes
+    // must not be read through — or reported clean — on the second one either.
+    const guard = await guardDirectory(dir);
+    if (guard.kind === "gone") return [];
+    if (guard.kind === "failure") return [guard.failure];
     let entries: string[];
     try {
       entries = await fs.readdir(dir);
       if (keep) entries = entries.filter((entry) => !keep.has(entry));
     } catch (err: unknown) {
-      if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return [];
+      if (isEnoent(err)) return [];
       throw err;
     }
     if (entries.length === 0) return [];
@@ -372,11 +484,11 @@ async function wipeHomeUserState(): Promise<string[]> {
   );
   for (const rel of HOME_CONTENT_WIPE_DIRS) {
     const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel));
-    failures.push(...dirFailures.map((f) => `${rel}/${f}`));
+    failures.push(...dirFailures.map((f) => labelFailure(rel, f)));
   }
   for (const { rel, keep } of HOME_CONTENT_WIPE_KEEP) {
     const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel), keep);
-    failures.push(...dirFailures.map((f) => `${rel}/${f}`));
+    failures.push(...dirFailures.map((f) => labelFailure(rel, f)));
   }
   // Agent-scheduled cron jobs. `crontab -r` exits non-zero when there is no
   // crontab — that's the desired end state, not a failure; anything else
@@ -492,24 +604,32 @@ export async function POST(request: Request) {
     await maskAndStopGateway();
 
     const dataFailures: string[] = [];
-    try {
-      const entries = await fs.readdir(DATA_DIR);
-      const results = await Promise.allSettled(
-        entries
-          .filter(entry => !DATA_KEEP_NAMES.has(entry))
-          .map(entry => fs.rm(path.join(DATA_DIR, entry), { recursive: true, force: true }))
-      );
-      for (const r of results) {
-        if (r.status === "rejected") dataFailures.push(String(r.reason));
+    // The top of data/ is wiped by a readdir + rm pass of its own rather than
+    // through removeDirectoryContents (it keeps no retry, so a survivor is
+    // reported on the first pass), so it needs the same guard: a link planted
+    // at data/ would point this rm at whatever it names.
+    const dataGuard = await guardDirectory(DATA_DIR);
+    if (dataGuard.kind === "failure") dataFailures.push(dataGuard.failure);
+    if (dataGuard.kind === "directory") {
+      try {
+        const entries = await fs.readdir(DATA_DIR);
+        const results = await Promise.allSettled(
+          entries
+            .filter(entry => !DATA_KEEP_NAMES.has(entry))
+            .map(entry => fs.rm(path.join(DATA_DIR, entry), { recursive: true, force: true }))
+        );
+        for (const r of results) {
+          if (r.status === "rejected") dataFailures.push(String(r.reason));
+        }
+      } catch (err: unknown) {
+        if (!isEnoent(err)) throw err;
       }
-    } catch (err: unknown) {
-      if (!(err && typeof err === "object" && "code" in err && err.code === "ENOENT")) throw err;
     }
     // …then take each container keep down to its exception list.
     for (const { rel, keep } of DATA_KEEP) {
       if (!keep) continue;
       dataFailures.push(
-        ...(await removeDirectoryContents(path.join(DATA_DIR, rel), keep)).map((f) => `${rel}/${f}`),
+        ...(await removeDirectoryContents(path.join(DATA_DIR, rel), keep)).map((f) => labelFailure(rel, f)),
       );
     }
 

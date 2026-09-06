@@ -39,7 +39,7 @@ import ReconnectStage from "@/components/ReconnectStage";
  */
 
 /** The rebuild's own budget (REBUILD_TAKEOVER_TIMEOUT_MS) plus room to reboot. */
-const STUCK_AFTER_MS = 20 * 60 * 1000;
+const STUCK_AFTER_MS = 25 * 60 * 1000;
 const POLL_MS = 2000;
 
 interface Step { id: string; label: string; status: string }

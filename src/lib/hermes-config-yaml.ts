@@ -47,7 +47,7 @@ import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { hermesHome } from "@/lib/hermes-env";
-import { getTopLevelScalar, getYamlPath, setYamlPath, unsetYamlPath, YamlEditUnsupported } from "@/lib/yaml-block-edit";
+import { getTopLevelScalar, getYamlPath, readYamlPath, setYamlPath, unsetYamlPath, YamlEditUnsupported } from "@/lib/yaml-block-edit";
 
 export class HermesConfigWriteError extends Error {}
 
@@ -307,19 +307,63 @@ export async function readHermesConfigTopLevelScalar(
 }
 
 /** Read one dotted key straight from the file. Returns null when unset. */
-export async function readHermesConfigValue(key: string): Promise<string | null> {
+/**
+ * What the file says about one key, with "not set" kept apart from "could not
+ * be read".
+ *
+ *   "value"      — the key resolves to a scalar, and here it is.
+ *   "present"    — the key is written here in a shape that is not a scalar: a
+ *                  nested block or a list (which is what Hermes' own model
+ *                  discovery writes into `providers.<slug>.models`), or a key
+ *                  with no value at all. Still a key in the file.
+ *   "absent"     — the key is not there — including under a parent written as
+ *                  the inline `{}`, since a mapping with no members cannot hold
+ *                  a member by that name. Line-scanned, never parsed: a level
+ *                  the reader could not index answers `unreadable` instead, so
+ *                  this stays a positive fact rather than "we found nothing".
+ *   "unreadable" — the file could not be read (EACCES), or the path could not
+ *                  be resolved in it (a non-empty flow mapping, a duplicate
+ *                  key). Not an answer, and never to be treated as one.
+ *
+ * {@link readHermesConfigValue} collapses everything but `value` into `null`,
+ * which is right for "what is configured" and wrong for "did my write take": a
+ * caller PROVING a removal must read neither a failed question nor a shape it
+ * cannot name as a removed key. The CLI fallback in {@link patchHermesConfig}
+ * is entered precisely BECAUSE the line editor could not work with the file, so
+ * both are ordinary outcomes there rather than exotic ones.
+ */
+export type HermesConfigRead =
+  | { state: "value"; value: string }
+  | { state: "present" }
+  | { state: "absent" }
+  | { state: "unreadable" };
+
+export async function resolveHermesConfigValue(key: string): Promise<HermesConfigRead> {
+  let text: string;
   try {
-    const { text } = await readConfigText(hermesConfigPath());
-    return getYamlPath(text, splitKey(key));
+    ({ text } = await readConfigText(hermesConfigPath()));
   } catch (err) {
-    // `null` means "unset" to every caller (hermes-local-ai reads it as "this
-    // leaf is not a scalar" and as "not applied yet"), and this signature has
-    // no third state to give them. A value we could not RESOLVE is a different
-    // fact, so it is at least said out loud rather than passing silently for a
-    // key nobody set.
-    if (err instanceof YamlEditUnsupported) {
-      console.error(`[hermes-config-yaml] ${key} could not be resolved, reading as unset:`, err.message);
-    }
-    return null;
+    // ENOENT/ENOTDIR never reach here — readConfigText answers them with an
+    // empty file, which is genuinely "nothing configured".
+    console.error(`[hermes-config-yaml] ${key} could not be read:`, err instanceof Error ? err.message : err);
+    return { state: "unreadable" };
   }
+  try {
+    return readYamlPath(text, splitKey(key));
+  } catch (err) {
+    console.error(
+      `[hermes-config-yaml] ${key} could not be resolved:`,
+      err instanceof Error ? err.message : err,
+    );
+    return { state: "unreadable" };
+  }
+}
+
+export async function readHermesConfigValue(key: string): Promise<string | null> {
+  // `null` means "unset" to every caller (hermes-local-ai reads it as "this
+  // leaf is not a scalar" and as "not applied yet"), and this signature has no
+  // other state to give them. A caller that needs the rest asks
+  // `resolveHermesConfigValue` instead; the failure is logged there either way.
+  const read = await resolveHermesConfigValue(key);
+  return read.state === "value" ? read.value : null;
 }

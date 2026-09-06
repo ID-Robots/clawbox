@@ -87,7 +87,11 @@ type BuildOutcome =
   /** Exit 0, nothing written at all. */
   | "exits-zero-without-output"
   /** Exit 0 with BUILD_ID but no standalone entry: the half-run postbuild. */
-  | "no-standalone-entry";
+  | "no-standalone-entry"
+  /** Next's unwrapped standalone copy hits a file that vanished; the retry works. */
+  | "trace-race-then-succeeds"
+  /** The same ENOENT every time — a file that is gone for good, not a race. */
+  | "trace-race-always";
 
 interface Scenario {
   build?: BuildOutcome;
@@ -124,6 +128,8 @@ interface Scenario {
    */
   diskHeadroom?: "ample" | "tight";
   bunInstall?: "succeeds" | "fails";
+  /** Can `run_next_build` open its build log at all? */
+  buildLog?: "writable" | "unwritable";
   nodePty?: "succeeds" | "fails";
   /** Which shipped function to run. */
   entry?: "do_rebuild" | "step_build";
@@ -148,12 +154,16 @@ interface Run {
   buildSawOwner: string;
   /** Did a stamp survive into the tree the box is left serving? */
   ownerLeftBehind: boolean;
+  /** How many times `bun run build` was actually invoked. */
+  attempts: number;
 }
 
 let sandbox: string;
 let systemctlLog: string;
 let projectDir: string;
 let ownerProbe: string;
+let buildAttempts: string;
+let unwritableTmp: string;
 
 function writeBuild(dir: string, buildId: string, withEntry = true): void {
   mkdirSync(path.join(dir, "standalone"), { recursive: true });
@@ -172,9 +182,13 @@ function run(scenario: Scenario = {}): Run {
     diskHeadroom = "ample",
     bunInstall = "succeeds",
     nodePty = "succeeds",
+    buildLog = "writable",
     entry = "do_rebuild",
   } = scenario;
 
+  // Per RUN, not per test: a case that calls this twice must not read the
+  // first build's attempts as the second's.
+  rmSync(buildAttempts, { force: true });
   mkdirSync(projectDir, { recursive: true });
   if (previousBuild === "servable") writeBuild(path.join(projectDir, ".next"), "old-build-id");
   if (parkedBuild === "servable") {
@@ -215,6 +229,20 @@ function run(scenario: Scenario = {}): Run {
     "oom-killed": 'echo "Killed" >&2; exit 137',
     "exits-zero-without-output": "exit 0",
     "no-standalone-entry": 'mkdir -p "$1/.next" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && exit 0',
+    // The message node throws out of `fs.promises.copyFile`, which Next's
+    // standalone copy does NOT catch for the middleware and instrumentation
+    // traces. Verbatim, because the retry is gated on recognising it.
+    "trace-race-then-succeeds": [
+      'if [ "$ATTEMPT" = "1" ]; then',
+      `  echo "Error: ENOENT: no such file or directory, copyfile '$1/data/webapps/demo/index.html' -> '$1/.next/standalone/data/webapps/demo/index.html'" >&2`,
+      "  exit 1",
+      "fi",
+      'mkdir -p "$1/.next/standalone" && printf "new-build-id\\n" > "$1/.next/BUILD_ID" && printf "// server\\n" > "$1/.next/standalone/server.js" && exit 0',
+    ].join("\n"),
+    "trace-race-always": [
+      `echo "Error: ENOENT: no such file or directory, copyfile '$1/data/webapps/demo/index.html' -> '$1/.next/standalone/data/webapps/demo/index.html'" >&2`,
+      "exit 1",
+    ].join("\n"),
   };
   // Sampled from inside the build, because that is the only moment the
   // question matters: the reclaim fires on a box whose `bun run build` is
@@ -236,13 +264,28 @@ function run(scenario: Scenario = {}): Run {
     '  printf "none\\n" > ' + JSON.stringify(ownerProbe),
     "fi",
   ].join("\n");
-  writeFileSync(fakeBuild, "#!/usr/bin/env bash\n" + probeOwner + "\n" + bodies[build] + "\n", "utf-8");
+  // Counts its own invocations, because "was the build run twice?" is the
+  // whole question for the retry cases — and the guard that a build which
+  // failed for any other reason is still run exactly once.
+  const countAttempt = [
+    "ATTEMPTS_FILE=" + JSON.stringify(buildAttempts),
+    'ATTEMPT=$(( $(cat "$ATTEMPTS_FILE" 2>/dev/null || echo 0) + 1 ))',
+    'printf "%s\\n" "$ATTEMPT" > "$ATTEMPTS_FILE"',
+  ].join("\n");
+  writeFileSync(
+    fakeBuild,
+    "#!/usr/bin/env bash\n" + countAttempt + "\n" + probeOwner + "\n" + bodies[build] + "\n",
+    "utf-8",
+  );
   spawnSync("chmod", ["+x", fakeBuild]);
 
   const lines = [
     "set -euo pipefail",
     "",
     "PROJECT_DIR=" + JSON.stringify(projectDir),
+    // A /tmp the box cannot write — a Jetson tmpfs under exactly the memory
+    // pressure free_memory_for_build exists for, or a full eMMC.
+    "TMPDIR=" + JSON.stringify(buildLog === "unwritable" ? unwritableTmp : sandbox),
     "CLAWBOX_USER=clawbox",
     "BUN=/nonexistent/bun",
     "FAKE_BUILD=" + JSON.stringify(fakeBuild),
@@ -328,6 +371,7 @@ function run(scenario: Scenario = {}): Run {
       "promote_parked_build",
       "set_previous_build_aside",
       "restore_previous_build",
+      "run_next_build",
     ),
     "",
     shellFunction(entry),
@@ -353,6 +397,9 @@ function run(scenario: Scenario = {}): Run {
     parked: existsSync(path.join(projectDir, ".next-old")),
     buildSawOwner: existsSync(ownerProbe) ? readFileSync(ownerProbe, "utf-8").trim() : "not-run",
     ownerLeftBehind: existsSync(path.join(projectDir, ".next", ".rebuild-pid")),
+    attempts: existsSync(buildAttempts)
+      ? Number(readFileSync(buildAttempts, "utf-8").trim())
+      : 0,
   };
 }
 
@@ -361,6 +408,13 @@ beforeEach(() => {
   systemctlLog = path.join(sandbox, "systemctl.log");
   projectDir = path.join(sandbox, "clawbox");
   ownerProbe = path.join(sandbox, "parked-owner.txt");
+  buildAttempts = path.join(sandbox, "build-attempts.txt");
+  // A regular FILE, not a 0500 directory: mode bits do not stop UID 0, so a
+  // suite running as root would create the log inside it and skip the very
+  // fallback these cases exist for. A file makes `mktemp -d` under it fail
+  // with ENOTDIR whoever runs the tests.
+  unwritableTmp = path.join(sandbox, "no-write");
+  writeFileSync(unwritableTmp, "", "utf-8");
 });
 
 afterEach(() => {
@@ -372,7 +426,7 @@ describe("the shipped function bodies these tests run", () => {
   // of every function it reads today, and silently wrong the day one grows a
   // heredoc or an indented closing brace at column 0 — the tests would then
   // assert against a fragment and pass for the wrong reason.
-  it.each(["do_rebuild", "step_build", "verify_build_present", "restore_previous_build"])(
+  it.each(["do_rebuild", "step_build", "verify_build_present", "restore_previous_build", "run_next_build"])(
     "%s is extracted whole",
     (name) => {
       const body = shellFunction(name);
@@ -420,6 +474,77 @@ describe("do_rebuild verifies the build it produced", () => {
     const r = run({ build: "succeeds", identity: "drift" });
     expect(r.status).not.toBe(0);
     expect(r.buildId).toBe("old-build-id");
+  });
+
+  it("rebuilds once when a file the build was tracing vanished under it", () => {
+    // TASK-670. Next copies the middleware and instrumentation file traces
+    // with NO error handling — the page and app-page copies are `.catch`
+    // wrapped, those two are not (node_modules/next/dist/build/utils.js on
+    // 16.3.3) — and both traces carry the project root as an asset directory,
+    // data/webapps and data/code-projects included (measured on the OpenClaw
+    // box). So a web app the agent creates or removes while the build runs
+    // kills `next build` with ENOENT during the standalone copy, and the whole
+    // update dies on a file nobody needed. The next trace cannot list a file
+    // that is gone, so one rebuild is the whole repair.
+    const r = run({ build: "trace-race-then-succeeds" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.buildId).toBe("new-build-id");
+    expect(r.hasEntry).toBe(true);
+  });
+
+  it("gives up after ONE retry when the same file is still missing", () => {
+    // A file that is gone for good is not a race, and a second five-minute
+    // build is all this may ever spend finding that out.
+    const r = run({ build: "trace-race-always" });
+    expect(r.status).not.toBe(0);
+    expect(r.attempts).toBe(2);
+    // The box keeps serving what it was serving.
+    expect(r.buildId).toBe("old-build-id");
+  });
+
+  it("gives the full-install build the same retry", () => {
+    // `install.sh --step build` is dispatchable on a live box, so it races the
+    // same writers do_rebuild does.
+    const r = run({ build: "trace-race-then-succeeds", entry: "step_build" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(2);
+    expect(r.hasEntry).toBe(true);
+  });
+
+  it("runs the build exactly once when it works", () => {
+    // The other half of the retry cases: a loop that always ran twice would
+    // satisfy every one of them and double every healthy update.
+    expect(run({ build: "succeeds" }).attempts).toBe(1);
+  });
+
+  it("still succeeds when it cannot open a build log at all", () => {
+    // The log is a debugging convenience for the retry gate, not a
+    // precondition of building. A /tmp the box cannot write must cost the
+    // RETRY, never the build — `tee`'s status is not the build's, and
+    // verify_build_present is what catches a build that produced nothing.
+    const r = run({ build: "succeeds", buildLog: "unwritable" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(1);
+    expect(r.buildId).toBe("new-build-id");
+    expect(r.hasEntry).toBe(true);
+    expect(r.stdout).toContain("could not open a build log");
+  });
+
+  it("still runs the build at all when it cannot open a build log", () => {
+    // `step_build` calls the helper BARE, with errexit live: a failure while
+    // opening the log there would abort the script before the build ran.
+    const r = run({ build: "succeeds", buildLog: "unwritable", entry: "step_build" });
+    expect(r.status).toBe(0);
+    expect(r.attempts).toBe(1);
+    expect(r.hasEntry).toBe(true);
+  });
+
+  it("does not retry a build that failed for any other reason", () => {
+    // A retry over a real failure buys the owner a second wait and the same
+    // answer, and hides which attempt the error came from.
+    expect(run({ build: "oom-killed" }).attempts).toBe(1);
+    expect(run({ build: "no-standalone-entry" }).attempts).toBe(1);
   });
 
   it("warns rather than failing when the identity script is not on disk", () => {

@@ -322,6 +322,9 @@ export CLAWBOX_IMAGE_PLUGIN="clawai"
 # Mirrors HERMES_IMAGE_PLUGIN_KEY in src/lib/hermes-image-plugin.ts.
 export CLAWBOX_IMAGE_PLUGIN_KEY="image_gen/clawai"
 export CLAWBOX_IMAGE_PLUGIN_ENTRY="$HERMES_PLUGINS_DIR/image_gen/clawai/__init__.py"
+# The protected-path table (TASK-605). The same file the OpenClaw hook plugin
+# reads; see the block that renders approvals.deny from it below.
+export CLAWBOX_PROTECTED_PATHS="$PROJECT_DIR/config/protected-paths.json"
 
 python3 - <<'PY'
 import ast, json, os, sys, tempfile
@@ -523,6 +526,125 @@ else:
     # the MCP registration above must still land.
     print("[register-mcp] WARNING: agent is not a mapping; "
           "leaving the clarify timeout at hermes' own default.", file=sys.stderr)
+
+# ── The protected-path deny rule (TASK-605). ────────────────────────────────
+# On 2026-09-02 a turn asked to "delete the largest of those files" ran rm on a
+# 3.2 GB Gemma GGUF, mid-turn, with no confirmation of any kind. The owner's
+# ruling of 2026-09-04 is a hard deny on the local-model folder and the ClawBox
+# tree and NO prompt anywhere else — "narrower, but silent when it bites".
+#
+# HERMES' OWN MECHANISM, not ours. `approvals.deny` is a user-defined list of
+# fnmatch globs that block a command unconditionally, and a match fires BEFORE
+# the --yolo / /yolo / approvals.mode=off bypass — "the user-editable
+# counterpart to the code-shipped hardline blocklist". Read on the pinned 0.20.5
+# build on the Hermes box: tools/approval.py `_match_user_deny_rule` (:623) and
+# `_user_deny_block_result` (:655), applied in `check_dangerous_command` (:3751)
+# and `check_all_command_guards` (:4384), which tools/terminal_tool.py (:351) is
+# the caller of. The refusal text it hands the agent names the rule and tells it
+# not to retry — which is what makes a silent deny something the agent can still
+# explain to the owner.
+#
+# NOT tirith, which the brief offered as the alternative: tirith on 0.20.5 is an
+# external binary that scans command CONTENT for homograph URLs, pipe-to-
+# interpreter and terminal injection (tools/tirith_security.py), and its config
+# surface is four keys — enabled, path, timeout, fail_open. It has no
+# user-authored rule file and cannot express a path.
+#
+# The globs are rendered from config/protected-paths.json, the same table the
+# OpenClaw edition's before_tool_call hook reads, and
+# src/tests/unit/protected-paths.test.ts runs one case table through both.
+#
+# ADD-ONLY. Anything already in the list stays: an owner's own deny rule is not
+# ours to drop, and neither is a glob left behind by an older version of the
+# table. The failure that leaves is a deny slightly wider than the current
+# table, which is the safe direction; the failure it prevents is this script
+# silently deleting a rule someone added on purpose.
+try:
+    with open(os.environ["CLAWBOX_PROTECTED_PATHS"]) as f:
+        protected = json.load(f)
+    roots = [str(r) for r in protected["pathRoots"]]
+    terminators = str(protected["pathTerminators"])
+    boundary = str(protected["tokenBoundary"])
+    verb_first = [str(t) for t in protected["verbFirstTokens"]]
+    path_first = [str(t) for t in protected["pathFirstTokens"]]
+    redirections = [str(p) for p in protected["redirectionPrefixes"]]
+except (OSError, ValueError, KeyError, TypeError) as err:
+    # Never fatal: the MCP registration above is what most of this script is
+    # for, and a box with tools and no deny rule is strictly better than a box
+    # with neither. Loud, because the deny is a safety rule and its absence must
+    # not be silent.
+    print(f"[register-mcp] WARNING: could not read the protected-path table "
+          f"({type(err).__name__}); the model folder and the ClawBox tree are "
+          f"NOT deny-listed this boot.", file=sys.stderr)
+else:
+    # fnmatch matches the WHOLE string, so every glob is `*`-wrapped. The class
+    # is what makes a root end a path segment: `~/clawbox` and `~/clawbox/data`
+    # are the tree, `~/clawbox-backup` is not. A root at the very end of the
+    # command line gets its own glob, because there is no character there to put
+    # in a class — that is the `rm -rf ~/clawbox` spelling.
+    #
+    # The class carries TAB, NEWLINE and CR as literal characters. Both halves
+    # of that survive: fnmatch.translate copies a class through and a regex
+    # class holds a literal control character, and PyYAML writes the glob as a
+    # double-quoted scalar with \t \n \r escapes that safe_load reads back
+    # identically. Changing this class changes every rendered glob, and the
+    # merge below is add-only by design (an owner's own rule must survive), so
+    # a box updated across such a change keeps the superseded globs alongside
+    # the new ones — harmless, since a deny only ever adds refusals, and the
+    # alternative is a script that deletes rules it did not write.
+    term_class = "[" + terminators + "]"
+    # The LEFT boundary of a token, so `rm ` is not found inside `confirm ` or
+    # `xterm `. fnmatch's negated class, and the reason `tokenBoundary` is
+    # stored in fnmatch's own syntax: the JavaScript side translates the `!`,
+    # this side splices it in verbatim. Two variants per token, because a
+    # command that STARTS with the verb has no character in front of it and
+    # `fnmatch` matches the whole string.
+    bound_class = "[" + boundary + "]"
+    desired_deny = []
+    for root in roots:
+        for token in verb_first:
+            for head in (f"{token}", f"*{bound_class}{token}"):
+                desired_deny.append(f"{head}*{root}")
+                desired_deny.append(f"{head}*{root}{term_class}*")
+        for token in path_first:
+            # No end-anchored variant: a root at the end of the line has no
+            # token after it, and no start-anchored one: the root is in front.
+            desired_deny.append(f"*{root}{term_class}*{bound_class}{token}*")
+        for prefix in redirections:
+            desired_deny.append(f"*{prefix}{root}")
+            desired_deny.append(f"*{prefix}{root}{term_class}*")
+
+    approvals_cfg = cfg.get("approvals")
+    if approvals_cfg is None:
+        approvals_cfg = {}
+        cfg["approvals"] = approvals_cfg
+    if not isinstance(approvals_cfg, dict):
+        print("[register-mcp] WARNING: approvals is not a mapping; the model folder "
+              "and the ClawBox tree are NOT deny-listed.", file=sys.stderr)
+    else:
+        existing = approvals_cfg.get("deny")
+        # Hermes itself reads a non-list `deny` as denying nothing
+        # (`_match_user_deny_rule` iterates it and keeps only stripped strings),
+        # so a shape this script does not understand is not a rule that would be
+        # lost by replacing it — but it IS something somebody typed, so say so
+        # rather than overwrite it.
+        if existing is None:
+            current = []
+        elif isinstance(existing, list):
+            current = [str(item) for item in existing]
+        else:
+            current = None
+            print("[register-mcp] WARNING: approvals.deny is not a list; leaving it "
+                  "alone — the model folder and the ClawBox tree are NOT deny-listed.",
+                  file=sys.stderr)
+        if current is not None:
+            missing = [g for g in desired_deny if g not in current]
+            if missing:
+                approvals_cfg["deny"] = current + missing
+                changed = True
+                print(f"[register-mcp] added {len(missing)} approvals.deny rules — the "
+                      "ClawBox tree and the local-model folders cannot be deleted, "
+                      "overwritten, truncated or moved by the agent")
 
 def config_name_list(value):
     """The plugin names in a hermes config list value, or None for a shape this

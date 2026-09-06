@@ -18,6 +18,7 @@ import { HOME, spawnArgv } from "../lib/guard";
 import { json, text, type Registrar, type ToolResult } from "../lib/register";
 import { zBool, zConfirm, zEnumOf, zInt, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
+import { versionsForDevice, type VersionsPayload } from "../lib/versions";
 import { PREFERENCE_LANGUAGES, WALLPAPER_FITS } from "../../src/lib/preference-schema";
 import { deriveProtection, type Protection, type ProtectionInput } from "../../src/lib/clawkeep-protection";
 
@@ -154,13 +155,48 @@ function coercePreference(key: string, value: string): string | number {
 
 // ── Backup ───────────────────────────────────────────────────────────────────
 
-// ClawKeep archives the OpenClaw agent through the openclaw CLI, so on a Hermes
-// device the feature cannot run at all — src/lib/clawkeep.ts reports
-// supportedOnEdition:false and the Settings app renders an "unavailable on this
-// edition" card with nothing to pair. backup_list and backup_now are therefore
-// not REGISTERED on Hermes (see the registrations below); backup_status stays,
-// because the agent still has to be able to answer "do you back up?" honestly.
+// ClawKeep archives EITHER agent now — `clawkeep/clawkeep/agent.py` is the seam
+// that hands the runner an OpenClaw or a Hermes backend, `getStatus()` answers
+// `supportedOnEdition: true` unconditionally (`src/lib/clawkeep.ts`), and the
+// daemon is installed on both boxes. The paragraph that used to stand here said
+// the opposite; it described the state before that seam existed.
+//
+// `backup_list` and `backup_now` are nevertheless still registered on OpenClaw
+// only (see the registrations below), so on a Hermes box the whole exit-code
+// taxonomy below is unreachable FROM THE AGENT even though the daemon can back
+// that box up — the owner reaches it from the ClawKeep app, which is on both.
+// Widening the registration is a decision about what the agent may start, not a
+// comment fix, so it is left for its own change and named in the PR body.
+// `backup_status` is on both editions, because the agent has to be able to
+// answer "do you back up?" honestly wherever it runs.
 const BACKUP_RULES: ErrorRule[] = [
+  // Ordered: the first match wins. Since TASK-672 the daemon's whole `EXIT_*`
+  // taxonomy reaches this tool as a real status instead of a 200 with
+  // `ok:false`, and none of these failures is worth retrying — every one of
+  // them needs the owner.
+  //
+  // Every rule that names a status this MIDDLEWARE can also produce is gated on
+  // the route's own `code` as well. A bare `status: 401` would swallow the
+  // MCP's own auth failure: `/setup-api/*` answers a JSON 401 whenever the
+  // bearer is missing or stale, `matchRule` runs before `fromApiError`, and the
+  // agent would be told to tear down a perfectly good ClawKeep pairing — with
+  // "do not retry" stopping it from reaching the tool that would have found the
+  // real fault. `mcp-tool-honesty.test.ts` pins that principle for the sibling
+  // route already.
+  {
+    status: 409,
+    match: /"code"\s*:\s*"needs_passphrase"/,
+    code: "CONFLICT",
+    message: "Cloud backup needs an encryption passphrase before it can run.",
+    next: "Tell the user to set one in Settings -> Backup. Do not retry.",
+  },
+  {
+    status: 409,
+    match: /"code"\s*:\s*"token_unreadable"/,
+    code: "CONFLICT",
+    message: "The ClawKeep pairing file on this device could not be read.",
+    next: "Tell the user to check that it exists and is mode 600 — this is not a re-pairing. Do not retry.",
+  },
   {
     status: 409,
     code: "CONFLICT",
@@ -172,6 +208,58 @@ const BACKUP_RULES: ErrorRule[] = [
     code: "NOT_SUPPORTED_HERE",
     message: "Cloud backup is not available on this device.",
     next: "Tell the user it is not set up, and do not call the backup tools again this session.",
+  },
+  {
+    status: 401,
+    match: /"code"\s*:\s*"pairing_revoked"/,
+    code: "CONFLICT",
+    message: "ClawKeep rejected this device's pairing — it was probably removed at the portal.",
+    next: "Tell the user to pair the device again in Settings -> Backup. Do not retry.",
+  },
+  {
+    status: 402,
+    match: /"code"\s*:\s*"tier_limit"/,
+    code: "CONFLICT",
+    message: "This ClawKeep plan does not allow that backup.",
+    next: "Tell the user what their plan does not cover. Do not retry.",
+  },
+  {
+    status: 507,
+    match: /"code"\s*:\s*"quota_full"/,
+    code: "CONFLICT",
+    message: "The ClawKeep account is out of space.",
+    next: "Tell the user to free some snapshots or upgrade the plan. Do not retry.",
+  },
+  {
+    status: 503,
+    match: /"code"\s*:\s*"daemon_missing"/,
+    code: "ENDPOINT_DOWN",
+    message: "The ClawKeep daemon is not installed on this device.",
+    next: "Tell the user cloud backup is not installed here. Do not retry.",
+  },
+  {
+    status: 504,
+    match: /"code"\s*:\s*"(offline|timed_out)"/,
+    code: "ENDPOINT_DOWN",
+    message: "The backup could not reach the ClawKeep portal, or ran out of time.",
+    next: "Do not start another one. Call backup_status, and tell the user what it reports.",
+  },
+  {
+    // 500 is the box's own fault — a corrupt config, a broken openssl, an
+    // archiver that failed. Retrying the same backup cannot help, which is what
+    // the catch-all in `fromApiError` would otherwise advise.
+    status: 500,
+    match: /"code"\s*:\s*"(config_error|encryption_failed|archive_failed)"/,
+    code: "ENDPOINT_DOWN",
+    message: "The backup failed on the device itself.",
+    next: "Do not start another one. Call backup_status, and tell the user what it reports.",
+  },
+  {
+    status: 502,
+    match: /"code"\s*:\s*"(backup_failed|portal_error|upload_failed)"/,
+    code: "ENDPOINT_DOWN",
+    message: "The backup did not finish.",
+    next: "Do not start another one. Call backup_status, and tell the user what it reports.",
   },
 ];
 
@@ -368,10 +456,20 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "update_check",
-    "Check whether a newer ClawBox software version is available, and report the installed version. This only reports — it never installs anything. If an update is waiting, tell the user to install it from Settings -> System Update.",
+    "Check whether a newer ClawBox software version is available, and report the installed version. This only reports — it never installs anything. If an update is waiting, tell the user to install it from Settings -> System Update. If `remote.reachable` is false the device could not reach GitHub for this check, so say the check failed and quote `remote.reason` — do NOT report the device as up to date.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, profile: "core" },
-    async () => json(await apiGet("/setup-api/update/versions", { timeoutMs: 20_000 })),
+    // Shaped, not raw: the route always carries an `openclaw` component and
+    // fills its target from the ClawBox pin, so the raw payload names an
+    // OpenClaw version for a device that ships no OpenClaw. Same strip
+    // device_status applies to the same payload — see mcp/lib/versions.ts.
+    async () =>
+      json(
+        versionsForDevice(
+          await apiGet<VersionsPayload>("/setup-api/update/versions", { timeoutMs: 20_000 }),
+          ctx,
+        ),
+      ),
   );
 
   if (ctx.capabilities.journal) {
@@ -636,20 +734,21 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       }
       // An unpaired box is a 409 `not_paired`, which BACKUP_RULES above turns
       // into CONFLICT + "tell the user to pair it in Settings -> Backup".
-      // Everything else the daemon can fail at still comes back as HTTP 200
-      // with ok:false and the reason in stderrTail; a 200 never raises, so the
-      // tool used to return prose with no isError flag — a failed backup that
-      // reads as a success. Hence the explicit check below.
-      const body = await apiPost<{ ok?: boolean; exitCode?: number; stderrTail?: string }>(
+      // Since TASK-672 every OTHER daemon failure is a real status too, so it
+      // raises here rather than arriving as a 200 with `ok:false` and the
+      // reason buried in `stderrTail` — a failed backup that read as a
+      // success. The check below is what is left of that: a 200 must now mean
+      // the backup finished, and anything else in one is a server this tool
+      // does not understand.
+      const body = await apiPost<{ ok?: boolean; exitCode?: number }>(
         "/setup-api/clawkeep/backup",
         { ...(label ? { label } : {}) },
         { timeoutMs: 180_000, rules: BACKUP_RULES },
       );
       if (body.ok !== true) {
-        const reason = (body.stderrTail || "").trim().split("\n").filter(Boolean).pop();
         throw new ToolError(
           "ENDPOINT_DOWN",
-          `The backup did not run${reason ? `: ${reason}` : "."}`,
+          "The backup did not run.",
           "Do not start another one. Call backup_status, and tell the user what it reports.",
         );
       }

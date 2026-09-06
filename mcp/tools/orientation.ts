@@ -8,6 +8,7 @@ import { DEFAULT_CWD } from "../lib/guard";
 import { json, text, type Ed, type Registrar } from "../lib/register";
 import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, reported, type HermesDefaultSource } from "../lib/report";
 import type { McpContext } from "../lib/context";
+import { shipsOpenclaw, type VersionsPayload } from "../lib/versions";
 import { WEBAPP_KV_CLIENT_SNIPPET } from "../../src/lib/webapp-sandbox";
 
 const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
@@ -208,11 +209,6 @@ interface StatsPayload {
   temperature?: unknown;
 }
 
-interface VersionsPayload {
-  clawbox?: { current?: string | null; target?: string | null; updateAvailable?: boolean };
-  openclaw?: { current?: string | null; target?: string | null; updateAvailable?: boolean };
-}
-
 interface ClawaiPayload {
   hasToken?: boolean;
   tier?: string;
@@ -399,13 +395,35 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
         ai,
         disk: rootDisk(stats),
         memory_used_percent: stats?.memory?.usedPercent ?? "unknown",
+        // `shipsOpenclaw`, not `ctx.edition`: the question is whether the DEVICE
+        // has an OpenClaw to update, which the payload answers itself. Reading
+        // the active harness here hid a waiting OpenClaw update from a dual box
+        // whenever Hermes happened to be the one answering.
         update: versions
           ? {
               clawbox: versions.clawbox ?? "unknown",
-              ...(ctx.edition === "openclaw" ? { openclaw: versions.openclaw ?? "unknown" } : {}),
+              ...(shipsOpenclaw(versions, ctx) ? { openclaw: versions.openclaw ?? "unknown" } : {}),
+              // Emitted on its PRESENCE, which is the payload's own "this box
+              // ships Hermes" signal. Without it the tool the server's
+              // instructions tell every model to call FIRST had no answer to
+              // "what version of Hermes am I running" on the two SKUs that have
+              // one — and a model with no answer states one from training
+              // memory. It never carries a target: see updater.ts.
+              ...(versions.hermes ? { hermes: versions.hermes } : {}),
+              // "unknown", not false, when the device could not reach GitHub.
+              // This is the tool the server's instructions tell every model to
+              // call FIRST, so `waiting: false` here is how the owner asking
+              // "am I on the latest version?" gets told yes by a box that never
+              // managed to ask (TASK-655). The reason travels with it so the
+              // model can say what actually happened.
               waiting:
-                versions.clawbox?.updateAvailable === true
-                || (ctx.edition === "openclaw" && versions.openclaw?.updateAvailable === true),
+                versions.remote?.reachable === false
+                  ? "unknown"
+                  : versions.clawbox?.updateAvailable === true
+                    || (shipsOpenclaw(versions, ctx) && versions.openclaw?.updateAvailable === true),
+              ...(versions.remote?.reachable === false
+                ? { check_failed: versions.remote.reason ?? "could not reach the update repository" }
+                : {}),
             }
           : "unknown",
       });

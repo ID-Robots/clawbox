@@ -20,6 +20,7 @@ import { startRootStep } from "./root-step-runner";
 import { setUpdateLock, clearUpdateLock } from "./update-lock";
 import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
+import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -57,13 +58,268 @@ const execFile = promisify(execFileCb);
 function execGit(
   projectDir: string,
   args: string[],
-  options: { timeout: number; maxBuffer?: number },
+  options: { timeout: number; maxBuffer?: number; env?: NodeJS.ProcessEnv },
 ) {
   return execFile(
     "git",
     ["-c", `safe.directory=${projectDir}`, "-C", projectDir, ...args],
     options,
   );
+}
+
+/**
+ * git's own switch for "never ask a human for a credential".
+ *
+ * Every ClawBox fetches this repository anonymously and has no credential to
+ * offer. Without this, a git run that inherits a tty — a support engineer's
+ * `install.sh` in a terminal, a root unit started from one — blocks on a
+ * username prompt nobody is there to type, and the update hangs instead of
+ * failing. With it the refusal is deterministic and immediate.
+ */
+const GIT_NO_PROMPT_ENV: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
+
+/**
+ * How this device's network reach to the update remote actually went.
+ *
+ * `reachable: false` is the fact /update/versions used to lose: the fetch was
+ * swallowed, HEAD was compared against a STALE `origin/<branch>` and the box
+ * told its owner "You're up to date" while it had not managed to ask.
+ */
+export interface RemoteReachability {
+  reachable: boolean;
+  /**
+   * GitHub answered a public repository's anonymous `git-upload-pack` with
+   * 401. git words that as "could not read Username", which names credentials
+   * a ClawBox never has — so it is classified here rather than shown raw.
+   */
+  refusedAnonymously?: boolean;
+  /** One owner-facing sentence. Absent when the remote answered. */
+  reason?: string;
+}
+
+const REMOTE_REACHABLE: RemoteReachability = { reachable: true };
+
+/**
+ * Measured on the dev network, 2026-09-02 (TASK-655): GitHub answers git's
+ * protocol-v2 POST to `/git-upload-pack` with `HTTP 401` and a body reading
+ * "Repository not found." — for a PUBLIC repository — once an address has used
+ * up its anonymous allowance. On the day it was measured the GET to
+ * `/info/refs` kept answering while the POST did not, which is why the fetch
+ * failed and `ls-remote` did not. That was the state that afternoon, NOT a
+ * property of the endpoint: the GET is refused too, which is why it is retried
+ * and why getTargetVersion has a branch for it being unreachable.
+ *
+ * git reports it as `fatal: could not read Username for 'https://github.com'`.
+ * That sentence points at credentials; the cause is an anonymous-access
+ * refusal, and no ClawBox has a credential to add. Two people lost an
+ * afternoon to that wording before it was measured.
+ *
+ * Narrow on purpose. `Authentication failed` and `terminal prompts disabled`
+ * are the same 401 seen through another git version, but they ALSO fire on a
+ * QA box pointed at a private fork — where "the repository is public and the
+ * device needs no password" would be a false diagnosis. Only the measured
+ * signature earns that sentence; see refusalReason().
+ */
+function isAnonymousFetchRefusal(text: string): boolean {
+  return /could not read Username|could not read Password|Repository not found/i.test(text);
+}
+
+/** The same 401 in a spelling that does not prove the remote is public. */
+function isCredentialRefusal(text: string): boolean {
+  return isAnonymousFetchRefusal(text)
+    || /Authentication failed|terminal prompts disabled/i.test(text);
+}
+
+/**
+ * No DNS — this box is not on the network at all.
+ *
+ * Told apart from a refusal because the answers differ: a refusal is worth
+ * asking again in a moment; "there is no network" is not, and retrying it only
+ * spends the owner's time on a question already answered.
+ */
+function isOffline(text: string): boolean {
+  return /Could not resolve host|Temporary failure in name resolution|Network is unreachable/i.test(text);
+}
+
+/**
+ * The remote answered, and what it said is that this ref does not exist.
+ *
+ * A CONFIGURATION answer, not a network one: an operator who pinned Settings →
+ * System Update → Advanced to a branch that has since been deleted has a pin
+ * problem, and reporting it as "could not reach GitHub" sends them to the
+ * router instead of to the setting.
+ */
+function isMissingRef(text: string): boolean {
+  return /couldn't find remote ref|Remote branch .* not found/i.test(text);
+}
+
+/** A refusal, a timeout or a transient fault — all worth asking again. */
+function isRetryableRemoteFailure(err: unknown, text: string): boolean {
+  if (isOffline(text) || isMissingRef(text)) return false;
+  if (isCredentialRefusal(text)) return true;
+  // A git killed by execFile's own timeout has usually printed nothing, so
+  // there is no text to classify — and a stalled connection is the case a
+  // retry helps most. `killed`/`signal` is the only evidence there is.
+  const e = err as { killed?: boolean; signal?: string } | undefined;
+  if (e?.killed || e?.signal) return true;
+  return /Connection (?:timed out|refused|reset)|early EOF|RPC failed|The requested URL returned error: 5\d\d|unable to access/i
+    .test(text);
+}
+
+function errorText(err: unknown): string {
+  const e = err as { stderr?: string; stdout?: string; message?: string } | undefined;
+  return [e?.stderr, e?.stdout, e?.message].filter(Boolean).join("\n").trim();
+}
+
+/**
+ * Attempts and backoff for a refused fetch.
+ *
+ * Measured (TASK-655, 19:27): with GitHub letting roughly one anonymous fetch
+ * in three through, and one in-app update needing three separate fetches to
+ * succeed in a row, an update had a few percent chance of completing. git has
+ * no retry of its own — neither 2.34 (the boxes) nor 2.43 (the dev PC) carries
+ * a `fetch.retry`/`http.retry` knob — so it lives here.
+ *
+ * TWO budgets, because the callers pay different prices for the wrong one. The
+ * UPDATE path is a one-shot operation the owner is watching and losing it costs
+ * a whole run, so it gets the full three attempts. The VERSION CHECK is polled
+ * by four surfaces: a long retry there is dead time on every poll, and the
+ * refusal it is answering is caused by too many anonymous requests from this
+ * address — which a blanket 3x would feed. It asks twice, briefly, and it
+ * spends those two asks on the call it reads the answer from rather than
+ * splitting them: hence the third budget below, which is what the advisory tag
+ * fetch gets so the check's total stays where it was.
+ */
+const REMOTE_FETCH_ATTEMPTS = 3;
+const REMOTE_CHECK_ATTEMPTS = 2;
+/**
+ * The advisory tag fetch asks ONCE, and the retry it used to hold is spent on
+ * the `ls-remote` the tag answer is actually read from. That keeps the number
+ * of anonymous requests a version check can make exactly where it was — which
+ * matters, because the refusal being retried is caused by too many of them.
+ */
+const REMOTE_ADVISORY_ATTEMPTS = 1;
+/**
+ * An override that is not a non-negative number of milliseconds is replaced
+ * with the default, and said out loud.
+ *
+ * `Number("garbage")` is NaN, `Number(" ")` is 0, and a negative value stays
+ * negative; `setTimeout` treats all three as 0, so the retries would still run
+ * but back-to-back — removing the one thing the policy depends on, and sending
+ * the anonymous requests in the burst that causes the refusal being retried.
+ *
+ * The upper bound is here for the opposite reason, and it is why this clamps a
+ * RANGE where the shell knobs deliberately do not: `setTimeout` above
+ * 2^31 - 1 ms does not wait longer, it fires on the next tick with a
+ * `TimeoutOverflowWarning`. A huge value would therefore be INVERTED into no
+ * delay at all rather than honoured, and `reachOrigin` multiplies by the
+ * attempt number on top. Ten minutes is far past any sane version-check
+ * backoff and leaves the product three orders of magnitude clear of the limit.
+ */
+const MAX_RETRY_DELAY_MS = 600_000;
+
+function retryDelayMsFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const trimmed = raw.trim();
+  const parsed = trimmed === "" ? Number.NaN : Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_RETRY_DELAY_MS) {
+    console.warn(`[Updater] ${name}="${raw}" is not a number of milliseconds `
+      + `between 0 and ${MAX_RETRY_DELAY_MS}, using ${fallback}`);
+    return fallback;
+  }
+  return parsed;
+}
+
+const REMOTE_RETRY_DELAY_MS = retryDelayMsFromEnv("UPDATER_REMOTE_RETRY_DELAY_MS", 4000);
+const REMOTE_CHECK_RETRY_DELAY_MS = retryDelayMsFromEnv("UPDATER_REMOTE_CHECK_RETRY_DELAY_MS", 1200);
+
+const ANONYMOUS_REFUSAL_REASON =
+  "GitHub refused this ClawBox's anonymous request for the update repository. "
+  + "The repository is public and the device needs no password — GitHub answers 401 to anonymous git "
+  + "requests from an address that has made too many. Try again in a few minutes.";
+
+/** One owner-facing sentence for a failed reach. */
+function refusalReason(err: unknown, text: string): string {
+  if (isAnonymousFetchRefusal(text)) return ANONYMOUS_REFUSAL_REASON;
+  if (isCredentialRefusal(text)) {
+    return "The update repository refused this device's request for credentials it does not have. "
+      + "If this box is pointed at a private fork, it needs a remote it can read anonymously.";
+  }
+  if (isOffline(text)) {
+    return "This ClawBox could not look up github.com — check the network connection and try again.";
+  }
+  if (isMissingRef(text)) {
+    return "The update branch this ClawBox is pinned to no longer exists on GitHub. "
+      + "Choose a different branch in System Update → Advanced options.";
+  }
+  const e = err as { killed?: boolean; signal?: string } | undefined;
+  if (e?.killed || e?.signal) {
+    return "The update repository did not answer in time — the connection may be slow or blocked. Try again.";
+  }
+  // Last resort. errorText() on a spawn failure is Node's own
+  // `Command failed: git -c safe.directory=…`: an argv is not an explanation,
+  // so only its last line goes out, and only when there is nothing better.
+  return `Could not reach the update repository: ${text.split("\n").pop() || "unknown error"}`;
+}
+
+/**
+ * Run a git network command, retrying a refused or transient attempt.
+ *
+ * Returns how it went rather than throwing: every caller here wants to carry
+ * on and SAY the remote could not be reached, which is the whole point — the
+ * old `.catch(() => {})` is what turned a refusal into "up to date".
+ */
+async function reachOrigin(
+  projectDir: string,
+  args: string[],
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+): Promise<RemoteReachability> {
+  return (await readFromOrigin(projectDir, args, options)).remote;
+}
+
+/**
+ * The same policy, for a call whose OUTPUT is the answer.
+ *
+ * `RemoteReachability` travels into the /update/versions payload, so git's
+ * stdout is returned beside it rather than added to it.
+ */
+async function readFromOrigin(
+  projectDir: string,
+  args: string[],
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+): Promise<{ remote: RemoteReachability; stdout: string }> {
+  const attempts = options.attempts ?? REMOTE_FETCH_ATTEMPTS;
+  const retryDelayMs = options.retryDelayMs ?? REMOTE_RETRY_DELAY_MS;
+  let lastText = "";
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const { stdout } = await execGit(projectDir, args, {
+        timeout: options.timeout,
+        maxBuffer: options.maxBuffer,
+        env: { ...process.env, ...GIT_NO_PROMPT_ENV },
+      });
+      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? "") };
+    } catch (err) {
+      lastErr = err;
+      lastText = errorText(err);
+      if (attempt === attempts || !isRetryableRemoteFailure(err, lastText)) break;
+      console.warn(
+        `[Updater] git ${args[0]} attempt ${attempt}/${attempts} failed, retrying: `
+        + lastText.split("\n").pop(),
+      );
+      await delay(retryDelayMs * attempt);
+    }
+  }
+  return {
+    remote: {
+      reachable: false,
+      refusedAnonymously: isAnonymousFetchRefusal(lastText),
+      reason: refusalReason(lastErr, lastText),
+    },
+    stdout: "",
+  };
 }
 
 const VALID_HOST = /^[A-Za-z0-9.\-:]+$/;
@@ -156,7 +412,15 @@ import { RESTART_STEP_ID } from "./update-constants";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
-const REBUILD_TAKEOVER_TIMEOUT_MS = 900_000;
+//
+// 20 min, raised from 15 (TASK-670). `do_rebuild` may now run `next build` a
+// SECOND time when the first died on a file that changed under its own file
+// trace, and nothing extends this deadline once the wait has started: past it
+// `waitForRebuildToTakeOver` throws AND clears `update_needs_continuation`, so
+// a rebuild that actually worked would be reported red and post_update,
+// hermes_edition and gateway_verify would never run. One extra build is 2-4
+// min on a Jetson; this covers it with the same margin the original carried.
+const REBUILD_TAKEOVER_TIMEOUT_MS = 1_200_000;
 
 // The root unit that performs the rebuild + restart. Distinct from
 // RESTART_STEP_ID ("restart"), which is the UI step's identity — querying
@@ -776,7 +1040,27 @@ async function updateClawBoxAndReboot(): Promise<void> {
   //      are preserved so we don't nuke user state or force a multi-
   //      minute rebuild.
   const gitOptions = { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 };
-  await execGit(PROJECT_DIR, ["fetch", "origin"], gitOptions);
+  // NO fetch here. This used to be the THIRD anonymous fetch of one update —
+  // after the Node updater's own and step 0's (`bootstrap_updater` →
+  // install.sh `sync_repo_to_update_target`) — and the heaviest, because it
+  // asked for ALL refs. Step 0 is `failFast` and has already fetched origin AND
+  // hard-reset this tree to `upstream`, so this one could only ever re-fetch
+  // refs the run already has, while giving GitHub a third chance to refuse the
+  // whole update: an attempt on 2026-09-02 got through the first two, ran
+  // steps 1-8 for three and a half minutes, and died here (TASK-655).
+  //
+  // What replaces it is the question the reset actually depends on — is the ref
+  // on this device? — asked of the refs already on disk. Dropping the fetch
+  // without asking that would be a false success: `reset --hard` to a ref that
+  // was never fetched fails with git's own argv, and nothing would say why.
+  try {
+    await execGit(PROJECT_DIR, ["rev-parse", "--verify", `${upstream}^{commit}`], gitOptions);
+  } catch {
+    throw new Error(
+      `This ClawBox has no local copy of ${upstream}. Step 1 of this update was supposed to fetch it — `
+      + "run the update again, and if it keeps failing, GitHub may be refusing this address's anonymous requests.",
+    );
+  }
   await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
   try {
     await execGit(PROJECT_DIR, ["checkout", local], gitOptions);
@@ -815,6 +1099,21 @@ const LEGACY_GATEWAY_BLOCKER_RE =
 // for. Not global: `.match()` and `.test()` share this object.
 const PLUGIN_CAPABILITY_CONSENT_RE =
   /Plugin\s+["']?([A-Za-z0-9@._/-]+?)["']?\s+requires capability consent/i;
+// The OTHER refusal, and the one a core upgrade produces (TASK-602). Plugin
+// payloads live under `~/.openclaw/npm/projects/openclaw-<id>-<hash>__
+// openclaw-generation__g-<generation>`, keyed to the core that installed them,
+// so a core bump leaves them unreachable. The core's startup verification then
+// refuses readiness with its own sentence — `formatStartupPluginSmokeFailure`
+// in the installed 2026.8.1 bundle prints
+//
+//     - Plugin "discord": configured plugin payload verification failed
+//       (<reason>): <detail>. Run `openclaw update repair` to retry plugin repair.
+//
+// — and consent is not what is missing: the package is not on disk to consent
+// to. Matched on the core's own words rather than on the reason code, which is
+// an internal enum. Not global, for the same reason as the pattern above.
+const PLUGIN_PAYLOAD_VERIFICATION_RE =
+  /Plugin\s+["']?([A-Za-z0-9@._/-]+?)["']?\s*:\s*configured plugin payload verification failed/i;
 const CURRENT_GATEWAY_PRE_START = path.join(PROJECT_DIR, "scripts", "gateway-pre-start.sh");
 const GATEWAY_QUIESCED_ROOT_STEPS = new Set(["openclaw_install", "post_update"]);
 
@@ -982,9 +1281,25 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
   return outcome.value;
 }
 
+/**
+ * Every plugin id the pre-start says it put back, normalised.
+ *
+ * The script prints `  <id> plugin payload reinstalled (<spec>)` for each one.
+ * Reading its own report is what stops this file re-issuing the identical npm
+ * install a moment later for a package that is already back on disk.
+ */
+function pluginPayloadsRepairedByPreStart(preStartOutput: string): Set<string> {
+  const repaired = new Set<string>();
+  const re = /^\s*(\S+) plugin payload reinstalled \(/gim;
+  for (const match of preStartOutput.matchAll(re)) {
+    repaired.add(normalizeManagedPluginId(match[1]));
+  }
+  return repaired;
+}
+
 /** Run the newly checked-out pre-start repair while the gateway is stopped. */
-async function runCurrentGatewayPreStart(): Promise<void> {
-  if (!existsSync(CURRENT_GATEWAY_PRE_START)) return;
+async function runCurrentGatewayPreStart(): Promise<string> {
+  if (!existsSync(CURRENT_GATEWAY_PRE_START)) return "";
   const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
   const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
     || process.env.OPENCLAW_HOME
@@ -1007,7 +1322,7 @@ async function runCurrentGatewayPreStart(): Promise<void> {
     OPENCLAW_CONFIG_PATH: path.join(openclawHome, "openclaw.json"),
   };
   delete env.OPENCLAW_HOME;
-  await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
+  const { stdout } = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
     // Match the unit's 600s TimeoutStartSec with a little process overhead.
     // Killing this halfway through a plugin migration recreates the lock race
     // this maintenance path exists to avoid.
@@ -1015,6 +1330,7 @@ async function runCurrentGatewayPreStart(): Promise<void> {
     maxBuffer: 4 * 1024 * 1024,
     env,
   });
+  return stdout ?? "";
 }
 
 /**
@@ -1032,11 +1348,38 @@ async function runCurrentGatewayPreStart(): Promise<void> {
  * consents for everything blocked, including his.
  */
 const CLAWBOX_MANAGED_PLUGIN_IDS: ReadonlySet<string> = new Set([
+  // The ones `scripts/gateway-pre-start.sh` installs and owns the repair for.
   "codex",
   "deepseek",
-  "discord",
-  "whatsapp",
   "clawbox-email-directives",
+  // …and every channel the Settings panel can install, read from the map it
+  // installs from rather than copied: a channel added there and forgotten here
+  // would be classified as the OWNER's plugin and logged as one ClawBox may
+  // not answer for, over a package ClawBox itself put on the box.
+  ...Object.keys(OFFICIAL_CHANNEL_PLUGINS),
+]);
+
+/**
+ * The npm package behind each managed plugin whose payload this file may
+ * reinstall, keyed by the normalised plugin id.
+ *
+ * Only the plugins that are an npm `<package>@<version>` spec, because that is
+ * what the repair is: the core generation is what orphaned the payload, so the
+ * replacement has to be built for the core now on the box.
+ * `OFFICIAL_CHANNEL_PLUGINS` is the same map the Settings panel installs from,
+ * imported rather than copied — a second list here would be one more place to
+ * forget when a channel is added.
+ *
+ * The two managed plugins deliberately absent are absent for their SHAPE, not
+ * for who repairs them: `deepseek` is a ClawHub spec (`clawhub:@openclaw/…`)
+ * and `clawbox-email-directives` is copied out of the checkout, so an
+ * `@openclaw/<id>@<version>` guess would fetch a package that is not the
+ * plugin. `scripts/gateway-pre-start.sh` owns both, and
+ * `runCurrentGatewayPreStart()` has just run it.
+ */
+const MANAGED_PLUGIN_NPM_PACKAGES: ReadonlyMap<string, string> = new Map([
+  ["codex", "@openclaw/codex"],
+  ...Object.entries(OFFICIAL_CHANNEL_PLUGINS),
 ]);
 
 /**
@@ -1052,8 +1395,11 @@ function normalizeManagedPluginId(id: string): string {
   return id.replace(/^@openclaw\//, "").replace(/^openclaw-/, "");
 }
 
-/** Every plugin a consent refusal in this journal names, split by who owns it. */
-function pluginsNeedingConsent(journal: string): { managed: string[]; unmanaged: string[] } {
+/** Every plugin a refusal of one shape in this journal names, split by who owns it. */
+function pluginsNamedInRefusals(
+  journal: string,
+  pattern: RegExp,
+): { managed: string[]; unmanaged: string[] } {
   // A GLOBAL copy of the shared pattern, built here so the shared one keeps a
   // stable `lastIndex` for its `.test()` callers. Reading only the FIRST match
   // was a live dead end: the journal tail spans the whole boot (`-b`) and the
@@ -1061,7 +1407,7 @@ function pluginsNeedingConsent(journal: string): { managed: string[]; unmanaged:
   // ahead of a live `discord` one had the repair fix codex while
   // `getGatewayFailureDetail` — which scans in REVERSE — handed the owner the
   // discord sentence.
-  const namesRe = new RegExp(PLUGIN_CAPABILITY_CONSENT_RE.source, "gi");
+  const namesRe = new RegExp(pattern.source, "gi");
   // KEYED by the normalised id, VALUED by the first raw id seen for it. One
   // boot's journal can name the same plugin twice under different spellings —
   // `codex` from one start, `@openclaw/codex` from another — and a set of raw
@@ -1115,7 +1461,7 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
 }
 
 /**
- * Accept every ClawBox-managed plugin a concrete gateway error names.
+ * Repair every ClawBox-managed plugin a concrete gateway refusal names.
  *
  * WHY THIS IS NOT CODEX-ONLY ANY MORE (TASK-603). The gateway refuses readiness
  * for ANY enabled plugin whose declared capability surface has not been
@@ -1126,20 +1472,102 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
  * owner the core's own sentence: "rerun with --accept-capabilities". That is
  * advice about a CLI he never ran, over a box that will not come back until
  * somebody runs it for him. This is the tool doing the thing itself.
+ *
+ * WHY THERE ARE TWO REFUSALS (TASK-602). Consent is the refusal a plugin gets
+ * when its package is on disk and its reviewed surface is stale. A CORE UPGRADE
+ * produces the other one: plugin payloads live in npm project directories keyed
+ * to the core generation, so a bump strands the packages installed under the
+ * old one and the core's startup verification refuses over a payload that is
+ * not there. `plugins enable` cannot answer that, which is why the outage of
+ * 2026-09-01 survived a repair that only knew the consent sentence — the
+ * gateway then failed 21 times, systemd gave up, and the owner was left on
+ * "Connecting to gateway…" with no route back short of a hand-run CLI.
+ *
+ * WHY NOT `openclaw update repair --accept-capabilities`, which IS the harness's
+ * own post-core convergence and DOES take that flag on the pinned 2026.8.1: it
+ * consents for everything blocked, the owner's own plugins included. The
+ * whitelist is the point, so ClawBox drives the same underlying verbs per
+ * plugin instead. The core runs that convergence itself at startup
+ * (`runStartupUpgradeConvergence`), and it is exactly the capability-consent
+ * callback it has no way to answer there; the installed bundle exposes no
+ * config key and no environment variable for it, only the CLI flag.
  */
-async function repairPluginCapabilityConsent(journal: string): Promise<void> {
-  const { managed, unmanaged } = pluginsNeedingConsent(journal);
-  for (const pluginId of unmanaged) {
+interface PluginRepairOptions {
+  /**
+   * Consent only — no npm install.
+   *
+   * For the path where the pre-start FAILED: a payload reinstall is up to six
+   * minutes per plugin (`gateway_verify` is a `customRun` step, so its
+   * `timeoutMs` is unenforced and nothing bounds the total), spent after a
+   * pre-start that just died — possibly mid plugin migration, with OpenClaw's
+   * five-minute state leases held — and ending in that pre-start's failure
+   * anyway. `plugins enable` is local, ~12 s and safe there.
+   */
+  consentOnly?: boolean;
+  /** Normalised ids whose payload the gateway pre-start has already put back. */
+  alreadyRepaired?: Iterable<string>;
+}
+
+async function repairPluginsBlockingReadiness(
+  journal: string,
+  options: PluginRepairOptions = {},
+): Promise<void> {
+  const payload = options.consentOnly
+    ? { managed: [], unmanaged: [] }
+    : pluginsNamedInRefusals(journal, PLUGIN_PAYLOAD_VERIFICATION_RE);
+  const consent = pluginsNamedInRefusals(journal, PLUGIN_CAPABILITY_CONSENT_RE);
+  for (const pluginId of [...payload.unmanaged, ...consent.unmanaged]) {
     // Said out loud rather than skipped in silence: this is the one case where
     // the owner still has to run the CLI himself, and the update log is where
     // he or a support session will look for why nothing happened.
     console.info(
-      `[Updater] "${pluginId}" needs capability consent and is not a ClawBox-managed plugin — leaving it to its owner`,
+      `[Updater] "${pluginId}" is blocking gateway readiness and is not a ClawBox-managed plugin — leaving it to its owner`,
     );
   }
-  for (const pluginId of managed) {
+  // Payloads FIRST, and the plugins they repaired are then skipped by the
+  // consent pass below: `plugins install --accept-capabilities` puts the
+  // package back AND records the reviewed surface, so a following `enable`
+  // would be a second ~12 s CLI cold start for a question already answered.
+  // Only a reinstall that SUCCEEDED counts: `plugins enable` is the one repair
+  // here that touches no registry, and skipping it because a network install
+  // was attempted would drop the repair that could still have worked on a box
+  // whose network is why the update is being repaired.
+  const repaired = new Set<string>(options.alreadyRepaired ?? []);
+  for (const pluginId of payload.managed) {
+    const key = normalizeManagedPluginId(pluginId);
+    // The pre-start reinstalls the channel payloads too, and it ran a moment
+    // ago against this same box. Re-issuing the byte-identical install would
+    // pay a second npm fetch per plugin for a package already back on disk.
+    if (repaired.has(key)) {
+      console.info(`[Updater] "${pluginId}" payload was already reinstalled by the gateway pre-start`);
+      continue;
+    }
+    if (await repairManagedPluginPayload(pluginId)) repaired.add(key);
+  }
+  for (const pluginId of consent.managed) {
+    if (repaired.has(normalizeManagedPluginId(pluginId))) continue;
+    // Codex answers a consent refusal with the same pinned force-install it
+    // answers a missing payload with: a v1 migration can leave that ONE plugin
+    // as a project declaration with no `node_modules`, where `enable` says
+    // "Plugin not found".
     if (normalizeManagedPluginId(pluginId) === "codex") {
-      if (await codexCapabilityRepairIsAllowed()) await repairCodexCapabilityConsent();
+      // Codex has its own opt-out test, which also asks whether Codex is in
+      // use at all.
+      if (!(await codexCapabilityRepairIsAllowed())) continue;
+      if (options.consentOnly) {
+        // After a FAILED pre-start, the local verb — like every other managed
+        // plugin here. Codex's pinned reinstall exists because a migrated v1
+        // project can leave the declaration without `node_modules`, where
+        // `enable` answers "Plugin not found"; that is worth minutes of npm on
+        // the path that can restart the gateway afterwards, and not on the one
+        // that is about to report the pre-start's failure either way.
+        await recordPluginCapabilityConsent(pluginId);
+        continue;
+      }
+      // One spec, not two: the unpinned fallback exists for a payload that is
+      // GONE and may not be published under the pin's build suffix. Here the
+      // package is on disk and only its consent record is stale.
+      await reinstallManagedPluginPayload("@openclaw/codex", false);
       continue;
     }
     if (!(await pluginConsentRepairIsAllowed(pluginId))) continue;
@@ -1147,39 +1575,90 @@ async function repairPluginCapabilityConsent(journal: string): Promise<void> {
   }
 }
 
-/** The pinned force-install that repairs a partial Codex project AND consents it. */
-async function repairCodexCapabilityConsent(): Promise<void> {
+/**
+ * Put a managed plugin's payload back, pinned to the core now on the box.
+ *
+ * Returns whether the package is believed to be back. False covers both
+ * "nothing was tried" — the owner switched the plugin off, Codex is not in
+ * use, the payload is not this file's to replace — and "the install failed",
+ * because both leave the consent repair below worth attempting.
+ */
+async function repairManagedPluginPayload(
+  pluginId: string,
+  options: { fallbackToUnpinned?: boolean } = {},
+): Promise<boolean> {
+  const key = normalizeManagedPluginId(pluginId);
+  const npmPackage = MANAGED_PLUGIN_NPM_PACKAGES.get(key);
+  if (!npmPackage) {
+    // The pre-start owns this one, and `runCurrentGatewayPreStart()` has just
+    // run it. Saying so beats a silent skip: if the refusal survived that, the
+    // update log is where the reason will be looked for.
+    console.info(
+      `[Updater] "${pluginId}" failed payload verification; its install is the gateway pre-start's, which has already run`,
+    );
+    return false;
+  }
+  // Codex has its own opt-out test, which also asks whether Codex is in use at
+  // all — an owner who moved to another provider must not have a stale journal
+  // line buy him a six-minute npm install on every update.
+  const allowed = key === "codex"
+    ? await codexCapabilityRepairIsAllowed()
+    : await pluginConsentRepairIsAllowed(pluginId);
+  if (!allowed) return false;
+  return reinstallManagedPluginPayload(npmPackage, options.fallbackToUnpinned !== false);
+}
+
+/**
+ * `plugins install <pkg>@<core target> --force --accept-capabilities`.
+ *
+ * Pinned to the core the box is on, because both states this repairs are about
+ * the core: a migrated v1 install can leave only the managed-project
+ * declaration without node_modules, and a core BUMP re-keys the npm project
+ * directories so the payloads built for the old generation are unreachable
+ * (TASK-602). `enable` answers neither — it says "Plugin not found" — while a
+ * pinned force-install rebuilds the project and records consent in one
+ * idempotent operation. OpenClaw state leases live for five minutes after a
+ * killed startup, so this budget must outlast that bounded stale lease.
+ */
+async function reinstallManagedPluginPayload(
+  npmPackage: string,
+  fallbackToUnpinned: boolean,
+): Promise<boolean> {
   let target = OPENCLAW_VERSION_FALLBACK;
   try {
     target = (await readFile(OPENCLAW_TARGET_FILE, "utf-8")).trim().split(/\s+/)[0] || target;
   } catch {
     // The compiled fallback is the same pin used by the installer.
   }
-  try {
-    // A migrated v1 install can leave only the managed-project declaration,
-    // without node_modules. `enable` then says "Plugin not found"; a pinned
-    // force-install repairs that partial project and records consent in one
-    // idempotent operation. OpenClaw state leases live for five minutes after
-    // a killed startup, so this budget must outlast that bounded stale lease.
-    await execFile(
-      OPENCLAW_BIN,
-      [
-        "plugins",
-        "install",
-        `@openclaw/codex@${target}`,
-        "--force",
-        "--accept-capabilities",
-      ],
-      { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
-    );
-  } catch (err) {
-    // Best effort: the clean restart and positive port probe below decide the
-    // result. This must not replace a preceding pre-start failure either.
-    console.warn(
-      "[Updater] Codex capability repair did not complete:",
-      err instanceof Error ? err.message : err,
-    );
+  // Pinned first, then unpinned — the shape `deepseekPluginSpecs` already uses
+  // in this repo, and for its reason: npm republishes a release under a build
+  // suffix (2026.7.1 -> 2026.7.1-2), and a plugin published only under the base
+  // version 404s on a pin carrying one. The unpinned spec is safe as a LAST
+  // resort because the core checks the plugin's own `compat.pluginApi` against
+  // the running host and refuses a mismatch.
+  const specs = fallbackToUnpinned
+    ? [`${npmPackage}@${target}`, npmPackage]
+    : [`${npmPackage}@${target}`];
+  let lastError: unknown;
+  for (const spec of specs) {
+    try {
+      await execFile(
+        OPENCLAW_BIN,
+        ["plugins", "install", spec, "--force", "--accept-capabilities"],
+        { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
+      );
+      return true;
+    } catch (err) {
+      lastError = err;
+    }
   }
+  // Best effort: the clean restart and positive port probe below decide the
+  // result. This must not replace a preceding pre-start failure either.
+  console.warn(
+    `[Updater] payload repair for "${npmPackage}" did not complete:`,
+    lastError instanceof Error ? lastError.message : lastError,
+  );
+  return false;
 }
 
 /**
@@ -1321,7 +1800,16 @@ function getGatewayFailureDetail(logText: string): string | null {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  for (const pattern of [PLUGIN_CAPABILITY_CONSENT_RE, /SQLite transaction lock wait failed/i]) {
+  // Order is priority, not chronology: the FIRST pattern with a match wins.
+  // A payload that is not on disk outranks a consent question about it, and
+  // both outrank systemd's own "Start request repeated too quickly", which is
+  // what `lines.at(-1)` hands back once the unit has hit its start limit —
+  // true, and nothing the owner can act on (TASK-602).
+  for (const pattern of [
+    PLUGIN_PAYLOAD_VERIFICATION_RE,
+    PLUGIN_CAPABILITY_CONSENT_RE,
+    /SQLite transaction lock wait failed/i,
+  ]) {
     const match = [...lines].reverse().find((line) => pattern.test(line));
     if (match) return match;
   }
@@ -1357,16 +1845,20 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // is fatal here: restarting after killing a migration midway is unsafe.
   await withGatewayQuiesced(async () => {
     const journal = await readGatewayJournalTail();
+    let preStartOutput: string;
     try {
-      await runCurrentGatewayPreStart();
+      preStartOutput = await runCurrentGatewayPreStart();
     } catch (err) {
       // If an earlier pre-start migration fails, still record the narrowly
       // scoped consent named by the existing journal. Do not restart after a
       // partial pre-start; propagate its failure once the repair is recorded.
-      await repairPluginCapabilityConsent(journal);
+      // Consent only here — see PluginRepairOptions.
+      await repairPluginsBlockingReadiness(journal, { consentOnly: true });
       throw err;
     }
-    await repairPluginCapabilityConsent(journal);
+    await repairPluginsBlockingReadiness(journal, {
+      alreadyRepaired: pluginPayloadsRepairedByPreStart(preStartOutput),
+    });
     await runOpenclawDoctorFix();
   });
   // `awaitReady: false` on both restarts in this function, and only here: the
@@ -1407,7 +1899,12 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "bootstrap_updater",
     label: "Refreshing updater scripts",
-    timeoutMs: 120_000,
+    // 180 s, raised from 120: this step's fetch now retries (install.sh
+    // `git_with_retry`, up to 3 attempts with 3 s + 6 s of backoff). A retry
+    // that gets the fetch through on attempt 3 only to be killed by the budget
+    // it needed would turn an intermittent refusal into a hard failure, which
+    // is the retry paying for itself and then being billed for it. TASK-655.
+    timeoutMs: 180_000,
     requiresRoot: true,
     failFast: true,
   },
@@ -1673,7 +2170,23 @@ interface VersionInfo {
    * before.
    */
   edition: EditionName;
+  /**
+   * Whether this check could actually reach the update remote.
+   *
+   * Without it "no update available" is unfalsifiable: a device GitHub is
+   * refusing produces exactly the same payload as a device that is genuinely
+   * current, and the one screen whose job is "should I update?" answers
+   * "You're up to date" (TASK-655, fleet-wide, measured 2026-09-02).
+   */
+  remote: RemoteReachability;
 }
+
+/**
+ * How the last real tag lookup went. Kept beside `cachedTargetVersion` and
+ * invalidated with it, so a cached version and the reachability that produced
+ * it can never disagree.
+ */
+let lastTagRemote: RemoteReachability = REMOTE_REACHABLE;
 
 let cachedVersionInfo: VersionInfo | null = null;
 let versionInfoCacheTime = 0;
@@ -1686,6 +2199,7 @@ export function invalidateVersionCache(): void {
   // memoized result of the last lookup.
   cachedTargetVersion = null;
   targetVersionCacheTime = 0;
+  lastTagRemote = REMOTE_REACHABLE;
 }
 
 /**
@@ -1757,31 +2271,46 @@ async function readHermesVersion(): Promise<string | null> {
   }
 }
 
-async function getPinnedBranchTarget(projectDir: string): Promise<{
-  branch: string;
-  currentSha: string;
-  targetSha: string;
-} | null> {
+interface PinnedBranchCheck {
+  target: { branch: string; currentSha: string; targetSha: string } | null;
+  remote: RemoteReachability;
+}
+
+/**
+ * Compare the device against its pinned branch on origin.
+ *
+ * The fetch outcome is RETURNED, not swallowed. It used to be
+ * `.catch(() => {})`, after which HEAD was compared against whatever
+ * `origin/<branch>` the last successful fetch had left: on a box GitHub was
+ * refusing, that is HEAD itself, so the answer was "no update" and the About
+ * screen said "You're up to date" about a check that never happened
+ * (TASK-655).
+ */
+async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCheck> {
   let branch: string;
   try {
     branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
   } catch {
-    return null;
+    return { target: null, remote: REMOTE_REACHABLE };
   }
-  if (!branch || !isSafeBranch(branch)) return null;
+  if (!branch || !isSafeBranch(branch)) return { target: null, remote: REMOTE_REACHABLE };
 
+  const remote = await reachOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
+    timeout: 20_000,
+    attempts: REMOTE_CHECK_ATTEMPTS,
+    retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS,
+  });
   try {
-    await execGit(projectDir, ["fetch", "--quiet", "origin", branch], { timeout: 20_000 }).catch(() => {});
     const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
       execGit(projectDir, ["rev-parse", "HEAD"], { timeout: 10_000 }),
       execGit(projectDir, ["rev-parse", `origin/${branch}`], { timeout: 10_000 }),
     ]);
     const currentSha = currentOut.trim();
     const targetSha = targetOut.trim();
-    if (!currentSha || !targetSha || currentSha === targetSha) return null;
-    return { branch, currentSha, targetSha };
+    if (!currentSha || !targetSha || currentSha === targetSha) return { target: null, remote };
+    return { target: { branch, currentSha, targetSha }, remote };
   } catch {
-    return null;
+    return { target: null, remote };
   }
 }
 
@@ -1821,7 +2350,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // hermes binary, so this must never spawn there.
     hasHermes ? readHermesVersion() : Promise.resolve(null),
   ]);
-  const pinnedBranchTarget = await getPinnedBranchTarget(PROJECT_DIR);
+  const { target: pinnedBranchTarget, remote: pinnedRemote } = await getPinnedBranchTarget(PROJECT_DIR);
+  // Two independent reads of the same remote — the tag list (getTargetVersion's
+  // `ls-remote`, a GET to /info/refs) and the pinned branch's fetch (a POST to
+  // /git-upload-pack). BOTH can be refused; the POST far more often, which is
+  // what the card measured. Either failing means this check did not see the
+  // remote, so the worse of the two is what the device reports.
+  const remote = !pinnedRemote.reachable ? pinnedRemote : lastTagRemote;
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -1858,6 +2393,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       ? { hermes: { current: hermesCurrent, target: null, updateAvailable: false } }
       : {}),
     edition,
+    remote,
   };
   versionInfoCacheTime = Date.now();
   return cachedVersionInfo;
@@ -1866,16 +2402,38 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 export async function getTargetVersion(): Promise<string | null> {
   if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
   try {
-    await execGit(
+    // The tag fetch is ADVISORY: `ls-remote` below asks origin directly, so the
+    // answer is not read from the local tag refs this call updates. Its refusal
+    // is logged, never promoted — reporting the remote unreachable because an
+    // advisory call was refused while the authoritative one answered is the
+    // false-failure half of the same bug.
+    const tagFetch = await reachOrigin(
       PROJECT_DIR,
       ["fetch", "--quiet", "--tags", "origin"],
-      { timeout: 20_000 },
-    ).catch(() => {});
-    const { stdout } = await execGit(
+      // The delay is explicit even at one attempt: dropping it would fall back
+      // to the UPDATE path's 4 s budget, so raising REMOTE_ADVISORY_ATTEMPTS
+      // later would silently put a 4 s sleep on every polled version check.
+      { timeout: 20_000, attempts: REMOTE_ADVISORY_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
+    );
+    if (!tagFetch.reachable) console.warn(`[Updater] advisory tag fetch did not land: ${tagFetch.reason}`);
+    // The AUTHORITATIVE call, and so the one that is retried. It used to get a
+    // single attempt: one refused ls-remote then made every surface say the
+    // update server could not be reached, and TARGET_VERSION_CACHE_TTL held
+    // that answer for 60 s over a refusal that clears in seconds.
+    const lsRemote = await readFromOrigin(
       PROJECT_DIR,
       ["ls-remote", "--tags", "--refs", "origin"],
-      { timeout: 10_000 },
+      { timeout: 10_000, attempts: REMOTE_CHECK_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
     );
+    if (!lsRemote.remote.reachable) {
+      lastTagRemote = lsRemote.remote;
+      cachedTargetVersion = null;
+      targetVersionCacheTime = Date.now();
+      return null;
+    }
+    const stdout = lsRemote.stdout;
+    // origin answered, on the call the tag answer depends on.
+    lastTagRemote = REMOTE_REACHABLE;
     const tags = stdout
       .trim()
       .split("\n")
@@ -1897,7 +2455,13 @@ export async function getTargetVersion(): Promise<string | null> {
     cachedTargetVersion = semverTags[semverTags.length - 1];
     targetVersionCacheTime = Date.now();
     return cachedTargetVersion;
-  } catch {
+  } catch (err) {
+    const text = errorText(err);
+    lastTagRemote = {
+      reachable: false,
+      refusedAnonymously: isAnonymousFetchRefusal(text),
+      reason: refusalReason(err, text),
+    };
     cachedTargetVersion = null;
     targetVersionCacheTime = Date.now();
     return null;

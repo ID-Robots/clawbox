@@ -495,6 +495,7 @@ export const nl: Record<string, string> = {
   "skills.installUnknownOutcome": "Het antwoord van het apparaat was te lang om te lezen, dus of “{name}” is geïnstalleerd is onbekend. Controleer het tabblad Geïnstalleerd voordat u het opnieuw probeert.",
   "skills.uninstallUnknownOutcome": "Het antwoord van het apparaat was te lang om te lezen, dus of “{name}” is verwijderd is onbekend. Controleer het tabblad Geïnstalleerd voordat u het opnieuw probeert.",
   "skills.detailFailed": "De details van deze skill konden niet worden geladen. Probeer het opnieuw.",
+  "skills.detailNotFound": "Deze skill staat niet op dit apparaat en niet in de skillstore, dus er is niets te tonen.",
   "skills.detailUnavailable": "Hermes is niet op dit apparaat geïnstalleerd, dus de details van deze skill kunnen niet worden geladen.",
   "skills.detailDocsFailed": "De volledige documentatie van deze skill kon niet worden geladen. De gegevens hierboven komen van het apparaat.",
   "skills.skillDisabled": "Uitgeschakeld",

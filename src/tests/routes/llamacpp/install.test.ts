@@ -176,6 +176,51 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("\"success\":true");
   });
 
+  /**
+   * TASK-682 — the alias is a WIRE LABEL, not a choice of weights.
+   *
+   * `getLlamaCppLaunchSpec(alias)` resolves `modelPath` from
+   * `getDefaultLlamaCppFile()` whatever the alias is, and start-llamacpp.sh
+   * passes it as `--model` while the alias goes to `--alias`. So every alias on
+   * a box is the SAME GGUF, and `models.includes(alias)` asks a question about
+   * a label rather than about the runtime.
+   *
+   * Two other readers already know this — `waitForLlamaCppReady` and
+   * `isLlamaCppUp` (src/lib/local-ai-runtime.ts) both accept a non-empty
+   * `/v1/models` — and this route was the one that did not. With a warm runtime
+   * under a different label (the install route itself accepts any MODEL_ID_RE
+   * string, and a Settings model change never stops the old server), the pid
+   * file is live so nothing restarts, the alias never appears, and the wizard
+   * sat in a streamed HTTP handler for the FULL startupTimeoutMs — 20 minutes —
+   * before reporting a timeout for a runtime that was up and answering.
+   */
+  it("configures against a runtime that is already up under another alias, instead of polling to the timeout", async () => {
+    // A live pid: this is what stops the loop from restarting anything.
+    mockFs.readFile.mockImplementation((async (target: unknown) =>
+      String(target).endsWith("server.pid")
+        ? `${process.pid}\n`
+        : Promise.reject(new Error("ENOENT"))) as typeof fsp.readFile);
+    // The runtime answers — under the label the install route was given last time.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ id: "gemma-4-e2b" }] }),
+    }));
+    // Without this the RED case would take the real 20 minutes to fail.
+    vi.stubEnv("LLAMACPP_STARTUP_TIMEOUT_MS", "1");
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const text = await readStream(res);
+
+    vi.unstubAllEnvs();
+
+    expect(text).not.toContain("Timed out");
+    expect(text).toContain("already running");
+    expect(text).toContain("\"success\":true");
+    expect(mockConfigureAiModel).toHaveBeenCalled();
+    // And it must not race the live server for the one port.
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
   it("starts llama-server and configures after the model becomes ready", async () => {
     const mockFetch = vi.fn()
       .mockResolvedValueOnce({

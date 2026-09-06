@@ -803,6 +803,139 @@ describe("openclaw-config", () => {
       );
     });
 
+    it("moves the proxy bearer with the URL, never leaving a foreign key beside it", async () => {
+      // The proxy validates Authorization against data/.local-ai-token and
+      // answers 401 to anything else, so adopting the proxy URL while keeping
+      // somebody else's key turns "the wrong endpoint" into a refused request
+      // on every turn.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: { baseUrl: "http://127.0.0.1:8080/v1", apiKey: "an-operators-own-key" },
+          },
+        },
+      }) as never);
+
+      expect(await openclawConfig.ensureLocalAiProxyUrls()).toBe(true);
+
+      const written = mockFs.writeFile.mock.calls.at(-1)?.[1] as string;
+      expect(written).toContain('"baseUrl": "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"');
+      expect(written).not.toContain("an-operators-own-key");
+    });
+
+    it("pins the proxy bearer itself, not merely the absence of the old one", async () => {
+      // The assertion above only proves the operator's key is gone. Deleting
+      // `apiKey`, or writing an unrelated value there, would satisfy it too —
+      // and either leaves the proxy answering 401 to every turn.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: { providers: { llamacpp: { baseUrl: "http://127.0.0.1:8080/v1", apiKey: "an-operators-own-key" } } },
+      }) as never);
+
+      expect(await openclawConfig.ensureLocalAiProxyUrls()).toBe(true);
+
+      // From the SAME module instance the code under test got: `beforeEach`
+      // resets the registry, and this module caches the token it creates, so a
+      // top-level import would hold a different one and the assertion would be
+      // about module identity rather than about the value written.
+      const { getLocalAiToken } = await import("@/lib/local-ai-token");
+      const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+      expect(written.models.providers.llamacpp.apiKey).toBe(getLocalAiToken());
+    });
+
+    it("leaves a provider entry that is not an object alone, rather than throwing over it", async () => {
+      // `readConfig()` validates the ROOT object only, so anything at all can
+      // be sitting at `models.providers.llamacpp`. Module code is strict mode:
+      // assigning `baseUrl` on a string primitive throws a TypeError, and the
+      // repair's caller would see a crash where a hand-edited config needed a
+      // no-op.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: { providers: { llamacpp: "http://127.0.0.1:8080/v1" } },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("does not report a repair it could not persist, for an entry written as a list", async () => {
+      // An array takes the assignments and `JSON.stringify` drops every named
+      // property off it, so the write lands without `baseUrl` or `apiKey` while
+      // the function answers `true` — a repair reported and never made.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: { providers: { llamacpp: [] } },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("does not put the proxy bearer beside a model row that points somewhere else", async () => {
+      // OpenClaw resolves a row's endpoint as `model.baseUrl ?? provider.baseUrl`
+      // and there is no per-model credential slot — `providers.<p>.apiKey` is
+      // the bearer for every row under it. So adopting the proxy's token beside
+      // a row that keeps its own foreign baseUrl mails that token to a third
+      // party on every turn of that row. The same rule the openai image
+      // migration already applies through `foreignOpenAiRoute`: a provider
+      // block we did not build is one to leave alone, not to half-configure.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1:8080/v1",
+              apiKey: "an-operators-own-key",
+              models: [{ id: "gemma-4-e2b", baseUrl: "https://models.example.net/v1" }],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(false);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("still adopts the proxy when a row names THIS box", async () => {
+      // A row on loopback or on our own proxy is not somewhere the bearer could
+      // leak to — it is where the bearer already goes. Refusing there would be a
+      // false failure, and on the boot-migration side it leaves the entry with
+      // no provider baseUrl at all, which OpenClaw's schema rejects for this
+      // provider: a dead gateway bought for no security at all.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1:8080/v1",
+              models: [
+                { id: "own-server", baseUrl: "http://127.0.0.1:8080/v1" },
+                { id: "on-the-proxy", baseUrl: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1" },
+              ],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
+      const written = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+      expect(written.models.providers.llamacpp.baseUrl)
+        .toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
+    });
+
+    it("ignores a row OpenClaw's own schema would reject when deciding that", async () => {
+      // `ModelDefinitionSchema` requires a non-empty `id`, so a row without one
+      // can never route a turn and its baseUrl cannot receive anything. Letting
+      // it veto the repair would be the same false failure one shape over.
+      mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
+        models: {
+          providers: {
+            llamacpp: {
+              baseUrl: "http://127.0.0.1:8080/v1",
+              models: [{ name: "no id here", baseUrl: "https://models.example.net/v1" }],
+            },
+          },
+        },
+      }) as never);
+
+      await expect(openclawConfig.ensureLocalAiProxyUrls()).resolves.toBe(true);
+    });
+
     it("skips writes when local AI providers already point at the proxy", async () => {
       mockFs.readFile.mockResolvedValueOnce(JSON.stringify({
         models: {

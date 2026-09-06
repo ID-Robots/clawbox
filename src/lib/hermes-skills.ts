@@ -241,6 +241,20 @@ export interface HermesSkillDetail {
   bodyTruncated: boolean;
   /** True when a `&docs=1` fetch would add documentation we don't have yet. */
   needsRemoteDocs: boolean;
+  /**
+   * True when NOTHING on this device backed the record: not the installed
+   * skills, not the catalogue, not the bundled `official` files. Phase 1 fills
+   * every field from the catalogue row, so without one the answer is a
+   * placeholder built from the requested id — the name is the id echoed back.
+   *
+   * It is not evidence that the skill does not exist: this device's catalogue is
+   * a snapshot that ClawBox never rebuilds once it exists, and a bare NAME (what
+   * a `related_skills` chip carries) is not a key of it at all. Only Hermes can
+   * refuse an id, which is what phase 2 asks it to do — so this flag is what
+   * turns phase 2's 404 from "the documentation failed" into "there is no such
+   * skill", for the browser and for the agent alike.
+   */
+  catalogMiss?: boolean;
   headings?: { level: 2 | 3; text: string; slug: string }[];
 }
 
@@ -308,6 +322,38 @@ export interface BrowseResponse {
   /** True when the answer came from the CLI fallback (no paging, top-N only). */
   degraded: boolean;
 }
+
+/**
+ * How long the inspect route lets `hermes skills inspect` run for the phase-2
+ * documentation fetch before it gives up and answers `cli_timeout`.
+ *
+ * 60 s, not the 45 s it used to be. What that fetch actually costs, measured
+ * read-only on a Hermes box on 2026-09-05: 4.7 s for a github row, 11.3 s for a
+ * ClawHub one, 11.9 s for an official one — and SkillDetail.tsx records 9.5-14.6 s
+ * for the same call. The one figure that ever exceeded 45 s is the route's own
+ * older note, "~60 s on a loaded box" for a browse.sh/github row over the
+ * unauthenticated GitHub API, unqualified and not reproduced since. So this cap
+ * is 5-12x the measured cost of every population we can measure, and covers
+ * that older worst case at parity rather than beyond it: a box slower still
+ * gets its fetch killed, which the MCP tool now REPORTS instead of returning an
+ * empty README. It matches the budget the catalog-index builds in
+ * hermes-skill-index.ts already take.
+ */
+export const SKILL_DOCS_CLI_TIMEOUT_MS = 60_000;
+
+/**
+ * What a CLIENT of `inspect?docs=1` must allow, so the route's own answer wins
+ * the race: a budget at or below the cap above aborts first, and the 504 that
+ * names the DOCUMENTATION as the thing that failed never arrives. The MCP tool
+ * allowed the request 30 s against a 45 s cap and therefore never once saw it.
+ *
+ * The margin covers the HTTP round trip and the route's own work, NOT the queue:
+ * runSkillsCli admits two children at a time and that wait is not part of the
+ * CLI's timeout, so a route call can still outlast this. That case is not
+ * papered over — the tool words a client-side timeout as the device not
+ * answering, and claims a source deadline only when the route reports one.
+ */
+export const SKILL_DOCS_CLIENT_TIMEOUT_MS = SKILL_DOCS_CLI_TIMEOUT_MS + 10_000;
 
 /**
  * Why a skills route's CLI call could not answer. The route's `error` sentence

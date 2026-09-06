@@ -422,7 +422,47 @@ step_build() {
     echo "  Rebuilding native modules (node-pty)..."
     as_user_login "cd \"$PROJECT_DIR\" && npm_config_python=/usr/bin/python3 npm rebuild node-pty --foreground-scripts"
   fi
-  as_user_login "cd \"$PROJECT_DIR\" && \"$BUN\" run build"
+  # ONE retry, and only for the mid-build file-trace race — the same guard
+  # `run_next_build` carries in install.sh, copied rather than shared because
+  # this installer is standalone by design and has its own helper names. See
+  # that function for why the race exists and why one rebuild is the whole
+  # repair.
+  #
+  # This SKU needs it at least as much: there is no `do_rebuild` here, so this
+  # is the only build path on x64 — for a fresh install and for the documented
+  # `--step build` on a live box alike — and it parks no previous build, while
+  # `next build` wipes `.next/standalone` before it copies anything.
+  # A private `mktemp -d` directory, never a predictable path — this installer
+  # runs as root and a fixed name under TMPDIR is a symlink a local user can
+  # plant. See run_next_build in install.sh.
+  local build_log build_log_dir build_rc build_attempt
+  build_log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-x64-build-XXXXXX" 2>/dev/null || true)"
+  build_log=""
+  if [ -n "$build_log_dir" ]; then build_log="$build_log_dir/build.log"; fi
+  build_rc=0
+  for build_attempt in 1 2; do
+    if [ -n "$build_log" ]; then
+      if as_user_login "cd \"$PROJECT_DIR\" && \"$BUN\" run build" 2>&1 | tee "$build_log"; then
+        build_rc=0
+        break
+      fi
+      # The BUILD's status, never the pipeline's.
+      build_rc=${PIPESTATUS[0]}
+      if [ "$build_rc" -eq 0 ]; then break; fi
+    else
+      if as_user_login "cd \"$PROJECT_DIR\" && \"$BUN\" run build"; then build_rc=0; else build_rc=$?; fi
+      break
+    fi
+    if [ "$build_attempt" -eq 2 ]; then break; fi
+    # One awk, not two greps in a pipe — see run_next_build in install.sh.
+    awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$build_log" || break
+    echo "  A file this build was tracing changed while it ran — building once more"
+  done
+  if [ -n "$build_log_dir" ]; then rm -rf "$build_log_dir"; fi
+  if [ "$build_rc" -ne 0 ]; then
+    echo "Error: Build failed (exit $build_rc)"
+    exit "$build_rc"
+  fi
   if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
     echo "Error: Build failed — .next/standalone/server.js not found"
     exit 1

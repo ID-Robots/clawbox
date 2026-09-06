@@ -12,6 +12,13 @@
 #                          $PROJECT_DIR/.update-branch, so the device keeps
 #                          updating on the branch it was built with.
 #   NETWORK_INTERFACE    — WiFi interface override (default: auto-detect)
+#   CLAWBOX_GIT_RETRIES  — attempts per git network call (default: 3). GitHub
+#                          refuses anonymous fetches from an address that has
+#                          made too many, ~2 in 3 when measured (TASK-655).
+#                          A value that is not a whole number is replaced with
+#                          the default and a line is printed saying so.
+#   CLAWBOX_GIT_RETRY_DELAY — seconds before the first retry, doubling (default: 3).
+#                          Same rule for a value that is not a whole number.
 set -euo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
@@ -20,6 +27,89 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "Error: Run this script with sudo" >&2
   exit 1
 fi
+
+# Retry a git call that talks to a remote.
+#
+# Measured on the dev network 2026-09-02 (TASK-655): GitHub answers git's
+# protocol-v2 POST to /git-upload-pack with `HTTP 401` and a body reading
+# "Repository not found." — for a PUBLIC repository — once an address has used
+# up its anonymous allowance. git reports it as
+# `fatal: could not read Username for 'https://github.com'`, which names
+# credentials no ClawBox has, and roughly one attempt in three got through.
+# One in-app update needs three separate fetches to succeed in a row, so a
+# single refusal ended the update at step 0 with a message about a password.
+#
+# git owns no retry of its own — neither 2.34 (the boxes) nor 2.43 has a
+# `fetch.retry`/`http.retry` knob — so it lives here. GIT_TERMINAL_PROMPT=0
+# IS git's own switch and is used rather than reimplemented: without it the
+# same call blocks on a username prompt whenever a tty is attached.
+#
+# Output is captured and re-emitted at the end of each attempt rather than
+# streamed, so the classification below has the text to read. That costs live
+# progress on a long clone; install.sh's output is read from the journal after
+# the fact, so the trade is the honest message.
+# Is this failure worth asking again? Retrying "destination path already
+# exists" three times helps nobody and costs the step's budget.
+git_retryable_failure() {
+  case "$1" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*) return 0 ;;
+    *"Authentication failed"*|*"terminal prompts disabled"*) return 0 ;;
+    *"Could not resolve host"*|*"Connection timed out"*|*"Connection reset"*) return 0 ;;
+    *"early EOF"*|*"RPC failed"*|*"unable to access"*) return 0 ;;
+  esac
+  return 1
+}
+
+git_with_retry() {
+  local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-3}"
+  local out rc=0 verb
+  # Both knobs are operator input and both are used as NUMBERS. A non-numeric
+  # `max` makes `[ "$attempt" -ge "$max" ]` fail on every iteration — "integer
+  # expression expected" — so the break is never reached and the loop does not
+  # end on its own; the regression test has to kill it on a wall clock. A
+  # non-numeric `delay` makes `$((delay * 2))` an unbound-variable error under
+  # `set -u` and takes install.sh down mid-update.
+  #
+  # Replaced with the default rather than trusted, and SAID so: a knob that is
+  # silently ignored is the same class of quiet wrong answer this whole change
+  # is about. Only the shape is checked — `0` is a legitimate "do not retry"
+  # and survives, and a numeric-but-large value is the operator's own call.
+  case "$max" in
+    ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRIES is not a number, using 3" >&2; max=3 ;;
+  esac
+  case "$delay" in
+    ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
+  esac
+  # The subcommand, not "$1": every caller here leads with -c/-C, so naming the
+  # first argument produced "git -C attempt 1/3 failed" in the journal.
+  verb="$(printf '%s\n' "$@" | grep -m1 -E '^(fetch|clone|pull|push|ls-remote)$' || true)"
+  while :; do
+    # Output is CAPTURED so the classification below has the text to read, then
+    # re-emitted on stderr — where git puts it — so a caller that captures this
+    # function's stdout cannot mistake git's progress for a result.
+    if out="$(GIT_TERMINAL_PROMPT=0 git "$@" 2>&1)"; then
+      [ -z "$out" ] || printf '%s\n' "$out" >&2
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$attempt" -ge "$max" ] && break
+    git_retryable_failure "$out" || break
+    echo "  git ${verb:-remote} attempt $attempt/$max failed, retrying in ${delay}s..." >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+  printf '%s\n' "$out" >&2
+  case "$out" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*)
+      echo "Error: GitHub refused this ClawBox's anonymous request for the update repository after $attempt attempt(s)." >&2
+      echo "       The repository is public and this device needs no password — GitHub answers 401 to anonymous git" >&2
+      echo "       requests from an address that has made too many. Wait a few minutes and run the update again." >&2
+      ;;
+  esac
+  return "$rc"
+}
 
 # ── Bootstrap: pull latest install.sh and re-exec before parsing constants ───
 # Fixes the race where a stale install.sh (e.g. rsync'd from an out-of-date
@@ -92,7 +182,17 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
     echo "[bootstrap] WARN: cannot tell which branch this checkout belongs to; running the on-disk copy."
   else
     echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
-    git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
+    # Fetch #1 of the three an update needs, and the one that decides which
+    # install.sh the rest of the run uses — so it retries like the others.
+    # Still tolerated: the reset below uses whatever refs are on disk. But no
+    # longer SILENT, and no longer 2>/dev/null — the WARN quotes what git said
+    # rather than guessing, because "refreshing install.sh" printed above is
+    # otherwise a claim the run did not keep (TASK-655).
+    if ! _fetchout="$(git_with_retry -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>&1)"; then
+      echo "[bootstrap] WARN: could not refresh from origin; running the refs already on disk."
+      printf '%s\n' "$_fetchout" | tail -n 3
+    fi
+    unset _fetchout
     if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
       chown -R clawbox:clawbox "$_b" 2>/dev/null || true
       # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
@@ -1538,6 +1638,106 @@ restore_previous_build() {
   return 1
 }
 
+# `bun run build`, with ONE retry and only for the mid-build file-trace race.
+#
+# WHAT RACES. Next writes a `.nft.json` beside every server entry and then
+# copies every file it lists into `.next/standalone` — after wiping that
+# directory first. The page and app-page copies are `.catch`-wrapped; the
+# MIDDLEWARE and INSTRUMENTATION ones are not (node_modules/next/dist/build/
+# utils.js, still true on 16.3.3), so one `fs.copyFile` ENOENT there aborts
+# `next build` outright. And those two traces carry the project root as an
+# asset directory — measured on the OpenClaw box, beta build of 2026-09-05:
+# every ROUTE trace has 0 entries under data/ and .git/, while
+# middleware.js.nft.json has 27 under data/ and instrumentation.js.nft.json has
+# 32 under data/ plus 701 under .git/. So a web app the agent creates or
+# removes, a coding run writing a screenshot, or the update's own
+# `git reset --hard` between the trace and the copy kills the build over a file
+# the dashboard never needed.
+#
+# WHY NOT A CONFIG. `outputFileTracingExcludes` reaches route entries only — the
+# same measurement is what proves it, and it is why next.config.ts's own
+# `.git/**` key is inoperative for the instrumentation trace. Next exposes no
+# other tracing knob: `outputFileTracingRoot`, `-Excludes` and `-Includes` are
+# the whole surface in its config schema.
+#
+# WHY A RETRY IS THE RIGHT ANSWER. The failure is transient by construction: the
+# next trace cannot list a file that is gone. One retry, gated on the ENOENT the
+# copy throws, so a build that is broken for any other reason still fails on the
+# first attempt and is reported as such rather than hidden behind a second
+# five-minute build. `REBUILD_TAKEOVER_TIMEOUT_MS` in src/lib/updater.ts carries
+# the budget for that second build.
+#
+# The log copy exists ONLY so the gate can read what was printed, and it is
+# best-effort: a `/tmp` that is full or unwritable — a Jetson tmpfs under the
+# memory pressure `free_memory_for_build` exists for — must cost the retry, not
+# the build. The build's own status is the verdict, never the pipeline's, so
+# `tee` can never turn a build that worked into a failed update;
+# `verify_build_present` in both callers is what catches a build that exited 0
+# without producing anything. Output now carries the build's stderr on stdout so
+# the gate can see it, which is the one thing about the step log that changed.
+#
+# Every branch is written the long way — `if`, never `[ … ] && …` — and the
+# build runs as an `if` CONDITION. Both are about errexit: this file is
+# `set -euo pipefail`, `do_rebuild` calls this in a `||` context (errexit
+# suspended for the whole body) and `step_build` calls it bare (errexit live),
+# so a failing pipeline or a false `[ … ] &&` test outside a condition would
+# kill the script on the first attempt in one caller and not the other.
+run_next_build() {
+  # `bun run build` is `next build --webpack` (package.json): Next 16's default
+  # bundler, Turbopack, was OOM-killed on this board on 2026-09-05 at 4.6 GB
+  # resident with 5.7 GB free — the kernel's global OOM, not a cgroup — while a
+  # webpack build of the same commit fits in ~3.7 GB. Two webpack workers rather
+  # than one per core keeps its peak there.
+  local log log_dir rc attempt
+  # A PRIVATE directory from `mktemp -d`, never a predictable path. This script
+  # runs as root: `: > "$TMPDIR/<fixed name>"` follows a symlink a local user
+  # planted there, so root truncates and then `tee`s a build log into whatever
+  # it pointed at. `mktemp -d` creates a 0700 directory with an unguessable
+  # name atomically, so nothing can be waiting inside it. The cost is that an
+  # OOM kill — which this shell is a documented target of (TASK-709) — leaves an
+  # empty directory rather than nothing; a stale 0700 directory in /tmp is the
+  # cheaper of the two problems by a wide margin.
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-build-XXXXXX" 2>/dev/null || true)"
+  log=""
+  if [ -n "$log_dir" ]; then log="$log_dir/next-build.log"; fi
+  if [ -z "$log" ]; then
+    echo "  Note: could not open a build log; a mid-build trace race will not be retried"
+  fi
+  rc=0
+  for attempt in 1 2; do
+    if [ -n "$log" ]; then
+      if as_clawbox_login "cd $PROJECT_DIR && NEXT_WEBPACK_PARALLELISM=2 $BUN run build" 2>&1 | tee "$log"; then
+        rc=0
+        break
+      fi
+      # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
+      # for a tee that could not write too, and a log this function could not
+      # keep must never be the reason an update is reported failed.
+      rc=${PIPESTATUS[0]}
+      if [ "$rc" -eq 0 ]; then break; fi
+    else
+      if as_clawbox_login "cd $PROJECT_DIR && NEXT_WEBPACK_PARALLELISM=2 $BUN run build"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      break
+    fi
+    if [ "$attempt" -eq 2 ]; then break; fi
+    # The FATAL shape only. Next prints the identical `ENOENT … copyfile` node
+    # message inside the `.catch` it wraps the page and app-page copies in,
+    # prefixed with `Failed to copy traced files for` — a warning over a build
+    # that carried on, and no reason to spend a second build. ONE awk rather
+    # than two greps in a pipe: `grep -q` exits on its first match and can
+    # SIGPIPE the producer, which under `pipefail` reads as "no match" and
+    # would silently drop the retry this whole function exists for.
+    awk '/ENOENT.*copyfile/ && !/Failed to copy traced files for/ { hit = 1 } END { exit hit ? 0 : 1 }' "$log" || break
+    echo "  A file this build was tracing changed while it ran (ENOENT during the standalone copy) — building once more"
+  done
+  if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+  return "$rc"
+}
+
 # Stop the setup service, free memory, reinstall, and rebuild — without ever
 # leaving the box with no build at all.
 do_rebuild() {
@@ -1579,12 +1779,7 @@ do_rebuild() {
     set_previous_build_aside "$build_dir" "$kept_dir"
     echo "Running bun build..."
     built=1
-    # `bun run build` is `next build --webpack` (package.json): Next 16's
-    # default bundler, Turbopack, was OOM-killed on this board on 2026-09-05
-    # at 4.6 GB resident with 5.7 GB free — the kernel's global OOM, not a
-    # cgroup — while a webpack build of the same commit fits in ~3.7 GB. Two
-    # webpack workers rather than one per core keeps its peak there.
-    as_clawbox_login "cd $PROJECT_DIR && NEXT_WEBPACK_PARALLELISM=2 $BUN run build" || rc=$?
+    run_next_build || rc=$?
     if [ "$rc" -eq 0 ] && ! verify_build_present "$PROJECT_DIR"; then
       rc=1
     fi
@@ -1885,6 +2080,134 @@ apply_hostname() {
 
 step_set_hostname() {
   apply_hostname "$(read_configured_hostname)"
+}
+
+# The owner's timezone, as the web server recorded it. TASK-514.
+#
+# PARSED, never sourced — same rule and the same reason as
+# read_configured_hostname: data/ is clawbox-writable and this runs as root from
+# the granted clawbox-root-update@set_timezone.service, so a `.` on this file
+# would be arbitrary root code execution for anything that can already run code
+# as clawbox.
+#
+# read_untrusted_env_value cannot be reused: its character class deliberately
+# excludes `/`, and every IANA zone but `UTC` contains one. The gate here is
+# therefore its own — the same shape rule as src/lib/timezone.ts's
+# canonicalTimeZone (Area/Location over a small alphabet, no `..`, no leading
+# `/`, no leading `-` so nothing reaches `timedatectl` as an option) — and then
+# the ONLY authority worth trusting for "is this a real zone": the zoneinfo
+# database on this device. That is not the same authority the route asked:
+# Node's ICU is case-insensitive and may carry a NEWER tzdata than a Jetson
+# image, so `europe/sofia` or `America/Ciudad_Juarez` can pass there and fail
+# here. The route canonicalises for that reason; this side still refuses, and
+# says so.
+#
+# FOUR outcomes, not two, because "no value", "a value this device refuses" and
+# "the file is not the one the route writes" call for different behaviour and
+# different remedies: 0 with the zone, 1 for "nothing recorded" (a genuine
+# no-op), 2 for "a value was recorded and this device will not take it", 3 for
+# "data/timezone.env is not the plain file the route writes". A step that
+# discards its input must not exit 0, and an operator reading the journal must
+# be able to tell `rm data/timezone.env` from "pick a zone this tzdata has".
+#
+# CLAWBOX_ZONEINFO_DIR is a TEST seam only: it is read in a root step whose
+# environment comes from systemd, never from the clawbox-writable tree, so it
+# cannot be used to widen what this accepts on a device.
+read_configured_timezone() {
+  local tz_env="$PROJECT_DIR/data/timezone.env" line tz
+  local zoneinfo="${CLAWBOX_ZONEINFO_DIR:-/usr/share/zoneinfo}"
+  # NOT A PLAIN FILE, first and loudly. `[ -f ]` FOLLOWS a symlink and is false
+  # for a directory, a FIFO, a socket and a device node, so the old order let
+  # every one of those shapes answer 1 — "nothing recorded", the one outcome
+  # step_set_timezone treats as a legitimate no-op and exits 0 on. data/ is
+  # clawbox-writable and this runs as ROOT: anything but the plain file the
+  # route writes is tampering, not silence. A FIFO matters twice over — the
+  # `grep` below would block on it for ever.
+  if [ -L "$tz_env" ] || { [ -e "$tz_env" ] && [ ! -f "$tz_env" ]; }; then
+    echo "Error: $tz_env is not the plain file the timezone route writes — refusing to read it." >&2
+    return 3
+  fi
+  [ -f "$tz_env" ] || return 1
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TIMEZONE=" "$tz_env" 2>/dev/null)" || return 1
+  tz="${line#*=}"
+  case "$tz" in
+    \"*\") tz="${tz#\"}"; tz="${tz%\"}" ;;
+    \'*\') tz="${tz#\'}"; tz="${tz%\'}" ;;
+  esac
+  [ -n "$tz" ] || return 1
+  case "$tz" in
+    /*|-*|*..*|*[!A-Za-z0-9._/+-]*) return 2 ;;
+  esac
+  # `timedatectl list-timezones` is systemd's OWN list and the exact set
+  # `set-timezone` will accept, so it is asked first and nothing here maintains
+  # a list of its own. The zoneinfo fallback covers a container without systemd
+  # (and is the seam the guard tests drive) — it needs its own exclusions,
+  # because `/usr/share/zoneinfo` is a directory of files rather than a list of
+  # zones: `zone.tab`, `iso3166.tab`, `leapseconds` and `tzdata.zi` are all
+  # regular files and none is a zone, and `posix/` and `right/` are mirror trees
+  # `timedatectl` refuses by name. Letting one through means a step that fails
+  # on every start for anything that can write data/timezone.env.
+  local list
+  if [ -z "${CLAWBOX_ZONEINFO_DIR:-}" ] && list="$(timedatectl list-timezones 2>/dev/null)" && [ -n "$list" ]; then
+    printf '%s\n' "$list" | grep -qxF -- "$tz" || return 2
+  else
+    case "$tz" in
+      *.*|leapseconds|posix/*|right/*) return 2 ;;
+    esac
+    [ -f "$zoneinfo/$tz" ] || return 2
+  fi
+  printf '%s' "$tz"
+}
+
+apply_timezone() {
+  local tz="${1:-}" out
+  if [ -z "$tz" ]; then
+    # Not an error: a box whose owner has never answered simply keeps the image
+    # default, and this step is a no-op rather than a red line in the update.
+    echo "  No timezone recorded, leaving the system zone alone"
+    return 0
+  fi
+  if [ "$(timedatectl show -p Timezone --value 2>/dev/null)" = "$tz" ]; then
+    echo "  System timezone already $tz"
+    return 0
+  fi
+  # stderr is CAPTURED, not discarded: `timedatectl`'s own refusal is the one
+  # line that says why, and throwing it away leaves a red step with no reason.
+  if out="$(timedatectl set-timezone "$tz" 2>&1)"; then
+    echo "  System timezone set to $tz"
+    return 0
+  fi
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, timedatectl unavailable — skipping"
+    return 0
+  fi
+  echo "  Warning: timedatectl set-timezone $tz failed: $out" >&2
+  return 1
+}
+
+step_set_timezone() {
+  local tz rc=0
+  tz="$(read_configured_timezone)" || rc=$?
+  case "$rc" in
+    0) apply_timezone "$tz" ;;
+    1) echo "  No timezone recorded, leaving the system zone alone" ;;
+    3)
+      # The file itself is wrong — a symlink, a directory, a FIFO. The reader
+      # has already said which path; the remedy is to remove it, which is a
+      # different action from the one below, so it gets its own line.
+      echo "Error: the timezone file was refused — leaving the system zone alone." >&2
+      return 1
+      ;;
+    *)
+      # A value WAS recorded and this device will not take it — a newer zone
+      # name than its tzdata, a spelling its filesystem does not match, or
+      # something that is not a zone at all. Failing loudly is the point: this
+      # used to print "no timezone recorded" and exit 0, so every layer above
+      # reported the change as applied while the box stayed on Etc/UTC.
+      echo "Error: the recorded timezone is not one this device carries — leaving the system zone alone." >&2
+      return 1
+      ;;
+  esac
 }
 
 is_safe_git_ref() {
@@ -2225,7 +2548,7 @@ sync_repo_to_update_target() {
     exit 1
   fi
 
-  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
   # Discard local working-tree changes before switching branches. The later
   # `reset --hard` would blow them away anyway; doing it up-front avoids
   # `git checkout` aborting with "local changes would be overwritten" when
@@ -2267,7 +2590,7 @@ step_git_pull() {
   local fresh_clone=0
   if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo "  Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
-    git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
+    git_with_retry clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
     fresh_clone=1
   fi
@@ -2314,7 +2637,10 @@ step_build() {
   promote_parked_build
   as_clawbox_login "cd $PROJECT_DIR && $BUN install"
   ensure_node_pty
-  as_clawbox_login "cd $PROJECT_DIR && $BUN run build"
+  # Through do_rebuild's helper, for do_rebuild's reason: `--step build` is
+  # dispatchable on a live box, where the agent can create or remove a web app
+  # while the trace is being copied.
+  run_next_build
   # The same two questions do_rebuild asks, through the same helper: an install
   # that leaves a box unable to load the server is the defect this file already
   # tested for, and the identity half is the one the box already owns.
@@ -3066,6 +3392,25 @@ for p in d.get("plugins", []):
       case "$pkg" in
         @openclaw/*) spec="$pkg@$TARGET" ;;
       esac
+      # Matched on the NORMALISED id: the registry can key a plugin as
+      # `openclaw-discord` or `@openclaw/discord`. Hoisted above the refresh so
+      # the pin repair below and the consent whitelist further down ask about
+      # the same name.
+      local PLUGIN_KEY="${plugin#@openclaw/}"
+      PLUGIN_KEY="${PLUGIN_KEY#openclaw-}"
+      # Rebuild the pin when the package could not be derived (TASK-602). A
+      # plugin whose payload a core upgrade orphaned is listed by `plugins list
+      # --json` with no rootDir/source, so `$pkg` is empty, `$spec` stays the
+      # BARE id and npm resolves it as @latest — the exact drift this block was
+      # written to prevent, on the boxes that most need the refresh. For the
+      # plugins ClawBox installs from the @openclaw scope the package name IS
+      # the id, so the pinned spec can be rebuilt from it; anything else keeps
+      # the bare id, which is the caller's own plugin and its owner's business.
+      if [ "$spec" = "$plugin" ] && [ -n "$TARGET" ]; then
+        case "$PLUGIN_KEY" in
+          codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
+        esac
+      fi
       echo "    - $spec"
       # --accept-capabilities, for the plugins CLAWBOX installs and only those.
       #
@@ -3094,8 +3439,6 @@ for p in d.get("plugins", []):
       # silently, behind the WARN below. `$spec` keeps the raw name, which is
       # what the CLI has to be given.
       local CAP_ARGS=()
-      local PLUGIN_KEY="${plugin#@openclaw/}"
-      PLUGIN_KEY="${PLUGIN_KEY#openclaw-}"
       case "$PLUGIN_KEY" in
         codex|deepseek|discord|whatsapp|clawbox-email-directives)
           openclaw_is_v2 && CAP_ARGS=(--accept-capabilities)
@@ -4479,8 +4822,12 @@ install_root_libexec() {
   done
   # Everything the web server may invoke as root via a NOPASSWD grant. Same
   # rule as above: the copy that runs must not be the one clawbox can rewrite.
+  # gateway-restart-when-online.sh is launched BY ROOT from the NetworkManager
+  # dispatcher on every network event, so it belongs here for exactly the reason
+  # this block exists: the copy that runs must not be the one clawbox can
+  # rewrite. See scripts/nm-dispatcher-failover.sh.
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
-             clawbox-resource-limits.sh; do
+             clawbox-resource-limits.sh gateway-restart-when-online.sh; do
     if [ -f "$PROJECT_DIR/scripts/$src" ]; then
       install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
@@ -4975,10 +5322,55 @@ step_nm_dispatcher() {
     echo "  Skipping NM dispatcher: $SRC missing"
     return
   fi
-  mkdir -p "$DISPATCHER_DIR"
-  cp "$SRC" "$DEST"
-  chown root:root "$DEST"
-  chmod 0755 "$DEST"
+  # Every line below claims only what it has just done. step_post_update calls
+  # this step as `step_nm_dispatcher || echo "  Warning: …"`, and bash suspends
+  # `set -e` for the whole dynamic extent of a function run in a condition
+  # context — so on the in-app update path, the one every field box takes, an
+  # unchecked failure here would print "installed" over a file that never
+  # landed, and the `||` warning would never fire because the function still
+  # returned 0 from its last echo. Same rule step_systemd_services states for
+  # itself, for the same reason.
+  #
+  # install_root_file, not `cp` + `chown` + `chmod`: NetworkManager may execute
+  # this dispatcher at any instant, including mid-update, and `cp` writes the
+  # LIVE inode with O_TRUNC — which on an existing 0755 file means NM can run a
+  # truncated, still-executable dispatcher that silently does less than half its
+  # job. That is the prefix hazard install_root_file was written for (TASK-584).
+  # It stages `$DEST.new` in the same directory and renames, so NM sees either
+  # the whole old file or the whole new one. The staged name is briefly visible
+  # to NM's scan — `.new` is not one of the suffixes it skips — but the worst
+  # that costs is one extra run of a COMPLETE dispatcher, which the waiter's
+  # lock collapses anyway; a truncated one has no such floor.
+  if ! mkdir -p "$DISPATCHER_DIR" \
+     || ! install_root_file "$SRC" "$DEST" 0755; then
+    echo "  Warning: could not install the NetworkManager failover dispatcher at $DEST" >&2
+    record_provision_failure nm_dispatcher
+    return 1
+  fi
+  # The dispatcher is useless without the waiter it defers the gateway restart
+  # to, and the waiter must be the ROOT-OWNED copy — root runs it. Installed
+  # here as well as in install_root_libexec so an in-app UPDATE, which runs
+  # step_nm_dispatcher from step_post_update, gets both halves together rather
+  # than a new dispatcher pointing at nothing.
+  local WAITER_SRC="$PROJECT_DIR/scripts/gateway-restart-when-online.sh"
+  if [ -f "$WAITER_SRC" ]; then
+    # install_root_file returns 1 on both its failure paths and leaves the
+    # PREVIOUS copy in place, so an unreported failure is not "no waiter" but a
+    # STALE one — worse, and invisible until a network event logs the
+    # dispatcher's own "missing or not executable" line.
+    if install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR" \
+       && install_root_file "$WAITER_SRC" "$ROOT_LIBEXEC_DIR/gateway-restart-when-online.sh"; then
+      echo "  Deferred gateway-restart helper installed"
+    else
+      echo "  Warning: could not install the deferred gateway-restart helper — the failover will not restart the gateway" >&2
+      record_provision_failure nm_dispatcher
+      return 1
+    fi
+  else
+    # A checkout without the script is degraded, not broken: the dispatcher
+    # still fails over to WiFi. Reported, and not claimed as installed.
+    echo "  Warning: $WAITER_SRC missing — the failover will not restart the gateway"
+  fi
   echo "  NetworkManager failover dispatcher installed"
 }
 
@@ -6979,7 +7371,7 @@ DISPATCH_STEPS=(
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
   # box ended up running edition-blind updates that reinstalled OpenClaw.
   edition_lock edition_foreign_teardown hermes_install hermes_edition
-  network_setup set_hostname setup_config system_config
+  network_setup set_hostname set_timezone setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme

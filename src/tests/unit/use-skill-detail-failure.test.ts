@@ -76,6 +76,75 @@ describe("which skill a detail failure belongs to", () => {
   });
 });
 
+describe("a skill Hermes says does not exist", () => {
+  const UNBACKED = { id: "no-such-skill", name: "no-such-skill", catalogMiss: true, needsRemoteDocs: true };
+
+  it("stops showing the placeholder and says so, instead of blaming the documentation", async () => {
+    // Phase 1 cannot refuse an id — its catalogue is a snapshot and a
+    // related-skill chip carries a bare name — so it marks the record unbacked
+    // and phase 2 asks Hermes. Hermes refusing it is the answer: the panel used
+    // to keep the placeholder on screen under "couldn't load the documentation",
+    // and the placeholder's name is the requested id echoed back.
+    answer = (url) =>
+      url.includes("docs=1")
+        ? { ok: false, status: 404, body: { error: "Skill not found", code: "not_found" } }
+        : { ok: true, status: 200, body: { skill: UNBACKED } };
+
+    const { result } = renderHook(() => useSkillDetail("no-such-skill", false));
+
+    await waitFor(() => expect(result.current.error?.code).toBe("not_found"));
+    expect(result.current.error?.part).toBe("meta");
+    expect(result.current.detail).toBeNull();
+    // …and it is a TERMINAL state, not a reload. The derived phase is
+    // `stale ? 'meta' : phase` and `stale` is `!held`, so DROPPING the record
+    // sent the phase back to 'meta' for as long as the panel stayed open —
+    // which is what `SkillDetail` reads as `docsPending`, painting a
+    // documentation skeleton underneath "there's nothing to show". A spinner
+    // that never resolves next to "this does not exist" is the contradiction
+    // this card exists to remove.
+    expect(result.current.phase).toBe("done");
+  });
+
+  it("keeps a real skill on screen when only its documentation was refused", async () => {
+    // Same 404, over a record the catalogue DID back: that is a documentation
+    // failure and nothing more, and the metadata stays.
+    answer = (url) =>
+      url.includes("docs=1")
+        ? { ok: false, status: 404, body: { error: "Skill not found", code: "not_found" } }
+        : { ok: true, status: 200, body: { skill: { ...DETAIL, needsRemoteDocs: true } } };
+
+    const { result } = renderHook(() => useSkillDetail(ID, false));
+
+    await waitFor(() => expect(result.current.error?.part).toBe("docs"));
+    expect(result.current.detail?.name).toBe("PDF Tools");
+  });
+
+  it("does not cache the placeholder, so reopening asks again", async () => {
+    // The unbacked record was remembered before phase 2 ran; leaving it cached
+    // would paint the same imaginary skill on the next open without asking.
+    let refused = true;
+    answer = (url) => {
+      if (url.includes("docs=1")) {
+        return refused
+          ? { ok: false, status: 404, body: { error: "Skill not found", code: "not_found" } }
+          : { ok: true, status: 200, body: { delta: { body: "# Real after all" } } };
+      }
+      return { ok: true, status: 200, body: { skill: UNBACKED } };
+    };
+
+    const { result } = renderHook(() => useSkillDetail("no-such-skill", false));
+    await waitFor(() => expect(result.current.error?.code).toBe("not_found"));
+
+    refused = false;
+    await act(async () => {
+      result.current.refresh("no-such-skill");
+    });
+
+    await waitFor(() => expect(result.current.detail?.body).toBe("# Real after all"));
+    expect(result.current.error).toBeNull();
+  });
+});
+
 describe("which skill the PANEL's own state belongs to", () => {
   it("never paints one tab's skill for the other tab's id — not even for the frame before the fetch starts", async () => {
     // 40 ClawHub ids collide with a bundled skill on this device, which is why

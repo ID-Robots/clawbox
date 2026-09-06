@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * `?refresh=1` is not a read. It busts Hermes' per-provider disk cache and fans
@@ -36,6 +40,16 @@ vi.mock("@/lib/hermes-cli", () => ({
   runHermesCli: vi.fn(async () => ({ stdout: "", stderr: "", code: 0 })),
 }));
 
+// TASK-583: `verified` is present on every row and null on all of them, so
+// "connected" still means "a key is on disk". The marks a completed turn leaves
+// behind are the one source that costs nothing to read.
+const configGetMock = vi.hoisted(() => vi.fn(async () => undefined as unknown));
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
+  get: configGetMock,
+  set: vi.fn(async () => {}),
+}));
+
 const PAYLOAD = {
   providers: [{
     id: "anthropic",
@@ -56,6 +70,24 @@ const PAYLOAD = {
 
 let session: SessionFixture;
 let GET: (req: Request) => Promise<Response>;
+let hermesHome: string;
+let restoreEnv: () => void;
+
+/**
+ * Hermes' own pooled credential store, last written at `at`.
+ *
+ * The shape every Hermes box really has: `readProviderVerified` drops any mark
+ * older than this file's mtime, which is how a key written OUTSIDE this process
+ * (`hermes auth add` from the Terminal, or Hermes' own dashboard) expires a mark
+ * that no longer says anything about the credential on disk. An empty home
+ * would leave that filter unreachable and these assertions would pass down a
+ * branch no device takes.
+ */
+function writeAuthStore(at: Date): void {
+  const file = path.join(hermesHome, "auth.json");
+  writeFileSync(file, "{}");
+  utimesSync(file, at, at);
+}
 
 function request(query: string, authed: boolean): Request {
   return new Request(`http://localhost/setup-api/hermes/models${query}`, {
@@ -64,6 +96,21 @@ function request(query: string, authed: boolean): Request {
 }
 
 beforeEach(async () => {
+  // `readProviderVerified` drops any mark older than the mtime of Hermes' own
+  // pooled credential store (`$HERMES_HOME/auth.json`) — the anti-probe-once
+  // rule for keys written outside this process. Without an isolated home the
+  // marks below are read against whatever `~/.hermes/auth.json` the HOST has,
+  // so the fixed instants here expire on every real Hermes box (its store is
+  // dated the owner's last key change) while passing on a dev PC and in CI,
+  // which have no such file.
+  //
+  // Isolated AND populated: a store dated BEFORE the marks is the state of a
+  // device whose keys have not been touched since the turn that earned them, so
+  // the marks travel through the freshness filter rather than around it.
+  restoreEnv = saveEnv("HERMES_HOME");
+  hermesHome = mkdtempSync(path.join(tmpdir(), "clawbox-models-refresh-hermes-"));
+  process.env.HERMES_HOME = hermesHome;
+  writeAuthStore(new Date("2026-09-01T00:00:00.000Z"));
   session = installSessionFixture();
   getModelOptionsMock.mockReset();
   getModelOptionsMock.mockResolvedValue(PAYLOAD);
@@ -71,12 +118,23 @@ beforeEach(async () => {
   reconcileClawaiMock.mockClear();
   activeHarnessMock.mockReset();
   activeHarnessMock.mockResolvedValue("hermes");
+  configGetMock.mockReset();
+  configGetMock.mockResolvedValue(undefined);
   vi.resetModules();
   ({ GET } = await import("@/app/setup-api/hermes/models/route"));
 });
 
 afterEach(() => {
-  session.cleanup();
+  // `finally`, and the env first: a throwing `session.cleanup()` would
+  // otherwise leave `HERMES_HOME` pointing at a directory the next test removes.
+  try {
+    session.cleanup();
+  } finally {
+    restoreEnv();
+    // `mkdtempSync` can fail (an unwritable or full TMPDIR), and `rmSync`
+    // called on `undefined` would replace that error in the report.
+    if (hermesHome) rmSync(hermesHome, { recursive: true, force: true });
+  }
 });
 
 describe("GET /setup-api/hermes/models", () => {
@@ -154,5 +212,46 @@ describe("the scoped reply and the device's reasoning level", () => {
     // list, and `savedElsewhere` is null when it IS this provider — so
     // neither can name the default on the box's own provider.
     expect(body.savedPair).toEqual({ provider: "anthropic", model: "anthropic/claude-opus-5" });
+  });
+
+  it("reports a provider that has actually answered as verified, with when", async () => {
+    configGetMock.mockResolvedValue({ anthropic: "2026-09-02T19:53:34.000Z" });
+
+    const row = (await (await GET(request("", false))).json()).providers[0];
+
+    expect(row.verified).toBe(true);
+    expect(row.verifiedAt).toBe("2026-09-02T19:53:34.000Z");
+    // Pinned by KEY: a reader looking up the wrong one would otherwise pass,
+    // because the mock answers any key.
+    expect(configGetMock).toHaveBeenCalledWith("provider_verified_at");
+  });
+
+  it("stops calling a provider verified once its credential was rewritten outside ClawBox", async () => {
+    // ClawBox is not the only writer: `hermes auth add` from the Terminal and a
+    // key pasted into Hermes' own dashboard never pass through this process. So
+    // the mark is aged against the harness's own pooled store rather than
+    // pretended away — deliberately coarse (one file for every provider), and
+    // back to "not checked", never to "not connected".
+    writeAuthStore(new Date("2026-09-03T00:00:00.000Z"));
+    configGetMock.mockResolvedValue({ anthropic: "2026-09-02T19:53:34.000Z" });
+
+    const row = (await (await GET(request("", false))).json()).providers[0];
+
+    expect(row.verified).toBeNull();
+    expect(row).not.toHaveProperty("verifiedAt");
+    expect(row.credentialPresent).toBe(true);
+  });
+
+  it("leaves a provider nothing has exercised at NOT CHECKED, never at not connected", async () => {
+    // An offline box and a rate-limited subscription both land here. Null is
+    // the honest answer; false would say the credential was tried and failed.
+    configGetMock.mockResolvedValue({ openai: "2026-09-02T19:53:34.000Z" });
+
+    const row = (await (await GET(request("", false))).json()).providers[0];
+
+    expect(row.verified).toBeNull();
+    expect(row).not.toHaveProperty("verifiedAt");
+    // ...and presence is still reported separately, exactly as before.
+    expect(row.credentialPresent).toBe(true);
   });
 });

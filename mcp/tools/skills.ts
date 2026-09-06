@@ -10,22 +10,48 @@
 // the model has to decode.
 
 import {
+  CLI_FAILURE_SENTENCES,
   HERMES_SKILL_SOURCES,
   SORT_OPTIONS,
   checkInstallIdentifier,
   isBrowsableSource,
+  isCliFailureCode,
   isRemovableOrigin,
   isValidQuery,
   isValidSkillName,
   matchRemovableSkill,
+  REQUEST_REFUSAL,
+  SKILL_DOCS_CLI_TIMEOUT_MS,
+  SKILL_DOCS_CLIENT_TIMEOUT_MS,
+  type CliFailureCode,
   type InstalledHermesSkill,
 } from "../../src/lib/hermes-skills";
 import { type ApiOptions, apiGet, apiPost } from "../lib/api";
-import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
-import { json, text, type Registrar } from "../lib/register";
+import { ApiError, ToolError, type ErrorRule, type ToolErrorCode } from "../lib/errors";
+import { fitRows } from "../lib/guard";
+import { json, LIST_MAX_CHARS, text, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
 
 const BROWSABLE_SOURCES = HERMES_SKILL_SOURCES.filter((s) => isBrowsableSource(s));
+
+/**
+ * Third-party text on its way into a LINE-ORIENTED answer: one line, bounded.
+ *
+ * Everything a skill row prints comes out of a publisher's SKILL.md
+ * frontmatter, where `name: |` is a block scalar that keeps its newlines
+ * (`src/lib/hermes-skill-frontmatter.ts`, up to 2 000 characters). skill_list's
+ * contract is one row per line with the id first, so a value carrying a newline
+ * does not merely look untidy — it writes an extra row, and a 4-8B model has no
+ * way to tell that row from a real one.
+ */
+const oneLine = (value: string, max?: number): string => {
+  // `\p{Cc}\p{Cf}` as well as `\s`: JS `\s` does NOT cover U+0085 (NEL, a line
+  // break to some terminals and text pipelines) nor any other C0 control, so
+  // an ESC-bracket sequence in a card name would still reach a surface that
+  // renders this answer to a TTY and erase the line it is on.
+  const flat = value.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim();
+  return max === undefined ? flat : flat.slice(0, max);
+};
 
 interface BrowseSkill {
   id: string;
@@ -35,6 +61,13 @@ interface BrowseSkill {
   source?: string;
   trust?: string;
   installed?: boolean;
+}
+
+/** Phase 2 of the inspect route: the documentation delta, or an ambiguity. */
+interface InspectDocs {
+  delta?: { description?: string; body?: string };
+  ambiguous?: boolean;
+  candidates?: BrowseSkill[];
 }
 
 interface BrowseBody {
@@ -266,6 +299,28 @@ const uninstallRules = (name: string, shown = ""): ErrorRule[] => [
   },
 ];
 
+/**
+ * "This device has no Hermes install" — the one CATALOGUE rule the DOCUMENTATION
+ * phase also needs, named so it can be passed on its own.
+ *
+ * `skill_info`'s phase 2 is the only phase that spawns the CLI, so it is the
+ * only one that can answer `502 {code:"cli_missing"}`. Unmapped, that landed in
+ * `describeDocsFailure` as a retryable documentation failure — the wrong advice
+ * for a permanent device state. Handing phase 2 the WHOLE of `CATALOG_RULES`
+ * fixes that and breaks something else: every other 502 code would be
+ * intercepted here too, and `describeDocsFailure`'s own branches — which word
+ * the same facts for a README rather than for the catalogue, and know that
+ * `too_large` can never be retried away — would never run. So phase 2 takes
+ * this rule and nothing else.
+ */
+const CLI_MISSING_RULE: ErrorRule = {
+  status: 502,
+  match: /"code"\s*:\s*"cli_missing"/,
+  code: "NOT_SUPPORTED_HERE",
+  message: "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
+  next: "Do not retry and do not check the network. Tell the user this device's Hermes install is missing.",
+};
+
 const CATALOG_RULES: ErrorRule[] = [
   // The browse route's 400s. Both tools that install these rules pre-validate
   // with the ROUTE's own checks — `skill_search` calls `isValidQuery` and
@@ -294,13 +349,7 @@ const CATALOG_RULES: ErrorRule[] = [
     message: "Loading the skill catalogue took too long and was stopped.",
     next: "Retry once. If it times out again, tell the user the device is busy right now and to try later.",
   },
-  {
-    status: 502,
-    match: /"code"\s*:\s*"cli_missing"/,
-    code: "NOT_SUPPORTED_HERE",
-    message: "Hermes is not installed on this device, so the skill catalogue cannot be loaded.",
-    next: "Do not retry and do not check the network. Tell the user this device's Hermes install is missing.",
-  },
+  CLI_MISSING_RULE,
   {
     status: 502,
     match: /"code"\s*:\s*"too_large"/,
@@ -749,15 +798,18 @@ export function registerSkillTools(reg: Registrar): void {
     "List the skills already installed on this device. The first word of each line is the "
       + "name skill_uninstall removes it by. Call this before skill_install so you do not "
       + "install something twice, and before skill_uninstall to get the exact name. "
-      + "Only skills marked \"from the store\" can be removed.",
+      + "Only skills marked \"from the store\" can be removed. If the list was too long to "
+      + "send whole, a final line in brackets says how many skills were left out — that line "
+      + "is not a skill.",
     {},
-    { editions: ["hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
+    { editions: ["hermes"], readOnly: true, profile: "core", maxChars: LIST_MAX_CHARS },
     async () => {
       const body = await skillsGet<InstalledBody>("/setup-api/hermes/skills/installed", { timeoutMs: 15_000 });
-      // A device ships ~77 built-in skills. One terse line each — pretty-printed
+      // A device ships ~82 built-in skills (counted on a Hermes box,
+      // 2026-09-05). One terse line each — pretty-printed
       // JSON of the full records is four times the size and no clearer, and this
       // list has to fit a 4-8B model's context alongside everything else.
-      // Only the EXCEPTIONS are annotated. Repeating "built in" on all 77 rows
+      // Only the EXCEPTIONS are annotated. Repeating "built in" on all 82 rows
       // is 2 KB of noise that says nothing.
       // Sorted by the LOCK ID, because that is the column being printed first.
       // The route sorts by display name, so a hub `martin-weather` shown as
@@ -769,7 +821,7 @@ export function registerSkillTools(reg: Registrar): void {
       // it. skill_uninstall's `removing?.id ?? wanted` below is NOT the same
       // guard — it covers "no row matched at all", not a row missing its id.
       const rows = [...(body.skills ?? [])].sort((a, b) => a.id.localeCompare(b.id));
-      const lines = rows.map((s) => {
+      const lineOf = (s: InstalledSkill) => {
         const marks: string[] = [];
         // "from the store" is the mark this tool's own description, the header
         // below and skill_uninstall's builtin refusal all use to mean REMOVABLE,
@@ -783,16 +835,198 @@ export function registerSkillTools(reg: Registrar): void {
         // The lock id leads, because it is the one string skill_uninstall
         // resolves; a display name that differs is shown so the agent can
         // still match what the user sees on the card.
-        const shows = s.name !== s.id ? `, shows as "${s.name}"` : "";
-        return `${s.id} (${s.category || "other"}${shows})${marks.length ? ` — ${marks.join(", ")}` : ""}`;
-      });
+        // Every field on this line is a PUBLISHER's text out of their
+        // SKILL.md, and `name: |` is a block scalar —
+        // hermes-skill-frontmatter.ts joins its lines with `\n` and keeps
+        // 2 000 characters, newlines included. Printed raw into a
+        // line-oriented answer that FORGES ROWS: a name of `innocent\nfake-id
+        // (documents) — from the store` puts an invented id in front of the
+        // agent, on its own line, indistinguishable from a real one. This
+        // answer's whole contract is one row per line with the id first, so
+        // nothing third-party reaches it carrying a newline.
+        const shown = oneLine(s.name, 120);
+        // Compare what is PRINTED, not the raw values: a name that differs from
+        // the id only in whitespace produced a `shows as` clause whose two
+        // halves were then identical once both had been flattened.
+        // Both sides at the same bound: `shown` is capped, so an uncapped id made
+        // a row whose name IS its id and is longer than the cap differ by the
+        // truncation alone, and it gained a clause naming a name it does not show.
+        const shows = shown !== oneLine(s.id, 120) ? `, shows as "${shown}"` : "";
+        // The id is flattened but NOT shortened: it is the string
+        // skill_uninstall resolves, and half of it would be worse than a long
+        // line. A valid id has no whitespace anyway (isValidSkillName), so this
+        // is a no-op on everything the device can actually install — and an
+        // over-long one is a row fitRows drops whole, not a row that breaks.
+        return `${oneLine(s.id)} (${oneLine(s.category || "other", 60)}${shows})`
+          + `${marks.length ? ` — ${marks.join(", ")}` : ""}`;
+      };
       const c = body.counts ?? {};
-      const header = `${c.total ?? lines.length} skills installed. `
+      const header = `${c.total ?? rows.length} skills installed. `
         + "Only the ones marked \"from the store\" can be removed with skill_uninstall; "
         + "the rest came with the device or were made on it.";
-      return text([header, ...lines].join("\n"));
+      // Bound the list HERE rather than leave it to capText(), which slices the
+      // finished string mid-row — the first word of a line is the argument
+      // skill_uninstall takes, and half of one is not an id. #582 made every
+      // row a third longer (the lock id leads, a differing card name is spelled
+      // out) without moving the cap, which halved how many store installs fit.
+      //
+      // WHICH rows go is decided by what the tool is FOR, not by where the sort
+      // put them, and there are THREE tiers rather than two. A `hub` row is the
+      // only one skill_uninstall can act on (isRemovableOrigin is `hub` and
+      // nothing else), so it is kept first. A `local` row cannot be removed
+      // from here either, but it is a name a store install can still collide
+      // with, so it outranks a BUILT-IN, which answers to nothing the agent can
+      // call. Fitting the sorted list front-to-back instead kept all 82
+      // built-ins and dropped the store skills, which is the list backwards;
+      // fitting hub and local together let a device full of agent-written
+      // skills push out the one row the tool exists to name.
+      const tiers = [
+        rows.filter((s) => isRemovableOrigin(s.origin)),
+        rows.filter((s) => s.origin === "local"),
+        rows.filter((s) => !isRemovableOrigin(s.origin) && s.origin !== "local"),
+      ];
+      const omissionLine = (store: number, builtIn: number) => {
+        const parts = [
+          store ? `${store} more skills from the store or made here` : "",
+          builtIn ? `${builtIn} built-in skills` : "",
+        ].filter(Boolean);
+        return `(${parts.join(" and ")} are not listed — the full list was too long to send. `
+          + "To check whether a store skill is already installed, call skill_search: its results carry "
+          + "\"installed\". skill_uninstall also takes the name shown on a card, not only the id here.)";
+      };
+      // Reserved from the longest line this could produce, so the sentence can
+      // never be the thing that pushes the answer over the cap — the number in
+      // it is not known until the fit below has run.
+      let budget = LIST_MAX_CHARS - header.length - 1 - omissionLine(rows.length, rows.length).length - 1;
+      const keptIds = new Set<string>();
+      const dropped: number[] = [];
+      for (const tier of tiers) {
+        const fitted = fitRows(tier.map(lineOf), budget);
+        // By INDEX, never `slice(0, kept.length)`: fitRows skips a row too big
+        // for the budget left and goes on, so what it kept is a subset of the
+        // tier and not a prefix of it.
+        for (const i of fitted.keptIndexes) keptIds.add(tier[i].id);
+        budget -= fitted.kept.reduce((n, line) => n + line.length + 1, 0);
+        dropped.push(fitted.omitted);
+      }
+      // Emitted in the SORTED order the agent scans, whichever rows survived.
+      const lines = rows.filter((s) => keptIds.has(s.id)).map(lineOf);
+      const [hubOut, localOut, builtinOut] = dropped;
+      const omitted = hubOut + localOut + builtinOut
+        ? [omissionLine(hubOut + localOut, builtinOut)]
+        : [];
+      return text([header, ...lines, ...omitted].join("\n"));
     },
   );
+
+  /**
+   * The route's ambiguity answer, which is a 200 and not an error.
+   *
+   * It is emitted from the DOCS phase only (inspect/route.ts, `remoteDocs`),
+   * so checking it on phase 1 alone — as this tool did — was dead code, and
+   * the answer reached the agent as `documentation: ""` with nothing saying
+   * why. Checked on both phases now: one rule, wherever the route decides to
+   * raise it.
+   */
+  const throwIfAmbiguous = (body: { ambiguous?: boolean; candidates?: BrowseSkill[] }): void => {
+    if (body.ambiguous !== true) return;
+    const candidates = (body.candidates ?? []).slice(0, 8).map((c) => c.id);
+    throw new ToolError(
+      "BAD_ARGUMENT",
+      "That id matches more than one skill.",
+      `Pick one exact id and call skill_info again: ${candidates.join(", ")}`,
+    );
+  };
+
+  /**
+   * A phase-2 documentation fetch that did not deliver a README: what to tell
+   * the agent, and what to raise if the metadata turned out to be empty too.
+   *
+   * What this replaced was `.catch(() => null)`: the fetch failed,
+   * `documentation` stayed "", and nothing in the answer said so — so the agent
+   * described a store skill from its name alone and told the user it ships no
+   * documentation. An empty README and a README the device could not reach have
+   * to look different here, because they are different advice.
+   *
+   * Only the CODE is read, never the upstream's own text: the route's `error`
+   * is English composed on the device and a `cli_failed` body is the CLI's, so
+   * every sentence below is written locally.
+   */
+  interface DocsFailure {
+    /** The line appended to a record whose metadata is still worth having. */
+    note: string;
+    /** What to raise when there is no metadata either — see the guard below. */
+    code: ToolErrorCode;
+  }
+
+  const describeDocsFailure = (err: unknown): DocsFailure => {
+    const closing = " Everything else in this record was read on the device and is accurate."
+      + " Do not tell the user the skill has no documentation — say the device could not fetch it";
+    const retry = `${closing}, and offer to try again.`;
+    const final = `${closing}. Retrying will not change it.`;
+    let code: CliFailureCode | null = null;
+    // The route's own "the CLI does not know that id" verdict, which is the one
+    // failure here that is ABOUT the skill rather than about the fetch. Read
+    // from the BODY's code, never from the bare 404: a device build that
+    // predates this route answers 404 with no code at all, and reading that as
+    // a lookup miss puts "do not guess ids" back on a request that was never
+    // answered (CodeRabbit, #692).
+    let lookupMiss = false;
+    if (err instanceof ApiError) {
+      try {
+        const body = JSON.parse(err.body) as { code?: unknown };
+        if (isCliFailureCode(body.code)) code = body.code;
+        lookupMiss = err.status === 404 && body.code === REQUEST_REFUSAL.notFound;
+      } catch {
+        // A body that is not JSON, or a device build older than the codes.
+      }
+      // A 504 from this route is the documentation deadline by construction.
+      if (!code && err.status === 504) code = "cli_timeout";
+    }
+    if (code === "cli_timeout") {
+      // The ROUTE's own deadline: the number is real, and it is the source
+      // that ran out of it.
+      const seconds = Math.round(SKILL_DOCS_CLI_TIMEOUT_MS / 1_000);
+      return {
+        note: `The documentation could not be fetched: its source did not answer within ${seconds} seconds.${retry}`,
+        code: "TIMEOUT",
+      };
+    }
+    if (err instanceof ToolError && err.code === "TIMEOUT") {
+      // OUR budget ran out first — which can happen even with the margin
+      // below, because the route queues its CLI calls two at a time and the
+      // wait is not part of the cap. Naming a source deadline here would
+      // attribute a wait to a fetch that may never have started.
+      return {
+        note: `The documentation could not be fetched: the device did not answer in time.${retry}`,
+        code: "TIMEOUT",
+      };
+    }
+    if (code === "cli_missing") {
+      return {
+        note: `The documentation could not be fetched: ${CLI_FAILURE_SENTENCES.cli_missing}${final}`,
+        code: "NOT_SUPPORTED_HERE",
+      };
+    }
+    if (code === "too_large") {
+      return {
+        note: `The documentation could not be fetched: it was too large for the device to read.${final}`,
+        code: "TOO_LARGE",
+      };
+    }
+    if (lookupMiss) {
+      // The CLI's own verdict: it does not know that id. Not a fetch that
+      // failed — a lookup that answered.
+      return {
+        note: `There is no documentation to fetch: the device's skill browser does not recognise that id.${final}`,
+        code: "NOT_FOUND",
+      };
+    }
+    return {
+      note: `The documentation could not be fetched: the device could not load it.${retry}`,
+      code: "INTERNAL",
+    };
+  };
 
   reg.tool(
     "skill_info",
@@ -829,14 +1063,7 @@ export function registerSkillTools(reg: Registrar): void {
           ],
         },
       );
-      if (phase1.ambiguous === true) {
-        const candidates = (phase1.candidates ?? []).slice(0, 8).map((c) => c.id);
-        throw new ToolError(
-          "BAD_ARGUMENT",
-          "That id matches more than one skill.",
-          `Pick one exact id and call skill_info again: ${candidates.join(", ")}`,
-        );
-      }
+      throwIfAmbiguous(phase1);
       const detail = phase1.skill;
       if (!detail) {
         throw new ToolError(
@@ -848,13 +1075,62 @@ export function registerSkillTools(reg: Registrar): void {
 
       let description = typeof detail.description === "string" ? detail.description : "";
       let documentation = typeof detail.body === "string" ? detail.body : "";
+      let docsFailure: DocsFailure | null = null;
+      // Whether phase 2 RAN and returned, which is not the same question as
+      // whether it failed — a phase 2 that was never attempted fails at
+      // nothing. See the guard below.
+      let phase2Answered = false;
       if (detail.needsRemoteDocs === true) {
-        const phase2 = await skillsGet<{ delta?: { description?: string; body?: string } }>(
-          "/setup-api/hermes/skills/inspect",
-          { query: { id, docs: 1 }, timeoutMs: 30_000 },
-        ).catch(() => null);
+        // The budget is the route's own CLI cap plus its overhead — see
+        // SKILL_DOCS_CLIENT_TIMEOUT_MS. A shorter one aborts before the route
+        // can answer, which is exactly what a 30 s budget against a 45 s cap
+        // did: the 504 that names the documentation never arrived.
+        let phase2: InspectDocs | null = null;
+        try {
+          phase2 = await skillsGet<InspectDocs>(
+            "/setup-api/hermes/skills/inspect",
+            {
+              query: { id, docs: 1 },
+              timeoutMs: SKILL_DOCS_CLIENT_TIMEOUT_MS,
+              // ONE rule, and deliberately not phase 1's whole set. Phase 2 is
+              // the only phase that SPAWNS the CLI, so it is the only one that
+              // can answer `502 {code:"cli_missing"}` — a Hermes install that
+              // is not there. Unmapped it fell through to describeDocsFailure()
+              // and came back as "the device could not fetch it, offer to try
+              // again", which is the wrong advice for a permanent device state;
+              // mapped, it is the NOT_SUPPORTED_HERE the edition guard already
+              // raises for the same family of fact, and the catch below
+              // re-throws it rather than filing it as a docs failure.
+              //
+              // Every OTHER code stays with describeDocsFailure(), which reads
+              // it off the body and words it for the DOCUMENTATION rather than
+              // for the catalogue — and which knows that `too_large` can never
+              // be retried away. `CATALOG_RULES` here would shadow that branch
+              // and offer a retry that cannot succeed. Phase 1's `404 →
+              // NOT_FOUND` rule must not come here either: it would turn
+              // Hermes' refusal into a docs failure and delete the NOT_FOUND
+              // verdict the guard below depends on.
+              rules: [CLI_MISSING_RULE],
+            },
+          );
+          phase2Answered = true;
+        } catch (err) {
+          // Not every failure here is ABOUT the documentation. An off-Hermes
+          // device and a rejected token are the whole tool failing, and a note
+          // saying "the rest of this record is accurate, offer to try again"
+          // over one of those would be a second false story on top of the
+          // first.
+          if (err instanceof ToolError && (err.code === "NOT_SUPPORTED_HERE" || err.code === "AUTH_FAILED")) {
+            throw err;
+          }
+          docsFailure = describeDocsFailure(err);
+        }
+        if (phase2) throwIfAmbiguous(phase2);
         if (phase2?.delta?.body) documentation = phase2.delta.body;
         if (!description && phase2?.delta?.description) description = phase2.delta.description;
+        // Phase 1 had no body, so a failure here costs the whole README. If one
+        // arrived anyway, there is nothing to warn about.
+        if (documentation) docsFailure = null;
       }
 
       // The README is third-party markdown from a community registry, and it is
@@ -874,9 +1150,51 @@ export function registerSkillTools(reg: Registrar): void {
       // above has already given the Hermes CLI its chance to resolve it, so a
       // record that STILL carries no description, no documentation and no
       // provenance is not a sparse skill — it is a skill that does not exist.
+      //
+      // ASKED of the route where it answers (TASK-547): `catalogMiss` says in
+      // one field what the four-field test below infers — nothing in the
+      // catalogue and nothing on disk backed this record — and it is the
+      // route's own verdict rather than a guess from what the record happens to
+      // carry. It matters because the catalogue is a snapshot the browse route
+      // builds once and never rebuilds, so a real skill published since is
+      // missing from it, and `related_skills` chips address skills by bare NAME,
+      // which is not a key of it at all. The inferred test stays as the fallback
+      // for a device build that predates the field — absent is not `false`.
       const source = typeof detail.source === "string" ? detail.source : "";
       const trust = typeof detail.trust === "string" ? detail.trust : "";
-      if (!description && !documentation && !source && !trust) {
+      const inferredEmpty = !description && !documentation && !source && !trust;
+      const routeSaidUnbacked = detail.catalogMiss === true;
+      const unbacked = detail.catalogMiss === undefined ? inferredEmpty : routeSaidUnbacked;
+      // Where the ROUTE said `catalogMiss`, a phase 2 that ANSWERED settles the
+      // question in the skill's favour, whatever the delta carried: the route
+      // builds a delta off a real Hermes panel, so a panel with no Description
+      // row and no prose preview is still Hermes saying the skill exists. Only
+      // a phase 2 that refused or failed can leave the record unexplained.
+      // The inferred path keeps its own rule, because a build that predates
+      // `catalogMiss` has nothing else to go on.
+      // `phase2Answered`, never `!docsFailure`: a phase 2 that was never
+      // ATTEMPTED also leaves `docsFailure` null, and reading that as "Hermes
+      // answered" would return an unbacked placeholder as a complete skill —
+      // the exact fabrication this tool exists to stop. Unreachable from this
+      // build's route, which sets `needsRemoteDocs: true` on every record it
+      // marks `catalogMiss`, but the guard must not depend on that.
+      const phase2Settled = routeSaidUnbacked && phase2Answered && !docsFailure;
+      if (unbacked && !phase2Settled) {
+        // The guard's premise, stated above, is that phase 2 HAS run: only a
+        // lookup that ANSWERED and added nothing proves the skill is not
+        // there. A phase 2 that never answered proves nothing, and "do not
+        // guess ids" over a fetch that timed out is a harder version of the
+        // lie this tool exists to stop telling. `NOT_FOUND` is the one failure
+        // that IS the CLI's verdict, so it keeps the sentence below.
+        if (docsFailure && docsFailure.code !== "NOT_FOUND") {
+          throw new ToolError(
+            docsFailure.code,
+            "The device could not look that skill up: it holds no catalogue record for it, and reading the store failed.",
+            docsFailure.code === "TIMEOUT"
+              ? "Retry skill_info once. Do NOT tell the user the skill does not exist — the device could not check."
+              : "Do not retry. Tell the user the device could not reach its skill store — not that the skill is missing.",
+          );
+        }
         throw new ToolError(
           "NOT_FOUND",
           "No skill with that id — the device knows nothing about it.",
@@ -905,6 +1223,16 @@ export function registerSkillTools(reg: Registrar): void {
         needs_commands: (requirements?.commands ?? []).map((c) => c.name),
         needs_secrets: (requirements?.secrets ?? []).map((sec) => sec.label),
         documentation: framed(documentation.length > 4_000 ? `${documentation.slice(0, 4_000)}…` : documentation),
+        // The FLAG beside the sentence (TASK-547). An empty `documentation`
+        // reads as "this skill has none", and after the fix above that is
+        // exactly how a record whose docs lookup timed out — or whose docs
+        // Hermes refused while the CATALOGUE still backs the record — arrives
+        // here with nothing to show. A model that skims past prose still sees
+        // a boolean; `documentation_note` says which of the two it was and
+        // what to do about it.
+        ...(docsFailure
+          ? { documentation_unavailable: true, documentation_note: docsFailure.note }
+          : {}),
       });
     },
   );
@@ -943,7 +1271,11 @@ export function registerSkillTools(reg: Registrar): void {
         // match.
         throw refusalToToolError(err) ?? err;
       }
-      const name = body.name ?? id.split("/").pop() ?? id;
+      // Flattened but NOT shortened, exactly as skill_list treats a lock id: this
+      // is a text() answer, so a newline out of the publisher's frontmatter would
+      // write a sentence of its own — and it is also the string skill_uninstall
+      // resolves, which zText(128) accepts whole, so half of it would be worse.
+      const name = oneLine(body.name ?? id.split("/").pop() ?? id);
       const repaired = body.files?.repaired?.length ?? 0;
       // Return the LOCK NAME: it is the argument skill_uninstall needs, and
       // handing it over now is what stops the model guessing it later.
@@ -1011,7 +1343,13 @@ export function registerSkillTools(reg: Registrar): void {
       const sent = removing?.id ?? wanted;
       // The rules fire only on a FAILURE, where there is no body to read, so
       // they get what the pre-condition knew.
-      const shownPre = removing && removing.name !== sent ? ` (it showed as "${removing.name}")` : "";
+      // Flattened and bounded like the success answer below, and compared at the
+      // same bound: this is the same publisher field, on the same tool, and a
+      // refusal that prints it raw disagrees with the answer that does not.
+      const shownName = removing === undefined ? undefined : oneLine(removing.name, 120);
+      const shownPre = shownName !== undefined && shownName !== oneLine(sent, 120)
+        ? ` (it showed as "${shownName}")`
+        : "";
       let done: UninstallOk;
       try {
         done = await skillsPost<UninstallOk>(
@@ -1034,20 +1372,69 @@ export function registerSkillTools(reg: Registrar): void {
       // `weather` beside the ClawHub `martin-weather` that actually went) and,
       // with a builtin of that name, reported removing a store skill that never
       // existed.
-      const id = removing?.id ?? (typeof done?.id === "string" ? done.id : undefined) ?? wanted;
+      // The ROUTE's answer first. The pre-read and the POST are two moments,
+      // and the route resolves the argument again at the second one — so on a
+      // lock that moved in between (a parallel install, the owner removing it
+      // from Settings) the key it acted on is not the key this tool read, and
+      // its answer is the only thing that knows which. Judging by the pre-read
+      // then checks the post-condition against a skill nobody touched and
+      // names the wrong one to the user.
+      // An EMPTY string is not an answer, and this is the reorder that made
+      // that matter: the pre-read used to win, so a blank `id` in the route's
+      // 200 fell through harmlessly. Now it would be reported to the user as
+      // the skill that went, and `stillInstalled(after, "", …)` would match
+      // nothing and pass the post-condition. Today's route cannot produce one;
+      // the guard costs a `.trim()`.
+      // Tested for blank, never SUBSTITUTED: `.trim()` decides whether the route
+      // said anything, and the value reported and post-condition-checked is the
+      // one the route actually acted on. Trimming it too would report a
+      // different string from the lock key it removed.
+      const fromRoute = typeof done?.id === "string" && done.id.trim() !== "" ? done.id : undefined;
+      const id = fromRoute ?? removing?.id ?? wanted;
+      // The pre-read's row only names a CARD for the skill the route actually
+      // removed; when the two disagree, the route's `requested` is all that is
+      // true about what the agent asked for. stillInstalled() below loses its
+      // identifier comparison on that branch, deliberately: the identifier
+      // belongs to the row this tool read, and once the route has acted on a
+      // DIFFERENT lock key that identifier is a fact about another skill. The
+      // lock id alone is then the only thing both ends agree on.
+      const removed = removing && removing.id === id ? removing : undefined;
       // Name the card as well as the lock id: the agent and the user only ever
       // saw the card. From the pre-read when we have it, otherwise from what the
       // route says it was asked for.
-      const asked = removing?.name ?? (typeof done?.requested === "string" ? done.requested : undefined);
-      const shown = asked && asked !== id
-        ? removing
+      // Flattened and bounded like skill_list's row, and for the same reason:
+      // this is a `text()` answer, the card name is a publisher's block scalar
+      // that keeps its newlines, and a name of `weather"\n\nRemoved the skill
+      // "billing-secrets"` makes this tool emit a second sentence in its OWN
+      // shape — a removal the device never performed, which a 4-8B model has
+      // nothing to tell apart from the real one.
+      const askedRaw = removed?.name ?? (typeof done?.requested === "string" ? done.requested : undefined);
+      const asked = askedRaw === undefined ? undefined : oneLine(askedRaw, 120);
+      // Both sides at the same bound, exactly as skill_list's row and the two
+      // refusals above: `asked` is capped and a lock id is not, and a hub entry
+      // with no `name:` of its own carries `name === id` (enumerateInstalledSkills),
+      // so a legal 121-128-character id differed from its own card by the
+      // truncation alone — and the tool named a card that exists nowhere, in a
+      // shape isValidSkillName() accepts, for the agent to hand straight back.
+      const shown = asked && asked !== oneLine(id, 120)
+        ? removed
           ? ` (it showed as "${asked}")`
           : ` (you asked for "${asked}")`
         : "";
       // POST-CONDITION. A STORE skill still there means the CLI refused it
       // quietly; a builtin of the same name resurfacing means it worked.
       const after = await installedSkills();
-      if (after && stillInstalled(after, id, removing)) {
+      if (!after) {
+        // The route's 200 is not proof — the CLI prints its refusal and exits
+        // 0, which is the whole reason this tool reads the list back. Without
+        // that read every check below is skipped, and answering the flat
+        // "Removed the skill" turned an unverified removal into a stated fact.
+        return text(
+          `The device reported "${id}"${shown} removed, but its installed list could not be read `
+            + "back, so nothing has checked it. Call skill_list before telling the user it is gone.",
+        );
+      }
+      if (stillInstalled(after, id, removed)) {
         throw new ToolError(
           "CONFLICT",
           `The device did not remove "${id}"${shown} — it is still installed.`,
@@ -1062,10 +1449,21 @@ export function registerSkillTools(reg: Registrar): void {
       // card; that is the `weather` collision an exact lock id is allowed to
       // settle, and saying nothing about it is what would make the next
       // skill_list read as a failed uninstall.
-      const unshadowed = after?.find((sk) => sk.id === id && !isRemovableOrigin(sk.origin));
+      const unshadowed = after.find((sk) => sk.id === id && !isRemovableOrigin(sk.origin));
       const alias = unshadowed
         ? undefined
-        : after?.find((sk) => sk.id !== id && (sk.name === wanted || sk.name === asked));
+        // COMPARE WHAT IS PRINTED. `asked` is flattened and bounded above, so
+        // matching it against a RAW row silently loses this sentence for every
+        // card name oneLine() alters — a double space, a trailing space, a NBSP,
+        // anything over the bound — and the sentence is the guard that stops the
+        // next skill_list reading as a failed removal. The `wanted` clause stays a
+        // raw comparison on purpose — it is the string the AGENT typed, which
+        // isValidSkillName() has already refused whitespace in, so flattening the
+        // row on that side would widen what an exact name matches rather than fix
+        // what it prints. The flattened clause is the one that covers a card, and
+        // it is never the dead branch: the route answers `requested` on every 200
+        // (setup-api/hermes/skills/uninstall/route.ts), so `asked` is defined.
+        : after.find((sk) => sk.id !== id && (sk.name === wanted || oneLine(sk.name, 120) === asked));
       const survivor = unshadowed ?? alias;
       if (!survivor) return text(`Removed the skill "${id}"${shown}.`);
       const kind = survivor.origin === "local"
@@ -1073,7 +1471,7 @@ export function registerSkillTools(reg: Registrar): void {
         : isRemovableOrigin(survivor.origin) ? "store" : "built-in";
       const why = unshadowed
         ? `The device's own ${kind} "${id}" was underneath it and is available again`
-        : `A different ${kind} skill, "${survivor.id}", shows as "${survivor.name}" too`;
+        : `A different ${kind} skill, "${oneLine(survivor.id)}", shows as "${oneLine(survivor.name, 120)}" too`;
       return text(
         `Removed the store skill "${id}"${shown}. ${why}, so seeing that name again is not a `
           + "failed removal.",

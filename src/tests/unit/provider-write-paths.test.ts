@@ -24,6 +24,11 @@ const cliMock = vi.hoisted(() => vi.fn());
 const optionsMock = vi.hoisted(() => vi.fn());
 const patchMock = vi.hoisted(() => vi.fn());
 const readConfigMock = vi.hoisted(() => vi.fn());
+// The removal proves itself by reading every unset key back; "absent" is the
+// answer a device gives after a write that landed.
+const resolveConfigMock = vi.hoisted(() =>
+  vi.fn<(key: string) => Promise<{ state: string; value?: string }>>(async () => ({ state: "absent" })),
+);
 
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
@@ -33,6 +38,7 @@ vi.mock("@/lib/config-store", () => ({ get: storeGetMock, setMany: vi.fn() }));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: patchMock,
   readHermesConfigValue: readConfigMock,
+  resolveHermesConfigValue: resolveConfigMock,
 }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "local-token-xyz" }));
 vi.mock("@/lib/local-ai-runtime", () => ({
