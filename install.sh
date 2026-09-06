@@ -1490,7 +1490,11 @@ verify_build_present() {
 #     this cannot prove which of the two is wanted, and the next park clears
 #     `.next-old` and adopts it on the run after.
 drain_build_transients() {
-  local root="$1" kept_dir="$2" orphan
+  local root="$1" kept_dir="$2" orphan aside
+  # The private name this function claims into. Same family as the reclaim's
+  # own discard, so it is already drained, gitignored and pruned from the
+  # standalone trace — and a different process has a different one.
+  aside="$root/.next-discard.$$"
   for orphan in "$root"/.next-claim.* "$root"/.next-discard.*; do
     [ -e "$orphan" ] || continue
     if ! build_entry_present "$orphan"; then
@@ -1505,9 +1509,25 @@ drain_build_transients() {
     # "it failed" is not "there is a build there". An entry-less but non-empty
     # `.next-old` — an interrupted `rm -rf "$kept_dir"` in
     # set_previous_build_aside leaves exactly that — is worth nothing and must
-    # not keep a real build stranded for ever; clear it and adopt.
+    # not keep a real build stranded for ever.
+    #
+    # But it is CLAIMED before it is destroyed, never probed and then deleted:
+    # those are two syscalls apart, and a concurrent set_previous_build_aside
+    # can rename a real build into `$kept_dir` in between — which a
+    # check-then-delete would then destroy. The claim is a rename to a private
+    # name, the same mutex the whole reclaim rests on, and what was claimed is
+    # asked again before anything is removed.
     if ! build_entry_present "$kept_dir"; then
-      rm -rf "$kept_dir" || true
+      if mv -T "$kept_dir" "$aside" 2>/dev/null; then
+        if build_entry_present "$aside"; then
+          # It gained a build between the probe and the claim. Put it back and
+          # leave the orphan; the next run has a clear destination.
+          mv -T "$aside" "$kept_dir" 2>/dev/null || true
+          echo "  Note: $(basename "$orphan") holds a build and $kept_dir gained one — leaving it for the next run" >&2
+          continue
+        fi
+        rm -rf "$aside" || true
+      fi
       if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
         echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
         continue

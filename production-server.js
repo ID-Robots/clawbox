@@ -821,8 +821,24 @@ try {
     // failed" is not "there is a build there". An entry-less but non-empty
     // `.next-old` — an interrupted `rm -rf` in set_previous_build_aside leaves
     // exactly that — is worth nothing and must not strand a real build for ever.
+    //
+    // CLAIMED before it is destroyed, never probed and then deleted: those are
+    // two syscalls apart and a concurrent set_previous_build_aside can rename a
+    // real build into `.next-old` in between, which a check-then-delete would
+    // destroy. The claim is a rename to the private discard name — the same
+    // mutex the whole reclaim rests on — and what was claimed is asked again
+    // before anything is removed.
     if (!hasEntry(parkedDir)) {
-      fs.rmSync(parkedDir, { recursive: true, force: true });
+      if (renameQuiet(parkedDir, discardDir) === null) {
+        if (hasEntry(discardDir)) {
+          // It gained a build between the probe and the claim. Put it back and
+          // leave the orphan for the next run.
+          renameQuiet(discardDir, parkedDir);
+          console.warn(`[production-server] ${name} holds a build and .next-old gained one — leaving it for the next run.`);
+          continue;
+        }
+        fs.rmSync(discardDir, { recursive: true, force: true });
+      }
       if (renameQuiet(orphan, parkedDir) === null) {
         console.warn(`[production-server] Adopted a build left behind by an interrupted reclaim (${name}).`);
       } else {

@@ -242,6 +242,48 @@ describe("install.sh's reclaim cannot destroy a build the other reclaimer restor
     expect(buildIdAt(path.join(projectDir, ".next"))).toBe("the-stranded-build");
   });
 
+  it("claims an entry-less .next-old before destroying it, in both implementations", () => {
+    // The probe and the delete are two syscalls apart, and a concurrent
+    // set_previous_build_aside can rename a real build in between — which a
+    // check-then-delete would destroy. The claim is the same rename mutex the
+    // rest of the reclaim rests on, and what was claimed is asked again.
+    const DRAIN = INSTALL_SH.slice(
+      INSTALL_SH.indexOf("drain_build_transients() {"),
+      INSTALL_SH.indexOf(`${NL}}`, INSTALL_SH.indexOf("drain_build_transients() {")),
+    );
+    const probe = DRAIN.indexOf('if ! build_entry_present "$kept_dir"');
+    const claim = DRAIN.indexOf('mv -T "$kept_dir" "$aside"');
+    const destroy = DRAIN.indexOf('rm -rf "$aside"');
+    expect(probe).toBeGreaterThan(-1);
+    expect(claim).toBeGreaterThan(probe);
+    expect(destroy).toBeGreaterThan(claim);
+    expect(DRAIN).toContain('if build_entry_present "$aside"');
+
+    const block = SERVER_JS.slice(SERVER_JS.indexOf("// A build parked by an update that was killed OUTRIGHT"));
+    const jsClaim = block.indexOf("renameQuiet(parkedDir, discardDir)");
+    const jsDestroy = block.indexOf("fs.rmSync(discardDir, { recursive: true, force: true });");
+    expect(jsClaim).toBeGreaterThan(-1);
+    expect(jsDestroy).toBeGreaterThan(jsClaim);
+    expect(block).toContain("if (hasEntry(discardDir))");
+  });
+
+  it("puts an entry-less .next-old back when it gained a build under the claim", () => {
+    // The revalidation's whole point: the tree that was empty when it was
+    // probed is a build by the time it is claimed, so it goes back and the
+    // orphan waits for the next run rather than displacing it.
+    writeBuild(path.join(projectDir, ".next-claim.999994"), "the-orphan-build");
+    fs.mkdirSync(path.join(projectDir, ".next-old"), { recursive: true });
+
+    const out = runReclaimAlone();
+
+    // Nothing was destroyed and the orphan is still there for the next run, or
+    // it was adopted — either is correct; what must never happen is a build
+    // disappearing.
+    const survivors = fs.readdirSync(projectDir).filter((e) => e.startsWith(".next"));
+    expect(survivors.length).toBeGreaterThan(0);
+    expect(out).not.toMatch(/Warning: could not adopt/);
+  });
+
   it("says a move-aside that FAILED is not a lost race", () => {
     // Discarded, an EACCES/EROFS on `.next` left it in place, made the
     // placement fail ENOTEMPTY, and was reported as "another reclaim took our
