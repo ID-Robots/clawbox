@@ -106,6 +106,7 @@ import {
 // src/lib/log-safe.ts.
 import { logSafe } from "@/lib/log-safe";
 import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
+import { clearPluginRepair } from "@/lib/plugin-repair";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -2613,6 +2614,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         const plugin = await installDeepseekProviderPlugin();
         if (plugin.installed) {
           console.log(`[AI Config] deepseek provider plugin installed (${plugin.installed})`);
+          // The plugin the boot script may have marked for repair is on disk
+          // again, and this route goes on to write the provider itself — so
+          // this IS the outcome, and the "Needs repair" badge on the ClawBox AI
+          // row has to go with it. Deliberately here rather than inside
+          // `installDeepseekProviderPlugin`: the Retry route calls that same
+          // helper and clears the marker only after `plugins inspect --runtime`
+          // says the plugin actually loaded, and a clear inside the installer
+          // would have thrown the badge away before that question was asked.
+          await clearPluginRepair("deepseek").catch(() => false);
         } else {
           console.warn(
             "[AI Config] deepseek provider plugin install did not complete:",

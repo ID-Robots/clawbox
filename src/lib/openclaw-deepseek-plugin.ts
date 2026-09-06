@@ -1,5 +1,4 @@
 import { spawnOpenclawCli } from "./openclaw-config";
-import { clearPluginRepair } from "./plugin-repair";
 
 /**
  * The DeepSeek provider plugin ClawBox AI rides on. OpenClaw 2 unbundled it
@@ -61,11 +60,6 @@ export async function installDeepseekProviderPlugin(): Promise<DeepseekPluginIns
       await spawnOpenclawCli(["plugins", "install", spec, "--accept-capabilities"], {
         timeoutMs: INSTALL_TIMEOUT_MS,
       });
-      // The plugin the boot script may have marked for repair is now installed,
-      // whoever asked for it. A marker only the boot script cleared would leave
-      // a "Needs repair" badge on the ClawBox AI row of a box that has just
-      // been repaired from Settings (TASK-606).
-      await clearPluginRepair("deepseek").catch(() => false);
       return { installed: spec, failures };
     } catch (err) {
       failures.push(`${spec}: ${err instanceof Error ? err.message : String(err)}`);

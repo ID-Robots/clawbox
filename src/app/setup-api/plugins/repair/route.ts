@@ -132,13 +132,19 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, code: "not_supported" }, { status: 404 });
   }
 
-  let body: { pluginId?: unknown };
+  // `null`, `[]` and `"x"` are all valid JSON, and reading `.pluginId` off any
+  // of them is a throw rather than a 400.
+  let body: unknown;
   try {
-    body = (await req.json()) as { pluginId?: unknown };
+    body = await req.json();
   } catch {
     return NextResponse.json({ ok: false, code: "bad_request" }, { status: 400 });
   }
-  const asked = typeof body.pluginId === "string" ? body.pluginId.trim() : "";
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ ok: false, code: "bad_request" }, { status: 400 });
+  }
+  const raw = (body as { pluginId?: unknown }).pluginId;
+  const asked = typeof raw === "string" ? raw.trim() : "";
   if (!asked) {
     return NextResponse.json({ ok: false, code: "bad_request" }, { status: 400 });
   }

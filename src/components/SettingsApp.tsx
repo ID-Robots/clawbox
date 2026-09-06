@@ -1262,8 +1262,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     try {
       const r = await fetch("/setup-api/plugins/repair", { cache: "no-store" });
       if (!r.ok) return null;
-      const body = (await r.json()) as { repairs?: PluginRepairInfo[] };
-      return Array.isArray(body.repairs) ? body.repairs : [];
+      const body = (await r.json()) as { repairs?: unknown };
+      if (!Array.isArray(body.repairs)) return [];
+      // EVERY ROW CHECKED, not just the array. This renders inside Settings, so
+      // a row missing `pluginId` or `reason` is not a missing badge — it is a
+      // throw that takes the whole Settings window down.
+      return body.repairs.filter((row): row is PluginRepairInfo => {
+        const r = row as PluginRepairInfo | null;
+        return !!r && typeof r === "object"
+          && typeof r.pluginId === "string"
+          && typeof r.reason === "string"
+          && (r.stage === "install" || r.stage === "consent");
+      });
     } catch {
       // A box that cannot answer keeps the rows exactly as they were.
       return null;

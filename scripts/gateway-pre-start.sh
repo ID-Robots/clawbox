@@ -2468,7 +2468,10 @@ PY
 # keeps producing. Every success branch below calls this.
 clawbox_plugin_repair_clear() {
   [ -f "$CLAWBOX_PLUGIN_REPAIR_FILE" ] || return 0
-  CLAWBOX_REPAIR_ID="$1" python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null || true
+  # SAID, not swallowed. A clear that fails leaves a "Needs repair" badge on a
+  # row that is working — a false failure the owner cannot act on, because the
+  # Retry it offers will succeed and change nothing he can see.
+  if ! CLAWBOX_REPAIR_ID="$1" python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null
 import json, os, sys, tempfile
 
 path = sys.argv[1]
@@ -2494,6 +2497,9 @@ except Exception:
         pass
     raise
 PY
+  then
+    echo "  WARN: could not clear the $1 plugin repair record; Settings will go on offering a repair for something that now works" >&2
+  fi
 }
 
 # The whole "boot without it" move: switch the entry off if there is one to

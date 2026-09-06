@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import fs from "fs/promises";
 import path from "path";
 
@@ -165,7 +166,10 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
   if (!current[id]) return false;
   delete current[id];
   const target = pluginRepairPath();
-  const tmp = `${target}.tmp.${process.pid}`;
+  // The pid alone is not unique WITHIN a process: two clears in flight at once
+  // would stage over each other and one rename would land a file the other was
+  // still writing.
+  const tmp = `${target}.tmp.${process.pid}.${randomUUID()}`;
   await fs.mkdir(path.dirname(target), { recursive: true });
   await fs.writeFile(tmp, `${JSON.stringify(current, null, 2)}\n`, "utf-8");
   await fs.rename(tmp, target);
