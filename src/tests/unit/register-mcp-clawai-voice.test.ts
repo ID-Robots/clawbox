@@ -228,18 +228,26 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       expect(at("tts.provider")).toBe("openai");
     });
 
-    it("leaves a box that speaks for itself on its own voice", () => {
-      // Moving a box off its own voice is effectively permanent (the next
-      // `step_openclaw_tts` preserves `openai` as the owner's choice), so it is
-      // done only on a POSITIVE "this box cannot speak for itself".
+    it.each([
+      ["an unset selection", ""],
+      ["Hermes' factory `edge`", "edge"],
+      ["`clawbox-local`", "clawbox-local"],
+    ])("leaves a box with a working engine alone, whatever %s says", (_label, provider) => {
+      // The engine question is asked in EVERY unchosen state, not only over
+      // `clawbox-local`. `step_openclaw_tts` has one arm that leaves the key
+      // UNSET — a `hermes config get` that did not answer, i.e. one OOM-killed
+      // Python start on a loaded Jetson — and this script runs on every
+      // web-server boot, so it would fire before anything could correct it. A
+      // box that can speak entirely on-device must not be moved off its own
+      // voice by a boot script, and the move is effectively permanent.
       writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
-      writeYaml(`${BASE_CONFIG}tts:\n  provider: clawbox-local\n`);
+      writeYaml(provider ? `${BASE_CONFIG}tts:\n  provider: ${provider}\n` : BASE_CONFIG);
       installKokoroStamp();
 
       const r = run();
 
-      expect(at("tts.provider")).toBe("clawbox-local");
       expect(at("tts.openai")).toBeUndefined();
+      expect(at("tts.provider")).toBe(provider || undefined);
       expect(r.stdout).toContain("this box speaks for itself");
     });
 
@@ -368,30 +376,43 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       expect(at("tts.provider")).toBe("openai");
     });
 
-    it("never touches an owner's own speech server", () => {
+    it.each([
+      ["their key", "sk-theirs"],
+      // THE case, and the one the OpenClaw arm's ruling names outright: an owner
+      // can point OUR OWN token at an endpoint of their choosing, and that entry
+      // is theirs. A `claw_` credential is enough to REFRESH an entry — the worst
+      // that does is rewrite our fields to our values — and it is never enough to
+      // DELETE one.
+      ["OUR key at THEIR address", TOKEN],
+    ])("never touches an owner's own speech server, even with %s in it", (_label, key) => {
       writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
       writeYaml(
-        `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: https://speech.home.lan/v1\n    api_key: sk-theirs\n`,
+        `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: https://speech.home.lan/v1\n    api_key: ${key}\n    model: my-own-voice\n`,
       );
 
       const r = run();
 
-      expect(at("tts.openai.api_key")).toBe("sk-theirs");
+      expect(at("tts.openai.api_key")).toBe(key);
+      expect(at("tts.openai.base_url")).toBe("https://speech.home.lan/v1");
+      expect(at("tts.openai.model")).toBe("my-own-voice");
       expect(configCalls()).toEqual([]);
       expect(r.stdout).toContain("not ours to withdraw");
     });
 
     it("withdraws an entry left on a proxy address we have since moved off", () => {
-      // The credential is the other half of the ownership rule: a `claw_` token
-      // is ours wherever it points.
+      // The retired hosts are in the ownership set precisely so a box linked
+      // under a previous address is still recognisably ours. No `claw_` token
+      // here on purpose: the ADDRESS has to be what authorises the delete, or
+      // this case would pass for the reason the one above forbids.
       writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
       writeYaml(
-        `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: https://openclawhardware.dev/api/ai\n    api_key: ${TOKEN}\n`,
+        `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: https://openclawhardware.dev/api/ai\n    api_key: sk-someone-elses\n`,
       );
 
-      run();
+      const r = run();
 
       expect(at("tts.openai.api_key")).toBeUndefined();
+      expect(r.stdout).toContain("no longer includes it");
     });
 
     it("does not withdraw over a tier nobody has told us", () => {
@@ -447,7 +468,12 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       const r = run();
 
       expect(r.stdout).not.toContain("armed the ClawBox AI cloud voice");
-      expect(r.stdout).toContain("could not write tts.openai.base_url");
+      // THE NUMBER, not just the sentence. `$?` captured after `fi` is the `if`
+      // statement's own 0, so every failure line would read "(exit 0)" — which
+      // both misreports the cause and reads as a contradiction. §4's twenty-line
+      // comment on `tools disable` explains why 3, 124, 125 and 127 are four
+      // different facts to whoever is reading the journal.
+      expect(r.stdout).toContain("could not write tts.openai.base_url (exit 3)");
       expect(at("tts.provider")).toBeUndefined();
     });
 
@@ -469,7 +495,7 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     const tts = await import("@/lib/hermes-tts");
     const models = await import("@/lib/local-models");
     const script = fs.readFileSync(SCRIPT, "utf-8");
-    const block = script.slice(script.indexOf("── 4c. The ClawBox AI cloud voice"));
+    const block = script.slice(script.indexOf("── 4a. The ClawBox AI cloud voice"));
 
     expect(block).toContain(`CLAWBOX_SPEECH_DEVICE_TIER="${tts.CLAWBOX_AI_SPEECH_TIER}"`);
     expect(block).toContain(`CLOUD_MODEL = "${tts.HERMES_CLOUD_TTS_MODEL}"`);
@@ -478,9 +504,32 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     expect(block).toContain(`FACTORY_PROVIDER = "${tts.HERMES_FACTORY_TTS_PROVIDER}"`);
     expect(models.KOKORO_STAMP.endsWith("/.cache/clawbox/kokoro-installed")).toBe(true);
     expect(block).toContain("/.cache/clawbox/kokoro-installed");
+    // Every address ClawBox has ever written as its proxy — the set that makes a
+    // credential-blind delete safe, and the one the route already shares.
+    const { CLAWBOX_AI_PROXY_URLS } = await import("@/lib/clawbox-ai-models");
+    for (const url of CLAWBOX_AI_PROXY_URLS) expect(block).toContain(`"${url}"`);
     // And the tier constant is the DEVICE tier, not the plan name — the two are
     // off by one on purpose (CLAWBOX_AI_MODEL_BY_TIER).
     expect(tts.CLAWBOX_AI_SPEECH_TIER).toBe(ENTITLED_TIER);
+  });
+
+  it("arms a dual box, and writes nothing into ~/.openclaw", () => {
+    // Edition-gated, not harness-gated, and consistent with §4b: the web server
+    // is not restarted when the owner switches harness, so a block that asked
+    // which harness was active at boot would leave a switched-over box unvoiced.
+    // Dual is the one SKU where both editions' arms coexist — the OpenClaw half
+    // lives in gateway-pre-start.sh and this must not reach it.
+    fs.writeFileSync(lockPath, "CLAWBOX_EDITION=dual\n");
+    const openclawConfig = path.join(home, ".openclaw", "openclaw.json");
+    fs.mkdirSync(path.dirname(openclawConfig), { recursive: true });
+    fs.writeFileSync(openclawConfig, JSON.stringify({ agents: { defaults: {} } }));
+    writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(at("tts.provider")).toBe("openai");
+    expect(JSON.parse(fs.readFileSync(openclawConfig, "utf-8"))).toEqual({ agents: { defaults: {} } });
   });
 
   it("does nothing at all on an OpenClaw-only device", () => {

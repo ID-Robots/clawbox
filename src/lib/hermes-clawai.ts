@@ -1648,7 +1648,9 @@ async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
  * The cloud ENDPOINT AND CREDENTIAL are refreshed for the provider that speaks
  * through them — a box already on `openai` over our own route, and a box this
  * call is about to point there. `writeHermesCloudTarget` is the only writer of
- * `tts.openai.*` on this edition, so returning early on a box already speaking
+ * `tts.openai.*` REACHED FROM A LINK (`scripts/register-mcp.sh` §4a is the
+ * other one, and it runs at boot rather than on a save — TASK-717/718), so
+ * returning early on a box already speaking
  * through the cloud left `tts.openai.api_key` holding the token the portal
  * has just rotated: every utterance 401s while `hermesSpeaksReplies`, which
  * asks only that the two keys are non-empty, calls the voice configured. The
@@ -1732,8 +1734,10 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
       // An owner's own provider — elevenlabs, piper, one they added by hand.
       // The SELECTION is theirs and is never touched. The endpoint and
       // credential are refreshed only for the one provider that speaks through
-      // them, because this is the only writer of `tts.openai.*` on this edition
-      // and the portal rotates the token on a re-link: an unrefreshed key means
+      // them, because this is the only writer of `tts.openai.*` on the LINK
+      // path (the boot script's §4a is the other, and it only reaches a box
+      // whose plan it can confirm) and the portal rotates the token on a
+      // re-link: an unrefreshed key means
       // every utterance 401s while `hermesSpeaksReplies`, which asks only that
       // the two keys are non-empty, calls the voice configured. On a box
       // speaking through anything else those three writes would be 45 s of
