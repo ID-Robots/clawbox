@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
+import { controlUiEmailDirectiveScript, controlUiLocale } from "@/lib/control-ui-email-directives";
 import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
 import { envPort } from "@/lib/port-probe";
 import { readEditionSource } from "@/lib/edition-source";
@@ -71,7 +72,19 @@ export async function GET(request: NextRequest) {
         });
       })();
     </script>`;
-    html = html.replace(/<head\b[^>]*>/i, '$&' + autoConnect);
+    // The SECOND route that serves the Control UI's HTML. `serveGatewayHTML`
+    // injects the same handling for TASK-700, and a directive shown as a bare
+    // id here would be the same defect through a different door — the failure
+    // this repo keeps producing is the sibling call site, not the fix.
+    //
+    // From `<head>` the observer is what does the work: `document.body` is null
+    // this early, `scan(null)` returns, and `document.documentElement` already
+    // exists, so every node the SPA adds afterwards is still seen.
+    const emailDirectives = controlUiEmailDirectiveScript(await controlUiLocale());
+    // A replacer FUNCTION: the injected script carries a translated label, and
+    // `$&` / `` $` `` / `$'` / `$1` are substitutions inside a replacement
+    // string. Same reason as `serveGatewayHTML`.
+    html = html.replace(/<head\b[^>]*>/i, (match) => match + autoConnect + emailDirectives);
     return new NextResponse(html, {
       status: 200,
       headers: {

@@ -211,6 +211,43 @@ describe("gateway-proxy", () => {
       expect(html).toContain("Gateway Content");
     });
 
+    it("injects the EMAIL: directive handling this page had never heard of", async () => {
+      // TASK-700. This page is the gateway's own Control UI chat — a third
+      // `webchat` surface — and it showed `EMAIL:<uid>` as a bare internal id.
+      // No outbound hook can separate it from ClawBox's own two chats (one
+      // payload, one channel, three clients), so the only ClawBox-owned code on
+      // this surface is the script it already injects here.
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve("<html><body>Gateway Content</body></html>"),
+      }));
+
+      const html = await (
+        await gatewayProxy.serveGatewayHTML(createRequest("http://clawbox.local/chat"))
+      ).text();
+
+      expect(html).toContain("clawbox-email-card");
+      expect(html).toContain("/app/clawbox?email=");
+    });
+
+    it("injects it for a caller with no owner session too", async () => {
+      // The shell is served without a session (first boot, the login redirect)
+      // and simply carries no token. The directive handling is not a credential
+      // and must not be gated on one, or the page that IS served would keep
+      // showing the id.
+      ownerSession.mockResolvedValue(false);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        text: () => Promise.resolve("<html><body></body></html>"),
+      }));
+
+      const html = await (
+        await gatewayProxy.serveGatewayHTML(createRequest("http://clawbox.local/chat"))
+      ).text();
+
+      expect(html).toContain("clawbox-email-card");
+    });
+
     it("injects auth token when available", async () => {
       mockFs.readFile.mockResolvedValue(JSON.stringify({
         gateway: { auth: { token: "my-secret-token" } },

@@ -386,3 +386,49 @@ describe("the mascot chat, which had the same hole one step further in", () => {
     expect(screen.queryAllByTestId("chat-email-card")).toHaveLength(0);
   });
 });
+
+// ── The other end of a Control UI card ───────────────────────────────────────
+//
+// The gateway's own Control UI chat is a third `webchat` surface and rendered
+// the directive as a bare id (TASK-700). Nothing in the harness can tell the
+// three webchat clients apart, so the card is drawn by a script ClawBox injects
+// into the page it already serves — and that card can only be a LINK. This is
+// where the link lands: the same chat, showing the same message, through the
+// same panel a card here opens. One behaviour, not a third.
+describe("opening one message by link", () => {
+  const path = window.location.pathname;
+
+  afterEach(() => {
+    window.history.replaceState({}, "", path);
+  });
+
+  it("opens the message the link names, without asking for it twice", async () => {
+    window.history.replaceState({}, "", "/app/clawbox?email=4471");
+
+    render(<ChatApp />);
+
+    await screen.findByTestId("email-full-view");
+    await screen.findByText("Wednesday plan");
+    expect(mailboxReads()).toBe(1);
+    // The stub answers every unmatched URL with the same message, so the panel
+    // rendering proves nothing about WHICH message was asked for.
+    const asked = vi
+      .mocked(globalThis.fetch)
+      .mock.calls.map((call) => String(call[0]))
+      .filter((url) => url.includes("/setup-api/email/messages"));
+    expect(asked[0]).toContain("uid=4471");
+    // And the id is taken back out of the address, so a reload does not reopen
+    // the panel the owner has just closed.
+    expect(window.location.search).not.toContain("email=");
+  });
+
+  it("opens nothing at all when the link names no usable id", async () => {
+    window.history.replaceState({}, "", "/app/clawbox?email=0");
+
+    render(<ChatApp />);
+    await waitFor(() => expect(document.body.textContent).toContain(SUMMARY));
+
+    expect(screen.queryByTestId("email-full-view")).toBeNull();
+    expect(mailboxReads()).toBe(0);
+  });
+});
