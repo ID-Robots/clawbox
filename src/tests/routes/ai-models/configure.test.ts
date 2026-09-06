@@ -2638,8 +2638,11 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(body.error).toMatch(/legacy exec-approvals file/i);
       // The advice that could not work is gone from this arm.
       expect(body.error).not.toMatch(/run 'openclaw doctor --fix' from the Terminal/i);
-      // …and honest about the one case the boot path cannot clear on its own.
-      expect(body.error).toMatch(/if it cannot/i);
+      // …and honest about the one case the boot path cannot clear on its own,
+      // which is the difference between an owner who restarts once and one who
+      // restarts for ever.
+      expect(body.error).toMatch(/unless it holds approvals of yours/i);
+      expect(body.error).toMatch(/move aside by hand/i);
       // Fail closed, exactly as before: the legacy file does not stay behind.
       expect(mockFs.rename).toHaveBeenCalledWith(
         expect.stringMatching(/auth-profiles\.json$/),

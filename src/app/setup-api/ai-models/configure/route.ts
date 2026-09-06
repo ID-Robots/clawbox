@@ -2605,10 +2605,17 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
           return NextResponse.json(
             {
+              // Both outcomes named, in the order the owner meets them. The
+              // boot path moves a clearable blocker aside on the next start —
+              // but a file that provably holds approvals of HIS is left alone
+              // by design (TASK-737), and for that box a restart changes
+              // nothing. Leading with "restart and retry" alone would send
+              // exactly those owners round a loop.
               error: doctorBlockedByApprovals
                 ? "Credential migration is blocked by a legacy exec-approvals file, so the subscription sign-in"
-                  + " was rolled back. Restart the device and sign in again — the gateway clears that file on its"
-                  + " next start, and the boot log names it if it cannot."
+                  + " was rolled back. Restart the device and sign in again: the gateway moves that file aside on"
+                  + " its next start unless it holds approvals of yours. If the sign-in is refused again, the"
+                  + " gateway boot log names the file to move aside by hand."
                 : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
             },
             { status: 502 },
