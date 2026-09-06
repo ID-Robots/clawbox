@@ -10,6 +10,53 @@ const baseSchedule: ClawKeepSchedule = {
   retentionKeepLast: 10,
 };
 
+/**
+ * The three copies of the time-of-day validator.
+ *
+ * This branch exists because two of them disagreed: `clawkeep.ts` checked the
+ * SHAPE of `HH:MM` while `clawkeep-memory.ts` checked its RANGE, so the backup
+ * schedule stored "99:99" where the memory-index schedule rejected it. They
+ * agree now, and this is what keeps them agreeing.
+ *
+ * A contract test rather than one shared constant, deliberately. The natural
+ * home would be `clawkeep-protection.ts` — the module that exists to be
+ * imported by everything and to import nothing — but `MemoryShardApp.tsx` is a
+ * client component that must never reach `clawkeep.ts` (it opens `fs` at
+ * import), and the same codebase already settles this class the same way:
+ * `voice-output-warning-agreement` asserts that the selector and the privacy
+ * banner agree about which engines are local rather than merging them.
+ */
+describe("the time-of-day validator", () => {
+  const SOURCES = [
+    "src/lib/clawkeep.ts",
+    "src/lib/clawkeep-memory.ts",
+    "src/components/MemoryShardApp.tsx",
+  ];
+
+  it("is the same expression everywhere a schedule is validated", async () => {
+    const fs = await import("fs/promises");
+    const path = await import("path");
+    const found: Record<string, string[]> = {};
+    for (const file of SOURCES) {
+      const src = await fs.readFile(path.join(process.cwd(), file), "utf8");
+      // Every `HH:MM`-shaped anchored regex literal the code actually uses.
+      // Comments are dropped first: the modules quote the old expression while
+      // explaining why it was wrong, and a prose mention is not a validator.
+      const code = src
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .split("\n")
+        .map(line => (line.trimStart().startsWith("//") ? "" : line))
+        .join("\n");
+      found[file] = [...code.matchAll(/\/\^[^/\n]*:[^/\n]*\$\//g)].map(m => m[0]);
+      expect(found[file].length, `${file} must validate a time of day`).toBeGreaterThan(0);
+    }
+    const all = Object.values(found).flat();
+    expect(new Set(all).size, `expressions differ: ${JSON.stringify(found, null, 2)}`).toBe(1);
+    // And it must be the range-correct one, not merely a shared shape check.
+    expect(all[0]).toBe("/^([01]\\d|2[0-3]):[0-5]\\d$/");
+  });
+});
+
 describe("computeNextRunMs", () => {
   it("returns 0 when the schedule is disabled", () => {
     const now = new Date("2026-04-29T12:00:00");
