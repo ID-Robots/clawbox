@@ -190,6 +190,29 @@ describe("an approval turn from the owner's own conversation", () => {
     expect(after.card.outcomes).toEqual([expect.objectContaining({ id, ok: false, kind: "failed" })]);
   });
 
+  it("does not run the owner out of budget while he clears the queue", async () => {
+    // Twelve real approvals in a row, past the ten-attempt bound: a code that
+    // worked is not an attempt worth counting, and an owner told "too many
+    // attempts" half way through his own outbox is the false failure.
+    for (let i = 0; i < 12; i++) {
+      const { code } = await offered(`Draft ${i}`);
+      const res = await post({ senderId: OWNER, text: `send ${code}` });
+      expect(((await res.json()) as { handled: boolean }).handled).toBe(true);
+    }
+    expect(vi.mocked(smtp.sendMail)).toHaveBeenCalledTimes(12);
+  });
+
+  it("still stops a caller that keeps naming drafts that do not exist", async () => {
+    await offered();
+    const answers: number[] = [];
+    for (let i = 0; i < 12; i++) {
+      const res = await post({ senderId: OWNER, text: "send ZZZZZ" });
+      answers.push(res.status);
+    }
+    expect(answers).toContain(429);
+    expect(vi.mocked(smtp.sendMail)).not.toHaveBeenCalled();
+  });
+
   it("refuses a browser: this route takes the harness's bearer and nothing else", async () => {
     // middleware admits a session cookie too, so without this check a page the
     // owner visits could POST here with his cookie riding along. Every real

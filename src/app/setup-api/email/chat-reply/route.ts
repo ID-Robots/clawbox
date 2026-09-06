@@ -59,7 +59,7 @@
 import { NextResponse } from "next/server";
 import { applyReplyApproval } from "@/lib/email-approval-reply";
 import { verifyMcpBearer } from "@/lib/mcp-token";
-import { checkRateLimit } from "@/lib/rate-limit";
+import { checkRateLimit, resetRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +72,9 @@ export const dynamic = "force-dynamic";
  * Counted per process and per bucket, like every other budget in this subtree.
  */
 const ATTEMPT_BUDGET = { windowMs: 10 * 60 * 1000, max: 10 } as const;
+
+/** The bucket, shared by every caller: there is at most one harness asking. */
+const ATTEMPT_KEY = "harness";
 
 /** The one shape a caller may send. Anything else is a 400, never a guess. */
 interface ChatReplyBody {
@@ -102,7 +105,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ handled: false, error: "senderId and text are required" }, { status: 400 });
   }
 
-  if (!checkRateLimit("email-chat-reply", "harness", ATTEMPT_BUDGET)) {
+  if (!checkRateLimit("email-chat-reply", ATTEMPT_KEY, ATTEMPT_BUDGET)) {
     console.error("[email/chat-reply] refused: attempt budget exhausted");
     return NextResponse.json({ handled: false, error: "Too many attempts" }, { status: 429 });
   }
@@ -116,7 +119,16 @@ export async function POST(request: Request) {
     // The outcome is for this device's log, never for the caller: the plugin
     // relays `reply` to a person, and a stranger's refused attempt must not come
     // back as a different answer from an unknown code.
-    if (result.handled) console.error(`[email/chat-reply] settled a draft from chat: ${result.outcome}`);
+    if (result.handled) {
+      // A CODE THAT WORKED CLEARS THE BUDGET, and that is what keeps the bound
+      // off the owner. The queue holds up to twenty drafts; an owner clearing
+      // them one message at a time would otherwise be refused at the tenth,
+      // with nothing but "Too many attempts" to explain it — the false failure
+      // this whole subtree keeps producing. Only a caller that cannot name a
+      // real draft accumulates, which is the only thing the bound is for.
+      resetRateLimit("email-chat-reply", ATTEMPT_KEY);
+      console.error(`[email/chat-reply] settled a draft from chat: ${result.outcome}`);
+    }
     return NextResponse.json({ handled: result.handled, ...(result.reply ? { reply: result.reply } : {}) });
   } catch (err) {
     console.error("[email/chat-reply] failed:", err instanceof Error ? err.message : err);
