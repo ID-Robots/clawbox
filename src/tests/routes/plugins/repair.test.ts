@@ -4,6 +4,9 @@ vi.mock("child_process", () => ({ execFile: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
+  // The route resolves the binary through the repo's own resolver rather than
+  // guessing a path; the tests pin the argv, not where the binary lives.
+  findOpenclawBin: vi.fn(() => "/usr/bin/openclaw"),
   restartGateway: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
 }));
@@ -323,5 +326,28 @@ describe("plugins/repair — the Retry", () => {
     const r = await GET(new Request("http://x/setup-api/plugins/repair"));
     expect(r.status).toBe(200);
     expect(await r.json()).toMatchObject({ ok: true, repairs: [] });
+  });
+  it("asks the registry by the plugin's bare id, whatever key the marker used", async () => {
+    // `plugins enable` and `plugins inspect` look the id up in the registry
+    // report, which keys plugins by their bare manifest id — so a row filed as
+    // `@openclaw/discord` answered "plugin not found" on every press and the
+    // badge never cleared. The CONFIG writes keep the literal key, because they
+    // address the config by the key it carries.
+    readPluginRepairs.mockResolvedValue({
+      "@openclaw/discord": {
+        id: "@openclaw/discord", stage: "consent", reason: "no", atMs: 1, disabled: true, spec: "",
+      },
+    });
+    stubExec(async () => ({ stdout: JSON.stringify({ plugin: { id: "discord", status: "loaded", activated: true } }) }));
+    const r = await post({ pluginId: "discord" });
+    expect(r.status).toBe(200);
+    expect(execCalls).toEqual([
+      ["plugins", "enable", "discord", "--accept-capabilities"],
+      ["plugins", "inspect", "discord", "--runtime", "--json"],
+    ]);
+    // …and the config is still addressed by the key openclaw.json carries.
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith(
+      ['plugins.entries["@openclaw/discord"].enabled', "true", "--strict-json"],
+    );
   });
 });

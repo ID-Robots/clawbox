@@ -1425,6 +1425,54 @@ describe("updater", () => {
       errorSpy.mockRestore();
     });
 
+    it("keeps the repair record when `plugins enable` exits 0 without writing", async () => {
+      // The read-back's own case. `plugins enable` returning 0 is not the same
+      // as the entry being on, and clearing the badge on the exit code alone is
+      // the exact false success this card is about — one screen further out
+      // than the boot script's "gateway will still start".
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "Plugin \"codex\" requires capability consent\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadPluginRepairs.mockResolvedValue({
+        codex: {
+          id: "codex", stage: "install", reason: "offline", atMs: 1,
+          disabled: true, spec: "@openclaw/codex@2026.8.1",
+        },
+      });
+      mockClawboxDisabledEntryId.mockResolvedValue("codex");
+      // The verb exits 0 and the config still says the entry is off.
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (String(file).endsWith("/openclaw.json")) {
+          return JSON.stringify({ plugins: { entries: { codex: { enabled: false } } } });
+        }
+        throw new Error("ENOENT");
+      });
+      mockGatewayUp.mockResolvedValue(true);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      // The badge stays: the plugin is installed and still switched off, and
+      // the row is the only thing that says so.
+      expect(mockClearPluginRepair).not.toHaveBeenCalled();
+    });
+
     it("does not re-enable an explicitly disabled unused Codex plugin from a stale journal line", async () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },

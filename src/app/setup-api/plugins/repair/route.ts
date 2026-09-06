@@ -7,7 +7,7 @@ import { NextResponse } from "next/server";
 
 import { getActiveHarness } from "@/lib/harness";
 import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
-import { restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
+import { findOpenclawBin, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
@@ -46,8 +46,14 @@ const execFile = promisify(execFileCb);
  * so every id is unknown here and the route answers 404. Inert, not erroring.
  */
 
-const OPENCLAW_BIN = process.env.OPENCLAW_BIN
-  || `${process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox"}/.npm-global/bin/openclaw`;
+// THE REPO'S OWN RESOLVER, not a guess at one path. `findOpenclawBin()` searches
+// `dirname(process.execPath)`, `~/.npm-global/bin`, `/usr/local/bin`, `/usr/bin`
+// and every nvm node — which is why it exists — and it is what the updater, the
+// AI-models routes and `openclaw-config` all use. A hand-rolled path here means
+// this route can be looking for a binary the rest of the box is not using, and
+// the ENOENT would reach the owner as "the repair failed", permanently, on a
+// Retry that never ran anything.
+const OPENCLAW_BIN = findOpenclawBin();
 
 /** Long enough for an npm install on a Jetson, short enough to answer a click. */
 const INSTALL_TIMEOUT_MS = 180_000;
@@ -171,10 +177,18 @@ export async function POST(req: Request) {
   if (!entry) {
     return NextResponse.json({ ok: false, code: "not_marked" }, { status: 404 });
   }
+  const registryId = canonicalPluginId(entry.id);
 
   try {
     if (entry.stage !== "install") {
-      await execFile(OPENCLAW_BIN, ["plugins", "enable", entry.id, "--accept-capabilities"], {
+      // THE CANONICAL ID FOR THE REGISTRY, the configured key for the config.
+      // `plugins enable` and `plugins inspect` look the id up in the registry
+      // report, which keys plugins by their bare manifest id — so a marker
+      // filed under `@openclaw/discord` (the spelling this branch's whole
+      // canonicalisation exists for) would answer "plugin not found" on every
+      // press and never clear the badge. The `config set` writes below keep the
+      // literal key, because those address the config by the key it carries.
+      await execFile(OPENCLAW_BIN, ["plugins", "enable", registryId, "--accept-capabilities"], {
         timeout: CONSENT_TIMEOUT_MS,
         maxBuffer: 8 * 1024 * 1024,
       });
@@ -231,7 +245,7 @@ export async function POST(req: Request) {
     }
   }
 
-  const repaired = await harnessSaysLoaded(entry.id);
+  const repaired = await harnessSaysLoaded(registryId);
   if (repaired !== true) {
     // The re-enable is a STEP of the repair, not its verdict — but only a
     // plugin that DEMONSTRABLY does not load is switched back off.
