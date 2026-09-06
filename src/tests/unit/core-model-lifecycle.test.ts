@@ -148,6 +148,33 @@ describe("coreModelRetired", () => {
     expect(coreModelRetired("anthropic", "claude-opus-4-8")).toBe(true);
   });
 
+  it("does not read sibling provider blocks when the provider map exists", async () => {
+    writeManifest("deepseek", {
+      modelCatalog: {
+        providers: {
+          "deepseek-cli": { models: [{ id: "deepseek-local", status: "deprecated" }] },
+        },
+      },
+      providers: {
+        deepseek: { models: [{ id: "deepseek-web", status: "deprecated" }] },
+      },
+    });
+    const { coreModelRetired } = await load();
+    expect(coreModelRetired("deepseek", "deepseek-local")).toBe(false);
+    expect(coreModelRetired("deepseek", "deepseek-web")).toBe(false);
+  });
+
+  it("falls back to top-level providers when modelCatalog.providers is absent", async () => {
+    writeManifest("openrouter", {
+      providers: {
+        openrouter: { models: [{ id: "glm-5.1", status: "deprecated" }] },
+      },
+    });
+    const { coreModelRetired } = await load();
+    expect(coreModelRetired("openrouter", "glm-5.1")).toBe(true);
+    expect(coreModelRetired("openrouter", "glm-5.2")).toBe(false);
+  });
+
   it("re-reads a manifest the core replaced under a live process", async () => {
     // The in-app OpenClaw-only update runs INSIDE this server and deliberately
     // does not restart it, so "cached for the process lifetime" would keep a

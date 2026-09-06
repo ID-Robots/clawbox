@@ -151,6 +151,12 @@ function catalogueFor(manifest: unknown, provider: string): unknown {
   if (providers && typeof providers === "object" && !Array.isArray(providers)) {
     const own = (providers as Record<string, unknown>)[provider];
     if (own !== undefined) return own;
+    return {};
+  }
+  const topLevelProviders = (manifest as { providers?: unknown } | null)?.providers;
+  if (topLevelProviders && typeof topLevelProviders === "object" && !Array.isArray(topLevelProviders)) {
+    const shared = (topLevelProviders as Record<string, unknown>)[provider];
+    if (shared !== undefined) return shared;
   }
   return manifest;
 }
