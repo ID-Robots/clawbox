@@ -1300,6 +1300,180 @@ llamacpp_pid_if_running() {
   printf '%s' "$pid"
 }
 
+# The engines this run stopped, and that were RUNNING when it stopped them.
+#
+# Only these come back. An engine the owner had already stopped — or that the
+# runtime's own ten-minute idle standby (src/lib/local-ai-runtime.ts) had put
+# away — must stay stopped, or an update would be starting services nobody
+# asked for and holding memory nobody wanted held.
+PAUSED_ENGINE_UNITS=()
+PAUSED_ENGINE_USER_UNITS=()
+PAUSED_ENGINE_UID=""
+
+# Stop an engine, remembering whether it was running.
+#
+# Best-effort in the register of its caller: a box that cannot stop one of its
+# engines should still attempt the build it was asked for, and the log says
+# what happened.
+pause_engine_unit() {
+  local unit="$1"
+  systemctl cat "$unit" >/dev/null 2>&1 || return 0
+  # Asked BEFORE the stop, because after it the answer is always "inactive" and
+  # the pair would have nothing left to be symmetric about.
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    PAUSED_ENGINE_UNITS+=("$unit")
+  fi
+  echo "  Stopping $unit..."
+  systemctl stop "$unit" 2>/dev/null \
+    || echo "  Warning: could not stop $unit" >&2
+}
+
+# The same, for a USER unit reached through the clawbox user's session bus.
+pause_engine_user_unit() {
+  local unit="$1" uid="$2"
+  sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user cat "$unit" >/dev/null 2>&1 || return 0
+  if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+      systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+    PAUSED_ENGINE_USER_UNITS+=("$unit")
+    PAUSED_ENGINE_UID="$uid"
+  fi
+  echo "  Stopping $unit..."
+  sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
+    systemctl --user stop "$unit" 2>/dev/null \
+    || echo "  Warning: could not stop $unit" >&2
+}
+
+# How long a Type=simple unit is given to prove it did not fork and die.
+#
+# systemd calls a Type=simple unit ACTIVE the instant it forks, and every unit
+# in this pair is Type=simple (config/clawbox-embed.service, the kokoro and
+# whisper units scripts/install-voice.sh writes, and ollama's upstream unit).
+# So `is-active` asked immediately after `start` says no more than the exit
+# status does; asked again after a settle it separates a server that came up
+# from one that exited two seconds later — which clawbox-embed.service, with
+# `Restart=no`, will not retry.
+ENGINE_SETTLE_S="${CLAWBOX_ENGINE_SETTLE_S:-3}"
+# A settle that is not a plain number is not a settle: `sleep abc` FAILS, and
+# under errexit that would abort resume_paused_engines after the starts and
+# before the record is cleared — taking do_rebuild or step_post_update with it.
+# Same guard, same reason, as the gateway budget below.
+case "$ENGINE_SETTLE_S" in ''|*[!0-9]*) ENGINE_SETTLE_S=3 ;; esac
+
+# Start back every engine this run stopped, and check each one after a settle.
+#
+# The stop half of this pair has existed since TASK-709; the start half did
+# not. Measured on the OpenClaw box 2026-09-05 and on the Hermes box 2026-09-06:
+# step_post_update stopped ollama.service at 07:44:02, one second before the
+# step finished, and the updater reported the update complete; three hours later
+# the unit was still inactive because nothing had happened to ask for it. These
+# engines are on-demand — the local-AI proxy wakes ollama and the embedder,
+# `tts/warm` and the speak path wake the voice — so what the update leaves
+# behind is not a dead box but a box in a state it was not in before, whose
+# next use pays a cold start it did not have to. An update should hand the box
+# back as it found it, and saying "completed" over an engine it stopped and did
+# not restart is the false-success class (TASK-724).
+#
+# Never fails the update: refusing an otherwise-good update over one engine
+# would strand the box on the old build, which is strictly worse. What a failed
+# restart gets is a named [WARN] line on this step's stderr — the step's journal
+# — and nothing else. It deliberately does NOT go through
+# record_provision_failure: that channel turns the step's exit code non-zero,
+# which would paint a whole good update red over a voice engine, and there is no
+# quieter surface for it today. Whoever adds one should start here.
+#
+# RESIDUAL, stated rather than hidden: a shell SIGKILLed between the pause and
+# this call resumes nothing. That is not hypothetical — run_next_build's own
+# comment records this shell as a documented OOM-kill target (TASK-709) — and
+# nothing in bash can survive it. The box is then in exactly the pre-fix state
+# for those engines, and a reboot (which starts what is enabled) or the first
+# request through the proxy is what ends it.
+# Engines the RUNTIME wakes behind a memory guard, which a root `systemctl
+# start` would walk straight past.
+#
+# `ensureLocalAiReady("embed")` refuses to wake clawbox-embed.service below
+# EMBED_WAKE_MIN_AVAILABLE_MB (2,300) of MemAvailable, because the unit's own
+# cgroup cap cannot stop a wake from squeezing the gateway or a build. The
+# resume's whole failure arm is by definition the memory-starved path — an
+# OOM-killed build, seconds after restore_previous_build brought the dashboard
+# back — so asking for a ~2 GB embedder there is the one start in this pair that
+# can make things worse. Leave it to the proxy, which asks the guard: the first
+# memory search wakes it, exactly as it would have on a box that was never
+# updated. (This is the harness-first rule inside our own tree:
+# src/lib/local-ai-runtime.ts owns these lifecycles.)
+RUNTIME_WOKEN_UNITS="clawbox-embed.service"
+
+runtime_wakes_unit() {
+  case " $RUNTIME_WOKEN_UNITS " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+resume_paused_engines() {
+  local unit uid_dir
+  if [ "${#PAUSED_ENGINE_UNITS[@]}" -gt 0 ]; then
+    for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+      if runtime_wakes_unit "$unit"; then
+        echo "  Leaving $unit to the local-AI proxy's own guarded wake"
+        continue
+      fi
+      echo "  Starting $unit again (it was running before)..."
+      systemctl start "$unit" 2>/dev/null || true
+    done
+    # One settle for the whole set rather than one each: they are independent,
+    # and the update has already paid for the starts.
+    sleep "$ENGINE_SETTLE_S"
+    for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+      if runtime_wakes_unit "$unit"; then continue; fi
+      if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        echo "    [ok] $unit is back"
+      else
+        echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+      fi
+    done
+  fi
+  if [ "${#PAUSED_ENGINE_USER_UNITS[@]}" -gt 0 ] && [ -n "$PAUSED_ENGINE_UID" ]; then
+    uid_dir="/run/user/$PAUSED_ENGINE_UID"
+    # The same test the pause side applies. A session that ended during the
+    # build (no linger, the last login closed) leaves nothing to start into, and
+    # a [WARN] about that would be a false failure over a box that is fine.
+    if [ ! -d "$uid_dir" ]; then
+      echo "  The clawbox user has no session bus any more — leaving ${PAUSED_ENGINE_USER_UNITS[*]} to the next login"
+    else
+      for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+        echo "  Starting $unit again (it was running before)..."
+        sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="$uid_dir" \
+          systemctl --user start "$unit" 2>/dev/null || true
+      done
+      sleep "$ENGINE_SETTLE_S"
+      for unit in "${PAUSED_ENGINE_USER_UNITS[@]}"; do
+        if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="$uid_dir" \
+            systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+          echo "    [ok] $unit is back"
+        else
+          echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+        fi
+      done
+    fi
+  fi
+  forget_paused_engines
+  return 0
+}
+
+# Drop the record without acting on it — for the one caller that hands the
+# engines to something else (a reboot).
+forget_paused_engines() {
+  PAUSED_ENGINE_UNITS=()
+  PAUSED_ENGINE_USER_UNITS=()
+  PAUSED_ENGINE_UID=""
+}
+
+# The llama.cpp server is deliberately NOT in that pair. It has no unit: the
+# web server spawns it, holds the child handle and records the pid
+# (src/lib/local-ai-runtime.ts, src/instrumentation-node.ts), and wakes it on
+# the next request that needs it. A root shell starting a second llama-server
+# behind the app's back would be a process the app has no handle on, fighting
+# it over the same pidfile — a new defect in place of the one being fixed.
+
 # Give `bun run build` the board to itself.
 #
 # The rebuild is the most memory-hungry thing this appliance ever does, and on
@@ -1334,31 +1508,18 @@ free_memory_for_build() {
   before=$(available_mb)
   echo "Freeing memory for the build (${before} MB available)..."
 
-  if systemctl cat ollama.service >/dev/null 2>&1; then
-    echo "  Stopping ollama.service..."
-    systemctl stop ollama.service 2>/dev/null \
-      || echo "  Warning: could not stop ollama.service" >&2
-  fi
+  pause_engine_unit ollama.service
   # The memory embedder is a system unit of its own (~2 GB on the GPU while
   # awake) and outlives the web server whose idle timer would otherwise stop
   # it, so the build has to ask for its memory back explicitly.
-  if systemctl cat clawbox-embed.service >/dev/null 2>&1; then
-    echo "  Stopping clawbox-embed.service..."
-    systemctl stop clawbox-embed.service 2>/dev/null \
-      || echo "  Warning: could not stop clawbox-embed.service" >&2
-  fi
+  pause_engine_unit clawbox-embed.service
 
   # The voice engines are USER units, so they need the clawbox user's session
   # bus; with no /run/user/<uid> there is no session and nothing to stop.
   uid=$(id -u "$CLAWBOX_USER" 2>/dev/null || echo "")
   if [ -n "$uid" ] && [ -d "/run/user/$uid" ]; then
     for unit in kokoro-server.service whisper-server.service; do
-      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
-        systemctl --user cat "$unit" >/dev/null 2>&1 || continue
-      echo "  Stopping $unit..."
-      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$uid" \
-        systemctl --user stop "$unit" 2>/dev/null \
-        || echo "  Warning: could not stop $unit" >&2
+      pause_engine_user_unit "$unit" "$uid"
     done
   fi
 
@@ -1391,7 +1552,10 @@ free_memory_for_build() {
       echo "  llama.cpp did not exit on SIGTERM — killing it"
       kill -KILL "$pid" 2>/dev/null || true
     fi
-    rm -f "$PROJECT_DIR/data/llamacpp/server.pid"
+    # `|| true`: this sits between the engine pauses and the resume, and errexit
+    # is live in do_rebuild. A cosmetic cleanup that cannot be done (EACCES on
+    # the parent) must not kill the shell with every engine stopped.
+    rm -f "$PROJECT_DIR/data/llamacpp/server.pid" || true
   fi
 
   # Page cache last, once the engines have released their mappings. It is
@@ -1664,7 +1828,18 @@ promote_parked_build() {
 # entry of its own in .gitignore (`.next-old/` is already there).
 set_previous_build_aside() {
   local build_dir="$1" kept_dir="$2" need avail
-  rm -rf "$kept_dir"
+  # ANSWERS FOR ITSELF, because its caller is now a condition (`elif !`) and a
+  # condition suspends errexit for this whole body. Without these two returns a
+  # failing `rm -rf` fell through to the `mv` below, which with $kept_dir still
+  # present moves the box's only build INSIDE it (`.next-old/.next`) and exits
+  # 0 — a park that did not happen, reported as one, and a dashboard that stays
+  # down when the build then fails and restore_previous_build finds nothing.
+  # On beta the same failure aborted the shell: loud, and the parked tree was
+  # still where promote_parked_build would reclaim it.
+  if ! rm -rf "$kept_dir"; then
+    echo "  Error: could not clear $kept_dir before parking the build" >&2
+    return 1
+  fi
   [ -d "$build_dir" ] || return 0
   need="$(du -sk "$build_dir" 2>/dev/null | awk '{print $1}')"
   avail="$(df -Pk "$build_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
@@ -1677,6 +1852,10 @@ set_previous_build_aside() {
     echo "  Only ${avail}K free for a ${need}K build — clearing the old one instead of keeping it" >&2
     rm -rf "$build_dir"
     return 0
+  fi
+  if [ -e "$kept_dir" ]; then
+    echo "  Error: $kept_dir is still there — refusing to park the build inside it" >&2
+    return 1
   fi
   echo "Setting the current build aside..."
   # Before the rename, not after: the stamp and the park then arrive together,
@@ -1703,7 +1882,10 @@ set_previous_build_aside() {
      || ! printf '%s %s %s\n' "$$" "$boot_id" "$start_time" > "$build_dir/.rebuild-pid"; then
     echo "  Warning: could not record this rebuild as the owner of the build it is parking — a dashboard restarting mid-build may reclaim it" >&2
   fi
-  mv "$build_dir" "$kept_dir"
+  # `-T`, never a bare `mv`: with $kept_dir present a bare `mv` moves the build
+  # INSIDE it and reports success. The guard above makes that unreachable; this
+  # makes it unrepresentable.
+  mv -T "$build_dir" "$kept_dir"
 }
 
 # Bring the dashboard back up, and say exactly which build it came up on.
@@ -1887,10 +2069,14 @@ run_next_build() {
 
 # Stop the setup service, free memory, reinstall, and rebuild — without ever
 # leaving the box with no build at all.
+# `do_rebuild [--reboot-follows]`. The flag is the caller telling this function
+# that a reboot comes next, which decides one thing only: whether the engines
+# freed for the build are started again here or left to systemd.
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
-  local rc=0 built=0
+  local rc=0 built=0 reboot_follows=0
+  if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
 
   echo "Stopping clawbox-setup.service for rebuild..."
   systemctl stop clawbox-setup.service 2>/dev/null || true
@@ -1922,8 +2108,17 @@ do_rebuild() {
     rc=1
   elif ! ensure_node_pty; then
     rc=1
+  # A CONDITION, like its two neighbours above, and for a reason the neighbours
+  # did not have: errexit is live in this function (both callers invoke it
+  # bare), and set_previous_build_aside's `rm -rf` and `mv` can legitimately
+  # fail on a full or busy filesystem. A bare call there killed the shell
+  # between the engine pause and the resume below — leaving every engine
+  # stopped, which is the state this pair exists to prevent, on exactly the
+  # pressured box where it is most likely.
+  elif ! set_previous_build_aside "$build_dir" "$kept_dir"; then
+    echo "Error: could not set the current build aside" >&2
+    rc=1
   else
-    set_previous_build_aside "$build_dir" "$kept_dir"
     echo "Running bun build..."
     built=1
     run_next_build || rc=$?
@@ -1935,10 +2130,39 @@ do_rebuild() {
   if [ "$rc" -ne 0 ]; then
     echo "Error: rebuild failed (exit $rc)" >&2
     restore_previous_build "$build_dir" "$kept_dir" "$built" || true
+    # AFTER the restore, not before it: restore_previous_build gives the
+    # dashboard a fixed twenty seconds to answer on :80 before it reports the
+    # box DOWN, and this arm is by definition the memory-starved one. Four
+    # model servers asked for at the same moment would make a dashboard that is
+    # merely slow look dead — a false failure on the recovery path.
+    #
+    # Reached on this arm whichever caller we have: `reboot` in
+    # step_rebuild_reboot is BELOW its `do_rebuild`, and errexit ends the step
+    # before it.
+    resume_paused_engines
     return "$rc"
   fi
 
-  rm -rf "$kept_dir"
+  # `|| echo`, not bare: errexit is live in this function and this is the last
+  # statement between the engine pause and the resume below. An `rm -rf` that
+  # cannot remove the parked tree (EACCES, EBUSY, a mount in the way) would
+  # otherwise kill the shell with every engine stopped and neither the resume
+  # nor the hand-over reached — the exact state this pair exists to remove.
+  # A parked tree left behind is harmless: the next rebuild's
+  # promote_parked_build or set_previous_build_aside deals with it.
+  rm -rf "$kept_dir" || echo "  Warning: could not remove the parked build at $kept_dir" >&2
+  if [ "$reboot_follows" = "1" ]; then
+    # The caller reboots in a moment. Starting ollama, the ~2 GB embedder and
+    # both voice engines seconds before shutdown restores nothing that survives
+    # it, and it lengthens the very shutdown the updater is waiting through
+    # (REBUILD_TAKEOVER_TIMEOUT_MS). systemd starts what is enabled on the way
+    # back up, and the rest are on-demand — which is what the reboot leaves
+    # them as either way.
+    echo "  Leaving the paused engines to the reboot that follows this step"
+    forget_paused_engines
+  else
+    resume_paused_engines
+  fi
   echo "  Build complete"
 }
 
@@ -5768,9 +5992,13 @@ step_post_update() {
   # old copy (2.8 GB). `stop`, never `disable`: the runtime's own standby
   # convention, and the chat path can still wake it on demand. After the
   # helper, so nothing re-embeds through ollama on the way out.
-  if systemctl cat ollama.service >/dev/null 2>&1; then
-    systemctl stop ollama.service 2>/dev/null || true
-  fi
+  #
+  # Through the pause helper so this stop has a start too (TASK-724). It is the
+  # SECOND of the two an update performs — free_memory_for_build owns the
+  # first, in the rebuild step, and pairs it there — and it is the one whose
+  # missing start left local AI dead under a `completed` update, because
+  # nothing runs after post_update that would have woken it.
+  pause_engine_unit ollama.service
   step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a
@@ -5783,11 +6011,88 @@ step_post_update() {
   # the re-baked lock above is live immediately — while restarting the server
   # mid-update would kill the very process the updater is polling for progress.
   step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
+  # LAST, and after the smokes: ollama was stopped above to make it drop the
+  # stale embedder copy, and the memory stays free for step_llamacpp_model's
+  # download until here. A stopped-then-started ollama holds no model, so the
+  # 2.8 GB the stop was for is still released — what comes back is the idle
+  # server the box had before the update, which is the whole point of the pair.
+  resume_paused_engines
 }
 
 gateway_port_listening() {
   local gw_port="${GATEWAY_PORT:-18789}"
   ss -ltn 2>/dev/null | grep -qE "[:.]${gw_port}[[:space:]]"
+}
+
+# Is the gateway RUNNING, or at least still trying to be?
+#
+# Under `Restart=always` a crash loop spends most of its time in `activating`,
+# so this deliberately does not separate "starting for the first time" from
+# "restarting again". What it DOES separate is a unit that is not trying at all
+# — stopped, masked, or past its start limit — which is the case the recovery
+# below exists for and the one that must not be made to wait.
+gateway_unit_running_or_starting() {
+  case "$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null || echo unknown)" in
+    activating|active|reloading) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The same question as gateway_port_listening, asked with a budget.
+#
+# `gateway_port_listening` asks ONCE. That is the right question for
+# step_validate_services' Hermes probe, which asserts that nothing is listening;
+# it is the wrong question for "is this gateway broken", because the listener
+# arrives long after systemd says the unit started. Measured on the OpenClaw box
+# 2026-09-06: `Started ClawBox OpenClaw Gateway` at 07:53:43 and
+# `[gateway] http server listening (18 plugins; 7.2s)` at 07:53:57, with the
+# ExecStartPre ahead of it taking 31 s, 86 s and 120 s across the same boot's
+# three restarts. The recovery fired in the same second as `Started`; the
+# `openclaw doctor --fix` it then ran FAILED — "the Gateway or another SQLite
+# maintenance command owns this state directory", which is the gateway proving
+# it was alive — and the box paid a full extra cold start on every update.
+# Probe-once, and a false failure on top of it.
+#
+# Returns as soon as the port answers, and as soon as the unit stops trying, so
+# a healthy box costs a second or two and a genuinely dead one costs nothing.
+# Seconds this STEP has already spent waiting. The budget is the step's, not
+# each call's: the recovery asks up to four times, and four independent
+# 180-second budgets would turn a genuinely broken gateway from an 8-second
+# path into a six-minute one inside post_update's 900 s advisory budget — where
+# an overrun is reported `completed`, which is the false-success class at the
+# report level.
+GATEWAY_READY_SPENT=0
+
+wait_for_gateway_port() {
+  local budget="${CLAWBOX_GATEWAY_READY_BUDGET_S:-180}" waited=0 restarts_before restarts_now
+  # A budget that is not a plain number is not a budget; fall back rather than
+  # letting arithmetic below fail the update over an operator's typo.
+  case "$budget" in ''|*[!0-9]*) budget=180 ;; esac
+  budget=$(( budget > GATEWAY_READY_SPENT ? budget - GATEWAY_READY_SPENT : 0 ))
+  # A unit that RESTARTS while we wait is looping, not starting. Under
+  # `Restart=always` a crash loop spends most of its time `activating`, so the
+  # state alone cannot tell the two apart and the wait would run its whole
+  # budget over a gateway that is failing every few seconds.
+  restarts_before="$(systemctl show clawbox-gateway.service -p NRestarts --value 2>/dev/null || echo "")"
+  while :; do
+    if gateway_port_listening; then
+      return 0
+    fi
+    if ! gateway_unit_running_or_starting; then
+      return 1
+    fi
+    if [ "$waited" -ge "$budget" ]; then
+      return 1
+    fi
+    sleep 3
+    waited=$((waited + 3))
+    GATEWAY_READY_SPENT=$((GATEWAY_READY_SPENT + 3))
+    restarts_now="$(systemctl show clawbox-gateway.service -p NRestarts --value 2>/dev/null || echo "")"
+    if [ -n "$restarts_before" ] && [ -n "$restarts_now" ] && [ "$restarts_now" != "$restarts_before" ]; then
+      echo "  The gateway restarted while we waited for it ($restarts_before -> $restarts_now) — it is looping, not starting" >&2
+      return 1
+    fi
+  done
 }
 
 step_gateway_legacy_state_recovery() {
@@ -5796,17 +6101,39 @@ step_gateway_legacy_state_recovery() {
   # just churn (and, before the mask, resurrect it).
   is_hermes_edition && { echo "  [hermes edition] skipping gateway recovery"; return 0; }
   local gw_port="${GATEWAY_PORT:-18789}"
-  if gateway_port_listening; then
+  # WITH the budget, not a single `ss`: see wait_for_gateway_port. A gateway
+  # still in its ExecStartPre is not a gateway in legacy state.
+  if wait_for_gateway_port; then
     echo "  Gateway is listening on ${gw_port}, skipping legacy state recovery"
     return 0
   fi
 
   echo "  Gateway is not listening on ${gw_port}; running OpenClaw doctor recovery"
-  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  local doctor_out=""
+  doctor_out=$(as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive 2>&1) || true
+  printf '%s\n' "$doctor_out"
+  # `doctor` refusing BECAUSE the gateway holds its own state directory is
+  # positive evidence that the gateway is alive — it is the loser of a lock the
+  # gateway owns. Restarting on the strength of that is restarting over a
+  # working gateway, which is what cost a cold start per update. Wait for the
+  # listener instead and report honestly if it never comes.
+  if printf '%s\n' "$doctor_out" | grep -qiE 'owns this state directory|another (Gateway|SQLite maintenance command)'; then
+    echo "  openclaw doctor could not take the state directory because the gateway holds it — the gateway is alive, not in legacy state"
+    if wait_for_gateway_port; then
+      echo "  Gateway is listening on ${gw_port}"
+      return 0
+    fi
+    # The same observable state as the tail of this function — alive and not
+    # listening — so the same status. `step_post_update` calls this step as
+    # `… || echo "Warning: …"`, so a non-zero return is a warning in the update
+    # log and not a failed update; returning 0 here made a gateway that never
+    # binds its port produce a clean step.
+    echo "  Warning: the gateway holds its state directory but is not listening on ${gw_port}; not restarting over a live gateway" >&2
+    return 1
+  fi
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   systemctl restart clawbox-gateway.service || true
-  sleep 8
-  if gateway_port_listening; then
+  if wait_for_gateway_port; then
     echo "  Gateway recovered after doctor --fix"
     return 0
   fi
@@ -5849,9 +6176,11 @@ step_gateway_legacy_state_recovery() {
   # quarantined are never re-read, and the port check below reports a failure
   # over a recovery that was never attempted.
   systemctl restart clawbox-gateway.service || true
-  sleep 12
 
-  if gateway_port_listening; then
+  # Budgeted, for the same reason as the probe at the top: a `sleep 12` and one
+  # `ss` reported a healthy box as still offline whenever the pre-start took
+  # longer than twelve seconds, which on this hardware is the normal case.
+  if wait_for_gateway_port; then
     echo "  Gateway recovered after legacy state quarantine"
     return 0
   fi
@@ -7266,7 +7595,14 @@ step_rebuild_reboot() {
   # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
   # sees the new restore.py / scheduler logic.
   step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
-  do_rebuild
+  # The flag, on the arm that really reboots: see do_rebuild. In test mode
+  # nothing reboots, so the engines this rebuild stopped are this function's to
+  # give back and do_rebuild is called without it.
+  if is_test_mode; then
+    do_rebuild
+  else
+    do_rebuild --reboot-follows
+  fi
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
     systemctl restart clawbox-setup.service

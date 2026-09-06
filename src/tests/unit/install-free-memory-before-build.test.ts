@@ -39,8 +39,22 @@ const INSTALL_SH = readFileSync(INSTALL_SH_PATH, "utf-8");
 const NL = String.fromCharCode(10);
 
 function extractShellFunction(name: string): string {
+  const fn = findShellFunction(name);
+  if (fn === null) throw new Error(`${name} not found in install.sh`);
+  return fn;
+}
+
+/**
+ * The same cut, for a function a tree may not have yet.
+ *
+ * Used only where a MISSING function must fail the assertion it is part of
+ * rather than the whole file: the pause/resume pair is what these tests are
+ * about, and "install.sh has no pause_engine_unit" is the RED, not a harness
+ * error.
+ */
+function findShellFunction(name: string): string | null {
   const start = INSTALL_SH.indexOf(`${name}() {`);
-  if (start < 0) throw new Error(`${name} not found in install.sh`);
+  if (start < 0) return null;
   const end = INSTALL_SH.indexOf(`${NL}}`, start);
   if (end < 0) throw new Error(`${name} has no closing brace`);
   return INSTALL_SH.slice(start, end);
@@ -57,6 +71,48 @@ function shellCode(fn: string): string {
 
 const DO_REBUILD = shellCode(extractShellFunction("do_rebuild"));
 const FREE_MEMORY = shellCode(extractShellFunction("free_memory_for_build"));
+/**
+ * Everything that STOPS an engine for the build. The `systemctl` calls moved
+ * out of `free_memory_for_build` into the pause helpers when the stops gained
+ * their matching starts (TASK-724), so the rules below are asserted over the
+ * code that does the stopping wherever it lives.
+ */
+const PAUSE_CODE = [
+  FREE_MEMORY,
+  shellCode(findShellFunction("pause_engine_unit") ?? ""),
+  shellCode(findShellFunction("pause_engine_user_unit") ?? ""),
+].join(NL);
+
+/**
+ * The install.sh fragments the stubbed runs below need, cut out of the shipped
+ * file rather than restated here.
+ *
+ * The pause/resume trio is extracted BY THE SAME sed as everything else and is
+ * not required to exist: on a tree that has not got it, sed simply writes
+ * nothing and the assertions about it fail on what they are about — the
+ * missing start — instead of on a harness error.
+ */
+function sourceInstallShellFns(tmp: string): string[] {
+  const fns = [
+    "available_mb",
+    "llamacpp_pid_if_running",
+    "pause_engine_unit",
+    "pause_engine_user_unit",
+    "forget_paused_engines",
+    "runtime_wakes_unit",
+    "resume_paused_engines",
+    "free_memory_for_build",
+  ];
+  return [
+    `: > "${tmp}/fns.sh"`,
+    // The top-level state the pair keeps between the stop and the start, and
+    // the settle the check waits out. Cut from install.sh too, so a test cannot
+    // pass by declaring them itself.
+    `grep -E '^(PAUSED_ENGINE_[A-Z_]+|ENGINE_SETTLE_S|RUNTIME_WOKEN_UNITS)=' "$1" >> "${tmp}/fns.sh" || true`,
+    ...fns.map((f) => `sed -n '/^${f}() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`),
+    `. "${tmp}/fns.sh"`,
+  ];
+}
 
 describe("do_rebuild frees memory in the one place it can hold", () => {
   it("frees memory before the build", () => {
@@ -101,9 +157,10 @@ describe("free_memory_for_build stops engines without un-configuring them", () =
     // these engines are meant to come back on demand. An update that quietly
     // un-enabled one would be a box that stopped talking after its next
     // reboot — a worse bug than the OOM this prevents.
-    expect(FREE_MEMORY).toContain("systemctl stop ollama.service");
-    expect(FREE_MEMORY).not.toContain("disable");
-    expect(FREE_MEMORY).not.toMatch(/systemctl[^\n]*\benable\b/);
+    expect(FREE_MEMORY).toContain("pause_engine_unit ollama.service");
+    expect(PAUSE_CODE).toContain('systemctl stop "$unit"');
+    expect(PAUSE_CODE).not.toContain("disable");
+    expect(PAUSE_CODE).not.toMatch(/systemctl[^\n]*\benable\b/);
   });
 
   it("names every engine that can hold memory across the build", () => {
@@ -118,7 +175,7 @@ describe("free_memory_for_build stops engines without un-configuring them", () =
     // errexit is live (install.sh runs under `set -euo pipefail`) and this is
     // called as a bare statement, so every command that can legitimately fail
     // on a healthy box has to carry its own fallback.
-    const stops = FREE_MEMORY.split(NL).filter((l) => l.includes("systemctl") && l.includes("stop"));
+    const stops = PAUSE_CODE.split(NL).filter((l) => l.includes("systemctl") && l.includes("stop"));
     expect(stops.length).toBeGreaterThan(0);
     for (const line of stops) {
       expect(line, `a stop must not be able to abort the update: ${line}`).toMatch(/\|\|/);
@@ -152,15 +209,20 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
       [
         "#!/bin/sh",
         'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"',
-        'for a in "$@"; do',
-        '  if [ "$a" = "cat" ]; then shift_to_unit=1; fi',
-        "done",
         'case " $* " in',
         '  *" cat "*)',
         '    for u in $EXISTING_UNITS; do',
         '      case " $* " in *" $u "*) exit 0 ;; esac',
         "    done",
         "    exit 1 ;;",
+        // systemd answers 3 for a unit that exists and is not running, so the
+        // stub has to as well: `is-active` failing for any other reason is a
+        // different question from "it is stopped".
+        '  *" is-active "*)',
+        '    for u in ${ACTIVE_UNITS-$EXISTING_UNITS}; do',
+        '      case " $* " in *" $u "*) exit 0 ;; esac',
+        "    done",
+        "    exit 3 ;;",
         "esac",
         "exit 0",
         "",
@@ -264,10 +326,7 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
       `PROJECT_DIR="${tmp}"`,
       'CLAWBOX_USER="$(id -un)"',
       `export PATH="${tmp}/bin:$PATH"`,
-      `sed -n '/^available_mb() {/,/^}/p' "$1" > "${tmp}/fns.sh"`,
-      `sed -n '/^llamacpp_pid_if_running() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`,
-      `sed -n '/^free_memory_for_build() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`,
-      `. "${tmp}/fns.sh"`,
+      ...sourceInstallShellFns(tmp),
       "free_memory_for_build 2>&1",
     ].join(NL);
     let code = 0;
@@ -412,5 +471,396 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     expect(r.calls).toContain("stop ollama.service");
     expect(r.out).toMatch(/Warning: could not stop ollama\.service/);
     expect(r.out).toMatch(/Memory available for the build/);
+  });
+});
+
+/**
+ * TASK-724 — the stop half of this pair shipped without the start half.
+ *
+ * Measured on the Hermes box 2026-09-06: step_post_update stopped
+ * `ollama.service` at 07:44:02, one second before the step finished, the
+ * updater reported the update complete, and three hours later the unit was
+ * still inactive because nothing had happened to ask for it. These engines are
+ * on-demand, so what the update leaves behind is not a dead box but a box in a
+ * state it was not in before, whose next use pays a cold start it did not have
+ * to — and the update's own report said it was fine. False success.
+ *
+ * Two rules, and the second is what keeps the first from being over-reach:
+ * every engine this run stopped comes back, and ONLY the ones that were running
+ * when it stopped them — an engine the owner had switched off, or that the
+ * runtime's own ten-minute idle standby had put away, must stay off.
+ */
+describe("free_memory_for_build gives back what it took", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "resume-engines-"));
+    fs.mkdirSync(path.join(tmp, "bin"), { recursive: true });
+    fs.mkdirSync(path.join(tmp, "data", "llamacpp"), { recursive: true });
+    // Answers `cat` from EXISTING_UNITS and `is-active` from ACTIVE_UNITS, and
+    // flips a unit to inactive once it has been stopped — so a start that is
+    // asked for is visible in the log AND in the unit's state, and the "did it
+    // come back" check is a real question rather than a constant.
+    fs.writeFileSync(
+      path.join(tmp, "bin", "systemctl"),
+      [
+        "#!/bin/sh",
+        'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"',
+        'unit=""',
+        'for a in "$@"; do case "$a" in *.service) unit="$a" ;; esac; done',
+        'state="$SYSTEMCTL_STATE/$unit"',
+        'case " $* " in',
+        '  *" cat "*)',
+        '    for u in $EXISTING_UNITS; do',
+        '      [ "$u" = "$unit" ] && exit 0',
+        "    done",
+        "    exit 1 ;;",
+        '  *" stop "*)',
+        '    printf inactive > "$state"',
+        "    exit 0 ;;",
+        '  *" start "*)',
+        '    [ -n "$START_FAILS" ] && exit 1',
+        '    printf active > "$state"',
+        "    exit 0 ;;",
+        '  *" is-active "*)',
+        '    if [ -f "$state" ]; then',
+        '      [ "$(cat "$state")" = active ] && exit 0',
+        "      exit 3",
+        "    fi",
+        '    for u in $ACTIVE_UNITS; do',
+        '      [ "$u" = "$unit" ] && exit 0',
+        "    done",
+        "    exit 3 ;;",
+        "esac",
+        "exit 0",
+        "",
+      ].join(NL),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(
+      path.join(tmp, "bin", "sudo"),
+      ["#!/bin/sh", 'while [ $# -gt 0 ]; do', '  case "$1" in', "    -u) shift 2 ;;", "    -n) shift ;;",
+        "    *=*) shift ;;", "    *) break ;;", "  esac", "done", 'exec "$@"', ""].join(NL),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(path.join(tmp, "bin", "sync"), `#!/bin/sh${NL}exit 0${NL}`, { mode: 0o755 });
+    // The settle is real seconds on a box and nothing this file is about; the
+    // stub keeps the suite fast. That the settle EXISTS is asserted as text.
+    fs.writeFileSync(path.join(tmp, "bin", "sleep"), `#!/bin/sh${NL}exit 0${NL}`, { mode: 0o755 });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  /** Free memory, then resume — the pair `do_rebuild` performs around a build. */
+  function pauseThenResume({
+    existingUnits = "ollama.service clawbox-embed.service",
+    activeUnits = "ollama.service clawbox-embed.service",
+    startFails = "",
+  } = {}) {
+    const log = path.join(tmp, "systemctl.log");
+    const state = path.join(tmp, "state");
+    fs.writeFileSync(log, "");
+    fs.mkdirSync(state, { recursive: true });
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR="${tmp}"`,
+      'CLAWBOX_USER="$(id -un)"',
+      `export PATH="${tmp}/bin:$PATH"`,
+      ...sourceInstallShellFns(tmp),
+      "free_memory_for_build 2>&1",
+      "echo '--- build happens here ---'",
+      "resume_paused_engines 2>&1",
+    ].join(NL);
+    let code = 0;
+    let out: string;
+    try {
+      out = execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          SYSTEMCTL_LOG: log,
+          SYSTEMCTL_STATE: state,
+          EXISTING_UNITS: existingUnits,
+          ACTIVE_UNITS: activeUnits,
+          START_FAILS: startFails,
+        },
+      });
+    } catch (e: unknown) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+    }
+    return { code, out, calls: fs.readFileSync(log, "utf8").split(NL).filter(Boolean) };
+  }
+
+  it("starts ollama again after the build, having stopped it for the build", () => {
+    const r = pauseThenResume();
+    expect(r.code).toBe(0);
+    const stop = r.calls.indexOf("stop ollama.service");
+    const start = r.calls.indexOf("start ollama.service");
+    expect(stop, "the build still gets the memory").toBeGreaterThan(-1);
+    expect(start, "and the engine still gets to come back").toBeGreaterThan(stop);
+  });
+
+  it("leaves an engine that was already stopped alone", () => {
+    // The runtime stops ollama after ten idle minutes of its own accord, so
+    // "inactive" is a normal steady state and not something to undo. An update
+    // that started engines the box had put away would be holding memory nobody
+    // asked it to hold.
+    const r = pauseThenResume({ activeUnits: "clawbox-embed.service" });
+    expect(r.calls).toContain("stop ollama.service");
+    expect(r.calls).not.toContain("start ollama.service");
+  });
+
+  it("says so, by name, when an engine does not come back", () => {
+    // `systemctl start` answering 0 is not the outcome — it answers 0 for a
+    // unit whose ExecStart forked and died. The state after the start is.
+    const r = pauseThenResume({ startFails: "1" });
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/\[WARN\][^\n]*ollama\.service did not come back/);
+  });
+
+  it("reports the engines that did come back, so a log reader can tell", () => {
+    const r = pauseThenResume();
+    expect(r.out).toMatch(/\[ok\][^\n]*ollama\.service is back/);
+  });
+
+  it("pauses and resumes a USER unit, with a session bus this test owns", () => {
+    // Driven DIRECTLY rather than through free_memory_for_build, whose
+    // `[ -d /run/user/<uid> ]` gate is false in a CI container — so this third
+    // of the pair was exercised on a dev PC and nowhere else.
+    const log = path.join(tmp, "systemctl.log");
+    const state = path.join(tmp, "state");
+    const runUser = path.join(tmp, "run-user", "424242");
+    fs.writeFileSync(log, "");
+    fs.mkdirSync(state, { recursive: true });
+    fs.mkdirSync(runUser, { recursive: true });
+    const out = execFileSync("bash", ["-c", [
+      "set -euo pipefail",
+      `PROJECT_DIR="${tmp}"`,
+      'CLAWBOX_USER="$(id -un)"',
+      `export PATH="${tmp}/bin:$PATH"`,
+      // The helper reads /run/user/<uid>; point the whole pair at a directory
+      // this test owns by naming a uid whose directory it just created.
+      ...sourceInstallShellFns(tmp),
+      `sed -i 's#/run/user/#${tmp}/run-user/#g' "${tmp}/fns.sh"`,
+      `. "${tmp}/fns.sh"`,
+      'pause_engine_user_unit kokoro-server.service 424242',
+      'resume_paused_engines',
+    ].join(NL), "bash", INSTALL_SH_PATH], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, SYSTEMCTL_LOG: log, SYSTEMCTL_STATE: state,
+             EXISTING_UNITS: "kokoro-server.service", ACTIVE_UNITS: "kokoro-server.service", START_FAILS: "" },
+    });
+    const calls = fs.readFileSync(log, "utf8").split(NL).filter(Boolean);
+    expect(calls.some((c) => c.includes("stop kokoro-server.service"))).toBe(true);
+    expect(calls.some((c) => c.includes("start kokoro-server.service"))).toBe(true);
+    expect(out).toMatch(/\[ok\][^\n]*kokoro-server\.service is back/);
+  });
+
+  it("says the session is gone rather than warning about an engine that cannot come back", () => {
+    // A session that ends during the build (no linger, the last login closed)
+    // leaves nothing to start into. A [WARN] about that would be a false
+    // failure over a box that is fine.
+    const log = path.join(tmp, "systemctl.log");
+    const state = path.join(tmp, "state");
+    fs.writeFileSync(log, "");
+    fs.mkdirSync(state, { recursive: true });
+    fs.mkdirSync(path.join(tmp, "run-user", "424242"), { recursive: true });
+    const out = execFileSync("bash", ["-c", [
+      "set -euo pipefail",
+      `PROJECT_DIR="${tmp}"`,
+      'CLAWBOX_USER="$(id -un)"',
+      `export PATH="${tmp}/bin:$PATH"`,
+      ...sourceInstallShellFns(tmp),
+      `sed -i 's#/run/user/#${tmp}/run-user/#g' "${tmp}/fns.sh"`,
+      `. "${tmp}/fns.sh"`,
+      'pause_engine_user_unit kokoro-server.service 424242',
+      // The session ends between the pause and the resume.
+      `rm -rf "${tmp}/run-user/424242"`,
+      'resume_paused_engines',
+    ].join(NL), "bash", INSTALL_SH_PATH], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, SYSTEMCTL_LOG: log, SYSTEMCTL_STATE: state,
+             EXISTING_UNITS: "kokoro-server.service", ACTIVE_UNITS: "kokoro-server.service", START_FAILS: "" },
+    });
+    expect(out).toMatch(/no session bus any more/);
+    expect(out).not.toMatch(/\[WARN\]/);
+  });
+
+  it("leaves the memory embedder to the proxy's guarded wake", () => {
+    // src/lib/local-ai-runtime.ts refuses to wake clawbox-embed.service below
+    // EMBED_WAKE_MIN_AVAILABLE_MB; a root `systemctl start` walks past that
+    // guard, and the failure arm is the memory-starved path by definition.
+    const r = pauseThenResume();
+    expect(r.calls).toContain("stop clawbox-embed.service");
+    expect(r.calls).not.toContain("start clawbox-embed.service");
+    expect(r.out).toMatch(/Leaving clawbox-embed\.service to the local-AI proxy/);
+    // ollama is not the runtime's to refuse, so it still comes back.
+    expect(r.calls).toContain("start ollama.service");
+  });
+
+  it("cannot start an engine twice, so the second pause accounts only for itself", () => {
+    // post_update stops ollama a second time and resumes it at its own end. If
+    // resume did not clear its record, a later call would start whatever the
+    // first one had — including a unit the box has since stopped on purpose.
+    const log = path.join(tmp, "systemctl.log");
+    const state = path.join(tmp, "state");
+    fs.writeFileSync(log, "");
+    fs.mkdirSync(state, { recursive: true });
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR="${tmp}"`,
+      'CLAWBOX_USER="$(id -un)"',
+      `export PATH="${tmp}/bin:$PATH"`,
+      ...sourceInstallShellFns(tmp),
+      "free_memory_for_build >/dev/null 2>&1",
+      "resume_paused_engines >/dev/null 2>&1",
+      `printf '' > "$SYSTEMCTL_LOG"`,
+      "resume_paused_engines 2>&1",
+    ].join(NL);
+    execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        SYSTEMCTL_LOG: log,
+        SYSTEMCTL_STATE: state,
+        EXISTING_UNITS: "ollama.service",
+        ACTIVE_UNITS: "ollama.service",
+        START_FAILS: "",
+      },
+    });
+    expect(fs.readFileSync(log, "utf8").split(NL).filter(Boolean)).toEqual([]);
+  });
+});
+
+describe("both stops an update performs have a start", () => {
+  const POST_UPDATE = shellCode(extractShellFunction("step_post_update"));
+
+  it("do_rebuild accounts for the paused engines on BOTH of its exits", () => {
+    // Every arm has to end in one of the two verbs. The failure arm resumes
+    // (nothing reboots after it — errexit ends step_rebuild_reboot before its
+    // `reboot`); the success arm resumes unless the caller announced a reboot,
+    // in which case it hands them over explicitly rather than dropping them.
+    const branchIdx = DO_REBUILD.search(/if \[ "\$rc" -ne 0 \]/);
+    expect(branchIdx).toBeGreaterThan(-1);
+    const failureArm = DO_REBUILD.slice(branchIdx, DO_REBUILD.indexOf('return "$rc"'));
+    const successArm = DO_REBUILD.slice(DO_REBUILD.indexOf('return "$rc"'));
+    expect(failureArm).toContain("resume_paused_engines");
+    expect(successArm).toContain("resume_paused_engines");
+    expect(successArm).toContain("forget_paused_engines");
+    // After the build in both cases, or it would hand the memory back before
+    // it is used.
+    expect(DO_REBUILD.indexOf("run_next_build")).toBeLessThan(branchIdx);
+  });
+
+  it("resumes AFTER the restore on the failure arm, not before it", () => {
+    // restore_previous_build gives the dashboard a fixed twenty seconds to
+    // answer on :80. This arm is the memory-starved one by definition, so four
+    // model servers asked for first would make a slow dashboard look dead.
+    const branchIdx = DO_REBUILD.search(/if \[ "\$rc" -ne 0 \]/);
+    const failureArm = DO_REBUILD.slice(branchIdx);
+    expect(failureArm.indexOf("restore_previous_build"))
+      .toBeLessThan(failureArm.indexOf("resume_paused_engines"));
+  });
+
+  it("does not spin four model servers up seconds before a reboot", () => {
+    // step_rebuild_reboot is the in-app updater's step. On the arm that really
+    // reboots, the engines are systemd's to bring back; starting them here
+    // restores nothing that survives and lengthens the shutdown the updater is
+    // already waiting through.
+    const STEP = shellCode(extractShellFunction("step_rebuild_reboot"));
+    expect(STEP).toContain("do_rebuild --reboot-follows");
+    const testArm = STEP.slice(0, STEP.indexOf("do_rebuild --reboot-follows"));
+    expect(testArm, "test mode does not reboot, so it takes the resuming call")
+      .toMatch(/is_test_mode; then\s*\n\s*do_rebuild\s*\n/);
+  });
+
+  it("has NO unguarded statement between the pause and the accounting", () => {
+    // errexit is live in do_rebuild — both callers invoke it bare — so any
+    // statement in this window that can fail kills the shell with every engine
+    // stopped and neither verb reached. Naming one line was not enough: the
+    // first version of this fix guarded `set_previous_build_aside` and left
+    // `rm -rf "$kept_dir"` bare four statements later, on the same directory.
+    //
+    // So the rule is asserted over the WINDOW, not over a line: from
+    // free_memory_for_build to the rc branch, every statement that can fail
+    // must be a condition (`if`/`elif`/`while`), an assignment, or carry its
+    // own `||`.
+    const window = DO_REBUILD.slice(
+      DO_REBUILD.indexOf("free_memory_for_build"),
+      DO_REBUILD.search(/if \[ "\$rc" -ne 0 \]/),
+    );
+    expect(window.length).toBeGreaterThan(0);
+    const unguarded = window
+      .split(NL)
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => !/^(if|elif|else|fi|while|do|done|then)\b/.test(l))
+      .filter((l) => !l.includes("||"))
+      .filter((l) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(l))
+      .filter((l) => !/^(echo|resume_paused_engines|forget_paused_engines|free_memory_for_build)\b/.test(l));
+    expect(unguarded, `unguarded under errexit between the pause and the resume: ${unguarded.join(" | ")}`)
+      .toEqual([]);
+  });
+
+  it("set_previous_build_aside answers for itself, now that its caller suspends errexit", () => {
+    // `if !` suspends errexit for the whole function body, so a failing
+    // `rm -rf .next-old` there stopped aborting — and the `mv` below it then
+    // moved the box's only build INSIDE the directory it could not remove and
+    // returned 0. A park that did not happen, reported as one.
+    const PARK = shellCode(extractShellFunction("set_previous_build_aside"));
+    expect(PARK).toMatch(/if ! rm -rf "\$kept_dir"; then/);
+    expect(PARK).toMatch(/return 1/);
+    // And `mv -T`, so nesting is unrepresentable rather than merely unreachable.
+    expect(PARK).toContain('mv -T "$build_dir" "$kept_dir"');
+  });
+
+  it("waits before it believes a Type=simple unit came up", () => {
+    // systemd calls a Type=simple unit active the instant it forks, and every
+    // unit in the pair is Type=simple — so `is-active` asked immediately after
+    // `start` says no more than the exit status does.
+    const RESUME = shellCode(findShellFunction("resume_paused_engines") ?? "");
+    const start = RESUME.indexOf("systemctl start");
+    const settle = RESUME.indexOf("sleep \"$ENGINE_SETTLE_S\"");
+    const check = RESUME.indexOf("is-active");
+    expect(start).toBeGreaterThan(-1);
+    expect(settle).toBeGreaterThan(start);
+    expect(check).toBeGreaterThan(settle);
+  });
+
+  it("step_post_update's own ollama stop is paired too", () => {
+    // The second of the two stops an update performs, and the one whose missing
+    // start left the box dead: nothing runs after post_update that would have
+    // woken it.
+    expect(POST_UPDATE).toContain("pause_engine_unit ollama.service");
+    const pauseIdx = POST_UPDATE.indexOf("pause_engine_unit ollama.service");
+    const resumeIdx = POST_UPDATE.indexOf("resume_paused_engines");
+    expect(resumeIdx).toBeGreaterThan(pauseIdx);
+    // A bare stop beside the paired one would be a third, unaccounted-for stop.
+    expect(POST_UPDATE).not.toMatch(/systemctl stop ollama\.service/);
+  });
+
+  it("does not try to restart the llama.cpp server it killed", () => {
+    // It has no unit: the web server spawns it, holds the child handle and
+    // records the pid, and wakes it on the next request that needs it. A root
+    // shell starting a second one behind the app's back would be a process the
+    // app has no handle on, fighting it over the same pidfile.
+    const RESUME = findShellFunction("resume_paused_engines");
+    expect(RESUME, "resume_paused_engines must exist for the pair to close").not.toBeNull();
+    expect(shellCode(RESUME ?? "")).not.toMatch(/llama/i);
+    // Asserted where it is ENFORCED, not only where it shows: the llama.cpp
+    // branch of free_memory_for_build must never feed the pause helpers, or the
+    // exclusion would move into the arrays and this file would stay green.
+    const llamaBranch = FREE_MEMORY.slice(FREE_MEMORY.indexOf("llamacpp_pid_if_running"));
+    expect(llamaBranch.length).toBeGreaterThan(0);
+    expect(llamaBranch).not.toContain("pause_engine_unit");
+    expect(llamaBranch).not.toContain("pause_engine_user_unit");
   });
 });
