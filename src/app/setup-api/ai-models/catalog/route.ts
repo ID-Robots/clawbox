@@ -1079,7 +1079,13 @@ function toFetchResult(
   // of them `available: false`. Our own transform drops those rows, so `models`
   // is empty either way — what tells them apart from a failure is that the
   // command ran and refused nothing.
-  const noRowsAtAll = rows.length === 0 && parsed.count === 0;
+  // `Array.isArray` as well as the count, because `rows` above already turned a
+  // non-array `models` into `[]`: `{count: 0, models: {}}` would otherwise read
+  // as a clean zero and hide the provider for the record's whole lifetime. That
+  // coercion was written when an empty enumeration only meant "keep the previous
+  // catalogue"; it now decides whether a row is offered, so a malformed body has
+  // to fail the test rather than pass it.
+  const noRowsAtAll = Array.isArray(parsed.models) && rows.length === 0 && parsed.count === 0;
   const noRoutableRows = rows.length > 0 && availableRows === 0;
   const emptyIsAnswer = models.length === 0
     && parsed.ok !== false

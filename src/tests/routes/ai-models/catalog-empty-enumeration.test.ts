@@ -121,6 +121,19 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
     expect(await recordedCount("google")).toBe(2);
   });
 
+  it("records NOTHING when `models` is not a list at all", async () => {
+    // The parser coerces a non-array `models` to `[]`, so a body like
+    // `{count: 0, models: {}}` looks exactly like a clean zero once it is past
+    // that line — and would hide the provider for the record's whole lifetime.
+    // A shape we do not recognise is not an answer.
+    mockList({ count: 0, models: {} });
+    await get("anthropic", "&refresh=1");
+    await settle();
+
+    const recorded = fs.existsSync(RECORD) ? readRecord() : {};
+    expect(recorded.anthropic).toBeUndefined();
+  });
+
   it("records NOTHING when the payload never stated a count", async () => {
     // Read positively, not inferred from absence: a truncated or shape-shifted
     // payload parses into the same emptiness as a real answer, and this verdict
