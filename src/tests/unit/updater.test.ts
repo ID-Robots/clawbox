@@ -2949,6 +2949,39 @@ describe("updater", () => {
       expect(disableRan("byteplus")).toBe(true);
     });
 
+    it("acts on nothing a KILLED validator had buffered", async () => {
+      // TASK-741. The bound above now sends SIGKILL, and a killed child never
+      // reached the exit code that carries the core's verdict — so whatever it
+      // had already written to stdout is not an answer, however well-formed.
+      // This reader takes `warnings[]` from the payload whatever the exit was,
+      // and would switch the owner's plugin entries off on a buffer.
+      setupBox([notInstalledWarning("byteplus")]);
+      const buffered = Object.assign(new Error("Command failed: openclaw config validate --json"), {
+        killed: true,
+        signal: "SIGKILL",
+        stdout: JSON.stringify({ valid: true, warnings: [notInstalledWarning("byteplus")] }),
+        stderr: "",
+      });
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        [VALIDATE]: buffered,
+        [CONFIG_SET]: { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(disableRan("byteplus")).toBe(false);
+      expect(mockRecordPluginRepair).not.toHaveBeenCalled();
+      // …and the box is still reported dead, honestly, on the journal's own
+      // words rather than on a verdict nobody gave.
+      expect(state.phase).toBe("failed");
+      expect(state.error).not.toContain("refuses this device's configuration");
+    });
+
     it("leaves a plugin the core does not call not-installed to its owner", async () => {
       // A genuinely installed plugin whose reviewed surface is stale is a
       // consent question, and consenting for a plugin ClawBox did not install

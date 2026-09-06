@@ -1362,6 +1362,18 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
     // The core prints the verdict as JSON on stdout and exits 1 when it
     // refuses. Any other non-zero exit carries no verdict at all.
     accepted = false;
+    // A KILLED child answered nothing, whatever is in its buffer. It did not
+    // reach the exit code that carries the core's verdict, so anything parsed
+    // out of what it had written is this file guessing — and the guess is not
+    // free: `coreReportedMissingPlugins` reads `warnings[]` from the payload
+    // whatever the exit was, and would switch plugin entries off on it. The
+    // same rule this function already states for a validator it could not run,
+    // now applied to one it could not let finish (and the `killSignal` above
+    // makes that kill harder, so the two belong together).
+    if ((err as { killed?: boolean; signal?: unknown } | null)?.killed
+      || (err as { signal?: unknown } | null)?.signal) {
+      return { accepted, payload: null };
+    }
     text = commandOutput(err);
   }
   let parsed: unknown;
