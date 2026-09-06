@@ -1744,6 +1744,18 @@ async function clawboxSwitchedPluginOff(pluginId: string): Promise<boolean> {
 const CORE_PLUGIN_NOT_INSTALLED_RE = /plugin not installed\b/i;
 /** The package the core itself names in that warning, for the owner's Retry. */
 const CORE_PLUGIN_INSTALL_SPEC_RE = /openclaw\s+plugins\s+install\s+(\S+)/i;
+/**
+ * …and what a package spec may look like before it is written down.
+ *
+ * The capture above is `\S+` against a sentence, so a reworded core — one that
+ * ends the line with a backtick, a full stop or a closing quote — would hand
+ * the Retry an argv the registry cannot resolve, and the owner would meet a
+ * 502 on a button that can never work. A spec this does not recognise is
+ * dropped rather than guessed at: the row still goes up with the core's own
+ * sentence on it, and the Retry answers `no_spec` instead of running something
+ * shaped like a command.
+ */
+const NPM_PACKAGE_SPEC_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@[A-Za-z0-9][A-Za-z0-9._+-]*)?$/;
 /** `plugins.entries.<id>` — the warning's `path`, which is the CONFIG's key. */
 const CORE_PLUGIN_WARNING_PATH_RE = /^plugins\.entries\.(.+)$/;
 
@@ -1804,10 +1816,11 @@ async function coreReportedMissingPlugins(): Promise<Map<string, CoreMissingPlug
     // else meant a config key of `@openclaw/foo-provider` and a refusal naming
     // `foo` did not meet, and the box stayed dark. `deepseek` is filed exactly
     // that way, which is why the canonical rule exists at all.
+    const spec = CORE_PLUGIN_INSTALL_SPEC_RE.exec(message)?.[1] ?? "";
     found.set(canonicalPluginId(configuredId), {
       configuredId,
       reason: message,
-      spec: CORE_PLUGIN_INSTALL_SPEC_RE.exec(message)?.[1] ?? "",
+      spec: NPM_PACKAGE_SPEC_RE.test(spec) ? spec : "",
     });
   }
   return found;
@@ -1964,6 +1977,12 @@ async function disableStrandedPluginEntries(blockingIds: Iterable<string>): Prom
       continue;
     }
     if (await pluginEntryExplicitlyDisabled(entry.configuredId)) {
+      // ALREADY OFF, and no row is filed for it here. From the config alone
+      // this state is indistinguishable from "the owner switched it off
+      // himself", and badging his own decision as "needs repair" is the false
+      // failure this whole surface exists to avoid. The gap it leaves — a row
+      // ClawBox owed and could not write — is closed at the other end instead,
+      // by filing the row BEFORE the switch-off.
       console.info(
         `[Updater] "${entry.configuredId}" has no package on this core and is already switched off; leaving it alone`,
       );
@@ -1972,6 +1991,14 @@ async function disableStrandedPluginEntries(blockingIds: Iterable<string>): Prom
     stranded.push(entry);
   }
   if (stranded.length === 0) return;
+  // THE ROW FIRST, saying nothing has been changed yet. The switch-off is what
+  // the owner sees the consequence of, so the record of it must not depend on a
+  // write that happens afterwards: a marker write that failed once would
+  // otherwise leave the entry off with nothing on screen, and the next pass
+  // cannot tell that state from an entry the owner disabled himself. Written
+  // again below with what the read-back proved, which is the only field that
+  // can still change.
+  for (const entry of stranded) await recordMissingPluginRow(entry, false);
   await switchOffStrandedEntries(stranded);
   for (const entry of stranded) {
     // PROVED AGAINST THE FILE, never against an exit code — the same read-back
@@ -1990,24 +2017,44 @@ async function disableStrandedPluginEntries(blockingIds: Iterable<string>): Prom
         + "the gateway may go on refusing readiness until it is repaired",
       );
     }
-    // The row goes up either way, and says which of the two happened. A
-    // switch-off nobody can see is how an owner ends up with a provider that
-    // silently stopped existing; a failure nobody can see is worse.
-    try {
-      await recordPluginRepair({
-        id: entry.configuredId,
-        stage: "not-installed",
-        reason: entry.reason,
-        disabled,
-        spec: entry.spec,
-      });
-    } catch (err) {
-      console.warn(
-        `[Updater] the "${entry.configuredId}" repair record could not be written; `
-        + "Settings will show the row as simply not connected:",
-        err instanceof Error ? err.message : err,
-      );
-    }
+    // …and updated only when the switch-off landed: the row written above
+    // already says `disabled: false`, which is exactly right for an entry this
+    // pass could not switch off.
+    if (disabled) await recordMissingPluginRow(entry, true);
+  }
+}
+
+/**
+ * File the Settings row for one stranded entry.
+ *
+ * Never fatal — the gateway coming back outranks the bookkeeping — but never
+ * silent either: a row that was not written is a plugin switched off with
+ * nothing on screen to say so, and the update log is the only place left to
+ * say it.
+ *
+ * Called twice per entry — once before the switch-off and once after a proved
+ * one — so the row exists whatever the second write does. `disabled` is the
+ * only field that changes between the two, and it is what tells the Retry
+ * whether it has an entry of ClawBox's to switch back on.
+ */
+async function recordMissingPluginRow(
+  entry: CoreMissingPlugin,
+  disabled: boolean,
+): Promise<void> {
+  try {
+    await recordPluginRepair({
+      id: entry.configuredId,
+      stage: "not-installed",
+      reason: entry.reason,
+      disabled,
+      spec: entry.spec,
+    });
+  } catch (err) {
+    console.warn(
+      `[Updater] the "${entry.configuredId}" repair record could not be written; `
+      + "Settings will show the row as simply not connected:",
+      err instanceof Error ? err.message : err,
+    );
   }
 }
 

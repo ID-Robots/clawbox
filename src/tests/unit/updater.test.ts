@@ -2827,10 +2827,18 @@ describe("updater", () => {
       expect(disableRan("xiaomi")).toBe(false);
       // And the owner is told, on a row he can press: the core named the
       // package, so the Retry can install it for him if he wants it back.
+      // TWO writes per entry, and that is the point: the first goes down
+      // BEFORE the switch-off, so a marker write that fails afterwards cannot
+      // leave a plugin switched off with nothing on screen — a state the next
+      // pass could not tell from one the owner switched off himself.
       const marked = mockRecordPluginRepair.mock.calls.map(([row]) => row);
-      expect(marked.map((row) => row.id).sort()).toEqual(["byteplus", "vydra"]);
-      expect(marked.every((row) => row.stage === "not-installed" && row.disabled === true)).toBe(true);
-      expect(marked.find((row) => row.id === "byteplus")?.spec).toBe("@openclaw/byteplus-provider");
+      const settled = new Map(marked.map((row) => [row.id, row]));
+      expect([...settled.keys()].sort()).toEqual(["byteplus", "vydra"]);
+      expect(marked.filter((row) => row.id === "byteplus").map((row) => row.disabled))
+        .toEqual([false, true]);
+      expect([...settled.values()].every((row) => row.stage === "not-installed" && row.disabled === true))
+        .toBe(true);
+      expect(settled.get("byteplus")?.spec).toBe("@openclaw/byteplus-provider");
       expect(state.phase).toBe("completed");
     });
 
@@ -2872,9 +2880,31 @@ describe("updater", () => {
       expect(await updater.checkContinuation()).toBe(true);
       await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
 
+      // One entry, and every row written for it says the switch-off did not
+      // land — including the one filed before it was attempted.
       const marked = mockRecordPluginRepair.mock.calls.map(([row]) => row);
-      expect(marked).toHaveLength(1);
-      expect(marked[0].disabled).toBe(false);
+      expect(new Set(marked.map((row) => row.id))).toEqual(new Set(["byteplus"]));
+      expect(marked.every((row) => row.disabled === false)).toBe(true);
+    });
+
+    it("files no spec it cannot resolve, rather than a Retry that cannot work", async () => {
+      // The spec is captured with `\S+` out of an English sentence, so a core
+      // that reworded the line — a trailing backtick, a full stop, a closing
+      // quote — would hand the Retry an argv the registry cannot resolve and
+      // the owner a 502 on a button that can never succeed. The row still goes
+      // up with the core's own sentence on it; the Retry answers `no_spec`.
+      setupBox([{
+        path: "plugins.entries.byteplus",
+        message: "plugin not installed: byteplus — install the official external plugin"
+          + " with: `openclaw plugins install @openclaw/byteplus-provider`.",
+      }]);
+
+      await runContinuation();
+
+      const marked = mockRecordPluginRepair.mock.calls.map(([row]) => row);
+      expect(marked.every((row) => row.spec === "")).toBe(true);
+      // …and the entry is still switched off: the box comes back either way.
+      expect(disableRan("byteplus")).toBe(true);
     });
 
     it("leaves a plugin the core does not call not-installed to its owner", async () => {
