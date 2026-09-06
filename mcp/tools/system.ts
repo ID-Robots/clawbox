@@ -155,12 +155,20 @@ function coercePreference(key: string, value: string): string | number {
 
 // ── Backup ───────────────────────────────────────────────────────────────────
 
-// ClawKeep archives the OpenClaw agent through the openclaw CLI, so on a Hermes
-// device the feature cannot run at all — src/lib/clawkeep.ts reports
-// supportedOnEdition:false and the Settings app renders an "unavailable on this
-// edition" card with nothing to pair. backup_list and backup_now are therefore
-// not REGISTERED on Hermes (see the registrations below); backup_status stays,
-// because the agent still has to be able to answer "do you back up?" honestly.
+// ClawKeep archives EITHER agent now — `clawkeep/clawkeep/agent.py` is the seam
+// that hands the runner an OpenClaw or a Hermes backend, `getStatus()` answers
+// `supportedOnEdition: true` unconditionally (`src/lib/clawkeep.ts`), and the
+// daemon is installed on both boxes. The paragraph that used to stand here said
+// the opposite; it described the state before that seam existed.
+//
+// `backup_list` and `backup_now` are nevertheless still registered on OpenClaw
+// only (see the registrations below), so on a Hermes box the whole exit-code
+// taxonomy below is unreachable FROM THE AGENT even though the daemon can back
+// that box up — the owner reaches it from the ClawKeep app, which is on both.
+// Widening the registration is a decision about what the agent may start, not a
+// comment fix, so it is left for its own change and named in the PR body.
+// `backup_status` is on both editions, because the agent has to be able to
+// answer "do you back up?" honestly wherever it runs.
 const BACKUP_RULES: ErrorRule[] = [
   // Ordered: the first match wins. Since TASK-672 the daemon's whole `EXIT_*`
   // taxonomy reaches this tool as a real status instead of a 200 with
