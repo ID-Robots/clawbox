@@ -89,9 +89,11 @@ describe("assertMatchesSchema — the model reply against the schema it was aske
     expect(out.summary).toHaveLength(TRIAGE_SCHEMA.properties.summary.maxLength);
   });
 
-  it("caps the free-text fields of both bots' schemas", () => {
+  it("caps the free-text fields of the triage schema", () => {
     // The verdict's point about the SDK transport: the API enforces enums
     // there, but the free text is by design unbounded unless the schema says.
+    // (pr-review's SCHEMA is not importable; its caps are pinned as source
+    // text with the other sink checks below.)
     for (const key of ["summary", "suggested_action"] as const) {
       expect(typeof TRIAGE_SCHEMA.properties[key].maxLength, `${key} has no maxLength`).toBe("number");
     }
@@ -335,10 +337,11 @@ describe("callClaude — the SDK fallback transport", () => {
   };
 
   it("hands the API a schema without the caps it refuses, and still applies them locally", async () => {
-    // Anthropic's structured outputs reject `maxLength`/`maxItems` in a raw
-    // `output_config.format.schema` (only the SDK's `.parse()` strips them),
-    // so a schema sent as written was a 400 on every fallback call — and
-    // both bots' outer catch turns a 400 into a green run.
+    // Anthropic's structured outputs reject `maxLength`/`maxItems` (and every
+    // other constraint keyword) in a raw `output_config.format.schema` — only
+    // the SDK's `.parse()` strips them — so a schema sent as written was a
+    // 400 on every fallback call, and both bots' outer catch turns a 400 into
+    // a green run.
     const summary = "s".repeat(TRIAGE_SCHEMA.properties.summary.maxLength + 25);
     sdkCreateMock.mockResolvedValue({
       content: [{ type: "text", text: JSON.stringify({ ...canonical, summary, extra: "dropped" }) }],
@@ -395,6 +398,100 @@ describe("callClaude — the SDK fallback transport", () => {
     expect(schema.properties.highlights.maxItems, "the caller's schema was mutated").toBe(4);
   });
 
+  it("strips every constraint keyword Anthropic documents as unsupported, and keeps what the API enforces", () => {
+    // Only `maxLength` and `maxItems` were stripped; a `pattern` or a
+    // `minimum` added to a schema later would have been a 400 on the fallback
+    // transport — and a green run page, since both bots' outer catch exits 0.
+    const schema = {
+      type: "object",
+      properties: {
+        code: { type: "string", pattern: "^[a-z]+$", minLength: 1, maxLength: 8, format: "hostname", enum: ["a", "b"] },
+        count: { type: "number", minimum: 0, maximum: 10, exclusiveMinimum: 0, exclusiveMaximum: 11, multipleOf: 1 },
+        tags: { type: "array", minItems: 1, maxItems: 3, uniqueItems: true, items: { type: "string", maxLength: 4 } },
+        meta: { type: "object", minProperties: 1, maxProperties: 2, properties: {}, additionalProperties: false },
+      },
+      required: ["code", "count", "tags", "meta"],
+      additionalProperties: false,
+    };
+    expect(apiSchema(schema)).toEqual({
+      type: "object",
+      properties: {
+        code: { type: "string", enum: ["a", "b"] },
+        count: { type: "number" },
+        tags: { type: "array", items: { type: "string" } },
+        meta: { type: "object", properties: {}, additionalProperties: false },
+      },
+      required: ["code", "count", "tags", "meta"],
+      additionalProperties: false,
+    });
+    for (const keyword of ["pattern", "minimum", "maxLength", "maxItems", "format", "uniqueItems", "minProperties"]) {
+      expect(hasKeyword(apiSchema(schema), keyword), `${keyword} reached the API`).toBe(false);
+    }
+  });
+
+  it("strips keywords only at schema positions — a property NAMED maxLength survives", () => {
+    // `properties` maps NAMES to schemas; a walk that treated every key at
+    // every depth as a keyword deleted a field called `maxLength` or
+    // `pattern` outright, and then the API would refuse the reply that
+    // carried it as an unknown key.
+    const schema = {
+      type: "object",
+      properties: {
+        maxLength: { type: "string", maxLength: 12, description: "a field that happens to share a keyword's name" },
+        pattern: { type: "string", enum: ["stripes", "dots"] },
+        minimum: { type: "boolean" },
+      },
+      required: ["maxLength", "pattern", "minimum"],
+      additionalProperties: false,
+    };
+    expect(apiSchema(schema)).toEqual({
+      type: "object",
+      properties: {
+        maxLength: { type: "string", description: "a field that happens to share a keyword's name" },
+        pattern: { type: "string", enum: ["stripes", "dots"] },
+        minimum: { type: "boolean" },
+      },
+      required: ["maxLength", "pattern", "minimum"],
+      additionalProperties: false,
+    });
+    // …and the enum value or required name that spells a keyword is data too.
+    const withEnum = { type: "string", enum: ["maxLength", "format"] };
+    expect(apiSchema(withEnum)).toEqual(withEnum);
+  });
+
+  it("still enforces locally the caps the API is never shown", () => {
+    // The strip is for the transport only: the caller's schema keeps its
+    // caps and `assertMatchesSchema` applies them to whatever comes back.
+    const schema = {
+      type: "object",
+      properties: { name: { type: "string", maxLength: 3 }, list: { type: "array", maxItems: 1, items: { type: "string" } } },
+      required: ["name", "list"],
+      additionalProperties: false,
+    };
+    expect(hasKeyword(apiSchema(schema), "maxLength")).toBe(false);
+    expect(hasKeyword(apiSchema(schema), "maxItems")).toBe(false);
+    expect(assertMatchesSchema(schema, { name: "xxxxxx", list: ["a", "b"] })).toEqual({ name: "xxx", list: ["a"] });
+    expect(schema.properties.name.maxLength, "the caller's schema was mutated").toBe(3);
+  });
+
+  it("refuses a schema constraint it cannot check, so no cap is silently unenforced", () => {
+    // The API is never shown `pattern` (stripped above) and the validator
+    // does not apply it: a schema that grew one would ship a constraint
+    // nothing applies on either transport. Loud, and named as a schema fault
+    // rather than a model one — a value that even satisfies the pattern is
+    // refused, because the point is the keyword, not this answer.
+    const schema = {
+      type: "object",
+      properties: { name: { type: "string", pattern: "^x", maxLength: 3 } },
+      required: ["name"],
+      additionalProperties: false,
+    };
+    expect(() => assertMatchesSchema(schema, { name: "xx" })).toThrow(/schema at \$\.name uses `pattern`/);
+    // A property NAMED after a keyword is data, not a constraint.
+    const named = { type: "object", properties: { pattern: { type: "string", maxLength: 8 } }, required: ["pattern"], additionalProperties: false };
+    expect(assertMatchesSchema(named, { pattern: "dots" })).toEqual({ pattern: "dots" });
+  });
+
   it("validates the SDK reply the same way as the CLI one", async () => {
     sdkCreateMock.mockResolvedValue({
       content: [{ type: "text", text: JSON.stringify({ ...canonical, area: "everything" }) }],
@@ -430,6 +527,17 @@ describe("the bot scripts' sinks — pinned as text, since neither script can be
       expect(uses.length, `${field} is never rendered`).toBeGreaterThan(0);
       expect(wrapped.length, `${field} is rendered outside plain()`).toBe(uses.length);
     }
+  });
+
+  it("pr-review declares a maxLength on every free-text field, and a maxItems on the list", () => {
+    // pr-review's SCHEMA cannot be imported (main() runs at load) and the
+    // shape tests above use a hand-written mirror, so a cap deleted from the
+    // real schema kept this suite green while the SDK transport lost the
+    // bound. The fields are the ones plain() renders below.
+    for (const field of ["summary", "touches", "note", "of", "reason"]) {
+      expect(review, `pr-review's ${field} has no maxLength`).toMatch(new RegExp(`\\b${field}:\\s*\\{[^}]*maxLength:\\s*\\d+`));
+    }
+    expect(review, "pr-review's highlights list has no maxItems").toMatch(/highlights:\s*\{[^}]*maxItems:\s*\d+/);
   });
 
   it("pr-review renders its free text only through plain()", () => {

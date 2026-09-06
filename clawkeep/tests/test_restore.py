@@ -27,6 +27,7 @@ from clawkeep import openclaw as openclaw_mod
 from clawkeep import restore
 from clawkeep.api import Credentials
 from clawkeep.config import Config, HeartbeatConfig, OpenclawConfig
+from tests.conftest import cli_failure
 
 
 @pytest.fixture(autouse=True)
@@ -532,14 +533,6 @@ def test_restore_refuses_when_the_box_cannot_say_where_its_state_is(
     _assert_nothing_moved(state)
 
 
-def _cli_failure(message: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(
-        args=[], returncode=1,
-        stdout=json.dumps({"ok": False, "error": {"type": "cli_error", "message": message}}),
-        stderr=f"[openclaw] Reason: {message}\n",
-    )
-
-
 def _dry_run_answer(state: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(
         args=[], returncode=0, stderr="",
@@ -571,7 +564,7 @@ def test_a_state_only_manifest_restores_under_a_plan_that_came_from_the_retry(
         calls.append(list(args))
         if "--no-include-workspace" in args:
             return _dry_run_answer(state)
-        return _cli_failure(f"Config invalid at {state / 'openclaw.json'}. OpenClaw cannot reliably discover custom workspaces for backup.")
+        return cli_failure(f"Config invalid at {state / 'openclaw.json'}. OpenClaw cannot reliably discover custom workspaces for backup.")
 
     archive = tmp_path / "snap.tar.gz"
     _make_archive(archive, archive_root="snap-root", target_dir=state,
@@ -602,7 +595,7 @@ def test_a_workspace_outside_the_state_dir_is_refused_by_name_under_the_partial_
     def fake_cli(args, **kw):
         if "--no-include-workspace" in args:
             return _dry_run_answer(state)
-        return _cli_failure("Config invalid at x")
+        return cli_failure("Config invalid at x")
 
     archive = tmp_path / "snap.tar.gz"
     _make_multi_archive(archive, archive_root="snap-root", assets=[
@@ -636,7 +629,7 @@ def test_a_box_with_no_state_dir_restores_into_the_one_the_env_names(
                   payload={"openclaw.json": b"{}"})
     with patch(
         "clawkeep.openclaw.subprocess.run",
-        side_effect=lambda args, **kw: _cli_failure("No local OpenClaw state was found to back up."),
+        side_effect=lambda args, **kw: cli_failure("No local OpenClaw state was found to back up."),
     ):
         result = _run_restore(archive)
     assert (state / "openclaw.json").read_text() == "{}"
@@ -652,7 +645,7 @@ def test_a_box_with_no_state_dir_restores_into_the_one_the_env_names(
                   payload={"authorized_keys": b"attacker"})
     with patch(
         "clawkeep.openclaw.subprocess.run",
-        side_effect=lambda args, **kw: _cli_failure("No local OpenClaw state was found to back up."),
+        side_effect=lambda args, **kw: cli_failure("No local OpenClaw state was found to back up."),
     ):
         with pytest.raises(restore.RestoreError, match=r"\.ssh"):
             _run_restore(hostile)

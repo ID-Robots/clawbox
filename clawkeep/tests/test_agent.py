@@ -7,6 +7,7 @@ byte the customer cares about is back.
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
 import tarfile
@@ -189,12 +190,21 @@ def test_a_hermes_destination_is_pinned_to_its_kind(
     memories = str(home / ".hermes" / "memories")
     config = str(home / ".hermes" / "config.yaml")
 
-    # The real thing passes, with the shape it was archived in.
-    assert agent.assert_destination_allowed("memories", "dir", memories, roots=roots) == memories
-    assert agent.assert_destination_allowed("config", "file", config, roots=roots) == config
-    assert agent.assert_destination_allowed(
-        "sessions", "file", str(home / ".hermes" / "state.db"), roots=roots, sqlite=True,
-    )
+    # The real thing passes, with the shape it was archived in, and the answer
+    # is the ROOT it landed on: the path restore may use, and the box's own
+    # sqlite flag for it.
+    landed = agent.assert_destination_allowed("memories", "dir", memories, roots=roots)
+    assert landed.path == memories and not landed.sqlite
+    landed = agent.assert_destination_allowed("config", "file", config, roots=roots)
+    assert landed.path == config and not landed.sqlite
+    db = str(home / ".hermes" / "state.db")
+    landed = agent.assert_destination_allowed("sessions", "file", db, roots=roots, sqlite=True)
+    assert landed.path == db and landed.sqlite
+    # A manifest that says nothing about sqlite is still landing on a sqlite
+    # database: the flag comes from THIS box, so restore retires the stale
+    # `-wal`/`-shm` pair either way (the round trip below proves the effect).
+    landed = agent.assert_destination_allowed("sessions", "file", db, roots=roots)
+    assert landed.path == db and landed.sqlite
 
     # `entry: "file"` for a kind Hermes declares as a directory: a file swap
     # over `memories/` would delete the directory.
@@ -225,9 +235,13 @@ def test_an_openclaw_destination_must_be_a_declared_root_or_nested_agent_state(
         agent.RestoreRoot(str(state), "state", "dir", False, False),
         agent.RestoreRoot(str(tmp_path / "openclaw.json"), "config", "file", False, False),
     ))
-    assert agent.assert_destination_allowed("state", "dir", str(state), roots=roots)
+    assert agent.assert_destination_allowed(
+        "state", "dir", str(state), roots=roots,
+    ).path == str(state)
     # The one file kind, pinned to `file`.
-    assert agent.assert_destination_allowed("config", "file", str(tmp_path / "openclaw.json"), roots=roots)
+    assert agent.assert_destination_allowed(
+        "config", "file", str(tmp_path / "openclaw.json"), roots=roots,
+    ).path == str(tmp_path / "openclaw.json")
     # The CLI writes no `entry` key, so a `config` asset arrives as "dir" by
     # default and is refused — as a limitation of this restore (put the file
     # back by hand), never as the snapshot lying.
@@ -519,6 +533,73 @@ def test_a_wal_database_restores_without_its_stale_sidecars(
     finally:
         conn.close()
     assert rows == {"remember this", "in the wal"}
+
+
+def test_a_sessions_asset_that_omits_the_sqlite_flag_still_retires_the_sidecars(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sidecar retirement is decided by THIS BOX, not by the manifest.
+
+    `_VettedAsset.sqlite` used to be `bool(asset.get("sqlite"))` — the
+    manifest's word — so a `sessions` asset with the key left out restored
+    `state.db` and left the old database's `-wal`/`-shm` beside it, for
+    sqlite to replay the stale writes into the fresh copy the next time
+    anything opened it. The flag now comes from the root the asset matched,
+    which for `sessions` is always the sqlite one; the manifest may only
+    agree (`sqlite: true` on a root that is not sqlite is still refused,
+    `test_a_hermes_destination_is_pinned_to_its_kind`).
+    """
+    edition_file.write_text("CLAWBOX_EDITION=hermes\n", encoding="utf-8")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("CLAWBOX_HOME", str(home / ".clawbox"))
+    _seed(home)
+    db = home / ".hermes" / "state.db"
+
+    made = agent.create_archive(_cfg(), output_dir=tmp_path / "out")
+
+    # Rewrite the manifest with the `sqlite` key dropped from the sessions
+    # asset — what a hand-edited or pre-flag manifest looks like. The member
+    # keeps its name, so the verify still finds the payload it declares.
+    stripped = tmp_path / "out" / made.path.name
+    unstripped = tmp_path / "unstripped.tar.gz"
+    made.path.rename(unstripped)
+    with tarfile.open(unstripped, "r:gz") as src, tarfile.open(stripped, "w:gz") as dst:
+        for m in src:
+            if m.name.endswith("/manifest.json"):
+                manifest = json.loads(src.extractfile(m).read())
+                sessions = next(a for a in manifest["assets"] if a["kind"] == "sessions")
+                assert sessions.pop("sqlite") is True  # the archiver did write it
+                blob = json.dumps(manifest).encode()
+                m.size = len(blob)
+                dst.addfile(m, io.BytesIO(blob))
+            else:
+                dst.addfile(m, src.extractfile(m) if m.isfile() else None)
+
+    # The stale pair beside the live database — the state being defended
+    # against, fabricated so the test does not depend on sqlite's checkpoint.
+    db.with_name("state.db-wal").write_bytes(b"stale wal")
+    db.with_name("state.db-shm").write_bytes(b"stale shm")
+
+    def fake_download(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
+        dest_path.write_bytes(stripped.read_bytes())
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=fake_download),
+    ):
+        restore.restore_snapshot(_cfg(), "claw_x", stripped.name)
+
+    # Retired, exactly as they are when the manifest says `sqlite: true`.
+    assert not db.with_name("state.db-wal").exists()
+    assert not db.with_name("state.db-shm").exists()
+    assert list(db.parent.glob("state.db-wal.bak-restore-*"))
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT body FROM turns").fetchall() == [("remember this",)]
+    finally:
+        conn.close()
 
 
 def test_the_shared_identity_symlinks_come_back(

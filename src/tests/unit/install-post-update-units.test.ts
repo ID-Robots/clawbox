@@ -135,7 +135,16 @@ describe("root units execute root-owned copies, and updates deliver them", () =>
     // sure of the libexec copy itself, the way step_vnc_install does, or a
     // reorder would leave its `[ -x ]` guard skipping the repoint for another
     // update cycle with root still running the tree copy at every boot.
-    expect(refresh).toMatch(/\[ -x "\$ROOT_LIBEXEC_DIR\/ensure-vnc-on-first-boot\.sh" \] \|\| install_root_libexec/);
+    // Not as `[ -x … ] || install_root_libexec` any more: in an OR-list a copy
+    // that failed inside the function came back as 0 and was never reported,
+    // so the call keeps its own status (root-steps.test.ts pins the rest).
+    expect(refresh).toMatch(/\[ ! -x "\$ROOT_LIBEXEC_DIR\/ensure-vnc-on-first-boot\.sh" \]; then\n\s*install_root_libexec \|\| firstboot_rc=1/);
+    // ...and the repoint itself is gated on the copy being THERE, so a unit
+    // is never pointed at a file that did not land.
+    const repointAt = refresh.indexOf("sed -i \"s#^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh");
+    expect(repointAt).toBeGreaterThan(-1);
+    const gate = refresh.lastIndexOf('if [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then', repointAt);
+    expect(gate, "the repoint sits inside an `[ -x ]` test of the copy").toBeGreaterThan(-1);
   });
 });
 

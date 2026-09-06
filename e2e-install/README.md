@@ -136,10 +136,32 @@ unset):
 No `pull_request` run receives secrets — fork or same-repo; those specs
 skip but the install/setup/files/terminal/webapps/power coverage still
 runs. The in-workflow gate is hygiene rather than the fence (on a
-`pull_request` event the PR head supplies the workflow file too), so
-`CLAWBOX_AI_API_KEY` and `TELEGRAM_BOT_TOKEN` belong in a GitHub Environment
-whose deployment-branch policy allows only `beta` and `main`, with the
-repository-level copies deleted.
+`pull_request` event the PR head supplies the workflow file too), so the
+secrets live in a GitHub Environment, and the one `e2e-install` job names
+its Environment by event:
+
+- **`e2e-pull-request`** — what a `pull_request` run references. Holds no
+  secrets and carries no protection rule; it exists only so that a PR run
+  never references the credentialed one.
+- **`e2e-credentials`** — what the schedule and a `workflow_dispatch` run
+  reference. Holds every secret listed above, with a deployment-branch
+  policy that allows only `beta` and `main`: a run from any other ref is
+  refused by GitHub before a step starts, whatever the workflow file says.
+
+It is one job rather than a credentialed job beside a secretless one
+because the split would repeat the whole install-and-run step list, and a
+caller job that `uses:` a reusable workflow cannot set an Environment (only
+the called workflow's own jobs can, and on a pull request the PR head
+supplies that file too).
+
+Owner action (Settings → Environments), done once: create `e2e-pull-request`
+empty; create `e2e-credentials`, add the secrets to it, restrict its
+deployment branches to `beta` and `main`; then **delete the repository-level
+copies** of those secrets — while they remain, a same-repo PR that edits the
+step-level `if:` reads them regardless of the Environment. A consequence to
+know: `gh workflow run "E2E Install" --ref <feature-branch>` is refused by
+that policy; dispatch from `beta` or `main` and point
+`upgrade_target_branch` at the branch under test instead.
 
 ## Debugging a failed install
 

@@ -865,19 +865,22 @@ def restore_snapshot(
             entry = str(asset.get("entry") or "dir")
             if entry not in ("dir", "file"):
                 raise RestoreError(f"manifest asset {kind!r} has unknown entry {entry!r}")
-            sqlite = bool(asset.get("sqlite"))
             try:
-                agent.assert_destination_allowed(
-                    kind, entry, source_path, roots=roots, sqlite=sqlite,
+                landed = agent.assert_destination_allowed(
+                    kind, entry, source_path, roots=roots, sqlite=bool(asset.get("sqlite")),
                 )
             except agent.DestinationRefusedError as e:
                 raise RestoreError(str(e)) from e
             vetted.append(_VettedAsset(
                 kind=kind,
-                target=Path(source_path),
+                target=Path(landed.path),
                 archive_subpath=archive_subpath,
                 entry=entry,
-                sqlite=sqlite,
+                # The BOX's flag, not the manifest's: a `sessions` asset that
+                # omits `sqlite` still lands on `state.db`, and its stale
+                # `-wal`/`-shm` pair must still be retired, or sqlite replays
+                # the old database's writes into the restored one.
+                sqlite=landed.sqlite,
             ))
 
         # Everything this archive is ALLOWED to own — the vetted destinations,

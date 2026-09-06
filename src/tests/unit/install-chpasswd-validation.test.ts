@@ -44,6 +44,18 @@ function shellFunction(name: string): string {
   return INSTALL_SH.slice(start, end + 2);
 }
 
+/**
+ * systemd runs a system unit as root unless User= names somebody else; `root`,
+ * `0` and an empty value all name root (the last assignment wins), and
+ * DynamicUser=yes is a transient user. Same rule as root-steps.test.ts.
+ */
+function unitRunsAsRoot(unit: string): boolean {
+  if (/^DynamicUser=yes$/m.test(unit)) return false;
+  const users = [...unit.matchAll(/^User=(.*)$/gm)].map((m) => m[1].trim());
+  const user = users.at(-1) ?? "";
+  return user === "" || user === "root" || user === "0";
+}
+
 let tmp: string;
 let project: string;
 let inputFile: string;
@@ -281,13 +293,15 @@ d("root never evaluates a clawbox-writable data file", () => {
     // No exemptions: clawbox-heartbeat.service, which loaded its credential
     // from data/ into root's curl (ProtectHome does not stop an LD_PRELOAD
     // line — it only forces the .so outside /home), runs as `User=clawbox`
-    // now and is skipped by the User= test below like every other user unit.
+    // now and is skipped below like every other user unit. "Has a User= line"
+    // is NOT that test — `User=root` has one — so the value is parsed; and the
+    // whole value is checked, since `EnvironmentFile="/home/clawbox/…"` is a
+    // quoted path that starts with a quote.
     for (const unit of units) {
       const text = fs.readFileSync(path.join(configDir, unit), "utf-8");
-      if (/^User=/m.test(text)) continue;
-      for (const m of text.matchAll(/^EnvironmentFile=-?(.+)$/gm)) {
-        expect(m[1].startsWith("/home/clawbox/"), `${unit} loads a clawbox-writable environment: ${m[0]}`)
-          .toBe(false);
+      if (!unitRunsAsRoot(text)) continue;
+      for (const m of text.matchAll(/^EnvironmentFile=(.+)$/gm)) {
+        expect(m[1], `${unit} loads a clawbox-writable environment: ${m[0]}`).not.toContain("/home/clawbox");
       }
     }
     for (const unit of ["clawbox-ap.service", "clawbox-ap-watchdog.service"]) {

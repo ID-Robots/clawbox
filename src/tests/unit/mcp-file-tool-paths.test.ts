@@ -185,6 +185,31 @@ describe("MCP file tools open the vetted target, not the link", () => {
     expect(JSON.stringify(err)).not.toContain("hunter2");
   });
 
+  it("notebook_edit through a link into a credential directory refuses before reading, and changes nothing", async () => {
+    // notebook_edit called no guard at all once: the path was opened as
+    // typed, and a .ipynb link from an ordinary folder into ~/.ssh was read
+    // and rewritten there. The guard runs on the CANONICAL target now, ahead
+    // of the read, so a refused notebook is refused with its bytes untouched.
+    const nbTarget = path.join(ROOT, ".ssh", "creds.ipynb");
+    fs.mkdirSync(path.dirname(nbTarget), { recursive: true });
+    fs.writeFileSync(nbTarget, JSON.stringify({ cells: [{ cell_type: "code", source: ["x\n"] }] }));
+    const before = fs.statSync(nbTarget);
+    const alias = path.join(ROOT, "proj", "book.ipynb");
+    fs.symlinkSync(nbTarget, alias);
+    const err = await failure("notebook_edit", {
+      notebook_path: alias,
+      cell_index: 0,
+      edit_mode: "replace",
+      new_source: "pwned\n",
+      cell_type: "code",
+    });
+    expect(err.code).toBe("BLOCKED_PATH");
+    expect(err.message).toContain("device credentials");
+    expect(fs.readFileSync(nbTarget, "utf-8")).not.toContain("pwned");
+    expect(fs.statSync(nbTarget).mtimeMs).toBe(before.mtimeMs);
+    expect(fs.lstatSync(alias).isSymbolicLink()).toBe(true);
+  });
+
   it("still reads and writes a link to an ordinary file, naming the typed path", async () => {
     const real = path.join(ROOT, "proj", "real.txt");
     fs.writeFileSync(real, "one\ntwo\n");

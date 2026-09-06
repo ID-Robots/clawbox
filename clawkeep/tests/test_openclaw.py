@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from clawkeep import openclaw
+from tests.conftest import cli_failure
 
 
 def _cp(rc: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess:
@@ -203,16 +204,6 @@ def test_plan_roots_asks_for_the_full_dry_run_and_keeps_every_declared_root() ->
     assert not any("npm" in r.path or "plugin-skills" in r.path for r in roots)
 
 
-def _cli_failure(message: str) -> subprocess.CompletedProcess:
-    """How the CLI fails under `--json`: the JSON envelope on stdout AND the
-    "[openclaw] Reason:" lines on stderr, rc=1 (recorded on the box)."""
-    return _cp(
-        1,
-        stdout=json.dumps({"ok": False, "error": {"type": "cli_error", "message": message}}),
-        stderr=f"[openclaw] Could not start the CLI.\n[openclaw] Reason: {message}\n",
-    )
-
-
 CONFIG_INVALID = (
     "Config invalid at /home/clawbox/.openclaw/openclaw.json. OpenClaw cannot reliably "
     "discover custom workspaces for backup. Fix the config or rerun with "
@@ -255,7 +246,7 @@ def test_plan_roots_retries_without_the_workspace_when_the_config_is_broken() ->
         calls.append(list(args))
         if "--no-include-workspace" in args:
             return _cp(0, stdout=_partial_dry_run_payload())
-        return _cli_failure(CONFIG_INVALID)
+        return cli_failure(CONFIG_INVALID)
 
     with patch("clawkeep.openclaw.subprocess.run", side_effect=fake_run):
         roots = openclaw.plan_roots("/usr/bin/openclaw")
@@ -278,7 +269,7 @@ def test_plan_roots_falls_back_to_the_state_dir_the_env_names_when_there_is_none
 
     def no_state(args: list[str], **kw: object) -> subprocess.CompletedProcess:
         calls.append(list(args))
-        return _cli_failure(NO_LOCAL_STATE)
+        return cli_failure(NO_LOCAL_STATE)
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("OPENCLAW_HOME", raising=False)
@@ -294,10 +285,22 @@ def test_plan_roots_falls_back_to_the_state_dir_the_env_names_when_there_is_none
         roots = openclaw.plan_roots("/usr/bin/openclaw")
     assert roots == (openclaw.PlannedRoot("state", str(tmp_path / "elsewhere" / ".openclaw")),)
 
+    # The same sentence with NO JSON envelope on stdout — only the stderr
+    # "Reason:" line, behind "Could not start the CLI." — is the other form
+    # the CLI delivers it in, and it must select the same fallback: a prefix
+    # test read it as some other failure and failed closed on exactly the
+    # box a restore is for.
+    def no_state_stderr_only(args: list[str], **kw: object) -> subprocess.CompletedProcess:
+        return cli_failure(NO_LOCAL_STATE, envelope=False)
+
+    with patch("clawkeep.openclaw.subprocess.run", side_effect=no_state_stderr_only):
+        roots = openclaw.plan_roots("/usr/bin/openclaw")
+    assert roots == (openclaw.PlannedRoot("state", str(tmp_path / "elsewhere" / ".openclaw")),)
+
     # A different failure on the retry is not "no state": fail closed, and
     # say what BOTH runs said.
     def broken(args: list[str], **kw: object) -> subprocess.CompletedProcess:
-        return _cli_failure(CONFIG_INVALID if "--no-include-workspace" not in args else "disk on fire")
+        return cli_failure(CONFIG_INVALID if "--no-include-workspace" not in args else "disk on fire")
 
     with patch("clawkeep.openclaw.subprocess.run", side_effect=broken):
         with pytest.raises(openclaw.OpenclawError, match="dry-run failed") as excinfo:
@@ -327,6 +330,13 @@ def test_state_dir_mirrors_the_clis_resolution(tmp_path: Path) -> None:
     assert openclaw.state_dir({**env, "OPENCLAW_HOME": "~/acct"}) == str(home / "acct" / ".openclaw")
     assert openclaw.state_dir({**env, "OPENCLAW_HOME": "undefined"}) == str(home / ".openclaw")
     assert openclaw.state_dir({**env, "OPENCLAW_STATE_DIR": " /srv/oc "}) == "/srv/oc"
+    # The placeholder rule applies to the state-dir override too. Resolved
+    # raw, `OPENCLAW_STATE_DIR=undefined` names `<cwd>/undefined` as the one
+    # root a box with no state may restore into, and the manifest of the
+    # REAL state directory can never pass the allowlist.
+    for placeholder in ("undefined", "null", "", "   "):
+        unset = {**env, "OPENCLAW_STATE_DIR": placeholder}
+        assert openclaw.state_dir(unset) == str(home / ".openclaw")
 
 
 def test_plan_roots_fails_closed_when_the_cli_cannot_answer() -> None:

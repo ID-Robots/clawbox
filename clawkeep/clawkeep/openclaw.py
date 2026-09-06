@@ -152,8 +152,13 @@ def create_archive(
 
 
 #: The CLI's own sentence for a box with nothing to back up — no state
-#: directory at all. Matched by prefix, because the CLI prints it both as the
-#: `error.message` of its `--json` answer and as a "[openclaw] Reason:" line.
+#: directory at all. Matched by CONTAINMENT, never by prefix: the CLI prints
+#: it both as the `error.message` of its `--json` answer and as a
+#: "[openclaw] Reason:" line on stderr, and `_cli_error_message` hands back
+#: the second form — the raw stderr+stdout tail, with "[openclaw] Could not
+#: start the CLI." in front of it — whenever stdout carries no JSON envelope.
+#: A prefix test read that form as some other failure and failed closed on
+#: exactly the box a restore is for.
 _NO_LOCAL_STATE = "No local OpenClaw state was found"
 
 #: The two state-directory names the CLI looks for under the home, in the
@@ -189,7 +194,7 @@ def state_dir(env: dict[str, str] | None = None) -> str:
     """The state directory the CLI would resolve under `env` — the one root
     a box with NO state cannot be denied.
 
-    A mirror of the CLI's `resolveStateDir`, and deliberately nothing more:
+    A mirror of the CLI's `resolveStateDir` (one deliberate exception below):
     `OPENCLAW_STATE_DIR` first (`~` expanded); else `OPENCLAW_HOME` read as the
     ACCOUNT home — never as the state dir, the confusion `gateway-pre-start.sh`
     guards against — with `HOME` behind it; then `<home>/.openclaw` when it
@@ -208,8 +213,15 @@ def state_dir(env: dict[str, str] | None = None) -> str:
     else:
         home = os.path.abspath(os_home)
 
-    override = (e.get("OPENCLAW_STATE_DIR") or "").strip()
-    if override:
+    # Through `_home_value` like the two homes above. This is ClawKeep's own,
+    # stricter rule, not the CLI's: the installed CLI only trims this
+    # variable, so a unit that exported `OPENCLAW_STATE_DIR=undefined` would
+    # have it resolve `<cwd>/undefined` — and here that would become the box's
+    # ONE allowed restore root, so the manifest of the real state directory
+    # could never pass the allowlist. Treating the placeholder as unset can
+    # only widen a restore back to where the state really lives.
+    override = _home_value(e.get("OPENCLAW_STATE_DIR"))
+    if override is not None:
         if override == "~" or override.startswith("~/"):
             override = home + override[1:]
         return os.path.abspath(override)
@@ -308,7 +320,7 @@ def plan_roots(binary: str, *, timeout: float = 5 * 60) -> tuple[PlannedRoot, ..
         return roots
 
     retry_reason = _cli_error_message(retry)
-    if retry_reason.startswith(_NO_LOCAL_STATE):
+    if _NO_LOCAL_STATE in retry_reason:
         fallback = state_dir()
         log.warning(
             "openclaw found no local state to plan a backup from (%s); a restore may "

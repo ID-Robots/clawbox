@@ -262,12 +262,20 @@ def assert_destination_allowed(
     *,
     roots: RestoreRoots,
     sqlite: bool = False,
-) -> str:
+) -> RestoreRoot:
     """Vet ONE manifest asset's destination against the local roots.
 
-    Returns the path restore may use — the manifest's own string, which by
-    then has been proven to be an absolute, already-normalised path equal to
-    (or, for the OpenClaw nested kinds, inside) a root this box declared.
+    Returns the root the asset lands on. Its `path` is the path restore may
+    use — the manifest's own string, which by then has been proven to be an
+    absolute, already-normalised path equal to (or, for the OpenClaw nested
+    kinds, inside) a root this box declared. Its `sqlite` is what restore
+    must act on, and it is THIS BOX's word, never the manifest's: a Hermes
+    `sessions` manifest that omits the flag still lands on the `state.db`
+    root, and a restore that took the manifest's silence for "not sqlite"
+    would leave the old database's `-wal`/`-shm` pair beside the new file
+    for sqlite to replay into it. The manifest may only agree — `sqlite:
+    true` on a root this box does not archive that way is refused, since
+    honouring it would rename `config.yaml-wal` aside.
     Raises `DestinationRefusedError` naming the kind and the path otherwise.
 
     The shape rule first, whoever the agent is: `os.path.isabs(target)` and
@@ -348,7 +356,9 @@ def assert_destination_allowed(
         raise DestinationRefusedError(
             f"refusing to restore the {where}: it is not a sqlite database on this box",
         )
-    return target
+    # Every arm above leaves `matched.path == target` (the nested OpenClaw
+    # root is built from `target`), so the caller reads the path from here.
+    return matched
 
 
 def verify_archive(cfg: Config, archive: Path, *, agent: str) -> None:

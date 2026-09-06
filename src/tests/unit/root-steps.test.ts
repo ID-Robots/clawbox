@@ -1,4 +1,6 @@
+import { spawnSync } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { describe, expect, it } from "vitest";
 import {
@@ -34,6 +36,28 @@ const grantsIn = (file: string): string[] =>
     .split("\n")
     .filter((l) => l.trim().startsWith("clawbox ") && l.includes("NOPASSWD:"))
     .map((l) => l.split("NOPASSWD:")[1].trim());
+
+/**
+ * Does systemd run this unit as root? A system unit runs as root unless User=
+ * names somebody else — and `User=root`, `User=0` and an empty value all name
+ * root, so "has a User= line" is not the test: it exempted a `User=root` unit
+ * from every root-unit check below. The LAST assignment wins, as in systemd.
+ * DynamicUser=yes allocates a transient user and is never root.
+ */
+function runsAsRoot(unit: string): boolean {
+  if (/^DynamicUser=yes$/m.test(unit)) return false;
+  const users = [...unit.matchAll(/^User=(.*)$/gm)].map((m) => m[1].trim());
+  const user = users.at(-1) ?? "";
+  return user === "" || user === "root" || user === "0";
+}
+
+/** The body of a `name() {` shell function in install.sh, braces included. */
+function shellFn(source: string, name: string): string {
+  const start = source.indexOf(`${name}() {`);
+  if (start < 0) throw new Error(`${name} not found in install.sh`);
+  const end = source.indexOf("\n}", start);
+  return source.slice(start, end + 2);
+}
 
 /** Pull a whitespace-separated shell list assigned as NAME="..." . */
 function shellList(source: string, name: string): string[] {
@@ -207,8 +231,11 @@ describe("root-executed paths are outside clawbox's write access", () => {
     // ExecStart on scripts/ the tree, fired every 20 s by its timer) and their
     // EnvironmentFile= on data/network.env were never looked at, which is how a
     // zero-privilege clawbox → root path survived TASK-445. Generic now: every
-    // config/*.service and *.timer WITHOUT a User= runs as root, and nothing it
-    // executes or loads may live under /home/clawbox.
+    // config/*.service and *.timer systemd runs as root (no User=, or one that
+    // names root — see runsAsRoot), and nothing it executes or loads may live
+    // under /home/clawbox: not as the program, not as an argument, not as a
+    // quoted EnvironmentFile. A prefix test let `ExecStart=/usr/bin/bash
+    // /home/clawbox/clawbox/x.sh` through.
     const configDir = path.join(REPO, "config");
     const units = fs.readdirSync(configDir).filter((f) => /\.(service|timer)$/.test(f));
     expect(units.length).toBeGreaterThan(0);
@@ -222,15 +249,14 @@ describe("root-executed paths are outside clawbox's write access", () => {
     let rootUnits = 0;
     for (const unit of units) {
       const text = read(path.join(configDir, unit));
-      if (/^User=/m.test(text) || /^DynamicUser=yes$/m.test(text)) continue;
+      if (!runsAsRoot(text)) continue;
       rootUnits += 1;
       for (const m of text.matchAll(DIRECTIVES)) {
         const [, , raw] = m;
         // systemd's own prefixes: `-` (optional), `+`/`!`/`!!` (privilege), `@`
         // (argv[0]), `:` (no env expansion).
         const value = raw.trim().replace(/^[-+!@:]+/, "");
-        expect(value.startsWith("/home/clawbox"), `${unit} runs root over a clawbox-writable path: ${m[0]}`)
-          .toBe(false);
+        expect(value, `${unit} runs root over a clawbox-writable path: ${m[0]}`).not.toContain("/home/clawbox");
         expect(value, `${unit}: ${m[0]}`).not.toContain("$PROJECT_DIR");
       }
     }
@@ -247,7 +273,7 @@ describe("root-executed paths are outside clawbox's write access", () => {
     const body = libexecFn.slice(0, libexecFn.indexOf("\n}"));
     for (const unit of fs.readdirSync(configDir).filter((f) => /\.service$/.test(f))) {
       const text = read(path.join(configDir, unit));
-      if (/^User=/m.test(text)) continue;
+      if (!runsAsRoot(text)) continue;
       for (const m of text.matchAll(/^Exec(?:Start|Stop|StartPre)=(?:[-+!@:]+)?(\/usr\/local\/libexec\/clawbox\/(\S+))/gm)) {
         expect(body, `${unit} names ${m[1]} but install_root_libexec does not install it`).toContain(m[2]);
       }
@@ -313,5 +339,118 @@ describe("root-executed paths are outside clawbox's write access", () => {
     const sh = read(INSTALL_SH);
     expect(sh).toContain("CLAWBOX_ALLOW_SELF_UPDATE");
     expect(sh).toContain("_clawbox_may_self_update");
+  });
+});
+
+describe("runsAsRoot (the test's own reading of a unit)", () => {
+  it("treats User=root, User=0 and an empty User= as root, and a named user or DynamicUser as not", () => {
+    expect(runsAsRoot("[Service]\nExecStart=/bin/true\n")).toBe(true);
+    expect(runsAsRoot("[Service]\nUser=root\n")).toBe(true);
+    expect(runsAsRoot("[Service]\nUser=0\n")).toBe(true);
+    expect(runsAsRoot("[Service]\nUser=\n")).toBe(true);
+    expect(runsAsRoot("[Service]\nUser=clawbox\n")).toBe(false);
+    // The last assignment wins, as in systemd.
+    expect(runsAsRoot("[Service]\nUser=clawbox\nUser=root\n")).toBe(true);
+    expect(runsAsRoot("[Service]\nDynamicUser=yes\n")).toBe(false);
+  });
+});
+
+describe("install_root_libexec: a copy that did not land is never a success", () => {
+  // The recorded case is the UPDATE path. step_post_update runs its fixups as
+  // `step_x || echo "(non-fatal)"`, and bash runs a function called in an
+  // OR-list with errexit OFF, so a failed install_root_file inside
+  // install_root_libexec was followed by successful commands, the function
+  // returned 0, and the units and grants installed after it named a copy that
+  // was not there (a first update onto a fresh libexec) or was stale. Every
+  // run here is in that OR-list shape on purpose.
+  const sh = read(INSTALL_SH);
+
+  /** Run install_root_libexec against a fake tree; failOn names the copy whose install fails. */
+  function run(failOn: string): { stdout: string; landed: (name: string) => boolean } {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-libexec-"));
+    const project = path.join(tmp, "project");
+    const libexec = path.join(tmp, "libexec");
+    fs.mkdirSync(path.join(project, "config"), { recursive: true });
+    fs.mkdirSync(path.join(project, "scripts"), { recursive: true });
+    // No clawbox-resource-limits.env: its destination is the real /etc/clawbox,
+    // and the test must never write there.
+    for (const f of ["clawbox-root-manifest.sh", "clawbox-run-root-step.sh", "clawbox-root-step.sh"]) {
+      fs.writeFileSync(path.join(project, "config", f), "#!/bin/bash\n");
+    }
+    for (const f of ["start-ap.sh", "stop-ap.sh", "ap-watchdog.sh", "ensure-vnc-on-first-boot.sh"]) {
+      fs.writeFileSync(path.join(project, "scripts", f), "#!/bin/bash\n");
+    }
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      `ROOT_LIBEXEC_DIR=${JSON.stringify(libexec)}`,
+      `FAIL_ON=${JSON.stringify(failOn)}`,
+      // `install -d -o root` cannot run unprivileged; the directories are the
+      // point of those calls, and only one under the tmp tree is ever created —
+      // a runner that executes vitest as root must not gain an /etc/clawbox
+      // from a unit test.
+      'install() { if [ "$1" = -d ]; then case "${@: -1}" in "$ROOT_LIBEXEC_DIR"*) mkdir -p -- "${@: -1}";; esac; fi; }',
+      // install_root_file's contract, not its code: 1 for the named copy, else the file lands.
+      'install_root_file() { if [ -n "$FAIL_ON" ] && [ "$(basename -- "$2")" = "$FAIL_ON" ]; then return 1; fi; : > "$2"; }',
+      "write_root_exec_manifest() { return 0; }",
+      'record_provision_failure() { echo "recorded:$1"; }',
+      shellFn(sh, "install_root_libexec"),
+      // The OR-list shape of every step_post_update fixup.
+      'install_root_libexec || echo "rc=$?"',
+      'echo "after"',
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+    // Snapshot what landed, then remove the tree: nothing of this run outlives it.
+    const landedNames = fs.existsSync(libexec) ? fs.readdirSync(libexec) : [];
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return { stdout: r.stdout + r.stderr, landed: (name) => landedNames.includes(name) };
+  }
+
+  it("returns non-zero and records root_libexec when one copy fails, in the OR-list shape", () => {
+    const { stdout, landed } = run("start-ap.sh");
+    expect(stdout).toContain("rc=1");
+    expect(stdout).toContain("recorded:root_libexec");
+    expect(stdout).toContain("could not install");
+    // COLLECTED, not returned at the first failure: the copies are independent
+    // (install_root_file is atomic), and the dispatcher after the manifest
+    // block still lands, or a stale manifest would refuse every root step.
+    expect(landed("stop-ap.sh"), "the copies after the failed one still land").toBe(true);
+    expect(landed("clawbox-root-step.sh"), "the dispatcher still lands").toBe(true);
+    expect(landed("start-ap.sh")).toBe(false);
+  });
+
+  it("returns zero and records nothing when every copy lands", () => {
+    const { stdout, landed } = run("");
+    expect(stdout).not.toContain("rc=");
+    expect(stdout).not.toContain("recorded:");
+    expect(stdout).toContain("after");
+    expect(landed("clawbox-root-step.sh")).toBe(true);
+  });
+
+  it("names step_systemd_services as the repair for root_libexec", () => {
+    expect(shellFn(sh, "provision_repair_step")).toMatch(/root_libexec\)\s+printf 'systemd_services'/);
+  });
+
+  it("no caller hides the result in a `[ -x … ] || install_root_libexec` list", () => {
+    // Over the CODE only: the comments beside the two callers name the shape
+    // they replaced, and a pin that failed on its own explanation would make
+    // the explanation the thing to delete.
+    const code = sh.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+    expect(code).not.toMatch(/\]\s*\|\|\s*install_root_libexec\b/);
+    // The units and the sudoers grant installed by step_systemd_services name
+    // the copies: over copies that are not current they point at nothing.
+    expect(shellFn(sh, "step_systemd_services")).toMatch(/install_root_libexec \|\| \{/);
+    // The firstboot unit is gated on the FILE — a function's 0 is not a file.
+    const vncInstall = shellFn(sh, "step_vnc_install");
+    expect(vncInstall).toContain("install_root_libexec || return 1");
+    const fileGate = vncInstall.indexOf('if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then\n    echo');
+    expect(fileGate).toBeGreaterThan(-1);
+    expect(fileGate).toBeLessThan(vncInstall.indexOf("<<FIRSTBOOTVNC"));
+    // The refresh keeps the unrelated clawbox-vnc.service work and returns the
+    // collected status at its END, so step_post_update's warning is honest and
+    // the update is not cut short over it.
+    const vncRefresh = shellFn(sh, "step_vnc_refresh");
+    expect(vncRefresh).toContain("install_root_libexec || firstboot_rc=1");
+    expect(vncRefresh.trimEnd().endsWith('return "$firstboot_rc"\n}')).toBe(true);
   });
 });

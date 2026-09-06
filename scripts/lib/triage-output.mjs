@@ -31,11 +31,27 @@
  * missing required key, or a schema keyword this validator cannot check — a
  * schema it does not understand must not pass silently.
  */
+const UNCHECKED_CONSTRAINTS = [
+  "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+  "minLength", "pattern", "minItems", "uniqueItems", "minProperties", "maxProperties", "format",
+];
+
 export function assertMatchesSchema(schema, value, path = "$") {
   const fail = (what) => {
     throw new Error(`model output rejected at ${path}: ${what}`);
   };
   const describe = (v) => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
+
+  // A constraint this validator does not apply must not pass silently: the
+  // API is never shown these keywords (`apiSchema` in ai-backend.mjs strips
+  // the whole documented set), so a schema that carried one would ship a cap
+  // that NOTHING enforces on either transport. That is a mistake in the
+  // schema, not in the model's answer, and the message says so.
+  for (const key of UNCHECKED_CONSTRAINTS) {
+    if (key in schema) {
+      throw new Error(`schema at ${path} uses \`${key}\`, which this validator cannot check — only maxLength and maxItems are enforced`);
+    }
+  }
 
   if (Array.isArray(schema.enum) && !schema.enum.includes(value)) {
     fail(`expected one of ${JSON.stringify(schema.enum)}, got ${JSON.stringify(value)?.slice(0, 80) ?? describe(value)}`);

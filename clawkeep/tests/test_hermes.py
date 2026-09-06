@@ -384,10 +384,12 @@ def test_restore_refuses_a_non_directory_asset_root(tmp_path: Path) -> None:
 
 
 def test_every_asset_kind_is_unique_so_restore_can_pin_a_destination_by_it() -> None:
-    """`ASSETS_BY_KIND` is how restore turns a manifest's `kind` into the ONE
-    place, shape and sqlite flag this module would have archived it with. Two
-    assets sharing a kind would make that lookup ambiguous — and the manifest
-    would get to pick."""
+    """Restore matches a manifest asset's `kind` and path against the roots
+    `agent.restore_roots` builds from `hermes.ASSETS` (it never reads
+    `ASSETS_BY_KIND`, which is this suite's mirror of the same list). That
+    match relies on one root per kind: two assets sharing a kind would make
+    it ambiguous — and the manifest would get to pick. So the kinds must be
+    unique, and the mirror must still be the list, one entry for one."""
     kinds = [a.kind for a in hermes.ASSETS]
     assert len(kinds) == len(set(kinds))
     assert set(hermes.ASSETS_BY_KIND) == set(kinds)

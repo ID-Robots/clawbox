@@ -356,6 +356,7 @@ clear_provision_failure() {
 provision_repair_step() {
   case "$1" in
     root_exec_manifest) printf 'systemd_services' ;;
+    root_libexec) printf 'systemd_services' ;;
     *) printf '%s' "$1" ;;
   esac
 }
@@ -5308,15 +5309,32 @@ install_root_file() {
   fi
 }
 
+# Returns non-zero when ANY root-owned copy did not land, and records
+# `root_libexec` in the run's verdict. Every copy is still attempted — the
+# failures are COLLECTED rather than returned at the first one — because
+# install_root_file is atomic (a failed copy leaves the previous file untouched)
+# so the copies are independent of each other, and a return before the manifest
+# block below would leave a stale manifest behind, and the dispatcher then
+# refuses every pinned root step: a wider outage than one missing copy.
+#
+# The check matters on the update path specifically. step_post_update runs its
+# fixups as `step_x || echo "(non-fatal)"`, and bash switches errexit OFF for
+# the whole body of a function called in an OR-list, so without it a copy that
+# failed here was followed by successful commands, the function returned 0, and
+# the units and grants installed after it pointed at a copy that was not there
+# (a fresh libexec on the first update carrying it) or was stale.
 install_root_libexec() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
-  local src
+  local src failed=0
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
   for src in clawbox-root-manifest.sh clawbox-run-root-step.sh; do
     if [ -f "$PROJECT_DIR/config/$src" ]; then
-      install_root_file "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
+      install_root_file "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
+        failed=1
+      }
     fi
   done
   # Everything the web server may invoke as root via a NOPASSWD grant. Same
@@ -5347,14 +5365,20 @@ install_root_libexec() {
              clawbox-resource-limits.sh gateway-restart-when-online.sh \
              start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
     if [ -f "$PROJECT_DIR/scripts/$src" ]; then
-      install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
+      install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
+        failed=1
+      }
     fi
   done
   # The limits the scripts above read. Root-owned for the same reason they are.
   install -d -o root -g root -m 0755 /etc/clawbox
   if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
     install_root_file "$PROJECT_DIR/config/clawbox-resource-limits.env" \
-      /etc/clawbox/resource-limits.env 0644
+      /etc/clawbox/resource-limits.env 0644 || {
+      echo "  Error: could not install /etc/clawbox/resource-limits.env (the copy already there, if any, is untouched)" >&2
+      failed=1
+    }
   fi
 
   # Manifest, THEN dispatcher — never the other way round. The dispatcher fails
@@ -5367,11 +5391,22 @@ install_root_libexec() {
   if write_root_exec_manifest; then
     if [ -f "$PROJECT_DIR/config/clawbox-root-step.sh" ]; then
       install_root_file "$PROJECT_DIR/config/clawbox-root-step.sh" \
-        "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh"
+        "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh" || {
+        echo "  Error: could not install $ROOT_LIBEXEC_DIR/clawbox-root-step.sh (the dispatcher already there, if any, is untouched)" >&2
+        failed=1
+      }
     fi
   else
     echo "  Warning: could not record the root-exec manifest; leaving the existing root dispatcher in place" >&2
     record_provision_failure "root_exec_manifest"
+  fi
+  # A copy that did not land is a fact about the box (a full or read-only /usr),
+  # not about this step, so it goes in the verdict like the manifest failure
+  # above; provision_repair_step names step_systemd_services as its repair,
+  # the step that installs these copies and everything that points at them.
+  if [ "$failed" -ne 0 ]; then
+    record_provision_failure "root_libexec"
+    return 1
   fi
 }
 
@@ -5674,7 +5709,17 @@ step_systemd_services() {
   # firing every 20 s) would otherwise run the new unit against a copy that is
   # not there yet. It must also run before the sudoers drop-in further down,
   # which points at these copies. Security scan #21.
-  install_root_libexec
+  #
+  # And it must SUCCEED first: the units copied below and the sudoers drop-in
+  # name these copies, so installing them over a copy that did not land is a
+  # unit that points at nothing. On a fresh install errexit stops here anyway;
+  # on the update path, where step_post_update tolerates this step's failure,
+  # the return leaves the units and grants already on the box in place —
+  # still working, still pointing at the copies that ARE there.
+  install_root_libexec || {
+    echo "  Error: the root-owned copies under $ROOT_LIBEXEC_DIR are not all current; not installing the units and grants that point at them" >&2
+    return 1
+  }
 
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
@@ -7448,7 +7493,18 @@ step_vnc_install() {
   # undid it after every git reset, and the directory is clawbox-writable so a
   # rename replaced the file regardless. Security scan #21.
   chmod +x "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
-  [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ] || install_root_libexec
+  if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    install_root_libexec || return 1
+  fi
+  # The firstboot unit written below names this copy, and a root unit pointing
+  # at nothing is exactly the failure to avoid — so the gate is the FILE, not
+  # the function's word. Not `[ -x ] || install_root_libexec`: in an OR-list a
+  # failed copy inside the function was followed by successful commands and
+  # came back as 0, and the unit was written regardless.
+  if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    echo "  Error: $ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh is not installed; not writing clawbox-firstboot-vnc.service to point at it" >&2
+    return 1
+  fi
 
   # Systemd service for VNC — force virtual display mode. On headless
   # Jetsons, :0 is GDM's greeter; apps launched into it are covered by
@@ -7560,17 +7616,33 @@ step_vnc_refresh() {
   # cycle, with root still running the tree copy at every boot. Only the
   # ExecStart line, nothing else in the unit: the marker and the enable state
   # are deliberately left alone, as the comment above says.
+  #
+  # A copy that does not land is not swallowed and not fatal either: the
+  # repoint below is gated on the copy being THERE, so the unit keeps running
+  # the tree copy it ran before (the pre-fix state, which works) rather than
+  # pointing at nothing; the clawbox-vnc.service refresh further down has
+  # nothing to do with the copy and still happens; and the step returns
+  # non-zero at its end so step_post_update's warning line and the
+  # `root_libexec` record install_root_libexec leaves both say what happened.
+  # The `[ -x ] || install_root_libexec` this replaces reported nothing: an
+  # OR-list runs the function with errexit off, so a failed copy came back 0.
   local firstboot_unit=/etc/systemd/system/clawbox-firstboot-vnc.service
-  if [ -f "$firstboot_unit" ] \
-     && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit"; then
-    [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ] || install_root_libexec
-  fi
+  local firstboot_rc=0
   if [ -f "$firstboot_unit" ] \
      && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit" \
-     && [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
-    sed -i "s#^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$#ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh#" "$firstboot_unit"
-    systemctl daemon-reload
-    echo "  clawbox-firstboot-vnc.service repointed at $ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh"
+     && [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+    install_root_libexec || firstboot_rc=1
+  fi
+  if [ -f "$firstboot_unit" ] \
+     && grep -q "^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$" "$firstboot_unit"; then
+    if [ -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
+      sed -i "s#^ExecStart=$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh\$#ExecStart=$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh#" "$firstboot_unit"
+      systemctl daemon-reload
+      echo "  clawbox-firstboot-vnc.service repointed at $ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh"
+    else
+      echo "  Warning: clawbox-firstboot-vnc.service still runs the tree copy of ensure-vnc-on-first-boot.sh as root; the repoint waits for the next update" >&2
+      firstboot_rc=1
+    fi
   fi
 
   local unit_path=/etc/systemd/system/clawbox-vnc.service
@@ -7608,6 +7680,7 @@ VNCSVC
     echo "  VNC service already up-to-date, skipping restart"
   fi
   rm -f "$unit_tmp"
+  return "$firstboot_rc"
 }
 
 step_desktop_theme() {
