@@ -856,12 +856,18 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
    * over, and it leaves the core's own migration less to move rather than more.
    */
   describe("taking the cloud voice back from wherever the entry actually is", () => {
+    // The withdrawal reads the PLAN and never the device badge (TASK-744): the
+    // badge is `mapPortalTier`'s answer and prefers the portal's `deviceTier`
+    // stamp on purpose, so a Max subscriber running Flash carries a low badge
+    // and must not lose his voice over it. "A box that was Max and is not any
+    // more" — which is what every case here is about — is therefore a box whose
+    // PLAN is below the entitlement, and that is what these fixtures record.
     const OURS = { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED };
 
     it("takes back a stamped entry stranded in the legacy home", () => {
       const seeded = { messages: { tts: { providers: { openai: { ...OURS } } } } };
 
-      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
 
       expect(changed).toBe(true);
       const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
@@ -877,7 +883,7 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
         messages: { tts: { providers: { openai: { ...OURS } } } },
       };
 
-      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
 
       expect(changed).toBe(true);
       expect((cfg.tts as { providers: Record<string, SpeechEntry> }).providers.openai).toBeUndefined();
@@ -892,7 +898,7 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
       const theirs = { baseUrl: "https://their.own/voice", model: "x" };
       const seeded = { messages: { tts: { providers: { openai: { ...theirs } } } } };
 
-      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
 
       expect(changed).toBe(false);
       const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
@@ -907,7 +913,7 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
         messages: { tts: { providers: { openai: { ...OURS } } } },
       };
 
-      const { cfg } = migrate(seeded, { deviceTier: PRO_DEVICE_TIER });
+      const { cfg } = migrate(seeded, { deviceTier: PRO_DEVICE_TIER, planTier: PRO_DEVICE_TIER });
 
       expect((cfg.tts as { providers: Record<string, SpeechEntry> }).providers.openai).toEqual(OURS);
       const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
