@@ -131,11 +131,6 @@ export async function applyClawaiToHermes(
   // token on disk beside a mark asserting the old one worked. A mark lost to a
   // failed apply is always safe. See src/lib/provider-verified.ts.
   await forgetProviderVerified(CLAWAI_PROVIDER);
-  // And the other mark ABOUT this credential, for the same reason and at the
-  // same moment: a refusal the proxy gave the OLD token says nothing about the
-  // new one, and leaving it would make the picture button and the microphone
-  // stay away from a device that was just re-linked to fix exactly that.
-  forgetClawaiCredentialRefusal();
 
   // Read BEFORE anything is written, because the refresh at the bottom needs to
   // know whether this call is what turned drawing on. `hermesConfigGet` is keyed
@@ -274,6 +269,16 @@ export async function applyClawaiToHermes(
 
   for (const args of steps) {
     const r = await runHermesCli(args, { timeoutMs: 15_000 });
+    // The other mark ABOUT this credential, dropped the moment the new one is
+    // actually ON DISK — not before the loop, where a step that failed first
+    // would have re-enabled requests against the very token the proxy refused.
+    // The polarity is the opposite of `forgetProviderVerified` above, and so is
+    // the safe moment: that mark asserts something WORKED, so losing it early
+    // costs nothing; this one asserts something FAILED, so dropping it early
+    // costs traffic.
+    if (r.code === 0 && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
+      forgetClawaiCredentialRefusal();
+    }
     // `unset` of an absent key is a no-op; only a failing `set` is fatal.
     if (r.code !== 0 && args[1] === "set") {
       // This message is rendered verbatim in the Settings save banner (the

@@ -4,6 +4,7 @@ import { Readable } from "stream";
 import {
   CLAWBOX_AI_PROXY_URL,
   clawaiCredentialRefused,
+  clawaiCredentialGeneration,
   noteClawaiCredentialRefused,
   proxyRefusedClawaiCredential,
   resolveClawaiToken,
@@ -298,6 +299,11 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
     };
   }
 
+  // Snapshotted BEFORE the upload, for the reason the image path documents: a
+  // re-link that lands mid-request makes the answer a verdict on a credential
+  // the box no longer holds.
+  const generation = clawaiCredentialGeneration();
+
   const upstream = new FormData();
   upstream.set("file", audio.file, audio.name);
   upstream.set("model", TRANSCRIBE_MODEL);
@@ -331,7 +337,7 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
     // `missing_token` / `invalid_token`; a bare 401/403 can be an edge rule or
     // a plan gate, and remembering one of those would mute the microphone on a
     // box whose credential is fine. Only the proxy's own verdict is recorded.
-    if (await proxyRefusedClawaiCredential(res)) noteClawaiCredentialRefused(res.status);
+    if (await proxyRefusedClawaiCredential(res)) noteClawaiCredentialRefused(res.status, generation);
     const status = res.status === 401 || res.status === 403
       ? 503
       : res.status >= 400 && res.status < 500 ? 400 : 502;

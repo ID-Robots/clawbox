@@ -106,6 +106,24 @@ const CREDENTIAL_REFUSAL_TTL_MS = 15 * 60_000;
 let refusal: { status: number; until: number } | null = null;
 
 /**
+ * How many times this box's ClawBox AI credential has been rewritten.
+ *
+ * A plain counter, and deliberately nothing derived from the secret. It exists
+ * because a request made with the OLD credential can still be in flight when
+ * the new one is written: without this, that request's 403 lands after the
+ * rewrite and arms a refusal against a credential that was never refused,
+ * muting the microphone and the picture button on a device the customer has
+ * just successfully re-linked. Callers snapshot it before the request and hand
+ * it back with the verdict; a verdict from a superseded generation is dropped.
+ */
+let credentialGeneration = 0;
+
+/** The generation to snapshot before a request whose refusal may be recorded. */
+export function clawaiCredentialGeneration(): number {
+  return credentialGeneration;
+}
+
+/**
  * Has the ClawBox AI proxy refused this box's credential? Returns the status it
  * refused with, so the caller words the failure exactly as it would have worded
  * the real one.
@@ -134,7 +152,10 @@ export function clawaiCredentialRefused(): number | null {
  * too, but it belongs to a plan rather than to a credential and it resets on a
  * clock this module cannot see.
  */
-export function noteClawaiCredentialRefused(status: number): void {
+export function noteClawaiCredentialRefused(status: number, generation: number): void {
+  // The credential was rewritten while this request was in flight, so what came
+  // back is a verdict on a token this box no longer holds.
+  if (generation !== credentialGeneration) return;
   refusal = { status, until: Date.now() + CREDENTIAL_REFUSAL_TTL_MS };
 }
 
@@ -148,12 +169,14 @@ export function noteClawaiCredentialRefused(status: number): void {
  * whether this box is OpenClaw or Hermes.
  */
 export function forgetClawaiCredentialRefusal(): void {
+  credentialGeneration += 1;
   refusal = null;
 }
 
 /** Test seam: forget every remembered refusal. */
 export function resetClawaiCredentialRefusals(): void {
   refusal = null;
+  credentialGeneration = 0;
 }
 
 /**
