@@ -2571,7 +2571,13 @@ const FILE_TOOLS = ["Read", "Edit", "Write"] as const;
 // names who the owner mailed and what about. A run has no business reading
 // either, and a file that only exists once mail has been approved is exactly
 // the kind that gets added to the store and forgotten here.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "coding-agent-runs.json"];
+//
+// email-approval-prompts.json joined them when it stopped holding only ids: it
+// now carries the short CODE the owner types to release a draft
+// (email-approval-prompts.ts). The code is a name and not a password — identity
+// is what authorises an approval — but a live one has no business in a
+// delegated run's Read either.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json"];
 
 /**
  * Claude Code's Read/Edit/Write rules for the paths a run must not open.
