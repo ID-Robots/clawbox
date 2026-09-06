@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { coreModelLifecycle } from "@/lib/core-model-lifecycle";
 import { spawn } from "child_process";
 import { promises as fsp } from "fs";
 import path from "path";
@@ -614,6 +615,15 @@ function transformOpenclawEntries(
     if (entry.available === false) continue;
     // The only checks that read the ROW rather than the id; everything else is
     // `isOfferableModelId`, shared with the sanitiser.
+    //
+    // The `deprecated` TAG cannot fire on the pinned core and is kept only for
+    // the day it can: `toModelRow` builds `tags` from configured entries and
+    // aliases and never projects a model's lifecycle, so
+    // `anthropic/claude-opus-4-8` — `status: "deprecated"` in the core's own
+    // manifest — arrives here with `tags: []` (measured, 2026.8.1). The
+    // lifecycle is read from where the core actually publishes it, inside
+    // `isOfferableModelId`, so the sanitiser applies the same rule to a payload
+    // an older build cached.
     if (entry.tags?.includes("deprecated")) continue;
     if (!isOfferableModelId(provider, id)) continue;
     out.push({
@@ -663,6 +673,12 @@ function isOfferableModelId(provider: string, id: string): boolean {
   // segment is one of these two, and none carries `deprecated: true` — so this
   // is the set doing what it says rather than a change in what is offered.
   if (DEPRECATED_MODEL_IDS.has(lastModelSegment(id))) return false;
+  // And whatever the INSTALLED core says, which is the answer that cannot go
+  // stale: the set above is a hand-kept list, this is the harness's own
+  // catalogue. Fails open — a box with no core, no plugin manifest or a shape
+  // the reader does not recognise answers null and the row is offered, which
+  // is exactly what beta does today.
+  if (coreModelLifecycle(provider, lastModelSegment(id))?.deprecated) return false;
   return true;
 }
 
