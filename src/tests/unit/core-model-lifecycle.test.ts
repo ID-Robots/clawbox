@@ -22,32 +22,48 @@ vi.mock("@/lib/openclaw-config", () => ({ findOpenclawBin: () => "openclaw" }));
  */
 
 let tmpHome: string;
-let originalHome: string | undefined;
-let originalOpenclawHome: string | undefined;
+
+/**
+ * Every variable the lookup consults, aimed at the fixture.
+ *
+ * `CLAWBOX_OPENCLAW_HOME` is in here because `manifestPaths` reads it FIRST,
+ * ahead of `OPENCLAW_HOME`, and a device carries it — `install-x64.sh` bakes it
+ * into the web-server unit and `updater.ts` exports it into every gateway
+ * pre-start child. `vitest.config.ts` already floors it to `""` for the whole
+ * suite, so this is not a live failure; it is this file no longer depending on
+ * a config-level floor to point its own fixture at itself.
+ */
+const ENV = ["HOME", "OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME"] as const;
+const saved: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   vi.resetModules();
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "core-lifecycle-"));
-  originalHome = process.env.HOME;
-  originalOpenclawHome = process.env.OPENCLAW_HOME;
+  for (const key of ENV) saved[key] = process.env[key];
   process.env.HOME = tmpHome;
   process.env.OPENCLAW_HOME = path.join(tmpHome, ".openclaw");
+  process.env.CLAWBOX_OPENCLAW_HOME = path.join(tmpHome, ".openclaw");
 });
 
 afterEach(() => {
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
-  if (originalOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
-  else process.env.OPENCLAW_HOME = originalOpenclawHome;
+  for (const key of ENV) {
+    if (saved[key] === undefined) delete process.env[key];
+    else process.env[key] = saved[key];
+  }
   fs.rmSync(tmpHome, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
 
 /** Write a provider manifest where OpenClaw 2 puts it: beside the config. */
 function writeManifest(provider: string, body: unknown): void {
+  writeRawManifest(provider, JSON.stringify(body));
+}
+
+/** The same file, byte for byte — for the bytes `JSON.stringify` would repair. */
+function writeRawManifest(provider: string, raw: string): void {
   const dir = path.join(tmpHome, ".openclaw", "extensions", provider);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "openclaw.plugin.json"), JSON.stringify(body));
+  fs.writeFileSync(path.join(dir, "openclaw.plugin.json"), raw);
 }
 
 async function load() {
@@ -186,9 +202,56 @@ describe("coreModelRetired", () => {
     const { coreModelRetired } = await load();
     expect(coreModelRetired("anthropic", "claude-opus-4-8")).toBe(false);
 
-    writeManifest("gemini", "}{ not json" as unknown);
+    // Valid JSON, and nothing this module knows how to read.
+    writeManifest("openrouter", "not a catalogue at all");
+    const shape = await load();
+    expect(shape.coreModelRetired("openrouter", "anything")).toBe(false);
+
+    // Not JSON at all, written as RAW BYTES: `JSON.stringify("}{ not json")`
+    // is itself a valid JSON string, so putting this through `writeManifest`
+    // would take the shape path above and leave the `JSON.parse` catch unrun.
+    writeRawManifest("gemini", "}{ not json");
     const broken = await load();
     expect(broken.coreModelRetired("gemini", "anything")).toBe(false);
+  });
+
+  it("remembers a manifest it read but could make nothing of", async () => {
+    // The other half of the contrast the next case rests on, asserted rather
+    // than only asserted ABOUT: a shape this module does not recognise is still
+    // a fair answer about a file it successfully read, so it is cached — which
+    // is what makes the parse branch's refusal to cache a deliberate difference
+    // rather than an accident of where the `return` landed.
+    writeManifest("google", "not a catalogue at all");
+    const { coreModelRetired } = await load();
+    vi.useFakeTimers();
+    try {
+      expect(coreModelRetired("google", "gemini-old")).toBe(false);
+      writeManifest("google", { models: [{ id: "gemini-old", status: "deprecated" }] });
+      expect(coreModelRetired("google", "gemini-old")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not remember a manifest it could not parse", async () => {
+    // Why the two failures above are not interchangeable: an unrecognised
+    // SHAPE caches an empty set — a fair answer about a file that was read —
+    // while a PARSE failure deliberately caches nothing, because the file it
+    // failed on is the one `npm install -g openclaw@latest` is halfway through
+    // writing. Caching that would pin "nothing is retired" for the life of the
+    // process, which is the failure this module exists to survive.
+    writeRawManifest("openai", "}{ not json");
+    const { coreModelRetired } = await load();
+    // Time frozen, so a cached empty set would still be inside the stat floor
+    // and the second answer can only have come from a re-read.
+    vi.useFakeTimers();
+    try {
+      expect(coreModelRetired("openai", "gpt-5.5")).toBe(false);
+      writeManifest("openai", { models: [{ id: "gpt-5.5", status: "deprecated" }] });
+      expect(coreModelRetired("openai", "gpt-5.5")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses a provider id that could name anything but a directory", async () => {
