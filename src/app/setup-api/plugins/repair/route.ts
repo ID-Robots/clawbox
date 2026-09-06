@@ -210,30 +210,43 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, code: "repair_failed" }, { status: 502 });
   }
 
-  const repaired = await harnessSaysLoaded(entry.id);
-  if (repaired !== true) {
-    return NextResponse.json(
-      { ok: false, code: repaired === null ? "unverified" : "repair_failed" },
-      { status: 502 },
-    );
-  }
-
-  // PUT BACK WHAT THE BOOT SCRIPT TOOK AWAY. It set
-  // `plugins.entries.<id>.enabled = false` so the gateway could start; a repair
-  // that left it there would be the plainest false success this card has —
-  // badge gone, plugin still never loaded. `runOpenclawConfigSet` verifies the
-  // write against the file, so an unwritable config is a failure the owner is
-  // told about rather than a green answer.
+  // PUT BACK WHAT THE BOOT SCRIPT TOOK AWAY — BEFORE asking whether the repair
+  // worked, because the answer depends on it. It set
+  // `plugins.entries.<id>.enabled = false` so the gateway could start, and
+  // `openclaw plugins install` deliberately leaves an entry that is explicitly
+  // `false` alone (`explicitlyDisabled` short-circuits its config enablement) —
+  // so on the `install` stage the payload comes back, the entry stays off, and
+  // `plugins inspect --runtime` answers `status: "disabled"`. Verifying first
+  // therefore answered `repair_failed` for ever on exactly the markers this
+  // route exists to clear. `plugins enable`, which the consent stage runs, does
+  // flip an explicit `false`, so writing `true` over `true` is a no-op here.
   //
-  // `plugins enable` may already have set it: writing `true` over `true` is a
-  // no-op the CLI's own non-destructive guard handles, and asking first would
-  // cost a second read for nothing.
+  // `runOpenclawConfigSet` verifies the write against the file, so an unwritable
+  // config is a failure the owner is told about rather than a green answer.
   if (entry.disabled) {
     try {
       await runOpenclawConfigSet([`plugins.entries["${entry.id}"].enabled`, "true", "--strict-json"]);
     } catch {
       return NextResponse.json({ ok: false, code: "reenable_failed" }, { status: 502 });
     }
+  }
+
+  const repaired = await harnessSaysLoaded(entry.id);
+  if (repaired !== true) {
+    // The re-enable is a STEP of the repair, not its verdict. The plugin still
+    // does not load, so leaving the entry enabled would hand the next boot the
+    // readiness refusal this card exists to end — the box is put back exactly
+    // as it was found, badge and all. Best-effort: a config that cannot be
+    // written is reported by the boot script's own boot-without next time, and
+    // failing this differently would only hide the real answer.
+    if (entry.disabled) {
+      await runOpenclawConfigSet([`plugins.entries["${entry.id}"].enabled`, "false", "--strict-json"])
+        .catch(() => undefined);
+    }
+    return NextResponse.json(
+      { ok: false, code: repaired === null ? "unverified" : "repair_failed" },
+      { status: 502 },
+    );
   }
 
   // NOT a failure of the repair, which has already been proved: turning it into

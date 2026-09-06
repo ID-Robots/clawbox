@@ -150,7 +150,13 @@ describe("plugins/repair — the Retry", () => {
     const r = await post({ pluginId: "codex" });
     expect(r.status).toBe(502);
     expect(clearPluginRepair).not.toHaveBeenCalled();
-    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    // The entry is put back so the runtime can be asked about the repaired
+    // state, and switched off again when the answer is no — so what matters is
+    // where it is LEFT, not that it was never touched. See the two cases at the
+    // end of this file for the ordering that makes both halves necessary.
+    expect(runOpenclawConfigSet.mock.calls.at(-1)?.[0]).toEqual(
+      ['plugins.entries["codex"].enabled', "false", "--strict-json"],
+    );
   });
 
   it("keeps the badge when the device could not be asked at all", async () => {
@@ -229,5 +235,44 @@ describe("plugins/repair — the Retry", () => {
     const r = await post({ pluginId: "codex" });
     expect(r.status).toBe(200);
     expect(await r.json()).toMatchObject({ ok: true, markerCleared: false });
+  });
+  it("puts the entry back BEFORE asking the runtime whether the repair worked", async () => {
+    // `openclaw plugins install` deliberately leaves an entry whose
+    // `plugins.entries.<id>.enabled` is explicitly `false` alone — and that is
+    // exactly the state the boot script's own boot-without wrote. So the
+    // install succeeds, the payload is back, and `plugins inspect --runtime`
+    // still answers `status: "disabled"`: the Retry answered `repair_failed`
+    // for ever on precisely the markers it exists to clear.
+    readPluginRepairs.mockResolvedValue(marker({ stage: "install", disabled: true }));
+    const reenabled = () => runOpenclawConfigSet.mock.calls.some(
+      ([args]) => (args as string[])[0] === 'plugins.entries["codex"].enabled'
+        && (args as string[])[1] === "true",
+    );
+    stubExec(async (_cmd, args) => ({
+      stdout: args[1] === "inspect"
+        ? (reenabled() ? LOADED : JSON.stringify({ plugin: { id: "codex", status: "disabled", activated: false } }))
+        : "",
+    }));
+    const r = await post({ pluginId: "codex" });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ ok: true, pluginId: "codex" });
+    expect(clearPluginRepair).toHaveBeenCalledWith("codex");
+  });
+
+  it("switches the entry back off when the plugin still does not load", async () => {
+    // The re-enable is a step of the repair, not its verdict. If the runtime
+    // still refuses the plugin, leaving the entry enabled would hand the next
+    // boot the readiness refusal this whole card exists to end — so the box is
+    // left exactly as it was found, badge and all.
+    readPluginRepairs.mockResolvedValue(marker({ stage: "install", disabled: true }));
+    stubExec(async (_cmd, args) => ({ stdout: args[1] === "inspect" ? DISCOVERED_ONLY : "" }));
+    const r = await post({ pluginId: "codex" });
+    expect(r.status).toBe(502);
+    expect(await r.json()).toMatchObject({ ok: false, code: "repair_failed" });
+    expect(runOpenclawConfigSet.mock.calls.map(([args]) => (args as string[]).join(" "))).toEqual([
+      'plugins.entries["codex"].enabled true --strict-json',
+      'plugins.entries["codex"].enabled false --strict-json',
+    ]);
+    expect(clearPluginRepair).not.toHaveBeenCalled();
   });
 });

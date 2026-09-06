@@ -409,7 +409,7 @@ export interface UpdateState {
 
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
-import { clearPluginRepair, readPluginRepairs } from "./plugin-repair";
+import { clawboxDisabledEntryId, clearPluginRepair, readPluginRepairs } from "./plugin-repair";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -1601,13 +1601,55 @@ async function repairPluginsBlockingReadiness(
       // script ever cleared is a permanent badge on a plugin this update has
       // just put back (TASK-606).
       if (await reinstallManagedPluginPayload("@openclaw/codex", false)) {
-        await clearRepairMarker(pluginId);
+        await clearRepairMarkerAfterPayloadRepair(pluginId);
       }
       continue;
     }
     if (!(await pluginConsentRepairIsAllowed(pluginId))) continue;
     await recordPluginCapabilityConsent(pluginId);
   }
+}
+
+/**
+ * Put the entry back and THEN clear the marker, after a payload reinstall.
+ *
+ * `openclaw plugins install` deliberately leaves an entry whose
+ * `plugins.entries.<id>.enabled` is explicitly `false` alone — and that is what
+ * the boot script's own boot-without wrote when it could not install the plugin.
+ * So a successful reinstall is not yet a plugin that loads: clearing the badge
+ * on it alone takes the only visible sign off a plugin that is still switched
+ * off. `plugins enable` is the harness's own verb for the pair, and it
+ * re-records the consent surface at the same time.
+ *
+ * Only for a row that says CLAWBOX switched it off. `disabled: false` means a
+ * failure was recorded and nothing was changed, and an entry the owner turned
+ * off is his.
+ *
+ * If the re-enable fails the marker STAYS: the badge is then the only true
+ * thing on the owner's screen, and the Retry it offers is his way to try again.
+ */
+async function clearRepairMarkerAfterPayloadRepair(pluginId: string): Promise<void> {
+  // `clawboxDisabledEntryId` matches on the canonical id and answers the key the
+  // row was written under, so an alias (`@openclaw/discord`) is enabled under
+  // the spelling the registry knows.
+  const switchedOff = await clawboxDisabledEntryId(pluginId).catch(() => null);
+  if (switchedOff) {
+    try {
+      await execFile(
+        OPENCLAW_BIN,
+        ["plugins", "enable", switchedOff, "--accept-capabilities"],
+        { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
+      );
+    } catch (err) {
+      console.warn(
+        `[Updater] "${switchedOff}" was reinstalled but could not be switched back on; `
+        + "leaving its repair record in place:",
+        err instanceof Error ? err.message : err,
+      );
+      return;
+    }
+  }
+  await clearRepairMarker(pluginId);
 }
 
 /**
@@ -1664,7 +1706,7 @@ async function repairManagedPluginPayload(
   const installed = await reinstallManagedPluginPayload(npmPackage, options.fallbackToUnpinned !== false);
   // Same reason as the Codex arm above: a payload this update put back is not
   // a plugin Settings should go on offering a Retry for.
-  if (installed) await clearRepairMarker(pluginId);
+  if (installed) await clearRepairMarkerAfterPayloadRepair(pluginId);
   return installed;
 }
 

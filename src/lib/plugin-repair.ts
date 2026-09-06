@@ -185,6 +185,28 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * The CONFIGURED key of an entry ClawBox itself switched off, or null.
+ *
+ * `openclaw plugins install` deliberately leaves an entry whose
+ * `plugins.entries.<id>.enabled` is explicitly `false` alone — which is exactly
+ * what the boot script's boot-without wrote — so an install that succeeded is
+ * not yet a plugin that loads. Every caller that clears a marker after an
+ * INSTALL has to put the entry back first, and it needs the key the row was
+ * written under to do it.
+ *
+ * `disabled: false` answers null: that row records a failure over which nothing
+ * was changed, and an entry the OWNER turned off is his to turn back on.
+ */
+export async function clawboxDisabledEntryId(id: string): Promise<string | null> {
+  const wanted = canonicalPluginId(id);
+  const rows = await readPluginRepairs();
+  const row = Object.values(rows).find(
+    (entry) => canonicalPluginId(entry.id) === wanted && entry.disabled,
+  );
+  return row ? row.id : null;
+}
+
 /** The repair entry for a provider or channel row id, or null. */
 export function repairFor(repairs: PluginRepairs, rowId: string): PluginRepairEntry | null {
   const wanted = ROW_PLUGIN_IDS[rowId];

@@ -360,6 +360,12 @@ export async function ensureChannelPlugin(
   // The channel's plugin is installed and enabled, whoever asked for it. A
   // marker only the boot script cleared would leave a "Needs repair" badge on
   // the Discord row of a box the owner has just reconnected (TASK-606).
+  //
+  // NO RE-ENABLE STEP HERE, unlike the other post-install clears: the block
+  // above ends in `plugins enable`, which flips an entry that is explicitly
+  // `false` — whereas `plugins install` leaves one alone, which is why the
+  // updater and the AI-models route have to put the entry back themselves
+  // before they clear (see `clawboxDisabledEntryId`).
   await clearPluginRepair(channelId).catch((err: unknown) => {
     console.warn(
       `[openclaw-channels] the ${channelId} repair marker could not be cleared; Settings may still show a Retry:`,

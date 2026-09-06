@@ -54,13 +54,17 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
 // The TASK-606 marker, mocked so the clears the repair paths owe can be seen.
 // `readPluginRepairs` answers `{}`, which is what the real one answers under
 // this file's mocked `fs/promises` anyway — so nothing else moves.
-const { mockClearPluginRepair, mockReadPluginRepairs } = vi.hoisted(() => ({
+const { mockClearPluginRepair, mockReadPluginRepairs, mockClawboxDisabledEntryId } = vi.hoisted(() => ({
   mockClearPluginRepair: vi.fn(async () => true),
   mockReadPluginRepairs: vi.fn(async () => ({})),
+  // Null by default: no row says ClawBox switched anything off, so a payload
+  // repair clears the marker without touching the config.
+  mockClawboxDisabledEntryId: vi.fn(async (): Promise<string | null> => null),
 }));
 vi.mock("@/lib/plugin-repair", () => ({
   clearPluginRepair: mockClearPluginRepair,
   readPluginRepairs: mockReadPluginRepairs,
+  clawboxDisabledEntryId: mockClawboxDisabledEntryId,
 }));
 
 import { get, set, setMany } from "@/lib/config-store";
@@ -657,6 +661,16 @@ describe("updater", () => {
         );
         return consentIndex >= 0 && restartIndex > consentIndex;
       });
+      // The state the boot script's own boot-without leaves behind: the payload
+      // could not be installed, so the entry was switched off and the row says
+      // ClawBox did it. That is what the repair below has to undo.
+      mockReadPluginRepairs.mockResolvedValue({
+        codex: {
+          id: "codex", stage: "install", reason: "offline", atMs: 1,
+          disabled: true, spec: "@openclaw/codex@2026.8.1",
+        },
+      });
+      mockClawboxDisabledEntryId.mockResolvedValue("codex");
       updater = await import("@/lib/updater");
       if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
       else process.env.CLAWBOX_ROOT = priorRoot;
@@ -699,6 +713,18 @@ describe("updater", () => {
       // only the boot script ever cleared would leave a permanent "Needs
       // repair" badge on a plugin that is now fine.
       expect(mockClearPluginRepair.mock.calls.flat()).toContain("codex");
+
+      // …and the entry the boot script switched off is put back BEFORE the
+      // badge goes. `plugins install` leaves an explicitly disabled entry
+      // alone, so clearing on the install alone would take the badge off a
+      // plugin that is still switched off — the false success this card is
+      // about. `plugins enable` is the harness's own verb for it, and it also
+      // re-records the consent surface.
+      const enableIndex = calls.findIndex((call) =>
+        call.includes("plugins enable codex --accept-capabilities"),
+      );
+      expect(enableIndex).toBeGreaterThanOrEqual(0);
+      expect(enableIndex).toBeGreaterThan(consentIndex);
 
       expect(maskIndexes).toHaveLength(2);
       expect(stopIndexes).toHaveLength(2);

@@ -2399,6 +2399,29 @@ raise SystemExit(0 if isinstance(entry, dict) and entry.get("enabled") is False 
 PY
 }
 
+# The mirror of `clawbox_plugin_disable`, and PROVED the same way.
+#
+# `openclaw plugins install` deliberately leaves an entry whose
+# `plugins.entries.<id>.enabled` is explicitly `false` alone — its config
+# enablement short-circuits on exactly that — so a successful install is NOT yet
+# a plugin that loads when a previous boot switched the entry off. Answers 0 only
+# when the file itself now says `enabled: true`.
+clawbox_plugin_reenable() {
+  local id="$1"
+  timeout -k 5 60 "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" true --strict-json \
+    >/dev/null 2>&1 || true
+  CLAWBOX_PLUGIN_ID="$id" python3 - "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null
+import json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+entry = entries.get(os.environ["CLAWBOX_PLUGIN_ID"]) if isinstance(entries, dict) else None
+raise SystemExit(0 if isinstance(entry, dict) and entry.get("enabled") is True else 1)
+PY
+}
+
 # Record — or update — one plugin's repair row. Never fatal: a box that cannot
 # write this file still boots without the plugin, it just cannot explain itself
 # in Settings, and the boot log says so.
@@ -2468,6 +2491,41 @@ PY
 # keeps producing. Every success branch below calls this.
 clawbox_plugin_repair_clear() {
   [ -f "$CLAWBOX_PLUGIN_REPAIR_FILE" ] || return 0
+  # PUT THE ENTRY BACK BEFORE THE BADGE GOES, and only for a row that says WE
+  # switched it off.
+  #
+  # Every caller here reaches this line off a successful `plugins install` or
+  # `plugins enable`. `enable` flips an explicit `false`; `install` does not —
+  # it leaves an entry that is explicitly `false` exactly as it found it. So on
+  # the install paths the payload came back and the entry stayed OFF, and
+  # deleting the row there left the plugin dead with nothing on screen to say
+  # so: for DeepSeek permanently, because the install block's own on-disk guard
+  # stops it re-running and the managed consent loop only visits entries that
+  # are already enabled. Pairing the two here rather than at each success branch
+  # is what makes that impossible to forget at the next call site.
+  #
+  # `disabled: false` means ClawBox recorded a failure and changed nothing —
+  # an entry the OWNER turned off is his, and stays off.
+  if [ "$(CLAWBOX_REPAIR_ID="$1" python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null || echo 0
+import json, os, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        rows = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    print("0"); raise SystemExit(0)
+row = rows.get(os.environ["CLAWBOX_REPAIR_ID"]) if isinstance(rows, dict) else None
+print("1" if isinstance(row, dict) and row.get("disabled") is True else "0")
+PY
+)" = "1" ]; then
+    if ! clawbox_plugin_reenable "$1"; then
+      # The badge STAYS. It is the only true thing left on the screen: the
+      # plugin is installed and still switched off, and the Retry the badge
+      # offers is the owner's way to try the same write again.
+      echo "  WARN: could not switch the $1 plugin back on after repairing it; leaving the repair record in place" >&2
+      return 0
+    fi
+    echo "  Switched the $1 plugin back on after repairing it"
+  fi
   # SAID, not swallowed. A clear that fails leaves a "Needs repair" badge on a
   # row that is working — a false failure the owner cannot act on, because the
   # Retry it offers will succeed and change nothing he can see.
