@@ -209,8 +209,10 @@ export async function refreshProviderToolsIfSetChanged(
  *
  * The wrapper exists so the SIX write paths that move this set cannot each get
  * the ordering subtly different. The "after" read is deliberately taken AFTER
- * `run` has finished, because every one of those paths ends by calling
- * `invalidateModelOptions()` — so the read that follows sees the new catalogue
+ * `run` has finished, because every one of those paths calls
+ * `invalidateModelOptions()` BEFORE IT RETURNS — the local-AI removal does it in
+ * a `finally` around its own write, so a proof that then refuses cannot leave
+ * the memo standing — so the read that follows sees the new catalogue
  * rather than a memo of the old one, and the verdict is RE-READ rather than
  * assumed from the fact that the write returned. Assuming it is the exact shape
  * this round of fixes exists to remove.
