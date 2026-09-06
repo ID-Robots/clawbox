@@ -166,8 +166,10 @@ describe("background-jobs — the switches", () => {
     expect(patchHermesConfig).toHaveBeenCalledWith({ set: { "auxiliary.background_review.enabled": "false" } });
     // Nothing to restart: Hermes caches its config on the file's own mtime and
     // size and asks `is_background_review_enabled()` at each spawn, so the next
-    // turn already obeys the write (checked read-only on the box).
-    expect(await r.json()).toMatchObject({ restarted: false });
+    // turn already obeys the write (checked read-only on the box). `null`, not
+    // `false` — the panel renders `false` as "it takes effect when the assistant
+    // next restarts", which would be untrue of a write already in force.
+    expect(await r.json()).toMatchObject({ restarted: null });
     expect(restartGateway).not.toHaveBeenCalled();
   });
 

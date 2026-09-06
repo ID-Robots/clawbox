@@ -281,8 +281,9 @@ export async function setBackgroundJob(
  * AFTER the write has been read back: a restart that fails leaves a box whose
  * config already says the right thing, and the panel says the change takes
  * effect when the gateway next starts rather than claiming it already has.
+ * `null` is the third answer: no restart was needed at all.
  */
-export async function applyBackgroundJobRestart(harness: Harness): Promise<boolean> {
+export async function applyBackgroundJobRestart(harness: Harness): Promise<boolean | null> {
   // HERMES NEEDS NO RESTART, and that is checked rather than assumed. Its
   // config cache is keyed on the file's own `(mtime_ns, size)`
   // (`hermes_cli/config.py`, "Cached tuple is (user_mtime_ns, user_size, …)"),
@@ -290,7 +291,12 @@ export async function applyBackgroundJobRestart(harness: Harness): Promise<boole
   // `agent/background_review.py` — so a ClawBox write invalidates the cache and
   // the next turn already obeys it. Read read-only off the installed 0.20.5
   // package on the Hermes box.
-  if (harness === "hermes") return false;
+  //
+  // `null`, NOT `false`: "no restart was needed" and "the restart did not
+  // happen" are different facts, and the panel renders the second as "it takes
+  // effect when the assistant next restarts" — which on Hermes is untrue of a
+  // write that is already in force.
+  if (harness === "hermes") return null;
   try {
     await restartGateway();
     return true;

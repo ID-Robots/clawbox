@@ -2566,23 +2566,46 @@ except (OSError, json.JSONDecodeError):
     raise SystemExit(0)
 
 def read_seeded(path):
-    # An absent record is the normal first-boot state. An UNREADABLE or UNUSABLE
-    # one is read the same way on purpose: the cost is one `config set` of
-    # values the config may already carry, which is a no-op, while reading it as
-    # "everything is seeded" would leave a fresh box with its noisy defaults for
-    # good. Valid JSON that is not the shape we write (`[1,2]`, `"x"`,
-    # `{"seeded": 5}`) raises AttributeError/TypeError, which neither `except`
-    # catches — and `|| true` below then swallowed it, so the box never seeded
-    # and never said why.
+    """The keys this box has already been offered, or None if the record is unusable.
+
+    THREE DIFFERENT FACTS, and only one of them means "the owner has never been
+    asked". An ABSENT record is the normal first boot, so seed. A record that is
+    THERE but cannot be used — unreadable, undecodable, or valid JSON that is
+    not `{"seeded": [<string>, ...]}` — is neither: reading it as "nothing has
+    been seeded" would re-seed a box that has been, and for the check-ins key
+    that is not a harmless rewrite of a value the config already carries.
+    Switching check-ins ON REMOVES `agents.defaults.heartbeat.every` (the core's
+    default cadence is what should decide it), so `present()` is false for
+    exactly the key the owner has just turned on, and a re-seed writes `0m` back
+    over his choice. So: say so, and change nothing.
+
+    The membership test also has to be TOTAL, because the caller's `|| true`
+    swallows anything raised here and the box then neither seeds nor explains
+    itself — the failure this whole function exists to end. `set()` raises on a
+    list of unhashable elements and `sorted()` raises on mixed types, so the
+    rows must be strings all the way down before either is reached.
+    """
     try:
         with open(path, encoding="utf-8") as fh:
             record = json.load(fh)
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         return set()
-    rows = record.get("seeded") if isinstance(record, dict) else None
-    return set(rows) if isinstance(rows, list) else set()
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    rows = record.get("seeded")
+    if not isinstance(rows, list) or not all(isinstance(row, str) for row in rows):
+        return None
+    return set(rows)
 
 seeded = read_seeded(os.environ["CLAWBOX_OPTOUT_STATE"])
+if seeded is None:
+    print("")
+    print("  WARN: the background-job opt-out record exists but cannot be read; leaving the"
+          " harness keys exactly as they are rather than risking a re-seed over a switch the"
+          " owner has turned on", file=sys.stderr)
+    raise SystemExit(0)
 
 def present(path):
     node = cfg
@@ -2629,16 +2652,18 @@ SEEDPY
 import json, os, tempfile
 
 path = os.environ["CLAWBOX_OPTOUT_STATE"]
-# Same tolerance as the reader above: a record that is valid JSON but not the
-# shape we write is replaced rather than raised over, so the seeding is still
-# recorded and the next boot does not offer it again.
+# Same predicate as the reader above, and TOTAL for the same reason: this runs
+# after a write that landed, and a record that cannot be used must not stop the
+# recording of it — `sorted()` on a mixed list raises, the `if !` below turns
+# that into a WARN, and the same seed is then offered at every boot for ever.
+# Anything that is not `{"seeded": [<string>, ...]}` is replaced.
 try:
     with open(path, encoding="utf-8") as fh:
         record = json.load(fh)
 except (OSError, json.JSONDecodeError):
     record = None
 rows = record.get("seeded") if isinstance(record, dict) else None
-seeded = set(rows) if isinstance(rows, list) else set()
+seeded = {row for row in rows if isinstance(row, str)} if isinstance(rows, list) else set()
 seeded.update(json.loads(os.environ["CLAWBOX_OPTOUT_BATCH"])["settled"])
 
 directory = os.path.dirname(path) or "."

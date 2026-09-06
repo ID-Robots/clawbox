@@ -53,9 +53,21 @@ const ROWS: { id: BackgroundJobId; labelKey: string; hintKey: string }[] = [
 // used to be checked and the element shape was not.
 function isStatus(body: unknown): body is BackgroundJobsStatus {
   const jobs = (body as { jobs?: unknown } | null | undefined)?.jobs;
+  return Array.isArray(jobs) && jobs.every(isJob);
+}
+
+// EVERY FIELD THE ROW IS DRAWN FROM, not just the id. A half-row with `id` and
+// nothing else passes an id-only check, and `supported` then reads `undefined`
+// — so the panel draws "This edition has no such job" on a box that has it,
+// which is the same lie as a dead switch, pointing the other way.
+function isJob(job: unknown): boolean {
+  if (!job || typeof job !== "object") return false;
+  const row = job as Record<string, unknown>;
   return (
-    Array.isArray(jobs)
-    && jobs.every((job) => !!job && typeof job === "object" && typeof (job as { id?: unknown }).id === "string")
+    typeof row.id === "string"
+    && typeof row.enabled === "boolean"
+    && typeof row.supported === "boolean"
+    && (typeof row.key === "string" || row.key === null)
   );
 }
 
@@ -108,7 +120,11 @@ export default function BackgroundJobsPanel() {
       // saying it changed — not this component assuming it did.
       if (r.ok && (body as { ok?: unknown } | null)?.ok === true && isStatus(body)) {
         setStatus(body);
-        setPending((body as { restarted?: boolean }).restarted === false ? id : null);
+        // `false` means the restart was tried and did not happen. `null` means
+        // none was needed — Hermes re-reads its config on the file's own mtime,
+        // so the next turn already obeys the write and telling the owner to
+        // wait for a restart would be false.
+        setPending((body as { restarted?: boolean | null }).restarted === false ? id : null);
       } else setFailed(id);
     } catch {
       setFailed(id);

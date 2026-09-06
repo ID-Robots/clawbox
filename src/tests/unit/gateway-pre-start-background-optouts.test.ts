@@ -264,27 +264,40 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     expect(readFileSync(configPath, "utf-8")).toBe("{ broken");
     expect(calls()).toBe("");
   });
-  it("seeds through a state record that is valid JSON but not an object", () => {
-    // Only STATEPY writes this file and it always writes `{"seeded": [...]}` —
-    // but a corrupted or hand-edited record that is still valid JSON raised
-    // `AttributeError` out of SEEDPY, which `|| true` then swallowed: the box
-    // never seeded and never said why. An unreadable record is already treated
-    // as "nothing seeded yet"; an unusable one must be read the same way.
-    writeFileSync(statePath, "[1, 2]");
+  it.each([
+    ["a document that is not an object", "[1, 2]"],
+    ["a `seeded` that is not a list", JSON.stringify({ seeded: 5 })],
+    ["rows that are not strings", JSON.stringify({ seeded: [1, 2] })],
+    ["rows that are not even hashable", JSON.stringify({ seeded: [[1]] })],
+    ["a file that is not JSON at all", "{ broken"],
+  ])("says so and changes nothing when the record is there but unusable: %s", (_name, body) => {
+    // Only STATEPY writes this file and it always writes `{"seeded": [...]}`,
+    // so this needs a hand edit or a corrupted filesystem — but every one of
+    // these shapes used to raise out of the Python, which `|| true` swallowed:
+    // the box neither seeded nor said why.
+    //
+    // "THERE AND UNUSABLE" IS NOT "ABSENT". Re-seeding on it would write `0m`
+    // back over check-ins the owner has switched ON — switching them on REMOVES
+    // the key, so `present()` is false for exactly the key he just changed.
+    // Leaving the harness keys alone and saying so is the only answer that
+    // cannot undo his choice.
+    writeFileSync(statePath, body);
     const r = run();
     expect(r.status).toBe(0);
-    expect(at("agents.defaults.heartbeat.every")).toBe("0m");
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded)
-      .toContain("agents.defaults.heartbeat.every");
+    expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
+    expect(at("skills.workshop.autonomous.mode")).toBeUndefined();
+    expect(calls()).toBe("");
+    expect(r.stderr).toContain("cannot be read");
+    // …and it is left for a human to look at rather than overwritten.
+    expect(readFileSync(statePath, "utf-8")).toBe(body);
   });
 
-  it("seeds through a state record whose `seeded` is not a list", () => {
-    // `set(5)` raises TypeError, which neither `except` catches either.
-    writeFileSync(statePath, JSON.stringify({ seeded: 5 }));
-    const r = run();
-    expect(r.status).toBe(0);
-    expect(at("skills.workshop.autonomous.mode")).toBe("off");
-    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded)
-      .toContain("skills.workshop.autonomous.mode");
+  it("records a well-formed set even when the batch is recorded over a stale one", () => {
+    // STATEPY is reached only after a write that landed, so it must never raise
+    // over the record it is replacing: `sorted()` on a mixed list did, the `if
+    // !` turned that into a WARN, and the same seed was then offered at every
+    // boot for ever.
+    run();
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded).toHaveLength(3);
   });
 });
