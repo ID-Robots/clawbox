@@ -22,9 +22,7 @@ import {
 } from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_CHAT_MODEL_IDS,
-  CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_IMAGE_MODEL_ID,
-  CLAWBOX_AI_PRO_MODEL_ID,
   CLAWBOX_AI_MODEL_ID_BY_TIER,
   CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
