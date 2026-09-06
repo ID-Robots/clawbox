@@ -141,14 +141,23 @@ describe("gateway wire contract", () => {
     expect(frames[0].params).toEqual({ sessionKey: "agent:main:main", limit: 50 });
   });
 
-  it("subscribes to transcript appends as sessions.messages.subscribe{key}", async () => {
+  it("subscribes to transcript appends as sessions.messages.subscribe{key,includeApprovals}", async () => {
     await mountReady();
     // A generated picture is produced by a SEPARATE background run whose reply
     // reaches the chat stream with its MEDIA: directive stripped, so this
     // subscription is the only way the surface learns the transcript gained
     // something the live turn could not render.
+    //
+    // `includeApprovals: true` rides on the same call (TASK-704). The core's
+    // own note is that the opt-in is per subscribe and NOT sticky —
+    // re-subscribing without it removes an existing approval subscription — so
+    // the flag belongs in the wire contract rather than in one call site's
+    // memory, which is why it is pinned here.
     await waitFor(() => expect(framesFor("sessions.messages.subscribe")).toHaveLength(1));
-    expect(framesFor("sessions.messages.subscribe")[0].params).toEqual({ key: "agent:main:main" });
+    expect(framesFor("sessions.messages.subscribe")[0].params).toEqual({
+      key: "agent:main:main",
+      includeApprovals: true,
+    });
   });
 
   it("sends a turn as chat.send{sessionKey,message,deliver:false,idempotencyKey}", async () => {

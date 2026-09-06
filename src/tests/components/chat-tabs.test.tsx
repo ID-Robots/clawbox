@@ -194,7 +194,10 @@ describe("chat tabs", () => {
     await mountReady();
     expect(tabKeys()).toEqual([MAIN]);
     expect(activeTabKey()).toBe(MAIN);
-    expect(params(frames("sessions.messages.subscribe")[0])).toEqual({ key: MAIN });
+    // `includeApprovals` rides on every subscribe this surface makes (TASK-704):
+    // the opt-in is per call and not sticky, so a tab switch that dropped it
+    // would silently turn the approval cards off.
+    expect(params(frames("sessions.messages.subscribe")[0])).toEqual({ key: MAIN, includeApprovals: true });
   });
 
   it("the + opens a tab on a fresh session under the same agent: history read, subscribed, no reset, no greet", async () => {
@@ -265,7 +268,7 @@ describe("chat tabs", () => {
     await waitFor(() => expect(frames("chat.history").length).toBeGreaterThan(0));
     expect(tabKeys()).toEqual([MAIN, key]);
     expect(activeTabKey()).toBe(key);
-    expect(params(frames("sessions.messages.subscribe")[0])).toEqual({ key });
+    expect(params(frames("sessions.messages.subscribe")[0])).toEqual({ key, includeApprovals: true });
     expect(params(frames("chat.history")[0]).sessionKey).toBe(key);
   });
 

@@ -340,7 +340,11 @@ describe("a pending operator approval in the ClawBox chat", () => {
     // Not at the next render that happens to occur. A button that cannot work
     // is the UI's own false success, and pressing it would come back as "that
     // did not reach the box" over a gateway that answered perfectly well.
-    replay = [pendingExec({ expiresAtMs: Date.now() + 120 })];
+    // The window is a second and a half rather than a tenth: the first
+    // assertion is that the card is STILL offering buttons, and this file
+    // mounts React on a real clock, so a window shorter than a loaded runner's
+    // mount would fail for the machine's reason rather than the code's.
+    replay = [pendingExec({ expiresAtMs: Date.now() + 1_500 })];
     await mountReady();
 
     const card = await screen.findByTestId("chat-approval");
@@ -349,7 +353,7 @@ describe("a pending operator approval in the ClawBox chat", () => {
 
     await waitFor(
       () => expect(screen.getByTestId("chat-approval").getAttribute("data-approval-status")).toBe("expired"),
-      { timeout: 2_000 },
+      { timeout: 5_000 },
     );
     expect(screen.queryAllByTestId("chat-approval-decision")).toHaveLength(0);
     // Nothing was asked of the gateway to learn that.
