@@ -23,7 +23,11 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
-import { BACKUP_RUN_CAP_MS, expectedBackupWindowMs } from "@/lib/clawkeep-protection";
+import {
+  BACKUP_RUN_CAP_MS,
+  RESTORE_RUN_CAP_MS,
+  expectedBackupWindowMs,
+} from "@/lib/clawkeep-protection";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { get as configGet, set as configSet } from "@/lib/config-store";
 import { getEdition } from "@/lib/harness";
@@ -218,7 +222,15 @@ async function ensureDataDir(): Promise<void> {
 // Stale-flag window: if the restoring marker is older than the restore
 // timeout it almost certainly means the Next.js process crashed mid-run
 // and never cleaned up. Treat as not-restoring so the shield stops glowing.
-const RESTORING_FLAG_MAX_AGE_MS = 30 * 60 * 1000;
+//
+// It has to BE the restore timeout, not a number that happens to equal it.
+// The two were both 30 minutes, so the flag could never go stale during a
+// live restore — the run was SIGKILLed at the same instant. Raising the
+// restore cap without this would have had `isRestoring()` DELETE the flag of
+// a restore still in flight (it removes the file, it does not merely report
+// false), dropping the shelf's orange restoring shield back to a calm green
+// verdict while the box's whole state directory was being replaced.
+const RESTORING_FLAG_MAX_AGE_MS = RESTORE_RUN_CAP_MS;
 
 /**
  * "HH:MM", 24-hour, and a time that exists. Kept in step with the memory
@@ -1210,7 +1222,7 @@ export class RestoreNeedsPassphraseError extends ClawKeepError {
   }
 }
 
-const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
+const RESTORE_TIMEOUT_MS = RESTORE_RUN_CAP_MS;
 // Generous cap for a full backup (openclaw backup create + multipart upload).
 // A hung clawkeepd must not hold a Next.js worker open forever. Shared with
 // the UI's "is this `running` heartbeat still alive" rule, which is only
