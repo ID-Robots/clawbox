@@ -7,6 +7,7 @@ import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentDelegationArt from "./CodingAgentDelegationArt";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
+import { browserErrorText, runBrowserAction } from "@/lib/browser-actions";
 import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import {
   devicePollSeconds,
@@ -33,7 +34,7 @@ import {
 const SMALL_BUTTON = BTN_SECONDARY;
 const PRIMARY = BTN_PRIMARY;
 
-type Step = "intro" | "github" | "project" | "harness";
+type Step = "intro" | "github" | "project" | "browser" | "harness";
 
 type BrowseAnswer = {
   root: string;
@@ -239,12 +240,87 @@ export default function CodingAgentSetupWizard({
         throw new Error(out?.error || t("codingAgent.wizardFinishFailed"));
       }
       notifyCodingAgentChanged();
-      setStep("harness");
+      setStep("browser");
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.wizardFinishFailed"));
     } finally {
       setBusy(null);
     }
+  };
+
+  // ─── Which browser a run verifies its work in (step 3) ───
+
+  /**
+   * Write the owner's answer, and nothing else.
+   *
+   * Separate from making the browser ready, and always first, because it IS
+   * the answer to the question this step asks: a box whose apt mirror is
+   * unreachable this afternoon must not have "yes" recorded as "no". A run on
+   * a box where the screen's Chromium cannot be started falls back to the
+   * invisible one by itself, so an enabled setting over a browser that would
+   * not open is degraded, never broken.
+   */
+  const saveRealBrowser = async (realBrowser: boolean): Promise<boolean> => {
+    try {
+      const res = await fetch("/setup-api/coding-agent/enable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ realBrowser }),
+      });
+      if (!res.ok) {
+        const out = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(out?.error || t("codingAgent.wizardBrowserFailed"));
+      }
+      notifyCodingAgentChanged();
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.wizardBrowserFailed"));
+      return false;
+    }
+  };
+
+  /**
+   * Say yes, then make it true: the window a run will drive has to exist
+   * before a run can drive it, and this step is the only moment in the flow
+   * where the owner is being asked about it.
+   *
+   * "Chromium is not installed" is discovered as a REFUSAL rather than probed
+   * for first. The manage route names that case with a stable code, and a
+   * status read beforehand would cost every box a round trip to learn what all
+   * but a fresh one already answer — while the install itself is minutes of
+   * apt, which is why it gets a label of its own.
+   */
+  const enableBrowser = async () => {
+    setBusy("browser");
+    setError(null);
+    if (!(await saveRealBrowser(true))) {
+      setBusy(null);
+      return;
+    }
+    let result = await runBrowserAction("open-browser");
+    if (!result.ok && result.code === "chromium_not_installed") {
+      setBusy("browser-install");
+      const install = await runBrowserAction("install-chromium");
+      result = install.ok ? await runBrowserAction("open-browser") : install;
+    }
+    setBusy(null);
+    if (!result.ok) {
+      // The setting is saved; only the window is missing. Say which of the two
+      // failed in the device's own terms and leave the way forward open — the
+      // Browser app opens it later, and a run uses the invisible browser
+      // meanwhile.
+      setError(browserErrorText(t, result));
+      return;
+    }
+    setStep("harness");
+  };
+
+  const skipBrowser = async () => {
+    setBusy("browser-skip");
+    setError(null);
+    const saved = await saveRealBrowser(false);
+    setBusy(null);
+    if (saved) setStep("harness");
   };
 
   /**
@@ -295,8 +371,8 @@ export default function CodingAgentSetupWizard({
     }
   };
 
-  const stepNumber = step === "github" ? 1 : step === "project" ? 2 : 3;
-  const TOTAL_STEPS = 3;
+  const stepNumber = step === "github" ? 1 : step === "project" ? 2 : step === "browser" ? 3 : 4;
+  const TOTAL_STEPS = 4;
 
   return (
     <div
@@ -591,7 +667,45 @@ export default function CodingAgentSetupWizard({
         </>
       )}
 
-      {/* ── Step 3: prove the whole thing actually works, or don't. ── */}
+      {/* ── Step 3: which browser a run checks its work in. ── */}
+      {step === "browser" && (
+        <>
+          <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardBrowserTitle")}</h2>
+          <p className="mt-2 text-xs leading-relaxed text-[var(--text-secondary)]">
+            {t("codingAgent.wizardBrowserHint")}
+          </p>
+
+          <div className="mt-5 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void enableBrowser()}
+              disabled={busy === "browser" || busy === "browser-install" || busy === "browser-skip"}
+              data-testid="coding-agent-wizard-browser-enable"
+              className={PRIMARY}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">desktop_windows</span>
+              {busy === "browser-install"
+                ? t("codingAgent.wizardBrowserInstalling")
+                : busy === "browser"
+                  ? t("codingAgent.wizardBrowserOpening")
+                  : t("codingAgent.wizardBrowserEnable")}
+            </button>
+            {/* Skip is an ANSWER, not a deferral: it records "use the invisible
+                browser", which the hint says in as many words. */}
+            <button
+              type="button"
+              onClick={() => void skipBrowser()}
+              disabled={busy === "browser" || busy === "browser-install" || busy === "browser-skip"}
+              data-testid="coding-agent-wizard-browser-skip"
+              className={SMALL_BUTTON}
+            >
+              {busy === "browser-skip" ? t("codingAgent.wizardFinishing") : t("codingAgent.wizardBrowserSkip")}
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* ── Step 4: prove the whole thing actually works, or don't. ── */}
       {step === "harness" && (
         <>
           <h2 className="mt-1 text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.wizardHarnessTitle")}</h2>
@@ -627,6 +741,22 @@ export default function CodingAgentSetupWizard({
       )}
 
       {error && <StatusMessage type="error" message={error} />}
+
+      {/* Whatever failed on the browser step — the setting write or the window
+          itself — the wizard has one step left and no other way to reach it. A
+          screen whose only two buttons have both just refused is a dead end,
+          and the owner would have to close the window and start over. Under
+          the message, because it is the answer to what the message says. */}
+      {step === "browser" && error && (
+        <button
+          type="button"
+          onClick={() => setStep("harness")}
+          data-testid="coding-agent-wizard-browser-continue"
+          className={`${SMALL_BUTTON} mt-3`}
+        >
+          {t("codingAgent.wizardBrowserContinue")}
+        </button>
+      )}
     </div>
   );
 }

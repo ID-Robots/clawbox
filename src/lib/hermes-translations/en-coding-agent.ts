@@ -373,6 +373,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.genAudioLabel": "Let runs record speech",
   "codingAgent.genAudioHint": "A run can have this box speak a line and save it as a sound file in the project — narration, a greeting, a spoken cue. It uses the same voice as your spoken replies and waits its turn behind them; a run gets at most forty clips.",
   "codingAgent.genAudioFailed": "Could not change the speech setting.",
+  "codingAgent.realBrowserLabel": "Verify in this box's browser",
+  "codingAgent.realBrowserHint": "A run checks its work in the Chromium window on this box's screen — the one the Browser app shows — so you can watch the pages it opens. Switched off, it uses an invisible browser instead and nothing appears on the screen. Either way, a run that cannot reach the screen's browser falls back to the invisible one by itself.",
+  "codingAgent.realBrowserFailed": "Could not change the browser setting.",
 
   // A run that finished on its own keeps whatever it started — the way an app
   // that serves itself on a port is meant to work — so the page says so and
@@ -396,7 +399,7 @@ export const codingAgentEn: Record<string, string> = {
   // it works in. Settings keeps every one of these controls — this is an
   // onboarding path, not the only way in.
   "codingAgent.wizardTitle": "Set up the coding agent",
-  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes three steps.",
+  "codingAgent.wizardIntro": "The coding agent lets your assistant hand a whole task to Claude Code running on this box: it reads and writes files in one folder, runs commands there, and reports back. Setting it up takes four steps.",
   "codingAgent.wizardEnable": "Enable",
   "codingAgent.wizardStepOf": "Step {n} of {total}",
   "codingAgent.wizardNext": "Next",
@@ -427,6 +430,19 @@ export const codingAgentEn: Record<string, string> = {
   // and the most expensive one, and an owner who finds that out from a bill
   // was told too late.
   "codingAgent.wizardEffortCost": "Ultracode gives the best results and consumes a lot of tokens — it thinks longer and can run several agents for one task. A Business plan is recommended if you use it often. Lower effort costs less and finishes sooner.",
+  // ── Step 3: which browser a run checks its work in ──────────────────────
+  // The step says what the owner will SEE, because that is the difference
+  // between the two answers: pages opening on the device's own screen, or
+  // nothing at all. Skip is an answer, not a deferral, so it says so.
+  "codingAgent.wizardBrowserTitle": "Let runs use this box's browser",
+  "codingAgent.wizardBrowserHint": "When a run needs to check its work in a browser, it can drive the Chromium window on this box's own screen — the one the Browser app shows — so you can watch the pages it opens. Enable installs Chromium if it is missing and opens the window. Skip, and a run browses in an invisible window instead: nothing appears on the screen. Either way, you can change it later in Settings.",
+  "codingAgent.wizardBrowserEnable": "Use this box's browser",
+  "codingAgent.wizardBrowserOpening": "Opening the browser…",
+  "codingAgent.wizardBrowserInstalling": "Installing Chromium — this takes a few minutes…",
+  "codingAgent.wizardBrowserSkip": "Skip — browse invisibly",
+  "codingAgent.wizardBrowserFailed": "Could not save the browser setting.",
+  "codingAgent.wizardBrowserContinue": "Continue anyway",
+
   "codingAgent.wizardHarnessTitle": "Try it once",
   "codingAgent.wizardHarnessHint": "Run a small, real task in a scratch project to prove the whole chain works: Claude Code starts, writes a file, drives the browser and reports back. It costs one run. You can skip this and start it any time from the Test harness card in Settings.",
   "codingAgent.wizardHarnessRun": "Run the test",

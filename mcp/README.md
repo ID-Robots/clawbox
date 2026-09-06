@@ -92,7 +92,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 |---|---|
 | `device_status` | Edition, agent, the device's **default** AI provider/model/thinking (`ai.device_default` — a chat may run a per-session override, and `ai.current_chat` says the tool cannot see it), configured context/output limits, free disk, update waiting. One call, independent timeouts, dead legs report `"unknown"`. |
 | `clawbox_health` | Is the device API reachable and is our token accepted. Separates auth from connectivity. |
-| `clawbox_context` | The device field guide plus the webapp storage/styling rules. The guide is one file, `Clawbox.md`, filtered before it is served: `<!-- edition:… -->` blocks follow the ACTIVE HARNESS (tool sets) and `<!-- ships:… -->` blocks follow the INSTALL (what the device has), so a `dual` box is told about both harnesses and a Hermes agent is never handed the OpenClaw toolbelt. |
+| `clawbox_context` | The device field guide, the webapp storage/styling rules, and whose screen the browser tools drive (`BROWSER_GUIDE` — the desktop's window while the owner's real-browser setting is on, an invisible one when it is off). The guide is one file, `Clawbox.md`, filtered before it is served: `<!-- edition:… -->` blocks follow the ACTIVE HARNESS (tool sets) and `<!-- ships:… -->` blocks follow the INSTALL (what the device has), so a `dual` box is told about both harnesses and a Hermes agent is never handed the OpenClaw toolbelt. |
 
 ### Hermes skills (Hermes only)
 `skill_search` · `skill_info` · `skill_install` · `skill_list` · `skill_uninstall`
@@ -482,6 +482,27 @@ is not linked.
 
 `browser_type` reports a character count, never the text — it is the tool that
 types passwords.
+
+**Which Chromium answers is the OWNER's choice, not the agent's.** The route
+drives the desktop's own window — the one on the screen the owner is looking
+at — while the Coding Agent's real-browser setting is on
+(`coding_agent_real_browser` in the config store, ABSENT MEANS ON, written by
+`POST /setup-api/coding-agent/enable { realBrowser }` from the settings panel
+and from the Enable/Skip step of the app's first-run wizard), and an invisible
+Chromium of its own when the setting is off or that window cannot be used
+(another program holding CDP port 18800, a launch that failed). A screenshot
+from the two is identical, so every reply carries
+`browser: "desktop" | "headless"` and the tools relay it in the header line:
+ONCE per session, and again when a fresh session lands on the other browser — a
+property of the browser behind the session is not worth repeating on every
+click, which is the spend `briefResult` exists to avoid. Inside a run the line
+asks the run to say which one it verified on; outside one it stops the
+assistant sending the owner to look at a window that was never opened. A server
+that predates the field sends nothing and nothing is claimed.
+
+There is deliberately **no tool for the switch**: putting a browser on the
+owner's screen is a consent, and a tool that could turn it back on would make
+the owner's "no" temporary — the same reason `browser_auto_open` has none.
 
 **Inside a coding-agent run** (the runner spawns this server with
 `CLAWBOX_MCP_PROFILE=browser`, which registers ONLY the browser family): the

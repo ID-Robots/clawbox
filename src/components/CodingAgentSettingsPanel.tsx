@@ -91,6 +91,11 @@ export interface AgentStatus {
   generateImages?: boolean;
   /** May a run have this box speak a clip into its project? */
   generateAudio?: boolean;
+  /** Does a run verify its work in the Chromium on the box's own screen, or
+   *  in an invisible one? Optional, and ON by default like the media
+   *  switches — a server that predates the field is a box already driving the
+   *  screen, so the fallback below is `?? true`. */
+  realBrowser?: boolean;
 }
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
@@ -741,6 +746,34 @@ export default function CodingAgentSettingsPanel({
             label={t("codingAgent.genAudioLabel")}
             testId="coding-agent-gen-audio"
             onChange={(next) => void saveSetting({ generateAudio: next }, "genAudio", t("codingAgent.genAudioFailed"))}
+          />
+        </div>
+
+        {/* Which browser a run checks its work in. Beside the media switches
+            because it is the same kind of answer — what a run may use, not how
+            it works — and ON unless the owner says otherwise: `?? true`, since
+            a server that predates the field is a box that IS driving the
+            screen, and rendering it off would invite the owner to switch on
+            something that was never off. Off is not a loss of browsing: the
+            route uses an invisible Chromium instead. */}
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0 flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.realBrowserLabel")}
+            </span>
+            <HelpTip
+              text={t("codingAgent.realBrowserHint")}
+              label={t("codingAgent.realBrowserLabel")}
+              testId="coding-agent-real-browser-help"
+            />
+          </div>
+          <Switch
+            checked={status?.realBrowser ?? true}
+            busy={busy === "realBrowser"}
+            disabled={!status || saving}
+            label={t("codingAgent.realBrowserLabel")}
+            testId="coding-agent-real-browser"
+            onChange={(next) => void saveSetting({ realBrowser: next }, "realBrowser", t("codingAgent.realBrowserFailed"))}
           />
         </div>
 

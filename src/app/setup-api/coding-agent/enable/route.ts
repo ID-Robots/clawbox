@@ -13,6 +13,7 @@ import {
   setAutoPr,
   setGenerateAudio,
   setGenerateImages,
+  setRealBrowser,
   setReviewPass,
   setSetupComplete,
   setTokenLimit,
@@ -54,6 +55,9 @@ function forbidden() {
  * works. POST { generateAudio: boolean } → may a run have this box speak a
  * clip into its project. Both default ON; see their config keys in
  * @/lib/coding-agent for why these two are not consents.
+ * POST { realBrowser: boolean } → does a run verify its work in the Chromium
+ * on the owner's screen, or in a headless one nobody sees? ON when absent, for
+ * the same reason as the media switches.
  * POST { autoPr: boolean } → branch, open a pull request into the repo's
  * default branch, wait for GitHub Actions, and merge when at least one real
  * check has passed. See @/lib/coding-pr for the guardrails.
@@ -105,6 +109,7 @@ export async function POST(request: Request) {
     autoPr?: unknown;
     generateImages?: unknown;
     generateAudio?: unknown;
+    realBrowser?: unknown;
     setupComplete?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
@@ -113,6 +118,7 @@ export async function POST(request: Request) {
   const hasAutoPr = typeof fields.autoPr === "boolean";
   const hasGenImages = typeof fields.generateImages === "boolean";
   const hasGenAudio = typeof fields.generateAudio === "boolean";
+  const hasRealBrowser = typeof fields.realBrowser === "boolean";
   const hasEffort = typeof fields.effort === "string";
   const hasTurns = typeof fields.maxTurns === "number";
   // null is meaningful — it CLEARS the ceiling — so presence decides.
@@ -122,14 +128,15 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasGenImages && !hasGenAudio) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasGenImages && !hasGenAudio && !hasRealBrowser) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
           + "{ effort: string }, { maxTurns: number }, "
           + "{ tokenLimit: number | null }, { reviewPass: boolean }, "
-          + "{ generateImages: boolean }, { generateAudio: boolean } or "
+          + "{ generateImages: boolean }, { generateAudio: boolean }, "
+          + "{ realBrowser: boolean } or "
           + "{ setupComplete: boolean } or { autoPr: boolean }.",
       },
       { status: 400 },
@@ -180,6 +187,10 @@ export async function POST(request: Request) {
     if (hasGenAudio) {
       const saved = await setGenerateAudio(fields.generateAudio);
       console.error(`[coding-agent] generated audio switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasRealBrowser) {
+      const saved = await setRealBrowser(fields.realBrowser);
+      console.error(`[coding-agent] runs will verify their work in the ${saved ? "desktop" : "headless"} browser, by the owner's choice`);
     }
     if (hasSetupComplete) {
       const saved = await setSetupComplete(fields.setupComplete);
