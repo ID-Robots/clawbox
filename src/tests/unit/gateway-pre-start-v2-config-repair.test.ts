@@ -724,6 +724,9 @@ export { applyLegacyDoctorMigrations as A };
 printf '%s\\n' "$*" >> "$OC_CALLS"
 CFG="\${OPENCLAW_CONFIG_PATH:-\${OPENCLAW_CONFIG}}"
 if [ "$1" = "config" ] && [ "$2" = "validate" ]; then
+  if [ -n "\${OC_VALIDATE_RC:-}" ] && [ "\${OC_VALIDATE_RC}" != "0" ] && [ "\${OC_VALIDATE_RC}" != "1" ]; then
+    exit "\$OC_VALIDATE_RC"
+  fi
   ISSUES="\$(python3 "$OC_CORE_PY" issues "\$CFG")" || ISSUES='{"path":"config","message":"unreadable"}'
   if [ -z "\$ISSUES" ]; then
     printf '{"valid":true,"path":"%s","warnings":[]}\\n' "\$CFG"
@@ -799,22 +802,43 @@ exit 0
     expect(r.stderr).toContain("move it aside by hand");
   });
 
-  it("claims no remainder when the core's own migrations would make the config valid", () => {
-    // The measured case that makes the carry-it-across idea unnecessary: this
-    // is the box `openclaw gateway run` repairs by itself. Inventing a
-    // remainder here would be a refusal nobody made.
+  it("says the core will repair this one itself, instead of predicting exit 78 over it", () => {
+    // THE BOX THAT WAS NEVER BROKEN. Measured on 2026.8.1 with a real approval
+    // present throughout: `openclaw gateway run` migrates this config ITSELF
+    // and reaches `ready`, because the approvals gate is doctor's and the
+    // startup repair is not doctor. Telling that owner his gateway will exit 78
+    // and asking him to move a file holding his own deny rules aside would be
+    // wrong on the first box that reads this block — and the answer is already
+    // in hand two frames down, so throwing it away is the defect.
     const carryable = incidentConfig() as { messages: { tts: Record<string, unknown> } };
     delete carryable.messages.tts.voiceId;
     writeFileSync(configPath, JSON.stringify(carryable, null, 2));
-    writeFileSync(
-      path.join(stateDir, "exec-approvals.json"),
-      JSON.stringify({ version: 1, socket: {}, defaults: { deny: ["rm -rf /"] }, agents: {} }),
-    );
+    withRealApproval();
 
     const r = run();
 
-    expect(r.stderr).toContain("the core still refuses this config");
+    expect(r.stdout).toContain("it applies them itself when the gateway starts");
+    expect(r.stderr).not.toContain("the core still refuses this config");
     expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    // …and this PR's own manual step is not asked for over a box that is about
+    // to come up. (The approvals clearing loop's own NOTE above is beta's and
+    // is about the file, not about the gateway's fate.)
+    expect(r.stderr).not.toContain("refuses to start while");
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("says nothing about a remainder, and asks for nothing, when the validator could not run", () => {
+    // The rule this block's own `*)` arm states one screen down: a validator
+    // that could not be run says nothing about the config. A 124 there must not
+    // become a sentence about the owner's exec approvals.
+    withRealApproval();
+
+    const r = run("2026.8.1", { OC_VALIDATE_RC: "124" });
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("could not ask the installed core");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(r.stderr).not.toContain("refuses to start while");
     expect(previewFiles()).toEqual([]);
   });
 
@@ -831,8 +855,12 @@ exit 0
 
     expect(first.stderr).toContain('tts: Unrecognized key: "voiceId"');
     expect(second.stderr).toContain('tts: Unrecognized key: "voiceId"');
-    // The preview's own `config validate` is not spent a second time.
-    expect(calls().length - afterFirst).toBeLessThan(afterFirst);
+    // Boot one spends three `config validate` (the verdict, the preview, the
+    // re-ask after doctor) and one doctor; boot two spends the same MINUS the
+    // preview's, because that answer is remembered. Asserted exactly, because
+    // an inequality would also hold for a boot that skipped the arm entirely.
+    expect(calls().filter((c) => c === "config validate --json")).toHaveLength(5);
+    expect(calls().length - afterFirst).toBe(afterFirst - 1);
     // …and it asks again the moment the file changes, so this is not a verdict
     // remembered for ever.
     const fixed = incidentConfig() as { messages: { tts: Record<string, unknown> } };
