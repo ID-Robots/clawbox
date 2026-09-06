@@ -519,10 +519,17 @@ async function check(): Promise<void> {
     // NODE_ENV, BUN_ENV, PORT, HOSTNAME and CLAWBOX_EDITION, and nothing else),
     // so the path being reported is the module's hard-coded fallback and saying
     // otherwise sends an operator looking for a setting that does not exist.
+    // Three states, not two: set to a path, set to the EMPTY string (which
+    // `DEFAULT_CWD`'s `||` treats as absent, so the fallback applies while the
+    // variable is very much present), and unset. An operator told "unset" about
+    // a variable something exported as empty would go looking in the wrong
+    // place.
     const configured = process.env.CLAWBOX_ROOT;
     const rootLabel = configured
       ? `CLAWBOX_ROOT=${configured}`
-      : `CLAWBOX_ROOT is unset, so the default ${DEFAULT_CWD} applies`;
+      : configured === undefined
+        ? `CLAWBOX_ROOT is unset, so the default ${DEFAULT_CWD} applies`
+        : `CLAWBOX_ROOT is set but empty, so the default ${DEFAULT_CWD} applies`;
     const rootNote = cwd === DEFAULT_CWD
       ? `${rootLabel}; a directory refusal retries in /`
       : `${rootLabel}, and it cannot be entered — so the probes were NOT affected by it`;
