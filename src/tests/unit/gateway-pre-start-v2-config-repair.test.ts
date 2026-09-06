@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -56,6 +56,7 @@ let stateDir: string;
 let configPath: string;
 let stampPath: string;
 let coreDistDir: string;
+let tmpDir: string;
 
 /**
  * An `openclaw` that behaves like 2026.8.1 on a 2026.7 config.
@@ -152,6 +153,10 @@ beforeEach(() => {
   root = path.join(dir, "clawbox");
   binDir = path.join(dir, "bin");
   stateDir = path.join(dir, "openclaw");
+  // The block builds its migration preview under TMPDIR; per test, so one case
+  // cannot see another's leftovers or the machine's.
+  tmpDir = path.join(dir, "tmp");
+  mkdirSync(tmpDir, { recursive: true });
   mkdirSync(path.join(root, "data"), { recursive: true });
   mkdirSync(binDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });
@@ -761,12 +766,28 @@ exit 0
       .stdout.split("\n").filter((n) => n.includes("clawbox-preview"));
   }
 
+  /**
+   * The node the block runs the core's own migration with.
+   *
+   * Placed BESIDE the openclaw bin, which is the nvm and npm-global layout —
+   * `node` and `openclaw` in one bin directory — and the layout the block looks
+   * at first, for the same reason it looks for the bundle there: this unit sets
+   * no `Environment=PATH`, so an nvm node is not on the one systemd hands it.
+   * Measured 2026-09-07: this repo's CI runner is bun-only and has no
+   * `/usr/bin/node`, so a PATH-only lookup made the whole arm a silent no-op
+   * there while it worked on the box.
+   */
+  function installNodeBesideTheCore() {
+    symlinkSync(process.execPath, path.join(binDir, "node"));
+  }
+
   beforeEach(() => {
     coreDistDir = path.join(dir, "lib", "node_modules", "openclaw", "dist");
     writeFileSync(configPath, JSON.stringify(incidentConfig(), null, 2));
     stubCorePython();
     stubCoreMigrationChunk();
     stubContentAwareOpenclaw();
+    installNodeBesideTheCore();
   });
 
   it("names the key that is actually in the way, not the ones the core would have handled", () => {
@@ -881,6 +902,55 @@ exit 0
 
     expect(r.stderr).toContain("the core still refuses this config");
     expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("finds the interpreter beside the core when it is not on PATH at all", () => {
+    // The failure this replaced: the bundle was located relative to
+    // `$OPENCLAW_BIN` and the interpreter was looked up on PATH only, so on any
+    // box (or CI runner) whose node is not on the unit's PATH the whole arm
+    // returned 1 and said one NOTE. PATH here carries no node at all.
+    withRealApproval();
+
+    const r = run("2026.8.1", { PATH: "/usr/bin:/bin" });
+
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(r.stderr).not.toContain("could not be worked out here");
+  });
+
+  /**
+   * A PATH carrying every tool this block uses and NO node.
+   *
+   * Built rather than assumed: this dev PC has `/usr/bin/node` and the CI
+   * runner does not, so a case that just names `/usr/bin:/bin` would be
+   * measuring the machine instead of the code.
+   */
+  function pathWithoutNode(): string {
+    const toolsDir = path.join(dir, "tools-without-node");
+    mkdirSync(toolsDir, { recursive: true });
+    for (const tool of [
+      "bash", "sh", "head", "grep", "dirname", "cp", "rm", "mv", "mktemp",
+      "timeout", "date", "stat", "sed", "tr", "cut", "ls", "python3", "readlink",
+    ]) {
+      const found = spawnSync("bash", ["-c", `command -v ${tool} || true`], { encoding: "utf-8" })
+        .stdout.trim();
+      if (found) symlinkSync(found, path.join(toolsDir, tool));
+    }
+    return `${binDir}:${toolsDir}`;
+  }
+
+  it("fails closed, and says so, when there is no node anywhere", () => {
+    rmSync(path.join(binDir, "node"), { force: true });
+    withRealApproval();
+    const before = readFileSync(configPath, "utf-8");
+
+    const r = run("2026.8.1", { PATH: pathWithoutNode() });
+
+    // Nothing invented, nothing written, and the honest refusal still printed.
+    expect(r.stderr).toContain("could not be worked out here");
+    expect(r.stderr).toContain("the core still refuses this config");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(readFileSync(configPath, "utf-8")).toBe(before);
     expect(previewFiles()).toEqual([]);
   });
 

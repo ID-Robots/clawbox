@@ -398,6 +398,46 @@ clawbox_stamp_read() {
   head -n1 "$CLAWBOX_CONFIG_VALIDATED_STAMP" 2>/dev/null || true
 }
 
+# The node this box runs the core with, found the way the bundle is found.
+#
+# The bundle is located relative to `$OPENCLAW_BIN`, and the interpreter has to
+# be located the same way or the two disagree about which install is meant.
+# `config/clawbox-gateway.service` sets no `Environment=PATH`, so this unit
+# inherits systemd's default (`/usr/local/sbin:…:/bin`) — and an nvm or
+# tool-cache node, the layout where `node` and `openclaw` share ONE bin
+# directory, is not on it. Measured 2026-09-07: the CI runner for this repo is
+# bun-only and has no `/usr/bin/node` at all, which made this whole arm a silent
+# no-op there while it worked on the box.
+#
+# Order: the node beside the core's own bin, then the interpreter its entry
+# point names when that is a real path rather than `/usr/bin/env node`, then the
+# PATH. Echoes nothing and exits 1 when there is none — the caller says so.
+clawbox_node_bin() {
+  local sibling entry shebang interp
+  sibling="$(dirname "$OPENCLAW_BIN")/node"
+  if [ -x "$sibling" ]; then
+    printf '%s' "$sibling"
+    return 0
+  fi
+  entry="$(readlink -f "$OPENCLAW_BIN" 2>/dev/null || printf '%s' "$OPENCLAW_BIN")"
+  shebang="$(head -n1 "$entry" 2>/dev/null || true)"
+  case "$shebang" in
+    "#!"/*)
+      interp="${shebang#\#!}"
+      interp="${interp%% *}"
+      case "$interp" in
+        */node)
+          if [ -x "$interp" ]; then
+            printf '%s' "$interp"
+            return 0
+          fi
+          ;;
+      esac
+      ;;
+  esac
+  command -v node 2>/dev/null || return 1
+}
+
 # WHAT THE CORE STILL REFUSES AFTER IT HAS DONE EVERYTHING IT KNOWS (TASK-754).
 #
 # THE 25-HOUR OUTAGE WAS A DIAGNOSIS PROBLEM, not a missing repair. Measured on
@@ -480,13 +520,12 @@ clawbox_core_residual_issues() {
   if grep -qF '"$include"' "$OPENCLAW_CONFIG" 2>/dev/null; then
     return 1
   fi
-  node_bin="$(command -v node 2>/dev/null || true)"
+  node_bin="$(clawbox_node_bin || true)"
   if [ -z "$node_bin" ]; then
-    # Said, not swallowed: this unit inherits systemd's default PATH, and the
-    # sibling node guard further down this file prints the same NOTE for the
-    # same reason. A diagnosis that disappears silently is one nobody knows to
-    # ask for.
-    echo "  NOTE: no node on PATH, so what the core still refuses AFTER its own migrations could not be worked out here" >&2
+    # Said, not swallowed, and FAIL CLOSED: nothing is written and the caller's
+    # honest refusal line still stands. A diagnosis that disappears silently is
+    # one nobody knows to ask for.
+    echo "  NOTE: no node beside $OPENCLAW_BIN and none on PATH, so what the core still refuses AFTER its own migrations could not be worked out here" >&2
     return 1
   fi
   # Same derivation as the package.json read at the top of this file: the bin is
