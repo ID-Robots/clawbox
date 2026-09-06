@@ -44,6 +44,8 @@ const WP = [
 let savedWallpaperId = "custom-2";
 /** Which harness the box reports — the fallback wallpaper follows it. */
 let activeHarness = "openclaw";
+/** Milliseconds the harness probe takes to answer, so a case can run inside the window where it has not. */
+let harnessDelayMs = 0;
 /** Every preference body the desktop POSTed, in order. */
 const saved: Record<string, unknown>[] = [];
 
@@ -66,6 +68,7 @@ function installFetch() {
     }
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) {
+      if (harnessDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, harnessDelayMs));
       return answer({ active: activeHarness, edition: activeHarness });
     }
     if (url.includes("/setup-api/preferences?all=1")) {
@@ -111,6 +114,7 @@ describe("deleting a custom wallpaper", () => {
     window.localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(WP));
     savedWallpaperId = "custom-2";
     activeHarness = "openclaw";
+    harnessDelayMs = 0;
     saved.length = 0;
     resetHarnessCache();
     // jsdom does not implement it at all, so `vi.spyOn` cannot be used and
@@ -233,6 +237,30 @@ describe("deleting a custom wallpaper", () => {
     // Nothing moved: not the stored list, not what is on screen, not the box.
     expect(JSON.parse(window.localStorage.getItem("clawbox-custom-wallpapers") || "[]")).toEqual(WP);
     expect(wallpaperUrls().some((u) => u.includes(WP[2]))).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
+  });
+
+  it("writes nothing while the harness probe has not answered, and lands on the Hermes art", async () => {
+    // The preferences call and the harness probe race, and until the probe
+    // answers the desktop cannot know which edition's art the fallback is. The
+    // repair this replaced ran in that window and PERSISTED "clawbox" — on a
+    // Hermes box, box-wide and for good, since the later Hermes answer found a
+    // selection already made. Nothing is written now, so the paint simply
+    // catches up when the probe lands.
+    activeHarness = "hermes";
+    harnessDelayMs = 900;
+    window.localStorage.removeItem("clawbox-custom-wallpapers");
+    savedWallpaperId = "custom-2";
+
+    render(<ChromeDesktop />);
+    await waitFor(() => expect(screen.getByTestId("desktop-root")).toBeTruthy());
+    // Inside the window: the preferences have landed, the probe has not.
+    await waitFor(() => expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(true));
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
+
+    // And once it does answer, the paint follows the edition.
+    await waitFor(() => expect(wallpaperUrls().some((u) => u.includes("hermes-wallpaper"))).toBe(true));
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
   });

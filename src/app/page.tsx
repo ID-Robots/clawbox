@@ -630,8 +630,12 @@ function ChromeDesktopInner() {
     try {
       const saved = localStorage.getItem(CUSTOM_WPS_KEY);
       if (saved) {
-        const parsed: string[] = JSON.parse(saved);
-        applyCustomWallpapers(parsed);
+        // Whatever is under this key is not necessarily a list: another tab,
+        // an older build, a hand-edited profile. A non-array reached the grid
+        // as `.map is not a function` — the standalone route already checks,
+        // and the two read the same key.
+        const parsed: unknown = JSON.parse(saved);
+        if (Array.isArray(parsed)) applyCustomWallpapers(parsed as string[]);
       }
     } catch {}
     setCustomWallpapersLoaded(true);

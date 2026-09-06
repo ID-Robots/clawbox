@@ -6229,7 +6229,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         // never followed the UI language.
         const customIdx = customWallpaperIndex(ui.wallpaperId);
         const sub = customIdx === null
-          ? ui.wallpaperId
+          // A built-in's NAME, not its id — the row printed the raw slug
+          // `deep-space` beside a tile labelled "Deep Space".
+          ? (ui.wallpapers.find((w) => w.id === ui.wallpaperId)?.name ?? ui.wallpaperId)
           : t("settings.customWallpaper", { n: customIdx + 1 });
         return { subtitle: sub };
       }
