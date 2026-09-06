@@ -2617,9 +2617,56 @@ export function gatewayIsAbsent(): boolean {
  * install.sh: gateway stopped first (doctor migrates the store the gateway
  * holds open), safe migrations only, and the caller's restart starts it
  * again. On OpenClaw 1 there is nothing to migrate and doctor answers fast.
+ *
+ * ONE FAILURE IS NOT A FAILED MIGRATION, and it is reported rather than thrown
+ * (TASK-741). With a legacy `exec-approvals.json` in the state directory the
+ * core's security gate throws on the file's mere PRESENCE, so `doctor --fix`
+ * exits 1 having migrated NOTHING — measured against 2026.8.1 on 2026-09-06,
+ * with the sentence on STDERR and in full:
+ *
+ *     Legacy exec approvals exist at <state>/exec-approvals.json. Run
+ *     `openclaw doctor --fix` with OPENCLAW_STATE_DIR set to <state> before
+ *     using exec approvals.
+ *
+ * — i.e. advice for the command that has just run, with the state directory the
+ * caller had already set. THE MIGRATION STILL FAILED, and the caller's answer
+ * to that does not change: a legacy `auth-profiles.json` left in place is what
+ * stops an OpenClaw 2 gateway from starting. What changes is that the caller
+ * can now say WHICH failure it was, and name a file the owner can act on,
+ * instead of repeating the core's unusable advice.
+ *
+ * HARNESS FIRST, and the answer is uncomfortable: the core DOES have the
+ * importer. `--fix` arms its state migrations, and `migrateLegacyExecApprovals`
+ * imports a non-empty legacy file into SQLite, verifies it and removes the
+ * JSON. The exit 1 above is a different check — the runtime gate
+ * `assertNoPendingLegacyExecApprovals` — firing before that migration gets to
+ * run. So ClawBox is routing around an ordering defect in the core's own
+ * doctor, not filling a missing capability; that is worth reporting upstream
+ * and worth deleting from here when it lands.
+ *
+ * Returned rather than thrown as a typed error on purpose: 59 suites replace
+ * this module with a hand-written factory, and a new class to narrow on with
+ * `instanceof` is `undefined` in every one of them that omits it (see
+ * `openclaw-config-mock-completeness.test.ts`). A value a caller compares is
+ * inert under those mocks — an omitted `runOpenclawDoctorFix` answers
+ * `undefined`, which is not this outcome, which is the behaviour they have now.
+ * EVERY OTHER failure still throws, untouched.
  */
-export async function runOpenclawDoctorFix(): Promise<void> {
-  if (gatewayIsAbsent()) return;
+export type OpenclawDoctorFixOutcome = "completed" | "blocked-by-legacy-exec-approvals";
+
+/**
+ * The core's own words for the blocker, matched rather than re-derived.
+ *
+ * Three matchers now read this one English sentence — `install.sh`,
+ * `install-x64.sh` and `scripts/gateway-pre-start.sh` grep it case-sensitively,
+ * this one is case-insensitive. All three fail SAFE: a reworded upstream
+ * sentence simply reverts each to its old, stricter behaviour. A fourth site
+ * would be the point at which this deserves one shared constant.
+ */
+const LEGACY_EXEC_APPROVALS_RE = /Legacy exec approvals exist at/i;
+
+export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
+  if (gatewayIsAbsent()) return "completed";
   try {
     await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
       timeout: 30000,
@@ -2627,7 +2674,18 @@ export async function runOpenclawDoctorFix(): Promise<void> {
   } catch {
     /* older sudoers or already stopped — doctor itself reports real trouble */
   }
-  await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], { timeoutMs: 180_000 });
+  try {
+    await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], { timeoutMs: 180_000 });
+  } catch (err) {
+    // `spawnOpenclaw` rejects with `stderr.trim()` when there is any, which is
+    // where the core prints this. A timeout or a spawn error carries neither
+    // the sentence nor a verdict and is rethrown.
+    if (err instanceof Error && LEGACY_EXEC_APPROVALS_RE.test(err.message)) {
+      return "blocked-by-legacy-exec-approvals";
+    }
+    throw err;
+  }
+  return "completed";
 }
 
 /**

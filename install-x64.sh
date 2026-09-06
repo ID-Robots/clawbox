@@ -540,8 +540,24 @@ PATHEOF
       GATEWAY_WAS_ACTIVE=1
       systemctl stop "$GATEWAY_SERVICE"
     fi
-    as_user_runtime "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null \
-      || echo "  Warning: doctor could not complete before initial configuration"
+    # Say WHICH failure this was, like install.sh's twin (TASK-737/741). A bare
+    # `|| echo Warning` over a doctor that migrated NOTHING is the false-success
+    # shape this repo keeps producing, and the commonest reason it exits
+    # non-zero here is a legacy exec-approvals file whose mere presence makes
+    # the core refuse every migration before starting one. Still non-fatal: the
+    # gateway's own ExecStartPre moves a clearable one aside and re-runs the
+    # migration on the next start.
+    local _oc_doctor_out
+    if ! _oc_doctor_out="$(as_user_runtime "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)"; then
+      printf '%s\n' "$_oc_doctor_out"
+      if printf '%s\n' "$_oc_doctor_out" | grep -q 'Legacy exec approvals exist at'; then
+        echo "  Warning: doctor migrated NOTHING — a legacy exec-approvals file blocks it. The gateway's pre-start moves a clearable one aside and re-runs the migration on the next start."
+      else
+        echo "  Warning: doctor could not complete before initial configuration"
+      fi
+    else
+      printf '%s\n' "$_oc_doctor_out"
+    fi
     if [ "$GATEWAY_WAS_ACTIVE" -eq 1 ]; then
       systemctl start "$GATEWAY_SERVICE"
     fi

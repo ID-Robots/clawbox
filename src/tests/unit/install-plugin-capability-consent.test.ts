@@ -122,3 +122,25 @@ describe("install.sh plugin refresh", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+/**
+ * TASK-741 — the doctor transcript in the same function is not a global.
+ *
+ * `step_openclaw_install` captures the whole `openclaw doctor --fix` output to
+ * decide WHICH failure it was (TASK-737 made that branch honest). Every other
+ * assignment in the function is `local`; that one was not, so a transcript that
+ * can run to hundreds of lines outlived the function for the rest of an
+ * installer run whose later steps read whatever happens to be set.
+ *
+ * A source assertion, like the rest of this file: what has to be true of the
+ * line is its declaration, and running the step reaches npm and the registry.
+ */
+describe("step_openclaw_install keeps its doctor transcript to itself", () => {
+  it("declares _oc_doctor_out local", () => {
+    const start = INSTALL_SH.indexOf("step_openclaw_install() {");
+    expect(start, "step_openclaw_install was not found").toBeGreaterThan(-1);
+    const fn = INSTALL_SH.slice(start, INSTALL_SH.indexOf("\n}\n", start));
+    expect(fn).toContain("_oc_doctor_out");
+    expect(fn).toMatch(/^\s*local _oc_doctor_out\s*$/m);
+  });
+});

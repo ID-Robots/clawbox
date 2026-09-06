@@ -1203,6 +1203,35 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
 }
 
 /**
+ * Where this device's OpenClaw tree is, in one place.
+ *
+ * The two-line derivation below appeared three times — in `openclawChildEnv`,
+ * in `runCurrentGatewayPreStart` and in `readOpenclawConfigForRepair` — and
+ * three copies of a rule is two chances for them to disagree about which
+ * config a repair is reasoning over.
+ *
+ * PURE, and it returns the paths only. It deliberately does NOT build an
+ * environment: the three callers set genuinely different ones and one shared
+ * env would be wrong for all of them. `runCurrentGatewayPreStart` spawns a bash
+ * script that reads ClawBox's own names and must pin those; `openclawChildEnv`
+ * feeds the core CLI, which reads only `OPENCLAW_CONFIG_PATH` /
+ * `OPENCLAW_STATE_DIR`; `readOpenclawConfigForRepair` spawns nothing at all and
+ * only wants a path to read.
+ *
+ * `OPENCLAW_HOME` is read here as a FALLBACK and must never be exported to a
+ * child: ClawBox uses that name for the `.openclaw` directory itself, while the
+ * OpenClaw CLI reads it as the ACCOUNT home and builds its tree at
+ * `$OPENCLAW_HOME/.openclaw`. Each caller that spawns something deletes it.
+ */
+function openclawTreePaths(): { home: string; openclawHome: string } {
+  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(home, ".openclaw");
+  return { home, openclawHome };
+}
+
+/**
  * The environment that pins an `openclaw` child to THIS device's real config.
  *
  * Same rule as `runCurrentGatewayPreStart`: the CLI reads `OPENCLAW_HOME` as
@@ -1214,10 +1243,7 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
  * is dead.
  */
 function openclawChildEnv(): NodeJS.ProcessEnv {
-  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
-    || process.env.OPENCLAW_HOME
-    || path.join(home, ".openclaw");
+  const { home, openclawHome } = openclawTreePaths();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: home,
@@ -1319,6 +1345,16 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
     const { stdout } = await execFile(OPENCLAW_BIN, ["config", "validate", "--json"], {
       timeout: 60_000,
       maxBuffer: 2 * 1024 * 1024,
+      // SIGKILL at the deadline, the counterpart of the `-k 5` the boot
+      // script's validate bounds carry (TASK-741): node's `execFile` sends
+      // `killSignal` ONCE and never escalates, so the default SIGTERM leaves a
+      // validator that ignores it running with nothing to stop it, holding this
+      // recovery open past its bound. Safe here and only here — `config
+      // validate` writes nothing. The doctor bound above keeps SIGTERM for the
+      // opposite reason: a SIGKILL mid-import is what leaves an
+      // `exec-approvals.json.doctor-importing` claim behind, which then blocks
+      // every later doctor exactly as the original file does.
+      killSignal: "SIGKILL",
       env: openclawChildEnv(),
     });
     text = stdout ?? "";
@@ -1326,6 +1362,18 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
     // The core prints the verdict as JSON on stdout and exits 1 when it
     // refuses. Any other non-zero exit carries no verdict at all.
     accepted = false;
+    // A KILLED child answered nothing, whatever is in its buffer. It did not
+    // reach the exit code that carries the core's verdict, so anything parsed
+    // out of what it had written is this file guessing — and the guess is not
+    // free: `coreReportedMissingPlugins` reads `warnings[]` from the payload
+    // whatever the exit was, and would switch plugin entries off on it. The
+    // same rule this function already states for a validator it could not run,
+    // now applied to one it could not let finish (and the `killSignal` above
+    // makes that kill harder, so the two belong together).
+    if ((err as { killed?: boolean; signal?: unknown } | null)?.killed
+      || (err as { signal?: unknown } | null)?.signal) {
+      return { accepted, payload: null };
+    }
     text = commandOutput(err);
   }
   let parsed: unknown;
@@ -1534,10 +1582,7 @@ function pluginPayloadsRepairedByPreStart(preStartOutput: string): Set<string> {
 /** Run the newly checked-out pre-start repair while the gateway is stopped. */
 async function runCurrentGatewayPreStart(): Promise<string> {
   if (!existsSync(CURRENT_GATEWAY_PRE_START)) return "";
-  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
-    || process.env.OPENCLAW_HOME
-    || path.join(home, ".openclaw");
+  const { home, openclawHome } = openclawTreePaths();
   // Never `OPENCLAW_HOME` in a child's environment. ClawBox reads that name as
   // the .openclaw directory; the OpenClaw CLI reads it as the ACCOUNT home and
   // puts its tree at `$OPENCLAW_HOME/.openclaw`. Exported here it made every
@@ -2397,11 +2442,15 @@ async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
  * malformed config must not be what stops a box from coming back.
  */
 async function readOpenclawConfigForRepair(): Promise<Record<string, unknown> | null> {
-  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
-    || process.env.OPENCLAW_HOME
-    || path.join(home, ".openclaw");
-  const configPath = process.env.OPENCLAW_CONFIG || path.join(openclawHome, "openclaw.json");
+  // `OPENCLAW_CONFIG` first, and the helper deliberately does not settle it:
+  // this caller READS a file, `runCurrentGatewayPreStart` passes `process.env`
+  // through to a script that prefers the same name, and `openclawChildEnv`
+  // alone ignores it because the core CLI reads `OPENCLAW_CONFIG_PATH` instead.
+  // Nothing on a box sets `OPENCLAW_CONFIG` — it is a test-only name — but
+  // folding three different rules into one shared one is how they would come to
+  // address different files.
+  const configPath = process.env.OPENCLAW_CONFIG
+    || path.join(openclawTreePaths().openclawHome, "openclaw.json");
   try {
     return JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
   } catch {

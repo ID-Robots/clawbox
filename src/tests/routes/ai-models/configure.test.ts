@@ -2612,6 +2612,66 @@ describe("POST /setup-api/ai-models/configure", () => {
       );
     });
 
+    it("names the exec-approvals blocker instead of advising the command it blocks", async () => {
+      // TASK-741. A legacy exec-approvals file makes the core's own gate throw
+      // on the file's PRESENCE, so `doctor --fix` exits 1 having migrated
+      // nothing and its last line asks for the command that just ran. The
+      // migration still FAILED — the legacy auth-profiles.json this route wrote
+      // is what stops an OpenClaw 2 gateway from starting — so the rollback is
+      // unchanged and deliberately so. What changes is that the owner is told
+      // the cause and an action he can take, rather than being sent to a
+      // Terminal command that is blocked for exactly this reason.
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("blocked-by-legacy-exec-approvals");
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.8.1 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/legacy exec-approvals file/i);
+      // The advice that could not work is gone from this arm.
+      expect(body.error).not.toMatch(/run 'openclaw doctor --fix' from the Terminal/i);
+      // …and honest about the one case the boot path cannot clear on its own,
+      // which is the difference between an owner who restarts once and one who
+      // restarts for ever.
+      expect(body.error).toMatch(/unless it holds approvals of yours/i);
+      expect(body.error).toMatch(/move aside by hand/i);
+      // Fail closed, exactly as before: the legacy file does not stay behind.
+      expect(mockFs.rename).toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+    });
+
+    it("still sends every OTHER doctor failure to the generic advice", async () => {
+      // The half that must not move: a doctor that failed for any other reason
+      // is a state the owner can act on with the command, and this arm is what
+      // keeps the new sentence from swallowing it.
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exploded"));
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.8.1 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/run 'openclaw doctor --fix' from the Terminal/i);
+      expect(body.error).not.toMatch(/exec-approvals/i);
+    });
+
     it("keeps the legacy best-effort doctor behavior on an explicit OpenClaw 1 binary", async () => {
       vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("v1 doctor unavailable"));
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");

@@ -2563,8 +2563,21 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // The stop inside is unconditional; POST restores the unit if no later
       // step restarts it.
       gateway.state = "stopped-for-doctor";
+      // WHAT KIND of doctor failure this was (TASK-741). It still FAILS — the
+      // migration provably did not happen, and a legacy auth-profiles.json left
+      // in place is what stops an OpenClaw 2 gateway from starting — so the
+      // rollback below is unchanged. What changes is the sentence: telling the
+      // owner to "run `openclaw doctor --fix` from the Terminal" is advice for
+      // the command that is blocked, and he can do nothing with it.
+      let doctorBlockedByApprovals = false;
       try {
-        await runOpenclawDoctorFix();
+        if (await runOpenclawDoctorFix() === "blocked-by-legacy-exec-approvals") {
+          doctorBlockedByApprovals = true;
+          // Into the SAME failure path, deliberately: the v1/v2 decision below
+          // is what says whether the legacy file may stay, and a second copy of
+          // that judgement here is how the two would come to disagree.
+          throw new Error("openclaw doctor --fix is blocked by a legacy exec approvals file");
+        }
       } catch (doctorErr) {
         const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
         const migratedStore = siblings.some((name) => name.startsWith("auth-profiles.json.migrated-"));
@@ -2591,7 +2604,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
           await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
           return NextResponse.json(
-            { error: "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal." },
+            {
+              // Both outcomes named, in the order the owner meets them. The
+              // boot path moves a clearable blocker aside on the next start —
+              // but a file that provably holds approvals of HIS is left alone
+              // by design (TASK-737), and for that box a restart changes
+              // nothing. Leading with "restart and retry" alone would send
+              // exactly those owners round a loop.
+              error: doctorBlockedByApprovals
+                ? "Credential migration is blocked by a legacy exec-approvals file, so the subscription sign-in"
+                  + " was rolled back. Restart the device and sign in again: the gateway moves that file aside on"
+                  + " its next start unless it holds approvals of yours. If the sign-in is refused again, the"
+                  + " gateway boot log names the file to move aside by hand."
+                : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
+            },
             { status: 502 },
           );
         }
