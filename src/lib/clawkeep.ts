@@ -529,7 +529,21 @@ export async function readToken(): Promise<string | null> {
     return raw;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw e;
+    // A token that exists and cannot be READ is not "not paired" — saying so
+    // would send the owner to re-pair over a permissions problem — but the raw
+    // error carries the token's absolute path, and most of the ClawKeep routes
+    // put whatever they are handed into the response through
+    // `clawKeepErrorBody`. Default-deny rather than a list of errnos: EACCES and
+    // EPERM are the likely ones, but ENOTDIR (a botched install leaving
+    // `~/.clawkeep` a regular file), ELOOP and ENAMETOOLONG all carry the path
+    // in `e.message` too. One fixed sentence, no path; the real error goes to
+    // the server log where an operator can read it.
+    console.warn("[clawkeep] could not read the pairing token:", e);
+    throw new ClawKeepError(
+      "The ClawKeep pairing file could not be read — check that it exists and is mode 600",
+      409,
+      "token_unreadable",
+    );
   }
 }
 
@@ -983,6 +997,101 @@ export interface BackupResult {
   stderr: string;
 }
 
+/**
+ * The daemon's own failure taxonomy, as an HTTP answer.
+ *
+ * `clawkeepd` publishes a complete, deliberate set of exit codes and the
+ * bridge consumed none of them, so every failure left as HTTP 200 whose only
+ * explanation was `stderrTail` — the daemon's raw log line, printed verbatim by
+ * the panel, device paths and all. Leverage what the daemon already says
+ * rather than parsing its English: `clawkeep/clawkeep/runner.py` for the
+ * `EXIT_*` block, `clawkeep/clawkeep/daemon.py` for the two pre-run codes,
+ * whose own comment says the classification exists "so the runner can branch …
+ * without parsing English error strings".
+ *
+ * Two of these codes are the BRIDGE's, not the daemon's — `runBackup`
+ * synthesises 124 when its kill timer fires and 127 when the process could not
+ * be started — and they are mapped here for the same reason: to the owner they
+ * are equally "the backup did not happen".
+ *
+ * The sentence is one line the owner can act on and never the daemon's output;
+ * the `code` is what a caller branches on, so nothing has to match on English.
+ * The status is chosen so a client that only looks at the class still gets it
+ * right: 4xx where the owner has to do something (re-pair, buy room, set a
+ * passphrase), 5xx where the box or the portal failed.
+ */
+export function backupExitError(exitCode: number): ClawKeepError | null {
+  if (exitCode === 0) return null;
+  switch (exitCode) {
+    case 2: // EXIT_QUOTA_FULL
+      return new ClawKeepError(
+        "The ClawKeep account is out of space — free some snapshots or upgrade the plan",
+        507,
+        "quota_full",
+      );
+    case 3: // EXIT_AUTH_REVOKED — the portal-side unpair the token file cannot see
+      return new ClawKeepError(
+        "ClawKeep authorisation was rejected — pair this device again",
+        401,
+        "pairing_revoked",
+      );
+    case 4: // EXIT_TIER
+      return new ClawKeepError(
+        "This ClawKeep plan does not allow that backup",
+        402,
+        "tier_limit",
+      );
+    case 5: // EXIT_SERVER
+      return new ClawKeepError("The ClawKeep portal returned an error", 502, "portal_error");
+    case 6: // EXIT_NETWORK
+      return new ClawKeepError("Could not reach the ClawKeep portal", 504, "offline");
+    case 7:
+      // EXIT_OPENCLAW — building the archive failed, on either edition. The
+      // failure is the BOX's own, so 500 rather than 502: nothing upstream was
+      // even reached.
+      return new ClawKeepError("The backup archive could not be built", 500, "archive_failed");
+    case 8: // EXIT_UPLOAD
+      return new ClawKeepError("The backup could not be uploaded", 502, "upload_failed");
+    case 9: // EXIT_NEED_PASSPHRASE — the UI already has the modal for this
+      return new ClawKeepError(
+        "Set an encryption passphrase before backing up",
+        409,
+        "needs_passphrase",
+      );
+    case 10: // EXIT_ENCRYPTION_FAILED
+      return new ClawKeepError("The backup could not be encrypted", 500, "encryption_failed");
+    case 64: // daemon.py, EX_USAGE — a bad config, before the run begins
+      return new ClawKeepError("The ClawKeep configuration is unusable", 500, "config_error");
+    case 65:
+      // daemon.py, EX_DATAERR — `token.read_token` raised. It raises for THREE
+      // conditions and the pre-flight already refuses two of them before the
+      // spawn (`readToken` answers null for a missing file and for a body that
+      // is not `claw_*`), so the one that actually reaches here in the field is
+      // the third: `assert_perms` refusing a token with `0o077` bits — a 0644
+      // file restored from a backup, or a hand-edit under a loose umask. That
+      // is a `chmod 600`, not a re-pairing, and answering `not_paired` would
+      // walk the owner through a full unpair/re-pair for it. (The narrow race
+      // where the file is deleted between the pre-flight and the spawn lands
+      // here too and is served the same sentence, which names the file rather
+      // than the account.)
+      return new ClawKeepError(
+        "The ClawKeep pairing file could not be read — check that it exists and is mode 600",
+        409,
+        "token_unreadable",
+      );
+    case 124:
+      // runBackup's own kill timer. Not the daemon's word — ours.
+      return new ClawKeepError("The backup ran out of time and was stopped", 504, "timed_out");
+    case 127:
+      return new ClawKeepError("The ClawKeep daemon could not be started", 503, "daemon_missing");
+    default:
+      // EXIT_BACKUP_FAILED (1), EXIT_UNKNOWN (99), a signal, and anything a
+      // newer daemon adds. "It did not work" is still an honest answer, and it
+      // is a 502 rather than a 200.
+      return new ClawKeepError("The backup did not finish", 502, "backup_failed");
+  }
+}
+
 // Cap stdout/stderr capture so a chatty `openclaw backup create` over a
 // large workspace can't OOM the Next.js process. We only show a 2 KB tail
 // in the UI anyway, so keeping a generous tail buffer (64 KB) leaves plenty
@@ -1160,6 +1269,25 @@ function spawnCliJson<T>(
       // text if parsing fails so the caller still gets a usable message.
       try {
         const parsed = JSON.parse(stdout.trim().split("\n").pop() || "{}") as T;
+        // The CLI's exit code is an outcome, not decoration. A non-zero exit
+        // whose payload does not itself say `ok:false` — a partially written
+        // line, a stale object from an earlier run, or the empty `{}` the
+        // fallback above produces when a SIGKILL left nothing on stdout — was
+        // resolved as a success, which is the same false success the backup
+        // route had. `code` is `null` when the kill timer fired, and that is a
+        // failure too.
+        const saysFailed =
+          !!parsed && typeof parsed === "object" && (parsed as { ok?: unknown }).ok === false;
+        if (code !== 0 && !saysFailed) {
+          reject(
+            new ClawKeepError(
+              `ClawKeep could not complete ${subcommand}`,
+              502,
+              "cli_failed",
+            ),
+          );
+          return;
+        }
         resolve(parsed);
       } catch {
         reject(
