@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import http from "http";
+import zlib from "zlib";
 import os from "os";
 import path from "path";
 import type { AddressInfo } from "net";
@@ -113,6 +114,43 @@ describe("the app proxy", () => {
     const json = await routes.GET(req("/apps/site/data.json"), ctx("site", ["data.json"]));
     expect(json.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
     expect(json.headers.get("x-frame-options")).toBeNull();
+  });
+
+  it("does not label a body Node's fetch has already decompressed", async () => {
+    // The other half of the blank window. The proxy relays `upstream.body`,
+    // which fetch has already gunzipped, so passing the app's own
+    // `content-encoding: gzip` through told the browser to gunzip plain text:
+    // ERR_CONTENT_DECODING_FAILED on the stylesheet and the module script,
+    // and an empty #root again — this time with CORS answered.
+    meta("site");
+    const zipped = zlib.gzipSync(Buffer.from("body{color:red}"));
+    handler = (_r, res) => {
+      res.writeHead(200, {
+        "content-type": "text/css",
+        "content-encoding": "gzip",
+        "content-length": String(zipped.length),
+      });
+      res.end(zipped);
+    };
+    const res = await routes.GET(req("/apps/site/a.css"), ctx("site", ["a.css"]));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-encoding")).toBeNull();
+    expect(res.headers.get("content-length")).toBeNull();
+    expect(await res.text()).toBe("body{color:red}");
+    // And it asked for none in the first place: this hop is loopback.
+    expect(seen[0].headers["accept-encoding"]).toBe("identity");
+  });
+
+  it("leaves an encoding fetch did NOT unwrap alone", async () => {
+    // Dropping the header on a body that really is still encoded would be the
+    // same defect pointing the other way.
+    meta("site");
+    handler = (_r, res) => {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": "custom-thing" });
+      res.end("raw");
+    };
+    const res = await routes.GET(req("/apps/site/a.bin"), ctx("site", ["a.bin"]));
+    expect(res.headers.get("content-encoding")).toBe("custom-thing");
   });
 
   it("answers the CORS its own sandbox causes, so a module script and a crossorigin stylesheet load", async () => {

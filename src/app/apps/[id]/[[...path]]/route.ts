@@ -14,6 +14,21 @@ export const dynamic = "force-dynamic";
 
 /** Hop-by-hop headers, never forwarded in either direction. */
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host"]);
+/**
+ * The encodings Node's fetch unwraps for us before `upstream.body` is read.
+ *
+ * This is the other half of the blank window. `fetch` decompresses a response
+ * it understands, so the bytes we relay are PLAIN — and forwarding the
+ * `content-encoding` that came with them tells the browser to gunzip text
+ * that is already text: ERR_CONTENT_DECODING_FAILED, an asset that never
+ * arrives, and an empty `#root` with nothing on screen to say why. The
+ * request below asks the app for `identity` (this hop is loopback, so
+ * compressing it buys nothing), and anything that answers with an encoding
+ * regardless has that header dropped alongside its now-wrong content-length.
+ * An encoding NOT on this list was not touched by fetch and is passed
+ * through with its header intact.
+ */
+const DECODED_BY_FETCH = new Set(["gzip", "deflate", "br", "zstd", "x-gzip"]);
 /** How long the app has to ANSWER — its headers. The body streams for as long as it likes (a download, an event stream); only the client going away ends it. */
 const HEADERS_TIMEOUT_MS = 120_000;
 
@@ -42,6 +57,9 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
     headers.set(key, value);
   });
   headers.set("host", `127.0.0.1:${target.port}`);
+  // Loopback: compressing this hop costs CPU and saves nothing, and an
+  // uncompressed answer is one the relay below cannot mislabel.
+  headers.set("accept-encoding", "identity");
   headers.set("x-forwarded-host", request.headers.get("host") ?? incoming.host);
   headers.set("x-forwarded-proto", incoming.protocol.replace(":", ""));
   headers.set("x-forwarded-prefix", prefix);
@@ -73,13 +91,17 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
   }
   clearTimeout(timer);
 
+  const upstreamEncoding = (upstream.headers.get("content-encoding") ?? "").trim().toLowerCase();
+  const bodyWasDecoded = upstreamEncoding !== "" && upstreamEncoding.split(",").every((part) => DECODED_BY_FETCH.has(part.trim()));
   const out = new Headers();
   upstream.headers.forEach((value, key) => {
     if (HOP_BY_HOP.has(key)) return;
     // Framed by the desktop on purpose; the app's own refusal to be framed
     // would blank the window.
     if (key === "x-frame-options") return;
-    if (key === "content-length" && upstream.headers.get("content-encoding")) return;
+    // Both describe bytes that no longer exist once fetch has unwrapped them.
+    if (bodyWasDecoded && (key === "content-encoding" || key === "content-length")) return;
+    if (key === "content-length" && upstreamEncoding) return;
     out.append(key, value);
   });
   // The containment (see app-proxy.ts): an opaque origin for EVERY response
