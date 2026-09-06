@@ -580,4 +580,21 @@ describe("the words", () => {
     expect(team.outsideHint(["./index.html"], ["index.html"])).toEqual([]);
     expect(team.outsideHint(["anything"], [])).toEqual([]);
   });
+
+  // team-6rgz8cyx and team-5oxkp7a9 (2026-09-06): every alert of both runs was
+  // __pycache__/calc.cpython-310.pyc, written by CPython importing the very
+  // file the task named. Three of those hit the alert ceiling and killed runs
+  // whose work the reviewer had already accepted.
+  it("does not call a generated artifact a stray file", () => {
+    expect(team.outsideHint(["calc.py", "__pycache__/calc.cpython-310.pyc"], ["calc.py"])).toEqual([]);
+    expect(team.outsideHint(["src/a.py", "src/__pycache__/a.cpython-311.pyc"], ["src/a.py"])).toEqual([]);
+    expect(team.outsideHint(["node_modules/x/index.js", ".DS_Store", "app.tsbuildinfo"], ["src"])).toEqual([]);
+  });
+
+  it("still names a real file the task was not given", () => {
+    expect(team.outsideHint(["calc.py", "secrets.env"], ["calc.py"])).toEqual(["secrets.env"]);
+    // dist/ is generated too, but a task can be asked to produce it, so it
+    // is deliberately NOT ignorable: dropping it would lose the work.
+    expect(team.outsideHint(["dist/bundle.js"], ["src"])).toEqual(["dist/bundle.js"]);
+  });
 });

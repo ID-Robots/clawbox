@@ -43,7 +43,7 @@ import {
   type CodingRun,
   type CodingRunSource,
 } from "@/lib/coding-agent";
-import { addWorkerWorktree, changedFiles, ensureTeamBranch, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
@@ -563,7 +563,15 @@ export function outsideHint(touched: string[], hint: string[]): string[] {
   if (hint.length === 0) return [];
   const norm = (p: string) => p.replace(/^\.\//, "").replace(/\/+$/, "");
   const hints = hint.map(norm);
-  return touched.map(norm).filter((f) => !hints.some((h) => f === h || f.startsWith(`${h}/`)));
+  // A build or an interpreter writes its own files beside the source it was
+  // pointed at — a worker asked to edit calc.py cannot help CPython leaving
+  // __pycache__/calc.cpython-310.pyc there. Counting that as straying failed
+  // three correct tasks and killed a run on the alert ceiling (team-6rgz8cyx,
+  // team-5oxkp7a9, 2026-09-06). It is noise, not a trespass.
+  return touched
+    .map(norm)
+    .filter((f) => !isGeneratedArtifact(f))
+    .filter((f) => !hints.some((h) => f === h || f.startsWith(`${h}/`)));
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────

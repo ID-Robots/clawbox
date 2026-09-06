@@ -8,7 +8,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { addWorkerWorktree, changedFiles, ensureTeamBranch, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, changedFiles, ensureTeamBranch, isGeneratedArtifact, mergeWorkerBranch, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -129,5 +129,52 @@ describe("a coding team's git plumbing", () => {
     } finally {
       fs.rmSync(plain, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * team-6rgz8cyx and team-5oxkp7a9 (2026-09-06): CPython wrote
+ * __pycache__/calc.cpython-310.pyc beside the file each task named. It was
+ * swept in by `git add -A`, and the third alert of the run was git refusing
+ * to merge two workers' copies of it: "Cannot merge binary files". The run
+ * died on the alert ceiling with correct work in hand.
+ */
+describe("generated artifacts", () => {
+  it("keeps a worker's bytecode cache out of git entirely", async () => {
+    const team = await ensureTeamBranch(dir, "team-art");
+    expect(team.ok).toBe(true);
+
+    const exclude = fs.readFileSync(path.join(dir, ".git", "info", "exclude"), "utf8");
+    expect(exclude).toContain("__pycache__/");
+    expect(exclude).toContain("*.py[cod]");
+
+    const wt = await addWorkerWorktree(dir, "team-art", "t1", 1);
+    if (!wt.ok) throw new Error(wt.detail);
+
+    // A worker edits the file its task named; the interpreter leaves a .pyc.
+    fs.writeFileSync(path.join(wt.path, "calc.py"), "def add(a, b):\n    return a + b\n");
+    fs.mkdirSync(path.join(wt.path, "__pycache__"), { recursive: true });
+    fs.writeFileSync(path.join(wt.path, "__pycache__", "calc.cpython-310.pyc"), Buffer.from([0x6f, 0x0d, 0x0d, 0x0a, 0x00, 0xff]));
+
+    git(wt.path, "add", "-A");
+    git(wt.path, "-c", "user.email=t@x", "-c", "user.name=t", "commit", "-q", "-m", "work");
+
+    const inCommit = git(wt.path, "show", "--name-only", "--pretty=format:", "HEAD").split("\n").filter(Boolean);
+    expect(inCommit).toContain("calc.py");
+    expect(inCommit.some((f) => f.includes("__pycache__"))).toBe(false);
+
+    const merged = await mergeWorkerBranch(dir, wt.branch, "bring t1 home");
+    expect(merged).toMatchObject({ ok: true });
+  });
+
+  it("names what is generated and what is merely built on purpose", () => {
+    expect(isGeneratedArtifact("__pycache__/calc.cpython-310.pyc")).toBe(true);
+    expect(isGeneratedArtifact("src/__pycache__/a.pyc")).toBe(true);
+    expect(isGeneratedArtifact("node_modules/x/index.js")).toBe(true);
+    expect(isGeneratedArtifact(".DS_Store")).toBe(true);
+    expect(isGeneratedArtifact("app.tsbuildinfo")).toBe(true);
+    // A task can be asked to produce these, so they stay visible.
+    expect(isGeneratedArtifact("dist/bundle.js")).toBe(false);
+    expect(isGeneratedArtifact("src/calc.py")).toBe(false);
   });
 });
