@@ -30,6 +30,12 @@ const ghCalls = vi.hoisted(() => [] as string[][]);
  * changes the account under it.
  */
 const ghHold = vi.hoisted(() => ({ current: null as Promise<void> | null }));
+/**
+ * The same, but held BEFORE the answer is picked — which is what a real `gh`
+ * boot does: it reads the credential out of HOME at the moment it runs, so a
+ * boot that starts under alice and lands under bob answers as bob.
+ */
+const ghHoldEarly = vi.hoisted(() => ({ current: null as Promise<void> | null }));
 vi.mock("@/lib/child-run", async () => {
   const actual = await vi.importActual<typeof import("@/lib/child-run")>("@/lib/child-run");
   return {
@@ -37,6 +43,7 @@ vi.mock("@/lib/child-run", async () => {
     runChild: async (bin: string, args: string[], opts: Parameters<typeof actual.runChild>[2]) => {
       if (bin !== "gh") return actual.runChild(bin, args, opts);
       ghCalls.push(args);
+      if (ghHoldEarly.current && args.join(" ").startsWith("api user/repos")) await ghHoldEarly.current;
       const key = [...ghAnswers.keys()].find((k) => args.join(" ").startsWith(k));
       const a = key ? ghAnswers.get(key)! : { code: 1, stderr: "no answer scripted" };
       // Held AFTER the answer is picked, so a listing caught mid-flight still
@@ -74,6 +81,7 @@ beforeEach(async () => {
   ghAnswers.clear();
   ghCalls.length = 0;
   ghHold.current = null;
+  ghHoldEarly.current = null;
   githubStatus.mockResolvedValue({ installed: true, connected: true, login: "yalexx", loginCommand: "gh auth login" });
   vi.resetModules();
   lib = await import("@/lib/project-import");
@@ -319,8 +327,10 @@ describe("listGitHubRepos", () => {
     // asserted only on the OUTCOME it would show up as a 30 s deadlock here.
     let bobSettled = false;
     void forBob.then(() => { bobSettled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(bobSettled).toBe(true);
+    // waitFor, not a fixed sleep: bob's own eight `gh` boots can outlast 30 ms
+    // on a busy runner, and the failure this guards against is a DEADLOCK, so
+    // a generous ceiling costs a passing run nothing.
+    await vi.waitFor(() => expect(bobSettled).toBe(true));
 
     const bob = await forBob;
     release();
@@ -339,6 +349,49 @@ describe("listGitHubRepos", () => {
     const asked = ghCalls.length;
     expect(await lib.listGitHubRepos()).toMatchObject({ ok: true, login: "alice" });
     expect(ghCalls.length).toBeGreaterThan(asked);
+  });
+
+  it("throws away a listing the account bounced away from and back to", async () => {
+    // A → B → A. `gh` reads the credential out of HOME at every boot, so a
+    // listing started for alice can collect bob's rows and then find
+    // `activeLogin` back on "alice" — the name comparison alone waves it
+    // through, and the panel shows one account's repositories under the
+    // other's name. The account EPOCH is what catches it.
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("alice/secret-plans", { private: true })]) });
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+
+    let release!: () => void;
+    ghHoldEarly.current = new Promise<void>((resolve) => { release = resolve; });
+    const forAlice = lib.listGitHubRepos();
+    await vi.waitFor(() => expect(ghCalls.length).toBeGreaterThanOrEqual(1));
+
+    // Away to bob and straight back to alice while that boot is held BEFORE it
+    // reads the credential — so it will answer with whatever is scripted when
+    // it resumes, which is bob's. Neither intermediate listing is awaited:
+    // both are held on the same gate, exactly as they would be behind a real
+    // `gh` that is still starting.
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "bob", loginCommand: "x" });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("bob/todo")]) });
+    const forBob = lib.listGitHubRepos();
+    forBob.catch(() => undefined);
+    await vi.waitFor(() => expect(ghCalls.length).toBeGreaterThanOrEqual(2));
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+    // Back on alice for real: it is this call that puts `activeLogin` back, and
+    // that is the state the name comparison alone would find innocent.
+    const backOnAlice = lib.listGitHubRepos();
+    backOnAlice.catch(() => undefined);
+    // It makes no `gh` boot of its own — it joins the refresh already in
+    // flight for this account — so the probe is what says it has run.
+    await vi.waitFor(() => expect(githubStatus).toHaveBeenCalledTimes(3));
+
+    ghHoldEarly.current = null;
+    release();
+    const alice = await forAlice;
+    expect(alice).toMatchObject({ ok: false, reason: "failed" });
+    expect(JSON.stringify(alice)).not.toContain("bob/todo");
+    await forBob.catch(() => undefined);
+    await backOnAlice.catch(() => undefined);
   });
 
   it("never serves a failed listing from the cache", async () => {

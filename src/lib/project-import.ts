@@ -226,12 +226,30 @@ const reposRefresh = new Map<string, Promise<GitHubReposOutcome>>();
  * is what `fetchGitHubRepos` checks before it files or returns them.
  */
 let activeLogin: string | null = null;
+/**
+ * Bumped every time the signed-in account CHANGES, sign-out included.
+ *
+ * Comparing the login alone is not enough: `gh` reads the credential out of
+ * HOME at each boot, so an A → B → A switch during A's eight boots collects
+ * some of B's rows and then passes a `activeLogin === "A"` check at the end.
+ * A listing that saw the counter move is a listing that may be half one
+ * account's, whoever is signed in when it finishes.
+ */
+let accountEpoch = 0;
+
+/** Record who is signed in now, and note it if that is somebody else. */
+function setActiveLogin(login: string | null): void {
+  if (activeLogin === login) return;
+  activeLogin = login;
+  accountEpoch += 1;
+}
 
 /** For the tests: forget the cached listing. */
 export function _resetGitHubReposCacheForTests(): void {
   reposCache = null;
   reposRefresh.clear();
   activeLogin = null;
+  accountEpoch = 0;
 }
 
 /** The repositories the connected account can see, newest push first. */
@@ -242,12 +260,12 @@ export async function listGitHubRepos(): Promise<GitHubReposOutcome> {
   if (!status.connected || !status.login) {
     // Signing out IS an account change: an in-flight listing for the account
     // that has just gone must not be filed or served.
-    activeLogin = null;
+    setActiveLogin(null);
     return { ok: false, reason: "not_connected", detail: "Connect a GitHub account in the Coding Agent's settings first." };
   }
 
   const login = status.login;
-  activeLogin = login;
+  setActiveLogin(login);
   const cached = reposCache?.login === login ? reposCache : null;
   if (cached) {
     // Nobody is waiting on the refresh, so its failure must not surface as an
@@ -276,6 +294,9 @@ function startRepoRefresh(login: string): Promise<GitHubReposOutcome> {
 }
 
 async function fetchGitHubRepos(login: string): Promise<GitHubReposOutcome> {
+  // The account as it stands at the FIRST boot. Every `gh` below answers as
+  // whoever is signed in at the moment it runs.
+  const startedAtEpoch = accountEpoch;
   const rows: Omit<GitHubRepo, "clawboxApp">[] = [];
   let truncated = false;
   for (let page = 1; page <= REPOS_MAX_PAGES; page++) {
@@ -301,7 +322,11 @@ async function fetchGitHubRepos(login: string): Promise<GitHubReposOutcome> {
   // of those boots answered as whoever was signed in at the time. So the rows
   // are neither cached under `login` nor handed back: a listing that may be
   // half one account's and half another's belongs to nobody.
-  if (activeLogin !== login) {
+  //
+  // The EPOCH, not just the login: an A → B → A switch ends with `activeLogin`
+  // back on A and rows that are partly B's, which the name comparison alone
+  // waves through.
+  if (activeLogin !== login || accountEpoch !== startedAtEpoch) {
     return { ok: false, reason: "failed", detail: "The GitHub account changed while this ClawBox was listing its repositories. Try again." };
   }
   reposCache = { login, repos, truncated, at: Date.now() };
