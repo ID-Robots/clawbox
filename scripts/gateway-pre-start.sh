@@ -1895,9 +1895,15 @@ def _clawai_route_is_ours(_base_url, _api_key, _stamped, _proxy_base_url):
     The customer's transcription and voice stay pointed at a dead host and
     nothing says so: the false-failure class.
 
-    Ownership needs POSITIVE evidence, in the same three shapes the Hermes half
-    of this uses (`hermesCloudRouteIsOurs`, src/lib/hermes-tts.ts — one rule,
-    two editions, and TASK-726 is this half of it):
+    Ownership needs POSITIVE evidence, in the four shapes below. The Hermes half
+    (`hermesCloudRouteIsOurs`, src/lib/hermes-tts.ts — TASK-726 is this half of
+    it) asks the same question with the arms IT has: it writes no stamp, so it
+    has three, and it needs no delete arm at all because it HAS no destructive
+    path — `writeHermesCloudTarget` is the only writer of `tts.openai.*` and a
+    downgrade there just stops exposing the endpoint. The consequence is one
+    real divergence, and it is deliberate: our own `claw_` token at an address
+    of the owner's reads as OURS on Hermes and as THEIRS here, which is what
+    beta did and what the suite pins.
 
       - our own stamp on the entry (`clawboxManaged`);
       - or a `claw_` portal token on it, which is what survives the proxy URL
@@ -1907,11 +1913,15 @@ def _clawai_route_is_ours(_base_url, _api_key, _stamped, _proxy_base_url):
         endpoint alone says nothing: the canonical way an owner uses the
         generic `openai` slot is their key with no URL at all.
 
-    FOREIGN EVIDENCE OF EITHER KIND — their credential, or a host that is none
-    of ours — takes the slot back, and is asked first. Their key is the obvious
-    one and was the only one this asked for at first; but a speech server on the
-    LAN needs no key at all, so on the shape an owner is most likely to run, THE
-    ADDRESS IS THE ONLY THING THAT SPEAKS FOR IT. This is
+    FOREIGN EVIDENCE IS ASKED FIRST, and it comes in two kinds. A host that is
+    none of ours is decisive on its own: no stamp and no token of ours outranks
+    it. Their CREDENTIAL is weighed against the address rather than over it — an
+    `sk-` key on one of our own addresses still reads as ours, which is what beta
+    did and what this deliberately does not change (see the delete arm below).
+
+    The key was the only evidence this asked for at first. But a speech server on
+    the LAN needs no key at all, so on the shape an owner is most likely to run,
+    THE ADDRESS IS THE ONLY THING THAT SPEAKS FOR IT. This is
     the only generic OpenAI-compatible speech slot OpenClaw has, so an owner who
     wants their own speech server has to edit the entry we already wrote — which
     `openclaw config set` does in place, leaving our `clawboxManaged` key behind
@@ -1919,6 +1929,16 @@ def _clawai_route_is_ours(_base_url, _api_key, _stamped, _proxy_base_url):
     their server, their key and their model at the next gateway start, and
     DELETE the whole entry on a downgrade. `hermesCloudRouteIsOurs` refuses that
     same entry, and so did the rule this replaces.
+
+    ONE WIDENING, recorded rather than hidden: an entry carrying our stamp or our
+    token on a DIFFERENT PATH of one of our own hosts (`clawbox.com/api/ai-2025`)
+    reads as ours here, where the equality test called it theirs. That is the
+    card — it is how an entry we wrote under a moved proxy is recognised — and it
+    needs TWO pieces of our-ness at once, which a customer serving from their own
+    machine cannot produce. It does sit against the premise
+    gateway-pre-start-clawai-audio.test.ts:167 pins for the transcription block,
+    where another route on our own host IS the owner's; the difference is that
+    that block has no stamp and no credential to ask about.
 
     The transcription block above deliberately does NOT use this: nothing it
     writes carries a stamp or a credential, so its endpoint really is the only
