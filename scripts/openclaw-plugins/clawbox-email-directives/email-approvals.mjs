@@ -40,11 +40,18 @@ import { join } from "node:path";
  * Applied here as well as on the ClawBox side so that an ordinary message costs
  * a regex and no HTTP at all — this hook runs on every inbound message on every
  * channel. The two copies have to agree, and
- * `src/tests/routes/email/email-approval-reply-parity.test.ts` is what keeps
- * them agreeing: the authority is `parseApprovalReply` in
- * src/lib/email-approval-reply.ts.
+ * `src/tests/unit/email-approval-reply-parity.test.ts` is what keeps them
+ * agreeing: the authority is `parseApprovalReply` in
+ * src/lib/email-approval-reply.ts. It carries no `\s` and no `$`-before-newline
+ * subtlety — the text is trimmed first and the separator is literal spaces and
+ * tabs — because those are the two places the three languages disagree.
  */
-const APPROVAL_SHAPE = /^\s*[A-Za-z]{1,10}\s+[A-Za-z0-9]{4,8}\s*$/;
+export const APPROVAL_SHAPE = /^[A-Za-z]{1,10}[ \t]+[A-Za-z0-9]{4,8}$/;
+
+/** The trim the shape assumes. Its own function so the three copies match. */
+export function looksLikeApproval(text) {
+  return typeof text === "string" && APPROVAL_SHAPE.test(text.trim());
+}
 
 /** Long enough for one loopback POST plus an SMTP conversation behind it. */
 const TIMEOUT_MS = 60_000;
@@ -116,7 +123,7 @@ function contentOf(event) {
  */
 export async function onBeforeDispatch(event, ctx) {
   const text = contentOf(event);
-  if (!APPROVAL_SHAPE.test(text)) return undefined;
+  if (!looksLikeApproval(text)) return undefined;
   const senderId = senderOf(event, ctx);
   if (!senderId) return undefined;
   const token = apiToken();

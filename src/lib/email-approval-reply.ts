@@ -116,7 +116,14 @@ const REJECT_WORDS = new Set(["delete", "deny", "no", "n", "cancel", "reject", "
  */
 export function parseApprovalReply(text: string): { verb: "approve" | "reject"; code: string } | null {
   if (typeof text !== "string") return null;
-  const match = /^\s*([A-Za-z]{1,10})\s+([A-Za-z0-9]{4,8})\s*$/.exec(text);
+  // TRIM FIRST, then match with no `\s` anywhere. `\s` matches a newline in
+  // every one of the three languages this rule is written in, and Python's `$`
+  // also matches BEFORE a trailing newline where JavaScript's does not — so a
+  // pattern spelled with `\s` and `$` accepts a different set on each edition.
+  // Trimming takes the stray whitespace off in a way all three agree on, and a
+  // separator of literal spaces and tabs leaves nothing else to disagree about.
+  // email-approval-reply-parity.test.ts is what keeps them honest.
+  const match = /^([A-Za-z]{1,10})[ \t]+([A-Za-z0-9]{4,8})$/.exec(text.trim());
   if (!match) return null;
   const word = match[1].toLowerCase();
   const code = match[2].toUpperCase();

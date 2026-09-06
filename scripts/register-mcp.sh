@@ -229,6 +229,11 @@ EMAIL_HOOK_PLUGIN="clawbox_email_directives"
 # `"reply_payload_sending" in names` check (gateway-pre-start.sh), and it is why
 # the verdict below is a name test rather than a count.
 EMAIL_HOOK_NAME="transform_llm_output"
+# The inbound twin: Hermes' own pre_gateway_dispatch, which is how the owner's
+# "send <code>" reply to a queued email reaches ClawBox with no second Telegram
+# bot (scripts/hermes-plugins/clawbox_email_directives/approvals.py). Declared
+# in plugin.yaml beside the outbound one, so the doctor compares BOTH by name.
+EMAIL_HOOK_INBOUND_NAME="pre_gateway_dispatch"
 EMAIL_HOOK_SRC="$PROJECT_DIR/scripts/hermes-plugins/$EMAIL_HOOK_PLUGIN"
 # `HERMES_HOME` first, exactly like Hermes' own `get_hermes_home()` and like
 # `hermesHome()` in src/lib/hermes-env.ts — NOT `dirname $HERMES_CONFIG`. With
@@ -240,7 +245,7 @@ EMAIL_HOOK_DST="$HERMES_PLUGINS_DIR/$EMAIL_HOOK_PLUGIN"
 EMAIL_HOOK_INSTALLED=0
 
 if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] \
-  && [ -f "$EMAIL_HOOK_SRC/email_directives.py" ]; then
+  && [ -f "$EMAIL_HOOK_SRC/email_directives.py" ] && [ -f "$EMAIL_HOOK_SRC/approvals.py" ]; then
   # THE SOURCES ARE READ BEFORE ANYTHING ON DISK IS TOUCHED, exactly as the
   # OpenClaw twin does it (gateway-pre-start.sh). `cp` opens its source first
   # and leaves the destination alone when that open fails, so a source-side
@@ -249,13 +254,14 @@ if [ -f "$EMAIL_HOOK_SRC/__init__.py" ] && [ -f "$EMAIL_HOOK_SRC/plugin.yaml" ] 
   # question here is what lets the failure branch below know which state the box
   # is in.
   if ! cat "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
-           "$EMAIL_HOOK_SRC/email_directives.py" >/dev/null 2>&1; then
+           "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_SRC/approvals.py" >/dev/null 2>&1; then
     # The installed copy, if there is one, is untouched and still the last one
     # that worked. Leaving it alone is strictly better than removing it.
     log "WARNING: could not read the $EMAIL_HOOK_PLUGIN plugin sources in $EMAIL_HOOK_SRC — leaving whatever is already installed in place"
   elif mkdir -p "$EMAIL_HOOK_DST" 2>/dev/null \
     && cp -f "$EMAIL_HOOK_SRC/__init__.py" "$EMAIL_HOOK_SRC/plugin.yaml" \
-             "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_DST/" 2>/dev/null; then
+             "$EMAIL_HOOK_SRC/email_directives.py" "$EMAIL_HOOK_SRC/approvals.py" \
+             "$EMAIL_HOOK_DST/" 2>/dev/null; then
     rm -rf "$EMAIL_HOOK_DST/__pycache__" 2>/dev/null || true
     EMAIL_HOOK_INSTALLED=1
   else
@@ -1074,7 +1080,8 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
           log "NOTE: 'hermes plugins doctor' printed a report for $EMAIL_HOOK_PLUGIN and then exited $EMAIL_HOOK_DOCTOR_RC — not the error verdict --ci defines, so whether its hook registered is unknown here. hermes had printed: $EMAIL_HOOK_REASON"
         else
           case "$EMAIL_HOOK_FLAT" in
-            *"declares hook '$EMAIL_HOOK_NAME' but registration did not add it"*)
+            *"declares hook '$EMAIL_HOOK_NAME' but registration did not add it"*\
+            |*"declares hook '$EMAIL_HOOK_INBOUND_NAME' but registration did not add it"*)
               # THE name check, and the reason the manifest half of this change
               # exists. Declaring `provides_hooks` makes the doctor compare what
               # was declared against what register() actually added and warn BY
@@ -1083,12 +1090,18 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
               # in names`. It catches what no count can: a register() that adds a
               # DIFFERENT valid hook still prints "1 hook(s)" with no error.
               #
+              # BOTH NAMES, because this plugin now has two hooks and a box that
+              # loaded only one of them is a box where either the EMAIL: line
+              # reaches a channel or the owner's "send <code>" is answered by
+              # the agent instead of the queue. The doctor names the missing one
+              # in the line quoted below, so one arm covers both.
+              #
               # This direction ONLY. The opposite finding at :343 ("registration
               # adds hook X not listed in provides_hooks") means we registered
               # something EXTRA, which says nothing about ours being missing —
               # warning on it would put "directives may still reach channels" in
               # the boot log of a box where they are being stripped correctly.
-              log "WARNING: $EMAIL_HOOK_PLUGIN did not register its hook — EMAIL: directives will still reach channels. hermes plugins doctor said: $EMAIL_HOOK_REASON"
+              log "WARNING: $EMAIL_HOOK_PLUGIN did not register one of its hooks — EMAIL: directives may still reach channels, and approving a queued email from Telegram will not work. hermes plugins doctor said: $EMAIL_HOOK_REASON"
               ;;
             *" 0 hook(s)"*)
               # The one thing the name check cannot see: a box still carrying a
@@ -1114,7 +1127,7 @@ if [ "$EMAIL_HOOK_INSTALLED" = "1" ]; then
               # perfectly healthy, and matching `1 hook(s)` called that a defect
               # (while also reading "11 hook(s)" as a success — the bug this
               # change was opened for; it is gone because the count is gone).
-              log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound hook"
+              log "$EMAIL_HOOK_PLUGIN loaded and registered its outbound and inbound hooks"
               ;;
             *)
               # A report with no registration line at all. `format_text()` always

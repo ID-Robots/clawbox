@@ -173,9 +173,11 @@ d("Hermes transform_llm_output plugin — EMAIL: directives", () => {
     expect(answer).toEqual(["a"]);
   });
 
-  it("registers exactly one hook, under the name Hermes actually fires", () => {
+  it("registers exactly its two hooks, under the names Hermes actually fires", () => {
     // hermes_cli/plugins.py:3120 WARNS on an unknown hook name but registers it
-    // anyway, so a typo here would be a silent no-op on every box.
+    // anyway, so a typo here would be a silent no-op on every box. Both are
+    // pinned: the outbound strip this plugin was built for, and the inbound
+    // approval claim that now rides on it.
     const registered = py<Array<[string, string]>>(
       [
         "import clawbox_email_directives as p",
@@ -187,7 +189,10 @@ d("Hermes transform_llm_output plugin — EMAIL: directives", () => {
         "print(json.dumps(ctx.hooks))",
       ].join("\n"),
     );
-    expect(registered).toEqual([["transform_llm_output", "transform_llm_output"]]);
+    expect(registered).toEqual([
+      ["transform_llm_output", "transform_llm_output"],
+      ["pre_gateway_dispatch", "pre_gateway_dispatch"],
+    ]);
   });
 
   it("ships the two files Hermes needs to load a plugin at all", () => {

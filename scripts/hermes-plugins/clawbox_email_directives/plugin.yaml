@@ -1,6 +1,6 @@
 name: clawbox_email_directives
 version: 1.0.0
-description: "Strips ClawBox EMAIL: card directives from replies leaving the box for a channel, where no card can render."
+description: "Strips ClawBox EMAIL: card directives from replies leaving the box for a channel, where no card can render, and hands the owner's emailed-draft approval to ClawBox before the model sees it."
 author: ID-Robots
 kind: standalone
 # Hermes' own manifest field (hermes_cli/plugins.py: allowed manifest keys,
@@ -11,3 +11,4 @@ kind: standalone
 # beside its OK — a permanent warning about a plugin that is working.
 provides_hooks:
   - transform_llm_output
+  - pre_gateway_dispatch
