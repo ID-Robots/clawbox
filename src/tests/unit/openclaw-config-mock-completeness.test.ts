@@ -199,6 +199,77 @@ const SILENT_STORE_READER = "@/lib/clawai-credential-refusal";
 /** What that reader takes off the store, and therefore what a factory must name. */
 const STORE_EXPORTS = ["get", "set"] as const;
 
+/** Index of the next character that is neither whitespace nor a comment. */
+function skipTrivia(text: string, from: number): number {
+  let i = from;
+  for (;;) {
+    while (i < text.length && /\s/.test(text[i])) i += 1;
+    if (text[i] === "/" && text[i + 1] === "/") {
+      const nl = text.indexOf(String.fromCharCode(10), i);
+      if (nl < 0) return text.length;
+      i = nl + 1;
+      continue;
+    }
+    if (text[i] === "/" && text[i + 1] === "*") {
+      const close = text.indexOf("*/", i + 2);
+      if (close < 0) return text.length;
+      i = close + 2;
+      continue;
+    }
+    return i;
+  }
+}
+
+/**
+ * Where the object the factory RETURNS begins, or -1.
+ *
+ * Only two shapes count, and picking them apart matters: the direct
+ * arrow-expression body `() => ({ … })`, and a block body's own top-level
+ * `return { … }`. Taking the first `({` after the arrow instead would read a
+ * LOCAL object — `() => { const d = ({ get, set }); return { set }; }` reports
+ * both exports and misses that the mock omits one, which is the gate passing
+ * over exactly the hole it exists for.
+ */
+function returnedObjectStart(factory: string, from: number): number {
+  const head = skipTrivia(factory, from);
+  if (factory[head] === "(") {
+    const inner = skipTrivia(factory, head + 1);
+    return factory[inner] === "{" ? inner : -1;
+  }
+  if (factory[head] !== "{") return -1;
+
+  // A block body: find `return` at the body's own depth, not inside a nested
+  // function or object.
+  let depth = 0;
+  for (let i = head; i < factory.length; i += 1) {
+    const ch = factory[i];
+    if (ch === "/" && (factory[i + 1] === "/" || factory[i + 1] === "*")) {
+      i = skipTrivia(factory, i) - 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const quote = ch;
+      i += 1;
+      while (i < factory.length && factory[i] !== quote) {
+        if (factory[i] === "\\") i += 1;
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "{" || ch === "[" || ch === "(") { depth += 1; continue; }
+    if (ch === "}" || ch === "]" || ch === ")") { depth -= 1; if (depth === 0) return -1; continue; }
+    if (depth !== 1 || ch !== "r" || !/^return\b/.test(factory.slice(i))) continue;
+    const after = skipTrivia(factory, i + "return".length);
+    if (factory[after] === "{") return after;
+    if (factory[after] === "(") {
+      const inner = skipTrivia(factory, after + 1);
+      return factory[inner] === "{" ? inner : -1;
+    }
+    return -1;
+  }
+  return -1;
+}
+
 /**
  * The names a mock factory actually EXPORTS — the members of the object it
  * returns, at that object's own level and nowhere else.
@@ -223,18 +294,10 @@ const STORE_EXPORTS = ["get", "set"] as const;
  * read is a shape nobody has checked.
  */
 function factoryExports(factory: string): Set<string> | null {
-  // `() => ({ … })` is the form every factory in this repo uses; `return {`
-  // covers a block-bodied one. Anything else is unparseable here by design.
   const arrow = factory.indexOf("=>");
   if (arrow < 0) return null;
-  const parenObject = factory.indexOf("({", arrow);
-  const returned = factory.indexOf("return", arrow);
-  const start = parenObject >= 0
-    ? parenObject + 1
-    : returned >= 0
-      ? factory.indexOf("{", returned)
-      : -1;
-  if (start < 0 || factory[start] !== "{") return null;
+  const start = returnedObjectStart(factory, arrow + 2);
+  if (start < 0) return null;
 
   const names = new Set<string>();
   let depth = 0;
@@ -388,6 +451,14 @@ describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller
     // A block body, and a factory shape this cannot read at all.
     expect([...exportsOf("() => { return { get: vi.fn(), set: vi.fn() }; }")!].sort()).toEqual(["get", "set"]);
     expect(factoryExports('vi.mock("x", someHelper)')).toBeNull();
+
+    // A LOCAL object before the return is not what the factory exports. Reading
+    // the first `({` after the arrow would answer `get, set` here and miss that
+    // the mock omits `get` — the gate passing over the hole it exists for.
+    expect([...exportsOf("() => { const d = ({ get: vi.fn(), set: vi.fn() }); return { set: d.set }; }")!])
+      .toEqual(["set"]);
+    // …and a parenthesised return object is still read.
+    expect([...exportsOf("() => { return ({ get: vi.fn(), set: vi.fn() }); }")!].sort()).toEqual(["get", "set"]);
 
     // And the omission the gate exists for.
     expect([...exportsOf("() => ({ getAll: vi.fn(), setMany: vi.fn() })")!].sort()).toEqual(["getAll", "setMany"]);
