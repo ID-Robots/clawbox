@@ -290,6 +290,30 @@ describe("one CLI start fills every channel's memo", () => {
     expect(statusStarts).toBe(2);
   });
 
+  it("drops a row read from the gateway that was on its way down", async () => {
+    // The counter is bumped at BOTH ends of a restart, and one bump is not
+    // enough: a read that STARTS after the first bump carries the new
+    // generation already, so with only that bump the row it took from the dying
+    // process would be accepted for a full window after the new gateway is up.
+    // Here the read begins during the restart (generation 1) and the restart
+    // finishes (generation 2).
+    mockRestarts.mockReturnValue(1);
+    script = [{ ms: 20, out: JSON.stringify({
+      channelAccounts: { telegram: [{ configured: true, connected: true }] },
+    }) }, { ms: 0, out: JSON.stringify({
+      channelAccounts: { telegram: [{ configured: true, connected: false }] },
+    }) }];
+
+    const during = channels.readCachedChannelRow("telegram");
+    expect(await during).toMatchObject({ connected: true });
+    expect(statusStarts).toBe(1);
+
+    // `restartGateway` returns; the generation moves past the read.
+    mockRestarts.mockReturnValue(2);
+    expect(await channels.readCachedChannelRow("telegram")).toMatchObject({ connected: false });
+    expect(statusStarts).toBe(2);
+  });
+
   it("still asks about one channel only when the caller wants a read right now", async () => {
     // `readChannelRow` is the uncached "ask the gateway now" read that
     // `waitForChannelConnected` polls a transition with. Filtering there is
