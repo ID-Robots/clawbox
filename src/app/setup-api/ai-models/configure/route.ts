@@ -31,6 +31,8 @@ import {
 } from "@/lib/openclaw-config";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
+import { getCodingAgentStatus } from "@/lib/coding-agent";
+import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
 import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
@@ -2932,6 +2934,32 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // computed earlier so the value stored alongside the token always
     // matches the tier that drove `agents.defaults.model.primary` above.
     const clawboxAiTierForStore = resolvedClawboxTier;
+    // The coding agent's three tools — `coding_agent_run`, `_status`, `_stop` —
+    // are registered CONDITIONALLY by the ClawBox MCP server, from a probe it
+    // makes ONCE while it boots; it is then a long-lived stdio child of the
+    // agent. `getCodingAgentStatus().ready` is `enabled` AND the coding harness
+    // installed AND ClawBox AI connected, and "connected" IS the `clawai_token`
+    // the batches below write. So this route can flip readiness, and until now
+    // it was the one writer of that key that never said so: the panel went
+    // "ready" and the running agent still had none of the three tools.
+    //
+    // `/setup-api/hermes/clawai` closes the same gap by sampling the verdict
+    // ahead of its own write, and `coding-agent-mcp-refresh`'s docblock states
+    // the invariant as "every Hermes connect entry point funnels through
+    // `applyClawaiToHermes`". THIS path is the counter-example, and it is
+    // reachable: `openclawIsAbsent()` is `readEdition() === "hermes"`, so an
+    // `edition=dual` box running the Hermes harness comes down here rather than
+    // through the Hermes branch above (TASK-577).
+    //
+    // BEFORE the write, for the reason that route spells out: read it a line
+    // later and the answer is always true, the before/after guard sees no
+    // change, and nothing is refreshed. Only for a save that can write the key
+    // — `undefined` everywhere else, so no other save pays for two status
+    // reads — and `undefined` again on a probe that threw, which must not turn
+    // a save into a 500 or buy a reload nobody asked for.
+    const codingAgentReadyBefore = isClawAI
+      ? await getCodingAgentStatus().then((status) => status.ready).catch(() => undefined)
+      : undefined;
     if (isLocalScope) {
       await setMany({
         local_ai_configured: true,
@@ -3001,6 +3029,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();
+    }
+
+    // The credential is on disk, so ask the agent to rebuild its tool list if
+    // — and only if — this save is what made the coding agent usable, or
+    // stopped it being. The guard lives in the helper: a reload respawns every
+    // MCP child and invalidates the model's prompt cache, so a re-save of a
+    // token the box already held must not buy one. Best effort by design; the
+    // owner's save has already landed and an edition with no dashboard to ask
+    // re-probes at the next respawn on its own.
+    if (codingAgentReadyBefore !== undefined) {
+      const readyAfter = await getCodingAgentStatus()
+        .then((status) => status.ready)
+        .catch(() => undefined);
+      if (readyAfter !== undefined) {
+        await refreshCodingAgentToolsIfReadinessChanged(codingAgentReadyBefore, readyAfter);
+      }
     }
 
     // Connecting a provider is the owner saying "use this one": a provider the
