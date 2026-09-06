@@ -42,7 +42,11 @@ log() { logger -t "$LOG_TAG" -- "$*"; }
 #
 # Detached because NetworkManager runs dispatcher scripts serially and kills a
 # slow one: this script must return at once, and the waiting must not happen in
-# it. The waiter takes its own lock, so overlapping events do not stack.
+# it. Several events arriving for one recovery — `up`, `dhcp4-change` and
+# `connectivity-change` inside a second is the measured shape — are safe to
+# dispatch: the waiter's lock keeps their waits from overlapping, and its
+# record of the route it last asked a restart for collapses the rest of the
+# burst into that one restart.
 #
 # The launch is REPORTED, not fire-and-forget into /dev/null: NM runs
 # dispatchers with a minimal PATH (the reason 99-clawbox-avahi-reload resolves
@@ -141,6 +145,29 @@ case "$ACTION" in
     ;;
 esac
 
+# The carrier really went. Whatever comes back next is a NEW recovery, even on
+# the identical lease, so the waiter's "already asked for this recovery" record
+# must not outlive it: a cable pulled and replugged inside the coalescing window
+# would otherwise be stood down, and that swallowed restart is GH #529 itself.
+# The waiter notices an absence it waits through on its own; this covers the
+# flap that is over before a waiter even runs, which only the event knows about.
+#
+# ABOVE the interface case below, and for EVERY uplink this box routes through:
+# that case returns for the radio on anything but `up`, and a box joined to the
+# customer's WiFi through its own setup AP has no Ethernet arm at all, so a
+# clear only Ethernet reached left exactly that box standing down on the restart
+# its re-association owes. It over-clears by design — a radio dropping while
+# Ethernet still carries the traffic costs one extra restart on the next event,
+# which is bounded by a real `down`, where narrowing it to the interface the
+# record names would cost a swallowed restart the moment the two names disagree.
+if [ "$ACTION" = "down" ]; then
+  case "$IFACE" in
+    eth*|en*|"$WIFI_IFACE")
+      rm -f "$RUN_DIR/gateway-online-restart.stamp" 2>/dev/null || true
+      ;;
+  esac
+fi
+
 # The WiFi arm is the recovery half: after a failover the box's route comes back
 # on the wireless interface, and with only the ethernet arm nothing ever asked
 # for the restart that revives the channel accounts.
@@ -165,7 +192,8 @@ if [ "$ACTION" = "up" ]; then
   exit 0
 fi
 
-# Below: handle ethernet DOWN — failover to WiFi and clear stale sockets.
+# Below: handle ethernet DOWN — failover to WiFi and clear stale sockets. The
+# record was already cleared above, before this arm could return.
 [ "$ACTION" = "down" ] || exit 0
 
 # Confirm there is no other ethernet still up before failing over.

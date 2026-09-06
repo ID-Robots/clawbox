@@ -47,6 +47,9 @@ beforeAll(() => {
 let root: string;
 let bin: string;
 
+/** The shape NetworkManager's DHCP client actually writes for the wired link. */
+const ETH_ROUTE = "default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.50 metric 100";
+
 interface BoxOptions {
   /** What `nmcli -t networking connectivity check` answers, in order. */
   connectivity?: string[];
@@ -70,8 +73,19 @@ interface BoxOptions {
   unitProbeFails?: boolean;
   /** Whether `curl` is on PATH for the HTTPS half of the probe. */
   curlWorks?: boolean;
+  /** `systemctl try-restart` refuses — nothing was restarted. */
+  tryRestartFails?: boolean;
   /** Drop a re-arm marker once, from inside the poll loop. */
   rearmMidWait?: boolean;
+  /**
+   * The carrier drops WHILE `systemctl try-restart` is running. That call
+   * BLOCKS until the restart job completes — ~40 s on this hardware — so it is
+   * a wide window, and the dispatcher's stamp clear lands inside it. Modelled
+   * by running the real dispatcher's `down` arm from inside the stub.
+   */
+  dropCarrierDuringRestart?: boolean;
+  /** Bring the Ethernet route back once, from inside the poll loop. */
+  restoreRouteMidWait?: boolean;
 }
 
 /** A fake CLAWBOX_ROOT plus a PATH of stubs, so nothing touches a real radio. */
@@ -112,9 +126,40 @@ case "$*" in
   *) exit 0 ;;
 esac`);
 
+  // A routing table in a file rather than baked into the stub, so a test can
+  // move the route between two waiter runs — a failover from Ethernet to WiFi
+  // is a new recovery, and the route is how the waiter tells one from another.
+  writeFileSync(path.join(root, "routes"), opts.defaultRoute ? `${ETH_ROUTE}\n` : "");
   stub("ip", `
 echo "ip $*" >> ${JSON.stringify(calls)}
-${opts.defaultRoute ? 'echo "default via 192.0.2.1 dev eth0"' : "true"}`);
+routes=${JSON.stringify(path.join(root, "routes"))}
+case "$*" in
+  *"route get"*)
+    # The real one answers with the route the KERNEL SELECTED for that one
+    # destination plus the source address it would use — not the table. Modelled
+    # as the first line of the table, which is the order the kernel returns
+    # routes in (by metric), and with the same "unreachable" failure when there
+    # is none.
+    dest="\${@: -1}"
+    answer="$(awk -v d="$dest" 'NR == 1 {
+      gw = ""; dev = ""; src = "";
+      for (i = 1; i < NF; i++) {
+        if ($i == "via") gw = $(i + 1);
+        if ($i == "dev") dev = $(i + 1);
+        if ($i == "src") src = $(i + 1);
+      }
+      if (dev == "") exit;
+      printf "%s", d;
+      if (gw != "") printf " via %s", gw;
+      printf " dev %s", dev;
+      if (src != "") printf " src %s", src;
+      printf " uid 0";
+    }' "$routes" 2>/dev/null)"
+    [ -n "$answer" ] || { echo "RTNETLINK answers: Network is unreachable" >&2; exit 2; }
+    echo "$answer"
+    ;;
+  *) cat "$routes" 2>/dev/null || true ;;
+esac`);
 
   stub("ping", `
 echo "ping $*" >> ${JSON.stringify(calls)}
@@ -133,9 +178,21 @@ exit ${opts.curlWorks ? 0 : 1}`);
   stub("systemctl", `
 echo "systemctl $*" >> ${JSON.stringify(calls)}
 case "$1" in
-  # try-restart is a no-op on a stopped unit and reports success either way —
-  # exactly what the real one does, and why the script uses it.
-  try-restart) exit 0 ;;
+  # try-restart is a no-op on a stopped unit and reports success for it —
+  # exactly what the real one does, and why the script uses it. It does fail on
+  # a masked unit, which is what tryRestartFails models.
+  try-restart)
+    ${opts.dropCarrierDuringRestart
+      ? `m=${JSON.stringify(path.join(root, "carrier-dropped"))}
+    if [ ! -e "$m" ]; then
+      : > "$m"
+      # The carrier really goes, and NetworkManager runs the dispatcher for it
+      # while this restart is still in flight.
+      : > ${JSON.stringify(path.join(root, "routes"))}
+      bash ${JSON.stringify(DISPATCHER)} eth0 down >/dev/null 2>&1 || true
+    fi`
+      : ""}
+    exit ${opts.tryRestartFails ? 1 : 0} ;;
   # Kept, and kept FAITHFUL, although the shipped script no longer asks this:
   # only a unit that is not installed at all goes unlisted, so a regression to
   # this question turns the masked case below red instead of quietly passing.
@@ -166,12 +223,22 @@ echo "log $*" >> ${JSON.stringify(root + "/journal.log")}`);
   // Real `sleep` would make a 120 s wait a 120 s test. It is also the only
   // hook a test has INSIDE the poll loop, which is where a second network
   // event would really arrive.
-  stub("sleep", opts.rearmMidWait
-    ? `f=${JSON.stringify(path.join(root, "run", "gateway-online-restart.rearm"))}
+  stub("sleep", [
+    opts.rearmMidWait
+      ? `f=${JSON.stringify(path.join(root, "run", "gateway-online-restart.rearm"))}
 m=${JSON.stringify(path.join(root, "rearmed"))}
-if [ ! -e "$m" ]; then : > "$m"; : > "$f"; fi
-true`
-    : "true");
+if [ ! -e "$m" ]; then : > "$m"; : > "$f"; fi`
+      : "",
+    // The link comes back while the waiter is polling — the only place a test
+    // can put an event that lands INSIDE the wait, which is where a real
+    // carrier returns.
+    opts.restoreRouteMidWait
+      ? `r=${JSON.stringify(path.join(root, "routes"))}
+m=${JSON.stringify(path.join(root, "route-restored"))}
+if [ ! -e "$m" ]; then : > "$m"; printf '%s\\n' ${JSON.stringify(ETH_ROUTE)} > "$r"; fi`
+      : "",
+    "true",
+  ].filter(Boolean).join("\n"));
   // The dispatcher launches the waiter DETACHED, so a test that let it run
   // would be racing it. Record the request instead: the dispatcher's contract
   // is that it asks and returns, and the waiter's own decisions are exercised
@@ -223,6 +290,24 @@ function journal(): string {
 
 function restarts(): number {
   return calls().split("\n").filter((l) => l.startsWith("systemctl try-restart")).length;
+}
+
+/**
+ * The box's routing table from now on, most-preferred route first — which is
+ * the order the kernel returns them in, and therefore the one it selects from.
+ * No lines at all = no route.
+ */
+function moveRoute(...lines: string[]): void {
+  writeFileSync(path.join(root, "routes"), lines.filter(Boolean).map((l) => `${l}\n`).join(""));
+}
+
+/** What `nmcli networking connectivity` answers from now on, one per call. */
+function setConnectivity(...states: string[]): void {
+  writeFileSync(path.join(root, "connectivity"), `${states.join("\n")}\n`);
+}
+
+function journalLines(needle: string): string[] {
+  return journal().split("\n").filter((l) => l.includes(needle));
 }
 
 /**
@@ -435,11 +520,15 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     expect(journal()).toContain("asked systemd to restart");
   });
 
-  it("lets one waiter hold the wait, so a flapping carrier cannot stack restarts", async () => {
+  it("lets one waiter hold the wait, so overlapping events do not stack two waits", async () => {
     // Overlapping NetworkManager events — a carrier that flaps, or eth down
-    // then wifi up — would otherwise stack several waits and fire several
-    // restarts the moment the route returned, which is its own way of tripping
-    // the account supervisor.
+    // then wifi up — would otherwise run two waits at once, each holding the
+    // box's fate for two minutes.
+    //
+    // CONCURRENCY only, which this test is careful to say: events that do not
+    // overlap take this lock one after another and every one of them used to
+    // reach the restart. Collapsing those is the coalescing describe block that
+    // follows this one, not this lock.
     makeBox({ connectivity: ["full"] });
     const lock = path.join(root, "run", "gateway-online-restart.lock");
     const holder = spawn("flock", ["-n", lock, "-c", "sleep 20"], { stdio: "ignore" });
@@ -466,6 +555,266 @@ describe("Ethernet failover does not restart the gateway into a dead network", (
     } finally {
       holder.kill();
     }
+  });
+});
+
+describe("one restart per route recovery, not one per NetworkManager event", () => {
+  it("collapses a burst of NetworkManager events into a single restart request", () => {
+    // Measured on a box: one boot produced `Ethernet 'enP8p1s0' up`,
+    // `connectivity-change FULL` and `dhcp4-change` inside the SAME SECOND, and
+    // NetworkManager runs dispatchers serially — so three waiters ran one after
+    // another, each proved the same route, and each logged
+    // `asked systemd to restart clawbox-gateway.service`. The `flock` turned
+    // none of them away (no "already pending" line anywhere in that journal):
+    // it stops two waiters waiting AT ONCE, and these did not overlap.
+    //
+    // The unit then went through three stop/start cycles, the first landing one
+    // second after it had finally reached active. The gateway did not serve
+    // until three minutes after boot and churned for five and a half, burning
+    // ~3.5 minutes of CPU re-running gateway-pre-start.sh — and every one of
+    // those bounces drops the channel accounts a restart is supposed to revive.
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+
+    runWaiter("Ethernet 'eth0' up");
+    runWaiter("NetworkManager reports full connectivity");
+    runWaiter("DHCP lease on 'eth0' changed");
+
+    expect(restarts()).toBe(1);
+    // ...and the two that stood down said so, rather than vanishing.
+    expect(journalLines("already asked for this route recovery")).toHaveLength(2);
+  });
+
+  it("does not treat NetworkManager rewriting a route's metric as a new recovery", () => {
+    // NM rewrites `metric` and `proto` on a route that has not moved (a second
+    // profile activating, a renewed lease), so a recovery cannot be keyed on
+    // the raw line: only the device and the gateway say where the traffic goes.
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+
+    runWaiter("Ethernet 'eth0' up");
+    moveRoute("default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.50 metric 700");
+    runWaiter("DHCP lease on 'eth0' changed");
+
+    expect(restarts()).toBe(1);
+  });
+
+  it("asks again when the route moved, even inside the same window", () => {
+    // A failover from Ethernet to WiFi is a NEW recovery, not a repeat of the
+    // one before it: the sockets the gateway holds are bound to the address
+    // that just died, which is GH #529's own harm. A blanket cooldown would
+    // swallow exactly that restart, so the coalescing is keyed on the route.
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+
+    runWaiter("Ethernet 'eth0' down");
+    moveRoute("default via 198.51.100.1 dev wlan0 proto dhcp src 198.51.100.20 metric 600");
+    runWaiter("WiFi 'wlan0' up");
+
+    expect(restarts()).toBe(2);
+  });
+
+  it("asks again when a lease moved only the box's own address", () => {
+    // Same interface, same gateway, new address — a DHCP NAK and re-DISCOVER,
+    // which consumer routers and guest WiFi do routinely. The dispatcher
+    // already treats it as a real change (see the lease arm below) precisely
+    // because every socket bound to the old address is dead, so the waiter must
+    // not then throw that verdict away for being "the same route".
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+
+    runWaiter("DHCP lease on 'eth0' changed");
+    moveRoute("default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.77 metric 100");
+    runWaiter("DHCP lease on 'eth0' changed");
+
+    expect(restarts()).toBe(2);
+  });
+
+  it("does not treat a second uplink appearing beside the first as a new recovery", () => {
+    // Any box with a saved WiFi profile brings up a second default route at a
+    // higher metric while Ethernet keeps the traffic. Nothing moved, so nothing
+    // is owed a restart — and a key that read the whole table would have fired
+    // one, mid-cold-start, on the SKU this whole feature exists for.
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+
+    runWaiter("Ethernet 'eth0' up");
+    moveRoute(ETH_ROUTE, "default via 198.51.100.1 dev wlan0 proto dhcp src 198.51.100.20 metric 600");
+    runWaiter("WiFi 'wlan0' up");
+
+    expect(restarts()).toBe(1);
+  });
+
+  it("asks again when it watched the route go away and come back on the same lease", () => {
+    // THE dangerous half of coalescing. A cable pulled and replugged inside the
+    // window returns on the identical lease, so "same route, recently" is true
+    // — and the sockets it killed are just as dead as ones on a new address.
+    // A waiter that polled and found no route has PROVEN an absence since the
+    // last restart, and may never stand down on it.
+    makeBox({
+      connectivity: ["none"],
+      defaultRoute: true,
+      pingWorks: true,
+      restoreRouteMidWait: true,
+    });
+
+    runWaiter("Ethernet 'eth0' up");
+    expect(restarts()).toBe(1);
+
+    // The carrier really drops: no route at all, and NM has no verdict either.
+    moveRoute();
+    // ...and it returns from inside the wait, on the very same lease.
+    runWaiter("Ethernet 'eth0' up");
+
+    expect(restarts()).toBe(2);
+    expect(journalLines("already asked for this route recovery")).toHaveLength(0);
+  });
+
+  it("never coalesces against a route the kernel could not name", () => {
+    // `nmcli` can answer `full` while `ip` cannot answer at all (an IPv6-only
+    // uplink, a transient failure). An empty key matching a recorded empty key
+    // would turn this into the blanket cooldown the route key exists to avoid.
+    makeBox({ connectivity: ["full"] });
+    moveRoute();
+
+    runWaiter("Ethernet 'eth0' up");
+    runWaiter("NetworkManager reports full connectivity");
+
+    expect(restarts()).toBe(2);
+    expect(journalLines("already asked for this route recovery")).toHaveLength(0);
+  });
+
+  it("asks again for a later recovery on the same route, once the window has passed", async () => {
+    // The other side of the same coin: a cable pulled and replugged an hour
+    // later comes back on the very same lease, and that gateway must still be
+    // restarted. The shipped window is 60 s — long enough for the whole event
+    // burst above, short enough that a genuine second recovery is not held
+    // hostage by it — so this shortens the window rather than sleeping for it.
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+    const window = { CLAWBOX_RESTART_COALESCE: "1" };
+
+    runWaiter("Ethernet 'eth0' up", window);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    runWaiter("Ethernet 'eth0' up", window);
+
+    expect(restarts()).toBe(2);
+  });
+
+  // The flap the waiter cannot see: down and up again before any waiter runs,
+  // so no waiter ever polls an absence. Only the dispatcher knows the carrier
+  // went, and it is the one that clears the record.
+  //
+  // Parameterised over BOTH uplinks on purpose. A box provisioned through its
+  // own `ClawBox-Setup` AP and joined to the customer's WiFi has no Ethernet
+  // arm to save it — its carrier drop arrives as `<radio> down` — and a clear
+  // that only Ethernet reaches leaves that box standing down on the very
+  // restart its re-association owes, which is GH #529 through the wireless
+  // door. `wlan0` is what NETWORK_INTERFACE is set to in env().
+  it.each([
+    { iface: "eth0", dispatches: 1 },
+    { iface: "wlan0", dispatches: 0 },
+  ])("forgets the last restart request when the carrier actually drops on $iface", async ({ iface, dispatches }) => {
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+    const stamp = path.join(root, "run", "gateway-online-restart.stamp");
+    runWaiter(`'${iface}' up`);
+    expect(existsSync(stamp)).toBe(true);
+
+    runDispatcher(iface, "down");
+
+    expect(existsSync(stamp)).toBe(false);
+    // ...and Ethernet still hands the failover restart to the waiter, as
+    // before. The radio's own `down` never dispatched one and must not start:
+    // the AP/profile failover below is the Ethernet arm's job.
+    if (dispatches > 0) {
+      expect(await deferredEventually(dispatches)).toHaveLength(dispatches);
+    } else {
+      // Nothing to poll FOR — `deferredEventually(0)` returns on its first
+      // iteration and would pass on a launch that simply had not landed yet.
+      // Give the launch that must not happen room to happen, then assert.
+      await new Promise((resolve) => setTimeout(resolve, 750));
+      expect(deferred()).toHaveLength(0);
+    }
+  });
+
+  it("does not forget the record when the box's own recovery AP goes down", () => {
+    // `ap-watchdog.sh` re-raises the setup AP every ~20 s while setup is
+    // incomplete, and that profile is a `shared` one with no default route — so
+    // its transitions are not carrier events and must invalidate nothing. Now
+    // that the clear sits ABOVE the interface case, the AP guard at the top of
+    // the dispatcher is the only thing standing between that watchdog and a
+    // record cleared on every cycle.
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+    const stamp = path.join(root, "run", "gateway-online-restart.stamp");
+    runWaiter("Ethernet 'eth0' up");
+    expect(existsSync(stamp)).toBe(true);
+
+    runDispatcher("wlan0", "down", { CONNECTION_ID: "ClawBox-Setup" });
+
+    expect(existsSync(stamp)).toBe(true);
+  });
+
+  it("never lets a probe target be expanded into a filename", () => {
+    // A bare `${CLAWBOX_PING_TARGETS:-…}` is word-split AND pathname-expanded,
+    // so a `*` in the value made whatever happens to be in the working
+    // directory the ping destination — and therefore the destination
+    // `ip route get` keys the whole recovery on. The waiter runs from the repo
+    // root here, which is never empty, so an expansion would be visible.
+    makeBox({ connectivity: ["portal"], defaultRoute: true, pingWorks: true });
+
+    runWaiter("Ethernet 'eth0' up", { CLAWBOX_PING_TARGETS: "*" });
+
+    const pings = calls().split("\n").filter((l) => l.startsWith("ping "));
+    expect(pings).toEqual(["ping -c 1 -W 2 *"]);
+    expect(calls()).toContain("ip -o route get *");
+    expect(restarts()).toBe(1);
+  });
+
+  it("does not put back a record the carrier drop cleared while the restart was still running", () => {
+    // `systemctl try-restart` BLOCKS for the whole restart — ~40 s on this
+    // hardware — and the record was written after it returned, stamped with the
+    // route key read BEFORE the call. So a carrier drop inside that window was
+    // cleared by the dispatcher and then immediately re-written by the waiter,
+    // and the next recovery stood down on a record for a route that had already
+    // died. Nothing else notices: the waiter the `down` event dispatches is
+    // turned away by the flock this one holds, so no poll ever proves the
+    // absence for it.
+    //
+    // The clear must therefore win over the record whatever the ordering.
+    makeBox({ connectivity: ["full"], defaultRoute: true, dropCarrierDuringRestart: true });
+    const stamp = path.join(root, "run", "gateway-online-restart.stamp");
+
+    runWaiter("Ethernet 'eth0' up");
+
+    expect(restarts()).toBe(1);
+    // The hook really fired — otherwise this test would pass by not testing.
+    expect(existsSync(path.join(root, "carrier-dropped"))).toBe(true);
+    expect(existsSync(stamp)).toBe(false);
+
+    // The carrier returns on the very same lease, well inside the window.
+    moveRoute(ETH_ROUTE);
+    runWaiter("Ethernet 'eth0' up");
+
+    expect(restarts()).toBe(2);
+    expect(journalLines("already asked for this route recovery")).toHaveLength(0);
+  });
+
+  it("keeps the record in the root-owned run directory, beside the lock", () => {
+    // Not under the clawbox-writable data/: this runs as root, so a path that
+    // user can replace with a symlink is root writing wherever it points. /run
+    // is also cleared on boot, which is what "did we already restart for this
+    // recovery" wants — the first event after a boot is never a repeat.
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+
+    runWaiter("Ethernet 'eth0' up");
+
+    expect(existsSync(path.join(root, "run", "gateway-online-restart.stamp"))).toBe(true);
+  });
+
+  it("does not record a restart it failed to ask for", () => {
+    // False success in the other direction: try-restart failing means nothing
+    // was restarted, so the next event must still be allowed to try.
+    makeBox({ connectivity: ["full"], defaultRoute: true, tryRestartFails: true });
+
+    runWaiter("Ethernet 'eth0' up");
+    runWaiter("NetworkManager reports full connectivity");
+
+    expect(restarts()).toBe(2);
+    expect(journalLines("already asked for this route recovery")).toHaveLength(0);
   });
 });
 
