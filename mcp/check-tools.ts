@@ -509,11 +509,15 @@ async function check(): Promise<void> {
     // The contract above WAS checked over every posture; what this host could
     // not do is tell you whether these particular probes work.
     const cwd = defaultSpawnCwd();
+    // The POLICY, not a claim about where each probe ran: the fallback to `/`
+    // is also taken on the spawn's own refusal, which this side never sees. A
+    // note that named this directory outright would be wrong about exactly the
+    // host it is written for — one whose root exists and cannot be entered.
     const rootNote = cwd === DEFAULT_CWD
-      ? `CLAWBOX_ROOT=${DEFAULT_CWD}`
-      : `CLAWBOX_ROOT=${DEFAULT_CWD} cannot be entered, so spawns fell back to ${cwd} and were NOT affected by it`;
+      ? `CLAWBOX_ROOT=${DEFAULT_CWD}; a directory refusal retries in /`
+      : `CLAWBOX_ROOT=${DEFAULT_CWD} cannot be entered, so the probes were NOT affected by it`;
     console.log(
-      `\nnote: probes that answered false on this host. Spawns ran in ${cwd} (${rootNote});`
+      `\nnote: probes that answered false on this host. Spawns default to ${cwd} (${rootNote});`
       + `\n      device API probes call ${API_BASE}.`
       + `\n${noteLines.join("\n")}`
       + "\n      The contract and the matrix above come from the declared postures, which are the"
