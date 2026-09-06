@@ -63,6 +63,19 @@ import { isSameOriginRequest } from "@/lib/same-origin";
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
+/**
+ * The four things POST does, as a list rather than a chain of `!==`.
+ *
+ * The value the handler uses is SELECTED OUT OF THIS ARRAY, not the body's copy
+ * of one of these words. Both spell the same four things and no request can
+ * tell them apart — but the failure line below names the action, and a string
+ * read off `request.json()` is what CodeQL reports as `js/log-injection`
+ * (TASK-723). It does not recognise `logSafe` as a barrier (the note in
+ * ai-models/configure/route.ts says so); a value that came out of a literal
+ * array is not the request's string at all.
+ */
+const ACTIONS = ["select", "voice", "language", "autoReply"] as const;
+
 function refuse(error: string, code: string, status: number) {
   return NextResponse.json({ error, code }, { status, headers: NO_STORE });
 }
@@ -455,9 +468,10 @@ export async function POST(req: Request) {
   } catch {
     return refuse("Invalid request body", "bad_request", 400);
   }
-  const { action, choice, engine, voice, language, enabled } = (body ?? {}) as Record<string, unknown>;
+  const { action: rawAction, choice, engine, voice, language, enabled } = (body ?? {}) as Record<string, unknown>;
 
-  if (action !== "select" && action !== "voice" && action !== "language" && action !== "autoReply") {
+  const action = ACTIONS.find((name) => name === rawAction);
+  if (!action) {
     return refuse("Unknown action.", "bad_request", 400);
   }
   // OWNER ONLY for the switch, and from OUR page: whether the box answers a

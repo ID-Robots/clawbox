@@ -57,9 +57,26 @@ export async function POST(request: Request) {
       { status: result.kind === "is_default" ? 409 : 404 },
     );
   }
-  // The id is one the rule just matched to a row, but it is still the body's
-  // spelling of it: one line per flip, whatever the body carried.
-  console.error(`[providers] ${logSafe(provider)} switched ${fields.enabled ? "on" : "off"} by the owner`);
+  // The id the box FLIPPED, reported back by the rule from its own row —
+  // `deepseek` in the body is `clawai` here, and that is the id an operator
+  // greps the journal for. Nothing off the REQUEST reaches the line any more,
+  // which is what clears js/log-injection (TASK-723): CodeQL does not read
+  // `logSafe` as a barrier, and the note in ai-models/configure/route.ts says
+  // so.
+  //
+  // `logSafe` STAYS, and it is now guarding a different thing. A row id is
+  // ours in the sense that the box wrote it, not in the sense that it has a
+  // shape: `provider-status.ts` pushes the prefix of
+  // `agents.defaults.model.primary` as a row of its own, and
+  // `normalizeProviderId` only trims and lowercases it — so an agent holding
+  // the MCP bearer, which may run `openclaw config set` but may not POST here,
+  // can put an embedded newline or a megabyte into that id and have the
+  // owner's next flip write it. Both of `log-safe.ts`'s rules are about the
+  // record's SHAPE rather than who chose it: one value stays one line, and one
+  // caller does not decide how much gets written. Sanitising a value that is
+  // not a taint source cannot resurrect the alert — a barrier CodeQL fails to
+  // recognise is one that never creates a finding either.
+  console.error(`[providers] ${logSafe(result.provider)} switched ${fields.enabled ? "on" : "off"} by the owner`);
 
   // DELIBERATELY no catalogue signal here, and the reason is worth writing
   // down because it looks like one is missing. This flip writes exactly one

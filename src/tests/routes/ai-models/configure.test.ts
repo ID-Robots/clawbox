@@ -49,7 +49,7 @@ vi.mock("@/lib/clawkeep", () => ({
 // providers/enabled route tests; here only the call matters.
 vi.mock("@/lib/provider-enablement", () => ({
   getDisabledProviders: async () => new Set<string>(),
-  setProviderEnabled: vi.fn(async () => ({ ok: true })),
+  setProviderEnabled: vi.fn(async (id: string) => ({ ok: true, provider: id })),
 }));
 
 // The configure route fires a catalog refresh out-of-band and deliberately does

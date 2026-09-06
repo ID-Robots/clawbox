@@ -61,14 +61,14 @@ describe("setProviderEnabled", () => {
       lib.setProviderEnabled("openrouter", false),
       lib.setProviderEnabled("gemini", false),
     ]);
-    expect(a).toEqual({ ok: true });
-    expect(b).toEqual({ ok: true });
+    expect(a).toEqual({ ok: true, provider: "openrouter" });
+    expect(b).toEqual({ ok: true, provider: "gemini" });
     expect(store.values.ai_disabled_providers).toEqual(["gemini", "openrouter"]);
   });
 
   it("switches a provider back on", async () => {
     store.values.ai_disabled_providers = ["gemini", "openrouter"];
-    expect(await lib.setProviderEnabled("gemini", true)).toEqual({ ok: true });
+    expect(await lib.setProviderEnabled("gemini", true)).toEqual({ ok: true, provider: "gemini" });
     expect(store.values.ai_disabled_providers).toEqual(["openrouter"]);
     expect(await lib.isProviderEnabled("gemini")).toBe(true);
     expect(await lib.isProviderEnabled("openrouter")).toBe(false);
@@ -90,7 +90,10 @@ describe("setProviderEnabled", () => {
     // provider, and answering "not known to this box" would leave the switch
     // stuck at whatever it was last set to.
     hiddenProviders = ["google"];
-    expect(await lib.setProviderEnabled("google", false)).toEqual({ ok: true });
+    // …and it still reports WHICH provider it flipped: the hidden ones are the
+    // one branch with no row to read the id off, so the answer comes from the
+    // unrunnable list rather than being re-stated from the caller's string.
+    expect(await lib.setProviderEnabled("google", false)).toEqual({ ok: true, provider: "google" });
     expect(store.values.ai_disabled_providers).toEqual(["google"]);
   });
 });
