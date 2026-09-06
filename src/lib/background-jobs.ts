@@ -284,10 +284,13 @@ export async function setBackgroundJob(
  * `null` is the third answer: no restart was needed at all.
  */
 export async function applyBackgroundJobRestart(harness: Harness): Promise<boolean | null> {
-  // THERE IS NO GATEWAY TO RESTART ON HERMES. `restartGateway` restarts
-  // `clawbox-gateway.service`, which is the OpenClaw half; on a Hermes box this
-  // function has nothing to act on, so `null` — "no restart was applicable" —
-  // is the only true answer it can give.
+  // RESTARTING THE OPENCLAW GATEWAY WOULD NOT CARRY A HERMES WRITE.
+  // `restartGateway` restarts `clawbox-gateway.service`, which runs the OpenClaw
+  // half — and these rows were written into the Hermes config, which that
+  // service does not read. On a DUAL box that service may well be running, so
+  // "there is nothing to restart" would be wrong; what is true on every SKU is
+  // that no restart this function can perform would apply the write. Hence
+  // `null` — "no restart was applicable" — rather than `false`.
   //
   // `null`, NOT `false`: "none was needed" and "it was tried and did not
   // happen" are different facts, and the panel renders the second as "it takes

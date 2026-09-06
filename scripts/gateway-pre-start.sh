@@ -2615,8 +2615,10 @@ unusable = record is None
 seeded = set() if unusable else record
 if unusable:
     print("  WARN: the background-job opt-out record exists but cannot be read; the check-ins"
-          " opt-out is being left alone rather than risking a re-seed over a switch the owner"
-          " has turned on", file=sys.stderr)
+          " opt-out is being SKIPPED and recorded as settled, so it will not be offered again"
+          " — an absent heartbeat cadence is also what 'switched on' looks like, and re-seeding"
+          " it could undo that. Switch check-ins off in Settings if that is what you want.",
+          file=sys.stderr)
 
 def present(path):
     node = cfg
@@ -2675,10 +2677,16 @@ path = os.environ["CLAWBOX_OPTOUT_STATE"]
 # recording of it — `sorted()` on a mixed list raises, the `if !` below turns
 # that into a WARN, and the same seed is then offered at every boot for ever.
 # Anything that is not `{"seeded": [<string>, ...]}` is replaced.
+#
+# The except list matches `read_seeded`'s deliberately. SEEDPY used to exit on an
+# unusable record, so this half never saw one; now that it continues, a record
+# whose bytes are not valid UTF-8 — the shape a power cut mid-write leaves —
+# reaches here, and the narrow guard let `UnicodeDecodeError` out as a raw
+# traceback that no boot ever repaired.
 try:
     with open(path, encoding="utf-8") as fh:
         record = json.load(fh)
-except (OSError, json.JSONDecodeError):
+except (OSError, ValueError, RecursionError):
     record = None
 rows = record.get("seeded") if isinstance(record, dict) else None
 seeded = {row for row in rows if isinstance(row, str)} if isinstance(rows, list) else set()

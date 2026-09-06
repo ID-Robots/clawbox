@@ -264,13 +264,18 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     expect(readFileSync(configPath, "utf-8")).toBe("{ broken");
     expect(calls()).toBe("");
   });
-  it.each([
+  it.each<[string, string | Buffer]>([
     ["a document that is not an object", "[1, 2]"],
     ["a `seeded` that is not a list", JSON.stringify({ seeded: 5 })],
     ["rows that are not strings", JSON.stringify({ seeded: [1, 2] })],
     ["rows that are not even hashable", JSON.stringify({ seeded: [[1]] })],
     ["a file that is not JSON at all", "{ broken"],
-    ["a file that is not even UTF-8", "\uFFFD\uFFFD binary"],
+    // REAL BYTES. `"\uFFFD"` in a source file is written out as EF BF BD, which
+    // is valid UTF-8 and decodes fine — so a case named for the decode guard
+    // was passing through `JSONDecodeError`, the branch that was already there.
+    // These are the shapes a power cut mid-write actually leaves.
+    ["a file that is not even UTF-8", Buffer.from([0xff, 0xfe, 0x00, 0x67, 0x61, 0x72, 0x62])],
+    ["a document nested past the decoder's limit", "[".repeat(200_000)],
   ])("leaves the AMBIGUOUS key alone when the record is there but unusable: %s", (_name, body) => {
     // Only STATEPY writes this file and it always writes `{"seeded": [...]}`,
     // so this needs a hand edit or a corrupted filesystem — but every one of
@@ -287,13 +292,20 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     expect(r.status).toBe(0);
     expect(at("agents.defaults.heartbeat.every")).toBeUndefined();
     expect(r.stderr).toContain("cannot be read");
+    // No traceback: BOTH readers have to survive the record, not just the first.
+    // SEEDPY used to exit on an unusable one, so the recorder never saw it;
+    // now that it continues, a record it cannot decode reached the recorder and
+    // came back as a raw Python traceback that no later boot ever repaired.
+    expect(r.stderr).not.toContain("Traceback");
+    expect(r.stderr).not.toContain("could not record");
 
     expect(at("plugins.entries.memory-core.config.dreaming.enabled")).toBe(false);
     expect(at("skills.workshop.autonomous.mode")).toBe("off");
 
     // All three are recorded as settled — including the one deliberately not
-    // written, so the next boot does not offer it either — and the record it
-    // replaces is one STATEPY had to read without raising over it.
+    // written, so the next boot does not offer it either — and the unusable
+    // record is REPLACED with a well-formed one, which is what makes the box
+    // converge instead of repeating this every boot for ever.
     expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded).toEqual([
       "agents.defaults.heartbeat.every",
       "plugins.entries.memory-core.config.dreaming.enabled",

@@ -121,9 +121,10 @@ export default function BackgroundJobsPanel() {
       if (r.ok && (body as { ok?: unknown } | null)?.ok === true && isStatus(body)) {
         setStatus(body);
         // `false` means the restart was tried and did not happen. `null` means
-        // none was needed — Hermes re-reads its config on the file's own mtime,
-        // so the next turn already obeys the write and telling the owner to
-        // wait for a restart would be false.
+        // none was applicable — see `applyBackgroundJobRestart` for which of
+        // the Hermes rows that was actually traced and which was not; the point
+        // here is only that `null` must not draw the "wait for a restart" line
+        // that `false` draws.
         setPending((body as { restarted?: boolean | null }).restarted === false ? id : null);
       } else setFailed(id);
     } catch {
