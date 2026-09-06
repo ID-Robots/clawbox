@@ -19,6 +19,7 @@ import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardSt
 import { ApprovalPrompt } from '@/lib/chat-approvals'
 import {
   APPROVAL_SESSION_EVENT,
+  applyApprovalReplay,
   applyResolveResult,
   markApprovalBusy,
   mergeApprovalCard,
@@ -694,7 +695,34 @@ const VIEWPORT_MARGIN = 8
  * this behaviour — and getting it wrong is cheap in one direction only: a miss
  * means the owner approves in Settings → Email exactly as before.
  */
-export function isEmailSendTool(name: string): boolean {
+export /**
+ * Subscribe to one session's transcript AND its approvals, and take the
+ * authoritative pending set the response carries.
+ *
+ * ONE function for BOTH subscribes on purpose. The opt-in is not sticky — the
+ * core's own protocol note says re-subscribing to the same session without
+ * `includeApprovals: true` REMOVES an existing approval subscription — so a
+ * second call that forgot the flag would turn the cards off on the next tab
+ * switch, silently, with nothing on screen to say so.
+ *
+ * Never throws: a gateway without the RPC, or a socket that has gone, leaves
+ * the chat exactly as it was.
+ */
+async function subscribeSessionWithApprovals(
+  request: (method: string, params: unknown) => Promise<unknown>,
+  key: string,
+  applyReplay: (replay: ReturnType<typeof readApprovalReplay>) => void,
+): Promise<void> {
+  try {
+    const payload = await request('sessions.messages.subscribe', sessionApprovalSubscribeParams(key))
+    applyReplay(readApprovalReplay((payload as { approvalReplay?: unknown } | null)?.approvalReplay))
+  } catch {
+    // A gateway without the RPC just means the backstop reconcile does the
+    // transcript and no approval card appears; the chat still works.
+  }
+}
+
+function isEmailSendTool(name: string): boolean {
   return /(?:^|[^A-Za-z0-9])email_send$/.test(name)
 }
 
@@ -2055,20 +2083,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // needs `operator.approvals` on a paired device, which this connect
           // frame already is — so an approve/deny card costs one flag on a call
           // that was being made anyway, and no poll.
-          void wsRequest('sessions.messages.subscribe', sessionApprovalSubscribeParams(boundKey))
-            .then((payload) => {
-              const replay = readApprovalReplay((payload as { approvalReplay?: unknown } | undefined)?.approvalReplay)
-              // The replay is authoritative only when it says so. A truncated
-              // one may not REMOVE a card we are already showing — the gateway
-              // is the truth for what is gone, and `session.approval` says so.
-              setApprovals(prev => replay.truncated
-                ? replay.cards.reduce(mergeApprovalCard, prev)
-                : replay.cards.reduce(mergeApprovalCard, prev.filter(card => card.status !== 'pending')))
-            })
-            .catch(() => {
-              // A gateway without the RPC just means we fall back to the
-              // backstop reconcile below; the chat still works.
-            })
+          void subscribeSessionWithApprovals(wsRequest, boundKey, replay => {
+            setApprovals(prev => applyApprovalReplay(prev, replay))
+          })
           // Only a provider change or a plain gateway restart gets here: those
           // are the two things that still bounce the gateway and drop this
           // socket. A skill change no longer does either, so it never raises
@@ -2868,7 +2885,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Blanks the view and marks the greet done, so an empty new tab does not
     // greet itself with an unasked-for "hi".
     clearTranscript()
-    void wsRequest('sessions.messages.subscribe', { key }).catch(() => { /* best effort */ })
+    void subscribeSessionWithApprovals(wsRequest, key, replay => {
+      setApprovals(prev => applyApprovalReplay(prev, replay))
+    })
     lastSentThinkingRef.current = undefined
     setSessionEpoch(e => e + 1)
     const stash = tabStashRef.current.get(key)

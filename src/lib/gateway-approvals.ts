@@ -280,6 +280,27 @@ export function readApprovalReplay(raw: unknown): ApprovalReplay {
   return { cards, truncated };
 }
 
+/**
+ * The cards after a subscribe's replay.
+ *
+ * AUTHORITATIVE means authoritative: an untruncated replay is the whole set of
+ * what is still open, so a pending card it does not mention is gone and is
+ * dropped. A truncated one may only ADD — it is explicitly not the whole set,
+ * and removing on it would make a card vanish with no end state, which is the
+ * failure this feature exists to remove. Terminal cards are kept either way:
+ * they are what the owner reads to learn what happened.
+ */
+export function applyApprovalReplay(
+  prev: readonly ApprovalCard[],
+  replay: ApprovalReplay,
+): ApprovalCard[] {
+  const base = replay.truncated ? prev : prev.filter((card) => card.status !== "pending");
+  return replay.cards.reduce<ApprovalCard[]>(
+    (cards, card) => mergeApprovalCard(cards, card),
+    [...base],
+  );
+}
+
 /** `next` replacing any card with the same id, or appended, order preserved. */
 export function mergeApprovalCard(
   cards: readonly ApprovalCard[],

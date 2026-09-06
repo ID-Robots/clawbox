@@ -18,6 +18,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   APPROVAL_SESSION_EVENT,
+  applyApprovalReplay,
   applyResolveResult,
   approvalIsActionable,
   markApprovalBusy,
@@ -186,6 +187,36 @@ describe("the authoritative pending set the subscribe answers with", () => {
     expect(readApprovalReplay(undefined)).toEqual({ cards: [], truncated: true });
     expect(readApprovalReplay({ approvals: "no" })).toEqual({ cards: [], truncated: true });
     expect(readApprovalReplay({ approvals: [pendingExec()], truncated: true }).truncated).toBe(true);
+  });
+});
+
+describe("what an authoritative replay is allowed to do", () => {
+  it("drops a pending card the whole set no longer mentions", () => {
+    const before = [readApproval(pendingExec())!, readApproval(pendingSystemAgent())!];
+    const after = applyApprovalReplay(before, {
+      cards: [readApproval(pendingSystemAgent())!],
+      truncated: false,
+    });
+    expect(after.map((c) => c.id)).toEqual(["system-agent:2e94af8f"]);
+  });
+
+  it("removes nothing on a replay that says it is not the whole set", () => {
+    // The gateway is the truth for what is GONE, and it says so through
+    // `session.approval`. A truncated replay removing a card would make a
+    // question vanish with no end state — the failure this whole card exists
+    // to remove.
+    const before = [readApproval(pendingExec())!, readApproval(pendingSystemAgent())!];
+    const after = applyApprovalReplay(before, { cards: [], truncated: true });
+    expect(after.map((c) => c.id)).toEqual(before.map((c) => c.id));
+  });
+
+  it("keeps what has already been answered, whatever the replay holds", () => {
+    // A terminal card is what the owner READS to learn what happened; the
+    // replay only ever carries pending rows.
+    const denied = readApproval({ ...pendingExec(), status: "denied", reason: "user" })!;
+    const after = applyApprovalReplay([denied], { cards: [], truncated: false });
+    expect(after.map((c) => c.id)).toEqual([denied.id]);
+    expect(after[0].status).toBe("denied");
   });
 });
 
