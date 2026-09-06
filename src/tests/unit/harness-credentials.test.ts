@@ -183,3 +183,65 @@ describe("the credential module stays on the server", () => {
     }
   });
 });
+
+describe("a credential the ClawBox AI proxy has refused", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    readConfig.mockReset();
+    configStoreGet.mockReset();
+  });
+
+  /** The memory, freshly imported so each case starts with none. */
+  async function memo() {
+    const mod = await import("@/lib/harness/credentials");
+    mod.resetClawaiCredentialRefusals();
+    return mod;
+  }
+
+  it("remembers the status, so the next caller says the same thing", async () => {
+    const mod = await memo();
+    expect(mod.clawaiCredentialRefused()).toBeNull();
+    mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+    expect(mod.clawaiCredentialRefused()).toBe(403);
+  });
+
+  it("is dropped the moment the credential is rewritten", async () => {
+    // What makes "re-link the device" — the instruction every refusal prints —
+    // an instruction that works.
+    const mod = await memo();
+    mod.noteClawaiCredentialRefused(401, mod.clawaiCredentialGeneration());
+    expect(mod.clawaiCredentialRefused()).toBe(401);
+    mod.forgetClawaiCredentialRefusal();
+    expect(mod.clawaiCredentialRefused()).toBeNull();
+  });
+
+  it("ignores a verdict that arrives after the credential changed", async () => {
+    // The interleaving: a request sent with the OLD token is still in flight
+    // when the owner re-links, and its 403 lands afterwards. Recording it would
+    // mute the microphone and hide the picture button on a device that was just
+    // successfully re-linked — over a credential it no longer holds.
+    const mod = await memo();
+    const inFlight = mod.clawaiCredentialGeneration();
+    mod.forgetClawaiCredentialRefusal();
+    mod.noteClawaiCredentialRefused(403, inFlight);
+    expect(mod.clawaiCredentialRefused()).toBeNull();
+
+    // A verdict from the CURRENT credential is still recorded.
+    mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+    expect(mod.clawaiCredentialRefused()).toBe(403);
+  });
+
+  it("asks for no credential to answer, and is handed none", async () => {
+    // The security property, expressed as the shape of the API rather than by
+    // rummaging in module state: nothing here takes, returns or stores the
+    // token or anything derived from it. An earlier draft keyed the memory on a
+    // SHA-256 of it, and CodeQL was right to read a credential reaching a bare
+    // digest as a password hashed without a KDF.
+    const mod = await memo();
+    expect(mod.clawaiCredentialRefused.length).toBe(0);
+    expect(mod.clawaiCredentialGeneration.length).toBe(0);
+    expect(mod.forgetClawaiCredentialRefusal.length).toBe(0);
+    // status + generation, both non-secret.
+    expect(mod.noteClawaiCredentialRefused.length).toBe(2);
+  });
+});

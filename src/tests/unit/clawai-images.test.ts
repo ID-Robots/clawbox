@@ -328,6 +328,10 @@ describe("generateClawaiImage", () => {
       { upstream: 502, body: {}, status: 502, says: /Generating the picture failed/ },
     ];
     for (const c of cases) {
+      // Each case is its own box: the 401/403 arms leave a remembered refusal
+      // behind (see "stops asking once the proxy has refused…"), and the point
+      // here is what each STATUS is translated to.
+      resetClawaiImageProbe();
       const fetchImpl = vi.fn(async () => jsonResponse(c.body, c.upstream));
       const err = await generateClawaiImage("x", { fetchImpl }).catch((e) => e);
       expect(err).toBeInstanceOf(ClawaiImageError);
@@ -337,6 +341,101 @@ describe("generateClawaiImage", () => {
       expect(err.message).not.toContain("Invalid token");
       expect(err.message).not.toContain("gpt-image-1-mini");
     }
+  });
+
+  it("stops asking once the proxy has refused this device's credential", async () => {
+    // TASK-727. The proxy answers 403 `invalid_token` to a credential it no
+    // longer accepts, and that answer cannot change while the credential does
+    // not: nothing the box can do makes the next identical request succeed.
+    // Beta asked anyway, on every trigger, forever — 6,554 refused POSTs from
+    // one box in twelve hours and ~68 per e2e-install run, all of them
+    // guaranteed 403 before they were sent.
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ error: { message: "Invalid token", code: "invalid_token" } }, 403),
+    );
+    await expect(generateClawaiImage("x", { fetchImpl })).rejects.toMatchObject({ status: 503 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // Every later attempt still FAILS, with the same actionable sentence — the
+    // customer is told the truth each time. What must not happen is another
+    // request going out to be refused again.
+    for (let i = 0; i < 20; i++) {
+      await expect(generateClawaiImage("x", { fetchImpl })).rejects.toMatchObject({
+        status: 503,
+        message: expect.stringContaining("Re-link the device"),
+      });
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps asking when the 403 did not come from the proxy", async () => {
+    // The false-failure guard, and the reason the memo reads `error.code` at
+    // all. An edge rule, a rate-limit page or an interception proxy can answer
+    // 403 to a box whose credential is perfectly good — remembering one of
+    // those would hide the picture button and tell that customer to re-pair a
+    // working device. Only the proxy's own `invalid_token` / `missing_token`
+    // is proof, so anything else costs a retry rather than a feature.
+    const edge = vi.fn(async () => new Response("<html>403 Forbidden</html>", { status: 403 }));
+    for (let i = 0; i < 3; i++) {
+      await expect(generateClawaiImage("x", { fetchImpl: edge })).rejects.toMatchObject({ status: 503 });
+    }
+    expect(edge).toHaveBeenCalledTimes(3);
+
+    // Nor does an oversized body: an edge appliance can answer a 401/403 with a
+    // full HTML page, and buffering it to look for a code we are not going to
+    // find would spend the device's memory on the answer "no".
+    const huge = vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: "invalid_token" }, padding: "x".repeat(16 * 1024) }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    ));
+    await expect(generateClawaiImage("x", { fetchImpl: huge })).rejects.toMatchObject({ status: 503 });
+    await expect(generateClawaiImage("x", { fetchImpl: huge })).rejects.toMatchObject({ status: 503 });
+    expect(huge).toHaveBeenCalledTimes(2);
+
+    // A 403 the proxy DID attribute to the credential still stops the loop,
+    // and a plan gate that answers some other code still does not.
+    const gated = vi.fn(async () => jsonResponse({ error: { code: "model_not_allowed" } }, 403));
+    await expect(generateClawaiImage("x", { fetchImpl: gated })).rejects.toMatchObject({ status: 503 });
+    await expect(generateClawaiImage("x", { fetchImpl: gated })).rejects.toMatchObject({ status: 503 });
+    expect(gated).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks again the moment the device is re-linked", async () => {
+    // The other half, and the reason the memo has a way to be cleared at all:
+    // re-linking is the fix the error message tells the customer to apply, so
+    // it has to work without a restart and without waiting out any timer. The
+    // writers call `forgetClawaiCredentialRefusal` — the same shape, and the
+    // same call sites, as `forgetProviderVerified`.
+    const refuse = vi.fn(async () => jsonResponse({ error: { code: "invalid_token" } }, 403));
+    await expect(generateClawaiImage("x", { fetchImpl: refuse })).rejects.toMatchObject({ status: 503 });
+    await expect(generateClawaiImage("x", { fetchImpl: refuse })).rejects.toMatchObject({ status: 503 });
+    expect(refuse).toHaveBeenCalledTimes(1);
+
+    linkDevice("claw_freshtoken000000000000000000");
+    (await import("@/lib/harness/credentials")).forgetClawaiCredentialRefusal();
+    const accept = vi.fn(async () => jsonResponse(imageResponse()));
+    const result = await generateClawaiImage("x", { fetchImpl: accept });
+    expect(accept).toHaveBeenCalledTimes(1);
+    expect(result.media).toContain("/setup-api/chat/media");
+  });
+
+  it("stops offering the picture button while the credential is refused", async () => {
+    // The capability is `route is up` AND `credential works`, and beta could
+    // only ever answer the first half, so a box with a dead token kept showing
+    // a button whose every press ends in the same error bubble.
+    const refuse = vi.fn(async () => jsonResponse({ error: { code: "invalid_token" } }, 403));
+    await expect(generateClawaiImage("x", { fetchImpl: refuse })).rejects.toMatchObject({ status: 503 });
+
+    const probe = vi.fn(async () =>
+      jsonResponse({ status: "ok", models: [IMAGE_MODEL], defaultModel: IMAGE_MODEL }),
+    );
+    await expect(clawaiImageRouteReachable(probe)).resolves.toBe(false);
+    expect(probe).not.toHaveBeenCalled();
+
+    // And it comes back with a working credential, without a restart.
+    linkDevice("claw_freshtoken000000000000000000");
+    (await import("@/lib/harness/credentials")).forgetClawaiCredentialRefusal();
+    await expect(clawaiImageRouteReachable(probe)).resolves.toBe(true);
   });
 
   it("gives up rather than hanging, and says which kind of failure it was", async () => {

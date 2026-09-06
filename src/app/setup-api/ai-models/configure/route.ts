@@ -80,6 +80,7 @@ import {
   openaiAuthOrder,
 } from "@/lib/chatgpt-subscription";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
+import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 import {
   isValidModelId,
   GOOGLE_MODELS,
@@ -1210,6 +1211,13 @@ async function configureClawboxAi(
   // the CLI so the credential lands in the auth store of the running
   // generation (see pasteAuthApiKey).
   await pasteAuthApiKey(CLAWBOX_AI_PROVIDER, CLAWBOX_AI_PROFILE_KEY, clawboxAiToken);
+  // The credential is now on disk, so any memory that the PROXY refused the
+  // previous one is about a token this box no longer holds. AFTER the write,
+  // not before it: a paste that threw would otherwise have re-enabled requests
+  // against the very token that was refused. This is what makes "re-link the
+  // device" — the instruction every refusal prints — take effect on the next
+  // call rather than after a timer. See src/lib/harness/credentials.ts.
+  forgetClawaiCredentialRefusal();
 
   let snapshot: OpenClawConfig | null = null;
   try {
@@ -2063,7 +2071,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         console.warn("[configure] ClawBox AI portal tier probe failed:", err);
       }
     }
-    const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
+  const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
       ? (portalConfirmedTier
           ?? requestedClawboxAiTier
           ?? normalizeClawboxAiTier(configStore[CLAWBOX_AI_TIER_CONFIG_KEY])

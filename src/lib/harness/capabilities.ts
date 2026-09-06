@@ -64,8 +64,10 @@ export interface HarnessFacts {
    *
    * They cannot be collapsed the other way round either: the proxy's discovery
    * endpoint is UNAUTHENTICATED, so it answers "is there an image service" and
-   * says nothing whatever about whether this device's token still works. See
-   * `clawaiImageRouteReachable`.
+   * says nothing whatever about whether this device's token still works. The
+   * one exception is a token the proxy has ALREADY named as invalid on a real
+   * generation — `clawaiImageRouteReachable` reports false for that, because by
+   * then it is a measured fact rather than a guess. See that function.
    */
   hasClawaiImageRoute: boolean;
   /**
@@ -162,8 +164,9 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // plain words and the agent draws it — the same shape as OpenClaw. The
       // composer path: no backend yet, but a credential to spend
       // (`hasClawaiToken`) AND somewhere to spend it (`hasClawaiImageRoute`,
-      // probed against the proxy's own discovery endpoint) put a picture
-      // button in the composer instead.
+      // probed against the proxy's own discovery endpoint, and false while the
+      // proxy has named this device's credential invalid) put a picture button
+      // in the composer instead.
       //
       // This was FALSE outright until these two paths landed. On OpenClaw a
       // picture is made by the AGENT reaching for its own image tool — the

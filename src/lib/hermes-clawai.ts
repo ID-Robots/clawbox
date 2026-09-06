@@ -28,6 +28,7 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { forgetProviderVerified } from "@/lib/provider-verified";
+import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 
 // Applying ClawBox AI to a HERMES device, in one place.
 //
@@ -268,6 +269,16 @@ export async function applyClawaiToHermes(
 
   for (const args of steps) {
     const r = await runHermesCli(args, { timeoutMs: 15_000 });
+    // The other mark ABOUT this credential, dropped the moment the new one is
+    // actually ON DISK — not before the loop, where a step that failed first
+    // would have re-enabled requests against the very token the proxy refused.
+    // The polarity is the opposite of `forgetProviderVerified` above, and so is
+    // the safe moment: that mark asserts something WORKED, so losing it early
+    // costs nothing; this one asserts something FAILED, so dropping it early
+    // costs traffic.
+    if (r.code === 0 && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
+      forgetClawaiCredentialRefusal();
+    }
     // `unset` of an absent key is a no-op; only a failing `set` is fatal.
     if (r.code !== 0 && args[1] === "set") {
       // This message is rendered verbatim in the Settings save banner (the
