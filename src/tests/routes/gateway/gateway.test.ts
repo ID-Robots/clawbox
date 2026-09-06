@@ -109,6 +109,20 @@ describe("/setup-api/gateway", () => {
     expect(html).toContain("clawbox.local");
   });
 
+  it("carries the EMAIL: directive handling the other door already has", async () => {
+    // The sibling call site of TASK-700. `serveGatewayHTML` is not the only
+    // route that hands this page to a browser, and a bare `EMAIL:<uid>` here
+    // would be the same defect one door along.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      text: () => Promise.resolve("<html><head></head><body>Gateway</body></html>"),
+    });
+    const res = await GET(new NextRequest(new URL("http://clawbox.local/setup-api/gateway")));
+    const html = await res.text();
+    expect(html).toContain("clawbox-email-card");
+    expect(html).toContain("/app/clawbox?email=");
+  });
+
   it("returns offline HTML when gateway is down", async () => {
     mockFetch.mockRejectedValue(new Error("Connection refused"));
     const req = new NextRequest(new URL("http://clawbox.local/setup-api/gateway"));

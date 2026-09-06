@@ -35,7 +35,7 @@
  * `\u2028` or `\u2029` held back from its end — `.` cannot cross those three,
  * so the engine tried every split of the spaces between the two quantifiers.
  * One character class cannot backtrack against itself. Dropping the `\s*`
- * changes nothing else: `parseUid` trims the payload before reading it.
+ * changes nothing else: `parseEmailUid` trims the payload before reading it.
  *
  * This is the shared grammar — the same change is in the OpenClaw plugin's
  * `email-directives.mjs` and the Hermes plugin's `email_directives.py`, and
@@ -89,7 +89,7 @@ export function splitEmailRefs(raw: string): SplitEmailRefs {
       kept.push(line);
       continue;
     }
-    const uid = parseUid(match[1]);
+    const uid = parseEmailUid(match[1]);
     // A directive that names nothing usable is kept as text rather than
     // silently swallowed: dropping the line would hide the fact that the agent
     // meant to point at something.
@@ -125,8 +125,16 @@ export function splitEmailRefs(raw: string): SplitEmailRefs {
   return { text, uids };
 }
 
-/** A UID, or null when the payload is not one. */
-function parseUid(payload: string): number | null {
+/**
+ * A UID, or null when the payload is not one.
+ *
+ * Exported because a directive is no longer the only way one arrives: a card on
+ * the gateway's own Control UI chat is a LINK back into this chat
+ * (`control-ui-email-directives.ts`, TASK-700), and the id it carries has to be
+ * read by the same rule the directive is read by rather than by a second one
+ * written next to `useSearchParams`.
+ */
+export function parseEmailUid(payload: string): number | null {
   const value = unwrapQuoted(payload.trim());
   // Digits only: `+7`, `7.0`, `0x1f` and `7 or so` are all model output that
   // happens to start like a number, and `Number()` would take most of them.

@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
+import { controlUiEmailDirectiveScript } from "@/lib/control-ui-email-directives";
+import * as configStore from "@/lib/config-store";
 import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
 import { envPort } from "@/lib/port-probe";
 import { readEditionSource } from "@/lib/edition-source";
@@ -71,7 +73,16 @@ export async function GET(request: NextRequest) {
         });
       })();
     </script>`;
-    html = html.replace(/<head\b[^>]*>/i, '$&' + autoConnect);
+    // The SECOND route that serves the Control UI's HTML. `serveGatewayHTML`
+    // injects the same handling for TASK-700, and a directive shown as a bare
+    // id here would be the same defect through a different door — the failure
+    // this repo keeps producing is the sibling call site, not the fix.
+    //
+    // From `<head>` the observer is what does the work: `document.body` is null
+    // this early, `scan(null)` returns, and `document.documentElement` already
+    // exists, so every node the SPA adds afterwards is still seen.
+    const emailDirectives = controlUiEmailDirectiveScript(await uiLocale());
+    html = html.replace(/<head\b[^>]*>/i, '$&' + autoConnect + emailDirectives);
     return new NextResponse(html, {
       status: 200,
       headers: {
@@ -83,6 +94,16 @@ export async function GET(request: NextRequest) {
     });
   } catch {
     return gatewayOfflineResponse(await getGatewayServiceHealth());
+  }
+}
+
+/** The language the owner picked; see the twin in `gateway-proxy.ts`. */
+async function uiLocale(): Promise<string | undefined> {
+  try {
+    const value = await configStore.get("pref:ui_language");
+    return typeof value === "string" && value ? value : undefined;
+  } catch {
+    return undefined;
   }
 }
 

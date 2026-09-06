@@ -11,6 +11,8 @@ import {
   normalizeOrigin,
   resolveOriginsPath,
 } from "./control-ui-origins";
+import { controlUiEmailDirectiveScript } from "./control-ui-email-directives";
+import * as configStore from "./config-store";
 
 const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 const OPENCLAW_CONFIG_PATH = `${
@@ -218,6 +220,24 @@ export async function getOrGenerateGatewayToken(): Promise<string | null> {
 }
 
 /**
+ * The language the owner picked, or undefined when nothing has been picked or
+ * the store cannot be read.
+ *
+ * The card injected below carries a label, and this page is the one place
+ * ClawBox draws UI it does not own — `i18n.tsx` and its provider are not loaded
+ * here. Read on the server rather than fetched by the injected script: the
+ * script would need a second request on every page load to say three words.
+ */
+async function uiLocale(): Promise<string | undefined> {
+  try {
+    const value = await configStore.get("pref:ui_language");
+    return typeof value === "string" && value ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Fetches the gateway SPA HTML and injects the ClawBox bar + auth token.
  * Used by both the root route and the catch-all gateway route.
  */
@@ -289,7 +309,16 @@ export async function serveGatewayHTML(
   }catch(e){}
 })();
 </script>`;
-    html = html.replace(/<body\b[^>]*>/i, `$&${CLAWBOX_BAR}${wsScript}`);
+    // TASK-700: the gateway's own Control UI chat is a third `webchat` surface
+    // and showed `EMAIL:<uid>` as a bare internal id. No outbound hook can
+    // separate it from ClawBox's own two chats, so the directive handling rides
+    // in with the bar — on the page ClawBox already serves and already injects
+    // into. Not gated on the owner session: the shell is served without one and
+    // an id on screen is not a credential.
+    html = html.replace(
+      /<body\b[^>]*>/i,
+      `$&${CLAWBOX_BAR}${wsScript}${controlUiEmailDirectiveScript(await uiLocale())}`,
+    );
     return new NextResponse(html, {
       status: 200,
       headers: {

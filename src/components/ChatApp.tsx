@@ -22,6 +22,8 @@ import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib
 // to lift the directive out, and sharing the pieces is what stops them drifting
 // apart again.
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
+import { parseEmailUid } from '@/lib/chat-email-refs'
+import { CONTROL_UI_EMAIL_PARAM } from '@/lib/control-ui-email-directives'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
 // Same reason, one convention over: a generated picture and a spoken reply are
 // named by a `MEDIA:` line inside the reply text rather than delivered as
@@ -142,6 +144,25 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   }, [])
 
   useEffect(() => { scrollToBottom() }, [messages, streaming, scrollToBottom])
+
+  // `?email=<uid>` opens that message on arrival.
+  //
+  // The other end of a card on the gateway's own Control UI chat (TASK-700).
+  // That page is a third `webchat` surface ClawBox serves but does not build,
+  // so its card can only be a link — and this is where the link lands, in the
+  // panel a card in this chat opens, through the same fetch. The id is read by
+  // the directive's own rule rather than a second one, so a link that names
+  // nothing usable opens nothing rather than asking the mailbox about it.
+  //
+  // Once, on mount: the owner may close the panel, and reopening it on every
+  // render would make it unclosable while the query string is still there.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const named = new URLSearchParams(window.location.search).get(CONTROL_UI_EMAIL_PARAM)
+    if (named === null) return
+    const uid = parseEmailUid(named)
+    if (uid !== null) setOpenEmailUid(uid)
+  }, [])
 
   const wsRequest = useCallback((method: string, params: unknown): Promise<unknown> => {
     return new Promise((resolve, reject) => {
