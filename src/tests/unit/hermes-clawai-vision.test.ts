@@ -21,7 +21,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const cliMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
-vi.mock("@/lib/config-store", () => ({ setMany: vi.fn() }));
+// `get` too: the link reads the owner's explicit model pick before deciding
+// what the tier badge may write (TASK-713). Nothing stored here, so the badge
+// decides, exactly as it did before the marker existed.
+vi.mock("@/lib/config-store", () => ({ setMany: vi.fn(), get: vi.fn(async () => null) }));
 // The image half of the apply writes to ~/.hermes and copies a plugin into it.
 // Neither belongs in a unit test's blast radius, and both have their own file
 // (`hermes-clawai-images.test.ts`).
