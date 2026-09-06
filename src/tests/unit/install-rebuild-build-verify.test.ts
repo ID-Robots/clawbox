@@ -148,8 +148,10 @@ interface Run {
    * "live <pid>", "stale <pid>" or "none". The reclaim in production-server.js
    * has nothing else to go on: from the park until the standalone entry is
    * written there is no `.next/standalone/server.js`, which is the only thing
-   * it looks at, and clawbox-setup is pulled back up inside that window by
-   * `clawbox-gateway.service`'s `Wants=`.
+   * it looks at, and clawbox-setup can be up inside that window — routinely so
+   * before TASK-728 removed `clawbox-gateway.service`'s `Wants=`, and still on
+   * the update that removes it (the new unit lands in post_update) or when an
+   * operator starts the web server by hand.
    */
   buildSawOwner: string;
   /** Did a stamp survive into the tree the box is left serving? */
@@ -607,11 +609,16 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
 
   it("restarts clawbox-setup rather than starting it, so a latched unit is replaced", () => {
     // `start` on an already-active unit is a no-op, and the unit CAN be active
-    // here: clawbox-gateway.service's `Wants=clawbox-setup.service` pulls it
-    // back up mid-rebuild, and its own `Restart=always` latches it onto
-    // whatever tree exists once `next build` writes the standalone entry. A
-    // `start` would then leave the box serving the build that just failed
-    // verification while this function reported a rollback.
+    // here: once anything brings it back, its own `Restart=always` latches it
+    // onto whatever tree exists from the moment `next build` writes the
+    // standalone entry. A `start` would then leave the box serving the build
+    // that just failed verification while this function reported a rollback.
+    //
+    // What brought it back routinely was clawbox-gateway.service's
+    // `Wants=clawbox-setup.service`, removed in TASK-728 — which removes the
+    // routine trigger and not the case: the new unit file only reaches a box in
+    // post_update, so the update that removes the pull still rebuilds under the
+    // old one, and an operator can start the web server by hand.
     const r = run({ build: "succeeds", identity: "drift" });
 
     expect(r.status).not.toBe(0);
@@ -723,11 +730,14 @@ describe.skipIf(process.platform !== "linux")("do_rebuild says who owns the buil
    * to `.next-old` and only then runs `bun run build`, so for the whole length
    * of the build there is no `.next/standalone/server.js` and there is a parked
    * one — the exact condition production-server.js's boot-time reclaim fires
-   * on. And clawbox-setup comes back up inside that window as a matter of
-   * routine: `config/clawbox-gateway.service` carries
-   * `Wants=clawbox-setup.service`, so every gateway (re)start starts the
+   * on. And clawbox-setup used to come back up inside that window as a matter
+   * of routine: `config/clawbox-gateway.service` carried
+   * `Wants=clawbox-setup.service`, so every gateway (re)start started the
    * service `do_rebuild` had just stopped (e2e-install run 33971129750: four
-   * seconds after the stop, while `bun install` was still running).
+   * seconds after the stop, while `bun install` was still running). TASK-728
+   * removed that line; the stamp stays, because the new unit only reaches a box
+   * in post_update — after this very rebuild — and a hand-started web server
+   * lands in the same window.
    *
    * Nothing in the tree said "a rebuild is in flight", so the reclaim could not
    * tell that state from the one it exists for — a rebuild whose shell was

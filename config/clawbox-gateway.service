@@ -1,13 +1,34 @@
 [Unit]
 Description=ClawBox OpenClaw Gateway
-# After the web server as well: memory search reaches its embedder through the
-# web server's local-AI proxy, and OpenClaw's embedding client gives a refused
-# connection three attempts inside two seconds before it answers a search
-# keyword-only and leaves the index dirty. Started side by side at boot, the
-# gateway's first sync used to lose that race every time. Wants, not Requires:
-# a web server that fails to start must not keep the agent down with it.
+# ORDERED after the web server, and deliberately not a dependency on it: memory
+# search reaches its embedder through the web server's local-AI proxy, and
+# OpenClaw's embedding client gives a refused connection three attempts inside
+# two seconds before it answers a search keyword-only and leaves the index
+# dirty. Started side by side at boot, the gateway's first sync used to lose
+# that race every time.
+#
+# `After=` alone is what fixes that race, and it is enough: clawbox-setup.service
+# carries `[Install] WantedBy=multi-user.target` and install.sh enables it, so it
+# is in every boot transaction whether or not this unit asks for it — which is
+# exactly the shape clawbox-tunnel.service, clawbox-heartbeat.service and
+# clawbox-hermes-dashboard-proxy.service already use for the same web server.
+#
+# `Wants=clawbox-setup.service` was HERE, and it made every gateway (re)start
+# start the web server too. That is the defect (TASK-728): `do_rebuild` stops
+# clawbox-setup for the length of the rebuild, and a gateway crash-looping on
+# plugin consent restarts every five seconds against a multi-minute build — so
+# the dashboard came back four seconds after the stop (e2e-install run
+# 33971129750), the update's remaining steps ran from the PRE-UPDATE build, and
+# post_update died on a polkit denial it could not have hit on the new one. It
+# also voided free_memory_for_build's memory hold, since the gateway reaches
+# ollama and llama.cpp through that same proxy, and it is what pulled the web
+# server onto the parked build the #672 guard now has to catch.
+#
+# The one case that changes is a gateway started while the web server is DOWN.
+# During a rebuild that is the outcome this exists to produce; at any other time
+# clawbox-setup is up, or coming back under its own `Restart=always`.
 After=network-online.target clawbox-setup.service
-Wants=network-online.target clawbox-setup.service
+Wants=network-online.target
 # A cold Jetson can legitimately spend up to TimeoutStartSec in
 # gateway-pre-start.sh. Keep the limiter window long enough to contain several
 # complete slow failures; inherited 5-in-10s defaults never tripped when one

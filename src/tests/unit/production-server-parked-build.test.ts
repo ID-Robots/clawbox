@@ -220,12 +220,15 @@ describe("production-server.js reclaims a parked build at boot", () => {
     // and only THEN runs `bun run build`, so for the whole length of the build
     // — minutes on a Jetson — there is no `.next/standalone/server.js` and
     // there is a parked one. That is exactly the condition this block reclaims
-    // on, and clawbox-setup is pulled back up inside that window routinely:
-    // `clawbox-gateway.service` carries `Wants=clawbox-setup.service`, so every
-    // gateway (re)start starts the service `do_rebuild` had just stopped (seen
-    // in e2e-install run 33971129750, four seconds after the stop). Reclaiming
-    // there `rm -rf`s the half-written build out from under `next build` and
-    // renames the previous one on top of it.
+    // on, and clawbox-setup used to be pulled back up inside that window
+    // routinely: `clawbox-gateway.service` carried `Wants=clawbox-setup.service`,
+    // so every gateway (re)start started the service `do_rebuild` had just
+    // stopped (seen in e2e-install run 33971129750, four seconds after the
+    // stop). TASK-728 removed that line — which removes the routine trigger and
+    // not the case, since the new unit only reaches a box in post_update and an
+    // operator can start the web server by hand. Reclaiming there `rm -rf`s the
+    // half-written build out from under `next build` and renames the previous
+    // one on top of it.
     const kept = path.join(projectDir, ".next-old");
     writeBuild(kept, "parked-build-id");
     writeFileSync(path.join(kept, OWNER_STAMP), ownerStamp(process.pid), "utf-8");
