@@ -352,9 +352,12 @@ describe("CodingAgentApp", () => {
       // A bare folder name, resolved inside the folder the owner just chose on
       // the previous step — not a code project under data/.
       expect((run!.body as { directory: string }).directory).toBe("harness-test");
-      // ...and setup completes, so the owner lands on the home page with the
-      // run already in flight — which is where its progress is shown.
+      // ...and setup completes, landing the owner on the RUN's page with it
+      // already in flight — not on home, where the run was a dot in the rail
+      // (the wizard sweep, 2026-09-06).
       await waitFor(() => expect(posts.at(-1)!.body).toEqual({ setupComplete: true }));
+      expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-smoke001");
+      expect(screen.queryByTestId("coding-agent-wizard")).toBeNull();
     });
   });
 
@@ -786,6 +789,96 @@ describe("CodingAgentApp", () => {
         fireEvent.click(within(sidebar).getByTestId("coding-agent-sidebar-home"));
         expect(screen.queryByTestId("coding-agent-run-page")).toBeNull();
       } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("keeps a held run at the top of the sidebar however many newer runs there are", async () => {
+      // A review pass paused one evening was, a dozen newer runs later,
+      // listed nowhere: its folder gone (so no project row), and the rail
+      // shows the newest twelve. A run waiting on the owner is never out of
+      // sight — held runs come first, whatever their age.
+      const RO = class {
+        private cb: ResizeObserverCallback;
+        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+        unobserve() {}
+        disconnect() {}
+      };
+      vi.stubGlobal("ResizeObserver", RO);
+      try {
+        const newer = Array.from({ length: 14 }, (_, i) => ({ ...RUN, id: `run-newer${String(i).padStart(3, "0")}`, task: `Newer task ${i}`, startedAt: 2_000 + i }));
+        const paused = { ...RUN, id: "run-oldpause", task: "Paused long ago", status: "paused", completedAt: 900, startedAt: 800, directory: "/home/clawbox/Projects/gone", projectId: null };
+        stubFetch({ enabled: true, readiness: READY }, [...newer, paused], { projects: [SITE_PROJECT] });
+        render(<CodingAgentApp />);
+        const sidebar = await screen.findByTestId("coding-agent-sidebar");
+        const buttons = within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button");
+        // The paused run, then the twelve newest settled ones: the cap is theirs.
+        expect(buttons).toHaveLength(1 + 12);
+        expect(buttons[0]).toHaveTextContent("Paused long ago");
+        // …and opens its page, where Resume and Stop are.
+        fireEvent.click(buttons[0]);
+        expect(await screen.findByTestId("coding-agent-run-page")).toHaveAttribute("data-run-id", "run-oldpause");
+        expect(screen.getByTestId("coding-agent-resume-run-oldpause")).toBeInTheDocument();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("never hides a held run behind the rail's cap — the cap is the settled runs' alone", async () => {
+      const RO = class {
+        private cb: ResizeObserverCallback;
+        constructor(cb: ResizeObserverCallback) { this.cb = cb; }
+        observe(el: Element) { this.cb([{ contentRect: { width: 1200 } } as ResizeObserverEntry], this as unknown as ResizeObserver); void el; }
+        unobserve() {}
+        disconnect() {}
+      };
+      vi.stubGlobal("ResizeObserver", RO);
+      try {
+        const held = Array.from({ length: 14 }, (_, i) => ({ ...RUN, id: `run-held${String(i).padStart(4, "0")}`, task: `Held task ${i}`, status: "draft", completedAt: null, startedAt: 5_000 + i }));
+        const settled = Array.from({ length: 15 }, (_, i) => ({ ...RUN, id: `run-done${String(i).padStart(4, "0")}`, task: `Done task ${i}`, startedAt: 1_000 + i }));
+        stubFetch({ enabled: true, readiness: READY }, [...held, ...settled], { projects: [SITE_PROJECT] });
+        render(<CodingAgentApp />);
+        const sidebar = await screen.findByTestId("coding-agent-sidebar");
+        const labels = within(await within(sidebar).findByTestId("coding-agent-sidebar-runs")).getAllByRole("button").map((b) => b.textContent);
+        // All fourteen held runs, then twelve settled ones.
+        expect(labels).toHaveLength(14 + 12);
+        expect(labels.slice(0, 14).every((l) => l?.includes("Held task"))).toBe(true);
+        expect(labels.slice(14).every((l) => l?.includes("Done task"))).toBe(true);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("draws a refused action's sentence above the run's page, and brings it on screen", async () => {
+      // Drawn under the whole page, a refused Resume sat below the timeline,
+      // the summary and the evidence, off the screen the owner had just
+      // clicked on — nothing appeared to happen (2026-09-06).
+      const paused = { ...RUN, id: "run-paused02", status: "paused", completedAt: 900 };
+      stubFetch({ enabled: true, readiness: READY }, [paused], { projects: [SITE_PROJECT] });
+      const inner = globalThis.fetch;
+      const sentence = "The folder this run worked in is gone (/home/clawbox/Projects/gone), so it cannot be resumed. Start a new run instead.";
+      vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => (
+        input.toString() === "/setup-api/coding-agent/resume"
+          ? new Response(JSON.stringify({ error: sentence, kind: "not_found" }), { status: 404, headers: { "content-type": "application/json" } })
+          : inner(input, init)
+      )));
+      const scrolled = vi.fn();
+      Element.prototype.scrollIntoView = scrolled;
+      try {
+        render(<CodingAgentApp />);
+        await openRuns();
+        fireEvent.click(await screen.findByTestId("coding-agent-details-run-paused02"));
+        const page = await screen.findByTestId("coding-agent-run-page");
+        fireEvent.click(within(page).getByTestId("coding-agent-resume-run-paused02"));
+
+        const banner = await screen.findByTestId("coding-agent-action-error");
+        expect(banner).toHaveTextContent(sentence);
+        // Above the page's content in document order, not after it.
+        expect(banner.compareDocumentPosition(page) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(scrolled).toHaveBeenCalled();
+      } finally {
+        delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
         vi.unstubAllGlobals();
       }
     });

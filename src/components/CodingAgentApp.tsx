@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
-import { isLive, isSettled, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { isHeld, isLive, isSettled, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
@@ -380,6 +380,13 @@ export default function CodingAgentApp() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The refused action's sentence is drawn at the TOP of the page (see where
+  // it is rendered) and brought on screen when it appears: a control pressed
+  // far down a long list is no closer to the top than it was to the bottom.
+  const errorRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (error) errorRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [error]);
   /** The run whose own page is open — a page now, not a row that unfolds. */
   const [openRunId, setOpenRunId] = useState<string | null>(null);
   // The run whose page is in Live view — the browser it drives over its
@@ -849,6 +856,20 @@ export default function CodingAgentApp() {
   const visibleRuns = useMemo(() => (
     openProject ? runs.filter((r) => runBelongsTo(r, openProject)) : []
   ), [runs, openProject]);
+  /**
+   * The rail's recent runs: EVERY held run — running, paused, drafted —
+   * whatever its age, ahead of the newest SIDEBAR_RUNS settled ones. A run
+   * waiting on the owner is never out of sight: a review pass paused one
+   * evening was, a dozen newer runs later, listed nowhere (its folder gone,
+   * so no project row either), with its Resume and Stop unreachable. The
+   * cap is the settled runs' alone, so a thirteenth held run is not hidden
+   * by the twelve before it either.
+   */
+  const sidebarRuns = useMemo(() => {
+    const held = runs.filter((r) => isHeld(r.status));
+    const settled = runs.filter((r) => !isHeld(r.status));
+    return [...held, ...settled.slice(0, SIDEBAR_RUNS)];
+  }, [runs]);
   /**
    * Which face the window shows. Three, exclusive: the settings page sits
    * over whichever project was open, and the project face carries its
@@ -1325,7 +1346,7 @@ export default function CodingAgentApp() {
             <div className="px-3 pt-3 pb-4">
               <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{t("codingAgent.recentRuns")}</p>
               <ul className="space-y-0.5" data-testid="coding-agent-sidebar-runs">
-                {runs.slice(0, SIDEBAR_RUNS).map((run) => {
+                {sidebarRuns.map((run) => {
                   const active = view.face === "run" && view.run.id === run.id;
                   const tone = RUN_TONE[run.status];
                   return (
@@ -1426,6 +1447,19 @@ export default function CodingAgentApp() {
         </div>
         )}
 
+        {/* A refused action's sentence, ABOVE the page rather than under it.
+            Drawn at the bottom of the panel, a refused Resume on a run's page
+            sat below the timeline, the summary and the evidence — off the
+            screen the owner had just clicked on, so nothing appeared to
+            happen (the review pass paused in a folder that had since been
+            deleted, 2026-09-06). Here it is the first thing on whichever
+            face is up, and errorRef brings it on screen besides. */}
+        {error && (
+          <div ref={errorRef} className="mt-3" data-testid="coding-agent-action-error">
+            <StatusMessage type="error" message={error} />
+          </div>
+        )}
+
         {view.face === "settings" && (<>
           <CodingAgentBreadcrumb
             crumbs={[
@@ -1498,8 +1532,14 @@ export default function CodingAgentApp() {
             status={status}
             // The wizard writes through the same routes this window reads, so
             // finishing is just "read yourself again": the flag comes back
-            // true and the face flips to home.
-            onDone={() => { void load(); }}
+            // true and the face flips to home — or to the harness run's own
+            // page when the owner pressed "Try it once", which is where what
+            // they were promised (Claude Code starting, writing, reporting
+            // back) is actually shown.
+            onDone={(runId) => {
+              if (runId) { setOpenProjectDir(null); setOpenRunId(runId); }
+              void load();
+            }}
           />
         )}
 
@@ -2371,7 +2411,6 @@ export default function CodingAgentApp() {
           </>);
         })()}
 
-        {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
       </div>
       </div>
 
