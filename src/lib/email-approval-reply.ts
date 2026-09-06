@@ -26,6 +26,16 @@
 // stays exactly as it was: the surface with a BUTTON, for an owner who wants
 // one, and the fallback when a reply cannot be routed.
 //
+// ON BY DEFAULT, and that is deliberate — the one place this differs from its
+// sibling, whose comment says "OFF unless the owner turned it on". The sibling
+// is off because it cannot work until the owner has been to BotFather; this
+// needs nothing, and the owner's ask was that it simply work ("when I tell it
+// in Telegram to send, it will send", 2026-09-04). It also asks for no new
+// consent: it speaks only about a draft, and a draft exists only because the
+// owner turned on "ask me before sending" — which is a request to be asked.
+// The one thing it does that the desktop toast does not is put the draft's TEXT
+// in his Telegram, which is where he already talks to this box.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 // WHAT AUTHORISES A SEND HERE, AND WHAT DELIBERATELY DOES NOT
 //
