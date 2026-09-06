@@ -3,7 +3,7 @@
  * browser page) so happy-path tests can exercise the full install/setup
  * lifecycle without needing a full graphical session.
  */
-import { BASE_URL } from "./container";
+import { BASE_URL, dockerExec } from "./container";
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -377,14 +377,71 @@ export const getGatewayHealth = () =>
  * Returns the final state. Tolerates transient fetch failures with
  * `maxConsecutiveFetchErrors` so a service restart doesn't abort the wait.
  */
+/**
+ * "Nothing has started" — the state a box reports when no update was ever asked
+ * for.
+ *
+ * It is also, before TASK-731, what a box reported when an update HAD been
+ * asked for and the web server that was running it was replaced: the step
+ * list's position lived only in that process, and the next one released the
+ * update lock and answered this. Six e2e-install runs polled it for the whole
+ * 45-minute budget.
+ */
+function looksUnstarted(state: UpdateState): boolean {
+  return (
+    state.phase === "idle"
+    && state.currentStepIndex < 0
+    && state.steps.length > 0
+    && state.steps.every((step) => step.status === "pending")
+  );
+}
+
+/** What the container can say about a run that vanished. Never throws. */
+async function diagnoseLostUpdate(): Promise<string> {
+  const parts: string[] = [];
+  const ask = async (label: string, cmd: string[]) => {
+    try {
+      parts.push(`${label}:\n${(await dockerExec(cmd, { user: "root" })).trim()}`);
+    } catch (err) {
+      parts.push(`${label}: could not be read (${err instanceof Error ? err.message : String(err)})`);
+    }
+  };
+  // How many times the web server has been (re)started, and when: an update
+  // whose process was replaced shows a restart between the POST and now.
+  await ask("clawbox-setup.service", [
+    "systemctl", "show", "clawbox-setup.service",
+    "-p", "NRestarts", "-p", "ActiveEnterTimestamp", "-p", "ExecMainStartTimestamp", "-p", "Result",
+  ]);
+  await ask("the update lock and continuation flag on disk", [
+    "bash", "-lc",
+    "python3 -c \"import json;d=json.load(open('/home/clawbox/clawbox/data/config.json'));"
+    + "print({k:d.get(k) for k in ('update_in_progress','update_needs_continuation')})\" 2>&1 || true",
+  ]);
+  await ask("the last 40 web-server journal lines", [
+    "bash", "-lc", "journalctl -u clawbox-setup.service -n 40 --no-pager 2>&1 || true",
+  ]);
+  await ask("root update steps this boot", [
+    "bash", "-lc", "journalctl -u 'clawbox-root-update@*' -n 40 --no-pager 2>&1 || true",
+  ]);
+  return parts.join("\n\n");
+}
+
 export async function waitForUpdate(
-  opts: { timeoutMs?: number; maxConsecutiveFetchErrors?: number } = {},
+  opts: { timeoutMs?: number; maxConsecutiveFetchErrors?: number; unstartedBudgetMs?: number } = {},
 ): Promise<UpdateState> {
   const timeoutMs = opts.timeoutMs ?? 20 * 60_000;
   const maxConsecutiveFetchErrors = opts.maxConsecutiveFetchErrors ?? 60; // ~3min downtime
+  // How long a state that says "nothing has started" is tolerated before it is
+  // called what it is. It is legitimate only briefly — a web server that has
+  // just come back answers it until `checkContinuation()` resumes the second
+  // half, which is one poll later — so two minutes is generous by a wide
+  // margin, and it replaces a 45-minute wait for a state machine that cannot
+  // move.
+  const unstartedBudgetMs = opts.unstartedBudgetMs ?? 120_000;
   const deadline = Date.now() + timeoutMs;
   let consecutiveErrors = 0;
   let lastState: UpdateState | null = null;
+  let unstartedSince: number | null = null;
   while (Date.now() < deadline) {
     try {
       const state = await getUpdateStatus();
@@ -393,7 +450,22 @@ export async function waitForUpdate(
       if (state.phase === "completed" || state.phase === "failed") {
         return state;
       }
-    } catch {
+      if (looksUnstarted(state)) {
+        unstartedSince ??= Date.now();
+        if (Date.now() - unstartedSince > unstartedBudgetMs) {
+          throw new Error(
+            `the update was accepted but never started: the box has reported "nothing is running" for `
+            + `${Math.round((Date.now() - unstartedSince) / 1000)}s. This is the TASK-731 shape — the web `
+            + `server that owned the run was replaced, and its successor had nothing to resume.\n`
+            + `last state: ${JSON.stringify(lastState)}\n\n${await diagnoseLostUpdate()}`,
+          );
+        }
+      } else {
+        unstartedSince = null;
+      }
+    } catch (err) {
+      // Our own verdict is not a fetch failure; it must not be counted as one.
+      if (err instanceof Error && err.message.startsWith("the update was accepted")) throw err;
       consecutiveErrors += 1;
       if (consecutiveErrors > maxConsecutiveFetchErrors) {
         throw new Error(`update status unreachable for ${consecutiveErrors * 3}s — giving up`);
@@ -401,7 +473,10 @@ export async function waitForUpdate(
     }
     await new Promise((r) => setTimeout(r, 3_000));
   }
-  throw new Error(`update did not complete within ${timeoutMs}ms; last state: ${JSON.stringify(lastState)}`);
+  throw new Error(
+    `update did not complete within ${timeoutMs}ms; last state: ${JSON.stringify(lastState)}`
+    + `\n\n${await diagnoseLostUpdate()}`,
+  );
 }
 
 // ── Tunnel (Cloudflare quick-tunnel) ─────────────────────────────────

@@ -17,7 +17,7 @@ import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
-import { setUpdateLock, clearUpdateLock } from "./update-lock";
+import { setUpdateLock, clearUpdateLock, isUpdateLocked } from "./update-lock";
 import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
@@ -2793,7 +2793,38 @@ async function resumeContinuation(): Promise<boolean> {
     // continuation flag would otherwise leave the desktop locked with nothing
     // left to unlock it — there is no update to resume, so there is no lock to
     // hold. This is the one release path that does not follow a finished run.
+    //
+    // But releasing the lock is only half an answer, and the missing half is
+    // TASK-731. The lock is on disk and the step list is not: an update whose
+    // web server was replaced between `startUpdate()` (which sets the lock at
+    // the top of runUpdate) and the rebuild step (which writes the continuation
+    // flag) leaves the lock held and nothing to resume. This branch then
+    // cleared it and answered IDLE — indistinguishable from a box nobody ever
+    // asked to update, over a run that had been accepted with
+    // `{ started: true }`. Six e2e-install sightings of exactly that:
+    // `phase: idle, currentStepIndex -1`, every step pending, while the
+    // checkout had already moved to the new commit — and the harness then
+    // polled a state machine that could not move for the whole 45-minute
+    // budget.
+    //
+    // The lock IS the evidence, so it is read before it is cleared: held with
+    // nothing to resume means an update was interrupted, and that is reported
+    // as a failure rather than as silence. Nothing can be resumed — the
+    // position in the step list was only ever in the dead process's memory —
+    // so the honest outcome is a named failure the owner (or the harness) can
+    // act on immediately.
+    const wasInterrupted = await isUpdateLocked();
     await clearUpdateLock();
+    if (wasInterrupted) {
+      const message =
+        "The update was interrupted before it could finish: the web server was replaced while it ran, "
+        + "and no step is left to resume. Nothing was rolled back — start the update again.";
+      state = createInitialState(applicableSteps());
+      state.warnings = await restoreWarnings();
+      state.phase = "failed";
+      state.error = message;
+      console.error(`[Updater] ${message}`);
+    }
     return false;
   }
 
