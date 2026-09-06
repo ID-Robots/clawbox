@@ -294,23 +294,35 @@ describe("before_dispatch — the owner's approval reply", () => {
     expect(calls[0].init.headers).toMatchObject({ authorization: `Bearer ${TOKEN}` });
     // The surface and the harness travel with it: the allowlist ClawBox weighs
     // the sender against is Telegram's, and on a dual box it is THIS harness's.
-    // `deliverVerdict` is on so a timeout can be claimed safely — see the hook.
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
       senderId: "6001",
       text: "send AB2CD",
       channel: "telegram",
       harness: "openclaw",
-      deliverVerdict: true,
     });
-    expect(result).toEqual({ handled: true, text: "Sent to 1 recipient(s)." });
+    // The claim carries NO text even though this hook could: ClawBox posts the
+    // verdict itself, and a second copy here would be two messages for one
+    // approval — on the fast path only, which is worse than either.
+    expect(result).toEqual({ handled: true });
   });
 
-  it("claims without text when ClawBox sent none", async () => {
-    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
-    stubClawbox({ handled: true });
-    expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" })).toEqual({
-      handled: true,
-    });
+  it("refuses a token that is not token-shaped rather than putting it in a header", async () => {
+    // The bearer is read off disk and interpolated into an Authorization
+    // header, so a stray CR would be header injection.
+    //
+    // A FRESH MODULE, because the plugin caches the first token it reads for
+    // the life of the gateway process — which is the behaviour, and which every
+    // test above has already primed.
+    process.env.CLAWBOX_MCP_TOKEN = `${"t".repeat(20)}\r\nX-Evil: 1`;
+    const calls = stubClawbox({ handled: true });
+    vi.resetModules();
+    const fresh = (await import("../../../scripts/openclaw-plugins/clawbox-email-directives/email-approvals.mjs")) as {
+      onBeforeDispatch: typeof onBeforeDispatch;
+    };
+    expect(
+      await fresh.onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+    ).toBeUndefined();
+    expect(calls).toHaveLength(0);
   });
 
   it("leaves the message to the agent on every not-ours answer", async () => {

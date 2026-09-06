@@ -167,6 +167,32 @@ describe("the question", () => {
     expect(vi.mocked(ownerSend.sendOwnerTelegramText)).not.toHaveBeenCalled();
   });
 
+  it("stops rather than adding to a wait the caller has already spent", async () => {
+    // Two fan-outs live inside email_send's 60 s budget and this is the second.
+    // A deadline already past means nothing is attempted at all — the draft is
+    // on disk either way, and a caller that times out over a queued draft is
+    // the false failure this bound exists to stop.
+    const outcome = await reply.offerReplyApproval(queueDraft(), Date.now() - 1);
+    expect(outcome.kind).toBe("failed");
+    expect(vi.mocked(ownerSend.sendOwnerTelegramText)).not.toHaveBeenCalled();
+  });
+
+  it("stops the fan-out part way when the clock runs out", async () => {
+    const openclaw = await import("@/lib/openclaw-config");
+    vi.mocked(openclaw.readTelegramAllowFrom).mockResolvedValue(["6001", "6002", "6003"]);
+    // The first send eats the budget; the two after it must not be started.
+    const deadline = Date.now() + 40;
+    vi.mocked(ownerSend.sendOwnerTelegramText).mockImplementation(async () => {
+      while (Date.now() < deadline) { /* burn the budget the way a slow request would */ }
+      return true;
+    });
+
+    const outcome = await reply.offerReplyApproval(queueDraft(), deadline);
+
+    expect(outcome.kind).toBe("offered");
+    expect(vi.mocked(ownerSend.sendOwnerTelegramText)).toHaveBeenCalledTimes(1);
+  });
+
   it("says so when nobody is paired, instead of issuing a code nobody has", async () => {
     const openclaw = await import("@/lib/openclaw-config");
     vi.mocked(openclaw.readTelegramAllowFrom).mockResolvedValue([]);
@@ -268,7 +294,6 @@ describe("who may say send", () => {
       senderId: "7002",
       text: `send ${offer.code}`,
       harness: "hermes",
-      deliverVerdict: true,
     });
     expect(settled.handled).toBe(true);
     // ...and the verdict goes back on the Hermes bot.
@@ -309,32 +334,20 @@ describe("delete", () => {
 // ── Telling the person what happened ─────────────────────────────────────────
 
 describe("the verdict", () => {
-  it("goes to whoever answered, when the caller cannot render it itself", async () => {
-    const { code } = await offered();
-    vi.mocked(ownerSend.sendOwnerTelegramText).mockClear();
-
-    const result = await reply.applyReplyApproval({
-      senderId: OWNER,
-      text: `send ${code}`,
-      deliverVerdict: true,
-    });
-
-    expect(result.handled).toBe(true);
-    // Exactly one message, to the person who typed — not a fan-out to the
-    // household about a decision one of them made.
-    expect(vi.mocked(ownerSend.sendOwnerTelegramText).mock.calls).toEqual([
-      [OWNER, result.reply, undefined],
-    ]);
-  });
-
-  it("is returned rather than posted when the caller renders replies", async () => {
+  it("goes to whoever answered, exactly once", async () => {
     const { code } = await offered();
     vi.mocked(ownerSend.sendOwnerTelegramText).mockClear();
 
     const result = await reply.applyReplyApproval({ senderId: OWNER, text: `send ${code}` });
 
+    expect(result.handled).toBe(true);
     expect(result.reply).toContain("Sent to 1 recipient");
-    expect(vi.mocked(ownerSend.sendOwnerTelegramText)).not.toHaveBeenCalled();
+    // ONE message, to the person who typed — not a fan-out to the household
+    // about a decision one of them made, and not a second copy beside a hook
+    // that could have rendered it in-thread.
+    expect(vi.mocked(ownerSend.sendOwnerTelegramText).mock.calls).toEqual([
+      [OWNER, result.reply, undefined],
+    ]);
   });
 });
 
@@ -422,6 +435,14 @@ describe("parseApprovalReply", () => {
     for (const text of ["delete AB2CD", "deny AB2CD", "no AB2CD", "cancel AB2CD"]) {
       expect(reply.parseApprovalReply(text)).toEqual({ verb: "reject", code: "AB2CD" });
     }
+  });
+
+  it("will not walk a message that cannot possibly be one", () => {
+    // The route has no body limit of its own and this runs before the attempt
+    // budget, so the cheapest check comes first.
+    expect(reply.parseApprovalReply(`send ${"A".repeat(300)}`)).toBeNull();
+    expect(reply.parseApprovalReply("x".repeat(reply.MAX_REPLY_CHARS + 1))).toBeNull();
+    expect(reply.parseApprovalReply(`${" ".repeat(200)}send AB2CD`)).toEqual({ verb: "approve", code: "AB2CD" });
   });
 
   it("refuses anything that is not exactly a verb and a code", () => {

@@ -72,7 +72,10 @@ export const APPROVAL_SHAPE = new RegExp(`^(?:${APPROVAL_WORDS.join("|")})[ \\t]
  */
 export function looksLikeApproval(text) {
   if (typeof text !== "string") return false;
-  return APPROVAL_SHAPE.test(text.replace(/^[\ufeff\s]+|[\ufeff\s]+$/g, ""));
+  // A single-character global replace plus the engine's own trim: an
+  // anchored-at-the-end run of a character class is the polynomial-ReDoS shape,
+  // and this runs on every inbound message on every channel.
+  return APPROVAL_SHAPE.test(text.replace(/\ufeff/g, "").trim());
 }
 
 /**
@@ -89,6 +92,18 @@ const TIMEOUT_MS = 120_000;
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const MIN_TOKEN_LEN = 16;
+
+/**
+ * What a bearer may be made of.
+ *
+ * The token is read off disk and interpolated into an `Authorization` header,
+ * so its charset is load-bearing twice over: a stray CR or LF would be header
+ * injection, and CodeQL rightly flags file data reaching an outbound request
+ * (`js/file-access-to-http`) unless the value is rebuilt from characters a
+ * pattern allows. `src/lib/mcp-token.ts` mints hex, so this is wide enough for
+ * anything token-shaped and narrow enough to be a sanitizer.
+ */
+const TOKEN_RE = /^([A-Za-z0-9._~+/=-]{16,512})$/;
 
 let cachedToken = null;
 
@@ -145,7 +160,7 @@ function contentOf(event) {
 }
 
 /**
- * `{ handled: true, text }` when ClawBox settled a draft, `undefined` otherwise.
+ * `{ handled: true }` when ClawBox settled a draft, `undefined` otherwise.
  *
  * `undefined` and not `{ handled: false }`: the dispatcher reads a falsy result
  * as "this handler had no opinion", which is exactly what every path but a
@@ -159,20 +174,26 @@ function contentOf(event) {
  * from every other unhappy answer, which is not.
  */
 async function ask(token, body) {
+  // Rebuilt from the match, never tested and passed through — see TOKEN_RE.
+  const matched = TOKEN_RE.exec(token.trim());
+  if (!matched) return { status: 0, claim: undefined };
   const res = await fetch(`${API_BASE}/setup-api/email/chat-reply`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    headers: { "content-type": "application/json", authorization: `Bearer ${matched[1]}` },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) return { status: res.status, claim: undefined };
   const answer = await res.json();
   if (!answer || answer.handled !== true) return { status: res.status, claim: undefined };
-  const claim =
-    typeof answer.reply === "string" && answer.reply
-      ? { handled: true, text: answer.reply }
-      : { handled: true };
-  return { status: res.status, claim };
+  // A CLAIM WITH NO TEXT, even though this hook could carry one. ClawBox posts
+  // the verdict itself, so answering here as well would give the owner two
+  // messages for one approval — and it has to be ClawBox either way, because a
+  // hook that TIMED OUT has to claim the message silently (the mail may already
+  // be going) and cannot say anything at all. One path is the only way both
+  // editions and both timings say the same thing once. `answer.reply` is read
+  // by nothing here on purpose.
+  return { status: res.status, claim: { handled: true } };
 }
 
 /**
@@ -200,14 +221,7 @@ export async function onBeforeDispatch(event, ctx) {
   const token = apiToken();
   if (!token) return undefined;
 
-  // `deliverVerdict` ON, and not because this hook cannot answer for itself —
-  // it can, through the claim's `text`, in the thread the owner typed in. It is
-  // because of the TIMEOUT case below: when ClawBox takes longer than the
-  // ceiling the mail may already be going out, and the only honest thing this
-  // hook can then do is claim the message and say nothing. That is safe only if
-  // ClawBox is the one telling the owner what happened, so it always does, and
-  // the fast path simply says it twice — once here, once from the box.
-  const body = { senderId, text, channel, harness: "openclaw", deliverVerdict: true };
+  const body = { senderId, text, channel, harness: "openclaw" };
 
   try {
     let answer = await ask(token, body);

@@ -273,14 +273,13 @@ d("pre_gateway_dispatch — the owner's approval reply", () => {
     // owner would type his code and hear nothing back at all.
     // The surface and the harness travel with it: the allowlist ClawBox weighs
     // the sender against is Telegram's, and on a dual box it is THIS harness's.
-    // `deliverVerdict` is on because a `skip` carries no text — without it the
-    // owner would type his code and hear nothing at all.
+    // Nothing asks for the verdict — ClawBox posts it on both editions, which
+    // is what lets a timeout be claimed silently.
     expect(calls[0].body).toEqual({
       senderId: "6001",
       text: "send AB2CD",
       channel: "telegram",
       harness: "hermes",
-      deliverVerdict: true,
     });
     // `skip` and not `allow`: `allow` BREAKS the call site's loop over the
     // other plugins' results.

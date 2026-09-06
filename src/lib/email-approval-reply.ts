@@ -96,6 +96,23 @@ import { sendOwnerTelegramText } from "@/lib/telegram-owner-send";
  */
 const MAX_NOTICE_CHATS = 5;
 
+/**
+ * How long the fan-out may take, measured from the moment `email_send` began
+ * asking anyone.
+ *
+ * `email_send` waits 60 s for this whole request (mcp/lib/api.ts) and TWO
+ * fan-outs can happen inside it: the approvals bot's, then this one when that
+ * one delivered nothing. Serially, five chats each with their own per-request
+ * timeouts, they can outlast the caller — and a caller that times out over a
+ * draft that WAS queued is the false failure this subtree keeps producing.
+ *
+ * So the send route starts a clock before the first fan-out and hands the
+ * deadline here. Past it, this stops rather than adding to the wait: the draft
+ * is on disk either way, Settings → Email still works, and the agent is told
+ * the truth about whether the owner was asked.
+ */
+export const OFFER_BUDGET_MS = 25_000;
+
 /** What `offerReplyApproval` can say. */
 export type ReplyOfferOutcome =
   | { kind: "offered"; code: string; chats: number }
@@ -113,7 +130,10 @@ export interface ReplyApprovalResult {
    * to the harness's own auth exactly as it would have without this feature.
    */
   handled: boolean;
-  /** What to say back, when the caller renders replies itself. */
+  /**
+   * What was said back. ClawBox has already posted this to the owner; it is
+   * returned for the caller's log and for the tests, not as a second delivery.
+   */
   reply?: string;
   /** For the log and the tests. Never surfaced to the agent. */
   outcome?: CallbackOutcome | "not_command" | "not_owner" | "unknown_code";
@@ -128,6 +148,15 @@ export interface ReplyApprovalResult {
 export const APPROVE_WORDS = ["approve", "okay", "send", "yes", "ok", "y"] as const;
 export const REJECT_WORDS = ["discard", "cancel", "delete", "reject", "deny", "no", "n"] as const;
 
+/**
+ * The longest message that could possibly be an approval.
+ *
+ * Ten verbs' worth of slack over "approve XXXXX": generous for a person with a
+ * fat thumb, and small enough that nothing here ever walks a megabyte of text
+ * an authenticated caller sent for the purpose.
+ */
+export const MAX_REPLY_CHARS = 256;
+
 const APPROVE_SET = new Set<string>(APPROVE_WORDS);
 const REJECT_SET = new Set<string>(REJECT_WORDS);
 
@@ -141,7 +170,14 @@ const REJECT_SET = new Set<string>(REJECT_WORDS);
  * same way, and the parity test carries the case.
  */
 export function trimForApproval(text: string): string {
-  return text.replace(/^[\ufeff\s]+|[\ufeff\s]+$/g, "");
+  // NOT `/^[\ufeff\s]+|[\ufeff\s]+$/`. An anchored-at-the-end run of a
+  // character class is the polynomial-ReDoS shape — CodeQL flags exactly this
+  // one — and the input here is a message anyone may send. Dropping every
+  // U+FEFF with a single-character global replace is linear, and `trim()` is
+  // the engine's own. Removing an INTERIOR mark as well is a deliberate
+  // widening and the honest reading: a zero-width character in the middle of a
+  // pasted code is invisible to the person who pasted it.
+  return text.replace(/\ufeff/g, "").trim();
 }
 
 /**
@@ -174,6 +210,10 @@ const APPROVAL_SHAPE = new RegExp(
  */
 export function parseApprovalReply(text: string): { verb: "approve" | "reject"; code: string } | null {
   if (typeof text !== "string") return null;
+  // A valid approval is a word, a space and five characters. Anything past
+  // MAX_REPLY_CHARS cannot become one, and this route has no body limit of its
+  // own — so the cheapest possible check runs before any string work at all.
+  if (text.length > MAX_REPLY_CHARS) return null;
   // TRIM FIRST, then match with no `\s` anywhere. `\s` matches a newline in
   // every one of the three languages this rule is written in, and Python's `$`
   // also matches BEFORE a trailing newline where JavaScript's does not — so a
@@ -209,8 +249,14 @@ export function buildNoticeText(draft: PendingEmail, code: string): string {
  * works; the RESULT is returned so the send route can tell the agent the truth
  * about whether the owner was actually asked.
  */
-export async function offerReplyApproval(draft: PendingEmail): Promise<ReplyOfferOutcome> {
+export async function offerReplyApproval(
+  draft: PendingEmail,
+  /** Epoch ms after which the fan-out stops. Absent = no bound (tests). */
+  deadlineAt?: number,
+): Promise<ReplyOfferOutcome> {
   try {
+    const outOfTime = (): boolean => typeof deadlineAt === "number" && Date.now() >= deadlineAt;
+    if (outOfTime()) return { kind: "failed", error: "No time left to ask." };
     // ONE question per draft, whichever surface asked it. When the approvals
     // bot has already posted its buttons this finds that prompt and posts
     // nothing — two questions about one email would leave the owner holding two
@@ -246,6 +292,9 @@ export async function offerReplyApproval(draft: PendingEmail): Promise<ReplyOffe
     // both simpler and more exact than replaying the fan-out.
     let delivered = 0;
     for (const chatId of chats) {
+      // Checked BEFORE each send rather than after: the point is not to start a
+      // request whose own timeout would carry the caller past its budget.
+      if (outOfTime()) break;
       if (await sendOwnerTelegramText(chatId, text)) delivered += 1;
     }
 
@@ -290,8 +339,6 @@ export async function applyReplyApproval(input: {
    * not to whichever one happens to be active.
    */
   harness?: "openclaw" | "hermes";
-  /** Post the verdict over Telegram instead of returning it to be rendered. */
-  deliverVerdict?: boolean;
 }): Promise<ReplyApprovalResult> {
   const parsed = parseApprovalReply(input.text);
   if (!parsed) return { handled: false, outcome: "not_command" };
@@ -328,9 +375,15 @@ export async function applyReplyApproval(input: {
   await retireChatPrompt(prompt.draftId);
 
   const settled = await settlePrompt(prompt, parsed.verb === "approve");
-  // To the person who answered, and only them: they are the one waiting to hear
-  // whether it went. A caller that renders replies itself (OpenClaw's claim
-  // carries text) asks for neither.
-  if (input.deliverVerdict) await sendOwnerTelegramText(senderId, settled.note, input.harness);
+  // ONE DELIVERY PATH, ALWAYS, and to the person who answered rather than to
+  // the household: they are the one waiting to hear whether it went.
+  //
+  // OpenClaw's claim CAN carry the verdict in-thread and deliberately does not.
+  // Letting it would mean two messages for one approval on the fast path, and
+  // — worse — a different story on the slow one: a hook that times out has to
+  // claim the message silently (the mail may already be going), so the box has
+  // to be the one telling him either way. One path is the only way both
+  // editions and both timings say the same thing once.
+  await sendOwnerTelegramText(senderId, settled.note, input.harness);
   return { handled: true, reply: settled.note, outcome: settled.outcome };
 }

@@ -1,7 +1,7 @@
 // /setup-api/email/chat-reply — one inbound channel message, handed over by the
 // harness's own hook.
 //
-//   POST { senderId, text, deliverVerdict? } -> { handled, reply? }
+//   POST { senderId, text, channel, harness } -> { handled, reply? }
 //
 // WHO CALLS THIS. Not the agent, and not a tool. The two callers are ClawBox's
 // own plugins inside the two harnesses:
@@ -93,7 +93,6 @@ interface ChatReplyBody {
   text?: unknown;
   channel?: unknown;
   harness?: unknown;
-  deliverVerdict?: unknown;
 }
 
 /**
@@ -155,11 +154,12 @@ export async function POST(request: Request) {
       senderId,
       text,
       harness: harness as "openclaw" | "hermes",
-      deliverVerdict: body.deliverVerdict === true,
     });
-    // The outcome is for this device's log, never for the caller: the plugin
-    // relays `reply` to a person, and a stranger's refused attempt must not come
-    // back as a different answer from an unknown code.
+    // The outcome is for this device's log, never for the caller: a stranger's
+    // refused attempt must not come back as a different answer from an unknown
+    // code. `reply` rides along for the caller's own log — ClawBox has already
+    // posted it to the owner, and a caller that delivered it again would give
+    // him two messages for one approval.
     if (result.handled) {
       // A CODE THAT WORKED CLEARS THE BUDGET, and that is what keeps the bound
       // off the owner. The queue holds up to twenty drafts; an owner clearing

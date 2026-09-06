@@ -17,10 +17,10 @@ list, which is the same rule the button path applies to a callback query.
 
 TWO WAYS THIS DIFFERS FROM THE OPENCLAW TWIN, both of them the harnesses' doing:
 
-  * A skip carries NO TEXT. OpenClaw's ``{"handled": True, "text": …}`` answers
-    in the thread the owner typed in; here the claim is silent, so ClawBox is
-    asked to post the verdict itself (``deliverVerdict``) over the same bot it
-    sent the question on.
+  * A skip carries NO TEXT — and neither does the OpenClaw twin's claim, though
+    it could. ClawBox posts the verdict itself on both editions, over the same
+    bot it sent the question on, because that is the only arrangement where the
+    fast path and the timeout path say the same thing exactly once.
   * The hook is SYNCHRONOUS (``hermes_cli/lifecycle.invoke_hook`` returns a
     list, it does not await), so the request below blocks the dispatch path for
     as long as it takes. That is why the shape test is applied HERE first: an
@@ -79,11 +79,12 @@ APPROVAL_SHAPE = re.compile(
 #: (``"\ufeff".isspace()`` is false), so a stray byte order mark on the end of a
 #: pasted code made the same message an approval on OpenClaw and ordinary
 #: conversation here. Both copies now take it off explicitly.
-_TRIM_CHARS = "\ufeff"
-
-
+#: Dropped wherever it appears rather than only at the ends, so this stays the
+#: same rule as the JavaScript copy — which does it that way because an
+#: anchored-at-the-end run of a character class is the polynomial-ReDoS shape,
+#: and that hook reads every inbound message on every channel.
 def trim_for_approval(text: str) -> str:
-    return text.strip().strip(_TRIM_CHARS).strip()
+    return text.replace("\ufeff", "").strip()
 
 
 def looks_like_approval(text) -> bool:
@@ -112,6 +113,14 @@ TIMEOUT_S = 120
 CLAWBOX_ROOT = os.environ.get("CLAWBOX_ROOT") or "/home/clawbox/clawbox"
 API_BASE = os.environ.get("CLAWBOX_API_BASE") or "http://127.0.0.1:80"
 MIN_TOKEN_LEN = 16
+
+#: What a bearer may be made of.
+#:
+#: The token is read off disk and interpolated into an ``Authorization`` header,
+#: so its charset is load-bearing: a stray CR or LF would be header injection.
+#: ``src/lib/mcp-token.ts`` mints hex, so this is wide enough for anything
+#: token-shaped and narrow enough to be a check worth making.
+TOKEN_RE = re.compile(r"[A-Za-z0-9._~+/=-]{16,512}")
 
 _cached_token: str | None = None
 
@@ -164,10 +173,14 @@ def _sender_of(event) -> str:
 def _post(token: str, body: dict) -> tuple[int, bool]:
     """One POST. Answers ``(status, handled)`` so the caller can tell a stale
     token — worth one retry — from every other unhappy answer, which is not."""
+    # Rebuilt from the match, never tested and passed through — see TOKEN_RE.
+    matched = TOKEN_RE.fullmatch(token.strip())
+    if not matched:
+        return 0, False
     request = urllib.request.Request(
         f"{API_BASE}/setup-api/email/chat-reply",
         data=json.dumps(body).encode("utf-8"),
-        headers={"content-type": "application/json", "authorization": f"Bearer {token}"},
+        headers={"content-type": "application/json", "authorization": f"Bearer {matched.group(0)}"},
         method="POST",
     )
     try:
@@ -206,16 +219,7 @@ def _ask_clawbox(sender_id: str, text: str, channel: str) -> bool | None:
     token = _api_token()
     if not token:
         return False
-    body = {
-        "senderId": sender_id,
-        "text": text,
-        "channel": channel,
-        "harness": "hermes",
-        # ON because a ``skip`` carries no text: without this the owner would
-        # type his code and hear nothing back at all. It is also what makes the
-        # timeout above safe to claim — ClawBox tells him what happened.
-        "deliverVerdict": True,
-    }
+    body = {"senderId": sender_id, "text": text, "channel": channel, "harness": "hermes"}
     try:
         status, handled = _post(token, body)
         if status in (401, 403):

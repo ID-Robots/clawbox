@@ -43,7 +43,7 @@ const TELEGRAM_TIMEOUT_MS = 8_000;
  * counts what it is about to attempt — a key that cannot address anybody would
  * otherwise be reported as a delivery failure for a message nothing tried.
  */
-export const TELEGRAM_CHAT_ID_RE = /^-?\d{1,20}$/;
+export const TELEGRAM_CHAT_ID_RE = /^(-?)(\d{1,20})$/;
 
 /**
  * The shape Telegram issues: `<bot id>:<secret>`.
@@ -80,10 +80,17 @@ export function isTelegramBotToken(token: string): boolean {
 export async function sendTelegramBotMessage(token: string, chatId: string, text: string): Promise<boolean> {
   const matched = BOT_TOKEN_RE.exec(token.trim());
   if (!matched) return false;
-  // Rebuilt from the match rather than tested and passed through: the value
-  // that reaches the URL is constructed here out of characters the pattern
-  // allows, which is what lets CodeQL see the check as a sanitizer.
+  // BOTH values that came off the disk are REBUILT here, out of characters
+  // their own pattern allows, rather than tested somewhere else and passed
+  // through. The token is read from the harness's config and the chat id from
+  // the harness's allowlist, and this function — not its callers — is where
+  // they reach the wire, so this is where the check belongs. Rebuilding is also
+  // what lets CodeQL see it as a sanitizer instead of an unrelated branch
+  // (`js/file-access-to-http`).
   const safeToken = `${matched[1]}:${matched[2]}`;
+  const chat = TELEGRAM_CHAT_ID_RE.exec(chatId.trim());
+  if (!chat) return false;
+  const safeChatId = chat[1] === "-" ? `-${chat[2]}` : chat[2];
   try {
     // Interpolated raw, not encoded: Telegram wants the literal
     // "<bot id>:<secret>", and encodeURIComponent turns the colon into %3A,
@@ -93,7 +100,7 @@ export async function sendTelegramBotMessage(token: string, chatId: string, text
       headers: { "content-type": "application/json" },
       // No parse_mode: the text is plain, and a stray underscore must not turn
       // into a Markdown error that swallows the whole message.
-      body: JSON.stringify({ chat_id: chatId, text, disable_web_page_preview: true }),
+      body: JSON.stringify({ chat_id: safeChatId, text, disable_web_page_preview: true }),
       signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS),
     });
     return res.ok;
