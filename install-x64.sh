@@ -1128,7 +1128,21 @@ ensure_codex_cli() {
     return 1
   fi
   echo "  OpenAI Codex $version installed at $CODEX_NATIVE_BIN"
-  remove_npm_codex
+
+  local rc=0
+  remove_npm_codex || rc=1
+  # The same verdict the device installer ends on: PATH order, not the presence
+  # of a file. `as_user_login` puts ~/.bun/bin ahead of ~/.local/bin, so a codex
+  # installed by bun still shadows the pinned one and this would otherwise
+  # report success — and the two installers would answer differently about the
+  # same box.
+  local resolved
+  resolved="$(as_user_login "command -v codex" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+  if [ "$resolved" != "$CODEX_NATIVE_BIN" ]; then
+    echo "  WARN: \`codex\` still resolves to ${resolved:-nothing}, not $CODEX_NATIVE_BIN" >&2
+    rc=1
+  fi
+  return "$rc"
 }
 
 step_ai_tools_install() {

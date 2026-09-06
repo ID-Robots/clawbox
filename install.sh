@@ -7328,9 +7328,7 @@ ensure_claude_code() {
   fi
 
   local installer rc=1
-  # `|| true` for the errexit reason above; an empty path then falls into the
-  # download-failed branch, which reports rather than ends the run.
-  installer="$(mktemp || true)"
+  installer="$(mktemp)"
   # --max-time bounds a STALLED vendor: this runs inside step_post_update, and
   # every recovery step after it waits behind this download. --proto-redir keeps
   # a redirect from stepping down to plain HTTP on the way to something we then
@@ -7643,7 +7641,10 @@ ensure_codex_cli() {
   fi
 
   url="https://github.com/openai/codex/releases/download/rust-v$version/install.sh"
-  installer="$(mktemp)"
+  # `|| true` for the errexit reason above: `--step codex_cli` calls this
+  # plainly, so a full or read-only /tmp would end install.sh at this line with
+  # nothing said. Empty, it falls into the download-failed branch, which reports.
+  installer="$(mktemp || true)"
   # --max-time bounds THIS fetch — the ~30 KB installer script, nothing more.
   # The vendor's own 117 MB package download is bounded separately below.
   # --proto-redir stops a redirect stepping down to plain HTTP on the way to

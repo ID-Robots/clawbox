@@ -189,6 +189,16 @@ describe("the x64 desktop installer follows the same rules", () => {
   // running different builds, and it is asserted above.
   const ensure = () => extractShellFunctionFrom(INSTALL_X64, "ensure_codex_cli");
 
+  it("ends on the same verdict the device installer does: what `codex` resolves to", () => {
+    // Both files must answer the same question about the same box. `as_user_login`
+    // puts ~/.bun/bin ahead of ~/.local/bin here too, so removing the npm copy
+    // is not the same fact as the pinned binary being the one that runs.
+    const fn = shellCode(ensure());
+    expect(fn).toContain('as_user_login "command -v codex"');
+    expect(fn).toMatch(/still resolves to/);
+    expect(fn.lastIndexOf("command -v codex")).toBeGreaterThan(fn.lastIndexOf("remove_npm_codex"));
+  });
+
   it("verifies the installer's digest before running it, and probes with a login shell", () => {
     const fn = ensure();
     expect(fn.indexOf("sha256sum")).toBeGreaterThan(-1);
@@ -296,6 +306,8 @@ function runEnsure(opts: {
   pin?: string;
   /** Can the box compute a digest at all? */
   sha256sumWorks?: boolean;
+  /** Can it make a temp file at all? (a full or read-only /tmp) */
+  mktempWorks?: boolean;
   /** Call it the way `--step codex_cli` does: plainly, under `set -e`. */
   plainCall?: boolean;
 }): Run {
@@ -307,6 +319,7 @@ function runEnsure(opts: {
     bunCodex = false,
     npmDangling = false,
     sha256sumWorks = true,
+    mktempWorks = true,
     plainCall = false,
   } = opts;
   const pinned = readPin();
@@ -360,6 +373,7 @@ function runEnsure(opts: {
     '  cat "$PAYLOAD" > "$out"',
     "}",
     ...(sha256sumWorks ? [] : ["sha256sum() { return 127; }"]),
+    ...(mktempWorks ? [] : ["mktemp() { return 1; }"]),
     "chown() {",
     '  printf "chown %s\\n" "$*" >> "$CALLS"',
     "}",
@@ -445,6 +459,16 @@ d("a download that did not happen never deletes the working Codex", () => {
 });
 
 d("errexit must not swallow the refusal it is meant to print", () => {
+  it("says why it will not run an installer it could not write, called the way --step does", () => {
+    // Same shape as the digest one: a full or read-only /tmp fails `mktemp`,
+    // and unguarded that assignment ends install.sh at that line in silence.
+    const r = runEnsure({ payload: "#!/bin/sh\ntrue\n", mktempWorks: false, plainCall: true });
+    expect(r.status).not.toBe(0);
+    expect(r.output).toMatch(/could not download OpenAI's Codex installer/);
+    expect(r.output).toMatch(/Keeping the Codex this box resolves today/);
+    expect(r.npmExists).toBe(true);
+  });
+
   it("says why it will not run an installer it could not hash, called the way --step does", () => {
     // `--step codex_cli` runs "step_${name}" PLAINLY under `set -euo pipefail`,
     // so an unguarded `x="$(a | b)"` whose pipeline fails ends the whole run at
