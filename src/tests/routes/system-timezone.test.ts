@@ -433,6 +433,36 @@ describe("/setup-api/system/timezone", () => {
     expect(String(body.warning)).toMatch(/clock|Terminal/i);
   });
 
+  it("names BOTH legs when both fail", async () => {
+    // `harness.failure ?? osFailure` reported only the harness half, so an
+    // owner whose clock had also not moved was never told about the clock.
+    mockStartRootStep.mockRejectedValue(new Error("unit failed"));
+    mockConfigSet.mockRejectedValue(new Error("config set exited 1"));
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const body = await (await mod.POST(post({ timezone: "Europe/Sofia" }))).json();
+
+    expect(String(body.warning)).toMatch(/assistant|agent|harness/i);
+    expect(String(body.warning)).toMatch(/clock|Terminal/i);
+  });
+
+  it("writes the env file 0600, and keeps it 0600 on a rewrite", async () => {
+    // install.sh reads this as root and data/ is clawbox-writable. `writeFile`'s
+    // `mode` is ignored when the destination already exists, which is half of
+    // why the write goes through a fresh temp and a rename — so the second
+    // write is the one that matters here.
+    await fs.rm(TZ_ENV_PATH, { force: true });
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    await mod.POST(post({ timezone: "Europe/Sofia" }));
+    const first = (await fs.stat(TZ_ENV_PATH)).mode & 0o777;
+    await mod.POST(post({ timezone: "America/New_York" }));
+    const second = (await fs.stat(TZ_ENV_PATH)).mode & 0o777;
+
+    expect(first.toString(8)).toBe("600");
+    expect(second.toString(8)).toBe("600");
+  });
+
   it("does not record the zone as applied when only the OS leg failed", async () => {
     // Recording it there was a permanent false success: GET answered
     // `applied: true`, TimezoneAdopter stopped offering, and `date`, the

@@ -93,6 +93,38 @@ function readConfigured(contents: string | null): { code: number; value: string 
   return { code: Number(/rc=(\d+)/.exec(out)?.[1] ?? -1), value: out.replace(/ rc=\d+$/, "") };
 }
 
+/**
+ * The branch that actually runs on a device: no `CLAWBOX_ZONEINFO_DIR`, so the
+ * reader asks systemd's own `timedatectl list-timezones`. Every case above
+ * drives the zoneinfo fallback, which is the test seam — this one drives the
+ * authority, and the two have different exclusion rules.
+ */
+function readConfiguredViaTimedatectl(
+  contents: string,
+  zones: string[],
+): { code: number; value: string } {
+  fs.writeFileSync(tzEnv, contents);
+  const script = [
+    "set -uo pipefail",
+    `PROJECT_DIR=${JSON.stringify(projectDir)}`,
+    "timedatectl() {",
+    '  [ "${1:-}" = "list-timezones" ] || return 1',
+    `  printf '%s\n' ${zones.map((z) => JSON.stringify(z)).join(" ")}`,
+    "}",
+    extractShellFunction("read_configured_timezone"),
+    "out=$(read_configured_timezone); rc=$?",
+    'printf "[%s] rc=%s" "$out" "$rc"',
+  ].join("\n");
+  const r = spawnSync("bash", ["-c", script], {
+    encoding: "utf-8",
+    // Deliberately WITHOUT CLAWBOX_ZONEINFO_DIR: setting it is what routes
+    // around the branch this driver exists to reach.
+    env: testEnv({ PATH: process.env.PATH ?? "" }),
+  });
+  const out = (r.stdout ?? "").trim();
+  return { code: Number(/rc=(\d+)/.exec(out)?.[1] ?? -1), value: out.replace(/ rc=\d+$/, "") };
+}
+
 /** Drive apply_timezone with `timedatectl` stubbed and logged. */
 function runApply(tz: string, current = "Etc/UTC"): { status: number; out: string; calls: string[] } {
   const script = [
@@ -192,6 +224,36 @@ d("read_configured_timezone", () => {
       expect(r.code, name).toBe(3);
       expect(r.value, name).toBe("[]");
     }
+  });
+
+  it("asks systemd's own list when there is no zoneinfo seam", () => {
+    // The authority on a device, and the branch no case here reached: both
+    // drivers above set CLAWBOX_ZONEINFO_DIR, which is exactly what routes
+    // around it.
+    //
+    // The first two zones DISCRIMINATE. "Europe/Sofia is accepted" and
+    // "Mars/Olympus is refused" would pass just as well through the zoneinfo
+    // fallback against the host's real tzdata, so on their own they would prove
+    // nothing about which branch ran:
+    //  - `Test/Zone` is in the stubbed list and in no tzdata on earth, so
+    //    accepting it can only have come from `timedatectl list-timezones`;
+    //  - `Asia/Tokyo` is a real zone the host carries and is absent from the
+    //    list, so refusing it can only have come from there too.
+    // Verified by disabling the stub: the first assertion then fails with
+    // `{ code: 2, value: '[]' }`.
+    const zones = ["Europe/Sofia", "America/New_York", "UTC", "Test/Zone"];
+
+    expect(readConfiguredViaTimedatectl("TIMEZONE=Test/Zone\n", zones))
+      .toEqual({ code: 0, value: "[Test/Zone]" });
+    expect(readConfiguredViaTimedatectl("TIMEZONE=Asia/Tokyo\n", zones).code).toBe(2);
+
+    expect(readConfiguredViaTimedatectl("TIMEZONE=Europe/Sofia\n", zones))
+      .toEqual({ code: 0, value: "[Europe/Sofia]" });
+    // Case-exact, and refused by the list rather than by a filesystem lookup.
+    expect(readConfiguredViaTimedatectl("TIMEZONE=europe/sofia\n", zones).code).toBe(2);
+    // `posix/` is refused because systemd does not list it — the fallback's own
+    // exclusion list is not consulted on this branch.
+    expect(readConfiguredViaTimedatectl("TIMEZONE=posix/Europe/Sofia\n", zones).code).toBe(2);
   });
 
   it("answers 'nothing recorded' — not a rejection — when the box was never told", () => {

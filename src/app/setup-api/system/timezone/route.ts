@@ -195,9 +195,9 @@ export async function POST(request: Request) {
     // step_set_timezone is on no install or update path, so a reboot repairs
     // nothing. What does repair it is the applied marker staying unset — see
     // below.
-    osFailure = "The assistant now uses this timezone, but the device clock could not be changed — "
-      + "the Terminal and the logs stay on the old zone. It is not recorded as applied, so the next "
-      + "time this dashboard is opened it will try again.";
+    osFailure = "The device clock could not be changed — the Terminal and the logs stay on the old "
+      + "zone. It is not recorded as applied: an adopted zone is retried on the next dashboard load, "
+      + "an explicit one has to be sent again.";
   }
 
   const harness = await applyTimeZoneToHarness(tz);
@@ -209,7 +209,12 @@ export async function POST(request: Request) {
   const applied = !harness.failure && !osFailure;
   if (applied) await set(TIMEZONE_APPLIED_KEY, tz);
 
-  const warning = harness.failure ?? osFailure ?? harness.pending;
+  // JOINED, not `??`-chained. The two legs are independent, so when both fail
+  // the owner has two things to know: `harness.failure ?? osFailure` reported
+  // only the harness half and left the clock unmentioned. `pending` rides along
+  // for the same reason — a Hermes write that landed but needs a restart is
+  // still worth saying beside an OS leg that did not.
+  const warning = [harness.failure, osFailure, harness.pending].filter(Boolean).join(" ") || undefined;
   if (warning) {
     return NextResponse.json(
       {
