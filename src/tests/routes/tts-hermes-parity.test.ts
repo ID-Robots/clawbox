@@ -79,7 +79,7 @@ vi.mock("@/lib/voice-output-store", () => ({
   writeLocalVoice: (...a: unknown[]) => writeLocalVoiceMock(...a),
 }));
 
-/** `pref:ui_language` and `clawai_tier`; the box is on the plan that has a voice. */
+/** `pref:ui_language` and the two tier stamps; the box is on the plan that has a voice. */
 let storeValues: Record<string, unknown> = {};
 // Partial: the route now reaches the store through the owner gate (auth.ts
 // reads DATA_DIR at import) and the spoken-replies switch; only the reads

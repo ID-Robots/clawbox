@@ -34,6 +34,14 @@ import { getActiveHarness } from "@/lib/harness";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
 import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
+// The PLAN this account pays for, recorded in the same store write as the
+// badge: both boot scripts decide the cloud-voice entitlement from the pair and
+// one of them DELETES on it, so neither may outlive the credential (TASK-744).
+import {
+  CLAWAI_PLAN_TIER_KEY,
+  clawaiPlanTierForStore,
+  type ClawaiPortalPlan,
+} from "@/lib/clawai-plan-tier";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { applyCloudProviderKeyToHermes, HermesCloudApplyError } from "@/lib/hermes-cloud-provider";
 import {
@@ -2187,9 +2195,28 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // keeps "Max subscriber who deliberately runs Flash on this device"
     // working rather than being force-promoted here.
     let portalConfirmedTier: ClawboxAiTier | null = null;
+    // The PLAN this same lookup answered, or ABSENT for "it did not answer" —
+    // a third state the badge does not need and the plan does, because a
+    // RECORDED plan is what both boot scripts read as having been told, and one
+    // of them deletes a working cloud voice over it (TASK-744).
+    //
+    // WHY HERE AS WELL AS IN `/setup-api/ai-models/status`: that route is the
+    // 30-second poll, and every caller of it is a BROWSER — the wizard step,
+    // the Settings panel, the login hook. Nothing on the box asks it on its
+    // own. A customer who pairs and closes the tab would never have a plan on
+    // record, both scripts would fall back to the device badge for good, and
+    // that IS the state this card is about. This route holds a portal answer
+    // for the credential it is writing, at the moment it writes it.
+    let portalPlan: ClawaiPortalPlan | undefined;
     if (isClawAI && clawboxAiToken) {
       try {
         const lookup = await fetchPortalTier(clawboxAiToken);
+        // On ANY portal answer, including the Free one that leaves `tier` null:
+        // "this account pays for nothing" is an answer, and it is the one that
+        // has to retire a previous account's Max plan rather than leave it
+        // standing over the token this save is writing — and the one that lets
+        // a CANCELLED subscription's cloud voice be withdrawn at all.
+        if (lookup.source === "portal") portalPlan = { tier: lookup.planTier };
         if (lookup.source === "portal" && lookup.tier) {
           portalConfirmedTier = lookup.tier;
           if (requestedClawboxAiTier && requestedClawboxAiTier !== lookup.tier) {
@@ -2403,6 +2430,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           const applied = await applyClawaiToHermes(
             clawboxAiToken,
             resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
+            // The apply owns the store write on this SKU, so the plan travels
+            // with the badge from there rather than being written twice.
+            { portalPlan },
           );
           await forgetLocalWasDefault();
           // Reported from the apply's OWN decision rather than the one taken
@@ -3033,6 +3063,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // next account's box (TASK-713).
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
+        // The PLAN beside the badge, in the SAME batch so the pair the boot
+        // scripts read cannot come apart, and `undefined` — the store's DELETE
+        // — when the portal did not answer: this save has just rewritten the
+        // badge for whatever account the box now holds, and the previous
+        // account's plan may not be left standing beside it. Only on a ClawBox
+        // AI save; any other save leaves both keys exactly as they are.
+        ...(isClawAI ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) } : {}),
       });
       // Everything above configures OpenClaw. On a Hermes device that left the
       // model running and unreachable: Settings said "configured" while the
@@ -3067,6 +3104,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         ai_model_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
+        // The PLAN beside the badge, in the SAME batch so the pair the boot
+        // scripts read cannot come apart, and `undefined` — the store's DELETE
+        // — when the portal did not answer: this save has just rewritten the
+        // badge for whatever account the box now holds, and the previous
+        // account's plan may not be left standing beside it. Only on a ClawBox
+        // AI save; any other save leaves both keys exactly as they are.
+        ...(isClawAI ? { [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(portalPlan) } : {}),
         // The owner named a model in this save (TASK-713), or this save linked a
         // different ClawBox AI account and the previous owner's pick goes with
         // it. Either way in the SAME batch as the other facts about the save, so

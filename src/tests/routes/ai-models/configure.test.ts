@@ -2326,6 +2326,86 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
     });
 
+    // TASK-744. Both boot scripts decide an ENTITLEMENT from the store and one
+    // of them DELETES the cloud voice over it, so they read the PLAN
+    // (`clawai_plan_tier`) with the device badge only behind it — and never
+    // behind it for the delete. This route is the second place on the box that
+    // ever holds a portal answer, and the only one a headless pairing reaches:
+    // `/setup-api/ai-models/status` is polled by BROWSERS alone, so a customer
+    // who pairs and closes the tab would otherwise never have a plan on record.
+    describe("recording the PLAN beside the badge", () => {
+      /** Every `clawai_plan_tier` this save wrote, in order. */
+      const plansWritten = () =>
+        mockSetMany.mock.calls
+          .map(([entries]) => entries as Record<string, unknown>)
+          .filter((entries) => "clawai_plan_tier" in entries)
+          .map((entries) => entries.clawai_plan_tier);
+
+      it("records the plan of a Max account whose box is stamped flash", async () => {
+        // The exact shape of the card: the badge stays `flash`, because running
+        // Flash on this box is a choice the portal preserves on purpose, and
+        // the plan says `pro`, because that is what the account pays for and
+        // the only thing an entitlement may be read from.
+        vi.stubGlobal("fetch", deviceInfo({ tier: "max", deviceTier: "flash" }));
+
+        const res = await configurePost(jsonRequest({
+          provider: "clawai",
+          apiKey: "claw_max_running_flash",
+          clawaiTier: "pro",
+        }));
+
+        expect(res.status).toBe(200);
+        expect(mockSetMany).toHaveBeenCalledWith(
+          expect.objectContaining({ clawai_tier: "flash", clawai_plan_tier: "pro" }),
+        );
+      });
+
+      it("records an UNPAID answer as such, so a cancellation can be acted on", async () => {
+        // Not `undefined`: an absent key means "the portal has never answered
+        // for this box", and collapsing the two is what leaves a cancelled
+        // subscription's cloud voice armed and 403-ing for good.
+        vi.stubGlobal("fetch", deviceInfo({ tier: "free" }));
+
+        const res = await configurePost(jsonRequest({
+          provider: "clawai",
+          apiKey: "claw_free_account",
+          clawaiTier: "flash",
+        }));
+
+        expect(res.status).toBe(200);
+        expect(plansWritten()).toEqual(["free"]);
+      });
+
+      it("retires the previous account's plan when the portal did not answer", async () => {
+        // The false-failure guard AND the staleness rule in one: an outage may
+        // not put a plan on record, and this save has just rewritten the badge
+        // for whatever account the box now holds — so the old plan may not be
+        // left standing beside it either. `undefined` is the store's delete.
+        vi.stubGlobal("fetch", vi.fn(async () => {
+          throw new Error("portal unreachable");
+        }));
+
+        const res = await configurePost(jsonRequest({
+          provider: "clawai",
+          apiKey: "claw_offline",
+          clawaiTier: "pro",
+        }));
+
+        expect(res.status).toBe(200);
+        expect(plansWritten()).toEqual([undefined]);
+      });
+
+      it("leaves both keys alone on a save that is not about ClawBox AI", async () => {
+        const res = await configurePost(jsonRequest({
+          provider: "anthropic",
+          apiKey: "sk-ant-not-a-clawbox-key",
+        }));
+
+        expect(res.status).toBe(200);
+        expect(plansWritten()).toEqual([]);
+      });
+    });
+
     it("keeps the picker's choice when the portal is unreachable", async () => {
       // A portal outage during setup must never quietly downgrade a paying
       // box. `fetchPortalTier` reports network failures as `unreachable`.

@@ -324,19 +324,25 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     expect(configStoreSet).not.toHaveBeenCalled();
   });
 
-  it("retires the recorded PLAN with it, because that is a fact about the same credential", async () => {
+  it("retires an in-flight PLAN answer for the credential it replaced", async () => {
     // TASK-744. Two boot scripts prefer `clawai_plan_tier` over the device
-    // badge, and one of them deletes the cloud voice when the plan does not
-    // cover it. Left standing across a re-link, the PREVIOUS account's Max plan
-    // would keep the voice armed on a box now holding a lower plan's token —
-    // a refused round trip per spoken reply, with the panel calling the voice
-    // configured while it happens.
+    // badge and one of them DELETES the cloud voice over it, and a portal
+    // lookup for the OLD token can still be in flight — the same four-second
+    // window `notRecordedSince` above exists for. Landing afterwards it would
+    // write a retired account's plan, and the next boot would decide this box's
+    // entitlement from it.
+    //
+    // The plan itself is NOT cleared here: its writers record or delete it in
+    // the same store write as the badge, so it never outlives the account it
+    // describes. What this funnel owes it is the counter.
     const mod = await memo();
-    configStoreGet.mockResolvedValue("pro");
+    const { clawaiPlanGeneration } = await import("@/lib/clawai-plan-tier");
+    const before = clawaiPlanGeneration();
 
     await mod.forgetClawaiCredentialRefusal();
 
-    expect(configStoreSet).toHaveBeenCalledWith("clawai_plan_tier", undefined);
+    expect(clawaiPlanGeneration()).not.toBe(before);
+    expect(configStoreSet).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
   });
 
   it("still forgets in memory when the store cannot be written", async () => {

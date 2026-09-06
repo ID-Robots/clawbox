@@ -31,11 +31,11 @@ import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-mod
  * `deviceTier: "flash"` — a state `mapPortalTier` preserves deliberately — had
  * his cloud voice DELETED at every boot.
  *
- * Values are the same two-value enum `clawai_tier` uses (`"flash"` for the Pro
- * plan, `"pro"` for the Max plan — the names are off by one on purpose, see
- * `CLAWBOX_AI_MODEL_BY_TIER`). Anything else, `null` included, means the portal
- * has told us nothing we can act on, and every reader falls back to the device
- * stamp there rather than treating it as a downgrade.
+ * ALWAYS WRITTEN BESIDE `clawai_tier`, in the same store write, and deleted in
+ * that same write when the writer had no portal answer. The badge and the plan
+ * therefore always describe the same account: a plan that outlived the
+ * credential it was read for would be a fact about a retired account deciding
+ * whether this box keeps its voice.
  */
 export const CLAWAI_PLAN_TIER_KEY = "clawai_plan_tier";
 
@@ -49,34 +49,89 @@ export const CLAWAI_PLAN_TIER_KEY = "clawai_plan_tier";
 const CLAWAI_DEVICE_TIER_KEY = "clawai_tier";
 
 /**
- * The tier an ENTITLEMENT may be decided from: the plan when the portal has
- * told us one, and the device stamp only when it has not.
+ * "The portal answered, and this account has no paid plan."
  *
- * ONE rule, four implementations — this one, `speechEntitledTier()`, and a
- * transcription of it in each boot script — because neither shell can import
- * TypeScript. The suites pin the four together; nothing else stops them
- * drifting into disagreeing about which boxes have a cloud voice.
+ * A THIRD value, and it has to exist. `mapPortalTier` and `mapPortalPlanTier`
+ * both answer `null` for an unpaid account, and an absent key already means
+ * "the portal has never answered for this box" — so without a positive word
+ * for it, a CANCELLED subscription is indistinguishable from a box nobody has
+ * ever asked about, and the withdrawal below can never fire on the commoner of
+ * the two downgrade paths. `clawai_tier` cannot carry it (the badge's enum is
+ * the two paid tiers and `null`), which is the other reason this is a separate
+ * key rather than a widened one.
+ */
+export const CLAWAI_PLAN_UNPAID = "free";
+
+/** What the portal can tell us a plan IS: the two paid tiers, or unpaid. */
+export type ClawaiPlanTier = ClawboxAiTier | typeof CLAWAI_PLAN_UNPAID;
+
+/**
+ * The recorded plan, or `null` for a value no writer of ours produces.
  *
- * `null` is "nobody has told us", and it is NOT "not entitled": a caller that
- * refuses on it turns a portal outage or a box the status poll has never run on
- * into a downgrade. Callers that DESTROY configuration must require a non-null
- * answer; callers that merely decline to arm may treat it as declining.
+ * `normalizeClawboxAiTier`'s vocabulary plus {@link CLAWAI_PLAN_UNPAID}, and
+ * nothing else: an unrecognised string is a store somebody edited or a build we
+ * have not seen, and reading it as a plan would let a value we cannot interpret
+ * decide an entitlement.
+ */
+export function normalizeClawaiPlanTier(value: unknown): ClawaiPlanTier | null {
+  const paid = normalizeClawboxAiTier(value);
+  if (paid) return paid;
+  return typeof value === "string" && value.trim().toLowerCase() === CLAWAI_PLAN_UNPAID
+    ? CLAWAI_PLAN_UNPAID
+    : null;
+}
+
+/**
+ * ARM side: the tier a box may be GIVEN the cloud voice on — the plan when the
+ * portal has told us one, the device stamp only when it has not.
+ *
+ * The fallback belongs on this side alone. Arming is recoverable — the worst it
+ * does is write our own fields to our own values, and the next boot takes it
+ * back once the plan is on record — so a box whose plan nobody has asked about
+ * yet is better served by the badge than by silence. Every box in the field is
+ * in that state until its first successful status poll.
+ *
+ * ONE rule, three implementations — this one and a transcription in each boot
+ * script, because neither shell can import TypeScript. The suite pins the three
+ * together; nothing else stops them drifting into disagreeing about which boxes
+ * have a cloud voice.
  */
 export function clawaiEntitlementTier(
   planTier: unknown,
   deviceTier: unknown,
-): ClawboxAiTier | null {
-  return normalizeClawboxAiTier(planTier) ?? normalizeClawboxAiTier(deviceTier);
+): ClawaiPlanTier | null {
+  return normalizeClawaiPlanTier(planTier) ?? normalizeClawboxAiTier(deviceTier);
 }
 
 /**
- * The same rule, over the two stamps as they sit in `data/config.json`.
+ * WITHDRAW side: may this box's cloud voice be TAKEN AWAY?
+ *
+ * THE PLAN ALONE, and never the device stamp. This is the one irreversible act
+ * in either boot script, and the stamp is a DEFAULT a Max subscriber is allowed
+ * to have set to Flash — refusing on it is TASK-744 itself, and deleting on it
+ * is TASK-744 with the customer's configuration gone. So a box whose plan is
+ * not on record keeps what it has: not knowing is not a downgrade, and the cost
+ * of holding is a refused round trip per spoken reply until the next poll,
+ * against the cost of deleting, which is a Max subscriber's voice.
+ *
+ * @param planTier the recorded plan, as it sits in the store.
+ * @param entitledTier the tier the proxy serves speech to (`"pro"`, the tier of
+ *   the MAX plan — the names are off by one on purpose). Passed in rather than
+ *   imported so this module does not pull `hermes-tts.ts`'s graph behind it.
+ */
+export function clawaiSpeechWithdrawable(planTier: unknown, entitledTier: string): boolean {
+  const plan = normalizeClawaiPlanTier(planTier);
+  return plan !== null && plan !== entitledTier;
+}
+
+/**
+ * The same ARM rule, over the two stamps as they sit in `data/config.json`.
  *
  * The one TypeScript reader, so no surface derives the pair for itself. Reads
  * both keys, because "the plan is unknown" is a fact about the store rather
  * than about either value on its own.
  */
-export async function readClawaiEntitlementTier(): Promise<ClawboxAiTier | null> {
+export async function readClawaiEntitlementTier(): Promise<ClawaiPlanTier | null> {
   const [planTier, deviceTier] = await Promise.all([
     get(CLAWAI_PLAN_TIER_KEY),
     get(CLAWAI_DEVICE_TIER_KEY),
@@ -85,60 +140,102 @@ export async function readClawaiEntitlementTier(): Promise<ClawboxAiTier | null>
 }
 
 /**
- * Record the portal's plan answer.
+ * A portal answer about this box's plan, or the absence of one.
  *
- * Only a portal-ANSWERED lookup may call this — never the wizard's plan picker,
- * which is a guess the account has not been consulted about (TASK-481), and
- * never an `unreachable` verdict, which is the not-knowing this key exists to
- * keep distinguishable.
+ * `tier` is `mapPortalPlanTier`'s value: a paid tier, or `null` for an account
+ * with no paid plan. The OBJECT's presence is what says the portal answered at
+ * all — an `unreachable` lookup, a probe that threw, and a caller that never
+ * asked all pass nothing, and are all "we do not know".
+ */
+export interface ClawaiPortalPlan {
+  tier: ClawboxAiTier | null;
+}
+
+/**
+ * The value to write for {@link CLAWAI_PLAN_TIER_KEY} in the same store write
+ * that records `clawai_tier`.
+ *
+ * `undefined` is a DELETE in `set`/`setMany`, and that is the answer for a
+ * writer with no portal answer: it has just rewritten the badge for whatever
+ * account this box now holds, and leaving the previous account's plan beside it
+ * is how a retired Max plan comes to keep a Pro box's cloud voice armed.
+ */
+export function clawaiPlanTierForStore(
+  portalPlan: ClawaiPortalPlan | undefined,
+): ClawaiPlanTier | undefined {
+  if (!portalPlan) return undefined;
+  return portalPlan.tier ?? CLAWAI_PLAN_UNPAID;
+}
+
+/**
+ * How many times the box's ClawBox AI credential has been REPLACED.
+ *
+ * A plain counter, never anything derived from a token — the same shape, and
+ * the same reason, as `provenGeneration` in `clawbox-ai-portal-tier.ts`. It
+ * lives in this thin module rather than in `@/lib/harness/credentials` because
+ * the status route is one of its readers and importing that module into a badge
+ * route drags the whole Hermes adapter graph in behind it.
+ */
+let credentialGeneration = 0;
+
+/** Read the counter, to be handed back to {@link persistClawaiPlanTier}. */
+export function clawaiPlanGeneration(): number {
+  return credentialGeneration;
+}
+
+/**
+ * The credential was rewritten — anything learned about the old one is about an
+ * account this box has moved on from.
+ *
+ * Called from `forgetClawaiCredentialRefusal`, the funnel every credential
+ * writer already goes through. Nothing is CLEARED here: the writers record or
+ * delete the plan in the same store write as the badge, so there is never a
+ * moment where one describes a different account than the other. This only
+ * stops an answer that was already in flight from landing afterwards.
+ */
+export function noteClawaiCredentialReplaced(): void {
+  credentialGeneration += 1;
+}
+
+/** Test seam: forget the generation. */
+export function _resetClawaiPlanGeneration(): void {
+  credentialGeneration = 0;
+}
+
+/**
+ * Record what the portal said this account's plan is.
+ *
+ * ONLY a portal-ANSWERED lookup may call this. `planTier` is
+ * `mapPortalPlanTier`'s value, so `null` here means "the portal answered and
+ * this account has no paid plan" and is stored as {@link CLAWAI_PLAN_UNPAID} —
+ * NOT as an absent key, which means the opposite. The wizard's plan picker is a
+ * guess the account has not been consulted about (TASK-481) and an
+ * `unreachable` verdict is the not-knowing this key exists to keep
+ * distinguishable; neither may reach this function.
+ *
+ * `askedAtGeneration` is the credential counter as it stood when the lookup was
+ * SENT. Up to four seconds pass before the portal answers, and the box can be
+ * re-linked inside that window — writing then would be a plan for a token the
+ * box no longer holds, which is how a retired Pro plan comes to withdraw a Max
+ * subscriber's voice at the next boot. The same guard, for the same race, that
+ * `clearPersistedClawaiCredentialRefusal`'s `notRecordedSince` is.
  *
  * Read before write, so the overwhelmingly common path (the plan has not
  * changed) never opens the store for writing, and best-effort for the same
  * reason the refusal stamp is: a badge poll must not fail because a hint could
  * not be saved. What it costs when it fails is honest and bounded — the boot
- * scripts go on reading the device stamp, which is what they did before this
- * key existed.
+ * scripts go on reading the badge for the ARM and withdraw nothing at all.
  */
-export async function persistClawaiPlanTier(planTier: ClawboxAiTier | null): Promise<void> {
+export async function persistClawaiPlanTier(
+  planTier: ClawboxAiTier | null,
+  askedAtGeneration?: number,
+): Promise<void> {
+  if (askedAtGeneration !== undefined && askedAtGeneration !== credentialGeneration) return;
   try {
-    const stored = normalizeClawboxAiTier(await get(CLAWAI_PLAN_TIER_KEY));
-    if (stored === planTier) return;
-    // `undefined` DELETES the key, which is the honest record of "the portal
-    // answered and this account has no paid plan": there is no third enum value
-    // for it, and writing `null` would be read back as a plan we cannot act on
-    // anyway. Both leave the boot scripts on the device stamp.
-    await set(CLAWAI_PLAN_TIER_KEY, planTier ?? undefined);
+    const next = planTier ?? CLAWAI_PLAN_UNPAID;
+    if (normalizeClawaiPlanTier(await get(CLAWAI_PLAN_TIER_KEY)) === next) return;
+    await set(CLAWAI_PLAN_TIER_KEY, next);
   } catch {
     // See the docblock. The next poll writes it again.
-  }
-}
-
-/**
- * Forget the recorded plan — the credential changed, so the plan on record
- * belongs to an account this box no longer holds a token for.
- *
- * Called from `forgetClawaiCredentialRefusal`, the one funnel every credential
- * writer already goes through, rather than beside each of them: a writer that
- * retired the refusal and left the plan would let the PREVIOUS account's Max
- * plan keep the cloud voice armed on a box that has just been re-linked to a
- * lower one, which is a refused round trip per spoken reply and the panel
- * calling the voice configured while it happens. That funnel fires on every
- * credential WRITE rather than only on a change, and clearing too eagerly is
- * the safe direction here: it puts both boot scripts back on the device stamp
- * until the next status poll answers — which is exactly, and only, where they
- * were before this key existed. Clearing too seldom would be a fact about a
- * retired account overriding a fresh one.
- *
- * Costs nothing when it lands on a box whose plan has not been recorded — the
- * read below is what decides.
- */
-export async function clearClawaiPlanTier(): Promise<void> {
-  try {
-    if ((await get(CLAWAI_PLAN_TIER_KEY)) === undefined) return;
-    await set(CLAWAI_PLAN_TIER_KEY, undefined);
-  } catch {
-    // Bounded the same way: an uncleared plan costs one status poll, after
-    // which the portal's answer for the credential the box now holds replaces
-    // it.
   }
 }

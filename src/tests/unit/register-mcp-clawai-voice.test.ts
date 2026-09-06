@@ -299,7 +299,7 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     });
 
     it("does not arm a box whose plan does not include the cloud voice", () => {
-      writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
 
       run();
 
@@ -364,7 +364,7 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
 
     it("takes the endpoint, credential and model back when the plan drops", () => {
       armedBox();
-      writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
 
       const r = run();
 
@@ -379,7 +379,7 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       // that the choice is no longer available, and silently rewriting it would
       // hide the downgrade.
       armedBox();
-      writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
 
       run();
 
@@ -395,7 +395,7 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       // DELETE one.
       ["OUR key at THEIR address", TOKEN],
     ])("never touches an owner's own speech server, even with %s in it", (_label, key) => {
-      writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
       writeYaml(
         `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: https://speech.home.lan/v1\n    api_key: ${key}\n    model: my-own-voice\n`,
       );
@@ -414,7 +414,7 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       // under a previous address is still recognisably ours. No `claw_` token
       // here on purpose: the ADDRESS has to be what authorises the delete, or
       // this case would pass for the reason the one above forbids.
-      writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
       writeYaml(
         `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: https://openclawhardware.dev/api/ai\n    api_key: sk-someone-elses\n`,
       );
@@ -437,7 +437,7 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
 
     it("is idempotent — a second unentitled boot writes nothing", () => {
       armedBox();
-      writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
       run();
       fs.writeFileSync(hermesLog, "");
       const before = fs.readFileSync(configPath, "utf-8");
@@ -499,6 +499,35 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       expect(at("tts.openai.api_key")).toBeUndefined();
       expect(at("tts.openai.base_url")).toBeUndefined();
       expect(r.stdout).toContain("no longer includes it");
+    });
+
+    it("withdraws from a CANCELLED subscription", () => {
+      // The commoner of the two downgrade paths, and the one no null tier can
+      // express: `mapPortalTier` and `mapPortalPlanTier` both answer null for
+      // an unpaid account, so `free` is the word that tells a cancellation
+      // apart from a box nobody has ever asked about.
+      armedYaml();
+      writeStore({ clawai_token: TOKEN, clawai_plan_tier: "free" });
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBeUndefined();
+      expect(r.stdout).toContain("no longer includes it");
+    });
+
+    it("does not withdraw on the device badge alone, however low it reads", () => {
+      // The badge may fill in for a missing plan when ARMING and never when
+      // destroying: `mapPortalTier` prefers `deviceTier` on purpose, so a Max
+      // subscriber running Flash carries exactly this pair until his first
+      // status poll, and withdrawing on it is the card's own defect.
+      armedYaml();
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBe(TOKEN);
+      expect(configCalls()).toEqual([]);
+      expect(r.stdout).toContain("a badge is not a plan");
     });
 
     it("falls back to the device stamp when no plan has been recorded", () => {
@@ -649,7 +678,7 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     // An empty "our proxy" is the worst value this binding can take: it makes
     // an owner's slot carrying their key and NO base_url — the canonical way
     // Hermes' generic `openai` slot is used — read as ours.
-    writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+    writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
     writeYaml(`${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    api_key: sk-theirs\n`);
 
     const r = run({ CLAWBOX_AI_PROXY_URL: override });

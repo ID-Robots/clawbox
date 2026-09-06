@@ -465,8 +465,26 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     expect(selectProviderMock).toHaveBeenCalledWith("cloud");
   });
 
-  it("writes nothing at all to the voice config on an unentitled box", async () => {
+  it("keeps the credential current on an unentitled box already speaking through us, and selects nothing", async () => {
+    // TASK-744 moved the entitlement gate BELOW the refresh. A box on our own
+    // cloud route is already calling that endpoint on every spoken reply, and
+    // the portal rotates the token on a re-link: leaving the old one there
+    // makes every utterance 401 rather than the 403 its plan has earned, and
+    // this is the only writer of `tts.openai.*` on the LINK path. What the plan
+    // governs is the SELECTION, which is never made here — taking the voice
+    // away is `register-mcp.sh` §4a's job, on a plan it can confirm.
     readVoiceMock.mockResolvedValue(voice("openai"));
+
+    await applyClawaiToHermes(TOKEN, "flash");
+
+    expect(writeCloudMock).toHaveBeenCalledWith(TOKEN);
+    expect(selectProviderMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps its hands off an unentitled box that is NOT on our route", async () => {
+    // The other half, and the one that must not move: an owner's own speech
+    // server is not ours to refresh whatever their plan says.
+    readVoiceMock.mockResolvedValue(voice("elevenlabs"));
 
     await applyClawaiToHermes(TOKEN, "flash");
 

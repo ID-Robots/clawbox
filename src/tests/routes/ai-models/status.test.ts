@@ -237,7 +237,11 @@ describe("/setup-api/ai-models/status", () => {
     // portal answer to write.
     it("records the PLAN beside the device badge", async () => {
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
-      mockGetConfigValue.mockResolvedValue(null);
+      // KEY-KEYED, not one answer for every key: a mock that answers the same
+      // value everywhere would let this pass over a writer that read
+      // `clawai_tier` where it meant `clawai_plan_tier`.
+      const stamps: Record<string, unknown> = {};
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key] ?? null);
       fetchSpy.mockResolvedValue(new Response(
         // The exact shape TASK-744 is about: Max plan, box stamped Flash.
         JSON.stringify({ tier: "max", deviceTier: "flash" }),
@@ -250,9 +254,15 @@ describe("/setup-api/ai-models/status", () => {
       expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", "pro");
     });
 
-    it("clears the recorded plan when the portal answers that the account is unpaid", async () => {
+    it("records an UNPAID plan as such, not as an absent one", async () => {
+      // The cancelled subscription. `mapPortalTier` and `mapPortalPlanTier`
+      // both answer null for a Free account, and an absent key already means
+      // "the portal has never answered for this box" — so without a positive
+      // word the two are indistinguishable and neither boot script can ever
+      // withdraw a cancelled subscription's cloud voice.
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
-      mockGetConfigValue.mockResolvedValue("pro");
+      mockGetConfigValue.mockImplementation(async (key: string) =>
+        key === "clawai_plan_tier" ? "pro" : "pro");
       fetchSpy.mockResolvedValue(new Response(
         JSON.stringify({ tier: "free", deviceTier: null }),
         { status: 200 },
@@ -260,7 +270,27 @@ describe("/setup-api/ai-models/status", () => {
 
       await GET();
 
-      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", undefined);
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", "free");
+    });
+
+    it("does not write a plan for a credential the box no longer holds", async () => {
+      // The re-link race, on the plan. The poll asks about the token the box
+      // held when the request started; four seconds later it has been
+      // re-linked. Writing then puts a RETIRED account's plan on record, and
+      // the next boot decides this box's entitlement from it — a retired Pro
+      // plan withdrawing a Max subscriber's voice, which is TASK-744 again.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      const { noteClawaiCredentialReplaced } = await import("@/lib/clawai-plan-tier");
+      fetchSpy.mockImplementation(async () => {
+        // The re-link lands while this lookup is still on the wire.
+        noteClawaiCredentialReplaced();
+        return new Response(JSON.stringify({ tier: "pro", deviceTier: "flash" }), { status: 200 });
+      });
+
+      await GET();
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
     });
 
     it("records no plan at all when the portal did not answer", async () => {

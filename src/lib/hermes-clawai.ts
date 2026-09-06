@@ -34,6 +34,16 @@ import {
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
+// The PLAN this box's account pays for, and the badge behind it — the one rule
+// the panel and both boot scripts read for "may this box have the cloud voice"
+// (TASK-744). Written into the store by this module, read back below.
+import {
+  CLAWAI_PLAN_TIER_KEY,
+  clawaiEntitlementTier,
+  clawaiPlanTierForStore,
+  type ClawaiPlanTier,
+  type ClawaiPortalPlan,
+} from "@/lib/clawai-plan-tier";
 
 // Applying ClawBox AI to a HERMES device, in one place.
 //
@@ -127,6 +137,20 @@ export interface ApplyClawaiOptions {
    * unset and the read below is honest.
    */
   previousClawaiToken?: string;
+  /**
+   * What the PORTAL said about this account's plan, when the caller asked it.
+   *
+   * The plan is written into the store below in the SAME write as `clawai_tier`
+   * and is DELETED there when this is absent — see `clawaiPlanTierForStore`.
+   * The two boot scripts decide an entitlement from the pair and one of them
+   * deletes the cloud voice on it, so a plan that outlived the credential it
+   * was read for would be a retired account deciding this box's voice
+   * (TASK-744). Only `/setup-api/ai-models/configure` has an answer to pass:
+   * the device-code finaliser and `/setup-api/hermes/clawai` carry the wizard's
+   * plan PICKER, which is a guess the account has not been consulted about
+   * (TASK-481) and must never be recorded as a plan.
+   */
+  portalPlan?: ClawaiPortalPlan;
 }
 
 /**
@@ -410,6 +434,11 @@ export async function applyClawaiToHermes(
   await setMany({
     clawai_token: trimmed,
     clawai_tier: tier,
+    // The PLAN, in the same write as the badge and the token it belongs to, and
+    // `undefined` — a DELETE — when this caller had no portal answer. That
+    // pairing is the whole invariant: the entitlement the boot scripts read can
+    // never describe an account this box has moved on from.
+    [CLAWAI_PLAN_TIER_KEY]: clawaiPlanTierForStore(options.portalPlan),
     ai_model_configured: true,
     ai_model_provider: CLAWAI_PROVIDER,
     ai_model_configured_at: new Date().toISOString(),
@@ -436,7 +465,15 @@ export async function applyClawaiToHermes(
   // Hermes' factory `edge` cloud is still selected, or where the on-device
   // provider is selected with no engine behind it, which is the state the
   // measured box was left in.
-  await selectHermesCloudVoiceIfUnvoiced(trimmed, tier);
+  // The entitlement, resolved HERE from the two facts this call already holds
+  // rather than read back out of the store it has just written: the plan the
+  // portal answered (when this caller asked it) with the badge behind it, which
+  // is `clawaiEntitlementTier` exactly. A function that re-read its own write
+  // would also be one a fixture could satisfy without the write ever landing.
+  await selectHermesCloudVoiceIfUnvoiced(
+    trimmed,
+    clawaiEntitlementTier(clawaiPlanTierForStore(options.portalPlan), tier),
+  );
 
   // Everything above wrote to DISK. The agent that will serve the next turn is
   // a process that has been running since long before any of it, and two of the
@@ -1663,7 +1700,10 @@ async function readPluginsDisabledFromCli(): Promise<Set<string> | null> {
  * Never throws: a link that worked must not report failure because the voice
  * could not be pointed. The Voice panel remains the place to set it by hand.
  */
-async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTier): Promise<void> {
+async function selectHermesCloudVoiceIfUnvoiced(
+  token: string,
+  entitlementTier: ClawaiPlanTier | null,
+): Promise<void> {
   try {
     const [
       {
@@ -1681,28 +1721,6 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
       import("@/lib/hermes-tts"),
       import("@/lib/local-models"),
     ]);
-    // The tier just linked, not a re-read: `setMany` wrote `clawai_tier` a
-    // moment ago, but the argument is the same fact without a second round trip
-    // and without a window where the store has not settled. It is the DEVICE
-    // tier, and the PLAN stamp `speechEntitledTier()` and both boot scripts
-    // prefer (`clawai_plan_tier`, TASK-744) is deliberately not read here:
-    // `forgetClawaiCredentialRefusal` retires it a few lines up as part of
-    // writing this very credential, so there is nothing on record to prefer.
-    // The device tier is the only answer this call has, and it is the one it
-    // has always used.
-    //
-    // What that costs is bounded and one-directional: a Max subscriber whose
-    // box is stamped Flash is not handed the cloud voice by the LINK. He is
-    // handed it by `register-mcp.sh` at the next web-server boot, once the
-    // status poll has recorded the plan — and the Voice tab offers it in the
-    // meantime, because the panel reads the pair. Nothing here can take a voice
-    // away; this function only ever selects one on a box that had none.
-    if (tier !== CLAWBOX_AI_SPEECH_TIER) {
-      console.log(
-        `[hermes-clawai] this plan does not include the cloud voice — leaving tts.provider alone`,
-      );
-      return;
-    }
     const voice = await readHermesVoice();
     // A READ THAT FAILED IS NOT AN ANSWER, asked of every key this decides on
     // rather than only of `tts.provider`. `hermes config get` exits the same
@@ -1763,6 +1781,26 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
           "[hermes-clawai] tts.openai already names its own speech route — leaving it alone",
         );
       }
+      return;
+    }
+    // THE ENTITLEMENT, and only now. Everything above either refreshed a
+    // credential this box is ALREADY speaking through or left an owner's own
+    // choice alone, and neither depends on the plan; what follows SELECTS the
+    // cloud voice on a box that has chosen nothing, which is the one decision
+    // the entitlement governs. The gate used to sit at the top of this
+    // function, above the read — so a box on our own cloud route whose token
+    // the portal had just rotated was never refreshed, and every utterance
+    // 401'd, which is the hole this function's own docblock describes.
+    //
+    // The PLAN with the badge behind it — `clawaiEntitlementTier`, the same
+    // rule the Voice panel and both boot scripts read, resolved by the caller.
+    // Reading the badge alone is TASK-744: a Max subscriber whose box is
+    // stamped `deviceTier: flash` was refused the voice `register-mcp.sh` arms
+    // for him at the next boot.
+    if (entitlementTier !== CLAWBOX_AI_SPEECH_TIER) {
+      console.log(
+        "[hermes-clawai] this plan does not include the cloud voice — leaving tts.provider alone",
+      );
       return;
     }
     // What this box HAS, asked in every unchosen state rather than only over a
