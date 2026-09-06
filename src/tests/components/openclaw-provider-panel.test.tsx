@@ -76,6 +76,7 @@ vi.mock("@/hooks/useLlamaCppModels", () => ({
 const summary: ProviderStatusSummary = {
   harness: "openclaw",
   defaultProvider: "clawai",
+  unrunnable: [],
   degraded: false,
   providers: [
     { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },

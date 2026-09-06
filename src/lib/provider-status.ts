@@ -27,6 +27,7 @@ import {
 } from "@/lib/hermes-providers";
 import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
 import { readPluginRepairs, repairFor, type PluginRepairStage } from "@/lib/plugin-repair";
+import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 
 /**
  * What the strip paints, and the only five things it may say.
@@ -102,6 +103,17 @@ export interface ProviderStatusSummary {
   providers: ProviderStatusRow[];
   /** The default provider's id, or null when the box has none yet. */
   defaultProvider: string | null;
+  /**
+   * Provider ids dropped from `providers` because this box can run NO model
+   * from them — the owner's ruling on TASK-668, and the only reason a curated
+   * row ever goes missing.
+   *
+   * Carried rather than left implicit because "absent" and "the summary could
+   * not be built" look the same to a client, and a second surface that renders
+   * its own hard-coded provider list (the Connect panel) has to be able to tell
+   * them apart: an empty array means every row it knows about may be shown.
+   */
+  unrunnable: string[];
   /**
    * True when the answer came from a fallback rather than from the live box —
    * a Hermes dashboard that did not respond, or an unreadable config. The strip
@@ -192,7 +204,7 @@ function sectionFor(id: string): "ai" | "localAi" {
 
 /** A row before the owner's switch is stamped on it; see `readProviderStatus`. */
 type UnstampedRow = Omit<ProviderStatusRow, "enabled">;
-interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
+interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers" | "unrunnable"> {
   providers: UnstampedRow[];
 }
 
@@ -412,6 +424,28 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
 }
 
 /**
+ * "Can this box run any model from the provider this ROW stands for?"
+ *
+ * The verdicts are keyed by CATALOGUE provider, and a row can stand for more
+ * than one: `codex` — the ChatGPT-subscription catalogue — folds onto the
+ * `openai` row. So the row is only written off when every catalogue behind it
+ * says the same thing, and one that can still run something keeps it. Nothing
+ * recorded at all is `unknown`, which shows the row.
+ */
+function rowRunnable(
+  rowId: string,
+  verdicts: Map<string, ProviderRunnable>,
+): ProviderRunnable {
+  let sawNone = false;
+  for (const [catalogueProvider, verdict] of verdicts) {
+    if (normalizeProviderId(catalogueProvider) !== rowId) continue;
+    if (verdict === "some") return "some";
+    if (verdict === "none") sawNone = true;
+  }
+  return sawNone ? "none" : "unknown";
+}
+
+/**
  * The aggregate, for whichever harness this box runs.
  *
  * Never throws: a box that cannot answer reports `degraded` with no rows,
@@ -433,9 +467,30 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
     // readers from having to know about it at all. On Hermes the file never
     // exists and this is an empty map, so the badge is absent by construction.
     const repairs = await readPluginRepairs();
+    // TASK-668, the owner's ruling: a provider this box can run NO model from
+    // is not offered at all. The verdict is read from what the enumeration the
+    // catalog route already performs recorded — no probe, no fork — and a
+    // provider with no recorded answer keeps its row exactly as on beta.
+    //
+    // OpenClaw only. Hermes' rows carry a `total` from the dashboard, but a
+    // zero there is documented (see `providerHasModels` in
+    // hermes-model-options.ts) as "credentialed and its /v1/models could not be
+    // enumerated" as often as "serves nothing" — the two are indistinguishable
+    // under `include_unconfigured=true`, so hiding on it would delete a working
+    // provider. Hermes keeps every panel row until that answer exists.
+    const verdicts = summary.harness === "openclaw"
+      ? await readProviderRunnable().catch(() => new Map<string, ProviderRunnable>())
+      : new Map<string, ProviderRunnable>();
+    const unrunnable = summary.providers
+      // The provider the box is POINTED AT is never hidden. It is the reason
+      // chat is broken, and a row nobody can see is a row nobody can change.
+      .filter((row) => !row.isDefault && rowRunnable(row.id, verdicts) === "none")
+      .map((row) => row.id);
+    const hidden = new Set(unrunnable);
     return {
       ...summary,
-      providers: summary.providers.map((row) => {
+      unrunnable,
+      providers: summary.providers.filter((row) => !hidden.has(row.id)).map((row) => {
         const repair = repairFor(repairs, row.id);
         return {
           ...row,
@@ -454,6 +509,6 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
       }),
     };
   } catch {
-    return { harness, providers: [], defaultProvider: null, degraded: true };
+    return { harness, providers: [], defaultProvider: null, unrunnable: [], degraded: true };
   }
 }

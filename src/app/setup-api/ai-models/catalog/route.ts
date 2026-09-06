@@ -14,6 +14,7 @@ import {
   isNonChatModelId,
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
+import { recordProviderEnumeration } from "@/lib/provider-runnable";
 
 export const dynamic = "force-dynamic";
 
@@ -989,6 +990,18 @@ interface CatalogFetchResult {
    * the command, else its stderr. Empty when it simply had nothing to list.
    */
   diagnostic: string;
+  /**
+   * True when an empty `models` is THE BOX'S ANSWER rather than a failure to
+   * get one — the CLI ran, refused nothing, printed nothing on stderr and
+   * listed no rows at all.
+   *
+   * The distinction is the whole false-failure guard for TASK-668: a refusal, a
+   * timeout, a plugin that is gone, or rows that our own chat-model filter ate
+   * all produce an empty list too, and recording any of them as "this box can
+   * run no <provider> model" would hide a provider that works. Only the clean
+   * zero is recorded, and only it stops the row being offered.
+   */
+  emptyIsAnswer: boolean;
 }
 
 function toFetchResult(
@@ -1020,7 +1033,10 @@ function toFetchResult(
       ? `all ${rows.length} listed rows report available: false (no route this box can take yet)`
       : `${rows.length} rows listed, none of them chat models this picker can offer`;
   }
-  return { models, diagnostic };
+  // A clean zero: the command ran, said nothing was wrong, and listed nothing.
+  // `diagnostic` is empty in exactly that case — a refusal or stderr fills it
+  // above, and rows that were all filtered out fill it just now.
+  return { models, diagnostic, emptyIsAnswer: models.length === 0 && !diagnostic };
 }
 
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
@@ -1108,7 +1124,10 @@ async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
     throw new Error(`openrouter ${res.status}`);
   }
   const data = (await res.json()) as OpenRouterListResponse;
-  return { models: transformOpenRouterEntries(data.data ?? []), diagnostic: "" };
+  // Never an authoritative empty: this is openrouter.ai's catalogue, not this
+  // box's answer about what it can route, and an empty `data` from a REST
+  // endpoint is far more likely to be a bad hour upstream than a fact.
+  return { models: transformOpenRouterEntries(data.data ?? []), diagnostic: "", emptyIsAnswer: false };
 }
 
 // Refresh the catalog for `provider` in the background. Returns
@@ -1283,7 +1302,7 @@ export function refreshInBackground(
     // The only catalogue with no upstream to ask: Mike's gateway routes the
     // two device tiers and nothing else, so these two rows ARE the device's
     // answer rather than a stand-in for one.
-    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, diagnostic: "" });
+    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, diagnostic: "", emptyIsAnswer: false });
   } else {
     fetcher = fetchOpenclawCatalog(provider);
   }
@@ -1334,6 +1353,12 @@ export function refreshInBackground(
     memCache.set(provider, payload);
     publishedSeq.set(provider, forkSeq);
     await writeDiskCache(provider, payload);
+    // What the box can run, for the surfaces that only need the COUNT (the
+    // Providers rows, the picker). Written from the published list rather than
+    // the raw one so it cannot disagree with what the picker is offered, and
+    // written on every publish so a provider that comes back from zero stops
+    // being hidden without anything else having to notice.
+    await recordProviderEnumeration(provider, payload.models.length);
     console.log(
       `[catalog] refreshed ${provider}: ${models.length} models`
       + (surfaceIds ? ` (${surfaceIds.size} on the subscription surface)` : ""),
@@ -1355,19 +1380,42 @@ export function refreshInBackground(
   };
 
   fetcher
-    .then(async ({ models, diagnostic }) => {
+    .then(async ({ models, diagnostic, emptyIsAnswer }) => {
       if (models.length === 0) {
-        // NOT a success. "[catalog] refreshed codex: 0 models" used to be
-        // followed by a disk write of the curated list, which then read back
-        // as a device answer — a false success in the exact shape this
-        // codebase keeps producing. An empty enumeration says the plugin is
-        // disabled, the provider id is gone, or the CLI failed silently; none
-        // of those are facts about what the box can run.
-        console.warn(
-          `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
-          + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
-        );
-        markStale();
+        // Still NOT a catalogue. Nothing is published and nothing is written to
+        // `<provider>.json` on either branch below — "[catalog] refreshed
+        // codex: 0 models" used to be followed by a disk write of the curated
+        // list, which then read back as a device answer.
+        //
+        // What splits the two branches is whether the box ANSWERED. A refusal,
+        // a plugin that is gone, or rows our own chat filter ate are failures:
+        // they keep beta's behaviour exactly — the previous catalogue stays and
+        // the backoff rations the retries.
+        if (!emptyIsAnswer) {
+          console.warn(
+            `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
+            + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
+          );
+          markStale();
+          return;
+        }
+        // A clean zero IS the answer: under `models.mode: "replace"` the core
+        // skips the authenticated catalogue and `openclaw models list
+        // --provider google` genuinely lists nothing (TASK-668). Recording it
+        // is what lets the Providers page and the picker stop offering a
+        // provider whose every row the gateway would refuse.
+        //
+        // Counted as an ANSWERED generation, and as a successful refresh, on
+        // purpose: this is the half the previous attempt at this card got
+        // wrong. Leaving the generation unanswered made the `.finally` below
+        // start a replacement immediately, and `markStale()` made the row
+        // permanently stale — together, a three-minute two-core enumeration
+        // per backoff window, for ever, over a provider that had already told
+        // us the truth.
+        recordSuccessfulRefresh(provider);
+        publishedSeq.set(provider, forkSeq);
+        await recordProviderEnumeration(provider, 0);
+        console.log(`[catalog] ${provider}: the box lists no models for it — recorded, nothing re-enumerated`);
         return;
       }
       await publish(models, null);
