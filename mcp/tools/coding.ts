@@ -676,9 +676,11 @@ export function registerCodingTools(reg: Registrar): void {
       assertPathAllowed(target);
 
       // The shared probe, not a second copy of it: this was an inlined
-      // `env which rg` that inherited the same missing-cwd false-failure
-      // hasBinary() was just fixed for (TASK-722), and it degraded a box with
-      // ripgrep installed to `grep -r` silently.
+      // `env which rg` carrying the same missing-cwd false failure hasBinary()
+      // was just fixed for (TASK-722). On a device the tree is there and it
+      // answered correctly; where it is not — a dev PC, a CI runner, the brief
+      // mid-update window — a host with ripgrep silently searched with
+      // `grep -r` instead.
       const useRg = await hasBinary("rg");
       const args: string[] = [];
       if (useRg) {

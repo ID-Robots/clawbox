@@ -217,6 +217,12 @@ const DRAIN_MS = 250;
 export interface SpawnOptions {
   timeoutMs?: number;
   maxBytes?: number;
+  /**
+   * Run the child HERE. Omit it and the child runs in the project root, or in
+   * `/` when that root cannot be entered — so an argument that is not an
+   * absolute path does not name a fixed file. A directory named here is used
+   * exactly as given and is never substituted.
+   */
   cwd?: string;
   input?: string;
   /** Extra environment for this child only (e.g. DISPLAY for a screen grab). */
@@ -228,7 +234,7 @@ export interface SpawnOptions {
  *
  * `DEFAULT_CWD` is the project root, and it is the right answer for RESOLVING
  * a relative path (see resolveUserPath). It is NOT a precondition of running a
- * program: when that directory is absent, `spawn` fails ENOENT before the
+ * program: when that directory cannot be entered, `spawn` fails before the
  * binary is ever reached and `spawnArgv` settles at 127 — which `hasBinary()`
  * reads as "not installed" and `probeJournal()` as "no journal". The whole
  * capability sweep then answers false at once and the MCP server drops
@@ -238,8 +244,9 @@ export interface SpawnOptions {
  * failed mount, a mis-set CLAWBOX_ROOT — which is when those tools are wanted.
  *
  * `/` is the fallback because it is the one directory that cannot be missing
- * and cannot be a surprise: every argument these tools pass is already an
- * absolute path (`resolveUserPath` guarantees it), so nothing changes meaning.
+ * and cannot be a surprise. It is safe only because every argument these tools
+ * pass is already an ABSOLUTE path — the rule is restated on `spawnArgv` and on
+ * `SpawnOptions.cwd`, where a caller adding an argument will read it.
  *
  * Asked per spawn rather than once at import: the tree comes BACK after an
  * update, and a capability answered once and kept for the process lifetime is
@@ -247,7 +254,15 @@ export interface SpawnOptions {
  */
 const FALLBACK_CWD = "/";
 
-function defaultSpawnCwd(): string {
+/**
+ * The directory a `spawnArgv` call with no `cwd` will actually use.
+ *
+ * Exported because `check-tools.ts` PRINTS it when a probe answers false: a
+ * note that named `DEFAULT_CWD` there would attach the old, wrong cause ("your
+ * tree is missing") to a probe that failed for a real reason ("scrot is not
+ * installed") — the very misdiagnosis this fix removes.
+ */
+export function defaultSpawnCwd(): string {
   try {
     return statSync(DEFAULT_CWD).isDirectory() ? DEFAULT_CWD : FALLBACK_CWD;
   } catch {
@@ -255,23 +270,60 @@ function defaultSpawnCwd(): string {
   }
 }
 
+/** The spawn failed on the DIRECTORY, before the program was reached. */
+function isCwdRefusal(code: string | undefined): boolean {
+  return code === "ENOENT" || code === "EACCES" || code === "ENOTDIR";
+}
+
+interface Attempt {
+  result: SpawnResult;
+  /** Set when the child never started and the reason could be the directory. */
+  refusedCode?: string;
+}
+
 /**
  * The ONLY process entry point outside the `bash` tool. Argv array, never a
  * shell string — so no argument, however hostile, can be re-parsed as a
  * command. Output is capped and the child is killed at the cap so a runaway
  * producer cannot OOM the stdio server and take every tool down with it.
+ *
+ * EVERY PATH IN `args` MUST BE ABSOLUTE. With no `cwd` the child runs in the
+ * project root, or in `/` when that root cannot be entered, so a relative
+ * argument does not name a fixed file. `resolveUserPath` is what every caller
+ * uses to satisfy this, and `rm -rf --` is one of the callers.
  */
 export function spawnArgv(
   bin: string,
   args: string[],
   options: SpawnOptions = {},
 ): Promise<SpawnResult> {
-  const { timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024, cwd, input, extraEnv } = options;
+  const { cwd } = options;
   // A cwd the CALLER named is honoured exactly as given, missing or not: that
   // directory is the caller's meaning, and running somewhere else instead
   // would be the false-success mirror of the bug the fallback above fixes.
-  const effectiveCwd = cwd ?? defaultSpawnCwd();
-  return new Promise((resolveP) => {
+  if (cwd !== undefined) return spawnAttempt(bin, args, options, cwd).then((a) => a.result);
+  const chosen = defaultSpawnCwd();
+  return spawnAttempt(bin, args, options, chosen).then((a) => {
+    // The stat above answers "does this exist", which is not the same question
+    // as "can this process chdir into it" — a root-owned tree part-way through
+    // an install answers yes and then refuses EACCES — and the two syscalls are
+    // far enough apart for the tree to vanish between them, which is precisely
+    // the mid-update window this fix is about. So the refusal itself, not a
+    // prediction of it, is what selects the fallback.
+    if (chosen === FALLBACK_CWD || !isCwdRefusal(a.refusedCode)) return a.result;
+    return spawnAttempt(bin, args, options, FALLBACK_CWD).then((retry) => retry.result);
+  });
+}
+
+function spawnAttempt(
+  bin: string,
+  args: string[],
+  options: SpawnOptions,
+  effectiveCwd: string,
+): Promise<Attempt> {
+  const { timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024, input, extraEnv } = options;
+  return new Promise((resolveA) => {
+    const resolveP = (result: SpawnResult, refusedCode?: string) => resolveA({ result, refusedCode });
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(bin, args, { cwd: effectiveCwd, env: { ...process.env, HOME, ...extraEnv }, shell: false });
@@ -282,7 +334,7 @@ export function spawnArgv(
         exitCode: 127,
         timedOut: false,
         truncated: false,
-      });
+      }, (err as NodeJS.ErrnoException | undefined)?.code);
       return;
     }
     let stdout = "";
@@ -291,6 +343,8 @@ export function spawnArgv(
     let timedOut = false;
     let settled = false;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+    let refusedCode: string | undefined;
 
     const finish = (exitCode: number) => {
       if (settled) return;
@@ -301,7 +355,7 @@ export function spawnArgv(
       // does not accumulate open handles once per hung call.
       child.stdout?.destroy();
       child.stderr?.destroy();
-      resolveP({ stdout, stderr, exitCode, timedOut, truncated });
+      resolveP({ stdout, stderr, exitCode, timedOut, truncated }, refusedCode);
     };
 
     // Kill, then settle on OUR schedule. Killing the direct child does not
@@ -344,6 +398,10 @@ export function spawnArgv(
     });
     child.on("error", (err: Error) => {
       stderr += err.message;
+      // The code travels with the result so the caller above can tell "the
+      // directory refused us" from "the program is not there" — the same
+      // message text serves both.
+      refusedCode = (err as NodeJS.ErrnoException).code;
       finish(127);
     });
 
