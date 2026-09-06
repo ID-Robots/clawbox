@@ -71,7 +71,7 @@ describe("POST /setup-api/update/dismiss", () => {
     mockDismiss.mockResolvedValue({
       dismissed: false,
       reason: "not-written" as const,
-      error: "EACCES: data/config.json",
+      error: "The device could not save that change — see the server log.",
     });
 
     const res = await dismissPost(request(session.cookie));
@@ -79,7 +79,7 @@ describe("POST /setup-api/update/dismiss", () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.dismissed).toBe(false);
-    expect(body.error).toMatch(/EACCES/);
+    expect(body.error).toMatch(/could not save that change/);
   });
 
   it("refuses a caller with no session", async () => {

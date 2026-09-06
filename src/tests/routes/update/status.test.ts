@@ -21,6 +21,10 @@ import {
   isInterruptedVerdict,
 } from "@/lib/updater";
 import { collectBuildIdentity } from "@/lib/build-identity";
+// The real sentence, from the client-safe module the updater re-exports it
+// from: a hand-copied duplicate would let this fixture go on passing while the
+// gate it is meant to describe stopped matching.
+import { INTERRUPTED_MESSAGE } from "@/lib/update-constants";
 
 const mockCollectBuildIdentity = vi.mocked(collectBuildIdentity);
 const mockGetUpdateState = vi.mocked(getUpdateState);
@@ -283,8 +287,7 @@ describe("GET /setup-api/update/status", () => {
       phase: "failed" as const,
       steps: defaultState.steps.map((s) => ({ ...s, status: "pending" as const })),
       currentStepIndex: -1,
-      error: "The update was interrupted before it could finish: the web server was replaced while it ran, "
-        + "and no step is left to resume. Nothing was rolled back — start the update again.",
+      error: INTERRUPTED_MESSAGE,
     };
 
     it("reports the completion that overtook it", async () => {

@@ -3,7 +3,7 @@ import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
-import { get, set, setMany } from "./config-store";
+import { get, getKnown, set, setMany } from "./config-store";
 import {
   findOpenclawBin,
   GATEWAY_PORT,
@@ -29,20 +29,11 @@ import { setUpdateLock, clearUpdateLock, isUpdateLocked } from "./update-lock";
  */
 const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
 
-/**
- * The sentence an interrupted run is reported with — one constant, because it
- * is also the IDENTITY of that verdict.
- *
- * The verdict is remembered in memory as well as on disk, and the reader that
- * decided it need not be the process that ran the update: on a Hermes box the
- * boot hook resumed the second half while the status route's own copy of this
- * module sat idle, stamped the record from what the disk said mid-run, and
- * latched a `failed` it could never revisit. Recognising the state it left is
- * what lets a completion take it back.
- */
-const INTERRUPTED_MESSAGE =
-  "The update was interrupted before it could finish: the web server was replaced while it ran, "
-  + "and no step is left to resume. Nothing was rolled back — start the update again.";
+// The sentence an interrupted run is reported with, from the client-safe
+// module: it is the IDENTITY of that verdict, and the route and the tests have
+// to be able to name it without pulling this file's Node built-ins in with it.
+export { INTERRUPTED_MESSAGE } from "./update-constants";
+import { INTERRUPTED_MESSAGE } from "./update-constants";
 import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
@@ -2764,12 +2755,34 @@ export async function dismissSettledUpdate(): Promise<DismissOutcome> {
   // this the next idle poll re-reads it and raises the same failure again,
   // which would make it undismissable — so the record goes FIRST, and the
   // in-memory state is only cleared once the disk agrees.
-  try {
-    await set(UPDATE_INTERRUPTED_KEY, undefined);
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    console.warn("[Updater] Could not forget the settled run:", error);
-    return { dismissed: false, reason: "not-written", error };
+  //
+  // …but only when there IS one. Most settled failures carry no record at all —
+  // the rebuild-evidence verdict, any failed step, "No internet connection" —
+  // and for those the write is a no-op deletion whose failure says nothing
+  // about the thing being dismissed. Letting it refuse would make a failed
+  // update UNDISMISSABLE on a box whose disk is full: the panel is re-adopted
+  // on every reload, and the owner cannot reach the button that retries the
+  // update. `getKnown` because "the store could not be read" is not evidence
+  // that the key is unset — that store may well hold a record.
+  const record = await getKnown(UPDATE_INTERRUPTED_KEY);
+  if (!record.known || record.value !== undefined) {
+    try {
+      await set(UPDATE_INTERRUPTED_KEY, undefined);
+    } catch (err) {
+      console.warn(
+        "[Updater] Could not forget the settled run:",
+        err instanceof Error ? err.message : err,
+      );
+      // The reason travels; the store's own words do NOT. A write that failed
+      // on the READ half is a JSON.parse error, and its message quotes a window
+      // of data/config.json — which holds both bot tokens and the mailbox
+      // password. That belongs in the log, not in an HTTP response body.
+      return {
+        dismissed: false,
+        reason: "not-written",
+        error: "The device could not save that change — see the server log.",
+      };
+    }
   }
   // Re-asked after the await: a run can claim the box while the write is in
   // flight, and resetting the state under it would show an empty step list
@@ -2801,28 +2814,31 @@ interface SettledMarkers {
   completedAt: string | null;
 }
 
-async function readSettledMarkers(): Promise<SettledMarkers> {
+/**
+ * …or `null` when the store could not be read.
+ *
+ * Through `getKnown`, not `get`: the forgiving reader answers `{}` to an
+ * EACCES, a half-written file and a non-object JSON alike, and "we could not
+ * read the file" is not evidence that a key is unset (config-store.ts says so
+ * in as many words). Read the other way, an unreadable store would look like a
+ * box with no interruption on it — and the caller would retract a verdict it
+ * still has every reason to hold. `data/config.json` being briefly unreadable
+ * is exactly what `post_update` can do to it.
+ */
+async function readSettledMarkers(): Promise<SettledMarkers | null> {
   const [interruptedAt, completed, completedAt] = await Promise.all([
-    get(UPDATE_INTERRUPTED_KEY),
-    get("update_completed"),
-    get("update_completed_at"),
+    getKnown(UPDATE_INTERRUPTED_KEY),
+    getKnown("update_completed"),
+    getKnown("update_completed_at"),
   ]);
+  if (!interruptedAt.known || !completed.known || !completedAt.known) return null;
   return {
-    interruptedAt: typeof interruptedAt === "string" ? interruptedAt : null,
-    completed: Boolean(completed),
-    completedAt: typeof completedAt === "string" ? completedAt : null,
+    interruptedAt: typeof interruptedAt.value === "string" ? interruptedAt.value : null,
+    completed: Boolean(completed.value),
+    completedAt: typeof completedAt.value === "string" ? completedAt.value : null,
   };
 }
 
-/**
- * Did a completion come AFTER the interruption the box remembers?
- *
- * Both records carry a time, so the newer one is the true one. Strictly newer,
- * and only with a date on both sides: older boxes carried `update_completed =
- * true` for ever with no `update_completed_at` beside it, and "some completion
- * happened at some point" cannot prove it came after this interruption —
- * guessing that it did would be the silence TASK-731 exists to end.
- */
 /**
  * Drop the record, reporting a store that would not take the write.
  *
@@ -2841,6 +2857,21 @@ async function forgetInterruption(): Promise<void> {
   }
 }
 
+/**
+ * Did a completion come AFTER the interruption the box remembers?
+ *
+ * Both records carry a time, so the newer one is the true one. Strictly newer,
+ * and only with a date on both sides: older boxes carried `update_completed =
+ * true` for ever with no `update_completed_at` beside it, and "some completion
+ * happened at some point" cannot prove it came after this interruption —
+ * guessing that it did would be the silence TASK-731 exists to end.
+ *
+ * Every uncertain answer is `false`, which KEEPS the failure showing: an
+ * unparseable date, an undated completion, equal times. The clock is the one
+ * assumption left — a box whose time is stepped BACKWARDS between the two
+ * writes reads its own completion as older — and that is the direction to fail
+ * in, since the next run's prologue clears both markers anyway.
+ */
 function completionOutranksInterruption(markers: SettledMarkers): boolean {
   if (!markers.interruptedAt || !markers.completed || !markers.completedAt) return false;
   const completedAt = Date.parse(markers.completedAt);
@@ -2957,11 +2988,20 @@ async function resumeContinuation(): Promise<boolean> {
     // open by their own paths.
     const released = (await isUpdateLocked()) && (await clearUpdateLock());
     const markers = await readSettledMarkers();
+    // A store that could not be read decides NOTHING — it neither stamps a
+    // record nor retracts the verdict this process is already holding.
+    if (!markers) return false;
     const overtaken = completionOutranksInterruption(markers);
     if (overtaken) await forgetInterruption();
     const remembered = Boolean(markers.interruptedAt) && !overtaken;
     if ((released && !markers.completed) || remembered) {
       if (!remembered) {
+        // Asked once more, immediately before the stamp. The run can finish
+        // between the read above and this line, and a record dated after the
+        // completion it describes would outrank it for ever — the very defect
+        // this branch is being fixed for, through a window of milliseconds.
+        const now = await readSettledMarkers();
+        if (!now || now.completed) return false;
         // Only on the transition, so the record keeps the time it happened.
         await set(UPDATE_INTERRUPTED_KEY, new Date().toISOString());
       }

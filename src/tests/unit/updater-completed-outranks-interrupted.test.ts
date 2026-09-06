@@ -30,18 +30,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * and it must survive this one.
  */
 
-vi.mock("@/lib/config-store", () => ({
-  get: vi.fn(),
-  set: vi.fn(),
-  setMany: vi.fn(),
-}));
+vi.mock("@/lib/config-store", () => {
+  // `getKnown` is the tri-state reader ("we could not read the file" is not
+  // "the key is unset"), and it answers from the SAME mock every fixture in
+  // this file already drives — so a case that wants an unreadable store says
+  // so by overriding `getKnown` alone.
+  const get = vi.fn();
+  return {
+    get,
+    getKnown: vi.fn(async (key: string) => ({ value: await get(key), known: true })),
+    set: vi.fn(),
+    setMany: vi.fn(),
+  };
+});
 
 vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 
-import { get, set } from "@/lib/config-store";
+import { get, getKnown, set } from "@/lib/config-store";
+import { INTERRUPTED_MESSAGE } from "@/lib/update-constants";
 import * as updater from "@/lib/updater";
 
 const mockGet = vi.mocked(get);
+const mockGetKnown = vi.mocked(getKnown);
 const mockSet = vi.mocked(set);
 
 /** The moment the restart step replaced the web server. */
@@ -163,6 +173,45 @@ describe("an interruption never outlives a completion newer than it", () => {
     expect(updater.getUpdateState().phase).toBe("failed");
   });
 
+  it("keeps the verdict when the store cannot be read at all", async () => {
+    // `config-store.get` answers `{}` to an EACCES, a half-written file and a
+    // non-object JSON alike, so read that way an unreadable store looks exactly
+    // like a box with no interruption on it — and the rule above would retract
+    // a verdict the box still has every reason to hold. "We could not read the
+    // file" is not evidence that a key is unset; `getKnown` is what says which.
+    // A root-owned or half-written data/config.json is what `post_update` can
+    // leave behind, which is the very run this verdict is about.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: true });
+    await updater.checkContinuation();
+    expect(updater.getUpdateState().phase).toBe("failed");
+
+    mockGetKnown.mockImplementation(async () => ({ value: undefined, known: false }));
+    await updater.checkContinuation();
+
+    expect(updater.getUpdateState().phase).toBe("failed");
+  });
+
+  it("is the verdict the status route recognises, word for word", async () => {
+    // The route's gate is `isInterruptedVerdict`, and the branch below is the
+    // only thing that produces the state it has to match. Driven through the
+    // real predicate so the two cannot drift apart.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: true });
+
+    await updater.checkContinuation();
+
+    const settled = updater.getUpdateState();
+    expect(settled.error).toBe(INTERRUPTED_MESSAGE);
+    expect(updater.isInterruptedVerdict(settled)).toBe(true);
+    // A failure with a cause of its own is NOT that verdict and is never
+    // re-opened by the markers.
+    expect(updater.isInterruptedVerdict({
+      ...settled,
+      error: "The device restarted without producing a new build",
+    })).toBe(false);
+  });
+
   it("drops the verdict this process is holding once its record is gone", async () => {
     // The verdict is remembered in memory as well as on disk, and the two
     // readers are not the same process. What clears the record — a completion,
@@ -191,6 +240,9 @@ describe("dismissing a settled run", () => {
     diskState({ locked: true });
     await updater.checkContinuation();
     expect(updater.getUpdateState().phase).toBe("failed");
+    // The record the branch just wrote is on the disk it wrote it to — a `set`
+    // this file mocks away is still a `set` the box made.
+    diskState({ locked: false, interruptedAt: INTERRUPTED_AT });
 
     mockSet.mockRejectedValueOnce(new Error("EACCES: data/config.json") as never);
     const result = await updater.dismissSettledUpdate();
@@ -198,17 +250,39 @@ describe("dismissing a settled run", () => {
     expect(result.dismissed, "a write that did not happen is not a dismissal").toBe(false);
     if (result.dismissed) throw new Error("unreachable");
     expect(result.reason).toBe("not-written");
-    expect(result.error).toMatch(/EACCES/);
+    // The store's own words stay in the log: a write that failed on the READ
+    // half is a JSON.parse error whose message quotes a window of
+    // data/config.json, which holds both bot tokens and the mailbox password.
+    expect(result.error).toBe("The device could not save that change — see the server log.");
+    expect(result.error).not.toMatch(/EACCES/);
     expect(
       updater.getUpdateState().phase,
       "the run stays settled-failed: nothing was forgotten",
     ).toBe("failed");
   });
 
+  it("forgets a failure that never had a record, even when the store refuses writes", async () => {
+    // Most settled failures carry no `update_interrupted_at` at all — the
+    // rebuild-evidence verdict, a failed step, "No internet connection". For
+    // those the write is a no-op deletion, and letting its failure refuse the
+    // dismissal makes the panel UNDISMISSABLE on a box whose disk is full: it
+    // is re-adopted on every reload, and the owner cannot reach the button that
+    // retries the update.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    diskState({ locked: false });
+    mockSet.mockRejectedValue(new Error("ENOSPC: no space left on device") as never);
+
+    const result = await updater.dismissSettledUpdate();
+
+    expect(result.dismissed).toBe(true);
+    expect(mockSet).not.toHaveBeenCalledWith("update_interrupted_at", undefined);
+  });
+
   it("forgets the record when the write goes through", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     diskState({ locked: true });
     await updater.checkContinuation();
+    diskState({ locked: false, interruptedAt: INTERRUPTED_AT });
 
     const result = await updater.dismissSettledUpdate();
 

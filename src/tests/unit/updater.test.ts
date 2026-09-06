@@ -30,11 +30,19 @@ vi.mock("fs", async (importOriginal) => {
   return { ...actual, existsSync: vi.fn(actual.existsSync) };
 });
 
-vi.mock("@/lib/config-store", () => ({
-  get: vi.fn(),
-  set: vi.fn(),
-  setMany: vi.fn(),
-}));
+vi.mock("@/lib/config-store", () => {
+  // `getKnown` is the tri-state reader ("we could not read the file" is not
+  // "the key is unset"), and it answers from the SAME mock every fixture in
+  // this file already drives — so a case that wants an unreadable store says
+  // so by overriding `getKnown` alone.
+  const get = vi.fn();
+  return {
+    get,
+    getKnown: vi.fn(async (key: string) => ({ value: await get(key), known: true })),
+    set: vi.fn(),
+    setMany: vi.fn(),
+  };
+});
 
 // `waitForGateway` is the readiness wait, and it is what these tests drive: the
 // polling loop lives in port-probe now (shared with restartGateway's own wait),
