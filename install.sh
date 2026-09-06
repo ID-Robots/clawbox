@@ -1465,8 +1465,88 @@ verify_build_present() {
 # Ctrl-C leaves no `.next` at all and the good build under a gitignored
 # directory nothing else in the tree reads. Reclaim it before anything else
 # runs, or the next rename would delete it.
+# Every transient this reclaim can leave behind, and what to do with each.
+#
+# TASK-729's claim is a rename, which is what makes it a mutex — but a rename
+# needs somewhere to move the tree TO, and a process killed mid-claim leaves the
+# box's only build under that name. There are two such names, and BOTH are
+# private per process (`.<pid>` suffixed) so no shared destination can be
+# occupied and latch the reclaim: a stray shared `.next-claim` beside an
+# existing `.next-old` made every later claim fail ENOTEMPTY, on both
+# reclaimers, for ever.
+#
+# So the recovery is one drain over both globs, run before either reclaimer
+# decides anything:
+#   - an orphan with no build entry is junk and goes (a discard is entry-less by
+#     construction — it is the `.next` both reclaimers only ever touch when it
+#     has no entry — so a LIVE one loses nothing here, and its owner already
+#     copes with a discard that is gone);
+#   - an orphan WITH a build is a build, and is adopted under the parked name a
+#     rename at a time. Adopting a live claimer's tree is safe by the same
+#     property the claim rests on: the victim's placement rename then fails, it
+#     stands down, and the build is under `.next-old` for whoever claims next.
+#   - an orphan with a build while `.next-old` already holds one is a duplicate
+#     of a fallback we already have. It is REPORTED and left, never destroyed:
+#     this cannot prove which of the two is wanted, and the next park clears
+#     `.next-old` and adopts it on the run after.
+drain_build_transients() {
+  local root="$1" kept_dir="$2" orphan aside
+  # The private name this function claims into. Same family as the reclaim's
+  # own discard, so it is already drained, gitignored and pruned from the
+  # standalone trace — and a different process has a different one.
+  aside="$root/.next-discard.$$"
+  for orphan in "$root"/.next-claim.* "$root"/.next-discard.*; do
+    [ -e "$orphan" ] || continue
+    if ! build_entry_present "$orphan"; then
+      rm -rf "$orphan" || true
+      continue
+    fi
+    if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
+      echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
+      continue
+    fi
+    # A rename onto a non-empty destination fails whatever is in it, so
+    # "it failed" is not "there is a build there". An entry-less but non-empty
+    # `.next-old` — an interrupted `rm -rf "$kept_dir"` in
+    # set_previous_build_aside leaves exactly that — is worth nothing and must
+    # not keep a real build stranded for ever.
+    #
+    # But it is CLAIMED before it is destroyed, never probed and then deleted:
+    # those are two syscalls apart, and a concurrent set_previous_build_aside
+    # can rename a real build into `$kept_dir` in between — which a
+    # check-then-delete would then destroy. The claim is a rename to a private
+    # name, the same mutex the whole reclaim rests on, and what was claimed is
+    # asked again before anything is removed.
+    if ! build_entry_present "$kept_dir"; then
+      if mv -T "$kept_dir" "$aside" 2>/dev/null; then
+        if build_entry_present "$aside"; then
+          # It gained a build between the probe and the claim. Put it back and
+          # leave the orphan; the next run has a clear destination.
+          mv -T "$aside" "$kept_dir" 2>/dev/null || true
+          echo "  Note: $(basename "$orphan") holds a build and $kept_dir gained one — leaving it for the next run" >&2
+          continue
+        fi
+        rm -rf "$aside" || true
+      fi
+      if mv -T "$orphan" "$kept_dir" 2>/dev/null; then
+        echo "  Adopted a build left behind by an interrupted reclaim ($(basename "$orphan"))" >&2
+        continue
+      fi
+      echo "  Warning: could not adopt $(basename "$orphan") into $kept_dir" >&2
+      continue
+    fi
+    echo "  Note: $(basename "$orphan") holds a build and $kept_dir already does — leaving it for the next run" >&2
+  done
+}
+
 promote_parked_build() {
   local build_dir="${1:-$PROJECT_DIR/.next}" kept_dir="${2:-$PROJECT_DIR/.next-old}"
+  local root="${build_dir%/.next}" claim_dir discard_dir
+  claim_dir="$root/.next-claim.$$"
+  discard_dir="$root/.next-discard.$$"
+
+  drain_build_transients "$root" "$kept_dir"
+
   # `-e`, and `-L` beside it: for the nested standalone layout `postbuild`
   # supports, `.next/standalone/server.js` is a SYMLINK to an absolute path
   # inside `.next` — which dangles for as long as the tree is parked, so `-f`
@@ -1474,8 +1554,56 @@ promote_parked_build() {
   build_entry_present "$kept_dir" || return 0
   build_entry_present "$build_dir" && return 0
   echo "  Found a build parked by an interrupted rebuild — putting it back" >&2
-  rm -rf "$build_dir"
-  mv "$kept_dir" "$build_dir"
+
+  # THE CLAIM, and the whole of TASK-729's fix. There are two reclaimers of
+  # these directories — this one and the boot-time block in
+  # production-server.js — with no lock between them, and both used to run the
+  # same non-atomic pair: `rm -rf .next` then `mv .next-old .next`. Whichever
+  # arrived second destroyed what the first had just restored and then failed
+  # its own rename into a best-effort catch, leaving the box with NEITHER tree
+  # — the exact outcome the park exists to prevent.
+  #
+  # A rename of the SOURCE is atomic and has exactly one winner, so the claim
+  # goes first and nothing is destroyed before it: the loser gets a failed `mv`
+  # and returns having touched nothing. The destination is private, so it can
+  # never be occupied by somebody else's leftovers.
+  if ! mv -T "$kept_dir" "$claim_dir" 2>/dev/null; then
+    # A tree that is no longer there was taken by the other reclaimer — a normal
+    # outcome. One that IS still there could not be moved, which is a real
+    # failure (a read-only rootfs, EACCES, ENOSPC) and reads differently to an
+    # operator. Saying "someone else got there first" over a box that cannot
+    # move its own directories would be a false cause in the line they triage
+    # from.
+    if [ -e "$kept_dir" ]; then
+      echo "  Warning: could not claim the parked build at $kept_dir — leaving it where it is" >&2
+    fi
+    return 0
+  fi
+
+  # Everything from here destroys only PRIVATE names. `.next` is moved aside
+  # rather than deleted, so even if the "it has no build entry" judgement above
+  # was raced by the other reclaimer placing a good one, nothing is lost: the
+  # branch below puts it back, and a kill in between leaves it for the drain.
+  # The move-aside's result is the difference between "somebody took our claim"
+  # and "this filesystem will not let us move a directory". Discarded, an
+  # EACCES/EROFS/EBUSY here left `.next` in place, made the placement fail
+  # ENOTEMPTY, and was then reported as a lost race while the build stayed under
+  # the claim — a false cause on a box that is about to crash-loop for want of
+  # an entry.
+  if ! mv -T "$build_dir" "$discard_dir" 2>/dev/null && [ -e "$build_dir" ]; then
+    echo "  Warning: could not move $build_dir aside, so the parked build stays claimed at $claim_dir" >&2
+    return 0
+  fi
+  if mv -T "$claim_dir" "$build_dir" 2>/dev/null; then
+    rm -rf "$discard_dir" || true
+  else
+    # Our claim was adopted by the other reclaimer's drain, which means it is
+    # placing this same build. Return what we moved aside and get out of its
+    # way; the tree we were carrying is not lost, it is in its hands.
+    mv -T "$discard_dir" "$build_dir" 2>/dev/null || rm -rf "$discard_dir" || true
+    return 0
+  fi
+
   # The stamp names the run that died (see set_previous_build_aside); it must
   # not ride into the tree the box is about to serve. `|| true` because a
   # cosmetic cleanup must never be what aborts a recovery under `set -e`.

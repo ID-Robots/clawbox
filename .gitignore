@@ -6,6 +6,13 @@ node_modules/
 node_modules
 .next/
 .next-old/
+# The two transient names the atomic build reclaim uses (TASK-729), both
+# PRIVATE per process: the tree a rename claims the parked build into, and the
+# one it moves the outgoing .next aside into. Both must be ignored for the same
+# reason .next-old is — an update runs `git clean -fd` over this tree, and a
+# claim swept away mid-flight is a box with no build.
+.next-claim.*/
+.next-discard.*/
 out/
 build/
 coverage/
