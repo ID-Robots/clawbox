@@ -175,6 +175,31 @@ describe("Codex is installed the way OpenAI supports", () => {
   });
 });
 
+describe("the x64 desktop installer follows the same rules", () => {
+  // install-x64.sh is a standalone twin of install.sh by design, so its copy is
+  // the one most likely to drift back to `curl | sh`. Only the rules that make
+  // the install SAFE are pinned here; the pin file is what stops the two hosts
+  // running different builds, and it is asserted above.
+  const ensure = () => extractShellFunctionFrom(INSTALL_X64, "ensure_codex_cli");
+
+  it("verifies the installer's digest before running it, and probes with a login shell", () => {
+    const fn = ensure();
+    expect(fn.indexOf("sha256sum")).toBeGreaterThan(-1);
+    expect(fn.indexOf("sha256sum")).toBeLessThan(fn.indexOf("sh '$installer'"));
+    expect(fn).toContain('chown "$CLAWBOX_USER" "$installer"');
+    expect(fn.indexOf("curl")).toBeLessThan(fn.indexOf('chown "$CLAWBOX_USER"'));
+    expect(shellCode(fn)).not.toContain("sudo -u");
+  });
+
+  it("takes the npm copy away only after the native binary reports the pin", () => {
+    const fn = ensure();
+    const verified = fn.lastIndexOf("codex_native_is_current");
+    const removed = fn.lastIndexOf("remove_npm_codex");
+    expect(verified).toBeGreaterThan(-1);
+    expect(verified).toBeLessThan(removed);
+  });
+});
+
 describe("delivery to devices already in the field", () => {
   it("post_update installs it, so an in-app update is enough", () => {
     // Fresh-install-only delivery is this installer's default failure mode:
