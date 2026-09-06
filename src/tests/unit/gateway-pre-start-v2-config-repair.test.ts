@@ -124,6 +124,10 @@ function run(version = "2026.8.1", extraEnv: Record<string, string> = {}) {
       OC_CALLS: path.join(dir, "calls.log"),
       OC_STATE: stateDir,
       OC_CORE_PY: path.join(binDir, "core.py"),
+      // The block builds its migration preview under TMPDIR, so the "nothing is
+      // left behind" checks have to look where it actually writes. Per test, so
+      // one case cannot see another's leftovers or the machine's.
+      TMPDIR: tmpDir,
       ...extraEnv,
     }),
     timeout: 30_000,
@@ -761,9 +765,26 @@ exit 0
     writeFileSync(path.join(stateDir, "exec-approvals.json"), realApproval);
   }
 
+  /**
+   * Everything the block's migration preview could have left behind.
+   *
+   * BOTH places, because the preview moved: it used to sit beside openclaw.json
+   * in the state directory and now lives in its own directory under TMPDIR. A
+   * helper that looked only at the old place, under the old name, made every
+   * "nothing is left behind" assertion unfailable — verified by mutation: with
+   * the three `rm -rf "$preview_dir"` lines removed from the block, the
+   * migrated config (secrets and all) is left as `openclaw.json` inside a
+   * `clawbox-config-preview-` directory, and the old helper still answered
+   * with an empty list.
+   */
   function previewFiles(): string[] {
-    return spawnSync("bash", ["-c", `ls ${JSON.stringify(stateDir)}`], { encoding: "utf-8" })
-      .stdout.split("\n").filter((n) => n.includes("clawbox-preview"));
+    const listing = (at: string) =>
+      spawnSync("bash", ["-c", `ls -A ${JSON.stringify(at)} 2>/dev/null || true`], { encoding: "utf-8" })
+        .stdout.split("\n").filter(Boolean);
+    return [
+      ...listing(stateDir).filter((n) => n.includes("preview")),
+      ...listing(tmpDir).filter((n) => n.includes("preview")),
+    ];
   }
 
   /**
