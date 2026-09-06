@@ -540,11 +540,10 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
   it.each([
     ["a whitespace-only override", " "],
     ["an override that is only slashes", "///"],
-  ])("never treats an unset endpoint as ours, given %s", (_label, override) => {
+  ])("never withdraws an unset endpoint as ours, given %s", (_label, override) => {
     // An empty "our proxy" is the worst value this binding can take: it makes
     // an owner's slot carrying their key and NO base_url — the canonical way
-    // Hermes' generic `openai` slot is used — read as ours, so the arm would
-    // overwrite their credential and the withdrawal would delete it.
+    // Hermes' generic `openai` slot is used — read as ours.
     writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
     writeYaml(`${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    api_key: sk-theirs\n`);
 
@@ -553,6 +552,32 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     expect(at("tts.openai.api_key")).toBe("sk-theirs");
     expect(configCalls()).toEqual([]);
     expect(r.stdout).toContain("not ours to withdraw");
+  });
+
+  it.each([
+    ["a whitespace-only override", " "],
+    ["an override that is only slashes", "///"],
+  ])("never ARMS over an unset endpoint either, given %s", (_label, override) => {
+    // The other direction, and the one the withdraw cases above cannot reach:
+    // an ENTITLED box with the same owner slot. `route_is_ours` would be true
+    // over an empty `base_url` if the proxy binding were empty, and the arm
+    // would overwrite their credential with ours before any downgrade ever
+    // happened. The two guards are separately load-bearing — remove the default
+    // restoration and keep `OUR_PROXIES.discard("")` and only this half fails.
+    // The selection is left UNSET on purpose, so `route_is_ours` is the ONLY
+    // thing standing between their credential and ours — an already-chosen
+    // `openai` would be held by the selection test one line earlier and would
+    // not exercise this at all.
+    writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
+    writeYaml(`${BASE_CONFIG}tts:\n  openai:\n    api_key: sk-theirs\n`);
+
+    const r = run({ CLAWBOX_AI_PROXY_URL: override });
+
+    expect(at("tts.openai.api_key")).toBe("sk-theirs");
+    expect(at("tts.openai.base_url")).toBeUndefined();
+    expect(at("tts.provider")).toBeUndefined();
+    expect(configCalls()).toEqual([]);
+    expect(r.stdout).toContain("already names its own speech route");
   });
 
   it("arms a dual box, and writes nothing into ~/.openclaw", () => {
