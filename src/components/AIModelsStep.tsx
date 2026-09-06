@@ -2075,7 +2075,12 @@ export default function AIModelsStep({
   }, [configuringState?.completed, handleConfiguringDone]);
 
   const baseProviders = (providerIdSet ? allowedProviders : PROVIDERS)
-    .filter((provider) => !unrunnableProviders.has(provider.id));
+    // The SELECTED row is never dropped. Everything else in this component that
+    // decides what to render — the "keep the selection valid" effect, the
+    // credential panel, the deep-link handler — resolves against the unfiltered
+    // list, so removing the selected row would leave its form on screen with no
+    // radio above it and no "show more" toggle to get back.
+    .filter((provider) => provider.id === selectedProvider || !unrunnableProviders.has(provider.id));
   // The list opens on the provider that is actually in play and keeps the rest
   // one tap behind the same toggle that used to reveal only the secondary
   // ones. Four rows plus that toggle is ~350px of catalogue standing on top of

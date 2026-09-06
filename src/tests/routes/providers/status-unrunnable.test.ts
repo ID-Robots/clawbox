@@ -109,6 +109,42 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     expect(body.unrunnable).toEqual([]);
   });
 
+  it("never hides a provider the owner has not connected", async () => {
+    // That row IS the fix: connecting a cloud provider writes its configured
+    // model rows and `models.mode: "merge"`, which is exactly what turns a
+    // zero-row provider back into a routable one. Hiding it would leave the box
+    // with no way out of the state that hid it.
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
+      agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
+    });
+    recordEnumerations({ google: 0 });
+    const body = await (await GET()).json();
+
+    expect(ids(body)).toContain("google");
+    expect(body.providers.find((p: Row) => p.id === "google")!.state).toBe("disconnected");
+    expect(body.unrunnable).toEqual([]);
+  });
+
+  it("stops trusting a count older than the catalogue's own refresh interval", async () => {
+    // Nothing re-enumerates a hidden provider — no row, no picker, no configure
+    // POST for it — so a verdict that has aged past the interval the catalogue
+    // itself would re-ask on has to expire back to `unknown` rather than hide
+    // the row for the life of the box.
+    boxWithGoogleKey();
+    const dir = path.join(dataDir, "catalog-cache");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      path.join(dir, "_enumerations.json"),
+      JSON.stringify({ providers: { google: { models: 0, atMs: Date.now() - 7 * 60 * 60_000 } } }),
+      "utf8",
+    );
+    const body = await (await GET()).json();
+
+    expect(ids(body)).toContain("google");
+    expect(body.unrunnable).toEqual([]);
+  });
+
   it("keeps the row when the record is corrupt", async () => {
     boxWithGoogleKey();
     const dir = path.join(dataDir, "catalog-cache");

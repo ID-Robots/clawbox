@@ -424,23 +424,44 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
 }
 
 /**
+ * The catalogues that answer for one ROW.
+ *
+ * A row can stand for more than one: `codex` — the ChatGPT-subscription
+ * catalogue — normalises onto the `openai` row, and a box signed in to ChatGPT
+ * with no API key runs on the one while the other has nothing.
+ */
+const CATALOGUES_BY_ROW: ReadonlyMap<string, readonly string[]> = new Map(
+  Object.entries({
+    clawai: ["clawai"],
+    openai: ["openai", "codex"],
+    anthropic: ["anthropic"],
+    google: ["google"],
+    openrouter: ["openrouter"],
+  }),
+);
+
+/**
  * "Can this box run any model from the provider this ROW stands for?"
  *
- * The verdicts are keyed by CATALOGUE provider, and a row can stand for more
- * than one: `codex` — the ChatGPT-subscription catalogue — folds onto the
- * `openai` row. So the row is only written off when every catalogue behind it
- * says the same thing, and one that can still run something keeps it. Nothing
- * recorded at all is `unknown`, which shows the row.
+ * `none` demands UNANIMITY, and every catalogue behind the row must actually
+ * have answered: one `some` keeps the row, and so does one that nobody has
+ * asked about. That is what stops a ChatGPT-subscription box losing its OpenAI
+ * row because the API-key catalogue is empty — and, since `codex` has no
+ * enumeration on this core at all (`hasNoEnumerationOnThisCore` in the catalog
+ * route), it means the OpenAI row is never hidden today. Deliberate: the
+ * alternative is hiding the row a subscription box actually runs on.
  */
 export function providerRowRunnable(
   rowId: string,
   verdicts: Map<string, ProviderRunnable>,
 ): ProviderRunnable {
+  const catalogues = CATALOGUES_BY_ROW.get(rowId) ?? [rowId];
   let sawNone = false;
-  for (const [catalogueProvider, verdict] of verdicts) {
-    if (normalizeProviderId(catalogueProvider) !== rowId) continue;
+  for (const catalogue of catalogues) {
+    const verdict = verdicts.get(catalogue);
     if (verdict === "some") return "some";
     if (verdict === "none") sawNone = true;
+    else return "unknown";
   }
   return sawNone ? "none" : "unknown";
 }
@@ -482,9 +503,24 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
       ? await readProviderRunnable().catch(() => new Map<string, ProviderRunnable>())
       : new Map<string, ProviderRunnable>();
     const unrunnable = summary.providers
-      // The provider the box is POINTED AT is never hidden. It is the reason
-      // chat is broken, and a row nobody can see is a row nobody can change.
-      .filter((row) => !row.isDefault && providerRowRunnable(row.id, verdicts) === "none")
+      .filter((row) => {
+        // A row the owner has NOT connected is never hidden, whatever the
+        // count says — that row IS the fix. Connecting a cloud provider writes
+        // its configured model rows and `models.mode: "merge"`
+        // (`writeOpenAICompatProvider` in the configure route), which is
+        // exactly what turns a zero-row provider back into a routable one, so
+        // hiding it would leave the box with no way out of the state that hid
+        // it. What this hides is the other case: a provider the box IS set up
+        // for and still cannot run a single model from.
+        if (row.state !== "connected" && row.state !== "needs-reauth") return false;
+        // The provider the box is POINTED AT is never hidden. It is the reason
+        // chat is broken, and a row nobody can see is a row nobody can change.
+        if (row.isDefault) return false;
+        // Nor is one whose plugin the boot script had to switch off: that row
+        // carries the Retry, the single affordance that repairs it (TASK-606).
+        if (repairFor(repairs, row.id)) return false;
+        return providerRowRunnable(row.id, verdicts) === "none";
+      })
       .map((row) => row.id);
     const hidden = new Set(unrunnable);
     return {

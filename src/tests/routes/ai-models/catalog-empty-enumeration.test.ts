@@ -115,6 +115,18 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
     expect(await recordedCount("google")).toBe(2);
   });
 
+  it("records NOTHING when the payload never stated a count", async () => {
+    // Read positively, not inferred from absence: a truncated or shape-shifted
+    // payload parses into the same emptiness as a real answer, and this verdict
+    // hides a row.
+    mockList({ models: [] });
+    await get("google", "&refresh=1");
+    await settle();
+
+    const recorded = fs.existsSync(RECORD) ? readRecord() : {};
+    expect(recorded.google).toBeUndefined();
+  });
+
   it("records NOTHING when the CLI refused — an error is not an empty catalogue", async () => {
     // The false-failure guard. `ok: false` and a message on stderr mean the
     // question was not answered; recording zero there would hide a provider

@@ -14,7 +14,7 @@ import {
   isNonChatModelId,
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
-import { recordProviderEnumeration } from "@/lib/provider-runnable";
+import { forgetProviderEnumeration, recordProviderEnumeration } from "@/lib/provider-runnable";
 
 export const dynamic = "force-dynamic";
 
@@ -569,6 +569,13 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
     publishedSeq.set(surfaceProvider, currentSeq(surfaceProvider));
     recordSuccessfulRefresh(surfaceProvider);
     await writeDiskCache(surfaceProvider, payload);
+    // The same count `publish` records. This is the file's second full publish
+    // path, and a catalogue published here while the record still said zero
+    // would keep a provider hidden that had just answered with rows. Dead
+    // today — no `SUBSCRIPTION_SURFACE` entry names a separate provider — and
+    // closed rather than left for the day one does, like every other rule this
+    // function had to be taught twice.
+    await recordProviderEnumeration(surfaceProvider, payload.models.length);
     return new Set(payload.models.map((m) => m.id));
   } catch (err) {
     console.warn(
@@ -1033,10 +1040,24 @@ function toFetchResult(
       ? `all ${rows.length} listed rows report available: false (no route this box can take yet)`
       : `${rows.length} rows listed, none of them chat models this picker can offer`;
   }
-  // A clean zero: the command ran, said nothing was wrong, and listed nothing.
-  // `diagnostic` is empty in exactly that case — a refusal or stderr fills it
-  // above, and rows that were all filtered out fill it just now.
-  return { models, diagnostic, emptyIsAnswer: models.length === 0 && !diagnostic };
+  // A clean zero: the command ran, said nothing was wrong, and STATED that it
+  // has nothing — `count: 0` beside an empty `models`. Read positively rather
+  // than inferred from absence, because a truncated or shape-shifted payload
+  // parses into the same emptiness as a real answer and this verdict hides a
+  // row. `diagnostic` covers the rest: a refusal or stderr fills it above, and
+  // rows that were all filtered out by OUR chat rule fill it just now.
+  //
+  // Deliberately NOT extended to "rows listed, every one `available: false`",
+  // which the core does report and which is the other way a box says it can
+  // route nothing here. It is also exactly what a provider with no credential
+  // looks like, and the two cannot be told apart from the payload — so that
+  // case keeps beta's behaviour and records nothing.
+  const emptyIsAnswer = models.length === 0
+    && rows.length === 0
+    && parsed.ok !== false
+    && parsed.count === 0
+    && !diagnostic;
+  return { models, diagnostic, emptyIsAnswer };
 }
 
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
@@ -1355,9 +1376,9 @@ export function refreshInBackground(
     await writeDiskCache(provider, payload);
     // What the box can run, for the surfaces that only need the COUNT (the
     // Providers rows, the picker). Written from the published list rather than
-    // the raw one so it cannot disagree with what the picker is offered, and
-    // written on every publish so a provider that comes back from zero stops
-    // being hidden without anything else having to notice.
+    // the raw one, so the number and the catalogue the picker is offered cannot
+    // disagree. Reached only past the generation guard above, so a fork from
+    // before the box changed records nothing.
     await recordProviderEnumeration(provider, payload.models.length);
     console.log(
       `[catalog] refreshed ${provider}: ${models.length} models`
@@ -1382,40 +1403,32 @@ export function refreshInBackground(
   fetcher
     .then(async ({ models, diagnostic, emptyIsAnswer }) => {
       if (models.length === 0) {
-        // Still NOT a catalogue. Nothing is published and nothing is written to
-        // `<provider>.json` on either branch below — "[catalog] refreshed
-        // codex: 0 models" used to be followed by a disk write of the curated
-        // list, which then read back as a device answer.
+        // NOT a success, and every line of beta's handling stands: nothing is
+        // published, the previous catalogue is kept, and `markStale` records
+        // the backoff that rations the retries. "[catalog] refreshed codex: 0
+        // models" used to be followed by a disk write of the curated list,
+        // which then read back as a device answer.
         //
-        // What splits the two branches is whether the box ANSWERED. A refusal,
-        // a plugin that is gone, or rows our own chat filter ate are failures:
-        // they keep beta's behaviour exactly — the previous catalogue stays and
-        // the backoff rations the retries.
-        if (!emptyIsAnswer) {
-          console.warn(
-            `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
-            + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
-          );
-          markStale();
-          return;
+        // What is NEW is only that a clean zero is written down as a COUNT
+        // (TASK-668). Under `models.mode: "replace"` the core skips the
+        // authenticated catalogue and `openclaw models list --provider google`
+        // genuinely lists nothing, and the surfaces need to know that to stop
+        // offering a connected provider whose every row the gateway refuses.
+        // It changes no freshness or backoff rule: this branch behaves exactly
+        // as it does on beta, and the record is an extra fact beside it.
+        //
+        // Generation-guarded like `publish` is, and for the same reason: a fork
+        // that started before a credential landed is answering about a box that
+        // no longer exists, and its zero would hide the provider the customer
+        // just connected.
+        if (emptyIsAnswer && forkSeq >= currentSeq(provider)) {
+          await recordProviderEnumeration(provider, 0);
         }
-        // A clean zero IS the answer: under `models.mode: "replace"` the core
-        // skips the authenticated catalogue and `openclaw models list
-        // --provider google` genuinely lists nothing (TASK-668). Recording it
-        // is what lets the Providers page and the picker stop offering a
-        // provider whose every row the gateway would refuse.
-        //
-        // Counted as an ANSWERED generation, and as a successful refresh, on
-        // purpose: this is the half the previous attempt at this card got
-        // wrong. Leaving the generation unanswered made the `.finally` below
-        // start a replacement immediately, and `markStale()` made the row
-        // permanently stale — together, a three-minute two-core enumeration
-        // per backoff window, for ever, over a provider that had already told
-        // us the truth.
-        recordSuccessfulRefresh(provider);
-        publishedSeq.set(provider, forkSeq);
-        await recordProviderEnumeration(provider, 0);
-        console.log(`[catalog] ${provider}: the box lists no models for it — recorded, nothing re-enumerated`);
+        console.warn(
+          `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
+          + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
+        );
+        markStale();
         return;
       }
       await publish(models, null);
@@ -1482,6 +1495,12 @@ export function refreshInBackground(
 export function notifyProviderSetChanged(ocProvider: string | null | undefined): void {
   if (!ocProvider) return;
   const catalogProvider = ocProvider === "deepseek" ? "clawai" : ocProvider;
+  // The recorded model COUNT is about the box as it was, and the box has just
+  // changed (TASK-668). Forgetting it is what makes a hidden row come back on
+  // the next render — a plan change, a model install, a key paste — without
+  // waiting for an enumeration that, for a hidden provider, nothing would ask
+  // for. It costs one small file write and starts nothing.
+  void forgetProviderEnumeration(catalogProvider);
   if (!isCatalogProvider(catalogProvider)) return;
   if (NO_CLI_ENUMERATION_PROVIDERS.has(catalogProvider)) return;
   refreshInBackground(catalogProvider, { providerChanged: true });

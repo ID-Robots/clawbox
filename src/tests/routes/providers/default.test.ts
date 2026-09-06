@@ -15,7 +15,13 @@ vi.mock("@/lib/harness", () => ({
   HERMES_BIN: "/usr/bin/hermes-test",
 }));
 vi.mock("@/app/setup-api/hermes/models/route", () => ({ POST: vi.fn() }));
-vi.mock("@/app/setup-api/chat/model/route", () => ({ GET: vi.fn(), POST: vi.fn() }));
+vi.mock("@/app/setup-api/chat/model/route", () => ({
+  GET: vi.fn(),
+  POST: vi.fn(),
+  // Consulted only when the filtered list has no row for the named provider
+  // (TASK-668); an empty list here keeps every existing case unchanged.
+  readChatModelStateUnfiltered: vi.fn(async () => ({ options: [] })),
+}));
 vi.mock("@/lib/provider-enablement", () => ({ isProviderEnabled: vi.fn() }));
 
 let POST: (request: Request) => Promise<Response>;

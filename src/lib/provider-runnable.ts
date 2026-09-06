@@ -14,9 +14,10 @@
 // WHAT THIS MODULE MAY NOT DO. It never probes and never forks. `openclaw
 // models list` costs about three minutes on a Jetson, and the whole reason the
 // obvious version of this fix was refused is that it bought a permanent `stale`
-// flag plus one fork per backoff window. The count read here is recorded by the
-// enumeration the catalog route ALREADY runs (boot warmup, a picker open, the
-// six-hour interval); this module only reads the file that route writes.
+// flag plus one fork per backoff window. The count read here is recorded by an
+// enumeration the catalog route was ALREADY going to run — its boot warmup, or
+// a picker open — and that route's freshness and backoff rules are untouched by
+// it. This module only reads the file that route writes.
 //
 // THE ONE RULE. Only a definite count decides anything. No record, an
 // unreadable record, a record for another provider — all of that is UNKNOWN,
@@ -129,6 +130,20 @@ export function recordProviderEnumeration(provider: string, models: number): Pro
 }
 
 /**
+ * Forget one provider's count, because the BOX changed under it.
+ *
+ * Called from `notifyProviderSetChanged` — a key pasted, a plugin switched on,
+ * a plan changed — where the number stops describing anything before the next
+ * enumeration can say what replaced it. Nothing is started here: the row simply
+ * goes back to `unknown` and is shown.
+ */
+export function forgetProviderEnumeration(provider: string): Promise<void> {
+  return mutate((providers) => {
+    delete providers[provider];
+  });
+}
+
+/**
  * Forget every recorded count.
  *
  * `models.mode` decides what a catalogue MEANS — under `replace` the core
@@ -146,7 +161,20 @@ export function forgetProviderEnumerations(): Promise<void> {
 }
 
 /**
- * The verdict for every provider the box has an answer for.
+ * How long a recorded count is still a fact about this box.
+ *
+ * The catalog route's own freshness interval, and the same argument: past it,
+ * the enumeration behind the number is old enough that the route would re-ask
+ * before serving it. It matters most in one direction — a row hidden by a
+ * count nothing has refreshed since comes BACK rather than staying gone, and
+ * the picker open that follows is what re-enumerates it. Every other path that
+ * brings a row back is an event (`notifyProviderSetChanged`, a `models.mode`
+ * flip); this is the one that needs no event at all.
+ */
+const RECORD_TTL_MS = 6 * 60 * 60_000;
+
+/**
+ * The verdict for every provider the box has a CURRENT answer for.
  *
  * One file read per call, deliberately not memoised: the callers are a
  * 30-second status poll and a picker load, and a cached verdict would keep a
@@ -155,8 +183,16 @@ export function forgetProviderEnumerations(): Promise<void> {
 export async function readProviderRunnable(): Promise<Map<string, ProviderRunnable>> {
   const providers = await readRecordFile();
   const verdicts = new Map<string, ProviderRunnable>();
+  const now = Date.now();
   for (const [provider, record] of Object.entries(providers)) {
     if (typeof record?.models !== "number" || !Number.isFinite(record.models)) continue;
+    // A clock that jumped backwards makes `now - atMs` negative, which is not
+    // "expired" — an unusable stamp is treated as expired instead, the side
+    // that shows the row.
+    const ageMs = typeof record.atMs === "number" && Number.isFinite(record.atMs)
+      ? now - record.atMs
+      : Number.POSITIVE_INFINITY;
+    if (ageMs > RECORD_TTL_MS) continue;
     verdicts.set(provider, record.models > 0 ? "some" : "none");
   }
   return verdicts;
