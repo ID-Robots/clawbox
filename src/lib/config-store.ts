@@ -119,6 +119,29 @@ export async function set(key: string, value: unknown): Promise<void> {
   writeConfig(config);
 }
 
+/**
+ * Set `key` and return what it held — read and written in ONE synchronous step.
+ *
+ * `get` then `set` is not the same thing. The `await` between them is a point
+ * where another request can land its own write, and the caller then reasons
+ * about a predecessor its call never actually replaced. There is no await
+ * between the read and the write here, so nothing can interleave.
+ *
+ * Same strict read as `set`, for the same reason: a write over a store nobody
+ * can read must throw rather than replace it with the one key being saved.
+ */
+export async function swap(key: string, value: unknown): Promise<unknown> {
+  const config = readConfigStrict();
+  const previous = config[key];
+  if (value === undefined) {
+    delete config[key];
+  } else {
+    config[key] = value;
+  }
+  writeConfig(config);
+  return previous;
+}
+
 export async function setMany(entries: Record<string, unknown>): Promise<void> {
   const config = readConfigStrict();
   for (const [key, value] of Object.entries(entries)) {

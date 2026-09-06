@@ -49,20 +49,19 @@ import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reloa
  * succeeded into an error. A box that cannot be asked catches up at the next
  * restart, which is what every box did before this existed.
  *
- * @param before the harness that was active, or null when it could not be read
+ * @param before the harness this switch REPLACED, as answered by the write
  * @param after  the harness now active
  * @returns true when the box's MCP children were respawned for this change
  */
 export async function refreshHarnessToolsIfSwitched(
-  before: string | null,
+  before: string,
   after: string,
 ): Promise<boolean> {
   // A re-select of the harness already running changes nothing the agent can
-  // see, and must cost nothing. An unreadable "before" is NOT treated as a
-  // change either: it would ask for a reload on every save on a box whose
-  // harness store is unreadable, which is the one state where the answer is
-  // least likely to have moved.
-  if (before === null || before === after) return false;
+  // see, and must cost nothing. `before` comes back from the persist itself, so
+  // this compares what was actually replaced — not a value read earlier that
+  // another request may have moved in between.
+  if (before === after) return false;
 
   const moved = `the active harness moved from ${before} to ${after}`;
   // `.catch` even though `reloadMcpServers` documents that it never throws: the

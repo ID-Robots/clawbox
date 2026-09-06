@@ -64,13 +64,6 @@ describe("the agent's tool list, after the owner switches harness", () => {
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  it("costs nothing when the previous harness could not be read", async () => {
-    // "I could not tell" is not evidence of a flip, and treating it as one
-    // would buy a reload on every save on the one box least likely to need it.
-    await expect(refreshHarnessToolsIfSwitched(null, "hermes")).resolves.toBe(false);
-    expect(rpcMock).not.toHaveBeenCalled();
-  });
-
   it("says so rather than reporting a reload the dashboard refused", async () => {
     // `confirm_required` is an ordinary non-error reply that means NOTHING
     // HAPPENED — the false-success shape the shared helper exists to catch.

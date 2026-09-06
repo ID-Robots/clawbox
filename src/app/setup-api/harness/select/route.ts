@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
-import { getActiveHarness, setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition } from "@/lib/harness";
+import { setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition, type Harness } from "@/lib/harness";
 import { refreshHarnessToolsIfSwitched } from "@/lib/harness-mcp-refresh";
 import { CONFIG_ROOT } from "@/lib/config-store";
 
@@ -49,11 +49,6 @@ export async function POST(request: Request) {
     );
   }
 
-  // Read BEFORE the switch, so the refresh below can tell a real flip from a
-  // re-select of the harness already running. Unreadable answers null, which
-  // that guard treats as "not a flip" rather than as a change.
-  const previous = await getActiveHarness().catch(() => null);
-
   // Propagate the canonical identity to both harnesses (OpenClaw real copies +
   // gateway refresh; Hermes FTS5 reindex) BEFORE flipping the active one, so we
   // never complete a switch that leaves the selected harness without its shared
@@ -78,8 +73,15 @@ export async function POST(request: Request) {
   // failure the device is in an uncertain state (synced but maybe not flipped);
   // return the JSON error contract and tell the client to re-read status rather
   // than letting a framework-generated 500 leak through.
+  // The harness this call REPLACED, answered by the write itself so the refresh
+  // below can tell a real flip from a re-select of the one already running.
+  // Read separately up here it was read before the identity sync above, which
+  // has a 60 s budget: two switches in opposite directions both saw the same
+  // predecessor, and the second one persisted its harness and then decided
+  // nothing had moved.
+  let previous: Harness;
   try {
-    await setActiveHarness(harness);
+    previous = await setActiveHarness(harness);
   } catch (err) {
     console.error("[harness/select] failed to persist active harness:", err instanceof Error ? err.message : err);
     return NextResponse.json(
