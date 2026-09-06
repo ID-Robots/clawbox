@@ -947,6 +947,348 @@ else
   log "could not disable the built-in browser toolset (exit $BROWSER_DISABLE_RC) — continuing"
 fi
 
+# ── 4b. Hermes' own background jobs, opted out of ONCE per box. ─────────────
+# TASK-609 / owner ruling 2026-09-03: the assistant must not message the owner
+# or spend his tokens on its own initiative unless he asked it to. OpenClaw 2's
+# three such jobs are seeded by `gateway-pre-start.sh`; these are Hermes' two,
+# and they are the harness's own documented keys, read off the installed 0.20.5
+# package on the box:
+#
+#   auxiliary.background_review.enabled  default TRUE — `agent/background_review.py`
+#     (`aux.get("background_review")` -> `is_truthy_value(task.get("enabled"),
+#     default=True)`). The post-turn memory/skill review fork.
+#   curator.enabled                      default TRUE — `hermes_cli/config_defaults.py`
+#     ("curator": {"enabled": True, …}); `agent/curator.py` `is_enabled()`,
+#     "Default ON when no config says otherwise". The background skill pass.
+#
+# Hermes has NO heartbeat: its only `heartbeat` keys are transport-level
+# (`compute_host_heartbeat_secs`, `websocket_heartbeat_ack_max_age_seconds`),
+# so there is no third row to seed. Settings -> System draws the two switches
+# and reports the check-ins row `supported: false` (src/lib/background-jobs.ts).
+#
+# WHY HERE, AND NOT IN THE WEB SERVER. This was first written as a Node boot
+# hook calling `patchHermesConfig`, the comment-preserving writer the Settings
+# toggles use — and that is a SECOND, UNLOCKED writer of config.yaml on a boot
+# path where two already cooperate over `${HERMES_CONFIG}.lock`.
+# `production-server.js` spawns THIS script on every web-server boot (on every
+# edition; §1 above is what makes it a no-op on the OpenClaw SKU), and it holds
+# that lock from §3 to exit while doing a PyYAML read-modify-write plus two CLI
+# calls; `setup-hermes-dashboard-auth.sh` is a third, concurrent, locked writer.
+# `patchHermesConfig` cannot take the lock (it is a Python `filelock`, i.e. a
+# flock, and its own header says so), so a Node seed would win or lose the
+# rename by luck: either recording the keys as seeded and then having them
+# erased — never offered again, both jobs running, and its own read-back cannot
+# see a clobber that lands after it — or erasing `mcp_servers.clawbox`, the
+# protected-path `approvals.deny` table and `skills.disabled`, leaving the agent
+# with no device tools and no path guard. One writer per harness, inside the
+# lock it already holds, is the fix.
+#
+# WHY NOT `hermes config set`, which IS the native surface. §3 above already
+# gives the reason for this file, in this script: the CLI "rewrites the whole
+# config through Hermes' own save_config(), which is a much wider blast radius
+# for a boot-time provisioning step, and it is slow" — two more Python
+# interpreter starts inside a step that already time-boxes its only two CLI
+# calls. It also buys nothing back: `save_config()` re-serialises and drops the
+# comments just as `safe_dump` does. And it has a known failure mode here — the
+# CLI has been seen to exit 0 while storing a STRING, and `agent/curator.py`
+# reads `bool(cfg.get("enabled", True))`, so a stored `"false"` would leave the
+# curator ON with a config that looks right. The read-back below is what makes
+# either writer safe, and this one writes a real YAML boolean.
+#
+# WHAT THIS COSTS, measured rather than assumed: the live config.yaml on the
+# Hermes box carries 36 comment lines (of 275), including Hermes' own
+# "── Security ──" and "── Fallback Model ──" blocks, so the ONE boot that seeds
+# re-serialises them away. It is once per box — the record below means a seeded
+# box never writes again — and the previous revision is kept at
+# `config.yaml.bak`, the same recovery path `hermes-config-yaml.ts` uses for its
+# own writes. §3's "already current, skipping write" means an ALREADY-REGISTERED
+# box pays this on the upgrade boot alone rather than alongside a write it was
+# making anyway; a fresh box pays it with §3's first write.
+#
+# GATED ON THE EDITION, not on the active harness: on a dual box the owner can
+# switch to Hermes at any time without restarting the web server, so a seed that
+# asked which harness was active at boot would leave a switched-over box running
+# both jobs at the harness default until something restarted the server.
+#
+# THE RECORD, and the drift it accepts. `data/background-optouts.json` is
+# ClawBox's own file, shared with the OpenClaw half, and it is a marker for
+# state that lives in `~/.hermes` — the shape §4 above argues against, because a
+# marker and the thing it stands for can drift. Kept anyway, and the difference
+# from §4's case is that re-converging is not free here: `tools disable browser`
+# is idempotent, whereas re-writing an opt-out every boot would put `false` back
+# over a key the owner had unset by hand to mean "back to the default". The
+# accepted residual is the mirror of that: something that restores or reinstalls
+# `~/.hermes` without touching `data/` (a ClawKeep harness restore, a manual
+# reinstall) leaves the record saying "seeded" over a config that no longer
+# carries the keys, and both jobs run at the harness default until the owner
+# uses Settings or the box is factory reset — which empties `data/` and offers
+# the seed again.
+CLAWBOX_OPTOUT_STATE="$PROJECT_DIR/data/background-optouts.json" \
+CLAWBOX_HERMES_CONFIG="$HERMES_CONFIG" \
+python3 - <<'PY' || log "WARNING: the Hermes background-job opt-out seed did not complete; see the note above it for what was and was not written"
+import json, os, sys, tempfile
+
+try:
+    import yaml
+except ImportError:
+    # Defence in depth: §3 above already exits 1 on this, so it cannot be
+    # reached from there — but this block must not be the one that assumes it.
+    print("[register-mcp] NOTE: PyYAML is unavailable; the background-job opt-outs were not seeded",
+          file=sys.stderr)
+    raise SystemExit(0)
+
+# path -> the value ClawBox seeds when the owner has expressed no opinion.
+# Unlike OpenClaw's heartbeat row, BOTH of these are written explicitly in both
+# directions (`true` for on, `false` for off), so an absent value can only mean
+# "no opinion expressed" — there is no key here whose "on" looks like an absence.
+WANTED = [
+    (("auxiliary", "background_review", "enabled"), False),
+    (("curator", "enabled"), False),
+]
+
+state_path = os.environ["CLAWBOX_OPTOUT_STATE"]
+cfg_path = os.environ["CLAWBOX_HERMES_CONFIG"]
+
+
+def read_seeded(path):
+    """The keys this box has already been offered, or None if the record is unusable.
+
+    Absent is the normal first boot. Unusable — unreadable, undecodable, or
+    valid JSON that is not `{"seeded": [<string>, ...]}` — is a third fact, and
+    the difference matters on a DUAL box, where `gateway-pre-start.sh` keeps its
+    own three keys in this same file: rewriting an unusable record would replace
+    it with a valid one naming only these two, and the OpenClaw half would then
+    read a well-formed record that does not mention `heartbeat.every`, find the
+    key absent because the owner had switched check-ins back ON, and write `0m`
+    over his choice. So an unusable record still SEEDS (safe, see WANTED) and
+    records nothing, leaving the file for the half that can repair it safely.
+
+    Total, because the caller cannot tell a raised exception from a real
+    failure: `ValueError` covers JSONDecodeError AND UnicodeDecodeError (a
+    record written in another encoding), `RecursionError` a document nested past
+    the decoder's limit.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            record = json.load(fh)
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    rows = record.get("seeded")
+    if not isinstance(rows, list) or not all(isinstance(row, str) for row in rows):
+        return None
+    return set(rows)
+
+
+record = read_seeded(state_path)
+unusable = record is None
+seeded = set() if unusable else record
+if unusable:
+    print("[register-mcp] WARN: the background-job opt-out record exists but cannot be read;"
+          " the Hermes opt-outs are still seeded where the key is absent, and nothing is recorded",
+          file=sys.stderr)
+
+pending = [(path, value) for path, value in WANTED if ".".join(path) not in seeded]
+# A seeded box pays one small file read and nothing else — no YAML load, no
+# write. This runs on every web-server boot.
+if not pending:
+    raise SystemExit(0)
+
+try:
+    with open(cfg_path, encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh)
+except FileNotFoundError:
+    cfg = {}
+except Exception as exc:  # noqa: BLE001 - any unreadable config defers, never settles
+    # Also defence in depth: §3 exits 1 on an unreadable or unparseable config,
+    # so the script never reaches here with one.
+    print("[register-mcp] NOTE: the Hermes config could not be read (%s); the background-job"
+          " opt-outs will be offered again at the next start" % type(exc).__name__, file=sys.stderr)
+    raise SystemExit(0)
+if cfg is None:
+    cfg = {}
+if not isinstance(cfg, dict):
+    print("[register-mcp] NOTE: the Hermes config is not a mapping; the background-job opt-outs"
+          " were not seeded", file=sys.stderr)
+    raise SystemExit(0)
+
+
+def resolve(path):
+    """'value' (the owner has said something), 'absent', or 'unusable'.
+
+    `None` is an ABSENCE, not an unusable shape. `curator:` written as a bare
+    header with nothing under it loads as `None`, and calling that unusable
+    would refuse the opt-out on every boot for ever over an empty section — the
+    write below replaces a null parent with a mapping exactly as it creates a
+    missing one. Only a parent holding something ELSE (a scalar, a list) is a
+    shape this seed will not reshape.
+    """
+    node = cfg
+    for part in path[:-1]:
+        if node is None:
+            return "absent"
+        if not isinstance(node, dict):
+            return "unusable"
+        if part not in node:
+            # Nothing below an absent parent exists either, and the parents are
+            # ours to create.
+            return "absent"
+        node = node[part]
+    if node is None:
+        return "absent"
+    if not isinstance(node, dict):
+        return "unusable"
+    return "value" if node.get(path[-1]) is not None else "absent"
+
+
+settled = []
+wrote = []
+for path, value in pending:
+    key = ".".join(path)
+    state = resolve(path)
+    if state == "unusable":
+        # A parent written as something other than a mapping. Not ours to
+        # reshape, and not settled either: "we could not look" is not "the owner
+        # has an opinion", and settling it would give up the opt-out for ever.
+        print("[register-mcp] NOTE: %s sits under a key this seed cannot read; it will be"
+              " offered again at the next start" % key, file=sys.stderr)
+        continue
+    # Settled whether it was written or was already the owner's: ClawBox has had
+    # its say about this key, and offering it again could only ever undo him.
+    settled.append(key)
+    if state == "value":
+        continue
+    node = cfg
+    for part in path[:-1]:
+        child = node.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            node[part] = child
+        node = child
+    node[path[-1]] = value
+    wrote.append(key)
+
+if not settled:
+    raise SystemExit(0)
+
+if wrote:
+    directory = os.path.dirname(cfg_path) or "."
+    try:
+        os.makedirs(directory, exist_ok=True)
+        # The previous revision, at the stable name `hermes-config-yaml.ts` uses
+        # for its own writes — this is the one boot that re-serialises the
+        # customer's config, and the comments it drops are recoverable from here.
+        try:
+            with open(cfg_path, "rb") as fh:
+                previous = fh.read()
+        except OSError:
+            previous = None
+        if previous is not None:
+            bfd, btmp = tempfile.mkstemp(dir=directory, prefix=".config.bak.", suffix=".tmp")
+            try:
+                os.fchmod(bfd, 0o600)
+                with os.fdopen(bfd, "wb") as fh:
+                    fh.write(previous)
+                os.replace(btmp, cfg_path + ".bak")
+            except Exception:
+                try:
+                    os.unlink(btmp)
+                except OSError:
+                    pass
+                raise
+        fd, tmp = tempfile.mkstemp(dir=directory, prefix=".config.", suffix=".tmp")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                yaml.safe_dump(cfg, fh, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            os.replace(tmp, cfg_path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as exc:  # noqa: BLE001
+        # NOT a bare raise: a top-level `python3` under `set -euo pipefail` puts
+        # the whole traceback in the clawbox-setup journal, which is what
+        # TASK-657 took out of §3. Nothing was recorded, so the next boot offers
+        # the seed again.
+        print("[register-mcp] WARN: could not write the Hermes background-job opt-outs (%s);"
+              " the box may spend tokens on background jobs until Settings is used"
+              % type(exc).__name__, file=sys.stderr)
+        raise SystemExit(0)
+    # READ BACK OFF THE FILE, not off `cfg`. A dump that lost a key, a rename
+    # that landed somewhere else, a config a concurrent writer replaced inside
+    # this critical section — all of them leave `cfg` saying the right thing and
+    # the box saying the old one, and recording that as seeded would mean the
+    # keys are never offered again. This block sits AFTER §4 for the same
+    # reason: `hermes tools disable browser` does the CLI's own load ->
+    # save_config on this file, so a read-back above it would not be the last
+    # word on what the boot leaves behind.
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            back = yaml.safe_load(fh) or {}
+    except Exception:  # noqa: BLE001
+        back = None
+    for key in wrote:
+        node = back
+        for part in key.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        if node is not False:
+            print("[register-mcp] WARN: %s did not read back as off after the write; nothing was"
+                  " recorded, so the opt-outs are offered again at the next start" % key,
+                  file=sys.stderr)
+            raise SystemExit(0)
+    print("[register-mcp] seeded the Hermes background-job opt-outs (%s) — Settings can switch"
+          " them back on" % ", ".join(wrote))
+
+# RECORDED ONLY AFTER THE WRITE LANDED, and merged rather than replaced: on a
+# dual box `gateway-pre-start.sh` keeps its own three keys in this file, and a
+# wholesale rewrite would drop them and offer that half's seed all over again.
+# Merging is SEQUENTIAL safety only — neither half locks this file, and on a
+# dual box the gateway's ExecStartPre can run beside this script — so the record
+# is re-read here rather than reused from the top, which is as narrow as the
+# window gets. The verdict is re-derived from that second read too: a record
+# that went bad in between must not be laundered into a valid one naming only
+# these two keys, which is the `heartbeat.every` revert `read_seeded` refuses.
+if unusable:
+    raise SystemExit(0)
+again = read_seeded(state_path)
+if again is None:
+    print("[register-mcp] WARN: the background-job opt-out record became unreadable while the"
+          " opt-outs were being written; nothing was recorded", file=sys.stderr)
+    raise SystemExit(0)
+keep = set(again)
+keep.update(settled)
+
+directory = os.path.dirname(state_path) or "."
+try:
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".background-optouts.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"seeded": sorted(keep)}, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, state_path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+except Exception as exc:  # noqa: BLE001
+    # The config IS seeded and verified at this point — only the record is
+    # missing, so the next boot writes the same values over themselves and
+    # records them then. Said precisely, because "the box may spend tokens" is
+    # false on this arm.
+    print("[register-mcp] NOTE: the Hermes background-job opt-outs are in place, but the record"
+          " of them could not be written (%s); the next start will write them again"
+          % type(exc).__name__, file=sys.stderr)
+PY
+
 # ── 5. Prove the EMAIL: hook plugin actually LOADS, every boot. ─────────────
 # `hermes plugins list` would say "enabled" for a plugin that raises on import,
 # has no `register()`, or registers a mistyped hook name: its status is read
