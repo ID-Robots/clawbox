@@ -190,6 +190,24 @@ describe("an approval turn from the owner's own conversation", () => {
     expect(after.card.outcomes).toEqual([expect.objectContaining({ id, ok: false, kind: "failed" })]);
   });
 
+  it("refuses a browser: this route takes the harness's bearer and nothing else", async () => {
+    // middleware admits a session cookie too, so without this check a page the
+    // owner visits could POST here with his cookie riding along. Every real
+    // caller is a harness plugin holding the bearer; none of them has a cookie.
+    const { id, code } = await offered();
+    const res = await POST(
+      new Request("http://127.0.0.1/setup-api/email/chat-reply", {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ senderId: OWNER, text: `send ${code}` }),
+      }),
+    );
+    expect(res.status).toBe(403);
+    expect(((await res.json()) as { handled: boolean }).handled).toBe(false);
+    expect(vi.mocked(smtp.sendMail)).not.toHaveBeenCalled();
+    expect(pending.getPending(id)).not.toBeNull();
+  });
+
   it("refuses a body it cannot read rather than guessing", async () => {
     const res = await POST(
       new Request("http://127.0.0.1/setup-api/email/chat-reply", {

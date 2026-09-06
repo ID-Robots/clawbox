@@ -21,12 +21,21 @@
 // holds it and an Approve button answering to the agent is not a gate. This
 // route CANNOT do that: it is called from inside the harness process, which has
 // no browser session, so it is reached on the same bearer middleware already
-// admits. That is a real difference and it is contained by three things:
+// admits. That is a real difference and it is contained by the four things
+// below.
 //
 //   1. THE GATE IS THE SENDER, NOT THE CALLER. `senderId` is checked against
 //      the harness's OWN owner allowlist — the same list, and the same rule,
 //      that decides who may press the button in email-approval.ts. A caller
 //      cannot approve on its own behalf; it can only relay a person's message.
+//   1a. AND THE BEARER IS REQUIRED EXPLICITLY, not merely accepted. middleware
+//      admits a caller on the bearer OR a session cookie; every real caller
+//      here is a harness process holding the bearer and none of them has a
+//      cookie, so this route asks for the bearer itself. That takes the
+//      BROWSER off this route completely — a page the owner happens to visit
+//      cannot reach it with his cookie riding along, which is the shape of
+//      cross-site request the other owner-only routes answer with a
+//      same-origin check.
 //   2. THE MESSAGE NAMES ONE DRAFT. The code was posted to the owner's chat by
 //      ClawBox, names exactly one queued draft and its content fingerprint, and
 //      is consumed on use. There is no "approve what is waiting" verb here, and
@@ -49,6 +58,7 @@
 
 import { NextResponse } from "next/server";
 import { applyReplyApproval } from "@/lib/email-approval-reply";
+import { verifyMcpBearer } from "@/lib/mcp-token";
 import { checkRateLimit } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
@@ -71,6 +81,14 @@ interface ChatReplyBody {
 }
 
 export async function POST(request: Request) {
+  if (!verifyMcpBearer(request.headers.get("authorization"))) {
+    // Identical to what an unknown code gets, and on purpose: a caller that can
+    // tell "wrong credential" from "wrong code" apart learns something about
+    // what is queued. `handled: false` is also what the hooks read as "carry
+    // on", so a misconfigured box degrades to the behaviour it had before.
+    return NextResponse.json({ handled: false }, { status: 403 });
+  }
+
   let body: ChatReplyBody;
   try {
     body = (await request.json()) as ChatReplyBody;
