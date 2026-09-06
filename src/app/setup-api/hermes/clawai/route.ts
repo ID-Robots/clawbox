@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { decideClawboxAiModelId, readExplicitModelPick } from "@/lib/explicit-model-pick";
 import { get, setMany } from "@/lib/config-store";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 import { hermesConfigGet } from "@/lib/hermes-config-cache";
@@ -51,17 +52,35 @@ export async function GET() {
   const blocked = await requireHermes();
   if (blocked) return blocked;
 
-  const [token, tierStored] = await Promise.all([readToken(), readStoredTier()]);
+  const [token, tierStored, storedPick] = await Promise.all([
+    readToken(),
+    readStoredTier(),
+    readExplicitModelPick(),
+  ]);
   const tier: ClawboxAiTier = tierStored ?? "flash";
   // Memoised against config.yaml's mtime: this GET runs on every chat open and
   // every Settings visit, and the CLI spawn behind it costs ~600 ms each time.
-  const active = (await hermesConfigGet("model.provider")) === CLAWAI_PROVIDER;
+  // The second key is free once the first has warmed that cache.
+  const [activeProvider, storedModel] = await Promise.all([
+    hermesConfigGet("model.provider"),
+    hermesConfigGet("model.default"),
+  ]);
+  const active = activeProvider === CLAWAI_PROVIDER;
   return NextResponse.json({
     hasToken: Boolean(token),
     tier,
     tierStored,
     active,
-    model: clawaiModelForTier(tier),
+    // The model this box RUNS for ClawBox AI, which is no longer the same
+    // question as which tier the badge shows: an explicit pick outlives the
+    // badge (TASK-713), and the panel renders this string as "Model: …". The
+    // decision is read-only here — the migration it can suggest belongs to the
+    // link that writes, not to a GET the chat makes on every open.
+    model: decideClawboxAiModelId({
+      storedPick,
+      currentPrimary: active ? storedModel : null,
+      tierModelId: clawaiModelForTier(tier),
+    }).modelId,
   });
 }
 

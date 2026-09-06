@@ -59,7 +59,8 @@ vi.mock("@/lib/coding-agent", () => ({
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: vi.fn(async () => "restarted") }));
 
-import { POST } from "@/app/setup-api/hermes/clawai/route";
+import { GET, POST } from "@/app/setup-api/hermes/clawai/route";
+import { EXPLICIT_MODEL_PICK_KEY } from "@/lib/explicit-model-pick";
 
 /** A well-formed pasted token: charset+length is all the route checks. */
 const PASTED = "claw_abcdef0123456789";
@@ -149,5 +150,38 @@ describe("POST /setup-api/hermes/clawai", () => {
     const response = await POST(post({ token: PASTED, tier: "flash" }));
     expect(response.status).toBe(200);
     expect(reloadCount()).toBe(1);
+  });
+});
+
+/**
+ * TASK-713 — the panel renders this field as "Model: …", so it has to name the
+ * model the box RUNS, not the one the tier badge implies. Once an explicit pick
+ * outlives the badge, those are two different questions.
+ */
+describe("GET /setup-api/hermes/clawai", () => {
+  beforeEach(() => {
+    for (const key of Object.keys(store)) delete store[key];
+    store.clawai_token = "claw_token_abc";
+  });
+
+  it("names the tier's model when the owner has picked none", async () => {
+    store.clawai_tier = "flash";
+
+    const body = await (await GET()).json();
+
+    expect(body.model).toBe("deepseek-v4-flash");
+    expect(body.tier).toBe("flash");
+  });
+
+  it("names the owner's own model when there is one, whatever the badge says", async () => {
+    store.clawai_tier = "flash";
+    store[EXPLICIT_MODEL_PICK_KEY] = "deepseek/deepseek-v4-pro";
+
+    const body = await (await GET()).json();
+
+    expect(body.model).toBe("deepseek-v4-pro");
+    // The badge itself is untouched — it is the PLAN, and it is still what the
+    // plan card renders.
+    expect(body.tier).toBe("flash");
   });
 });
