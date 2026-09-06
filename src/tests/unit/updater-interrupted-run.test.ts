@@ -41,11 +41,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * replacement erases.
  */
 
-vi.mock("@/lib/config-store", () => ({
-  get: vi.fn(),
-  set: vi.fn(),
-  setMany: vi.fn(),
-}));
+vi.mock("@/lib/config-store", () => {
+  // `getKnown` is the tri-state reader ("we could not read the file" is not
+  // "the key is unset"), and it answers from the SAME mock every fixture in
+  // this file already drives — so a case that wants an unreadable store says
+  // so by overriding `getKnown` alone.
+  const get = vi.fn();
+  return {
+    get,
+    getKnown: vi.fn(async (key: string) => ({ value: await get(key), known: true })),
+    set: vi.fn(),
+    setMany: vi.fn(),
+  };
+});
 
 vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 
@@ -197,7 +205,10 @@ describe("an update whose process was replaced is reported, not forgotten", () =
     await updater.checkContinuation();
     expect(updater.getUpdateState().phase).toBe("failed");
 
-    diskState({ locked: false });
+    // The record the line above wrote is what the verdict rests on, so the
+    // next poll's disk still carries it — a `set` this file mocks away is
+    // still a `set` the box made.
+    diskState({ locked: false, interruptedAt: "2026-09-06T09:00:00.000Z" });
     await updater.checkContinuation();
 
     expect(

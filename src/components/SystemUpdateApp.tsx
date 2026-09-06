@@ -333,7 +333,17 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     void (async () => {
       try {
         const res = await fetch("/setup-api/update/dismiss", { method: "POST" });
-        if (res.status !== 409) return;
+        if (res.ok) return;
+        // Anything OTHER than a 409 is the server saying the result is still
+        // there — the record could not be written away. The panel has already
+        // been cleared locally, so leaving it at that hides a dismissal that
+        // did not happen and hands the same failure back on the next reload,
+        // with nothing said. Put it back and say why.
+        if (res.status !== 409) {
+          setUpdateStarted(true);
+          setUpdateError(tr("update.dismissFailed", "The device could not clear that result. Try again in a moment."));
+          return;
+        }
         const status = await fetch("/setup-api/update/status", { cache: "no-store" });
         if (!status.ok) return;
         const data = (await status.json()) as UpdateState;
@@ -343,7 +353,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         startPolling();
       } catch { /* offline: the next mount adopts whatever is running */ }
     })();
-  }, [stopPolling, startPolling]);
+  }, [stopPolling, startPolling, tr]);
 
   const saveBranch = useCallback(async (next: string | null) => {
     setBranchSaving(true);

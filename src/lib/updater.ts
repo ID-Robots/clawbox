@@ -3,7 +3,7 @@ import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
-import { get, set, setMany } from "./config-store";
+import { get, getKnown, set, setMany } from "./config-store";
 import {
   findOpenclawBin,
   GATEWAY_PORT,
@@ -28,6 +28,12 @@ import { setUpdateLock, clearUpdateLock, isUpdateLocked } from "./update-lock";
  * cleared when a new run starts and when the owner dismisses the result.
  */
 const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
+
+// The sentence an interrupted run is reported with, from the client-safe
+// module: it is the IDENTITY of that verdict, and the route and the tests have
+// to be able to name it without pulling this file's Node built-ins in with it.
+export { INTERRUPTED_MESSAGE } from "./update-constants";
+import { INTERRUPTED_MESSAGE } from "./update-constants";
 import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
@@ -2715,6 +2721,10 @@ export function resetUpdateState(): void {
   continuationInFlight = null;
 }
 
+export type DismissOutcome =
+  | { dismissed: true }
+  | { dismissed: false; reason: "in-progress" | "not-written"; error: string };
+
 /**
  * Forget a run that has already settled, at the owner's request.
  *
@@ -2727,17 +2737,146 @@ export function resetUpdateState(): void {
  *
  * Refuses while an update owns the box: this clears no `running` flag on
  * purpose — `resetUpdateState` does, and doing that here would let a second
- * run start beside the one still going. Answers whether it cleared anything so
- * the route can say 409 rather than pretend.
+ * run start beside the one still going. Answers WHY it refused, so the route
+ * can say 409 over a live run and 500 over a store that would not take the
+ * write, rather than one answer for two different things.
+ *
+ * The write is AWAITED. It used to be `void set(...)` with an unconditional
+ * `true` beside it: the route answered 200, the owner's Dismiss looked like it
+ * took, and the record was still on disk for the next poll to raise the same
+ * failure from — the false-success class, on the one button whose whole job is
+ * to make something go away.
  */
-export function dismissSettledUpdate(): boolean {
-  if (updateOwned() || state.phase === "running") return false;
-  state = createInitialState(applicableSteps());
+export async function dismissSettledUpdate(): Promise<DismissOutcome> {
+  if (updateOwned() || state.phase === "running") {
+    return { dismissed: false, reason: "in-progress", error: "An update is in progress" };
+  }
   // The interrupted-run record is part of the result being dismissed. Without
   // this the next idle poll re-reads it and raises the same failure again,
-  // which would make it undismissable.
-  void set(UPDATE_INTERRUPTED_KEY, undefined);
-  return true;
+  // which would make it undismissable — so the record goes FIRST, and the
+  // in-memory state is only cleared once the disk agrees.
+  //
+  // …but only when there IS one. Most settled failures carry no record at all —
+  // the rebuild-evidence verdict, any failed step, "No internet connection" —
+  // and for those the write is a no-op deletion whose failure says nothing
+  // about the thing being dismissed. Letting it refuse would make a failed
+  // update UNDISMISSABLE on a box whose disk is full: the panel is re-adopted
+  // on every reload, and the owner cannot reach the button that retries the
+  // update. `getKnown` because "the store could not be read" is not evidence
+  // that the key is unset — that store may well hold a record.
+  const record = await getKnown(UPDATE_INTERRUPTED_KEY);
+  if (!record.known || record.value !== undefined) {
+    try {
+      await set(UPDATE_INTERRUPTED_KEY, undefined);
+    } catch (err) {
+      console.warn(
+        "[Updater] Could not forget the settled run:",
+        err instanceof Error ? err.message : err,
+      );
+      // The reason travels; the store's own words do NOT. A write that failed
+      // on the READ half is a JSON.parse error, and its message quotes a window
+      // of data/config.json — which holds both bot tokens and the mailbox
+      // password. That belongs in the log, not in an HTTP response body.
+      return {
+        dismissed: false,
+        reason: "not-written",
+        error: "The device could not save that change — see the server log.",
+      };
+    }
+  }
+  // Re-asked after the await: a run can claim the box while the write is in
+  // flight, and resetting the state under it would show an empty step list
+  // over an update that is going. Through `getUpdateState()` because the
+  // compiler holds its narrowing of this module-level binding across the await
+  // and would call the second read impossible — which is the whole race.
+  if (updateOwned() || getUpdateState().phase === "running") {
+    return { dismissed: false, reason: "in-progress", error: "An update is in progress" };
+  }
+  state = createInitialState(applicableSteps());
+  return { dismissed: true };
+}
+
+/**
+ * Is this state the remembered-interruption verdict, rather than a failure with
+ * a cause of its own?
+ *
+ * Only that verdict may be taken back by a completion: a rebuild that failed is
+ * a different finding, decided from evidence the markers say nothing about.
+ */
+export function isInterruptedVerdict(reported: UpdateState): boolean {
+  return reported.phase === "failed" && reported.error === INTERRUPTED_MESSAGE;
+}
+
+/** The two durable records of how the last run ended. */
+interface SettledMarkers {
+  interruptedAt: string | null;
+  completed: boolean;
+  completedAt: string | null;
+}
+
+/**
+ * …or `null` when the store could not be read.
+ *
+ * Through `getKnown`, not `get`: the forgiving reader answers `{}` to an
+ * EACCES, a half-written file and a non-object JSON alike, and "we could not
+ * read the file" is not evidence that a key is unset (config-store.ts says so
+ * in as many words). Read the other way, an unreadable store would look like a
+ * box with no interruption on it — and the caller would retract a verdict it
+ * still has every reason to hold. `data/config.json` being briefly unreadable
+ * is exactly what `post_update` can do to it.
+ */
+async function readSettledMarkers(): Promise<SettledMarkers | null> {
+  const [interruptedAt, completed, completedAt] = await Promise.all([
+    getKnown(UPDATE_INTERRUPTED_KEY),
+    getKnown("update_completed"),
+    getKnown("update_completed_at"),
+  ]);
+  if (!interruptedAt.known || !completed.known || !completedAt.known) return null;
+  return {
+    interruptedAt: typeof interruptedAt.value === "string" ? interruptedAt.value : null,
+    completed: Boolean(completed.value),
+    completedAt: typeof completedAt.value === "string" ? completedAt.value : null,
+  };
+}
+
+/**
+ * Drop the record, reporting a store that would not take the write.
+ *
+ * Never fatal to the reader: failing to FORGET a verdict that has already been
+ * suppressed in memory must not turn a status poll into a 500, on a box whose
+ * config.json is the thing that is broken.
+ */
+async function forgetInterruption(): Promise<void> {
+  try {
+    await set(UPDATE_INTERRUPTED_KEY, undefined);
+  } catch (err) {
+    console.warn(
+      "[Updater] Could not clear the interruption a later update overtook:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
+ * Did a completion come AFTER the interruption the box remembers?
+ *
+ * Both records carry a time, so the newer one is the true one. Strictly newer,
+ * and only with a date on both sides: older boxes carried `update_completed =
+ * true` for ever with no `update_completed_at` beside it, and "some completion
+ * happened at some point" cannot prove it came after this interruption —
+ * guessing that it did would be the silence TASK-731 exists to end.
+ *
+ * Every uncertain answer is `false`, which KEEPS the failure showing: an
+ * unparseable date, an undated completion, equal times. The clock is the one
+ * assumption left — a box whose time is stepped BACKWARDS between the two
+ * writes reads its own completion as older — and that is the direction to fail
+ * in, since the next run's prologue clears both markers anyway.
+ */
+function completionOutranksInterruption(markers: SettledMarkers): boolean {
+  if (!markers.interruptedAt || !markers.completed || !markers.completedAt) return false;
+  const completedAt = Date.parse(markers.completedAt);
+  const interruptedAt = Date.parse(markers.interruptedAt);
+  return Number.isFinite(completedAt) && Number.isFinite(interruptedAt) && completedAt > interruptedAt;
 }
 
 export async function isUpdateCompleted(): Promise<boolean> {
@@ -2832,28 +2971,63 @@ async function resumeContinuation(): Promise<boolean> {
     // and `update_completed` with no continuation flag is what tells the two
     // apart. Reporting there would tell an owner to re-run a ten-minute update
     // that already worked.
-    const wasLocked = await isUpdateLocked();
-    const released = await clearUpdateLock();
-    const finished = Boolean(await get("update_completed"));
-    const remembered = Boolean(await get(UPDATE_INTERRUPTED_KEY));
-    if ((wasLocked && released && !finished) || remembered) {
-      const message =
-        "The update was interrupted before it could finish: the web server was replaced while it ran, "
-        + "and no step is left to resume. Nothing was rolled back — start the update again.";
+    //
+    // …and the record is judged AGAINST that completion by time, which is the
+    // 2026-09-06 follow-up. The state this branch reads — locked, nothing to
+    // resume, not completed — is also what the SECOND HALF of an ordinary
+    // update looks like to a reader that is not the process running it, so an
+    // interruption gets stamped on the normal path of every update. Measured on
+    // the Hermes box: `update_interrupted_at` 71 seconds BEFORE
+    // `update_completed_at`, on an update that worked, and the box answered
+    // "Update failed" with every step pending from then on. A completion newer
+    // than the record voids it, here and on disk.
+    // The release only when the lock was actually HELD. `set` is a
+    // read-modify-write of the whole of data/config.json and this branch now
+    // runs on every status poll, so an unconditional clear would rewrite that
+    // file every two seconds — beside install.sh and the gateway, which have it
+    // open by their own paths.
+    const released = (await isUpdateLocked()) && (await clearUpdateLock());
+    const markers = await readSettledMarkers();
+    // A store that could not be read decides NOTHING — it neither stamps a
+    // record nor retracts the verdict this process is already holding.
+    if (!markers) return false;
+    const overtaken = completionOutranksInterruption(markers);
+    if (overtaken) await forgetInterruption();
+    const remembered = Boolean(markers.interruptedAt) && !overtaken;
+    if ((released && !markers.completed) || remembered) {
       if (!remembered) {
+        // Asked once more, immediately before the stamp. The run can finish
+        // between the read above and this line, and a record dated after the
+        // completion it describes would outrank it for ever — the very defect
+        // this branch is being fixed for, through a window of milliseconds.
+        const now = await readSettledMarkers();
+        if (!now || now.completed) return false;
         // Only on the transition, so the record keeps the time it happened.
         await set(UPDATE_INTERRUPTED_KEY, new Date().toISOString());
       }
       state = createInitialState(applicableSteps());
       state.warnings = await restoreWarnings();
       state.phase = "failed";
-      state.error = message;
-      console.error(`[Updater] ${message}`);
+      state.error = INTERRUPTED_MESSAGE;
+      console.error(`[Updater] ${INTERRUPTED_MESSAGE}`);
+    } else if (isInterruptedVerdict(state)) {
+      // This process is still holding a verdict whose record is gone — cleared
+      // by the completion above, by the next run's prologue, or by a Dismiss in
+      // another copy of this module. A failure the box has no evidence for is
+      // not one to keep showing.
+      state = createInitialState(applicableSteps());
     }
     return false;
   }
 
-  await set("update_needs_continuation", undefined);
+  // The restart this is resuming is the one the update ASKED FOR: the flag is
+  // written by the rebuild step itself. So anything a reader stamped while that
+  // replacement was under way describes the update's own normal path, and goes
+  // with the flag rather than outliving it.
+  await setMany({
+    update_needs_continuation: undefined,
+    [UPDATE_INTERRUPTED_KEY]: undefined,
+  });
 
   // Resolve the list ONCE and reuse it for the state, the resume index and the
   // runner. The edition is stable across the reboot (post_update re-bakes the
@@ -3153,6 +3327,12 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     await setMany({
       update_completed: true,
       update_completed_at: new Date().toISOString(),
+      // In the SAME write, so the two records can never disagree: an
+      // interruption stamped while this run was going describes this run, and
+      // this run finished. Left standing it is read as the newer fact for ever
+      // — "Update failed", every step pending, over an update that worked
+      // (measured on the Hermes box, 2026-09-06).
+      [UPDATE_INTERRUPTED_KEY]: undefined,
     });
   }
   // The warnings have been carried across the reboot and are now in the live
