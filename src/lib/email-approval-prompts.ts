@@ -183,10 +183,10 @@ const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
  * the harness reports, exactly as it is for the button, and a code long enough
  * to be a password would be one nobody types.
  */
-export const CODE_LEN = 5;
+const CODE_LEN = 5;
 
 /** A code as it may be written back — the parser upper-cases before it asks. */
-export const CODE_RE = new RegExp(`^[${CODE_ALPHABET}]{${CODE_LEN}}$`);
+const CODE_RE = new RegExp(`^[${CODE_ALPHABET}]{${CODE_LEN}}$`);
 
 /**
  * A code no live prompt is already using.
