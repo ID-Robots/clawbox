@@ -38,6 +38,7 @@ import { BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
+import BackgroundJobsPanel from "./BackgroundJobsPanel";
 
 /* ── Types ── */
 
@@ -5488,6 +5489,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 that change what the box does, and the cards below are what
                 they change. TASK-455. */}
             <SystemProfilePanel />
+
+            {/* What the box does WITHOUT being asked (TASK-609). Beside the two
+                panels above for the same reason they are here: it changes what
+                the device does rather than reporting on it — and it is the only
+                place on the box that says these jobs exist at all. */}
+            <BackgroundJobsPanel />
 
             {stats ? (
               <>
