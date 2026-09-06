@@ -104,8 +104,8 @@ EOPY
   fs.chmodSync(stub, 0o755);
 }
 
-function run(env: Record<string, string> = {}): { status: number; stdout: string; stderr: string } {
-  const r = spawnSync("bash", [SCRIPT], {
+function run(env: Record<string, string> = {}, script: string = SCRIPT): { status: number; stdout: string; stderr: string } {
+  const r = spawnSync("bash", [script], {
     encoding: "utf-8",
     env: testEnv({
       PATH: process.env.PATH ?? "",
@@ -374,16 +374,19 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       expect(r.stdout).toContain("no longer includes it");
     });
 
-    it("leaves the owner's SELECTION where it is", () => {
-      // The same ruling the OpenClaw arm records: the panel's job is to show
-      // that the choice is no longer available, and silently rewriting it would
-      // hide the downgrade.
+    it("moves the SELECTION off our own route, which is the point of TASK-745", () => {
+      // This used to assert the opposite, on the OpenClaw arm's ruling that the
+      // panel's job is to show the choice is gone. That ruling holds where the
+      // delete removes a NAMED entry and the selection is left pointing at
+      // nothing. On Hermes `openai` is the harness's own built-in, so a
+      // selection left naming it resolves to api.openai.com — the box would
+      // speak to a third party to show its owner that it cannot.
       armedBox();
       writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
 
       run();
 
-      expect(at("tts.provider")).toBe("openai");
+      expect(at("tts.provider")).toBe("clawbox-local");
     });
 
     it.each([
@@ -631,11 +634,14 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       expect(at("tts.provider")).toBe("elevenlabs");
     });
 
-    it("does not hand a box with no local engine to Microsoft's cloud", () => {
-      // `hermes config unset tts.provider` is NOT a stand-down: `_get_provider`
-      // in tools/tts_tool.py falls back to `DEFAULT_PROVIDER = "edge"`, which
-      // is Microsoft's cloud — install.sh selects `clawbox-local` on every
-      // Hermes box precisely so an engineless board is honestly mute instead.
+    it("stands a box with no engine DEFINITION down locally, never onto Microsoft", () => {
+      // `hermes config unset tts.provider` is not a stand-down: `_get_provider`
+      // falls back to `DEFAULT_PROVIDER = "edge"`, Microsoft's cloud. Selecting
+      // `clawbox-local` with no definition behind it IS one — an unresolvable
+      // command provider raises `tts.providers.clawbox-local.command is not
+      // configured` at the harness, with no fall-through, so nothing leaves the
+      // box. It is also the state install.sh itself creates on a board that
+      // declines Kokoro.
       writeYaml(
         `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: ${PROXY}\n`
         + `    api_key: ${TOKEN}\n    model: ${CLOUD_MODEL}\n`,
@@ -644,10 +650,47 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
 
       const r = run();
 
-      expect(at("tts.openai.api_key")).toBeUndefined();
+      expect(at("tts.openai")).toBeUndefined();
+      expect(at("tts.provider")).toBe("clawbox-local");
       expect(configCalls()).not.toContain("config unset tts.provider");
       expect(configCalls()).not.toContain("config set tts.provider edge");
-      expect(r.stdout).toContain("no on-device voice to fall back to");
+      expect(r.stdout).toContain("speaks from the box again");
+    });
+
+    it("moves the selection BEFORE it removes the definition", () => {
+      // Every intermediate state has to be safe, and the dangerous one is a
+      // slot our endpoint has been taken out of while `tts.provider` still
+      // names `openai`: the built-in then resolves to api.openai.com and the
+      // owner's text goes to a third party. De-selecting first means the only
+      // intermediate state is a box speaking from itself with a stale
+      // definition nothing points at.
+      armedWithLocalEngine();
+      downgraded();
+
+      run();
+
+      const calls = configCalls();
+      const selected = calls.findIndex((c) => c.startsWith("config set tts.provider"));
+      const removed = calls.findIndex((c) => c === "config unset tts.openai");
+      expect(selected).toBeGreaterThanOrEqual(0);
+      expect(removed).toBeGreaterThan(selected);
+    });
+
+    it("leaves the definition in place when it cannot move the selection", () => {
+      // The failure that matters: if the box cannot be moved off `openai`, its
+      // route must stay complete, so a spoken reply is refused at OUR proxy
+      // rather than sent to OpenAI with no credential.
+      armedWithLocalEngine();
+      downgraded();
+      writeHermesStub(9);
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBe(TOKEN);
+      expect(at("tts.openai.base_url")).toBe(PROXY);
+      expect(configCalls()).not.toContain("config unset tts.openai");
+      expect(r.stdout).toContain("could not move this box off the ClawBox AI cloud voice");
+      expect(r.stdout).toContain("(exit 9)");
     });
   });
 
@@ -656,6 +699,37 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
   // computed` and nothing else: it failed in the safe direction, silently, and
   // the boot log could not say why.
   describe("a plan step that crashes says so on the boot log", () => {
+    /**
+     * The shipped script with one line inserted into the plan heredoc, so a
+     * REAL exception is raised inside the real program with the real hook
+     * installed. Nothing else about the file changes.
+     */
+    function scriptThatRaises(): string {
+      const src = fs.readFileSync(SCRIPT, "utf-8");
+      const anchor = "sys.excepthook = _plan_failed\n";
+      expect(src).toContain(anchor);
+      const patched = src.replace(anchor, `${anchor}\nraise RuntimeError("boom")\n`);
+      const out = path.join(home, "register-mcp-raises.sh");
+      fs.writeFileSync(out, patched);
+      return out;
+    }
+
+    it("names the exception and the line, and keeps the traceback out of the journal", () => {
+      // A runtime failure is not allowed to print a traceback: it can be raised
+      // from inside a VALUE — a YAML error quotes the offending line, and the
+      // line it would quote is `tts.openai.api_key`. The operator gets the type
+      // and the line in this block, which is what says where to look.
+      writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
+
+      const r = run({}, scriptThatRaises());
+
+      expect(r.status).toBe(0);
+      expect(configCalls()).toEqual([]);
+      expect(r.stdout).toMatch(/the voice plan could not be computed \(RuntimeError at line \d+\)/);
+      expect(r.stderr).not.toContain("Traceback");
+      expect(r.stderr).not.toContain("boom");
+    });
+
     /**
      * A `python3` that fails ONLY for the plan step.
      *
@@ -682,14 +756,17 @@ exec ${real} "$@"
       return dir;
     }
 
-    it("lets the traceback reach the journal instead of /dev/null", () => {
+    it("lets a python that fails to START reach the journal instead of /dev/null", () => {
       writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
       const dir = shadowPython();
 
       const r = run({ PATH: `${dir}:${process.env.PATH ?? ""}` });
 
-      // The script still stands down — a plan it could not compute writes
-      // nothing — and now it says what happened.
+      // The half the excepthook cannot cover: an interpreter that dies before
+      // the program runs (a SyntaxError in the heredoc, a broken python) has no
+      // hook installed, and its stderr only ever quotes this script's own
+      // source. `2>/dev/null` swallowed exactly that. The script still stands
+      // down — a plan it could not compute writes nothing — and now it says so.
       expect(r.status).toBe(0);
       expect(configCalls()).toEqual([]);
       expect(r.stdout).toContain("the voice plan could not be computed");
@@ -764,7 +841,11 @@ exec ${real} "$@"
 
     expect(block).toContain(`CLAWBOX_SPEECH_DEVICE_TIER="${tts.CLAWBOX_AI_SPEECH_TIER}"`);
     expect(block).toContain(`CLAWBOX_VOICE_MODEL="${tts.HERMES_CLOUD_TTS_MODEL}"`);
-    expect(block).toContain(`LOCAL_PROVIDER = "${tts.HERMES_LOCAL_TTS_PROVIDER}"`);
+    // The local name is now a SHELL binding, because the withdrawal writes it
+    // and the plan step names it — one value, passed in, so the two cannot
+    // drift into disagreeing about which provider the box falls back to.
+    expect(block).toContain(`CLAWBOX_VOICE_LOCAL="${tts.HERMES_LOCAL_TTS_PROVIDER}"`);
+    expect(block).toContain('LOCAL_PROVIDER = os.environ["CLAWBOX_VOICE_LOCAL"]');
     expect(block).toContain(`CLOUD_PROVIDER = "${tts.HERMES_CLOUD_TTS_PROVIDER}"`);
     expect(block).toContain(`FACTORY_PROVIDER = "${tts.HERMES_FACTORY_TTS_PROVIDER}"`);
     expect(models.KOKORO_STAMP.endsWith("/.cache/clawbox/kokoro-installed")).toBe(true);
