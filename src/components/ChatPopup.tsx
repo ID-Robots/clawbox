@@ -4461,7 +4461,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // thing that can say a `openai/<id>` pick is the ChatGPT subscription rather
   // than the API key: on a box holding both credentials the two rows offer the
   // same reference, and the server cannot tell them apart from the model alone.
-  const switchChatModel = useCallback(async (target: { model: string; label: string; provider?: string | null }): Promise<boolean> => {
+  const switchChatModel = useCallback(async (target: { model: string; label: string; provider?: string | null; automatic?: boolean }): Promise<boolean> => {
     if (switchingModel || chatModelState?.activeModel === target.model) return false
     // Intercept a ClawBox AI pick the portal POSITIVELY refuses, and say so
     // here rather than letting every turn on it come back as the opaque
@@ -4497,6 +4497,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         body: JSON.stringify({
           model: target.model,
           ...(target.provider ? { provider: target.provider } : {}),
+          // The box's own recovery is not the owner choosing this model, and
+          // the server must not remember it as one (TASK-713).
+          ...(target.automatic ? { automatic: true } : {}),
         }),
       })
       const data = await res.json()
@@ -4600,7 +4603,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // that other switch finishes.
     if (switchingModel) return
     tierGuardAttemptRef.current = { model: active, allowed: clawboxLogin.allowedModels }
-    void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: 'Pro Tier' })
+    void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: 'Pro Tier', automatic: true })
       .then(switched => {
         // Posted from the SUCCESS path only. This sentence says the box was
         // moved, and until the POST comes back that is not known — announcing

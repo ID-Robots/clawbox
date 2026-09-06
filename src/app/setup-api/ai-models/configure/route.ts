@@ -410,6 +410,23 @@ async function readModelsMode(): Promise<string | null> {
   }
 }
 
+/**
+ * `agents.defaults.model.primary` as openclaw.json carries it, or null.
+ *
+ * Null on the Hermes SKU (there is no OpenClaw config) and on an unreadable
+ * one. Its only caller migrates a pre-marker explicit pick, and "we could not
+ * read it" must leave that question open rather than answer it wrongly.
+ */
+async function readOpenClawPrimaryModel(): Promise<string | null> {
+  if (openclawIsAbsent()) return null;
+  try {
+    const primary = (await readOpenClawConfig())?.agents?.defaults?.model?.primary;
+    return typeof primary === "string" && primary.trim() ? primary.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function pasteAuthApiKey(provider: string, profileId: string, key: string): Promise<void> {
   // The sign-in guard is NOT here, deliberately: see `assertNoSignInAt`. By
   // the time this runs the request has already written its own
@@ -2110,6 +2127,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           ?? normalizeClawboxAiTier(configStore[CLAWBOX_AI_TIER_CONFIG_KEY])
           ?? CLAWBOX_AI_DEFAULT_TIER)
       : null;
+    // Set by the branch below in which the OWNER named a model, rather than one
+    // that filled a default in for them. Written to the store after the save
+    // succeeds, beside the other facts about what was configured.
+    let explicitPickToRecord: string | null = null;
+
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
@@ -2174,8 +2196,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // running is the evidence of the choice.
       const clawaiDecision = decideClawboxAiModelId({
         storedPick: configStore[EXPLICIT_MODEL_PICK_KEY],
-        currentPrimary: (await readOpenClawConfig().catch(() => null))
-          ?.agents?.defaults?.model?.primary,
+        currentPrimary: await readOpenClawPrimaryModel(),
         tierModelId: CLAWBOX_AI_MODEL_ID_BY_TIER[resolvedClawboxTier],
       });
       if (clawaiDecision.migrate) await recordExplicitModelPick(clawaiDecision.migrate);
@@ -2238,6 +2259,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           );
         }
         config.defaultModel = `${targetProvider}/${requestedModel}`;
+        // The owner named this model. Remembered for the same reason the chat
+        // picker's pick is (TASK-713): a default may fill a gap, never
+        // overwrite a choice — and the marker holds the LAST choice, whichever
+        // provider it was about.
+        explicitPickToRecord = config.defaultModel;
       }
     }
 
@@ -2870,6 +2896,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         ai_model_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
+        // The owner named a model in this save (TASK-713). In the same batch
+        // as the other facts about it, so a save that landed and a pick that
+        // was remembered cannot come apart.
+        ...(explicitPickToRecord ? { [EXPLICIT_MODEL_PICK_KEY]: explicitPickToRecord } : {}),
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();

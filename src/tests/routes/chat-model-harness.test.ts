@@ -26,6 +26,8 @@ vi.mock("util", () => ({ promisify: vi.fn() }));
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
+  // A successful switch records the owner's explicit model pick (TASK-713).
+  setMany: vi.fn(),
 }));
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   notifyProviderSetChanged: vi.fn(),

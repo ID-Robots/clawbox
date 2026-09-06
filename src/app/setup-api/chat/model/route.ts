@@ -38,6 +38,7 @@ import {
   providerRowRunnable,
 } from "@/lib/provider-status";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
+import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
@@ -920,12 +921,18 @@ export async function POST(request: Request) {
     return NextResponse.json(WRONG_STORE, { status: 409 });
   }
   try {
-    let body: { source?: ChatModelSource; model?: string; provider?: string };
+    let body: { source?: ChatModelSource; model?: string; provider?: string; automatic?: boolean };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
+
+    // "The BOX made this switch, not the owner." Set by the chat's entitlement
+    // guard, which drops a Max model the portal refuses down to Flash so chat
+    // keeps working. It changes nothing about the write — only whether the
+    // result is remembered as the owner's own pick (TASK-713).
+    const automaticSwitch = body.automatic === true;
 
     // One read of openclaw.json for the request: the state below and every
     // credential fact the routing turns on come from the same snapshot.
@@ -1355,6 +1362,17 @@ export async function POST(request: Request) {
     //     Each announcement therefore sits at the write it describes.
     const pluginSwitchedOn = providerPluginSwitchedOnBy([targetModel], configBeforeBatch);
     if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
+
+    // 1b-2. The owner chose this model, so nothing that fills in a DEFAULT may
+    //       overwrite it later — that is the whole of TASK-713, and this is
+    //       where the choice is made. Recorded after the write landed, so a
+    //       refused batch records nothing.
+    //
+    //       `automatic` is the one exemption: the chat's entitlement guard
+    //       drops a refused Max model to Flash by posting HERE, and recording
+    //       that as a choice would pin the box to Flash for good — the box's
+    //       own recovery, read back as the owner's decision.
+    if (!automaticSwitch) await recordExplicitModelPick(targetModel);
 
     // 1c. The other side of the arm: a pick that is NOT the subscription's, on
     //     a reference an earlier ChatGPT pick armed, has to clear it — a

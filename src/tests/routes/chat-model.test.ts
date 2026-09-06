@@ -12,6 +12,9 @@ vi.mock("util", () => ({
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
+  // The owner's explicit model pick is written here after a successful switch
+  // (TASK-713): a picker click is the one place a choice is made.
+  setMany: vi.fn(),
 }));
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));

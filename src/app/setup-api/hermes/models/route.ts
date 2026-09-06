@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
+import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { getActiveHarness } from "@/lib/harness";
 import { requireSession } from "@/lib/route-auth";
 import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
@@ -306,6 +307,12 @@ export async function POST(request: Request) {
       if (providerChanged || targetModel !== payload.current.model) {
         await setKey("model.default", targetModel);
       }
+      // The owner chose this model here, so the ClawBox AI tier badge may not
+      // fill one in over it on the next link or re-pair (TASK-713). Recorded
+      // after the write landed, and on the no-op path too: "already on the
+      // model I want" is the same choice, and a box that reached it before the
+      // marker existed would otherwise never get one.
+      await recordExplicitModelPick(targetModel);
     } catch (err) {
       if (providerChanged && previousProvider) {
         // runHermesCli RESOLVES with a non-zero `code` on a failed command and

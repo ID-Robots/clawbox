@@ -1,4 +1,6 @@
 import { setMany } from "@/lib/config-store";
+import { decideClawboxAiModelId, readExplicitModelPick, recordExplicitModelPick } from "@/lib/explicit-model-pick";
+import { hermesConfigGet } from "@/lib/hermes-config-cache";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
@@ -125,7 +127,25 @@ export async function applyClawaiToHermes(
   if (!trimmed || trimmed.startsWith("-")) {
     throw new ClawaiApplyError("Sign in to ClawBox AI first to get a device token.");
   }
-  const model = clawaiModelForTier(tier);
+  // The tier badge fills in a DEFAULT and never overwrites a choice (TASK-713).
+  // Same rule and same decision function as the OpenClaw route — a re-pair
+  // reaches both editions carrying a tier it cannot be told apart from a plan
+  // press, so what settles it is whether the owner has ever picked a ClawBox AI
+  // model here. `model.default` is read for the MIGRATION only, and through the
+  // mtime-keyed cache the rest of this function already uses; an unreadable one
+  // simply leaves the question open and the badge fills it in, as on beta.
+  const clawaiDecision = decideClawboxAiModelId({
+    storedPick: await readExplicitModelPick(),
+    currentPrimary: await hermesConfigGet("model.default").catch(() => null),
+    tierModelId: clawaiModelForTier(tier),
+  });
+  if (clawaiDecision.migrate) await recordExplicitModelPick(clawaiDecision.migrate);
+  if (clawaiDecision.explicit) {
+    console.log(
+      `[Hermes ClawAI] keeping the owner's own model ${clawaiDecision.modelId} over the ${tier} badge default`,
+    );
+  }
+  const model = clawaiDecision.modelId;
   // BEFORE the first write. The token is about to change — an account switch, a
   // re-pair, a rotated device token — and the step loop below can throw after
   // `providers.clawai.api_key` has already landed, which would leave the new
