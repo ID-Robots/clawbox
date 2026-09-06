@@ -1467,6 +1467,18 @@ verify_build_present() {
 # runs, or the next rename would delete it.
 promote_parked_build() {
   local build_dir="${1:-$PROJECT_DIR/.next}" kept_dir="${2:-$PROJECT_DIR/.next-old}"
+  local claim_dir="${build_dir%/.next}/.next-claim" discard_dir
+  discard_dir="${build_dir%/.next}/.next-discard.$$"
+
+  # A claim a kill interrupted left the build under the claim name. Fold it back
+  # under the parked name so the one path below handles both. `mv -T` is a
+  # rename, so two processes doing this produce one winner and one failure, and
+  # a `.next-old` that is already there refuses the move rather than nesting
+  # the tree inside it.
+  if build_entry_present "$claim_dir"; then
+    mv -T "$claim_dir" "$kept_dir" 2>/dev/null || true
+  fi
+
   # `-e`, and `-L` beside it: for the nested standalone layout `postbuild`
   # supports, `.next/standalone/server.js` is a SYMLINK to an absolute path
   # inside `.next` — which dangles for as long as the tree is parked, so `-f`
@@ -1474,8 +1486,45 @@ promote_parked_build() {
   build_entry_present "$kept_dir" || return 0
   build_entry_present "$build_dir" && return 0
   echo "  Found a build parked by an interrupted rebuild — putting it back" >&2
-  rm -rf "$build_dir"
-  mv "$kept_dir" "$build_dir"
+
+  # THE CLAIM, and the whole of TASK-729's fix. There are two reclaimers of
+  # these directories — this one and the boot-time block in
+  # production-server.js — with no lock between them, and both used to run the
+  # same non-atomic pair: `rm -rf .next` then `mv .next-old .next`. Whichever
+  # arrived second destroyed what the first had just restored and then failed
+  # its own rename into a best-effort catch, leaving the box with NEITHER tree
+  # — the exact outcome the park exists to prevent.
+  #
+  # A rename is atomic and has exactly one winner, so the claim goes first and
+  # nothing is destroyed before it: the loser gets a failed `mv` and returns
+  # having touched nothing.
+  if ! mv -T "$kept_dir" "$claim_dir" 2>/dev/null; then
+    # ENOENT means the other reclaimer took it — a normal outcome. Anything
+    # else (a read-only rootfs, EACCES, ENOSPC) is a real failure, and the tree
+    # still being there is how this tells them apart. Saying "someone else got
+    # there first" over a box that cannot move its own directories would be a
+    # false cause in the one line an operator triages from.
+    if [ -e "$kept_dir" ]; then
+      echo "  Warning: could not claim the parked build at $kept_dir — leaving it where it is" >&2
+    fi
+    return 0
+  fi
+
+  # Everything from here destroys only PRIVATE names. `.next` is moved aside
+  # rather than deleted, so even if the "it has no build entry" judgement above
+  # was raced by the other reclaimer placing a good one, nothing is lost: the
+  # branch below puts it back.
+  mv -T "$build_dir" "$discard_dir" 2>/dev/null || true
+  if mv -T "$claim_dir" "$build_dir" 2>/dev/null; then
+    rm -rf "$discard_dir"
+  else
+    # Our claim was taken by the other reclaimer's fold-back above, which means
+    # it is placing this same build. Return what we moved aside and get out of
+    # its way; the tree we were carrying is not lost, it is in its hands.
+    mv -T "$discard_dir" "$build_dir" 2>/dev/null || rm -rf "$discard_dir"
+    return 0
+  fi
+
   # The stamp names the run that died (see set_previous_build_aside); it must
   # not ride into the tree the box is about to serve. `|| true` because a
   # cosmetic cleanup must never be what aborts a recovery under `set -e`.

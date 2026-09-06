@@ -122,7 +122,13 @@ SDIR="$(dirname "$SRVJS")"
 # refuse a parked entry on its own (that is what its `-prune` is for), and in
 # the nested layout the copy lands beside the entry rather than at the top of
 # the standalone tree, so both places are swept.
-for swept in "$STANDALONE"/.next-old* "$SDIR"/.next-old*; do
+# `.next-claim*` and `.next-discard.*` beside `.next-old*`: the atomic build
+# reclaim (TASK-729) moves the parked tree through those two names, and a build
+# that happened to run while one of them existed would trace it in exactly the
+# way it traces `.next-old`.
+for swept in "$STANDALONE"/.next-old* "$SDIR"/.next-old* \
+             "$STANDALONE"/.next-claim* "$SDIR"/.next-claim* \
+             "$STANDALONE"/.next-discard.* "$SDIR"/.next-discard.*; do
   [ -e "$swept" ] || continue
   echo "postbuild: removing $swept — a parked previous build was traced into the standalone output" >&2
   rm -rf "$swept"

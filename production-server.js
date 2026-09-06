@@ -778,6 +778,34 @@ try {
   // supports, this path is a symlink into `.next` that DANGLES while the tree is
   // parked, and `existsSync` would call the box's only build absent.
   const present = (p) => { try { fs.lstatSync(p); return true; } catch { return false; } };
+  const nextDir = path.join(__dirname, ".next");
+  // The claim name is SHARED with install.sh's promote_parked_build, and taking
+  // it is a rename — see the block that uses it below.
+  const claimDir = path.join(__dirname, ".next-claim");
+  const claimEntry = path.join(claimDir, "standalone", "server.js");
+  const discardDir = path.join(__dirname, `.next-discard.${process.pid}`);
+  /**
+   * A rename that answers WHY it failed instead of throwing.
+   *
+   * The distinction matters at the claim below: ENOENT means the other
+   * reclaimer took the parked tree, which is a normal outcome and not a
+   * problem; anything else — EROFS, EACCES, ENOSPC — is a real failure an
+   * operator has to see, and reporting it as "someone else got there first"
+   * would be a false cause in the one line they triage from.
+   */
+  const renameQuiet = (from, to) => {
+    try { fs.renameSync(from, to); return null; } catch (err) { return err; }
+  };
+
+  // A claim a kill interrupted left the build under the claim name, where
+  // nothing looks for it. Fold it back under the parked name so the one block
+  // below handles both — a rename again, so this cannot take a tree from a
+  // reclaim that is mid-flight without that reclaim noticing and standing down.
+  if (present(claimEntry)) {
+    console.warn("[production-server] A previous reclaim left the parked build under .next-claim — folding it back.");
+    renameQuiet(claimDir, parkedDir);
+  }
+
 
   // …and "no entry, a parked one exists" is not on its own the killed rebuild
   // this block repairs. It is ALSO the normal state of a rebuild in flight, for
@@ -849,19 +877,54 @@ try {
         console.warn("[production-server] .next-old carries a rebuild stamp that names no live rebuild — treating the parked build as abandoned.");
       }
       console.warn("[production-server] No .next build, but .next-old holds one — an update was killed mid-rebuild. Putting it back.");
-      fs.rmSync(path.join(__dirname, ".next"), { recursive: true, force: true });
-      fs.renameSync(parkedDir, path.join(__dirname, ".next"));
-      console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
-      // Its own try, deliberately: the reclaim is already done by the line
-      // above, and `force` swallows ENOENT but not EACCES or EIO. Letting one
-      // reach the catch below would report "Could not reclaim a parked build"
-      // over a reclaim that succeeded — a false failure in the line an
-      // operator triages from.
-      try {
-        fs.rmSync(path.join(__dirname, ".next", OWNER_STAMP), { force: true });
-      } catch {
-        // A stale stamp inside the restored tree is inert: the next park
-        // overwrites it, and nothing else reads it there.
+
+      // THE CLAIM, and the whole of TASK-729's fix. There are two reclaimers of
+      // these directories — this one and install.sh's promote_parked_build —
+      // with no lock between them, and both used to run the same non-atomic
+      // pair, `rm -rf .next` then `mv .next-old .next`. Whichever arrived
+      // second deleted what the first had just restored and then failed its own
+      // rename into this file's best-effort catch, leaving the box with NEITHER
+      // tree: the exact outcome the park exists to prevent.
+      //
+      // A rename is atomic and has exactly one winner, so the claim goes first
+      // and nothing is destroyed before it. The loser returns having touched
+      // nothing, which is the whole point.
+      const claimErr = renameQuiet(parkedDir, claimDir);
+      if (claimErr && claimErr.code === "ENOENT") {
+        console.warn("[production-server] Another reclaim took the parked build first — leaving it to finish.");
+      } else if (claimErr) {
+        // Not a lost race: the tree is still there and this box could not move
+        // it. Same sentence the outer catch used to produce, because it is the
+        // line an operator triages from.
+        console.warn("[production-server] Could not reclaim a parked build:", claimErr.message);
+      } else {
+        // Everything from here destroys only PRIVATE names. `.next` is moved
+        // aside rather than deleted, so even if "it has no build entry" was
+        // raced by the other reclaimer placing a good one, nothing is lost.
+        renameQuiet(nextDir, discardDir);
+        if (!renameQuiet(claimDir, nextDir)) {
+          fs.rmSync(discardDir, { recursive: true, force: true });
+          console.warn("[production-server] Restored the parked build. Run the update again to get the new one.");
+          // Its own try, deliberately: the reclaim is already done by the lines
+          // above, and `force` swallows ENOENT but not EACCES or EIO. Letting
+          // one reach the catch below would report "Could not reclaim a parked
+          // build" over a reclaim that succeeded — a false failure in the line
+          // an operator triages from.
+          try {
+            fs.rmSync(path.join(nextDir, OWNER_STAMP), { force: true });
+          } catch {
+            // A stale stamp inside the restored tree is inert: the next park
+            // overwrites it, and nothing else reads it there.
+          }
+        } else {
+          // Our claim was folded back by the other reclaimer, which means it is
+          // placing this same build. Return what we moved aside and get out of
+          // its way; the tree is not lost, it is in the other one's hands.
+          if (renameQuiet(discardDir, nextDir)) {
+            fs.rmSync(discardDir, { recursive: true, force: true });
+          }
+          console.warn("[production-server] Another reclaim claimed the parked build mid-flight — leaving it to finish.");
+        }
       }
     }
   }
