@@ -60,6 +60,7 @@ function runStep(opts: {
   swaponFails?: boolean;
   testMode?: boolean;
   container?: boolean;
+  detectVirtMissing?: boolean;
   readOnlyFstab?: boolean;
   fstab?: string;
 }) {
@@ -84,12 +85,20 @@ function runStep(opts: {
   stub("free", `echo "Swap: 11Gi 1Gi 10Gi"`);
   stub("fallocate", `echo "fallocate $*" >> "${tmp}/calls"; : > "\${!#}"; exit 0`);
   // The container probe answers through systemd-detect-virt on a real box.
-  stub("systemd-detect-virt", `exit ${opts.container ? 0 : 1}`);
+  if (!opts.detectVirtMissing) stub("systemd-detect-virt", `exit ${opts.container ? 0 : 1}`);
+  // …and falls back to marker files. Point those at the sandbox: read from the
+  // real filesystem, every case here would answer "container" whenever the
+  // suite itself runs in one, and skip the provisioning it is meant to prove.
+  const markerDir = path.join(tmp, "markers");
+  fs.mkdirSync(markerDir, { recursive: true });
+  const markers = [path.join(markerDir, "dockerenv"), path.join(markerDir, "containerenv")];
+  if (opts.container) for (const m of markers) fs.writeFileSync(m, "");
   if (opts.readOnlyFstab) fs.chmodSync(fstab, 0o444);
 
   const script = [
     "set -uo pipefail",
     `CLAWBOX_TEST_MODE=${opts.testMode ? 1 : 0}`,
+    `CLAWBOX_CONTAINER_MARKERS=${JSON.stringify(markers.join(" "))}`,
     "is_test_mode() { [ \"$CLAWBOX_TEST_MODE\" = \"1\" ]; }",
     'SWAPFILE_SIZE_GB=8',
     'SWAPFILE_DISK_RESERVE_GB=20',
@@ -183,6 +192,15 @@ describe("step_swapfile stands down rather than harming the box", () => {
     const r = runStep({ availGb: 25 });
     expect(r.status).toBe(0);
     expect(r.calls).toMatch(/fallocate -l 4G/);
+  });
+
+  it("answers the marker files as well as systemd-detect-virt", () => {
+    // The fallback path is what a box without systemd-detect-virt uses; the
+    // probe must not depend on the one binary.
+    const r = runStep({ availGb: 400, container: true, detectVirtMissing: true });
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/Skipping swapfile: running in a container/);
+    expect(r.calls).toBe("");
   });
 
   it("skips a container BEFORE writing anything, test flag or not", () => {

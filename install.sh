@@ -701,7 +701,15 @@ in_container() {
   if command -v systemd-detect-virt >/dev/null 2>&1; then
     systemd-detect-virt --container --quiet && return 0
   fi
-  [ -f /.dockerenv ] || [ -f /run/.containerenv ]
+  # The marker paths are a variable so a test can point them at its own
+  # sandbox: read from the real filesystem, this probe answers "container" for
+  # every suite that itself runs in one, and the cases it would then skip are
+  # the ones worth exercising.
+  local marker
+  for marker in ${CLAWBOX_CONTAINER_MARKERS:-/.dockerenv /run/.containerenv}; do
+    [ -f "$marker" ] && return 0
+  done
+  return 1
 }
 
 harness_has_no_gpu() {
