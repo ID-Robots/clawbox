@@ -44,18 +44,17 @@
 
 import { desktopTranslations } from "./desktop-translations";
 import * as configStore from "./config-store";
+import { CONTROL_UI_EMAIL_PARAM, controlUiEmailHref } from "./chat-email-refs";
 import type { Locale } from "./i18n";
 
-/** The query parameter `/app/clawbox` reads to open one message on arrival. */
-export const CONTROL_UI_EMAIL_PARAM = "email";
+// SERVER-ONLY. `configStore` is `node:fs`, so nothing a client component can
+// reach may import this file — the link's own shape lives in
+// `chat-email-refs.ts`, which the chat imports, and is re-exported here so the
+// script and the chat cannot describe the same link differently.
+export { CONTROL_UI_EMAIL_PARAM, controlUiEmailHref };
 
 /** The one place the deep link's shape is written. */
-const CONTROL_UI_EMAIL_HREF_PREFIX = `/app/clawbox?${CONTROL_UI_EMAIL_PARAM}=`;
-
-/** Where a Control UI card sends the owner: the chat that already draws it. */
-export function controlUiEmailHref(uid: number): string {
-  return `${CONTROL_UI_EMAIL_HREF_PREFIX}${uid}`;
-}
+const CONTROL_UI_EMAIL_HREF_PREFIX = controlUiEmailHref(0).slice(0, -1);
 
 /** The card's label, in the language the owner picked, falling back to English. */
 export function controlUiCardLabel(locale: string | undefined): string {

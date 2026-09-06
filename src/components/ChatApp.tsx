@@ -21,8 +21,7 @@ import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib
 // rendered `EMAIL:<uid>` as text because only one of the two chats had learned
 // to lift the directive out, and sharing the pieces is what stops them drifting
 // apart again.
-import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective, parseEmailUid } from '@/lib/chat-email-refs'
-import { CONTROL_UI_EMAIL_PARAM } from '@/lib/control-ui-email-directives'
+import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective, parseEmailUid, CONTROL_UI_EMAIL_PARAM } from '@/lib/chat-email-refs'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
 // Same reason, one convention over: a generated picture and a spoken reply are
 // named by a `MEDIA:` line inside the reply text rather than delivered as

@@ -126,6 +126,24 @@ export function splitEmailRefs(raw: string): SplitEmailRefs {
 }
 
 /**
+ * The query parameter `/app/clawbox` reads to open one message on arrival, and
+ * the link that carries it.
+ *
+ * HERE rather than beside the script that draws the card
+ * (`control-ui-email-directives.ts`, TASK-700), because that module is
+ * SERVER-ONLY — it reads the owner's language out of the config store, which is
+ * `node:fs` — and this constant is needed by the full-screen chat, which is a
+ * client component. Importing the server module from there put `fs` in the
+ * browser bundle and the Turbopack build refused it outright.
+ */
+export const CONTROL_UI_EMAIL_PARAM = "email";
+
+/** Where a Control UI card sends the owner: the chat that already draws it. */
+export function controlUiEmailHref(uid: number): string {
+  return `/app/clawbox?${CONTROL_UI_EMAIL_PARAM}=${uid}`;
+}
+
+/**
  * A UID, or null when the payload is not one.
  *
  * Exported because a directive is no longer the only way one arrives: a card on
