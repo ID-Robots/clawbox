@@ -1319,11 +1319,15 @@ llamacpp_pid_if_running() {
 # knowing which. The routine breaker was clawbox-gateway.service's
 # `Wants=clawbox-setup.service`, which started the unit do_rebuild had just
 # stopped on every gateway (re)start; that line is gone (TASK-728), so a
-# crash-looping gateway no longer reopens the proxy behind the build. It is not
-# a fence even so: the new unit file only reaches the disk in step_systemd_
-# services, which runs in post_update — AFTER this rebuild — so the update that
-# delivers the change still runs its own build under the old unit, and an
-# operator can always start the web server by hand.
+# crash-looping gateway no longer reopens the proxy behind the build — including
+# on the update that DELIVERS the change, because the new unit file is installed
+# and daemon-reloaded before this function runs (step_rebuild_reboot calls
+# step_systemd_services seven lines above do_rebuild, and the updater's
+# gateway_setup step, which cps the same file, is the step immediately before
+# the rebuild). What is still not fenced: `install.sh --step rebuild` run by
+# hand, a box where gateway_setup was skipped (the unit is absent on the hermes
+# SKU) or step_systemd_services failed non-fatally, and an operator or the
+# sudoers grant restarting clawbox-setup inside the window.
 #
 # Stop, never disable — the same rule the idle standby follows, and the reason
 # it is safe: every engine here is meant to come back on demand. An update that
@@ -1631,11 +1635,12 @@ restore_previous_build() {
   #
   # What used to bring it back routinely was clawbox-gateway.service's
   # `Wants=clawbox-setup.service`, removed in TASK-728. This stays `restart`
-  # regardless: the new unit file only lands in post_update, so the update that
-  # removes the pull still rebuilds under the old one, boxes updating from an
-  # older build carry it for one more cycle, and an operator can start the web
-  # server by hand at any time. A rollback that reports itself wrongly is the
-  # expensive failure here; a redundant restart costs nothing.
+  # regardless, because the ways in are fewer rather than none: `install.sh
+  # --step rebuild` by hand, a box where gateway_setup was skipped or
+  # step_systemd_services failed non-fatally, and an operator or the sudoers
+  # grant restarting clawbox-setup inside the window. A rollback that reports
+  # itself wrongly is the expensive failure here; a redundant restart costs
+  # nothing.
   # `reset-failed` first, as both gateway recovery paths do. The reclaim in
   # production-server.js is now correctly refused for the length of the build,
   # so clawbox-setup crash-loops on `require`ing a build that is not there yet;
@@ -1786,11 +1791,12 @@ do_rebuild() {
   # The stop is what makes that ordering worth having. It did not keep the
   # dashboard down for the length of the rebuild, because clawbox-gateway.service
   # carried `Wants=clawbox-setup.service` and started it again on any gateway
-  # (re)start; that line is gone (TASK-728). The park still stamps the tree it
-  # sets aside and the two `systemctl` calls that end a rebuild still use
-  # `restart` rather than `start`: the removal reaches a box only when
-  # step_systemd_services reinstalls the unit in post_update, which is after this
-  # rebuild, and neither guard costs anything once it has.
+  # (re)start; that line is gone (TASK-728), and it is already gone for THIS
+  # rebuild — step_systemd_services runs seven lines above the do_rebuild in
+  # step_rebuild_reboot. The park still stamps the tree it sets aside and the two
+  # `systemctl` calls that end a rebuild still use `restart` rather than `start`:
+  # a hand-run `--step rebuild`, a skipped gateway_setup and an operator restart
+  # all still land in the window, and neither guard costs anything.
   promote_parked_build "$build_dir" "$kept_dir"
 
   # After the stop, never before it — see free_memory_for_build.
@@ -7156,11 +7162,14 @@ step_rebuild_reboot() {
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
     # `reset-failed` first, as the other two rebuild-ending restarts already do
-    # (step_rebuild, restore_previous_build): the unit can crash-loop for the
-    # length of a rebuild, and a latched StartLimit would turn this restart into
-    # a failure over a build that is fine. This is the branch e2e-install takes,
-    # and it is bare under `set -euo pipefail`, so that failure would end the
-    # step.
+    # (step_rebuild, restore_previous_build). With no start dependency left,
+    # nothing starts clawbox-setup DURING a rebuild any more, so it can no
+    # longer crash-loop on the missing standalone entry from that source — but a
+    # hand restart or the sudoers grant can still land in the window and latch
+    # the unit's inherited 5-in-10 s start limit, and a latched limit would turn
+    # this restart into a failure over a build that is fine. This is the branch
+    # e2e-install takes, and it is bare under `set -euo pipefail`, so that
+    # failure would end the step.
     systemctl reset-failed clawbox-setup.service 2>/dev/null || true
     systemctl restart clawbox-setup.service
     return 0

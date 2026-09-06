@@ -7,11 +7,19 @@ Description=ClawBox OpenClaw Gateway
 # dirty. Started side by side at boot, the gateway's first sync used to lose
 # that race every time.
 #
-# `After=` alone is what fixes that race, and it is enough: clawbox-setup.service
-# carries `[Install] WantedBy=multi-user.target` and install.sh enables it, so it
-# is in every boot transaction whether or not this unit asks for it — which is
-# exactly the shape clawbox-tunnel.service, clawbox-heartbeat.service and
-# clawbox-hermes-dashboard-proxy.service already use for the same web server.
+# `After=` orders this unit after the web server's EXEC, not after it is ready —
+# clawbox-setup.service is Type=simple, so its start job completes the moment
+# node is forked, which was equally true when this line said `Wants=` as well.
+# What actually covers the race is scripts/gateway-pre-start.sh launching
+# scripts/ensure-local-embeddings.sh detached, which waits
+# EMBED_PROXY_WAIT_SECONDS (120) for the proxy to answer and exits without
+# touching the config if it never does. The ordering is worth keeping anyway —
+# it removes the common case for free — and it costs nothing, because
+# clawbox-setup.service carries `[Install] WantedBy=multi-user.target` and
+# install.sh enables it, so it is in every boot transaction whether or not this
+# unit asks for it. That is exactly the shape clawbox-tunnel.service,
+# clawbox-heartbeat.service and clawbox-hermes-dashboard-proxy.service already
+# use for the same web server.
 #
 # `Wants=clawbox-setup.service` was HERE, and it made every gateway (re)start
 # start the web server too. That is the defect (TASK-728): `do_rebuild` stops
@@ -24,9 +32,15 @@ Description=ClawBox OpenClaw Gateway
 # ollama and llama.cpp through that same proxy, and it is what pulled the web
 # server onto the parked build the #672 guard now has to catch.
 #
-# The one case that changes is a gateway started while the web server is DOWN.
-# During a rebuild that is the outcome this exists to produce; at any other time
-# clawbox-setup is up, or coming back under its own `Restart=always`.
+# Three cases change, and none of them is the boot: a box whose clawbox-setup an
+# operator DISABLED is no longer dragged up by the gateway (the operator's
+# intent is honoured, and the next update's enable loop puts it back); a
+# `systemctl restart clawbox-gateway` or `--step gateway_setup` run while the
+# web server is down now brings the gateway up beside a dead dashboard; and the
+# dashboard stays down for the whole of a rebuild, which is the outcome this
+# change exists to produce. `Restart=always` is NOT the safety net for the first
+# two — it does not revive a unit that was stopped, disabled or masked on
+# purpose.
 After=network-online.target clawbox-setup.service
 Wants=network-online.target
 # A cold Jetson can legitimately spend up to TimeoutStartSec in

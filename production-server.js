@@ -787,9 +787,10 @@ try {
   // carried `Wants=clawbox-setup.service`, so every gateway (re)start started the
   // service do_rebuild had just stopped (e2e-install run 33971129750: four
   // seconds after the stop). That line is gone (TASK-728), which removes the
-  // routine trigger and not the case: the unit file only reaches a box in
-  // post_update, so the update that removes it still rebuilds under the old one,
-  // and an operator can start the web server by hand at any time. Reclaiming
+  // routine trigger and not the case: `install.sh --step rebuild` run by hand, a
+  // box where the gateway unit was never installed so gateway_setup is skipped,
+  // and an operator (or the sudoers grant) restarting clawbox-setup all still
+  // land inside the window. Reclaiming
   // there `rm -rf`s the half-written build
   // out from under `next build` and renames the previous one on top of it, and
   // the box comes back on the build the update was replacing.

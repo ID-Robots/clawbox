@@ -225,8 +225,9 @@ describe("production-server.js reclaims a parked build at boot", () => {
     // so every gateway (re)start started the service `do_rebuild` had just
     // stopped (seen in e2e-install run 33971129750, four seconds after the
     // stop). TASK-728 removed that line — which removes the routine trigger and
-    // not the case, since the new unit only reaches a box in post_update and an
-    // operator can start the web server by hand. Reclaiming there `rm -rf`s the
+    // not the case: a hand-run `--step rebuild`, a box where gateway_setup is
+    // skipped, and an operator restarting the web server all still land inside
+    // the window. Reclaiming there `rm -rf`s the
     // half-written build out from under `next build` and renames the previous
     // one on top of it.
     const kept = path.join(projectDir, ".next-old");

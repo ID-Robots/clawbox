@@ -109,24 +109,42 @@ describe("the ordering the removed Wants= was resting on", () => {
     // The enable loop skips several units by name (browser, embed, tunnel, the
     // timer-driven one-shots). clawbox-setup must not join that list, or the
     // gateway would be ordered after a unit nothing starts.
-    const loop = INSTALL_SH.slice(
-      INSTALL_SH.indexOf('for svc in "${ALL_SERVICES[@]}"; do'),
-      INSTALL_SH.indexOf('systemctl enable --now clawbox-heartbeat.timer'),
+    //
+    // Anchored on the loop that ENABLES, not the earlier one that copies: there
+    // are two `for svc in "${ALL_SERVICES[@]}"` loops, and slicing from the
+    // first would drag 38 unrelated lines into a negative assertion — which
+    // would then fail the day anyone wrote a comment naming this unit in them.
+    const enableLoopStart = INSTALL_SH.indexOf(
+      'for svc in "${ALL_SERVICES[@]}"; do',
+      INSTALL_SH.indexOf('systemctl daemon-reload'),
     );
-    expect(loop.length).toBeGreaterThan(0);
+    const loop = INSTALL_SH.slice(
+      enableLoopStart,
+      INSTALL_SH.indexOf("systemctl enable --now clawbox-heartbeat.timer"),
+    );
+    expect(enableLoopStart).toBeGreaterThan(-1);
     expect(loop).toContain('systemctl enable "$svc"');
-    expect(loop).not.toContain("clawbox-setup.service");
+    // Only the SKIP lines are the question, so only they are read.
+    const skipped = loop
+      .split("\n")
+      .filter((line) => line.includes("&& continue"))
+      .join("\n");
+    expect(skipped).not.toContain("clawbox-setup");
     expect(INSTALL_SH).toMatch(/EXPECTED_ACTIVE_SERVICES=\([^)]*clawbox-setup\.service/);
   });
 });
 
 describe("every rebuild-ending restart clears a latched start limit", () => {
   /**
-   * The unit crash-loops for the length of a rebuild, so a latched
-   * StartLimitBurst turns the restart that ENDS the rebuild into a failure over
-   * a build that is fine. Two of the three restarts got `reset-failed` in
-   * 5e268479; the test-mode branch of step_rebuild_reboot — the one e2e-install
-   * takes, and bare under `set -euo pipefail` — did not.
+   * A latched StartLimitBurst turns the restart that ENDS a rebuild into a
+   * failure over a build that is fine. With no start dependency left nothing
+   * starts clawbox-setup DURING a rebuild any more, so it can no longer
+   * crash-loop on the missing standalone entry from that source — but an
+   * operator, or the sudoers `systemctl restart clawbox-setup` grant, can still
+   * land inside the window and latch the unit's inherited 5-in-10 s limit. Two
+   * of the three restarts got `reset-failed` in 5e268479; the test-mode branch
+   * of step_rebuild_reboot — the one e2e-install takes, and bare under
+   * `set -euo pipefail` — did not.
    */
   function shellFn(name: string): string {
     const start = INSTALL_SH.indexOf(`${name}() {`);
