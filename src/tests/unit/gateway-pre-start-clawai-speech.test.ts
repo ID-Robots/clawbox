@@ -584,6 +584,69 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
     const tts = cfg.tts as { providers?: Record<string, SpeechEntry> };
     expect(tts.providers?.openai).toEqual({ baseUrl: "https://their.own/voice", model: "x" });
   });
+
+  /**
+   * TASK-739. The stand-down over a legacy `messages.tts` block says in its own
+   * comment that writing the v2 home beside it "would leave two speech configs
+   * racing the migration" — and then did exactly that: `_tts = _legacy_tts`
+   * binds the SAME dict object as `cfg["messages"]["tts"]`, and the body below
+   * it went on to mutate that dict and alias it at `cfg["tts"]`.
+   *
+   * The written config then carries the block under BOTH homes, which is the
+   * `messages: Unrecognized key: "tts"` OpenClaw 2026.8 refuses with exit 78 —
+   * one of the four keys that kept a customer box dark for 25 hours
+   * (TASK-737). Latent on the healthy path now that the pre-start migrates
+   * before this block runs, and one owner action that re-enters this block
+   * puts the legacy key straight back.
+   */
+  it("stands down over a legacy messages.tts block instead of writing it under BOTH homes", () => {
+    const local = { command: "/home/clawbox/clawbox/scripts/openclaw/clawbox-tts.sh", outputFormat: "wav" };
+    const legacy = { provider: "tts-local-cli", providers: { "tts-local-cli": local } };
+
+    const { cfg, changed } = migrate({ messages: { tts: legacy } }, { v2: true });
+
+    // Nothing written: the core's own migration has not moved this block yet,
+    // and the next boot reads the migrated home.
+    expect(changed).toBe(false);
+    // The key 2026.8 refuses. Present at all is the defect — aliased to the
+    // same object as `messages.tts` is how it got there.
+    expect(cfg).not.toHaveProperty("tts");
+    // …and the owner's legacy block is left exactly as it was. This block is
+    // not the migrator; standing down must not edit what it stood down over.
+    expect((cfg.messages as { tts: unknown }).tts).toEqual(legacy);
+  });
+
+  it("stands down on the KEY, whatever the legacy block holds", () => {
+    // The core refuses `messages.tts` for EXISTING, not for its contents:
+    // measured against 2026.8.1, `{}`, `{"provider": …}` and `{"providers": {}}`
+    // each give `messages: Unrecognized key: "tts"` with exit 1. A
+    // contents-based discriminator went on writing the v2 home beside the three
+    // shapes that carry no providers map — and `{"provider": "tts-local-cli"}`,
+    // the selection written and the map never wired, is a state install.sh
+    // already has an error message for.
+    //
+    // Not a Max box left without a voice, either: the block at the top of this
+    // script runs the core's own `doctor --fix` over a config the core refuses
+    // BEFORE this program, so the next boot sees the key moved and writes the
+    // cloud voice then.
+    for (const legacy of [{}, { provider: "tts-local-cli" }, { providers: {} }]) {
+      const { cfg, changed } = migrate({ messages: { tts: legacy } }, { v2: true });
+
+      expect(changed).toBe(false);
+      expect(cfg).not.toHaveProperty("tts");
+      expect((cfg.messages as { tts: unknown }).tts).toEqual(legacy);
+    }
+  });
+
+  it("writes the v2 home when there is no legacy key at all", () => {
+    // The other side of the same guard: standing down on a key that is not
+    // there would leave every entitled box without a cloud voice.
+    const { cfg, changed } = migrate({ messages: { provider: "telegram" } }, { v2: true });
+
+    expect(changed).toBe(true);
+    const tts = cfg.tts as { providers?: Record<string, SpeechEntry> } | undefined;
+    expect(tts?.providers?.openai).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
+  });
 });
 
 /**
