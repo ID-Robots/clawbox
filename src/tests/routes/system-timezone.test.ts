@@ -6,6 +6,7 @@ import { spawnSync } from "child_process";
 import { startRootStep } from "@/lib/root-step-runner";
 import { runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { patchHermesConfig } from "@/lib/hermes-config-yaml";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * TASK-514 — the ClawBox thinks it lives in UTC.
@@ -73,18 +74,29 @@ vi.mock("@/lib/hermes-config-yaml", async (orig) => ({
   ...(await orig<typeof import("@/lib/hermes-config-yaml")>()),
   patchHermesConfig: vi.fn(async () => ({ mode: "merge", backupPath: null })),
 }));
+// A landed OS leg re-arms both device-local schedulers (F-B): whole-module
+// mocks, because the real ones read the box's `~/.clawkeep/*.json` and would
+// arm a real backup timer inside this worker. Their behaviour is pinned in
+// src/tests/routes/system/timezone-process-zone.test.ts, not here.
+vi.mock("@/lib/clawkeep-scheduler", () => ({ refresh: vi.fn(async () => {}) }));
+vi.mock("@/lib/clawkeep-memory-scheduler", () => ({ refresh: vi.fn(async () => {}) }));
 
 const mockStartRootStep = vi.mocked(startRootStep);
 const mockConfigSet = vi.mocked(runOpenclawConfigSet);
 const mockPatchHermes = vi.mocked(patchHermesConfig);
 
+let restoreEnv: () => void;
+
 beforeAll(async () => {
+  // TZ too: a successful POST now sets the process zone, and a worker that
+  // kept Europe/Sofia would hand it to every file that runs after this one.
+  restoreEnv = saveEnv("CLAWBOX_ROOT", "TZ");
   process.env.CLAWBOX_ROOT = TEST_ROOT;
   await fs.mkdir(path.dirname(TZ_ENV_PATH), { recursive: true });
 });
 
 afterAll(async () => {
-  delete process.env.CLAWBOX_ROOT;
+  restoreEnv();
   await fs.rm(TEST_ROOT, { recursive: true, force: true });
 });
 

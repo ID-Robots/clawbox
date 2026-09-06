@@ -135,6 +135,37 @@ export function armMemoryStatusWarm(deps: {
 }
 
 /**
+ * Seed the process zone from the zone the box has already applied, so the two
+ * "device-local" schedulers arm in it from the first boot on.
+ *
+ * WHY. `POST /setup-api/system/timezone` applies a change to the RUNNING web
+ * server (applyProcessTimeZone), but a server that starts takes its zone from
+ * the OS once and keeps it. On a healthy boot that is already the owner's
+ * zone and this is a no-op; it earns its place when the server comes up
+ * BEFORE the OS leg has landed — an update restarting the web server while
+ * the `set_timezone` root step is still queued, a zone changed while the
+ * server was down — because otherwise the first schedule armed at boot is in
+ * the wrong zone and stays there until the next change. Only a zone the store
+ * records as APPLIED (`timezone_applied` equal to `timezone`, exactly the
+ * route's own reading): a stored zone whose apply failed is what the marker
+ * exists to say, and seeding it would put the schedulers three hours from the
+ * `date` the Terminal shows. Answers the zone seeded, or null.
+ *
+ * Handed its readers so a test can drive it without `require()`-ing the real
+ * config store; the wiring into `register()` is pinned by reading the boot
+ * file, as the other hooks are.
+ */
+export async function seedProcessTimeZone(deps: {
+  get: (key: string) => Promise<unknown>
+  apply: (tz: unknown) => string | null
+  keys: { stored: string; applied: string }
+}): Promise<string | null> {
+  const [stored, applied] = await Promise.all([deps.get(deps.keys.stored), deps.get(deps.keys.applied)])
+  if (typeof stored !== 'string' || !stored || applied !== stored) return null
+  return deps.apply(stored)
+}
+
+/**
  * Next.js calls this once per server start, in both runtimes. Everything
  * below is Node-only and loaded through `require()` so the Edge bundle never
  * sees it; each hook fails on its own and none of them may stop the boot.
@@ -163,6 +194,26 @@ export async function register() {
     armUpdateContinuation(checkContinuation, { afterConfigRepair: configRepaired })
   } catch (err) {
     console.error('[instrumentation] Could not arm the update continuation:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The process zone, BEFORE either scheduler below arms: they compute their
+    // "device-local" hour with `setHours` in whatever zone this process has
+    // when they run, and a zone seeded after them would be a slot armed in
+    // the old one. AWAITED for that reason alone — one mtime-cached JSON read
+    // — and the one hook here that is; see seedProcessTimeZone for why only an
+    // APPLIED zone is taken.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { TIMEZONE_APPLIED_KEY, TIMEZONE_STORE_KEY, applyProcessTimeZone } = require('./lib/timezone')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { get } = require('./lib/config-store')
+    const seeded = await seedProcessTimeZone({
+      get,
+      apply: applyProcessTimeZone,
+      keys: { stored: TIMEZONE_STORE_KEY, applied: TIMEZONE_APPLIED_KEY },
+    })
+    if (seeded) console.log(`[instrumentation] Process timezone seeded from the applied zone: ${seeded}`)
+  } catch (err) {
+    console.error('[instrumentation] Could not seed the process timezone:', err instanceof Error ? err.message : err)
   }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports

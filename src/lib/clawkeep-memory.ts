@@ -177,10 +177,30 @@ let statusInFlight: Promise<ClawKeepMemoryStatus> | null = null;
 /**
  * Bumped by every invalidation. A probe that was already running when a run
  * finished reports the index as it was mid-run; comparing the generation it
- * started under with the current one is how that answer is kept from being
- * served as fresh for the next two minutes.
+ * started under with the current one is how that answer is caught — probed
+ * once more before it is stored (`probeMemoryStatusSettled`), and kept from
+ * being served as fresh for the next two minutes when the retry straddles as
+ * well.
  */
 let statusGeneration = 0;
+/**
+ * True while the cached reading is of an index that a run has changed since,
+ * or was changing while the probe read it: set by a probe that found a run
+ * going when it came back, and by every run's finish (whatever the cache
+ * holds then predates the pass — the post-run probe has not answered yet).
+ * Cleared only by a probe that came back with no run going and no
+ * invalidation under it.
+ *
+ * WHILE a run is going such a reading is still answered at once — nothing
+ * better exists until the pass ends, and blocking every read for the whole
+ * pass is the defect `invalidateMemoryStatusCache`'s comment names. Once no
+ * run is going, `getMemoryStatus` WAITS for the probe instead of serving it:
+ * that read is the one that flips the card out of "running", and answered
+ * from the old reading it drew the amber "Run a full reindex" banner over an
+ * index that had just been rebuilt (F-C of the real-browser sweep). A stale
+ * reading past the TTL is a different thing and is still served at once.
+ */
+let cachedStatusUnsettled = false;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -682,17 +702,70 @@ export function invalidateMemoryStatusCache(): void {
   cachedStatusAtMs = 0;
 }
 
+/**
+ * How many times one reload probes again because the generation moved while
+ * its probe ran. One, and bounded on purpose: a run that settles during the
+ * probe is the ordinary case (the card polls every 3 s while a run is going,
+ * and the probe takes ~8 s), a second invalidation during the retry is a rare
+ * one, and a loop that waited for a quiet moment could wait through a whole
+ * scheduled pass.
+ */
+const STATUS_STRADDLE_RETRIES = 1;
+
+/**
+ * The probe, repeated once when a run settled underneath it. Observed on the
+ * box: the read that flipped the card's `running` off — the one that then
+ * polls only every 30 s — carried the MID-REBUILD reading (identity
+ * "mismatched", one pending file), so the amber "Run a full reindex" banner
+ * sat over an index that had just been rebuilt. A straddled reading is
+ * neither stored nor handed to a caller waiting on this probe: the retry's
+ * reading is. (A caller that already holds a reading does not wait on this
+ * at all — what THAT caller is answered with is `getMemoryStatus`'s rule,
+ * through `cachedStatusUnsettled`.)
+ *
+ * Only the reading that is returned is stored. A straddled one that is about
+ * to be probed again is not: the reading already in the cache — from before
+ * the run, answered stale to anyone who peeks — is at least consistent, and
+ * a mid-rebuild one was never the index the owner will see.
+ */
+async function probeMemoryStatusSettled(): Promise<ClawKeepMemoryStatus> {
+  for (let attempt = 0; ; attempt++) {
+    const generation = statusGeneration;
+    const status = await loadMemoryStatus();
+    const settled = generation === statusGeneration;
+    if (settled || attempt >= STATUS_STRADDLE_RETRIES) {
+      cachedStatus = status;
+      // Invalidated during the retry as well: keep the answer, but as stale,
+      // so the next reader refreshes it again instead of trusting a mid-run
+      // reading for two minutes.
+      cachedStatusAtMs = settled ? Date.now() : 0;
+      // A reading taken while a pass was writing the index is of no index
+      // the owner will see, and a run's finish marks it so as well — but a
+      // pass started by a web server that has since restarted has no finish
+      // here, so the probe judges it for itself from the run state it read
+      // AFTER the CLI answered. Not stored stale on that account: a stale
+      // reading kicks a probe behind every read, and that would boot an
+      // OpenClaw process every few seconds for the length of the pass.
+      cachedStatusUnsettled = !settled || status.run.status === "running";
+      return status;
+    }
+  }
+}
+
+/**
+ * The reading this box has — stale, or of an index a run has changed since —
+ * or the cold probe when it has none. For the caller that wants a figure
+ * from the LAST reading and must never wait for a settled one.
+ */
+function lastMemoryStatus(): Promise<ClawKeepMemoryStatus> {
+  return cachedStatus ? Promise.resolve(cachedStatus) : reloadMemoryStatus();
+}
+
 function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   if (!statusInFlight) {
-    const generation = statusGeneration;
-    statusInFlight = loadMemoryStatus().then((status) => {
-      cachedStatus = status;
-      // Invalidated while the probe ran: keep the answer, but as stale, so
-      // the next reader refreshes it again instead of trusting a mid-run
-      // reading for two minutes.
-      cachedStatusAtMs = generation === statusGeneration ? Date.now() : 0;
-      return status;
-    }).finally(() => {
+    // Single-flight: every caller joins the probe already going, retry
+    // included, so a burst of reads still boots one OpenClaw process.
+    statusInFlight = probeMemoryStatusSettled().finally(() => {
       statusInFlight = null;
     });
   }
@@ -701,17 +774,31 @@ function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
 
 /**
  * The CLI probe behind this takes ~8 s on a Jetson (a whole OpenClaw process
- * boots to answer it). Only a caller with NO reading yet waits for it: once a
+ * boots to answer it). A caller with NO reading yet waits for it; once a
  * status has been read, a stale one is answered at once and refreshed in the
  * background — otherwise Settings → Local AI, which polls the inventory every
  * five seconds, froze on a skeleton for eight seconds every half minute.
  *
- * The run state is read at answer time on both paths, so a caller that
+ * The one other wait is the read after a run: while the cached reading is of
+ * an index a pass has changed since (`cachedStatusUnsettled`) and no pass is
+ * going now, the answer is the probe's, not the cache's. That read is the
+ * card's flip out of "running", and the probe it waits on is the one the
+ * finish already started — ~8 s, up to 90 s on a cold box — so the card
+ * says "Indexing…" for the length of the probe rather than drawing the
+ * mid-rebuild identity for 30 s. `peekMemoryStatus` never waits, and
+ * `resolveIndexMode` reads through `lastMemoryStatus` for the same reason.
+ *
+ * The run state is read at answer time on every path, so a caller that
  * joined a probe already in flight still gets the run as it is now.
  */
 export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   let base = cachedStatus;
   if (!base) {
+    base = await reloadMemoryStatus();
+  } else if (cachedStatusUnsettled && (await readMemoryRunState()).status !== "running") {
+    // Bounded by the probe, not by a quiet moment: when a second pass
+    // settled under the retry as well, this answers the retry's reading —
+    // flagged unsettled still — and the NEXT read pays one more probe.
     base = await reloadMemoryStatus();
   } else if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
     reloadMemoryStatus().catch(() => { /* the next read tries again */ });
@@ -772,16 +859,20 @@ export function warmMemoryStatusCache(): Promise<void> {
  * the full build. The run records the mode it really used, and the panel
  * prints it, so "Index now" never claims an incremental pass it did not do.
  *
- * Answered from the cached reading when there is one (stale included: the
- * cost of a stale zero is one more pass over an index that was just built,
- * inside the ten seconds before the refresh lands). Only a box that has never
- * been probed waits for the probe — and `startMemoryIndex` asks this AFTER
- * declining a caller that overlaps a run, so that wait never overlaps one.
+ * Answered from the cached reading when there is one (stale included, and
+ * one a run has changed since: the cost of a stale zero is one more pass
+ * over an index that was just built, inside the ten seconds before the
+ * refresh lands). Only a box that has never been probed waits for the probe —
+ * `lastMemoryStatus` rather than `getMemoryStatus`, which now waits for the
+ * settled reading after a run, and a click of "Index now" seconds after a
+ * pass must not sit behind that probe — and `startMemoryIndex` asks this
+ * AFTER declining a caller that overlaps a run, so that wait never overlaps
+ * one.
  */
 export async function resolveIndexMode(requested: MemoryIndexMode): Promise<MemoryIndexMode> {
   if (requested === "full") return "full";
   try {
-    const status = await getMemoryStatus();
+    const status = await lastMemoryStatus();
     // `available` is load-bearing: a failed CLI probe returns the unavailable
     // status, which also reports zero chunks. Without this check a probe
     // timeout would silently turn a scheduled incremental pass into a --force
@@ -997,6 +1088,14 @@ export async function startMemoryIndex(
     };
     await writeRunState(finalState).catch(() => { /* status route will reconcile */ });
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+    // Whatever the cache holds now — the reading from before the pass, or one
+    // a TTL probe took while the pass was writing the index — predates the
+    // index the owner will see. The invalidation alone only marked it stale,
+    // and the very next read was answered from it: the card's flip out of
+    // "running", drawing "Run a full reindex" over an index that had just
+    // been rebuilt (F-C). Unsettled, the next read that finds no run going
+    // waits for the probe below instead.
+    cachedStatusUnsettled = true;
     invalidateMemoryStatusCache();
     // Refresh behind the finished run rather than on the next read, so the new
     // counts are there by the time the owner looks, not ten seconds after.

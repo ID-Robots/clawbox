@@ -208,6 +208,49 @@ describe("MemoryShardWizard", () => {
     expect(screen.queryByText(START_FAILED)).not.toBeInTheDocument();
   });
 
+  it("holds Next while a folder is being added, so the owner cannot leave the step before the add is answered", async () => {
+    // The add is a ~5 s CLI spawn. Next used to stay live through it: the
+    // step unmounted mid-write, the write still landed, and a refusal of
+    // that add was never seen by anyone.
+    const inner = fetch;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString().startsWith("/setup-api/clawkeep/memory/sources") && init?.method === "POST") await gate;
+      return inner(input, init);
+    }));
+    render(<MemoryShardWizard onDone={vi.fn()} />);
+    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+    fireEvent.click(screen.getByTestId("memory-shard-browse"));
+    fireEvent.click(await screen.findByTestId("memory-shard-pick"));
+
+    await waitFor(() => expect(screen.getByTestId("memory-shard-next-schedule")).toBeDisabled());
+    release();
+    await waitFor(() => expect(screen.getByTestId("memory-shard-next-schedule")).not.toBeDisabled());
+    expect(posts).toEqual([{ url: "/setup-api/clawkeep/memory/sources", body: { path: "/home/clawbox" } }]);
+  });
+
+  it("saves the last VALID time when the field holds a half-typed one (ms-findings F-F)", async () => {
+    // The home card already keeps a half-entered time in the field alone;
+    // the wizard sent it as typed, the route sanitised "" to 03:00, and the
+    // hour the owner had picked was quietly gone.
+    const done = vi.fn();
+    render(<MemoryShardWizard onDone={done} />);
+    fireEvent.click(await screen.findByTestId("memory-shard-enable"));
+    fireEvent.click(screen.getByTestId("memory-shard-next-schedule"));
+    const field = screen.getByTestId("memory-shard-time") as HTMLInputElement;
+    fireEvent.change(field, { target: { value: "04:30" } });
+    fireEvent.change(field, { target: { value: "" } });
+    // The field shows what is being typed…
+    expect(field.value).toBe("");
+    fireEvent.click(screen.getByTestId("memory-shard-next-provision"));
+    fireEvent.click(screen.getByTestId("memory-shard-index-now"));
+    await waitFor(() => expect(done).toHaveBeenCalled());
+    // …and what is saved is the last time that was one.
+    expect(posts.find((p) => p.url === "/setup-api/clawkeep/memory/schedule")?.body)
+      .toEqual({ enabled: true, frequency: "daily", timeOfDay: "04:30", weekday: 0 });
+  });
+
   it("aborts the download when the window closes mid-fetch", async () => {
     stub({ pullHangs: true });
     const done = vi.fn();

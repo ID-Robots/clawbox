@@ -111,6 +111,34 @@ export function canonicalTimeZone(value: unknown): string | null {
 }
 
 /**
+ * Put the zone into THIS process, so every schedule computed from now on is
+ * computed in it.
+ *
+ * WHY. Node fixes its zone once, at start. Every `Date#setHours` in the two
+ * "device-local" schedulers (`clawkeep-scheduler`, `clawkeep-memory-scheduler`)
+ * is evaluated in the PROCESS zone, so a web server that came up in `Etc/UTC`
+ * kept arming the owner's "weekly, Tue 04:30" at 07:30 local after the owner
+ * had set Europe/Sofia — three hours off, with the card saying "device-local"
+ * beside the field, until the server happened to restart (the Memory Shard
+ * sweep, 2026-09-06). `readOsTimeZone` below already works around the same
+ * per-process caching for its own probe; this is the same fix for the clock
+ * the schedulers read. Node honours a RUNTIME assignment to `process.env.TZ`
+ * (verified on the box: the next `new Date` carries the new offset), which is
+ * the one hook there is.
+ *
+ * Validated first, never assigned raw: a TZ Node does not recognise makes it
+ * fall back to UTC silently, which is exactly the zone this exists to leave.
+ * Answers the canonical zone applied, or null for a value it refused — and
+ * then the process stays where it was.
+ */
+export function applyProcessTimeZone(tz: unknown): string | null {
+  const zone = canonicalTimeZone(tz);
+  if (!zone) return null;
+  process.env.TZ = zone;
+  return zone;
+}
+
+/**
  * The zone the SERVER process is running in — i.e. what the box's OS says.
  *
  * The same call OpenClaw's core makes when `userTimezone` is unset, which is

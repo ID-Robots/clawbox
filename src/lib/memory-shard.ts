@@ -10,7 +10,7 @@
 import { readFile } from "fs/promises";
 import path from "path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
-import { findOpenclawBin, readConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { findOpenclawBin, readConfig, readConfigStrict, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import {
@@ -55,30 +55,65 @@ export async function setMemoryShardSetupComplete(done: boolean): Promise<boolea
 }
 
 /**
+ * The list as one parsed config holds it. Each entry is
+ * `string | { path, pattern? }`; ClawBox writes the object form when it has
+ * extra facts to carry (a derived folder of extracted Markdown and the folder
+ * of documents it came from).
+ */
+function extraPathsOf(config: unknown): string[] {
+  const search = (config as Record<string, unknown>)?.memory as { search?: { extraPaths?: unknown } } | undefined;
+  const raw = search?.search?.extraPaths;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => (typeof entry === "string" ? entry : (entry as { path?: unknown })?.path))
+    .filter((p): p is string => typeof p === "string" && p.trim().length > 0);
+}
+
+/**
  * The folders the owner added, read from OpenClaw's own config.
  *
  * `memory.search.extraPaths` is OpenClaw's supported way to widen the index, and
  * it is already what the status probe counts — so this is a READ of the thing
  * that actually governs indexing, not a ClawBox-side mirror that could drift
  * away from it.
- *
- * Each entry is `string | { path, pattern? }`; ClawBox writes the object form
- * when it has extra facts to carry (a derived folder of extracted Markdown and
- * the folder of documents it came from).
  */
 export async function readExtraPaths(): Promise<string[]> {
   try {
-    const config = await readConfig();
-    const search = (config as Record<string, unknown>)?.memory as { search?: { extraPaths?: unknown } } | undefined;
-    const raw = search?.search?.extraPaths;
-    if (!Array.isArray(raw)) return [];
-    return raw
-      .map((entry) => (typeof entry === "string" ? entry : (entry as { path?: unknown })?.path))
-      .filter((p): p is string => typeof p === "string" && p.trim().length > 0);
+    return extraPathsOf(await readConfig());
   } catch {
     // An unreadable config is "no extra folders", not a crash: the wizard has
     // to be able to open on a box whose gateway config is mid-write.
     return [];
+  }
+}
+
+/**
+ * openclaw.json is there and could not be read as a configuration, so the
+ * folder list is UNKNOWN — which a mutation must not mistake for empty. Its
+ * own class so the route can name the refusal without matching on a message.
+ */
+export class ExtraPathsUnreadableError extends Error {
+  readonly code = "read_failed";
+  constructor(cause: unknown) {
+    super("The folder list could not be read", { cause });
+    this.name = "ExtraPathsUnreadableError";
+  }
+}
+
+/**
+ * The read half of a mutation. `readExtraPaths` forgives every failure as
+ * `[]`, which is right for the wizard's first paint and wrong for a writer:
+ * an add that read `[]` off a half-written or EACCES'd file would save a
+ * one-entry list over every folder the owner had chosen, and a remove would
+ * answer "no folders" over a list still on disk. `readConfigStrict` is the
+ * reader built for that — ENOENT is still `{}` (a fresh box has nothing to
+ * lose), everything else throws.
+ */
+async function readExtraPathsForWrite(): Promise<string[]> {
+  try {
+    return extraPathsOf(await readConfigStrict());
+  } catch (err) {
+    throw new ExtraPathsUnreadableError(err);
   }
 }
 
@@ -87,6 +122,67 @@ export async function writeExtraPaths(paths: readonly string[]): Promise<void> {
   await runOpenclawConfigSetBatch([
     [EXTRA_PATHS_CONFIG_PATH, JSON.stringify([...paths]), "--json"],
   ]);
+}
+
+/**
+ * The one queue every extraPaths mutation waits in. Always settled to
+ * `undefined` — a turn that failed is caught before it becomes the tail, so
+ * the next caller runs after it rather than inheriting its rejection.
+ */
+let extraPathsQueue: Promise<void> = Promise.resolve();
+
+function sameList(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((entry, i) => entry === b[i]);
+}
+
+/**
+ * Read → change → write the folder list, one mutation at a time.
+ *
+ * A write is one `openclaw config set` (~5 s on a Jetson, and the gateway
+ * restarts on the change), and the two handlers behind the wizard's picker
+ * each did their own read-modify-write with nothing between them: on the box
+ * an add and a remove overlapped, the remove's write landed last, and
+ * openclaw.json ended with `extraPaths: []` while the add had ANSWERED with
+ * the folder in the list — the wizard then provisioned and indexed nothing
+ * (ms-findings F-A). Serialised here, in process, so each mutation reads the
+ * state the previous one left — and reads it STRICTLY, so a config that
+ * cannot be read rejects the turn (`ExtraPathsUnreadableError`) rather than
+ * reading as an empty list to be written over.
+ *
+ * `fn` gets the list as read and answers the list wanted; nothing is written
+ * when the two are the same (an idempotent add or a remove of a folder that
+ * is not there costs no CLI spawn and no gateway restart). Answers the list
+ * as read back after the write, so a caller reports what is on disk rather
+ * than what it asked for — or, when only that read-back fails, the list that
+ * was written, which is what is on disk then.
+ */
+export async function mutateExtraPaths(
+  fn: (current: string[]) => string[] | Promise<string[]>,
+): Promise<string[]> {
+  const turn = extraPathsQueue.then(async () => {
+    const current = await readExtraPathsForWrite();
+    const next = [...(await fn([...current]))];
+    if (sameList(current, next)) return current;
+    await writeExtraPaths(next);
+    // Strict here too: a lenient read-back would answer `[]` over the list
+    // just written. But a read-back that FAILS is not a failed mutation —
+    // the CLI has validated and saved `next` by now — so it is not the
+    // pre-write `ExtraPathsUnreadableError` either: that one means "nothing
+    // was touched", and the route answers it as such. Reported that way, a
+    // folder that IS on disk would be shown as not added and the status
+    // cache left warm over a changed identity. The written list is the
+    // truth here, so it is answered, and the read-back failure logged.
+    try {
+      return await readExtraPathsForWrite();
+    } catch (err) {
+      console.warn("[memory-shard] extraPaths written but could not be read back; answering the written list:", err);
+      return next;
+    }
+  });
+  // The tail never rejects: a failed write is this caller's to report, not
+  // the next caller's to inherit.
+  extraPathsQueue = turn.then(() => undefined, () => undefined);
+  return turn;
 }
 
 /**
