@@ -432,7 +432,7 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
  * says the same thing, and one that can still run something keeps it. Nothing
  * recorded at all is `unknown`, which shows the row.
  */
-function rowRunnable(
+export function providerRowRunnable(
   rowId: string,
   verdicts: Map<string, ProviderRunnable>,
 ): ProviderRunnable {
@@ -484,7 +484,7 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
     const unrunnable = summary.providers
       // The provider the box is POINTED AT is never hidden. It is the reason
       // chat is broken, and a row nobody can see is a row nobody can change.
-      .filter((row) => !row.isDefault && rowRunnable(row.id, verdicts) === "none")
+      .filter((row) => !row.isDefault && providerRowRunnable(row.id, verdicts) === "none")
       .map((row) => row.id);
     const hidden = new Set(unrunnable);
     return {

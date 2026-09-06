@@ -68,6 +68,14 @@ vi.mock("@/lib/provider-enablement", () => ({
 // console silencing and no global unhandled-rejection swallow, either of which
 // would hide this class of bug rather than remove it. Nothing in this file
 // asserts on the refresh; it is out-of-band work by design.
+// TASK-668: the recorded per-provider model counts. Only the forget is
+// reachable from this route, and only on a `models.mode` flip.
+vi.mock("@/lib/provider-runnable", () => ({
+  forgetProviderEnumerations: vi.fn(async () => {}),
+  recordProviderEnumeration: vi.fn(async () => {}),
+  readProviderRunnable: vi.fn(async () => new Map()),
+}));
+
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
   notifyProviderSetChanged: vi.fn(),
@@ -181,6 +189,7 @@ import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
+import { forgetProviderEnumerations } from "@/lib/provider-runnable";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -728,6 +737,49 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
     expect(commands).toContain("config set models.mode merge");
+  });
+
+  /**
+   * `models.mode` decides what EVERY provider's catalogue means: under
+   * `replace` the core skips the authenticated rows for all of them at once
+   * (measured on a box — anthropic 15->9, openai 30->2, google 10->0). So a
+   * flip invalidates every model count recorded under the old mode, and none
+   * of them may go on hiding a Providers row. Forgetting is the whole
+   * response: no enumeration, no fork, every row back at once (TASK-668).
+   */
+  describe("a models.mode flip forgets the recorded model counts", () => {
+    /** openclaw.json's `models.mode`, kept in step with what the route writes. */
+    function trackModelsMode(initial: string) {
+      let mode = initial;
+      mockReadOpenClawConfig.mockImplementation(async () => ({ models: { mode } }));
+      vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async (batch) => {
+        for (const op of batch) if (op[0] === "models.mode" && typeof op[1] === "string") mode = op[1];
+      });
+    }
+
+    it("forgets them when a local-model save flips merge -> replace", async () => {
+      trackModelsMode("merge");
+
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+
+      expect(res.status).toBe(200);
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain("config set models.mode replace");
+      expect(vi.mocked(forgetProviderEnumerations)).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves them alone when the mode is written but does not change", async () => {
+      // The false-failure direction to avoid is the other one — forgetting is
+      // cheap — but a save that changed nothing should still change nothing.
+      trackModelsMode("merge");
+
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", scope: "local" }));
+
+      expect(res.status).toBe(200);
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain("config set models.mode merge");
+      expect(vi.mocked(forgetProviderEnumerations)).not.toHaveBeenCalled();
+    });
   });
 
   it("keeps local AI as fallback-only when a primary AI provider is already configured", async () => {

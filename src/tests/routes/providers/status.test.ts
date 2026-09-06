@@ -449,7 +449,9 @@ describe("the response carries statuses, never credentials", () => {
     const body = await (await GET()).json();
 
     expect(Object.keys(body).sort()).toEqual(
-      ["defaultProvider", "degraded", "harness", "providers"],
+      // `unrunnable` is a list of provider IDS — a status, like every other
+      // field here, and pinned by the same contract (TASK-668).
+      ["defaultProvider", "degraded", "harness", "providers", "unrunnable"],
     );
     for (const row of body.providers) {
       expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
@@ -469,7 +471,9 @@ describe("the response carries statuses, never credentials", () => {
     const body = await (await GET()).json();
 
     expect(Object.keys(body).sort()).toEqual(
-      ["defaultProvider", "degraded", "harness", "providers"],
+      // `unrunnable` is a list of provider IDS — a status, like every other
+      // field here, and pinned by the same contract (TASK-668).
+      ["defaultProvider", "degraded", "harness", "providers", "unrunnable"],
     );
     expect(body.providers.some((row: Row) => row.state === "checking")).toBe(true);
     for (const row of body.providers) {

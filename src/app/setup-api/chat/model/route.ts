@@ -31,7 +31,13 @@ import {
   isValidModelId,
   parseModelSlug,
 } from "@/lib/provider-models";
-import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
+import {
+  DISABLED_PROVIDERS_KEY,
+  normalizeProviderId,
+  parseDisabledProviders,
+  providerRowRunnable,
+} from "@/lib/provider-status";
+import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
@@ -830,12 +836,44 @@ const WRONG_STORE = {
   code: "wrong_store",
 } as const;
 
+/**
+ * Drop the options for a provider this box can run NO model from (TASK-668).
+ *
+ * The same verdict the Providers page hides its row on, read from the same
+ * recorded enumeration — one file read, no probe, no fork — so the two surfaces
+ * cannot disagree about who is offered. Nothing recorded is `unknown`, and an
+ * unknown provider keeps its option exactly as on beta.
+ *
+ * OFFERED, not accepted: this runs on the READ path only. A POST naming such a
+ * model is still judged by the catalogue guards it always was, so a verdict
+ * that is somehow wrong costs a row in a dropdown and never a refusal over a
+ * model the gateway would have routed.
+ *
+ * The active model is exempt: it is what the header pill names, and an option
+ * list that omits it leaves the chat showing a model that is in no list.
+ */
+async function withoutUnrunnableProviders(
+  state: Awaited<ReturnType<typeof loadChatModelState>>,
+): Promise<Awaited<ReturnType<typeof loadChatModelState>>> {
+  const verdicts = await readProviderRunnable().catch(
+    () => new Map<string, ProviderRunnable>(),
+  );
+  if (verdicts.size === 0) return state;
+  const options = state.options.filter((option) => {
+    if (option.model && option.model === state.activeModel) return true;
+    const canonical = normalizeProviderId(option.provider);
+    if (!canonical) return true;
+    return providerRowRunnable(canonical, verdicts) !== "none";
+  });
+  return options.length === state.options.length ? state : { ...state, options };
+}
+
 export async function GET() {
   if (!(await chatModelLivesHere())) {
     return NextResponse.json(WRONG_STORE, { status: 409, headers: { "Cache-Control": "no-store" } });
   }
   try {
-    const state = await loadChatModelState();
+    const state = await withoutUnrunnableProviders(await loadChatModelState());
     return NextResponse.json(state, {
       headers: { "Cache-Control": "no-store" },
     });

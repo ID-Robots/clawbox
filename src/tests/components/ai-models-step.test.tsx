@@ -107,6 +107,68 @@ describe("AIModelsStep variants", () => {
     }));
   });
 
+  /**
+   * TASK-668. The Providers page decides server-side which providers this box
+   * can run a model from; this list must not go on offering the ones it
+   * dropped. `unrunnable` is what carries that decision — an empty array (and
+   * a status call that has not landed) hides nothing.
+   */
+  describe("a provider the box can run no model from", () => {
+    function stubStatus(unrunnable: string[]) {
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+        if (url.includes("/setup-api/providers/status")) {
+          return {
+            ok: true,
+            json: async () => ({
+              harness: "openclaw",
+              defaultProvider: "clawai",
+              unrunnable,
+              degraded: false,
+              providers: [
+                { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },
+              ],
+            }),
+          };
+        }
+        if (url.includes("/setup-api/ai-models/oauth/providers")) {
+          return { ok: true, json: async () => ({ providers: [] }) };
+        }
+        return { ok: true, json: async () => ({}) };
+      }));
+    }
+
+    async function providerGroupText(unrunnable: string[]): Promise<string> {
+      stubStatus(unrunnable);
+      const { getByRole, findByText } = render(
+        <AIModelsStep
+          embedded
+          providerIds={["clawai", "anthropic", "google"]}
+          testId="providers-test"
+        />,
+      );
+      // The list opens collapsed onto the selected row; the whole point here is
+      // what the EXPANDED list offers.
+      const showMore = await findByText("Show more providers...").catch(() => null);
+      if (showMore) fireEvent.click(showMore);
+      return getByRole("radiogroup", { name: "AI Provider" }).textContent ?? "";
+    }
+
+    it("is not offered", async () => {
+      const text = await providerGroupText(["google"]);
+
+      expect(text).not.toContain("Google Gemini");
+      expect(text).toContain("Anthropic");
+    });
+
+    it("is offered exactly as before when the box has said nothing about it", async () => {
+      const text = await providerGroupText([]);
+
+      expect(text).toContain("Google Gemini");
+      expect(text).toContain("Anthropic");
+    });
+  });
+
   it("renders only Gemma in Local AI mode and defaults to llama.cpp", async () => {
     const { getByRole, getByText, queryByText } = render(
       <AIModelsStep

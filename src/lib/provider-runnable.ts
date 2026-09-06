@@ -35,8 +35,16 @@ import { DATA_DIR } from "@/lib/config-store";
  *
  * Counts and provider ids only — the directory is public-servable
  * (`DATA_DIR_PUBLIC_SUBTREES`), and nothing here is a credential.
+ *
+ * Resolved per call, and null rather than thrown when there is no data
+ * directory to resolve it against. A module-level `path.join` on an undefined
+ * root throws AT IMPORT, which would take down every route that transitively
+ * imports the Providers strip — the opposite of what a file whose absence is
+ * supposed to mean "we do not know" may do.
  */
-const RECORD_PATH = path.join(DATA_DIR, "catalog-cache", "_enumerations.json");
+function recordPath(): string | null {
+  return DATA_DIR ? path.join(DATA_DIR, "catalog-cache", "_enumerations.json") : null;
+}
 
 /** What the last enumeration for a provider answered. */
 interface EnumerationRecord {
@@ -71,8 +79,10 @@ export type ProviderRunnable = "some" | "none" | "unknown";
 let writeChain: Promise<void> = Promise.resolve();
 
 async function readRecordFile(): Promise<Record<string, EnumerationRecord>> {
+  const file = recordPath();
+  if (!file) return {};
   try {
-    const parsed = JSON.parse(await fsp.readFile(RECORD_PATH, "utf8")) as RecordFile;
+    const parsed = JSON.parse(await fsp.readFile(file, "utf8")) as RecordFile;
     const providers = parsed?.providers;
     if (!providers || typeof providers !== "object") return {};
     return providers;
@@ -85,12 +95,14 @@ async function readRecordFile(): Promise<Record<string, EnumerationRecord>> {
 
 async function mutate(fn: (providers: Record<string, EnumerationRecord>) => void): Promise<void> {
   const next = writeChain.then(async () => {
+    const file = recordPath();
+    if (!file) return;
     const providers = await readRecordFile();
     fn(providers);
-    const tmp = `${RECORD_PATH}.${process.pid}.tmp`;
-    await fsp.mkdir(path.dirname(RECORD_PATH), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(tmp, JSON.stringify({ providers }), "utf8");
-    await fsp.rename(tmp, RECORD_PATH);
+    await fsp.rename(tmp, file);
   }).catch((err: unknown) => {
     // A record we could not write costs a row that stays visible, which is the
     // safe direction. It must never take the refresh that produced it down.

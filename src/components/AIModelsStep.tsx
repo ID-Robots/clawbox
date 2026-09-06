@@ -636,6 +636,15 @@ export default function AIModelsStep({
     () => providerStatus?.providers.find((row) => row.isDefault) ?? null,
     [providerStatus],
   );
+  // Providers this box can run NO model from (TASK-668). The server decides —
+  // this is the same list the Providers strip's rows were dropped from — so the
+  // two halves of the same Settings section cannot offer different providers.
+  // Absent, or a status call that has not landed, is an EMPTY set: nothing is
+  // hidden until the box has actually said so.
+  const unrunnableProviders = useMemo(
+    () => new Set(providerStatus?.unrunnable ?? []),
+    [providerStatus],
+  );
   /** A row's connection state, as a dot AND a word. */
   const rowStatus = useCallback((id: string) => {
     const row = statusById.get(id);
@@ -2065,7 +2074,8 @@ export default function AIModelsStep({
     return () => clearTimeout(timer);
   }, [configuringState?.completed, handleConfiguringDone]);
 
-  const baseProviders = providerIdSet ? allowedProviders : PROVIDERS;
+  const baseProviders = (providerIdSet ? allowedProviders : PROVIDERS)
+    .filter((provider) => !unrunnableProviders.has(provider.id));
   // The list opens on the provider that is actually in play and keeps the rest
   // one tap behind the same toggle that used to reveal only the secondary
   // ones. Four rows plus that toggle is ~350px of catalogue standing on top of
