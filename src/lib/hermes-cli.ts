@@ -16,6 +16,13 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // A config/auth command's output is tiny; cap the buffer so a misbehaving
 // child can't grow it unbounded.
 const MAX_OUTPUT_BYTES = 1_000_000;
+// One name each, because the silenced version probe below has to tell "the
+// child could not be started" (retry the supported call) from "the child said
+// far too much" (asking again would overflow the same buffer).
+const OUTPUT_LIMIT_MESSAGE = "hermes output exceeded the size limit";
+const ERROR_OUTPUT_LIMIT_MESSAGE = "hermes error output exceeded the size limit";
+const isOutputLimitError = (e: unknown) =>
+  e instanceof Error && (e.message === OUTPUT_LIMIT_MESSAGE || e.message === ERROR_OUTPUT_LIMIT_MESSAGE);
 
 /**
  * Console width for the CLI's `rich` output.
@@ -56,15 +63,44 @@ const WIDE_CONSOLE_COLUMNS = "400";
 // is the opposite of a silence: it selects the `git ls-remote` branch and is
 // part of the cache key, so it would force a miss on every ClawBox probe AND on
 // the owner's next banner.)
-const HERMES_AGENT_DIR = path.join(HOME_DIR, ".hermes", "hermes-agent");
-// The shim is four lines: unset PYTHONPATH, unset PYTHONHOME, exec this
-// interpreter on `<agent_dir>/hermes`. install.sh already treats the pair as
-// the install's identity (step_hermes_install's `venv_python` guard).
-const HERMES_VENV_PYTHON = path.join(HERMES_AGENT_DIR, "venv", "bin", "python");
+//
+// The shim is four lines: unset PYTHONPATH, unset PYTHONHOME, exec
+// `<agent_dir>/venv/bin/python <agent_dir>/hermes`. Where that agent dir is
+// resolves the way the rest of this repo resolves it — `hermesHome()` in
+// hermes-env.ts, `whatsappBridgeInstallDir()` in hermes-whatsapp.ts — so both
+// documented overrides move BOTH halves of the probe together and the silent
+// form can never answer for a different install than the fallback runs. Read
+// per call rather than at import, and copied rather than imported: this block
+// is meant to be deleted whole, and a new module edge out of hermes-cli.ts
+// would have to be added to every suite that mocks that module.
+const hermesAgentDir = () =>
+  process.env.HERMES_AGENT_DIR ||
+  path.join(process.env.HERMES_HOME || path.join(HOME_DIR, ".hermes"), "hermes-agent");
 const SILENT_VERSION_PY =
   "from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)";
 /** The one argv this file knows a silent equivalent for. */
 const isSilenceableVersionCall = (args: string[]) => args.length === 1 && args[0] === "--version";
+/**
+ * The silent attempt's own ceiling, spent ON TOP of the caller's budget.
+ *
+ * Deliberately not a slice of `timeoutMs`: the supported call has to keep
+ * every millisecond it had before this workaround existed, or a cold, loaded
+ * Orin where `hermes --version` answers in eight seconds would start reporting
+ * no version at all — the workaround causing the very failure it removes. The
+ * silent form does no network and measured 853-870 ms on a Hermes box; 5 s is
+ * headroom for a cold interpreter start, and it is time added at most once.
+ */
+const SILENT_VERSION_TIMEOUT_MS = 5_000;
+/**
+ * A banner ClawBox can actually use.
+ *
+ * `parseHermesVersion` falls back to SHOWING an unrecognised first line, so
+ * anything the interpreter happens to print (a sitecustomize notice, a future
+ * upstream banner) would become "the Hermes version" on the About screen and
+ * the supported call that prints the real one would never be made.
+ */
+const looksLikeVersionBanner = (stdout: string) =>
+  /\bv?\d+\.\d+/.test(stdout.split("\n", 1)[0] ?? "");
 
 export interface HermesCliResult {
   code: number | null;
@@ -75,10 +111,7 @@ export interface HermesCliResult {
 export interface HermesCliOptions {
   timeoutMs?: number;
   input?: string;
-  // `undefined` REMOVES a variable the server inherited, which is what the
-  // silenced version probe needs for PYTHONHOME (see below) — the shim
-  // unsets it for the same reason.
-  env?: Record<string, string | undefined>;
+  env?: Record<string, string>;
   /**
    * Kill the child when the caller gives up (a browser that navigated away
    * aborts its fetch, but that alone would leave the process running to its
@@ -130,41 +163,54 @@ export async function runHermesCli(
   const argv = opts.sudo ? ["-n", HERMES_BIN, ...args] : args;
 
   if (opts.silenceUpdateCheck && !opts.sudo && isSilenceableVersionCall(args)) {
-    const budgetMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    const started = Date.now();
+    const agentDir = hermesAgentDir();
     try {
-      const quiet = await spawnHermes(HERMES_VENV_PYTHON, ["-c", SILENT_VERSION_PY], {
-        ...opts,
-        // Half the budget, never more. The silent form does no network at all
-        // (measured 853-857 ms on a Hermes box), and whatever it does spend
-        // has to leave the fallback enough of the CALLER's deadline to answer
-        // — a fix that turns one timeout into two would be worse than the
-        // defect it removes.
-        timeoutMs: Math.max(1, Math.floor(budgetMs / 2)),
-        // The package IS the checkout — there is no pip dist to import — so
-        // the checkout goes on the path the shim's `exec <dir>/hermes` would
-        // have put there. PYTHONHOME is removed rather than set: an inherited
-        // one would send this interpreter at a different stdlib.
-        env: { PYTHONPATH: HERMES_AGENT_DIR, PYTHONHOME: undefined, ...opts.env },
-      });
-      if (quiet.code === 0 && quiet.stdout) return quiet;
-    } catch {
-      // Fall through to the supported call. Not swallowing an outcome: this
-      // path has produced nothing yet, and the call below is the answer.
+      const quiet = await spawnHermes(
+        path.join(agentDir, "venv", "bin", "python"),
+        ["-c", SILENT_VERSION_PY],
+        {
+          ...opts,
+          timeoutMs: Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, SILENT_VERSION_TIMEOUT_MS),
+          // The package IS the checkout — there is no pip dist to import — so
+          // the checkout goes on the path the shim's `exec <dir>/hermes` puts
+          // there. PYTHONSAFEPATH keeps the CWD off sys.path[0], where `-c`
+          // would otherwise put it and the shim never does; Python 3.11+ reads
+          // it and older interpreters ignore an unknown PYTHON* variable.
+          env: { ...opts.env, PYTHONPATH: agentDir, PYTHONSAFEPATH: "1" },
+        },
+        // PYTHONHOME goes the way the shim takes it — removed, not set: an
+        // inherited one aims this interpreter at a different stdlib. And no
+        // console line for a speculative spawn that has a supported call
+        // behind it, or a box with no venv logs every probe twice.
+        { unsetEnv: ["PYTHONHOME"], logSpawnFailure: false },
+      );
+      if (quiet.code === 0 && looksLikeVersionBanner(quiet.stdout)) return quiet;
+    } catch (e) {
+      // Fall through to the supported call — except for the one failure that
+      // says the CHILD misbehaved rather than that it could not be started:
+      // asking the same question again would overflow the same buffer.
+      if (isOutputLimitError(e)) throw e;
     }
-    return spawnHermes(bin, argv, {
-      ...opts,
-      timeoutMs: Math.max(1, budgetMs - (Date.now() - started)),
-    });
   }
 
   return spawnHermes(bin, argv, opts);
+}
+
+interface SpawnExtras {
+  /** Variables to REMOVE from the child's environment — the shim's `unset`. */
+  unsetEnv?: readonly string[];
+  /**
+   * Whether a child that could not be started is worth a console line. Off for
+   * a speculative attempt that has a supported call behind it.
+   */
+  logSpawnFailure?: boolean;
 }
 
 function spawnHermes(
   bin: string,
   argv: string[],
   opts: HermesCliOptions,
+  extras: SpawnExtras = {},
 ): Promise<HermesCliResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   // Already aborted BEFORE the call: nothing may be started. `abort` fires
@@ -178,7 +224,7 @@ function spawnHermes(
   // install is precisely the thing to avoid. Same rejection as `onAbort`, so
   // callers have one message to recognise.
   if (opts.signal?.aborted) return Promise.reject(new Error("hermes call cancelled"));
-  const env: Record<string, string | undefined> = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: HOME_DIR,
     PATH: `${path.dirname(HERMES_BIN)}:${process.env.PATH || ""}`,
@@ -192,15 +238,14 @@ function spawnHermes(
     COLUMNS: WIDE_CONSOLE_COLUMNS,
     ...opts.env,
   };
-  // An `undefined` from `opts.env` means REMOVE, not "leave as inherited":
-  // deleted here rather than relied on inside `spawn`, so the contract is the
-  // one this file states.
-  for (const [key, value] of Object.entries(env)) if (value === undefined) delete env[key];
+  // Removals are applied AFTER the defaults, so HOME/PATH/COLUMNS stay the
+  // guarantee this function makes and only this file can take one away.
+  for (const key of extras.unsetEnv ?? []) delete env[key];
   return new Promise<HermesCliResult>((resolve, reject) => {
     const child = spawn(bin, argv, {
       stdio: [opts.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
       cwd: HOME_DIR,
-      env: env as NodeJS.ProcessEnv,
+      env,
     });
 
     let out = "";
@@ -230,7 +275,7 @@ function spawnHermes(
     child.stdout!.on("data", (chunk: Buffer) => {
       outBytes += chunk.length;
       if (outBytes > MAX_OUTPUT_BYTES) {
-        finish(() => { child.kill("SIGKILL"); reject(new Error("hermes output exceeded the size limit")); });
+        finish(() => { child.kill("SIGKILL"); reject(new Error(OUTPUT_LIMIT_MESSAGE)); });
         return;
       }
       out += chunk.toString();
@@ -238,7 +283,7 @@ function spawnHermes(
     child.stderr!.on("data", (chunk: Buffer) => {
       errBytes += chunk.length;
       if (errBytes > MAX_OUTPUT_BYTES) {
-        finish(() => { child.kill("SIGKILL"); reject(new Error("hermes error output exceeded the size limit")); });
+        finish(() => { child.kill("SIGKILL"); reject(new Error(ERROR_OUTPUT_LIMIT_MESSAGE)); });
         return;
       }
       err += chunk.toString();
@@ -255,7 +300,7 @@ function spawnHermes(
         // out raw. That matters MORE here — eleven setup-api routes reject-path
         // this straight into their JSON `error` — so the sanitising belongs at
         // the spawn, not at each caller.
-        console.error("[hermes cli] spawn failed", e);
+        if (extras.logSpawnFailure !== false) console.error("[hermes cli] spawn failed", e);
         reject(new Error(spawnFailureMessage(e)));
       });
     });

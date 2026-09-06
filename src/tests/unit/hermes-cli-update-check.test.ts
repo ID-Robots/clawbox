@@ -44,7 +44,7 @@ import { parseHermesVersion } from "@/lib/version-utils";
  *  - it FAILS OPEN — an interpreter that cannot answer leaves the plain
  *    `hermes --version` call, and the banner parser still reads the version
  *    off the noisy output (the false-failure guard);
- *  - it never turns one deadline into two.
+ *  - it never shortens the supported call it falls back to.
  */
 
 vi.mock("child_process", () => ({ spawn: vi.fn() }));
@@ -133,8 +133,10 @@ describe("runHermesCli({ silenceUpdateCheck }) — the version probe stops payin
     // The shim is four lines: unset PYTHONPATH, unset PYTHONHOME, exec the
     // venv interpreter on `<agent_dir>/hermes`. Running `-c` instead means
     // pointing PYTHONPATH at the checkout (the package IS the checkout — there
-    // is no pip dist to import) while still refusing an inherited PYTHONHOME,
-    // which would send the interpreter at a different stdlib.
+    // is no pip dist to import), refusing an inherited PYTHONHOME, which would
+    // send the interpreter at a different stdlib, and keeping the CWD off
+    // `sys.path[0]` — `-c` puts it there and the shim never does, so a
+    // stdlib-shadowing file in $HOME would break a probe the shim runs fine.
     process.env.PYTHONHOME = "/somewhere/else";
     try {
       mockSpawn.mockImplementation(() => answers(SILENT_BANNER) as never);
@@ -142,10 +144,71 @@ describe("runHermesCli({ silenceUpdateCheck }) — the version probe stops payin
       await runHermesCli(["--version"], { timeoutMs: 10_000, silenceUpdateCheck: true });
 
       expect(spawnedEnv(0).PYTHONPATH).toBe(AGENT_DIR);
+      expect(spawnedEnv(0).PYTHONSAFEPATH).toBe("1");
       expect(spawnedEnv(0)).not.toHaveProperty("PYTHONHOME");
+      // …and the three variables every hermes child is promised are still there.
+      expect(spawnedEnv(0).HOME).toBe(HOME);
+      expect(spawnedEnv(0).COLUMNS).toBe("400");
     } finally {
       delete process.env.PYTHONHOME;
     }
+  });
+
+  it("follows the install the fallback would run, not a hard-coded one", async () => {
+    // Both halves have to read the SAME install: if the silent probe answered
+    // for `~/.hermes` while the shim ran an install `HERMES_HOME` moved, the
+    // About screen would show a version belonging to a different agent — and
+    // both paths exist, so nothing would look wrong. Same overrides the rest of
+    // the repo honours (hermesHome() in hermes-env.ts).
+    process.env.HERMES_HOME = "/opt/hermes-home";
+    try {
+      mockSpawn.mockImplementation(() => answers(SILENT_BANNER) as never);
+
+      await runHermesCli(["--version"], { silenceUpdateCheck: true });
+
+      expect(mockSpawn.mock.calls[0][0]).toBe(
+        path.join("/opt/hermes-home", "hermes-agent", "venv", "bin", "python"),
+      );
+      expect(spawnedEnv(0).PYTHONPATH).toBe(path.join("/opt/hermes-home", "hermes-agent"));
+    } finally {
+      delete process.env.HERMES_HOME;
+    }
+  });
+
+  it("falls open when the printer answers something that is not a banner", async () => {
+    // `parseHermesVersion` SHOWS an unrecognised first line rather than
+    // reporting nothing, so a sitecustomize notice (or a future upstream line)
+    // on stdout would become "the Hermes version" on the About screen and the
+    // supported call that prints the real one would never be made.
+    mockSpawn
+      .mockImplementationOnce(() => answers("Note: running under a virtualenv") as never)
+      .mockImplementationOnce(() => answers(NOISY_BANNER) as never);
+
+    const result = await runHermesCli(["--version"], { silenceUpdateCheck: true });
+
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+    expect(mockSpawn.mock.calls[1][0]).toBe(HERMES_BIN);
+    expect(parseHermesVersion(result.stdout)).toBe("v0.20.5");
+  });
+
+  it("does not ask the same question twice when the child said far too much", async () => {
+    // Every other failure means the child could not be STARTED, and the
+    // supported call is the answer. A runaway child is not that: retrying it
+    // would overflow the same buffer, so the caller hears the real reason.
+    mockSpawn.mockImplementation(
+      () =>
+        fakeChild((c) => {
+          c.stdout.emit("data", Buffer.alloc(1_000_001, 0x61));
+        }) as never,
+    );
+
+    const err = await runHermesCli(["--version"], { silenceUpdateCheck: true }).then(
+      () => new Error("expected a rejection"),
+      (e: Error) => e,
+    );
+
+    expect(err.message).toMatch(/exceeded the size limit/);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
   });
 
   it("falls open to `hermes --version` when the interpreter is not there", async () => {
@@ -211,40 +274,79 @@ describe("runHermesCli({ silenceUpdateCheck }) — the version probe stops payin
   });
 });
 
-describe("the silence spends one deadline, not two", () => {
+describe("the silence never shortens the supported call", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
-  it("hands the fallback what is left of the caller's budget", async () => {
-    // Two full timeouts in series would turn a 10 s probe into a 20 s one and
-    // make the fix worse than the defect it removes: `getVersionInfo` is what
-    // the About screen polls.
+  it("caps itself and hands the fallback the caller's WHOLE budget", () => {
+    // Splitting the caller's budget in half was the first shape of this, and
+    // it made the fix worse than the defect on the hardware it targets: a cold,
+    // loaded Orin where `hermes --version` answers in eight seconds would get
+    // five, time out, and report no version — a NEW false failure introduced by
+    // a change whose whole purpose is removing one. So the silent attempt has
+    // its own ceiling and the supported call keeps every millisecond it had.
     mockSpawn.mockImplementation(() => hangs() as never);
 
-    const call = runHermesCli(["--version"], { timeoutMs: 10_000, silenceUpdateCheck: true });
-    const settled = call.then(
+    const settled = runHermesCli(["--version"], {
+      timeoutMs: 10_000,
+      silenceUpdateCheck: true,
+    }).then(
       () => "resolved",
       (e: Error) => e.message,
     );
 
-    // Half the budget for the silent form — it does no network at all.
-    await vi.advanceTimersByTimeAsync(5_000);
-    expect(mockSpawn).toHaveBeenCalledTimes(2);
-    expect(mockSpawn.mock.calls[1][0]).toBe(HERMES_BIN);
+    return (async () => {
+      // The silent attempt's own 5 s ceiling, not a slice of the 10 s.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      expect(mockSpawn.mock.calls[1][0]).toBe(HERMES_BIN);
+      expect(mockSpawn.mock.calls[1][1]).toEqual(["--version"]);
 
-    // …and the other half for the fallback, so the whole call is still bounded
-    // by the 10 s the caller asked for.
-    await vi.advanceTimersByTimeAsync(5_000);
-    await expect(settled).resolves.toMatch(/timed out/);
+      // …and the fallback then gets the full 10 s the caller asked for: at
+      // 9_999 ms into it nothing has settled.
+      await vi.advanceTimersByTimeAsync(9_999);
+      await expect(Promise.race([settled, Promise.resolve("pending")])).resolves.toBe("pending");
+
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(settled).resolves.toMatch(/timed out/);
+    })();
+  });
+
+  it("never gives the silent attempt more than the caller allowed", () => {
+    // A caller with a budget under the ceiling still bounds the whole call.
+    mockSpawn.mockImplementation(() => hangs() as never);
+
+    const settled = runHermesCli(["--version"], {
+      timeoutMs: 2_000,
+      silenceUpdateCheck: true,
+    }).then(
+      () => "resolved",
+      (e: Error) => e.message,
+    );
+
+    return (async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(settled).resolves.toMatch(/timed out/);
+    })();
   });
 });
 
 /**
- * install.sh probes the agent twice with `--version` — once to decide whether
- * Hermes is installed at all, once to verify the install it just ran. Both
- * throw the answer away with `head -1`, and on a fresh box BOTH are cache
- * misses, so the step pays the fetch and the GitHub compare twice for a line
- * nobody reads.
+ * install.sh probes the agent twice — once to decide whether Hermes is
+ * installed at all, once to verify the install it just ran. Both throw the
+ * answer away with `head -1`, and on a fresh box BOTH are cache misses, so the
+ * step paid the fetch and the GitHub compare twice for a line nobody reads.
+ *
+ * The invariant the silence must NOT take with it is the one the step exists
+ * for: runnability is the SHIM's to prove. Importing `hermes_cli` says the
+ * package is on disk; it does not say `~/.local/bin/hermes` works, and a box
+ * where it does not is exactly the box this step has to repair. Driven for
+ * real in install-hermes-install-guard.test.ts ("a broken shim over an
+ * importable package is still 'not installed'"); pinned as text here because
+ * the four things that make the silent probe work are invisible to a
+ * behavioural harness whose fake interpreter ignores its argv.
  */
 describe("install.sh's own probes carry the same silence", () => {
   const REPO = path.resolve(__dirname, "../../..");
@@ -252,7 +354,7 @@ describe("install.sh's own probes carry the same silence", () => {
   const NL = String.fromCharCode(10);
 
   /** The step's code with comments dropped and continuations joined. */
-  const STEP = (() => {
+  const LINES = (() => {
     const start = INSTALL_SH.indexOf("step_hermes_install() {");
     if (start < 0) throw new Error("step_hermes_install not found in install.sh");
     const end = INSTALL_SH.indexOf(`${NL}}`, start);
@@ -260,28 +362,72 @@ describe("install.sh's own probes carry the same silence", () => {
       .split(NL)
       .filter((l) => !l.trim().startsWith("#"))
       .join(NL)
-      .replace(new RegExp("\\\\" + NL + "\\s*", "g"), " ");
+      .replace(new RegExp("\\\\" + NL + "\\s*", "g"), " ")
+      .split(NL);
   })();
 
+  const silentProbes = () => LINES.filter((l) => l.includes("check_updates=False"));
+
   it("tries the silent printer at both probes", () => {
-    const silent = STEP.split(NL).filter((l) => l.includes("check_updates=False"));
-    expect(silent).toHaveLength(2);
-    for (const line of silent) {
-      // Same two rules the shim probes already follow.
+    expect(silentProbes()).toHaveLength(2);
+    for (const line of silentProbes()) {
+      // Same two rules every hermes invocation in this step already follows:
+      // never as root (a root-run probe writes root-owned __pycache__ into a
+      // clawbox-owned tree, which is what made the factory reset abort
+      // mid-wipe), and HOME explicitly (hermes resolves ~/.hermes from it, and
+      // install.sh's own HOME is /root).
       expect(line, `must not run the agent as root: ${line}`).toContain('runuser -u "$CLAWBOX_USER"');
       expect(line, `must pass HOME: ${line}`).toContain('HOME="$CLAWBOX_HOME"');
+      // The package IS the checkout — there is no pip dist — so without this
+      // the import fails on every box and the silence is dead code.
+      expect(line, `must put the checkout on the path: ${line}`).toContain(
+        'PYTHONPATH="$agent_dir"',
+      );
+      // An inherited PYTHONHOME aims the interpreter at a different stdlib;
+      // the shim unsets it for exactly this reason.
+      expect(line, `must not inherit a Python home: ${line}`).toContain("env -u PYTHONHOME");
+      // `-c` puts the CWD on sys.path[0] and the shim never does.
+      expect(line, `must keep the CWD off sys.path: ${line}`).toContain("PYTHONSAFEPATH=1");
+      // A traceback on stderr must not reach the log, and — under
+      // `set -euo pipefail` — the assignment must not inherit the probe's
+      // status: that is what kills `install.sh --step hermes_install` outright.
+      expect(line, `must not print a traceback: ${line}`).toContain("2>/dev/null");
+      expect(line, `must not let errexit kill the step: ${line}`).toContain('|| installed=""');
     }
   });
 
-  it("keeps the `--version` probe as the fallback, after the silent one", () => {
-    const lines = STEP.split(NL);
-    const shimProbes = lines
-      .map((l, i) => ({ l, i }))
-      .filter(({ l }) => l.includes("--version") && l.includes("$shim"));
-    expect(shimProbes).toHaveLength(2);
-    for (const { i } of shimProbes) {
-      const before = lines.slice(0, i).filter((l) => l.includes("check_updates=False"));
-      expect(before.length, "the silent probe must come first").toBeGreaterThan(0);
+  it("lets the SHIM decide whether Hermes runs, before either version read", () => {
+    // The whole point of the step: "require the interpreter to exist AND the
+    // agent to actually answer". `--help` runs the same shim → entry script →
+    // hermes_cli.main path `--version` does and no update check with it.
+    const gates = LINES.map((l, i) => ({ l, i })).filter(
+      ({ l }) => l.includes("$shim") && l.includes("--help"),
+    );
+    expect(gates).toHaveLength(2);
+    for (const { l, i } of gates) {
+      expect(l, `the gate must run as the clawbox user with HOME: ${l}`).toContain(
+        'runuser -u "$CLAWBOX_USER"',
+      );
+      expect(l).toContain('HOME="$CLAWBOX_HOME"');
+      // …and it gates the version reads rather than sitting beside them.
+      expect(l.trimStart(), `the gate must be a condition: ${l}`).toMatch(/^if runuser/);
+      const after = LINES.slice(i);
+      expect(after.findIndex((x) => x.includes("check_updates=False"))).toBeGreaterThan(-1);
+    }
+  });
+
+  it("pairs each silent probe with the `--version` fallback that follows it", () => {
+    // Fail OPEN: an interpreter that cannot answer must leave the supported
+    // probe behind it, and it must be the NEXT statement rather than one
+    // somewhere later in the step.
+    for (const line of silentProbes()) {
+      const next = LINES[LINES.indexOf(line) + 1];
+      expect(next, `no fallback after: ${line}`).toBeDefined();
+      expect(next, `the fallback must be guarded on an empty result: ${next}`).toContain(
+        '[ -n "$installed" ] ||',
+      );
+      expect(next).toContain('"$shim" --version');
+      expect(next).toContain('|| installed=""');
     }
   });
 });
