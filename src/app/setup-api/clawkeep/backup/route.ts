@@ -14,9 +14,11 @@ export const dynamic = "force-dynamic";
 // bridge's own kill timer (BACKUP_RUN_CAP_MS) is the real ceiling and has an
 // owner-facing answer of its own, 504 `timed_out`. It is now the same four
 // hours `clawkeep/systemd/clawkeepd.service` declares: those timers are not
-// installed on a ClawBox, so this timer is the only ceiling ANY run gets —
-// scheduled or by hand — and at the old 60 minutes it killed the 12 GB
-// backups TASK-675 exists to support.
+// installed on a ClawBox, so this timer is the only ceiling ClawBox ITSELF
+// imposes on a run, scheduled or by hand — and at the old 60 minutes it
+// killed the 12 GB backups TASK-675 exists to support. It is not the only
+// ceiling that exists: the daemon's own per-step caps bind first, whatever
+// this one allows (`clawkeep/clawkeep/limits.py`).
 //
 // A box with no pairing is refused with 409 `not_paired` before the daemon is
 // started: `clawkeepd` would have loaded the token, failed and exited 65, and

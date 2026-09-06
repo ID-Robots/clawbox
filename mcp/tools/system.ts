@@ -721,7 +721,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "backup_now",
-    "Start a cloud backup of this ClawBox now. It can take several minutes; if this call times out the backup is still running, so do not start another one — call backup_list later to confirm it landed.",
+    "Start a cloud backup of this ClawBox now. It can take several minutes; if this call times out the backup may still be running, so do not start another one — call backup_list later to confirm it landed.",
     { label: zText(64, "Short name for this backup, e.g. \"before update\"").optional() },
     { editions: ["openclaw"], readOnly: false },
     async ({ label }: { label?: string }) => {
@@ -761,9 +761,16 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
           // flight — mid-run on a box that has never finished one it would
           // report "never backed up, unprotected", which is a worse answer
           // than none.
+          //
+          // All three sentences hedge on purpose. The abort establishes that
+          // THIS CLIENT stopped waiting and nothing else — `clawkeepd` may
+          // have exited, the box may have rebooted, the Next worker may have
+          // been replaced — so stating the run is alive is the same false
+          // certainty as the "Retry once" it replaces, pointing the other
+          // way. The ACTION is right either way, and is the part that matters.
           onTimeout: {
-            message: "The backup is taking longer than this call waits. It is still running.",
-            next: "Do not start another one. Tell the user it is still going, and call backup_list later to confirm it landed.",
+            message: "The backup is taking longer than this call waits. It may still be running.",
+            next: "Do not start another one. Tell the user it may still be running, and call backup_list later to confirm it landed.",
           },
         },
       );
