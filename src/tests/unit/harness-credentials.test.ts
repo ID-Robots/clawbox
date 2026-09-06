@@ -15,10 +15,16 @@ import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 
 const readConfig = vi.fn();
 const configStoreGet = vi.fn();
+const configStoreSet = vi.fn();
 
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: () => readConfig() }));
 vi.mock("@/lib/config-store", () => ({
   get: (key: string) => configStoreGet(key),
+  // The persisted half of a refusal is written through this — see
+  // @/lib/clawai-credential-refusal. A factory that omitted it would leave
+  // `set` undefined, the write would throw inside its own catch, and this file
+  // would go on passing over a fact that never reached the boot script.
+  set: (key: string, value: unknown) => configStoreSet(key, value),
   // Pulled in by the proxy-URL re-export chain; never called here.
   setMany: vi.fn(),
 }));
@@ -189,6 +195,7 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     vi.resetModules();
     readConfig.mockReset();
     configStoreGet.mockReset();
+    configStoreSet.mockReset();
   });
 
   /** The memory, freshly imported so each case starts with none. */
@@ -201,7 +208,7 @@ describe("a credential the ClawBox AI proxy has refused", () => {
   it("remembers the status, so the next caller says the same thing", async () => {
     const mod = await memo();
     expect(mod.clawaiCredentialRefused()).toBeNull();
-    mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+    await mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
     expect(mod.clawaiCredentialRefused()).toBe(403);
   });
 
@@ -209,9 +216,9 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     // What makes "re-link the device" — the instruction every refusal prints —
     // an instruction that works.
     const mod = await memo();
-    mod.noteClawaiCredentialRefused(401, mod.clawaiCredentialGeneration());
+    await mod.noteClawaiCredentialRefused(401, mod.clawaiCredentialGeneration());
     expect(mod.clawaiCredentialRefused()).toBe(401);
-    mod.forgetClawaiCredentialRefusal();
+    await mod.forgetClawaiCredentialRefusal();
     expect(mod.clawaiCredentialRefused()).toBeNull();
   });
 
@@ -222,12 +229,12 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     // successfully re-linked — over a credential it no longer holds.
     const mod = await memo();
     const inFlight = mod.clawaiCredentialGeneration();
-    mod.forgetClawaiCredentialRefusal();
-    mod.noteClawaiCredentialRefused(403, inFlight);
+    await mod.forgetClawaiCredentialRefusal();
+    await mod.noteClawaiCredentialRefused(403, inFlight);
     expect(mod.clawaiCredentialRefused()).toBeNull();
 
     // A verdict from the CURRENT credential is still recorded.
-    mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+    await mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
     expect(mod.clawaiCredentialRefused()).toBe(403);
   });
 
@@ -243,5 +250,90 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     expect(mod.forgetClawaiCredentialRefusal.length).toBe(0);
     // status + generation, both non-secret.
     expect(mod.noteClawaiCredentialRefused.length).toBe(2);
+  });
+
+  /*
+   * TASK-727: the same fact, written where the ROOT boot script can read it.
+   *
+   * The memory above is a module variable in the Next process, and the process
+   * that decides whether the agent's image path is declared at all is
+   * `scripts/gateway-pre-start.sh`, running as root before the gateway. Nothing
+   * downstream of it backs off — the pinned core's image provider declares only
+   * `authSignals` (a static availability gate) and the bundled OpenAI SDK
+   * retries 408/409/429/5xx and never 401/403 — so a box left armed over a
+   * refused credential spends refused calls for as long as it is switched on.
+   */
+  it("writes the refusal to the device store the boot script reads", async () => {
+    const mod = await memo();
+    configStoreGet.mockResolvedValue(undefined);
+
+    await mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+
+    expect(configStoreSet).toHaveBeenCalledWith(
+      "clawai_credential_refused_at",
+      expect.any(Number),
+    );
+  });
+
+  it("writes once per refusal window, not once per refused request", async () => {
+    // This runs on the picture and microphone paths. A store write per refused
+    // request would turn one dead credential into a write storm of its own.
+    const mod = await memo();
+    configStoreGet.mockResolvedValue(undefined);
+
+    await mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+    await mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+
+    expect(configStoreSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes the stamp rather than leaving one that belongs to a retired credential", async () => {
+    // A re-link whose persisted clear could not be written leaves the OLD
+    // credential's stamp standing. If the next refusal — of the NEW credential —
+    // did not move it, a portal answer for the old token, asked before the
+    // re-link, would clear it as "recorded before I asked" and the next gateway
+    // start would arm the image path over a credential the proxy refuses.
+    const mod = await memo();
+    configStoreGet.mockResolvedValue(1_788_000_000_000);
+
+    await mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+
+    const [key, value] = configStoreSet.mock.calls.at(-1) ?? [];
+    expect(key).toBe("clawai_credential_refused_at");
+    expect(value).toBeGreaterThan(1_788_000_000_000);
+  });
+
+  it("takes the persisted refusal back out when the credential is rewritten", async () => {
+    // The half that makes a re-link work: the configure route restarts the
+    // gateway right after writing the new token, and the boot that follows must
+    // not read a refusal about the credential that was just replaced.
+    const mod = await memo();
+    configStoreGet.mockResolvedValue(1_788_000_000_000);
+
+    await mod.forgetClawaiCredentialRefusal();
+
+    expect(configStoreSet).toHaveBeenCalledWith("clawai_credential_refused_at", undefined);
+  });
+
+  it("opens the store for writing only when there is something to clear", async () => {
+    const mod = await memo();
+    configStoreGet.mockResolvedValue(undefined);
+
+    await mod.forgetClawaiCredentialRefusal();
+
+    expect(configStoreSet).not.toHaveBeenCalled();
+  });
+
+  it("still forgets in memory when the store cannot be written", async () => {
+    // A root-owned data/config.json is a state this repo has seen. Losing the
+    // hint must not cost the caller its own answer.
+    const mod = await memo();
+    configStoreGet.mockResolvedValue(1_788_000_000_000);
+    configStoreSet.mockRejectedValue(new Error("EACCES"));
+
+    await mod.noteClawaiCredentialRefused(403, mod.clawaiCredentialGeneration());
+    expect(mod.clawaiCredentialRefused()).toBe(403);
+    await expect(mod.forgetClawaiCredentialRefusal()).resolves.toBeUndefined();
+    expect(mod.clawaiCredentialRefused()).toBeNull();
   });
 });

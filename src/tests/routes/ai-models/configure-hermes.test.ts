@@ -41,6 +41,12 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
   setMany: vi.fn(),
+  // The route reads and clears the persisted credential refusal through these
+  // (@/lib/clawai-credential-refusal). Omit them and the calls throw inside
+  // their own catch, so the route behaves as if nothing were ever on record and
+  // this file goes on passing over a gate that never ran.
+  get: vi.fn(async () => undefined),
+  set: vi.fn(async () => {}),
 }));
 
 vi.mock("@/lib/openclaw-config", () => ({

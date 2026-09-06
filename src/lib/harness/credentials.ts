@@ -1,6 +1,20 @@
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { get } from "@/lib/config-store";
 import { readConfig } from "@/lib/openclaw-config";
+// The persisted half of the refusal below. Its own module, and a deliberately
+// thin one: `/setup-api/ai-models/status` writes the same fact from the portal
+// poll, and importing THIS file there would drag the whole Hermes adapter graph
+// into a badge route.
+import {
+  clearPersistedClawaiCredentialRefusal,
+  persistClawaiCredentialRefusal,
+} from "@/lib/clawai-credential-refusal";
+
+export {
+  CLAWAI_CREDENTIAL_REFUSED_KEY,
+  clearPersistedClawaiCredentialRefusal,
+  persistClawaiCredentialRefusal,
+} from "@/lib/clawai-credential-refusal";
 
 /**
  * The one place that knows where each edition keeps the device's ClawBox AI
@@ -152,11 +166,18 @@ export function clawaiCredentialRefused(): number | null {
  * too, but it belongs to a plan rather than to a credential and it resets on a
  * clock this module cannot see.
  */
-export function noteClawaiCredentialRefused(status: number, generation: number): void {
+export async function noteClawaiCredentialRefused(status: number, generation: number): Promise<void> {
   // The credential was rewritten while this request was in flight, so what came
   // back is a verdict on a token this box no longer holds.
   if (generation !== credentialGeneration) return;
+  // Written down before the memo is armed, so "was this already remembered"
+  // below still means "did an earlier request record it".
+  const alreadyRemembered = clawaiCredentialRefused() !== null;
   refusal = { status, until: Date.now() + CREDENTIAL_REFUSAL_TTL_MS };
+  // One store write per refusal WINDOW, not per refused request: the second
+  // caller through here inside the window has nothing new to say, and this runs
+  // on the picture and microphone paths.
+  if (!alreadyRemembered) await persistClawaiCredentialRefusal();
 }
 
 /**
@@ -164,13 +185,20 @@ export function noteClawaiCredentialRefused(status: number, generation: number):
  * asks again.
  *
  * The same shape, and the same call sites, as `forgetProviderVerified`: a mark
- * about a credential is dropped by whoever rewrites that credential. Kept
- * synchronous and dependency-free so a writer can call it without caring
- * whether this box is OpenClaw or Hermes.
+ * about a credential is dropped by whoever rewrites that credential. Edition-
+ * agnostic, so a writer can call it without caring whether this box is OpenClaw
+ * or Hermes. It AWAITS now — the persisted half below has to land before the
+ * caller restarts the gateway, or the boot that follows a re-link reads a
+ * refusal about the credential that was just replaced.
  */
-export function forgetClawaiCredentialRefusal(): void {
+export async function forgetClawaiCredentialRefusal(): Promise<void> {
   credentialGeneration += 1;
   refusal = null;
+  // The persisted half goes with it, in the SAME funnel rather than beside each
+  // of the three callers: a writer that remembered one and forgot the other
+  // would leave a freshly re-linked box standing its image path down at the
+  // very restart the re-link triggers.
+  await clearPersistedClawaiCredentialRefusal();
 }
 
 /** Test seam: forget every remembered refusal. */

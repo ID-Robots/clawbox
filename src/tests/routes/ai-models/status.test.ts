@@ -325,6 +325,126 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("picker");
     });
 
+    it("writes the portal's refusal where the root boot script can read it", async () => {
+      // TASK-727. The pre-start decides on every gateway start whether to
+      // declare the agent's image path, and the pinned core has no back-off to
+      // fall back on — so "the portal refused this credential" has to leave
+      // this process. `clawai_credential_refused_at` is the same store the tier
+      // stamp above uses, and `CLAWBOX_DEVICE_STORE` is the same file.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token", type: "auth_error" } }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.any(Number),
+      );
+    });
+
+    it("clears it again the moment the portal accepts the credential", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      // A refusal is on record; the tier is the one the portal is about to
+      // confirm, so the tier write below cannot be what is asserted.
+      mockGetConfigValue.mockImplementation(async (key: string) =>
+        key === "clawai_credential_refused_at" ? 1_788_000_000_000 : "pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_credential_refused_at", undefined);
+    });
+
+    it("does not write down a refusal the portal module deliberately did not remember", async () => {
+      // The re-link race, and the reason this persists off
+      // `clawaiTokenRejectedByPortal()` rather than off the lookup's own
+      // `rejected`. A poll goes out with the OLD token; while its 403 is in
+      // flight the new token is proven good, so `fetchPortalTier` returns the
+      // verdict to its caller and deliberately does NOT remember it. Writing it
+      // to disk anyway would stand the image path down at the very restart the
+      // re-link triggers.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      let releaseOldTokenRefusal: () => void = () => {};
+      const oldTokenAnswered = new Promise<void>((resolve) => { releaseOldTokenRefusal = resolve; });
+      fetchSpy.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const auth = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "");
+        if (auth.includes("claw_NEW")) {
+          return new Response(JSON.stringify({ tier: "max", deviceTier: "pro" }), { status: 200 });
+        }
+        await oldTokenAnswered;
+        return new Response(
+          JSON.stringify({ error: { code: "invalid_token" } }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      });
+
+      const inFlight = GET();
+      // The re-link lands while that 403 is still on the wire.
+      const portal = await import("@/lib/clawbox-ai-portal-tier");
+      await portal.fetchPortalTier("claw_NEW");
+      releaseOldTokenRefusal();
+      await inFlight;
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.anything(),
+      );
+    });
+
+    it("does not let a slow portal answer erase a refusal recorded since it was asked", async () => {
+      // The re-link race, the other half. The poll asks about the credential the
+      // box held when the request started; four seconds later the device has
+      // been re-linked and the NEW credential refused. A clear here would be a
+      // verdict about a token the box no longer holds erasing one about the
+      // token it does — and the next gateway start would re-arm the image path
+      // over a credential the proxy refuses.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      const stamps: Record<string, unknown> = { clawai_tier: "pro" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key]);
+      mockSetConfigValue.mockImplementation(async (key: string, value: unknown) => {
+        if (value === undefined) delete stamps[key];
+        else stamps[key] = value;
+      });
+      fetchSpy.mockImplementation(async () => {
+        // A refusal of the credential the box holds NOW lands while this
+        // lookup is still on the wire.
+        stamps.clawai_credential_refused_at = Date.now() + 1;
+        return new Response(JSON.stringify({ tier: "max", deviceTier: "pro" }), { status: 200 });
+      });
+
+      await GET();
+
+      expect(stamps.clawai_credential_refused_at).toBeTypeOf("number");
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        undefined,
+      );
+    });
+
+    it("records nothing when the portal merely failed to answer", async () => {
+      // The false-failure half of the persisted fact: an unreachable portal
+      // would stand the image path down at the next boot on a box whose
+      // credential is perfectly good.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      fetchSpy.mockResolvedValue(new Response("upstream is down", { status: 503 }));
+
+      await GET();
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.anything(),
+      );
+    });
+
     it("does not call an unreachable portal a rejection", async () => {
       // The false-failure half. A 500, a timeout or a dead uplink says nothing
       // about the credential, and telling a customer on a train to re-link a
