@@ -513,9 +513,19 @@ async function check(): Promise<void> {
     // is also taken on the spawn's own refusal, which this side never sees. A
     // note that named this directory outright would be wrong about exactly the
     // host it is written for — one whose root exists and cannot be entered.
+    // "CLAWBOX_ROOT=<path>" over an UNSET variable is the same kind of false
+    // statement this whole note is being corrected for: on a shipped box the
+    // variable is not set at all (clawbox-setup.service's Environment= carries
+    // NODE_ENV, BUN_ENV, PORT, HOSTNAME and CLAWBOX_EDITION, and nothing else),
+    // so the path being reported is the module's hard-coded fallback and saying
+    // otherwise sends an operator looking for a setting that does not exist.
+    const configured = process.env.CLAWBOX_ROOT;
+    const rootLabel = configured
+      ? `CLAWBOX_ROOT=${configured}`
+      : `CLAWBOX_ROOT is unset, so the default ${DEFAULT_CWD} applies`;
     const rootNote = cwd === DEFAULT_CWD
-      ? `CLAWBOX_ROOT=${DEFAULT_CWD}; a directory refusal retries in /`
-      : `CLAWBOX_ROOT=${DEFAULT_CWD} cannot be entered, so the probes were NOT affected by it`;
+      ? `${rootLabel}; a directory refusal retries in /`
+      : `${rootLabel}, and it cannot be entered — so the probes were NOT affected by it`;
     console.log(
       `\nnote: probes that answered false on this host. Spawns default to ${cwd} (${rootNote});`
       + `\n      device API probes call ${API_BASE}.`
