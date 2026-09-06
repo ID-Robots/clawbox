@@ -125,6 +125,17 @@ describe("a Hermes re-pair and the owner's own model", () => {
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
   });
 
+  it("refuses a stored slot that is not a provider name", async () => {
+    // The slot is derived from a model reference that arrives in a request
+    // body, so it is validated rather than trusted — a name like `__proto__`
+    // has meaning to an object before it has meaning to us.
+    store({ [EXPLICIT_MODEL_PICKS_KEY]: { __proto__: CLAWBOX_AI_PRO_MODEL_ID } });
+
+    await applyClawaiToHermes("claw_token_abc", "flash");
+
+    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+  });
+
   it("lets the badge decide when the store could not be read at all", async () => {
     // Beta's answer, kept on purpose: a link that writes no model is a box with
     // no working chat, and bookkeeping we could not read is not worth holding a

@@ -87,6 +87,24 @@ export function clawboxAiModelIdOf(ref: unknown): string | null {
 }
 
 /**
+ * The shape every provider id this file will key by has: a letter, then letters,
+ * digits or hyphens (`clawai`, `openrouter`, `openai-codex`, `kimi-coding`).
+ *
+ * The slot is derived from a model reference that arrives in a REQUEST BODY and
+ * is then used as a property name, so it is validated rather than trusted: an
+ * unbounded key would put whatever the caller sent into `data/config.json`, and
+ * a name like `__proto__` or `constructor` has meaning to an object before it
+ * has meaning to us. Anything outside this shape is simply not a slot, and the
+ * pick is not recorded.
+ */
+const PROVIDER_SLOT_RE = /^[a-z][a-z0-9-]{0,31}$/;
+const RESERVED_SLOTS: ReadonlySet<string> = new Set(["constructor", "prototype", "__proto__"]);
+
+function isProviderSlot(slot: string): boolean {
+  return PROVIDER_SLOT_RE.test(slot) && !RESERVED_SLOTS.has(slot);
+}
+
+/**
  * Which provider slot a model reference belongs in.
  *
  * ClawBox AI's two spellings collapse onto `clawai`; everything else is keyed by
@@ -97,7 +115,8 @@ function pickSlotFor(ref: string): string | null {
   if (clawboxAiModelIdOf(ref)) return "clawai";
   const slash = ref.indexOf("/");
   if (slash <= 0) return null;
-  return ref.slice(0, slash).trim().toLowerCase() || null;
+  const slot = ref.slice(0, slash).trim().toLowerCase();
+  return isProviderSlot(slot) ? slot : null;
 }
 
 /** The stored map, tolerant of anything that is not one — the store is hand-editable JSON. */
@@ -105,6 +124,7 @@ export function explicitPicksFrom(raw: unknown): ExplicitModelPicks {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const picks: ExplicitModelPicks = {};
   for (const [provider, model] of Object.entries(raw as Record<string, unknown>)) {
+    if (!isProviderSlot(provider)) continue;
     if (typeof model === "string" && model.trim()) picks[provider] = model.trim();
   }
   return picks;
@@ -156,9 +176,12 @@ export async function recordExplicitModelPick(model: string): Promise<void> {
   if (!slot) return;
   try {
     const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
-    await setMany({
-      [EXPLICIT_MODEL_PICKS_KEY]: { ...explicitPicksFrom(value), [slot]: trimmed },
-    });
+    // `explicitPicksFrom` has already dropped every key that is not a provider
+    // slot, and `slot` itself came through `isProviderSlot`, so the property
+    // name written here is one of a bounded, known shape.
+    const picks = explicitPicksFrom(value);
+    picks[slot] = trimmed;
+    await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: picks });
   } catch (err) {
     console.warn(
       "[explicit-model-pick] could not record the owner's model pick:",
