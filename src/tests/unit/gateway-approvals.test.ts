@@ -297,6 +297,22 @@ describe("the authoritative pending set the subscribe answers with", () => {
     expect(readApprovalReplay({ approvals: "no" })).toEqual({ cards: [], truncated: true });
     expect(readApprovalReplay({ approvals: [pendingExec()], truncated: true }).truncated).toBe(true);
   });
+
+  it("says the set is incomplete when ONE of its rows could not be read", () => {
+    // The gateway said this was the whole set, and it may well have been — but
+    // a row this build cannot describe is a hole in what the owner is shown,
+    // and an authoritative replay is licensed to REMOVE the cards it does not
+    // mention. Reporting a set with a hole in it as complete would take a live
+    // approval off the screen because a different one was unreadable.
+    const replay = readApprovalReplay({
+      sessionKey: "main",
+      updatedAtMs: NOW,
+      approvals: [pendingExec(), { status: "pending", id: "x", presentation: { kind: "quantum" } }],
+      truncated: false,
+    });
+    expect(replay.cards.map((c) => c.id)).toEqual(["exec:3f1c"]);
+    expect(replay.truncated).toBe(true);
+  });
 });
 
 describe("what an authoritative replay is allowed to do", () => {
@@ -347,6 +363,30 @@ describe("keeping the cards in step with the harness", () => {
     const busy = markApprovalBusy(cards, "exec:3f1c", "allow-once");
     expect(busy[0].busy).toBe("allow-once");
     expect(approvalIsActionable(busy[0], NOW)).toBe(false);
+  });
+
+  it("keeps the in-flight lock across a pushed update, and drops it when the answer lands", () => {
+    // A `session.approval` push arrives while the owner's own press is still
+    // in flight. It carries the harness's truth and must win — but the press
+    // is OURS, and losing it would put the buttons back under a call that is
+    // still running, so the same approval could be resolved twice from one
+    // card. When the push is TERMINAL there is nothing left to press and the
+    // lock goes with it.
+    const busy = markApprovalBusy(
+      mergeApprovalCard([], readApproval(pendingExec())!),
+      "exec:3f1c",
+      "allow-once",
+    );
+    const stillPending = mergeApprovalCard(busy, readApproval(pendingExec())!);
+    expect(stillPending[0].busy).toBe("allow-once");
+    expect(approvalIsActionable(stillPending[0], NOW)).toBe(false);
+
+    const answered = mergeApprovalCard(
+      busy,
+      readApproval({ ...pendingExec(), status: "denied", reason: "user" })!,
+    );
+    expect(answered[0].status).toBe("denied");
+    expect(answered[0].busy).toBeUndefined();
   });
 });
 
