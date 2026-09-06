@@ -108,7 +108,7 @@ function migrate(cfg: Config, v2 = false, store?: DeviceStore): { cfg: Config; c
  * setting, which is the state every case above this one runs in and the state
  * the migration has always been exercised against.
  */
-type DeviceStore = { body: string } | Record<string, unknown>;
+type DeviceStore = { body: string } | { bytes: Buffer } | Record<string, unknown>;
 
 function deviceStorePath(store?: DeviceStore): string {
   const file = path.join(dir, "device-store.json");
@@ -116,9 +116,10 @@ function deviceStorePath(store?: DeviceStore): string {
   // otherwise keep whatever the FIRST call wrote, and "no store" would silently
   // mean "the previous store".
   if (store === undefined) { rmSync(file, { force: true }); return file; }
-  writeFileSync(file, typeof (store as { body?: unknown }).body === "string"
-    ? (store as { body: string }).body
-    : JSON.stringify(store));
+  const bytes = (store as { bytes?: unknown }).bytes;
+  if (Buffer.isBuffer(bytes)) writeFileSync(file, bytes);
+  else if (typeof (store as { body?: unknown }).body === "string") writeFileSync(file, (store as { body: string }).body);
+  else writeFileSync(file, JSON.stringify(store));
   return file;
 }
 
@@ -911,10 +912,59 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     ["a store that is not an object", { body: "[]" } as DeviceStore],
     ["a store with no refusal recorded", {} as DeviceStore],
     ["a refusal stamp that is not a number", { clawai_credential_refused_at: "yes" } as DeviceStore],
+    // A byte that is not valid UTF-8 — a torn write after a power cut. It
+    // raises `UnicodeDecodeError`, which is neither `OSError` nor
+    // `json.JSONDecodeError`, and this block sits in the ONE python heredoc in
+    // the script that is invoked bare under `set -euo pipefail`: an escape here
+    // aborts the ExecStartPre and the box gets no gateway at all.
+    ["a store that is not decodable at all", { bytes: Buffer.from([0x7b, 0xff]) } as DeviceStore],
   ])("arms as before over %s — not knowing is not a refusal", (_label, store) => {
     const { cfg } = migrate(pairedBox(), false, store);
 
     expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
     expect(imageEntry(cfg)?.id).toBe(CLAWBOX_AI_IMAGE_MODEL_ID);
+  });
+
+  it("takes back BOTH homes on a v2 box that carries both", () => {
+    // Neither home may be left naming a row the other arm has just removed: the
+    // core's loader migration re-creates `mediaModels.image` from the legacy
+    // key, so a stand-down that cleared only one would be undone on the next
+    // load and left pointing at a model that is gone.
+    const both = migrate(armedBox(true), true, REFUSED).cfg;
+    const withLegacy = JSON.parse(JSON.stringify(armedBox(true))) as Config;
+    ((withLegacy.agents as { defaults: Record<string, unknown> }).defaults)
+      .imageGenerationModel = { primary: CLAWBOX_AI_IMAGE_MODEL };
+
+    const { cfg } = migrate(withLegacy, true, REFUSED);
+    const defaults = (cfg.agents as { defaults: Record<string, unknown> }).defaults;
+
+    expect(defaults.imageGenerationModel).toBeUndefined();
+    expect(mediaImage(cfg)).toBeUndefined();
+    expect(imageEntry(cfg)).toBeUndefined();
+    expect(both).toBeTruthy();
+  });
+
+  it("removes the models list it created rather than leaving an empty one", () => {
+    // An explicitly empty `models` is not the same statement to the core as an
+    // absent one — a configured provider overrides the plugin catalog entirely.
+    const { cfg } = migrate(armedBox(), false, REFUSED);
+
+    expect("models" in openaiProvider(cfg)).toBe(false);
+  });
+
+  it("keeps the other rows when ours was not the only one", () => {
+    const theirs = { id: "gpt-5", name: "Theirs", baseUrl: "https://clawbox.com/api/ai" };
+    const armed = migrate(pairedBox({
+      models: {
+        providers: {
+          deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+          openai: { models: [theirs] },
+        },
+      },
+    })).cfg;
+
+    const { cfg } = migrate(armed, false, REFUSED);
+
+    expect(openaiModels(cfg)).toEqual([theirs]);
   });
 });

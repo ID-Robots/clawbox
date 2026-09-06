@@ -11,7 +11,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 // Portal tier resolution lives in @/lib/clawbox-ai-portal-tier so the
 // configure route can reach the same answer from the same cache (TASK-481).
-import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
+import { clawaiTokenRejectedByPortal, fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import { profileProviderId } from "@/lib/chatgpt-subscription";
 // The portal's verdict on this box's credential, written where the ROOT boot
 // script can read it: `scripts/gateway-pre-start.sh` decides on every gateway
@@ -248,9 +248,20 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         clawaiTokenRejected = lookup.rejected;
         // `rejected` is the PORTAL naming this credential as the reason, never
         // a bare 401/403 off the wire (see `portalRefusedTheToken`) — the same
-        // bar `noteClawaiCredentialRefused` insists on. `unreachable` without
-        // it says nothing about the credential and records nothing.
-        if (lookup.rejected) await persistClawaiCredentialRefusal();
+        // bar `noteClawaiCredentialRefused` insists on.
+        //
+        // Persisted off `clawaiTokenRejectedByPortal()` rather than off
+        // `lookup.rejected`, because those two are not the same fact.
+        // `fetchPortalTier` hands the CALLER a verdict it deliberately did not
+        // REMEMBER when a credential has been proven good since that lookup
+        // was sent — the generation guard that exists so a delayed 403 for the
+        // retired token cannot be read as a verdict on the one the box holds
+        // now. Writing `lookup.rejected` to disk would defeat exactly that: a
+        // re-link on the Settings page races the poll it is running, and the
+        // box would stand its image path down at the very restart the re-link
+        // triggers. The module's own guarded reader is the one that answers
+        // "is a rejection ON RECORD for the credential this box holds".
+        if (clawaiTokenRejectedByPortal()) await persistClawaiCredentialRefusal();
       }
     }
   }

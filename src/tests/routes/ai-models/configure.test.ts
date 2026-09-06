@@ -42,6 +42,12 @@ vi.mock("@/lib/config-store", () => ({
   // reader, so a store that cannot be read is not mistaken for an empty one.
   getKnown: vi.fn(),
   setMany: vi.fn(),
+  // The route reads and clears the persisted credential refusal through these
+  // (@/lib/clawai-credential-refusal). Omit them and the calls throw inside
+  // their own catch, so the route behaves as if nothing were ever on record and
+  // this file goes on passing over a gate that never ran.
+  get: vi.fn(async () => undefined),
+  set: vi.fn(async () => {}),
 }));
 
 vi.mock("@/lib/clawkeep", () => ({

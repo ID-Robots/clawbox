@@ -362,6 +362,43 @@ describe("/setup-api/ai-models/status", () => {
       expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_credential_refused_at", undefined);
     });
 
+    it("does not write down a refusal the portal module deliberately did not remember", async () => {
+      // The re-link race, and the reason this persists off
+      // `clawaiTokenRejectedByPortal()` rather than off the lookup's own
+      // `rejected`. A poll goes out with the OLD token; while its 403 is in
+      // flight the new token is proven good, so `fetchPortalTier` returns the
+      // verdict to its caller and deliberately does NOT remember it. Writing it
+      // to disk anyway would stand the image path down at the very restart the
+      // re-link triggers.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      let releaseOldTokenRefusal: () => void = () => {};
+      const oldTokenAnswered = new Promise<void>((resolve) => { releaseOldTokenRefusal = resolve; });
+      fetchSpy.mockImplementation(async (_url: string, init?: RequestInit) => {
+        const auth = String((init?.headers as Record<string, string> | undefined)?.Authorization ?? "");
+        if (auth.includes("claw_NEW")) {
+          return new Response(JSON.stringify({ tier: "max", deviceTier: "pro" }), { status: 200 });
+        }
+        await oldTokenAnswered;
+        return new Response(
+          JSON.stringify({ error: { code: "invalid_token" } }),
+          { status: 403, headers: { "content-type": "application/json" } },
+        );
+      });
+
+      const inFlight = GET();
+      // The re-link lands while that 403 is still on the wire.
+      const portal = await import("@/lib/clawbox-ai-portal-tier");
+      await portal.fetchPortalTier("claw_NEW");
+      releaseOldTokenRefusal();
+      await inFlight;
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.anything(),
+      );
+    });
+
     it("records nothing when the portal merely failed to answer", async () => {
       // The false-failure half of the persisted fact: an unreachable portal
       // would stand the image path down at the next boot on a box whose

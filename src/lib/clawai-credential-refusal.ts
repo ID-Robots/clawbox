@@ -49,6 +49,25 @@ function isRecordedRefusal(value: unknown): boolean {
 }
 
 /**
+ * Is a refusal on record for the credential this box holds?
+ *
+ * The read half of the same key `scripts/gateway-pre-start.sh` opens at boot,
+ * for the writers on this side that must not undo its stand-down: re-writing
+ * the image row and the image slot on a pass that did not change the credential
+ * would put the two out of step and start the storm again.
+ *
+ * Answers false to a store it cannot read, for the same reason the shell reader
+ * does: not knowing is not a refusal.
+ */
+export async function clawaiCredentialRefusalOnRecord(): Promise<boolean> {
+  try {
+    return isRecordedRefusal(await get(CLAWAI_CREDENTIAL_REFUSED_KEY));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Record that the proxy or the portal refused this box's ClawBox AI credential.
  *
  * Same evidential bar as `noteClawaiCredentialRefused` in
@@ -58,9 +77,17 @@ function isRecordedRefusal(value: unknown): boolean {
  *
  * Best effort, and deliberately so. The store can be unwritable (a root-owned
  * `data/config.json` is a state this repo has seen), and a picture or a badge
- * poll must not fail because a HINT could not be saved. What is lost when it
- * fails is one boot's worth of stand-down, not the refusal itself: the caller's
- * own in-memory memo still mutes its surface, and the next poll writes again.
+ * poll must not fail because a HINT could not be saved. The caller's own
+ * in-memory memo still mutes its surface, and the next refusal tries again.
+ *
+ * WHAT IT COSTS WHEN IT FAILS, honestly: the boot script goes on arming the
+ * agent's image path at every gateway start. This whole mechanism is
+ * BOOT-SCOPED in both directions — recording a refusal does not restart
+ * anything, so a box already running keeps spending refused calls until it is
+ * restarted for some other reason, and clearing one does not restart anything
+ * either, so a healed credential gets its pictures back at the next start
+ * rather than at the next poll. That is the trade for not letting a hint
+ * bounce the gateway.
  */
 export async function persistClawaiCredentialRefusal(): Promise<void> {
   try {
@@ -85,8 +112,11 @@ export async function clearPersistedClawaiCredentialRefusal(): Promise<void> {
     if (!isRecordedRefusal(await get(CLAWAI_CREDENTIAL_REFUSED_KEY))) return;
     await set(CLAWAI_CREDENTIAL_REFUSED_KEY, undefined);
   } catch {
-    // Bounded the other way, and self-healing: an uncleared stamp costs one
-    // boot of a suppressed image repair, and the portal poll clears it within
-    // its 30-second cadence once the credential is accepted again.
+    // Bounded, in the same boot-scoped way as the write above: an uncleared
+    // stamp costs the image path until a later clear lands and the gateway
+    // starts again. Note that an UNREADABLE store never gets here at all —
+    // `get` swallows the read and answers `undefined`, which reads as "nothing
+    // to clear" — so this catch is about a store that can be read and not
+    // written.
   }
 }

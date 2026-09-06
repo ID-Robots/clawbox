@@ -52,6 +52,12 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
   setMany: vi.fn(),
+  // The route reads and clears the persisted credential refusal through these
+  // (@/lib/clawai-credential-refusal). Omit them and the calls throw inside
+  // their own catch, so the route behaves as if nothing were ever on record and
+  // this file goes on passing over a gate that never ran.
+  get: vi.fn(async () => undefined),
+  set: vi.fn(async () => {}),
 }));
 
 vi.mock("@/lib/clawkeep", () => ({
@@ -131,7 +137,7 @@ vi.mock("@/lib/local-ai-token", () => ({
   markLocalAiTokenMigrated: vi.fn(),
 }));
 
-import { getAll, setMany } from "@/lib/config-store";
+import { getAll, setMany, get as configGet, set as configSet } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import {
   inferConfiguredLocalModel,
@@ -751,6 +757,71 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
 
       expect(logged.length).toBeLessThan(400);
       expect(logged).toContain("chars]");
+    });
+  });
+
+  /*
+   * TASK-727, the TypeScript half of the boot script's stand-down.
+   *
+   * `scripts/gateway-pre-start.sh` takes the image row and the image slot back
+   * when the proxy has permanently refused this box's credential — and this
+   * function writes exactly those two keys. It also runs on saves that have
+   * nothing to do with ClawBox AI: `ensureFallbackModel` calls
+   * `configureClawboxAi(true, undefined)` whenever a box with no local model
+   * saves ANY provider, and with no token supplied it re-pastes the STORED one.
+   * Without the gate below, the owner's obvious recovery — configure a
+   * different chat provider — cleared the persisted refusal, re-armed the image
+   * path and restarted the gateway on top of it.
+   */
+  describe("a credential the proxy has refused", () => {
+    /**
+     * The store the route reads the refusal stamp and the stored token from —
+     * a real one, so a clear the route performs is visible to the gate that
+     * reads the same key a few lines later.
+     */
+    function refusedBox(storedToken = CLAWAI_TOKEN) {
+      const keys: Record<string, unknown> = {
+        clawai_credential_refused_at: 1_788_000_000_000,
+        clawai_token: storedToken,
+      };
+      vi.mocked(configGet).mockImplementation(async (key: string) => keys[key]);
+      vi.mocked(configSet).mockImplementation(async (key: string, value: unknown) => {
+        if (value === undefined) delete keys[key];
+        else keys[key] = value;
+      });
+      mockGetAll.mockImplementation(async () => ({ ...keys }));
+    }
+
+    it("writes no image ops while a refusal is on record", async () => {
+      refusedBox();
+
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
+
+      expect(res.status).toBe(200);
+      expect(configSetCalls().filter(([path]) => path.startsWith("models.providers.openai"))).toEqual([]);
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+    });
+
+    it("does not retire the refusal on a pass that re-pastes the same token", async () => {
+      // The mark is about the CREDENTIAL. Re-pasting the bytes the box already
+      // holds is not a re-link, and clearing on one would let any other
+      // provider's save undo the boot script's stand-down.
+      refusedBox();
+
+      await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
+
+      expect(vi.mocked(configSet)).not.toHaveBeenCalledWith("clawai_credential_refused_at", undefined);
+    });
+
+    it("retires it and arms the image path again when the token really changes", async () => {
+      refusedBox("claw_OLD");
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_NEW" }));
+
+      expect(res.status).toBe(200);
+      expect(vi.mocked(configSet)).toHaveBeenCalledWith("clawai_credential_refused_at", undefined);
+      expect(callFor("agents.defaults.mediaModels.image")).toBeDefined();
     });
   });
 

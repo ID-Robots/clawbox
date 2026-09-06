@@ -1851,6 +1851,14 @@ def _clawai_credential_refused():
     we have not been told about is left armed. Failing the other way would take
     the picture button off every box whose Next app has never written a
     setting.
+
+    `except Exception`, and it has to be that broad — the same width as the
+    sibling reader. This call is inside the big unguarded heredoc, under
+    `set -euo pipefail`, so anything that escapes aborts the ExecStartPre and
+    the box gets NO GATEWAY. A narrower `(OSError, json.JSONDecodeError)` misses
+    `UnicodeDecodeError`, which is what one non-UTF-8 byte in
+    `data/config.json` — a torn write after a power cut — raises: a corrupt byte
+    in a hint file would have stopped the box from booting.
     """
     _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
     if not _store_path:
@@ -1858,7 +1866,7 @@ def _clawai_credential_refused():
     try:
         with open(_store_path) as _fh:
             _store = json.load(_fh)
-    except (OSError, json.JSONDecodeError):
+    except Exception:
         return False
     if not isinstance(_store, dict):
         return False
@@ -2033,26 +2041,56 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             #     removed.
             # `models.providers.openai.apiKey` is deliberately NOT removed: the
             # channel-audio and cloud-voice migrations below take their bearer
-            # from that same field, and their own gates decide their fate.
-            # Ownership of the slot is unchanged by a dead credential either,
-            # so `_clawai_openai_route_is_ours` stays true.
-            _slot_is_ours = (
-                isinstance(_image_model_cfg, dict)
-                and set(_image_model_cfg.keys()) == {"primary"}
-                and _image_model_cfg.get("primary") == CLAWBOX_IMAGE_MODEL_REF
+            # from that same field, and removing it would take voice
+            # transcription down with the pictures. Ownership of the slot is
+            # unchanged by a dead credential either, so
+            # `_clawai_openai_route_is_ours` stays true.
+            #
+            # SCOPE, stated plainly rather than implied: this arm covers the
+            # IMAGE path only. Neither of those two migrations reads the
+            # refusal — the cloud voice gates on `clawai_tier`, which a box with
+            # a dead credential can never refresh because only a portal-ANSWERED
+            # poll writes it — so a refused Max box still buys one refused round
+            # trip per spoken reply and per voice note. Lower volume than the
+            # image storm by orders of magnitude, and its own change.
+            def _slot_is_ours(_cfg):
+                return (
+                    isinstance(_cfg, dict)
+                    and set(_cfg.keys()) == {"primary"}
+                    and _cfg.get("primary") == CLAWBOX_IMAGE_MODEL_REF
+                )
+
+            # EACH HOME ON ITS OWN, not the one `_image_model_cfg` resolved to.
+            # A v2 box carrying both — a doctor pass, a hand edit, a loader
+            # migration that copied rather than moved — would otherwise keep the
+            # legacy key naming a row we had just deleted, and the core's own
+            # migration re-creates `mediaModels.image` from it on the next load:
+            # the stand-down undone, pointing at a model that is gone.
+            _legacy_is_ours = _slot_is_ours(agents_defaults.get("imageGenerationModel"))
+            _v2_is_ours = _clawbox_v2 and _slot_is_ours(_media_models.get("image"))
+            # Anything in either home that is NOT ours is the owner's image
+            # configuration, and it may well name our row — so the rows stay too.
+            _slot_is_theirs = (
+                (not _legacy_is_ours and agents_defaults.get("imageGenerationModel") is not None)
+                or (_clawbox_v2 and not _v2_is_ours and _media_models.get("image") is not None)
             )
-            if _slot_is_ours or _image_model_cfg is None:
+            if not _slot_is_theirs:
                 _stood_down = False
-                if _slot_is_ours:
-                    if _clawbox_v2 and isinstance(_media_models.get("image"), dict):
-                        del _media_models["image"]
-                    else:
-                        del agents_defaults["imageGenerationModel"]
+                if _legacy_is_ours:
+                    del agents_defaults["imageGenerationModel"]
+                    _stood_down = True
+                if _v2_is_ours:
+                    del _media_models["image"]
                     _stood_down = True
                 if _our_entries:
-                    openai_provider["models"] = [
-                        m for m in _openai_models if not _is_our_image_row(m)
-                    ]
+                    _kept = [m for m in _openai_models if not _is_our_image_row(m)]
+                    # An explicitly empty `models` is not the same statement to
+                    # the core as an absent one, and this migration is what
+                    # created the list on most boxes.
+                    if _kept:
+                        openai_provider["models"] = _kept
+                    else:
+                        del openai_provider["models"]
                     _stood_down = True
                 if _stood_down:
                     print(
