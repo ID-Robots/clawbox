@@ -379,11 +379,30 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
   });
 
   it("still answers 200 when the readiness probe itself throws", async () => {
+    // The BEFORE probe. The route never gets a verdict to compare against, so
+    // it must not buy a reload on a guess — and must not turn the save into a
+    // 500 either.
     mockGetCodingAgentStatus.mockRejectedValue(new Error("cannot read the store"));
 
     const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
 
     expect(res.status).toBe(200);
+    expect(mockReloadMcpServers).not.toHaveBeenCalled();
+  });
+
+  it("still answers 200 when the probe throws AFTER the credential is written", async () => {
+    // The other half, and the one that matters more: by then the token IS on
+    // disk. The save has landed and must be reported as landed; the tool list
+    // catches up at the next respawn, which is what every box did before this
+    // helper existed.
+    mockGetCodingAgentStatus
+      .mockImplementationOnce(readyFromStore)
+      .mockRejectedValueOnce(new Error("cannot read the store"));
+
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+
+    expect(res.status).toBe(200);
+    expect(store.clawai_token).toBe(CLAWAI_TOKEN);
     expect(mockReloadMcpServers).not.toHaveBeenCalled();
   });
 
