@@ -397,7 +397,14 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     // helper existed.
     mockGetCodingAgentStatus
       .mockImplementationOnce(readyFromStore)
-      .mockRejectedValueOnce(new Error("cannot read the store"));
+      .mockImplementationOnce(async () => {
+        // Asserted INSIDE the second probe, so the ordering is pinned and not
+        // just the count: a regression that took both readings before the write
+        // would still be called twice, still answer 200 and still buy no
+        // reload — and would be exactly the bug this whole change is about.
+        expect(store.clawai_token).toBe(CLAWAI_TOKEN);
+        throw new Error("cannot read the store");
+      });
 
     const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
 
