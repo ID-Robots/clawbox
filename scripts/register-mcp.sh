@@ -1295,6 +1295,302 @@ except Exception as exc:  # noqa: BLE001
           % type(exc).__name__, file=sys.stderr)
 PY
 
+# ── 4c. The ClawBox AI cloud voice: armed AND withdrawn, every boot. ────────
+# TASK-717 (the arm) and TASK-718 (the withdrawal). One block, because they are
+# the two halves of one decision and shipping either alone reproduces the defect
+# the other exists to fix: an arm with no withdrawal is the one-way migration
+# TASK-718 is about, and a withdrawal with no arm has nothing to take back on a
+# Hermes box that was never armed at boot in the first place.
+#
+# WHAT IS BROKEN WITHOUT IT. `applyClawaiToHermes` — the only thing on this
+# edition that ever points `tts.provider` at the ClawBox AI proxy — has three
+# callers and every one of them is an explicit (re-)link. So:
+#   - a box linked BEFORE the cloud-voice wiring existed never gets it. Nothing
+#     re-runs the link, and the owner has no reason to: Settings already says
+#     ClawBox AI is connected. It simply never speaks (TASK-717).
+#   - a box that WAS entitled and drops to a lower plan keeps `tts.openai.*`
+#     pointing at an endpoint the proxy now answers 403 to, and pays a refused
+#     round trip on every spoken reply (TASK-718).
+# The OpenClaw edition has had both arms since TASK-459: `gateway-pre-start.sh`
+# gates on `_clawai_speech_entitled` and has the `elif` that takes its own entry
+# back. This is that pair, for the edition that has no `gateway-pre-start.sh`.
+#
+# THE NATIVE SURFACE IS `hermes config set` / `unset`, and it is what this uses —
+# the same commands `hermes-tts.ts` issues for the Settings toggle, so the boot
+# repair and the panel cannot drift into writing the config two different ways.
+# Hermes has no entitlement mechanism of its own to lean on: `tts.provider` is a
+# plain selection with no notion of a plan, and the tier lives only in ClawBox's
+# device store because only ClawBox talks to the portal.
+#
+# WHY HERE. Same answer as §4b: this script already holds `${HERMES_CONFIG}.lock`
+# and already makes CLI calls under it, and `production-server.js` fire-and-
+# forgets it on every web-server boot on hermes|dual. A Node boot hook would be a
+# second, unlocked writer racing this one.
+#
+# THE ENTITLEMENT IS THE PORTAL'S, not a guess: `clawai_tier` in
+# `data/config.json`, which `/setup-api/ai-models/status` refreshes from
+# `device-info` on its 30-second poll — the same stamp `speechEntitledTier()`
+# reads for the panel and `CLAWBOX_SPEECH_DEVICE_TIER` reads on the OpenClaw
+# side. `"pro"` is the DEVICE tier of the MAX plan; the two names are off by one
+# on purpose (CLAWBOX_AI_MODEL_BY_TIER in src/lib/clawbox-ai-models.ts).
+#
+# NOT KNOWING IS NOT AN ANSWER, in either direction, and that is the whole
+# false-success/false-failure guard here. A device store that is absent,
+# unreadable or not an object; a `config.yaml` that will not parse; a tier that
+# is not recorded at all — every one of them holds, and the boot says why. Only
+# a tier we have actually been told, and a slot we can positively see is ours,
+# moves anything.
+#
+# OWNERSHIP, mirroring `hermesCloudRouteIsOurs` (src/lib/hermes-tts.ts) key for
+# key rather than inventing a second rule: the credential is a `claw_` portal
+# token, OR the endpoint names our proxy, OR the slot is genuinely empty (no
+# endpoint AND no key — `base_url` is optional for real OpenAI, so an unset
+# endpoint alone says nothing). On Hermes `tts.openai` is the GENERIC
+# OpenAI-compatible slot, not ClawBox's, and an owner may be running their own
+# speech server in it.
+#
+# THE SELECTION IS THE OWNER'S. The arm moves `tts.provider` only from a
+# genuinely unchosen value — unset, or Hermes' factory `edge` — or from
+# `clawbox-local` on a box that provably has no on-device engine, which is the
+# state the card is about: `install.sh` selects `clawbox-local` whatever the
+# engine answered, so an engineless box reads as a chosen local voice. A box on
+# `elevenlabs`, `piper` or anything else the owner picked is left alone.
+# And the withdrawal deliberately does NOT reset `tts.provider` either — the
+# same ruling the OpenClaw arm records: the panel's job is to show that the
+# choice is no longer available, and silently rewriting it would hide the
+# downgrade. Removing the DEFINITION is what stops the refused calls.
+#
+# IMAGES ARE NOT PART OF THIS, and that is measured rather than assumed: the
+# proxy publishes `modelTiers: {"gpt-image-1-mini": ["free","pro","max"]}`, so
+# the image backend has no tier to be downgraded from, and §"Re-arm the ClawAI
+# image backend" above already reconciles it every boot.
+# ONE binding, read by the decision below and by the writes after it, so the
+# endpoint we call ours and the endpoint we write cannot disagree — the same
+# staging override `hermes-clawai.ts` honours.
+CLAWBOX_VOICE_PROXY="${CLAWBOX_AI_PROXY_URL:-https://clawbox.com/api/ai}"
+CLAWBOX_VOICE_PLAN=$(
+  CLAWBOX_DEVICE_STORE="$PROJECT_DIR/data/config.json" \
+  CLAWBOX_HERMES_CONFIG="$HERMES_CONFIG" \
+  CLAWBOX_SPEECH_DEVICE_TIER="pro" \
+  CLAWBOX_AI_PROXY_URL="$CLAWBOX_VOICE_PROXY" \
+  CLAWBOX_KOKORO_STAMP="$HOME_DIR/.cache/clawbox/kokoro-installed" \
+  python3 - <<'PY' 2>/dev/null || echo "hold the voice plan could not be computed"
+import json, os
+
+# One verdict on stdout: `arm`, `withdraw`, or `hold <why>`. Everything this
+# block decides is decided here, so the shell below is only the writes.
+def say(verdict):
+    print(verdict)
+    raise SystemExit(0)
+
+try:
+    import yaml
+except ImportError:
+    say("hold PyYAML is unavailable")
+
+ENTITLED_TIER = os.environ["CLAWBOX_SPEECH_DEVICE_TIER"]
+# Trailing slashes are not significant in a base URL comparison, and
+# `hermesCloudRouteIsOurs` strips them the same way on the TypeScript side.
+PROXY = os.environ["CLAWBOX_AI_PROXY_URL"].strip().rstrip("/")
+# Hermes' factory default, and the one selection besides "unset" that means
+# nobody has chosen: `edge` is Microsoft's cloud voice, which the box gets for
+# having expressed no opinion.
+FACTORY_PROVIDER = "edge"
+LOCAL_PROVIDER = "clawbox-local"
+CLOUD_PROVIDER = "openai"
+# The one speech model the proxy serves; the same constant `hermes-tts.ts` pins
+# as HERMES_CLOUD_TTS_MODEL, because a request that names anything else is
+# answered 400.
+CLOUD_MODEL = "gpt-4o-mini-tts"
+
+
+def text(value):
+    return value.strip() if isinstance(value, str) else ""
+
+
+def load(path, loader):
+    try:
+        with open(path) as fh:
+            return loader(fh), None
+    except FileNotFoundError:
+        return None, "absent"
+    except Exception as exc:  # noqa: BLE001 — every failure is "we cannot tell"
+        return None, type(exc).__name__
+
+
+store, why = load(os.environ["CLAWBOX_DEVICE_STORE"], json.load)
+if why == "absent":
+    say("hold this box has no ClawBox AI link on record")
+if why is not None:
+    say("hold the device store could not be read (%s)" % why)
+if not isinstance(store, dict):
+    say("hold the device store is not an object")
+
+token = text(store.get("clawai_token"))
+tier = store.get("clawai_tier")
+tier = tier.strip() if isinstance(tier, str) else ""
+
+cfg, why = load(os.environ["CLAWBOX_HERMES_CONFIG"], yaml.safe_load)
+if why is not None:
+    say("hold ~/.hermes/config.yaml could not be read (%s)" % why)
+if cfg is None:
+    cfg = {}
+if not isinstance(cfg, dict):
+    say("hold ~/.hermes/config.yaml is not a mapping")
+
+tts = cfg.get("tts")
+tts = tts if isinstance(tts, dict) else {}
+provider = text(tts.get("provider"))
+slot = tts.get(CLOUD_PROVIDER)
+slot = slot if isinstance(slot, dict) else {}
+base_url = text(slot.get("base_url"))
+api_key = text(slot.get("api_key"))
+model = text(slot.get("model"))
+
+# `hermesCloudRouteIsOurs`, key for key: a `claw_` credential, OR our endpoint,
+# OR a genuinely empty slot.
+key_is_ours = api_key.startswith("claw_")
+slot_is_empty = base_url == "" and api_key == ""
+route_is_ours = key_is_ours or slot_is_empty or base_url.rstrip("/") == PROXY
+
+if token and tier == ENTITLED_TIER:
+    # ALREADY SPEAKING THROUGH US. The selection is not touched again; the
+    # DEFINITION still is, because the portal rotates the token on a re-link and
+    # this script is the only thing on the boot path that would notice. An
+    # unrefreshed key is a 401 on every utterance while every panel — which asks
+    # only that the two keys are non-empty — calls the voice configured.
+    if provider == CLOUD_PROVIDER and route_is_ours:
+        if base_url.rstrip("/") == PROXY and api_key == token and model == CLOUD_MODEL:
+            say("hold the cloud voice is already armed")
+        say("refresh")
+    if provider == LOCAL_PROVIDER:
+        # THE BOX THIS CARD IS ABOUT is here, not under "unset". `install.sh`
+        # `step_openclaw_tts` selects `clawbox-local` on every install and every
+        # update WHATEVER the engine answered — deliberately, because to Hermes
+        # an absent `tts.provider` resolves to Microsoft's Edge cloud, so an
+        # engineless box is left honestly mute rather than speaking through a
+        # third party. That is why "a Hermes box with no TTS engine" reads as a
+        # CHOSEN local voice rather than an unchosen slot.
+        #
+        # Moving a box off its own voice is effectively permanent — the next
+        # `step_openclaw_tts` sees `openai`, falls into its owner's-choice arm
+        # and preserves it — so it is done only on a POSITIVE "this box cannot
+        # speak for itself". The stamp is that positive: `localTtsEngineInstalled`
+        # is `stamped AND the unit is present`, so an ABSENT stamp settles it
+        # with a single file test and no systemd bus. A stamp that IS there is
+        # deliberately not pursued further here: the unit could still be missing,
+        # but "we did not finish asking" is not evidence, and this boot cannot
+        # afford the probe the link path makes.
+        if os.path.exists(os.environ["CLAWBOX_KOKORO_STAMP"]):
+            say("hold this box speaks for itself")
+    elif provider not in ("", FACTORY_PROVIDER):
+        say("hold this box has already chosen how it speaks (%s)" % provider)
+    if not route_is_ours:
+        say("hold tts.openai already names its own speech route")
+    say("arm")
+
+# The other direction. Only over a tier we have actually been TOLD: an absent
+# stamp is a box nobody has told us about, not a box that has lost its plan, and
+# taking a working voice away over a store we could not read is the false
+# failure this whole block is written to avoid.
+if tier and tier != ENTITLED_TIER:
+    # ONLY what we wrote. The stamp the OpenClaw arm can rely on does not exist
+    # here — Hermes' `tts.openai` block is the harness's own schema and carries
+    # no room for one — so ownership is the positive endpoint/credential test
+    # above, and an EMPTY slot is explicitly not something to take back.
+    if slot_is_empty:
+        say("hold there is no ClawBox AI cloud voice on this box to withdraw")
+    if not (key_is_ours or base_url.rstrip("/") == PROXY):
+        say("hold tts.openai names its own speech route — not ours to withdraw")
+    say("withdraw")
+
+say("hold nothing to do")
+PY
+)
+CLAWBOX_VOICE_VERDICT="${CLAWBOX_VOICE_PLAN%% *}"
+
+# One bounded CLI call, with the exit status kept. Braces and `-k 5` for the
+# reason §4's `tools disable` documents at length: `timeout` SIGKILLs its own
+# process group, bash announces a signal-killed foreground child on the SCRIPT's
+# stderr where the command's own redirect cannot reach it, and that notice lands
+# in the clawbox-setup journal reading as this script having been killed.
+hermes_voice_write() {
+  if { timeout -k 5 "$HERMES_CLI_TIMEOUT" "$HERMES_BIN" "$@" >/dev/null 2>&1; } 2>/dev/null; then
+    return 0
+  fi
+  # `$?` here is the CONDITION's status, which is what the caller reports — the
+  # same shape §4 uses, and the reason neither is written as `if ! …`, where
+  # `$?` in the branch would be the negation's 0.
+  CLAWBOX_VOICE_RC=$?
+  return 1
+}
+
+case "$CLAWBOX_VOICE_VERDICT" in
+  arm|refresh)
+    # DEFINITION BEFORE SELECTION, the same order `selectHermesEngine` keeps:
+    # the endpoint, credential and model land first, so a failure leaves
+    # `tts.provider` untouched rather than selecting a provider with nowhere to
+    # send a request. Nothing is recorded behind a marker, so a boot that got
+    # part way is simply offered the whole thing again by the next one.
+    CLAWBOX_VOICE_TOKEN=$(
+      CLAWBOX_DEVICE_STORE="$PROJECT_DIR/data/config.json" python3 - <<'TOKENPY' 2>/dev/null || true
+import json, os
+try:
+    with open(os.environ["CLAWBOX_DEVICE_STORE"]) as fh:
+        value = json.load(fh).get("clawai_token")
+except Exception:
+    value = None
+print(value.strip() if isinstance(value, str) else "")
+TOKENPY
+    )
+    if [ -z "$CLAWBOX_VOICE_TOKEN" ]; then
+      log "NOTE: the ClawBox AI cloud voice was armable but the device token could not be re-read; leaving the voice alone"
+    elif ! hermes_voice_write config set tts.openai.base_url "$CLAWBOX_VOICE_PROXY"; then
+      log "could not write tts.openai.base_url (exit $CLAWBOX_VOICE_RC) — the cloud voice is NOT selected; the next start will try again"
+    # The credential is an ARGUMENT and never reaches a message: one of these
+    # three writes carries the device token, and the journal keeps what is
+    # logged.
+    elif ! hermes_voice_write config set tts.openai.api_key "$CLAWBOX_VOICE_TOKEN"; then
+      log "could not write tts.openai.api_key (exit $CLAWBOX_VOICE_RC) — the cloud voice is NOT selected; the next start will try again"
+    elif ! hermes_voice_write config set tts.openai.model gpt-4o-mini-tts; then
+      log "could not write tts.openai.model (exit $CLAWBOX_VOICE_RC) — the cloud voice is NOT selected; the next start will try again"
+    elif [ "$CLAWBOX_VOICE_VERDICT" = refresh ]; then
+      # The selection is already ours and is NOT rewritten: one writer of
+      # `tts.provider`, and this path is only here to keep the credential and
+      # the endpoint current.
+      log "refreshed the ClawBox AI speech credential"
+    elif ! hermes_voice_write config set tts.provider openai; then
+      log "wrote the ClawBox AI speech endpoint but could not select it (exit $CLAWBOX_VOICE_RC) — the next start will try again"
+    else
+      log "armed the ClawBox AI cloud voice — this box's plan includes it and nothing else had been chosen"
+    fi
+    ;;
+  withdraw)
+    # `tts.provider` is deliberately left where it is — see the block comment.
+    # Removing the DEFINITION is what stops the refused round trips; the panel
+    # then reports the cloud voice unconfigured, which is the truth.
+    #
+    # The CREDENTIAL first, and every step reported rather than collapsed into
+    # one verdict: a partial withdrawal announced as a whole one is exactly the
+    # false success this arm exists to end.
+    CLAWBOX_VOICE_WITHDRAWN=true
+    for CLAWBOX_VOICE_KEY in tts.openai.api_key tts.openai.base_url tts.openai.model; do
+      if ! hermes_voice_write config unset "$CLAWBOX_VOICE_KEY"; then
+        log "could not remove $CLAWBOX_VOICE_KEY (exit $CLAWBOX_VOICE_RC) — this box may still be calling a speech endpoint its plan no longer includes; the next start will try again"
+        CLAWBOX_VOICE_WITHDRAWN=false
+      fi
+    done
+    if [ "$CLAWBOX_VOICE_WITHDRAWN" = true ]; then
+      log "removed the ClawBox AI cloud voice: this box's plan no longer includes it"
+    fi
+    ;;
+  *)
+    # Every hold says why, on the boot log, because "nothing happened" is the
+    # one outcome an operator cannot tell apart from "this step is not running".
+    log "left the voice alone — ${CLAWBOX_VOICE_PLAN#hold }"
+    ;;
+esac
+
 # ── 5. Prove the EMAIL: hook plugin actually LOADS, every boot. ─────────────
 # `hermes plugins list` would say "enabled" for a plugin that raises on import,
 # has no `register()`, or registers a mistyped hook name: its status is read
