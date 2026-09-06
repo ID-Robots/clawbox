@@ -24,7 +24,8 @@ import { useT } from "@/lib/i18n";
 
 export interface PluginRepairInfo {
   pluginId: string;
-  stage: "install" | "consent";
+  /** Mirrors `PluginRepairStage`, spelled out so this stays a client module. */
+  stage: "install" | "consent" | "not-installed";
   reason: string;
 }
 

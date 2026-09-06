@@ -1,11 +1,17 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
+import { EventEmitter } from "node:events";
 import * as fs from "fs/promises";
 import { existsSync } from "fs";
 
+// `spawn` beside the two: `runOpenclawConfigSetBatch` — the repo's own writer
+// for `plugins.entries.<id>.enabled`, which the stranded-entry repair calls —
+// goes through `spawnOpenclaw`, and a factory that omits it leaves `spawn`
+// undefined at runtime. `fakeChild` below gives it a child that closes 0.
 vi.mock("child_process", () => ({
   exec: vi.fn(),
   execFile: vi.fn(),
+  spawn: vi.fn(),
 }));
 
 // `realpath` beside `readFile`: readBuildId follows `.next/standalone/server.js`
@@ -62,17 +68,32 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
 // The TASK-606 marker, mocked so the clears the repair paths owe can be seen.
 // `readPluginRepairs` answers `{}`, which is what the real one answers under
 // this file's mocked `fs/promises` anyway — so nothing else moves.
-const { mockClearPluginRepair, mockReadPluginRepairs, mockClawboxDisabledEntryId } = vi.hoisted(() => ({
+const {
+  mockClearPluginRepair,
+  mockReadPluginRepairs,
+  mockClawboxDisabledEntryId,
+  mockRecordPluginRepair,
+} = vi.hoisted(() => ({
   mockClearPluginRepair: vi.fn(async () => true),
   mockReadPluginRepairs: vi.fn(async () => ({})),
   // Null by default: no row says ClawBox switched anything off, so a payload
   // repair clears the marker without touching the config.
   mockClawboxDisabledEntryId: vi.fn(async (): Promise<string | null> => null),
+  // The writer half of the same marker (TASK-738), so the row the owner sees
+  // can be asserted without a real `data/plugin-repair.json`.
+  mockRecordPluginRepair: vi.fn(async (_row: {
+    id: string;
+    stage: string;
+    reason: string;
+    disabled: boolean;
+    spec: string;
+  }) => {}),
 }));
 vi.mock("@/lib/plugin-repair", () => ({
   clearPluginRepair: mockClearPluginRepair,
   readPluginRepairs: mockReadPluginRepairs,
   clawboxDisabledEntryId: mockClawboxDisabledEntryId,
+  recordPluginRepair: mockRecordPluginRepair,
 }));
 
 import { get, set, setMany } from "@/lib/config-store";
@@ -88,6 +109,24 @@ const mockReadFile = vi.mocked(fs.readFile);
 const mockRealpath = vi.mocked(fs.realpath);
 const mockExists = vi.mocked(existsSync);
 const mockGatewayUp = vi.mocked(waitForPortOpen);
+const mockSpawn = vi.mocked(childProcess.spawn);
+
+/**
+ * A child that closes 0, for the `spawn` path.
+ *
+ * `spawnOpenclaw` attaches to `stdout`/`stderr` and resolves on `close`, so the
+ * fake needs both streams and the event — nothing more: these cases assert on
+ * the ARGV a write was issued with, and the config the write produced is the
+ * `readFile` fixture's job.
+ */
+function fakeChild(): EventEmitter & { stdout: EventEmitter; stderr: EventEmitter } {
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+  });
+  setImmediate(() => child.emit("close", 0));
+  return child;
+}
 
 /**
  * A box whose rebuild produced a build, and no other readable file.
@@ -2632,6 +2671,254 @@ describe("updater", () => {
       expect(state.error).toContain("OpenClaw gateway is not listening on port 18789");
       expect(state.error).toContain("gateway crashed for an unrelated reason");
       expect(state.error).not.toContain("refuses this device's configuration");
+    });
+  });
+
+  /**
+   * TASK-738 — link 3 of the same customer incident.
+   *
+   * The 2026.7 config carried eleven plugin entries the 2026.8 core no longer
+   * bundles and that were never installed on their own. The gateway prints
+   * `OpenClaw plugin verification failed; refusing to report the gateway
+   * ready.` followed by one `Plugin "<id>" requires capability consent` line
+   * each, and exits 1 — so links 1 and 2 could be repaired and the box was
+   * still dark.
+   *
+   * The refusal names them, but as a CONSENT question, and consent is not what
+   * is missing: the package is not on the box at all, so `plugins enable`
+   * answers "Plugin not found". `openclaw config validate --json` is the core's
+   * own answer to which of them that is, measured on 2026.8.1 (2026-09-06,
+   * throwaway OPENCLAW_HOME):
+   *
+   *   {"valid":true,"path":"…","warnings":[{"path":"plugins.entries.byteplus",
+   *    "message":"plugin not installed: byteplus — install the official
+   *    external plugin with: openclaw plugins install @openclaw/byteplus-provider"}]}
+   *
+   * Note `valid: true` and exit 0 — this is a WARNING, not a refusal — and note
+   * that the core emits one for an entry that is already `enabled: false` too,
+   * which is why the disabled entry below must be left exactly alone.
+   */
+  describe("plugin entries the installed core no longer bundles", () => {
+    const VALIDATE = " config validate";
+    const CONFIG_SET = " config set";
+
+    /** The core's own words, as measured. */
+    function notInstalledWarning(id: string) {
+      return {
+        path: `plugins.entries.${id}`,
+        message: `plugin not installed: ${id} — install the official external plugin`
+          + ` with: openclaw plugins install @openclaw/${id}-provider`,
+      };
+    }
+
+    /**
+     * The gateway's own journal in that state, in the incident's order.
+     *
+     * All THREE entries are named, including the one the owner has switched
+     * off: the refusal is the whole boot's journal and can carry a line from a
+     * start before he did it, so "the journal named it" must not be what makes
+     * a `leave it alone` assertion pass.
+     */
+    const refusedJournal = [
+      "OpenClaw plugin verification failed; refusing to report the gateway ready.",
+      'Plugin "byteplus" requires capability consent',
+      'Plugin "vydra" requires capability consent',
+      'Plugin "xiaomi" requires capability consent',
+      "",
+    ].join("\n");
+
+    /** Every `config set` argv the repo's writer issued, batched or single. */
+    function configSetWrites(): string[] {
+      const written: string[] = [];
+      for (const call of mockSpawn.mock.calls) {
+        const args = call[1];
+        if (!Array.isArray(args) || args[0] !== "config" || args[1] !== "set") continue;
+        if (args[2] === "--batch-json") {
+          for (const entry of JSON.parse(String(args[3])) as { path: string; value: unknown }[]) {
+            if (entry.value === false) written.push(entry.path);
+          }
+          continue;
+        }
+        if (String(args[3]) === "false") written.push(String(args[2]));
+      }
+      return written;
+    }
+
+    /** True once the core's own writer has switched this entry off. */
+    function disableRan(id: string): boolean {
+      return configSetWrites().includes(`plugins.entries["${id}"].enabled`);
+    }
+
+    /**
+     * A box whose openclaw.json carries the entries — and which reflects the
+     * disable, the way the core's `config set` does. Reading it back is how
+     * the repair proves the write landed, so a fixture frozen before the write
+     * would make a correct fix look like a failed one.
+     *
+     * `byteplus` carries NO `enabled` key, which is the shape a provider-config
+     * flow writes and the shape the installed 2026.8.1 core treats as ACTIVE:
+     * its activation decision short-circuits only on an explicit `false`. A
+     * fixture that wrote `enabled: true` for every entry would let a repair
+     * that skips this shape pass while the box it is written for stays dark.
+     */
+    function mockBoxWithEntries(): void {
+      mockReadFile.mockImplementation(async (file) => {
+        const name = String(file);
+        if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (name.endsWith("openclaw.json")) {
+          return JSON.stringify({
+            plugins: {
+              entries: {
+                byteplus: disableRan("byteplus") ? { enabled: false } : { config: { region: "eu" } },
+                vydra: { enabled: !disableRan("vydra") },
+                // The owner's own answer, already given. The core warns about
+                // it all the same, and the journal above still names it.
+                xiaomi: { enabled: false },
+              },
+            },
+          });
+        }
+        throw new Error("ENOENT");
+      });
+    }
+
+    /** The second half of an update, run to its terminal phase. */
+    async function runContinuation() {
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockBoxWithEntries();
+      mockSpawn.mockImplementation(fakeChild as unknown as typeof childProcess.spawn);
+      // The gateway comes back exactly when the blocking entries are off —
+      // which is the claim under test, not a convenience.
+      mockGatewayUp.mockImplementation(async () => disableRan("byteplus") && disableRan("vydra"));
+      updater = await import("@/lib/updater");
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(["completed", "failed"]).toContain(updater.getUpdateState().phase));
+      return updater.getUpdateState();
+    }
+
+    /** A box whose gateway refuses readiness, and a core that says why. */
+    function setupBox(warnings: { path: string; message: string }[]): void {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        [VALIDATE]: { stdout: JSON.stringify({ valid: true, path: "/home/clawbox/.openclaw/openclaw.json", warnings }), stderr: "" },
+        [CONFIG_SET]: { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+    }
+
+    it("switches off the entries the core says were never installed, and the gateway comes back", async () => {
+      setupBox([notInstalledWarning("byteplus"), notInstalledWarning("vydra"), notInstalledWarning("xiaomi")]);
+
+      const state = await runContinuation();
+
+      // `byteplus` has no `enabled` key at all and is switched off all the
+      // same: the core calls such an entry active, and it is blocking.
+      expect(disableRan("byteplus")).toBe(true);
+      expect(disableRan("vydra")).toBe(true);
+      // The owner switched this one off himself — and the journal names it
+      // exactly like the other two, so only the config read can spare it.
+      expect(disableRan("xiaomi")).toBe(false);
+      // And the owner is told, on a row he can press: the core named the
+      // package, so the Retry can install it for him if he wants it back.
+      // TWO writes per entry, and that is the point: the first goes down
+      // BEFORE the switch-off, so a marker write that fails afterwards cannot
+      // leave a plugin switched off with nothing on screen — a state the next
+      // pass could not tell from one the owner switched off himself.
+      const marked = mockRecordPluginRepair.mock.calls.map(([row]) => row);
+      const settled = new Map(marked.map((row) => [row.id, row]));
+      expect([...settled.keys()].sort()).toEqual(["byteplus", "vydra"]);
+      expect(marked.filter((row) => row.id === "byteplus").map((row) => row.disabled))
+        .toEqual([false, true]);
+      expect([...settled.values()].every((row) => row.stage === "not-installed" && row.disabled === true))
+        .toBe(true);
+      expect(settled.get("byteplus")?.spec).toBe("@openclaw/byteplus-provider");
+      expect(state.phase).toBe("completed");
+    });
+
+    it("writes every stranded entry in ONE CLI call, not one each", async () => {
+      // This runs inside `withGatewayQuiesced`, with the gateway masked and
+      // stopped, so every CLI cold start here is downtime the owner is paying
+      // for — eleven of them on the incident box. The repo's batch writer is
+      // also the one that retries the config-mutation conflict that issuing
+      // them back to back provokes.
+      setupBox([notInstalledWarning("byteplus"), notInstalledWarning("vydra")]);
+
+      await runContinuation();
+
+      const batches = mockSpawn.mock.calls.filter(([, args]) =>
+        Array.isArray(args) && args[0] === "config" && args[1] === "set");
+      expect(batches).toHaveLength(1);
+      expect(batches[0][1][2]).toBe("--batch-json");
+    });
+
+    it("says the write did not land when the config cannot be read back", async () => {
+      // False-success class, and the polarity is easy to get wrong: "the entry
+      // does not read as enabled" is also what an unreadable config answers.
+      // A row claiming `disabled: true` over an entry still on would tell the
+      // owner the box was repaired and teach the next repair that ClawBox owns
+      // an `enabled: false` it never wrote.
+      setupBox([notInstalledWarning("byteplus")]);
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockSpawn.mockImplementation(fakeChild as unknown as typeof childProcess.spawn);
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        throw new Error("EACCES");
+      });
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      // One entry, and every row written for it says the switch-off did not
+      // land — including the one filed before it was attempted.
+      const marked = mockRecordPluginRepair.mock.calls.map(([row]) => row);
+      expect(new Set(marked.map((row) => row.id))).toEqual(new Set(["byteplus"]));
+      expect(marked.every((row) => row.disabled === false)).toBe(true);
+    });
+
+    it("files no spec it cannot resolve, rather than a Retry that cannot work", async () => {
+      // The spec is captured with `\S+` out of an English sentence, so a core
+      // that reworded the line — a trailing backtick, a full stop, a closing
+      // quote — would hand the Retry an argv the registry cannot resolve and
+      // the owner a 502 on a button that can never succeed. The row still goes
+      // up with the core's own sentence on it; the Retry answers `no_spec`.
+      setupBox([{
+        path: "plugins.entries.byteplus",
+        message: "plugin not installed: byteplus — install the official external plugin"
+          + " with: `openclaw plugins install @openclaw/byteplus-provider`.",
+      }]);
+
+      await runContinuation();
+
+      const marked = mockRecordPluginRepair.mock.calls.map(([row]) => row);
+      expect(marked.every((row) => row.spec === "")).toBe(true);
+      // …and the entry is still switched off: the box comes back either way.
+      expect(disableRan("byteplus")).toBe(true);
+    });
+
+    it("leaves a plugin the core does not call not-installed to its owner", async () => {
+      // A genuinely installed plugin whose reviewed surface is stale is a
+      // consent question, and consenting for a plugin ClawBox did not install
+      // is what the managed whitelist exists to prevent.
+      setupBox([]);
+
+      const state = await runContinuation();
+
+      expect(disableRan("byteplus")).toBe(false);
+      expect(mockRecordPluginRepair).not.toHaveBeenCalled();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("requires capability consent");
     });
   });
 });

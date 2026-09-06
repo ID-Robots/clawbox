@@ -30,6 +30,14 @@ const execFile = promisify(execFileCb);
  * core's own documentation names for these states. This route adds the owner's
  * gesture and the bookkeeping around it; the repair itself is OpenClaw's.
  *
+ * AND THE THIRD ROW (TASK-738) is where that gesture matters most. A core bump
+ * strands entries an older core bundled and the installed one does not; the
+ * updater switches those off so the gateway can report ready, and files them
+ * with the official package the CORE named. Nothing installs them on the box's
+ * own initiative — that would be consenting to a plugin's capabilities on
+ * behalf of an owner who never chose it. Here it is his press, so the install
+ * runs, with his consent, on the spec the core supplied.
+ *
  * AND IT PROVES IT. `openclaw plugins list --json` is asked afterwards and the
  * marker is cleared only for a plugin that comes back installed AND consented.
  * A CLI that exits 0 having written nothing is the false success this whole
@@ -180,7 +188,13 @@ export async function POST(req: Request) {
   const registryId = canonicalPluginId(entry.id);
 
   try {
-    if (entry.stage !== "install") {
+    // MATCHED ON `consent`, not on "anything that is not an install". The
+    // third stage (`not-installed`, TASK-738) records an entry the core has no
+    // package for at all, and `plugins enable` answers that with "Plugin not
+    // found" — the install below is its repair, with the spec the CORE named.
+    // A `!== "install"` test sent it to the wrong verb and the badge could
+    // never clear.
+    if (entry.stage === "consent") {
       // THE CANONICAL ID FOR THE REGISTRY, the configured key for the config.
       // `plugins enable` and `plugins inspect` look the id up in the registry
       // report, which keys plugins by their bare manifest id — so a marker

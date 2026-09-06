@@ -26,7 +26,12 @@ import {
   hermesProviderLabel,
 } from "@/lib/hermes-providers";
 import { getModelOptions, probeStillOwed } from "@/lib/hermes-model-options";
-import { readPluginRepairs, repairFor, type PluginRepairStage } from "@/lib/plugin-repair";
+import {
+  pluginHasSettingsRow,
+  readPluginRepairs,
+  repairFor,
+  type PluginRepairStage,
+} from "@/lib/plugin-repair";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 
 /**
@@ -124,6 +129,31 @@ export interface ProviderStatusSummary {
    * See {@link ProviderConnectionState}.
    */
   degraded: boolean;
+  /**
+   * Plugins that need repair and have no Settings row of their own (TASK-738).
+   *
+   * A core bump can strand an entry for a plugin an older core bundled —
+   * `byteplus`, `vydra`, `xiaomi` on the incident box — which refuses gateway
+   * readiness until something switches it off. ClawBox does switch it off, and
+   * the owner then has a provider that silently stopped existing unless he is
+   * told: there is no Providers row and no Channels row for `vydra` to badge.
+   * These are those rows, listed under the provider list with the same notice
+   * and the same Retry every other repair uses.
+   *
+   * NOT filtered to the `not-installed` stage, on purpose: the rule is "no
+   * other surface will draw this row", not "the updater wrote it". If the boot
+   * script ever marks a plugin outside `ROW_PLUGIN_IDS`, that row belongs here
+   * too rather than nowhere.
+   *
+   * Absent rather than empty on a box that could not be asked, and absent on
+   * Hermes, where nothing writes the record at all.
+   */
+  unattachedRepairs?: {
+    pluginId: string;
+    stage: PluginRepairStage;
+    reason: string;
+    atMs: number;
+  }[];
 }
 
 /** OpenClaw's AI-provider section offers exactly these, in this order. */
@@ -523,9 +553,21 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
       })
       .map((row) => row.id);
     const hidden = new Set(unrunnable);
+    // The rows no provider or channel row will draw. Split here rather than in
+    // the panel so the two surfaces cannot disagree about which is which: the
+    // badge below and this list are fed from one read and one rule.
+    const unattachedRepairs = Object.values(repairs)
+      .filter((row) => !pluginHasSettingsRow(row.id))
+      .map((row) => ({
+        pluginId: row.id,
+        stage: row.stage,
+        reason: row.reason,
+        atMs: row.atMs,
+      }));
     return {
       ...summary,
       unrunnable,
+      ...(unattachedRepairs.length > 0 ? { unattachedRepairs } : {}),
       providers: summary.providers.filter((row) => !hidden.has(row.id)).map((row) => {
         const repair = repairFor(repairs, row.id);
         return {

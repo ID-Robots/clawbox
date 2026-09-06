@@ -4002,9 +4002,10 @@ MANAGEDPY
       # the checkout by the block ~450 lines below, which then writes
       # `enabled: true` unconditionally — so a disable here would be undone in
       # the same script run, leaving a marker that says `disabled: true` over a
-      # config that says otherwise, on a row no panel can render (it is neither
-      # a provider nor a channel) and no Retry can clear. It is also not a
-      # registry package: there is nothing for a Retry to install.
+      # config that says otherwise. It is also not a registry package: there is
+      # nothing for a Retry to install. (Settings CAN render a row for a plugin
+      # that is neither a provider nor a channel since TASK-738 — that half of
+      # the old reason is gone; the two above are the ones that hold.)
       echo "  WARN: could not confirm $MANAGED_PLUGIN plugin capabilities; EMAIL: directives may reach channels" >&2
       continue
     fi

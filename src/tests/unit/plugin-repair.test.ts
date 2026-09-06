@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -143,5 +143,96 @@ describe("plugin-repair — which row a failure belongs to", () => {
     const { clearPluginRepair } = await load();
     expect(await clearPluginRepair("whatsapp")).toBe(false);
     expect(await clearPluginRepair("@openclaw/whatsapp")).toBe(false);
+  });
+});
+
+/**
+ * The updater's half of the same file (TASK-738).
+ *
+ * `scripts/gateway-pre-start.sh` has written this record since TASK-606; the
+ * updater now writes one too, for an entry a core bump stranded. One file, one
+ * shape, one Retry — so what matters here is that the server-side writer keeps
+ * every other plugin's row and never sees a half-written file.
+ */
+describe("plugin-repair — recording a row from the server side", () => {
+  const strandedRow = {
+    id: "byteplus",
+    stage: "not-installed" as const,
+    reason: "plugin not installed: byteplus — install the official external plugin"
+      + " with: openclaw plugins install @openclaw/byteplus-provider",
+    disabled: true,
+    spec: "@openclaw/byteplus-provider",
+  };
+
+  it("writes a row a reader can read back, on a box with no file yet", async () => {
+    const { recordPluginRepair, readPluginRepairs } = await load();
+    await recordPluginRepair(strandedRow);
+    const rows = await readPluginRepairs();
+    expect(rows.byteplus).toMatchObject(strandedRow);
+    // Stamped by the writer, not passed in: a caller that forgot it would
+    // otherwise file a row dated 1970 beside the boot script's own.
+    expect(rows.byteplus.atMs).toBeGreaterThan(0);
+  });
+
+  it("keeps every other plugin's row", async () => {
+    write({ discord: { id: "discord", stage: "consent", reason: "no", atMs: 1, disabled: true, spec: "" } });
+    const { recordPluginRepair, readPluginRepairs } = await load();
+    await recordPluginRepair(strandedRow);
+    expect(Object.keys(await readPluginRepairs()).sort()).toEqual(["byteplus", "discord"]);
+  });
+
+  it("starts over on a file it cannot parse, exactly as the boot script does", async () => {
+    mkdirSync(path.join(dir, "data"), { recursive: true });
+    writeFileSync(path.join(dir, "data", "plugin-repair.json"), "{ not json", "utf-8");
+    const { recordPluginRepair, readPluginRepairs } = await load();
+    await recordPluginRepair(strandedRow);
+    expect(Object.keys(await readPluginRepairs())).toEqual(["byteplus"]);
+  });
+
+  it("leaves no temp file behind", async () => {
+    const { recordPluginRepair } = await load();
+    await recordPluginRepair(strandedRow);
+    expect(readFileSync(path.join(dir, "data", "plugin-repair.json"), "utf-8")).toContain("not-installed");
+    // The staging file is the assertion, not the target: a rename that lands
+    // is easy, and a `.tmp.<pid>.<uuid>` left in `data/` is what a failed one
+    // used to leave behind for ever.
+    expect(readdirSync(path.join(dir, "data"))).toEqual(["plugin-repair.json"]);
+  });
+
+  it("removes the staging file when the rename cannot land", async () => {
+    // A read-only remount or a full partition, on exactly the box that can
+    // least afford one stale temp file per boot. Mocked at the module rather
+    // than spied: `fs/promises` is an ESM namespace and its exports cannot be
+    // redefined in place.
+    vi.doMock("fs/promises", async () => {
+      const actual = await vi.importActual<typeof import("fs/promises")>("fs/promises");
+      const rename = async () => { throw new Error("EROFS: read-only file system"); };
+      return { ...actual, default: { ...actual, rename }, rename };
+    });
+    try {
+      const { recordPluginRepair } = await load();
+      mkdirSync(path.join(dir, "data"), { recursive: true });
+      await expect(recordPluginRepair(strandedRow)).rejects.toThrow("EROFS");
+      expect(readdirSync(path.join(dir, "data"))).toEqual([]);
+    } finally {
+      vi.doUnmock("fs/promises");
+    }
+  });
+
+  it("is read back as the third stage rather than dropped as an unknown one", async () => {
+    // `parseEntry` accepts a closed set, and a row whose stage it does not know
+    // is discarded whole — which would have made the badge disappear for
+    // exactly the rows this card adds.
+    write({ vydra: { id: "vydra", stage: "not-installed", reason: "no package", atMs: 5, disabled: true, spec: "" } });
+    const { readPluginRepairs } = await load();
+    expect((await readPluginRepairs()).vydra?.stage).toBe("not-installed");
+  });
+
+  it("knows which plugins have a Settings row of their own and which do not", async () => {
+    const { pluginHasSettingsRow } = await load();
+    expect(pluginHasSettingsRow("discord")).toBe(true);
+    expect(pluginHasSettingsRow("@openclaw/deepseek-provider")).toBe(true);
+    expect(pluginHasSettingsRow("byteplus")).toBe(false);
+    expect(pluginHasSettingsRow("vydra")).toBe(false);
   });
 });

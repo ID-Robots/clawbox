@@ -26,7 +26,8 @@ const ROWS = [
 
 let posts: { url: string; body: unknown }[] = [];
 
-function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number } } = {}) {
+/** The box's answers to every call this list makes, in one stub. */
+function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number }; unattachedRepairs?: unknown[] } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -37,7 +38,13 @@ function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string
       return json(opts.locale ? { ui_language: opts.locale } : {});
     }
     if (url.startsWith("/setup-api/providers/status")) {
-      return json({ harness: "openclaw", providers: rows, defaultProvider: "clawai", degraded: false });
+      return json({
+        harness: "openclaw",
+        providers: rows,
+        defaultProvider: "clawai",
+        degraded: false,
+        ...(opts.unattachedRepairs ? { unattachedRepairs: opts.unattachedRepairs } : {}),
+      });
     }
     if (url === "/setup-api/providers/enabled" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
@@ -426,5 +433,45 @@ describe("a checking answer that outlasts any fixed retry budget", () => {
     answer = "settled";
     await advance(30_000);
     expect(screen.getByTestId("ai-provider-openai")).toBeInTheDocument();
+  });
+});
+
+/**
+ * TASK-738 — a plugin with no row of its own.
+ *
+ * A core bump strands entries for plugins an older core BUNDLED and the
+ * installed one does not; the gateway refuses readiness over them, so the
+ * updater switches them off. `byteplus` has no Providers row and no Channels
+ * row, so before this the only trace was a line in the update log — the owner
+ * saw a provider that had silently stopped existing.
+ */
+describe("AiProviderList — plugins with no row of their own", () => {
+  const STRANDED = [{
+    pluginId: "byteplus",
+    stage: "not-installed",
+    reason: "plugin not installed: byteplus — install the official external plugin"
+      + " with: openclaw plugins install @openclaw/byteplus-provider",
+    atMs: 1_700_000_000_000,
+  }];
+
+  it("names the plugin, says why, and offers the Retry", async () => {
+    stubFetch(ROWS, { unattachedRepairs: STRANDED });
+    renderList();
+
+    expect(await screen.findByTestId("plugin-repair-byteplus")).toBeInTheDocument();
+    const group = screen.getByTestId("ai-provider-plugin-repairs");
+    // The label, or a name the owner has never seen is just sitting in his
+    // provider list with nothing saying what it is.
+    expect(group).toHaveTextContent(translations.en["settings.providers.strandedPlugins"]);
+    expect(group).toHaveTextContent("byteplus");
+    expect(screen.getByTestId("plugin-repair-byteplus")).toHaveTextContent(/plugin not installed: byteplus/);
+    expect(screen.getByTestId("plugin-repair-retry-byteplus")).toBeInTheDocument();
+  });
+
+  it("shows nothing at all on a box with none", async () => {
+    stubFetch();
+    renderList();
+    expect(await screen.findByTestId("ai-provider-clawai")).toBeInTheDocument();
+    expect(screen.queryByTestId("ai-provider-plugin-repairs")).not.toBeInTheDocument();
   });
 });

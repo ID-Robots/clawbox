@@ -268,6 +268,40 @@ export default function AiProviderList() {
           )}
         </ul>
       )}
+
+      {/* Plugins with no row of their own (TASK-738).
+          A core bump strands entries for plugins an older core bundled; the
+          updater switches them off so the gateway can report ready, and this
+          is the only place on the box that says so. Rendered OUTSIDE the list
+          above, and outside its loading gate: these rows come from the marker
+          file, not from a provider probe, and hiding them behind a skeleton
+          that is waiting on someone else's dashboard is how a switched-off
+          plugin stays invisible.
+          The plugin's own id is the label. It is what `openclaw plugins` calls
+          it and what the core's own sentence beside it names — a translated
+          display name would have to be invented per plugin for a set this
+          repo deliberately does not enumerate. */}
+      {(summary?.unattachedRepairs ?? []).length > 0 && (
+        <div className="mt-4" data-testid="ai-provider-plugin-repairs">
+          {/* The label is what stops a name the owner has never seen from
+              appearing in his provider list with no explanation. The plugin id
+              itself is not translated: it is what `openclaw plugins` calls it
+              and what the core's own sentence beside it names. */}
+          <label className="block mb-2 text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+            {t("settings.providers.strandedPlugins")}
+          </label>
+          <ul className="space-y-2 list-none p-0 m-0">
+            {(summary?.unattachedRepairs ?? []).map((repair) => (
+              <li key={repair.pluginId} className="rounded-xl border border-white/[0.08] px-3 py-2">
+                <span className="block text-[11px] font-medium text-[var(--text-secondary)] break-words">
+                  {repair.pluginId}
+                </span>
+                <PluginRepairNotice repair={repair} onRepaired={refresh} className="mt-0.5" />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

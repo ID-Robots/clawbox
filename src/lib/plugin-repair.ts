@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import { getActiveHarness, type Harness } from "@/lib/harness";
-import { canonicalPluginId, ROW_PLUGIN_IDS } from "@/lib/plugin-repair-id";
+import { canonicalPluginId, pluginHasSettingsRow, ROW_PLUGIN_IDS } from "@/lib/plugin-repair-id";
 
 // What the boot script could not install or consent, and therefore switched off.
 //
@@ -60,8 +60,18 @@ export function pluginRepairPath(): string {
   return path.join(root, "data", "plugin-repair.json");
 }
 
-/** Which step failed. The Retry re-runs exactly that step. */
-export type PluginRepairStage = "install" | "consent";
+/**
+ * Which step failed. The Retry re-runs exactly that step.
+ *
+ * `not-installed` is the third one (TASK-738), and it is the only one ClawBox
+ * did not attempt: the core reports the entry as `plugin not installed: <id>`
+ * in `openclaw config validate --json`, for a plugin an older core BUNDLED and
+ * the installed one does not. Nothing ever installed it, so there is no failed
+ * install to retry — what the row records is that the entry was switched OFF so
+ * the gateway could report ready, and the package the core itself names for
+ * anyone who wants it back.
+ */
+export type PluginRepairStage = "install" | "consent" | "not-installed";
 
 export interface PluginRepairEntry {
   /** The plugin id as `openclaw plugins` takes it — what Retry passes back. */
@@ -89,6 +99,14 @@ export interface PluginRepairEntry {
    * Retry that ran `plugins install codex` would resolve `@latest`, drift ahead
    * of the pinned runtime and crash every Codex chat — the bug the pin exists
    * to prevent — and `plugins install deepseek` names no ClawHub scheme at all.
+   *
+   * NOT ALWAYS PINNED, and deliberately so for the `not-installed` stage: what
+   * the core names in `plugin not installed: <id> — install … with: openclaw
+   * plugins install @openclaw/<pkg>` is the catalogue's own unversioned
+   * `npmSpec`, because these provider packages are versioned independently of
+   * the core (unlike `@openclaw/codex`). A pin invented here would be a
+   * version this repo made up; the core's own install-time host-version check
+   * is what refuses a build that does not fit.
    */
   spec: string;
 }
@@ -98,7 +116,10 @@ export type PluginRepairs = Record<string, PluginRepairEntry>;
 function parseEntry(key: string, raw: unknown): PluginRepairEntry | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
-  const stage = r.stage === "install" || r.stage === "consent" ? r.stage : null;
+  const stage: PluginRepairStage | null =
+    r.stage === "install" || r.stage === "consent" || r.stage === "not-installed"
+      ? r.stage
+      : null;
   if (!stage) return null;
   const reason = typeof r.reason === "string" && r.reason.trim() ? r.reason.trim() : null;
   if (!reason) return null;
@@ -152,6 +173,80 @@ export async function readPluginRepairs(): Promise<PluginRepairs> {
   return out;
 }
 
+/** One row, as a caller states it. `atMs` is stamped here, not passed in. */
+export type PluginRepairRecord = Omit<PluginRepairEntry, "atMs">;
+
+/**
+ * Record — or update — one plugin's repair row from the SERVER side.
+ *
+ * The mirror of `scripts/gateway-pre-start.sh`'s `clawbox_plugin_repair_mark`,
+ * and deliberately the same file with the same shape: the boot script writes it
+ * when IT could not install or consent a plugin, and the updater writes it when
+ * the core reports an entry as never installed on a core the update has just
+ * put on the box (TASK-738). One record, one reader, one Retry.
+ *
+ * THREE WRITERS, no lock, and only one pair can overlap. The boot script's is
+ * excluded by construction — the updater writes inside `withGatewayQuiesced`,
+ * after the pre-start has been waited out. What is left is an owner pressing
+ * Retry (`clearPluginRepair`) while an update is in its gateway-verify step:
+ * last writer wins and one row can be lost. It costs a badge, not a repair, and
+ * an `O_EXCL` lock file is where to start if it ever matters.
+ *
+ * A file that EXISTS and cannot be read is a THROW, not an empty map — the
+ * distinction `readPluginRepairs` deliberately does not make, because its
+ * wrong answer costs a missing badge while this one would rewrite the file and
+ * discard every other plugin's row. A file that is absent or unparseable is an
+ * empty map, exactly as the boot script treats it.
+ *
+ * Temp file plus rename in the same directory, so no reader ever sees half a
+ * file, and the same `pid + uuid` name as the clear: two writes in flight
+ * inside one process must not stage over each other.
+ */
+export async function recordPluginRepair(row: PluginRepairRecord): Promise<void> {
+  const target = pluginRepairPath();
+  let rows: Record<string, unknown> = {};
+  let raw: string | null = null;
+  try {
+    raw = await fs.readFile(target, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+  }
+  if (raw !== null) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        rows = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Same as the boot script: an unparseable file is started over.
+    }
+  }
+  rows[row.id] = { ...row, atMs: Date.now() };
+  await writeRowsAtomically(target, rows);
+}
+
+/**
+ * Stage the whole file beside itself and rename it into place.
+ *
+ * Temp file plus rename in the same directory, so no reader ever sees half a
+ * file; `pid + uuid` because two writes in flight inside one process must not
+ * stage over each other. AND the temp is removed when the rename fails, the
+ * way the boot script's writer already does it: a full `data/` partition or a
+ * read-only remount would otherwise leave one `plugin-repair.json.tmp.*` per
+ * attempt, for ever, on exactly the box that can least afford them.
+ */
+async function writeRowsAtomically(target: string, rows: unknown): Promise<void> {
+  const tmp = `${target}.tmp.${process.pid}.${randomUUID()}`;
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  try {
+    await fs.writeFile(tmp, `${JSON.stringify(rows, null, 2)}\n`, "utf-8");
+    await fs.rename(tmp, target);
+  } catch (err) {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    throw err;
+  }
+}
+
 /**
  * Remove one plugin's entry, after its install or consent has been proved to
  * work again. Answers whether anything was removed.
@@ -174,14 +269,7 @@ export async function clearPluginRepair(id: string): Promise<boolean> {
   const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
   if (keys.length === 0) return false;
   for (const key of keys) delete current[key];
-  const target = pluginRepairPath();
-  // The pid alone is not unique WITHIN a process: two clears in flight at once
-  // would stage over each other and one rename would land a file the other was
-  // still writing.
-  const tmp = `${target}.tmp.${process.pid}.${randomUUID()}`;
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(tmp, `${JSON.stringify(current, null, 2)}\n`, "utf-8");
-  await fs.rename(tmp, target);
+  await writeRowsAtomically(pluginRepairPath(), current);
   return true;
 }
 
@@ -218,4 +306,4 @@ export function repairFor(repairs: PluginRepairs, rowId: string): PluginRepairEn
 }
 
 // Re-exported so the server-side callers keep one import.
-export { canonicalPluginId, ROW_PLUGIN_IDS };
+export { canonicalPluginId, ROW_PLUGIN_IDS, pluginHasSettingsRow };
