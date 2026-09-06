@@ -1,6 +1,6 @@
 import fsp from "fs/promises";
 import path from "path";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { CLAWBOX_AI_IMAGE_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { mediaUrl } from "@/lib/chat-media";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "./credentials";
@@ -162,6 +162,67 @@ const PROBE_TTL_FAIL_MS = 60_000;
 let probeCache: { promise: Promise<boolean>; expiresAt: number } | null = null;
 
 /**
+ * How long a refusal of THIS device's credential is believed.
+ *
+ * A 401/403 from our own proxy means the credential is not accepted, and
+ * nothing the box can do makes the next identical request succeed — so the
+ * honest number here is "until the credential changes", which is what the
+ * fingerprint below actually keys on. The timer exists only for the one case
+ * the box cannot observe: a token the PORTAL restores (a mis-revocation put
+ * back, a plan reinstated) without the device being re-linked. Fifteen minutes
+ * is short enough that such a box heals on its own and long enough that the
+ * cost of being wrong is four requests an hour instead of two thousand.
+ */
+const CREDENTIAL_REFUSAL_TTL_MS = 15 * 60_000;
+
+/**
+ * The credential the proxy last refused, by fingerprint, and until when.
+ *
+ * The FINGERPRINT is what makes this a memory of one credential rather than a
+ * flag on the box: re-linking is the fix the error message tells the customer
+ * to apply, so a different token has to be tried at once — no restart, no
+ * waiting out the timer. It is a hash and never the token: this value is
+ * compared, never logged, but a bare secret sitting in module state is one
+ * stack trace away from a log line.
+ */
+let credentialRefusal: { fingerprint: string; status: number; until: number } | null = null;
+
+function fingerprintOf(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
+}
+
+/** Is this exact credential inside a live refusal? Expired ones are dropped. */
+function refusalFor(token: string): { status: number } | null {
+  if (!credentialRefusal) return null;
+  if (Date.now() >= credentialRefusal.until) {
+    credentialRefusal = null;
+    return null;
+  }
+  if (credentialRefusal.fingerprint !== fingerprintOf(token)) return null;
+  return credentialRefusal;
+}
+
+/**
+ * Note that the proxy refused this credential, so the next caller does not
+ * spend a request finding out again.
+ *
+ * Only 401 and 403 — the two the proxy answers with when the credential itself
+ * is the problem (`missing_token` / `invalid_token`). NOT 429: a spent daily
+ * allowance is refused for the same reason every time too, but it is refused
+ * for a whole plan rather than for a credential, it resets on a clock this
+ * module cannot see, and the icon pipeline already pauses the box for it
+ * (`BOX_WIDE_STATUSES` in webapp-icon.ts). Widening this to cover it would be
+ * a second, worse implementation of that.
+ */
+function rememberCredentialRefusal(token: string, status: number): void {
+  credentialRefusal = {
+    fingerprint: fingerprintOf(token),
+    status,
+    until: Date.now() + CREDENTIAL_REFUSAL_TTL_MS,
+  };
+}
+
+/**
  * Does the proxy serve image generation, for the model this box would ask for?
  *
  * A PROBED fact, for the reason every other fact in the capability table is
@@ -189,16 +250,28 @@ let probeCache: { promise: Promise<boolean>; expiresAt: number } | null = null;
  * — verified: it returns the same 200 with no token and with a wrong one — so
  * it cannot tell a live credential from a revoked one. That half of the answer
  * is `hasClawaiToken`, and the two are combined by the capability rather than
- * conflated here. A token that is present but revoked therefore still shows the
- * button, and fails at generate time with the proxy's 403 surfaced as "re-link
- * this device". That is the right way round: hiding the button on every box
- * whose token MIGHT be stale would hide it on every box.
+ * conflated here. A token that is present but MIGHT be stale therefore still
+ * shows the button: hiding it on every box whose token might be stale would
+ * hide it on every box.
+ *
+ * A token the proxy HAS refused is a different fact, and this does answer it.
+ * Once a generate came back 401/403 for the credential this box currently
+ * holds, the button is an offer to draw that ends in an error bubble every
+ * time, so it goes away until the device is re-linked — see
+ * `rememberCredentialRefusal`. Might-be-stale stays a button; proven-dead does
+ * not.
  *
  * Fails CLOSED. Anything other than a clean, parseable, model-listing 200 is
  * false, because a wrong `true` is an offer to draw that ends in an error
  * bubble — the same lie the microphone used to tell.
  */
 export async function clawaiImageRouteReachable(fetchImpl: FetchLike = fetch): Promise<boolean> {
+  // Ahead of the probe cache, not behind it: a 403 that lands a second after a
+  // successful probe would otherwise keep the button for the ten minutes that
+  // answer is good for, which is the whole window a customer spends pressing
+  // it.
+  const token = await resolveClawaiToken();
+  if (token && refusalFor(token)) return false;
   const now = Date.now();
   if (probeCache && now < probeCache.expiresAt) return probeCache.promise;
   // Seeded with the SHORT ttl so concurrent callers during the probe share one
@@ -216,9 +289,10 @@ export async function clawaiImageRouteReachable(fetchImpl: FetchLike = fetch): P
   return entry.promise;
 }
 
-/** Test seam: forget the cached answer so the next call asks again. */
+/** Test seam: forget every remembered answer so the next call asks again. */
 export function resetClawaiImageProbe(): void {
   probeCache = null;
+  credentialRefusal = null;
 }
 
 async function askProxyForImageModels(fetchImpl: FetchLike): Promise<boolean> {
@@ -288,6 +362,17 @@ export async function generateClawaiImageBytes(
     );
   }
 
+  const refused = refusalFor(token);
+  if (refused) {
+    // Refused WITHOUT asking again. The customer is still told, in the same
+    // words and with the same status as the request that established this, so
+    // nothing is hidden — what stops is the traffic. Beta sent one POST per
+    // trigger for as long as the box stayed up: 6,554 of them from a single
+    // device in twelve hours, every one a 403 that was knowable in advance.
+    const [status, message] = messageForStatus(refused.status);
+    throw new ClawaiImageError(status, message);
+  }
+
   let res: Response;
   try {
     // CodeQL `js/file-access-to-http` ("file data in outbound network request")
@@ -336,6 +421,9 @@ export async function generateClawaiImageBytes(
   }
 
   if (!res.ok) {
+    // A credential the proxy will not accept is the one failure here that
+    // CANNOT come right on its own, so it is remembered rather than re-tried.
+    if (res.status === 401 || res.status === 403) rememberCredentialRefusal(token, res.status);
     // The STATUS decides, never the body. An upstream error body is allowed to
     // quote the request that caused it, and this request carried a bearer
     // token — the same reason the transcription route relays a status and
