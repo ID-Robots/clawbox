@@ -228,15 +228,17 @@ export CLAWBOX_OPENCLAW_V2
 # (config/clawbox-gateway.service) and the rest of this script's own bounds
 # already add up to well over half of it — the version probe, two plugin
 # installs, the codex install and enable, the deepseek installs and the
-# auth-profile doctor below. The worst case added here is 65 + 180 + 65 = 310 s
-# — the two validate bounds carry a 5 s `-k` grace each, like every other CLI
-# bound in this file, because plain `timeout` sends SIGTERM only and a validator
-# that ignored it would hold this ExecStartPre for the unit's whole start
-# budget — and only on a box whose config the core actually refuses; an
+# auth-profile doctor below. What this block adds is 65 + 180 + 65 = 310 s ONCE
+# THE DOCTOR EXITS, and only on a box whose config the core actually refuses; an
 # accepted config costs one probe.
-# The doctor bound is SIGTERM-only, deliberately: a SIGKILL mid-import is how
-# a half-finished `exec-approvals.json.doctor-importing` claim gets left
-# behind, which blocks every later doctor exactly as the original file does.
+# The two validate bounds carry a 5 s `-k` grace each, like every other CLI
+# bound in this file, because plain `timeout` sends SIGTERM only and a validator
+# that ignored it would hold this ExecStartPre for the unit's whole start budget.
+# The doctor bound is SIGTERM-only, deliberately: a SIGKILL mid-import is how a
+# half-finished `exec-approvals.json.doctor-importing` claim gets left behind,
+# which blocks every later doctor exactly as the original file does. So 310 s is
+# not an upper bound on the doctor arm — `TimeoutStartSec=600` is its real
+# ceiling, and that is the trade taken on purpose.
 CLAWBOX_CONFIG_VALIDATED_STAMP="$CLAWBOX_ROOT/data/openclaw-config-validated"
 
 # Does this approvals file hold a decision of the OWNER's?
@@ -286,38 +288,54 @@ PY
 clawbox_core_config_verdict() {
   local out rc=0
   out="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
-  # EXIT 0 IS THE ANSWER, on its own (TASK-741). The core exiting 0 IS "the
-  # gateway will load this", and `getOpenclawConfigRefusal` (src/lib/updater.ts)
-  # has always read it that way — it returns "accepted" without parsing
-  # anything. Requiring stdout to parse as JSON on top of it made a core that
-  # exits 0 with empty, banner-prefixed or non-JSON output answer `unknown`,
-  # which skips the stamp and puts every single gateway start of a healthy box
-  # through a `config validate` and a WARN, for ever. Latent rather than live —
-  # measured on 2026.8.1, a valid config gives 75 bytes of pure JSON — and the
-  # shell parser below is stricter than the TypeScript one, which slices
-  # between the first `{` and the last `}`.
+  # EXIT 0 IS ACCEPTANCE unless the core's own payload contradicts it
+  # (TASK-741). Requiring stdout to parse as JSON on TOP of a zero exit made a
+  # core that exits 0 with empty, banner-prefixed or non-JSON output answer
+  # `unknown` — which skips the stamp and puts every single gateway start of a
+  # healthy box through a `config validate` and a WARN, for ever. Latent rather
+  # than live (measured on 2026.8.1, a valid config gives 75 bytes of pure
+  # JSON), and the shell parser below is stricter than the TypeScript one, which
+  # slices between the first `{` and the last `}`.
   #
-  # 1 = the core's verdict, and the only exit whose payload is worth reading.
-  # Anything else (124 the bound fired, 126/127 nothing to run, a crash) is NOT
-  # an answer about the config, and reporting one as a refusal would spend
-  # 180 s of doctor on every single start of a box whose config is fine.
+  # But NOT "exit 0 and never look": this stamp is durable, so a core exiting 0
+  # while printing `{"valid": false}` would be recorded as accepted and never
+  # asked again — a false success that outlives the boot. The payload is read on
+  # both exits and an explicit `valid: false` wins, whatever the exit code said.
+  #
+  # Anything other than 0 or 1 (124 the bound fired, 126/127 nothing to run, a
+  # crash) is NOT an answer about the config, and reporting one as a refusal
+  # would spend 180 s of doctor on every start of a box whose config is fine.
   case "$rc" in
-    0) printf 'accepted\n'; return 0 ;;
-    1) ;;
+    0|1) ;;
     *) printf 'unknown\tthe validator did not answer (exit %s)\n' "$rc"; return 0 ;;
   esac
-  CLAWBOX_VERDICT_JSON="$out" python3 <<'PY'
+  CLAWBOX_VERDICT_JSON="$out" CLAWBOX_VERDICT_RC="$rc" python3 <<'PY'
 import json, os, sys
+
+# Exit 0 with no readable verdict is still acceptance: the exit code IS the
+# answer, and a banner is not a contradiction. Exit 1 with no readable verdict
+# is `unknown` — a refusal we cannot state is not one worth spending 180 s of
+# doctor on, and the gateway's own exit 78 remains the authority either way.
+_accepted_on_zero = os.environ.get("CLAWBOX_VERDICT_RC") == "0"
+
+
+def _no_verdict(why):
+    print("accepted" if _accepted_on_zero else "unknown\t" + why)
+    sys.exit(0)
+
+
 try:
     doc = json.loads(os.environ.get("CLAWBOX_VERDICT_JSON") or "")
 except Exception:
-    print("unknown\tthe validator did not answer in JSON")
-    sys.exit(0)
+    _no_verdict("the validator did not answer in JSON")
 if not isinstance(doc, dict) or "valid" not in doc:
-    print("unknown\tthe validator's answer carried no verdict")
-    sys.exit(0)
-# Only reached on exit 1, which is the core's refusal — `valid: true` here
-# would be the CLI contradicting its own exit code, and the exit code wins.
+    _no_verdict("the validator's answer carried no verdict")
+if doc.get("valid") is not False:
+    # A zero exit with a positive verdict is the ordinary healthy answer. A
+    # NON-zero exit whose payload says the config is valid is the CLI
+    # contradicting itself, and neither half is worth a stamp or a doctor run:
+    # say so and ask again next boot.
+    _no_verdict("the validator's exit code and its verdict disagree")
 parts = []
 for issue in doc.get("issues") or []:
     if not isinstance(issue, dict):
@@ -353,11 +371,16 @@ clawbox_stamp_write() {
   fi
 }
 
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] \
-  && [ -x "$OPENCLAW_BIN" ] \
-  && [ -f "$OPENCLAW_CONFIG" ] \
-  && [ "$(clawbox_stamp_read)" != "$(clawbox_config_fingerprint)" ]
-then
+# THE APPROVALS BLOCKER IS CLEARED ON EVERY BOOT, not only on a core bump
+# (TASK-741). It used to live inside the config-fingerprint gate below, and the
+# two are gated on different facts: the blocker is an AUTH/STATE problem and the
+# stamp is a record about the CONFIG. A box whose config is already stamped —
+# every box that has booted once since its core bump — therefore kept its
+# blocker for ever, silently, and every later `doctor --fix` on that box (the
+# auth-profile migration below, `install.sh`'s, the updater's, the AI-models
+# configure route's) exited 1 having migrated nothing. Two `[ -e ]` tests is
+# what a box with no blocker pays for this.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -x "$OPENCLAW_BIN" ]; then
   # Both names block the core's gate: doctor renames the file to the
   # `.doctor-importing` claim for the duration of an import, so a killed
   # import leaves one behind that refuses every later doctor just as the
@@ -397,6 +420,13 @@ then
     esac
   done
 
+fi
+
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] \
+  && [ -x "$OPENCLAW_BIN" ] \
+  && [ -f "$OPENCLAW_CONFIG" ] \
+  && [ "$(clawbox_stamp_read)" != "$(clawbox_config_fingerprint)" ]
+then
   _cfg_verdict="$(clawbox_core_config_verdict)"
   _cfg_state="${_cfg_verdict%%$'\t'*}"
   _cfg_detail=""

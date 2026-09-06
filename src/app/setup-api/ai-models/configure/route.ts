@@ -2389,13 +2389,6 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // because a refusal that has already persisted a credential is not a
     // refusal, it is a half-applied save. Nothing between here and there
     // writes anything (the OAuth handoff file is consumed only on success).
-    // Set when `doctor --fix` was BLOCKED rather than failed: the sign-in is
-    // written and its move into the credential store happens at the next
-    // gateway start. A `{success:true}` with nothing said would leave the owner
-    // wondering why the provider needs a restart before it answers. Declared
-    // here because the block that sets it runs well before the other warnings
-    // are collected.
-    let credentialMigrationWarning: string | undefined;
     const settledSlash = config.defaultModel.indexOf("/");
     const settledProvider = settledSlash > 0 ? config.defaultModel.slice(0, settledSlash) : null;
     const settledModelId = config.defaultModel.slice(settledSlash + 1);
@@ -2570,26 +2563,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // The stop inside is unconditional; POST restores the unit if no later
       // step restarts it.
       gateway.state = "stopped-for-doctor";
+      // WHAT KIND of doctor failure this was (TASK-741). It still FAILS — the
+      // migration provably did not happen, and a legacy auth-profiles.json left
+      // in place is what stops an OpenClaw 2 gateway from starting — so the
+      // rollback below is unchanged. What changes is the sentence: telling the
+      // owner to "run `openclaw doctor --fix` from the Terminal" is advice for
+      // the command that is blocked, and he can do nothing with it.
+      let doctorBlockedByApprovals = false;
       try {
-        // A doctor BLOCKED by a legacy exec-approvals file did not fail this
-        // migration — it never started one (TASK-741). Rolling the sign-in back
-        // over that answer archived a credential this route had just written
-        // correctly, and told the owner to run the very command that is blocked.
-        // The gateway's own ExecStartPre clears the blocker on the next start
-        // and re-runs this migration (scripts/gateway-pre-start.sh, TASK-737),
-        // so the credential stands and the owner is told it is deferred.
         if (await runOpenclawDoctorFix() === "blocked-by-legacy-exec-approvals") {
-          console.warn(
-            "[configure] doctor --fix is blocked by a legacy exec-approvals file, so the credential store"
-            + " migration is deferred to the gateway's next start; the sign-in was written and is kept",
-          );
-          // Honest about the one case the boot path CANNOT clear: an approvals
-          // file that provably holds a decision of the owner's is left alone by
-          // design (TASK-737), and then the migration waits for him. The boot
-          // log carries the actionable NOTE; this says where to look.
-          credentialMigrationWarning = "Saved. A legacy exec-approvals file is blocking the move of this sign-in"
-            + " into OpenClaw's credential store; the gateway clears that on its next start, and says in the"
-            + " boot log what to move aside if it cannot.";
+          doctorBlockedByApprovals = true;
+          // Into the SAME failure path, deliberately: the v1/v2 decision below
+          // is what says whether the legacy file may stay, and a second copy of
+          // that judgement here is how the two would come to disagree.
+          throw new Error("openclaw doctor --fix is blocked by a legacy exec approvals file");
         }
       } catch (doctorErr) {
         const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
@@ -2617,7 +2604,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
           await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
           return NextResponse.json(
-            { error: "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal." },
+            {
+              error: doctorBlockedByApprovals
+                ? "Credential migration is blocked by a legacy exec-approvals file, so the subscription sign-in"
+                  + " was rolled back. Restart the device and sign in again — the gateway clears that file on its"
+                  + " next start, and the boot log names it if it cannot."
+                : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
+            },
             { status: 502 },
           );
         }
@@ -3347,7 +3340,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    const warning = [chatgptOrderWarning, credentialMigrationWarning, unvalidatedPrimaryWarning, gatewayWarning]
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, gatewayWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({

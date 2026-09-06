@@ -488,6 +488,58 @@ d("gateway pre-start: the config-repair block's own edges", () => {
     expect(src).not.toContain('timeout -k 5 180 "$OPENCLAW_BIN" doctor');
   });
 
+  it("clears the approvals blocker on a box whose config is already stamped", () => {
+    // The blocker is an AUTH/STATE fact and the stamp is a record about the
+    // CONFIG, and the two were gated on one another: the whole clearing loop
+    // sat inside the config-fingerprint guard, so a box that had booted once
+    // since its core bump kept its blocker for ever, silently — and every later
+    // `doctor --fix` on that box (the auth-profile migration in this same
+    // script, install.sh's, the updater's, the AI-models configure route's)
+    // exited 1 having migrated nothing.
+    writeFileSync(stampPath, `${currentFingerprint()}\n`);
+    writeFileSync(
+      path.join(stateDir, "exec-approvals.json"),
+      JSON.stringify({ version: 1, socket: {}, defaults: {}, agents: {} }),
+    );
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(false);
+    expect(approvalsFiles().some((n) => n.startsWith("exec-approvals.json.legacy-"))).toBe(true);
+    // …and the config half is still gated on the stamp, so a steady box pays
+    // for the two `[ -e ]` tests above and nothing else.
+    expect(calls()).toEqual([]);
+  });
+
+  it("refuses a config the core calls invalid, whatever it exited with", () => {
+    // The other half of "exit 0 is the answer". The stamp is DURABLE, so a core
+    // exiting 0 while printing `{"valid": false}` would be recorded as accepted
+    // and never asked again — a false success that outlives the boot and leaves
+    // the gateway exiting 78 with nothing in the log.
+    writeFileSync(
+      path.join(binDir, "openclaw"),
+      "#!/usr/bin/env bash\n"
+      + "printf '%s\\n' \"$*\" >> \"$OC_CALLS\"\n"
+      + "if [ \"$1\" = \"config\" ]; then\n"
+      + "  if [ -f \"$OC_STATE/migrated\" ]; then echo '{\"valid\":true,\"warnings\":[]}'; exit 0; fi\n"
+      + "  echo '{\"valid\":false,\"issues\":[{\"path\":\"a\",\"message\":\"bad\"}]}'; exit 0\n"
+      + "fi\n"
+      + "if [ \"$1\" = \"doctor\" ]; then touch \"$OC_STATE/migrated\"; exit 0; fi\n"
+      + "exit 0\n",
+    );
+    chmodSync(path.join(binDir, "openclaw"), 0o755);
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    // The core's own reason reached the boot log, and its own repair ran.
+    expect(r.stderr).toContain("refused: a: bad");
+    expect(calls().some((c) => c.startsWith("doctor --fix"))).toBe(true);
+    // …and the config it then ACCEPTED is the one that gets stamped.
+    expect(readFileSync(stampPath, "utf-8").trim()).toBe(currentFingerprint());
+  });
+
   it("never overwrites an earlier moved-aside approvals file", () => {
     // The stamp is second-resolution and `mv` was unguarded, so two boots
     // inside one second would silently overwrite the first copy. `date` is

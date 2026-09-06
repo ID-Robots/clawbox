@@ -1345,6 +1345,16 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
     const { stdout } = await execFile(OPENCLAW_BIN, ["config", "validate", "--json"], {
       timeout: 60_000,
       maxBuffer: 2 * 1024 * 1024,
+      // SIGKILL at the deadline, the counterpart of the `-k 5` the boot
+      // script's validate bounds carry (TASK-741): node's `execFile` sends
+      // `killSignal` ONCE and never escalates, so the default SIGTERM leaves a
+      // validator that ignores it running with nothing to stop it, holding this
+      // recovery open past its bound. Safe here and only here — `config
+      // validate` writes nothing. The doctor bound above keeps SIGTERM for the
+      // opposite reason: a SIGKILL mid-import is what leaves an
+      // `exec-approvals.json.doctor-importing` claim behind, which then blocks
+      // every later doctor exactly as the original file does.
+      killSignal: "SIGKILL",
       env: openclawChildEnv(),
     });
     text = stdout ?? "";
@@ -2420,10 +2430,13 @@ async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
  * malformed config must not be what stops a box from coming back.
  */
 async function readOpenclawConfigForRepair(): Promise<Record<string, unknown> | null> {
-  // `OPENCLAW_CONFIG` first, and only here: this caller READS a file and the
-  // other two spawn children that resolve their own path from
-  // `OPENCLAW_CONFIG_PATH`. Sharing one config-path rule would change which
-  // file two of the three address.
+  // `OPENCLAW_CONFIG` first, and the helper deliberately does not settle it:
+  // this caller READS a file, `runCurrentGatewayPreStart` passes `process.env`
+  // through to a script that prefers the same name, and `openclawChildEnv`
+  // alone ignores it because the core CLI reads `OPENCLAW_CONFIG_PATH` instead.
+  // Nothing on a box sets `OPENCLAW_CONFIG` — it is a test-only name — but
+  // folding three different rules into one shared one is how they would come to
+  // address different files.
   const configPath = process.env.OPENCLAW_CONFIG
     || path.join(openclawTreePaths().openclawHome, "openclaw.json");
   try {

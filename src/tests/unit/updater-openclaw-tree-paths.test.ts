@@ -31,15 +31,22 @@ const UPDATER = readFileSync(path.join(REPO, "src", "lib", "updater.ts"), "utf-8
 
 describe("the OpenClaw tree is derived in one place", () => {
   it("has exactly one derivation of openclawHome", () => {
-    const copies = UPDATER.match(/process\.env\.CLAWBOX_OPENCLAW_HOME\s*\n?\s*\|\|\s*process\.env\.OPENCLAW_HOME/g) ?? [];
-    expect(copies).toHaveLength(1);
     expect(UPDATER).toContain("function openclawTreePaths()");
+    // Counted on each PART of the rule, not on the pairing: a fourth site
+    // written as `process.env.OPENCLAW_HOME || path.join(home, ".openclaw")`
+    // slips past a regex that only knows the two-name form, which is exactly
+    // the hand-written copy this guard exists to catch.
+    expect(UPDATER.match(/process\.env\.CLAWBOX_OPENCLAW_HOME/g) ?? []).toHaveLength(1);
+    expect(UPDATER.match(/path\.join\(home, "\.openclaw"\)/g) ?? []).toHaveLength(1);
+    // And the fallback itself is read in exactly one place. (Comments name the
+    // variable too, so this counts the READ rather than the word.)
+    expect(UPDATER.match(/process\.env\.OPENCLAW_HOME/g) ?? []).toHaveLength(1);
   });
 
   it("still deletes OPENCLAW_HOME from every child environment it builds", () => {
-    // The helper hands back paths, not an environment, precisely so each caller
-    // keeps the one it actually sets — and both callers that spawn something
-    // owe this line.
+    // A PIN, not a regression test — both lines predate this change. The helper
+    // hands back paths rather than an environment precisely so each caller keeps
+    // the one it actually sets, and both callers that spawn something owe this.
     expect(UPDATER.match(/delete env\.OPENCLAW_HOME;/g) ?? []).toHaveLength(2);
   });
 });

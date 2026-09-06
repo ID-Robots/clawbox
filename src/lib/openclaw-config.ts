@@ -2621,19 +2621,28 @@ export function gatewayIsAbsent(): boolean {
  * ONE FAILURE IS NOT A FAILED MIGRATION, and it is reported rather than thrown
  * (TASK-741). With a legacy `exec-approvals.json` in the state directory the
  * core's security gate throws on the file's mere PRESENCE, so `doctor --fix`
- * exits 1 having migrated NOTHING and its last line asks the operator to run
- * the command that has just run — measured against 2026.8.1 on 2026-09-06, the
- * sentence arrives on STDERR:
+ * exits 1 having migrated NOTHING — measured against 2026.8.1 on 2026-09-06,
+ * with the sentence on STDERR and in full:
  *
  *     Legacy exec approvals exist at <state>/exec-approvals.json. Run
- *     `openclaw doctor --fix` … before using exec approvals.
+ *     `openclaw doctor --fix` with OPENCLAW_STATE_DIR set to <state> before
+ *     using exec approvals.
  *
- * Presenting that to the caller as a credential-migration failure is what made
- * `configure/route.ts` roll back a subscription sign-in it had in fact written.
- * The blocker is cleared by the gateway's own ExecStartPre on the next start
- * (`scripts/gateway-pre-start.sh`, TASK-737), which then re-runs this exact
- * migration — so the credential is not lost, it is deferred, and the caller can
- * say so instead of undoing it.
+ * — i.e. advice for the command that has just run, with the state directory the
+ * caller had already set. THE MIGRATION STILL FAILED, and the caller's answer
+ * to that does not change: a legacy `auth-profiles.json` left in place is what
+ * stops an OpenClaw 2 gateway from starting. What changes is that the caller
+ * can now say WHICH failure it was, and name a file the owner can act on,
+ * instead of repeating the core's unusable advice.
+ *
+ * HARNESS FIRST, and the answer is uncomfortable: the core DOES have the
+ * importer. `--fix` arms its state migrations, and `migrateLegacyExecApprovals`
+ * imports a non-empty legacy file into SQLite, verifies it and removes the
+ * JSON. The exit 1 above is a different check — the runtime gate
+ * `assertNoPendingLegacyExecApprovals` — firing before that migration gets to
+ * run. So ClawBox is routing around an ordering defect in the core's own
+ * doctor, not filling a missing capability; that is worth reporting upstream
+ * and worth deleting from here when it lands.
  *
  * Returned rather than thrown as a typed error on purpose: 59 suites replace
  * this module with a hand-written factory, and a new class to narrow on with
@@ -2645,7 +2654,15 @@ export function gatewayIsAbsent(): boolean {
  */
 export type OpenclawDoctorFixOutcome = "completed" | "blocked-by-legacy-exec-approvals";
 
-/** The core's own words for the blocker, matched rather than re-derived. */
+/**
+ * The core's own words for the blocker, matched rather than re-derived.
+ *
+ * Three matchers now read this one English sentence — `install.sh`,
+ * `install-x64.sh` and `scripts/gateway-pre-start.sh` grep it case-sensitively,
+ * this one is case-insensitive. All three fail SAFE: a reworded upstream
+ * sentence simply reverts each to its old, stricter behaviour. A fourth site
+ * would be the point at which this deserves one shared constant.
+ */
 const LEGACY_EXEC_APPROVALS_RE = /Legacy exec approvals exist at/i;
 
 export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
