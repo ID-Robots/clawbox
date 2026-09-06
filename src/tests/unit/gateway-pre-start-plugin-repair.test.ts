@@ -123,7 +123,7 @@ function config(): { plugins?: { entries?: Record<string, { enabled?: boolean } 
   return JSON.parse(readFileSync(configPath, "utf-8"));
 }
 
-function marker(): Record<string, { stage?: string; reason?: string; disabled?: boolean }> {
+function marker(): Record<string, { stage?: string; reason?: string; disabled?: boolean; spec?: string }> {
   return existsSync(markerPath) ? JSON.parse(readFileSync(markerPath, "utf-8")) : {};
 }
 
@@ -222,5 +222,49 @@ d("gateway-pre-start.sh — a plugin that cannot be consented", () => {
     expect(config().plugins?.entries?.discord?.enabled).toBe(true);
     expect(marker().discord.disabled).toBe(false);
     expect(r.stderr).toContain("could not switch the discord plugin off");
+  });
+  it("reinstalls a payload the core bump stranded, and does NOT switch the plugin off for it", () => {
+    // TASK-602 and TASK-606 meet in this one loop, and the composition is the
+    // point: `Plugin not found` is the core's own wording for a payload
+    // stranded by a core bump (the packages are keyed to the core generation),
+    // and the repair for THAT is the pinned reinstall — not disabling a channel
+    // the owner asked for. Resolving this region in favour of either card alone
+    // silently puts back the failure the other one exists to end.
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  echo "Plugin not found: $3. Run 'openclaw plugins list' to see installed plugins." >&2
+  exit 1
+fi
+if [ "$1" = "plugins" ] && [ "$2" = "install" ]; then exit "\${OC_INSTALL_EXIT:-0}"; fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("discord plugin payload reinstalled (@openclaw/discord@2026.8.1)");
+    // Still enabled, and no badge: the box boots WITH the channel.
+    expect(config().plugins?.entries?.discord?.enabled).toBe(true);
+    expect(marker()).toEqual({});
+  });
+
+  it("boots without it when even the pinned reinstall fails, and records the spec to retry", () => {
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  echo "Plugin not found: $3. Run 'openclaw plugins list' to see installed plugins." >&2
+  exit 1
+fi
+if [ "$1" = "plugins" ] && [ "$2" = "install" ]; then exit "\${OC_INSTALL_EXIT:-0}"; fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", OC_INSTALL_EXIT: "1" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("could not reinstall the discord plugin payload");
+    expect(r.stdout).toContain("booting without it");
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+
+    const row = marker().discord;
+    // `install`, not `consent`: the Retry has to reinstall the payload, and it
+    // must use the SAME pinned spec — `plugins install discord` would resolve
+    // @latest and drift ahead of the runtime that is actually installed.
+    expect(row.stage).toBe("install");
+    expect(row.spec).toBe("@openclaw/discord@2026.8.1");
+    expect(row.disabled).toBe(true);
   });
 });

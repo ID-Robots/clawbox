@@ -44,7 +44,26 @@ function extractBlock(): string {
   return src.slice(start, end + "\n  done\nfi\n".length);
 }
 
-const BLOCK = hasBash && hasPython3 ? extractBlock() : "";
+/**
+ * The repair helpers the loop calls, also verbatim (TASK-606).
+ *
+ * A refusal this block cannot repair now ends in `clawbox_plugin_boot_without`
+ * rather than a warning, so the loop no longer runs without them: the payload
+ * reinstall is the FIRST answer to a missing payload and booting without the
+ * plugin is the second, and a slice carrying only one of the two would run
+ * green here while the shipped script did something else.
+ */
+function extractHelpers(): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const from = "# ── Booting WITHOUT a plugin that could not be made loadable ";
+  const to = "# A `.openclaw` INSIDE the state directory";
+  const start = src.indexOf(from);
+  const end = src.indexOf(to, start);
+  if (start < 0 || end < 0) throw new Error("the plugin repair helpers are not in gateway-pre-start.sh");
+  return src.slice(start, end);
+}
+
+const BLOCK = hasBash && hasPython3 ? `${extractHelpers()}\n${extractBlock()}` : "";
 
 let dir: string;
 
@@ -108,6 +127,9 @@ function run(opts: RunOptions): { argv: string[]; stdout: string } {
       CLAWBOX_OPENCLAW_V2: "1",
       OPENCLAW_CONFIG: config,
       OPENCLAW_BIN: bin,
+      // This case's own root, so the repair marker the helpers write does not
+      // leak between cases through the run-wide one.
+      CLAWBOX_ROOT: dir,
       CLAWBOX_OPENCLAW_EFFECTIVE: opts.effective ?? "2026.8.1",
     }),
   });
@@ -148,11 +170,16 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       entries: { discord: { enabled: true }, whatsapp: { enabled: true } },
       enableFails: ["discord", "whatsapp"],
     });
-    expect(argv).toEqual([
+    expect(argv.filter((line) => line.startsWith("plugins"))).toEqual([
       "plugins enable discord --accept-capabilities",
       "plugins enable whatsapp --accept-capabilities",
     ]);
+    expect(argv.some((line) => line.startsWith("plugins install"))).toBe(false);
     expect(stdout).toContain("WARN: could not confirm discord plugin capabilities");
+    // …and the plugin is switched off so the gateway can start without it
+    // (TASK-606): the refusal is real, it is just not one an install repairs.
+    expect(argv).toContain('config set plugins.entries["discord"].enabled false --strict-json');
+    expect(stdout).toContain("booting without it");
   });
 
   it("repairs the payload under the alias the registry answers to", () => {
