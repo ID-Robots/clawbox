@@ -283,10 +283,15 @@ describe("an approval turn from the owner's own conversation", () => {
     // caller holding the device bearer could stream megabytes into the parse,
     // which necessarily runs ahead of the attempt budget.
     const huge = "x".repeat(5_000);
-    for (const headers of [
+    // Typed, because the two entries have different KEYS and the inferred
+    // union is not a `HeadersInit` — which `tsc` catches and vitest does not.
+    const attempts: Record<string, string>[] = [
+      // The caller's own claim...
       { "content-type": "application/json", authorization: `Bearer ${MCP_TOKEN}`, "content-length": "5100" },
+      // ...and a request that makes none, the way a chunked one does.
       { "content-type": "application/json", authorization: `Bearer ${MCP_TOKEN}` },
-    ]) {
+    ];
+    for (const headers of attempts) {
       const res = await POST(
         new Request("http://127.0.0.1/setup-api/email/chat-reply", {
           method: "POST",
