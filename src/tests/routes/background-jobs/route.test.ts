@@ -181,4 +181,14 @@ describe("background-jobs — the switches", () => {
     expect(r.status).toBe(200);
     expect(await r.json()).toMatchObject({ ok: true, restarted: false });
   });
+  it("answers bad_request for a body that parses to null, not an unstructured 500", async () => {
+    // `JSON.parse("null")` succeeds, so the `catch` never runs and the cast
+    // changes nothing at runtime: reading `.id` off it threw out of the handler.
+    const r = await POST(new Request("http://x/setup-api/background-jobs", {
+      method: "POST",
+      body: "null",
+    }));
+    expect(r.status).toBe(400);
+    expect(await r.json()).toMatchObject({ ok: false, code: "bad_request" });
+  });
 });

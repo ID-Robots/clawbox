@@ -264,4 +264,27 @@ d("gateway-pre-start.sh — the OpenClaw 2 background-job opt-outs", () => {
     expect(readFileSync(configPath, "utf-8")).toBe("{ broken");
     expect(calls()).toBe("");
   });
+  it("seeds through a state record that is valid JSON but not an object", () => {
+    // Only STATEPY writes this file and it always writes `{"seeded": [...]}` —
+    // but a corrupted or hand-edited record that is still valid JSON raised
+    // `AttributeError` out of SEEDPY, which `|| true` then swallowed: the box
+    // never seeded and never said why. An unreadable record is already treated
+    // as "nothing seeded yet"; an unusable one must be read the same way.
+    writeFileSync(statePath, "[1, 2]");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(at("agents.defaults.heartbeat.every")).toBe("0m");
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded)
+      .toContain("agents.defaults.heartbeat.every");
+  });
+
+  it("seeds through a state record whose `seeded` is not a list", () => {
+    // `set(5)` raises TypeError, which neither `except` catches either.
+    writeFileSync(statePath, JSON.stringify({ seeded: 5 }));
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(at("skills.workshop.autonomous.mode")).toBe("off");
+    expect(JSON.parse(readFileSync(statePath, "utf-8")).seeded)
+      .toContain("skills.workshop.autonomous.mode");
+  });
 });

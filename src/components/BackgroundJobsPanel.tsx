@@ -47,6 +47,18 @@ const ROWS: { id: BackgroundJobId; labelKey: string; hintKey: string }[] = [
   { id: "skillLearning", labelKey: "settings.bgLearning", hintKey: "settings.bgLearningHint" },
 ];
 
+// SHAPE-CHECKED DOWN TO THE ELEMENT. `Array.isArray` says yes to `[null]`, and
+// the row lookup below then reads `.id` off it — a throw inside Settings, which
+// is the whole window down again rather than one missing card. The array-ness
+// used to be checked and the element shape was not.
+function isStatus(body: unknown): body is BackgroundJobsStatus {
+  const jobs = (body as { jobs?: unknown } | null | undefined)?.jobs;
+  return (
+    Array.isArray(jobs)
+    && jobs.every((job) => !!job && typeof job === "object" && typeof (job as { id?: unknown }).id === "string")
+  );
+}
+
 export default function BackgroundJobsPanel() {
   const { t } = useT();
   const [status, setStatus] = useState<BackgroundJobsStatus | null>(null);
@@ -67,13 +79,13 @@ export default function BackgroundJobsPanel() {
       try {
         const r = await fetch("/setup-api/background-jobs", { cache: "no-store" });
         if (!r.ok || !alive) return;
-        const body = (await r.json()) as Partial<BackgroundJobsStatus>;
+        const body: unknown = await r.json();
         // SHAPE-CHECKED, not cast. This panel is mounted inside Settings, so a
-        // body without `jobs` — an older server, a proxy's error page, a mock
-        // that answers `{}` — turned `status.jobs.find(...)` into a throw that
-        // took the whole Settings WINDOW down, not just this card. Three e2e
-        // specs caught exactly that.
-        if (alive && Array.isArray(body?.jobs)) setStatus(body as BackgroundJobsStatus);
+        // body without usable `jobs` — an older server, a proxy's error page, a
+        // mock that answers `{}` — turned `status.jobs.find(...)` into a throw
+        // that took the whole Settings WINDOW down, not just this card. Three
+        // e2e specs caught exactly that.
+        if (alive && isStatus(body)) setStatus(body);
       } catch {
         // Nothing to say and nothing to draw: the panel stays hidden.
       }
@@ -90,12 +102,12 @@ export default function BackgroundJobsPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, enabled }),
       });
-      const body = (await r.json().catch(() => null)) as (Partial<BackgroundJobsStatus> & { ok?: boolean }) | null;
+      const body: unknown = await r.json().catch(() => null);
       // Only a device-verified change moves the switch. The route reads its own
       // write back off the config before it answers, so an `ok` here is the box
       // saying it changed — not this component assuming it did.
-      if (r.ok && body?.ok === true && Array.isArray(body.jobs)) {
-        setStatus(body as BackgroundJobsStatus);
+      if (r.ok && (body as { ok?: unknown } | null)?.ok === true && isStatus(body)) {
+        setStatus(body);
         setPending((body as { restarted?: boolean }).restarted === false ? id : null);
       } else setFailed(id);
     } catch {
@@ -161,7 +173,12 @@ export default function BackgroundJobsPanel() {
                   aria-checked={job.enabled}
                   aria-label={t(row.labelKey)}
                   aria-busy={busy === row.id}
-                  disabled={busy === row.id}
+                  // EVERY switch, not only the clicked one: the POST writes the
+                  // key, reads it back and restarts the gateway — seconds on an
+                  // Orin — and each answer replaces the whole status, so a
+                  // second write started meanwhile can land its older answer
+                  // last and leave a switch showing a state the box is not in.
+                  disabled={busy !== null}
                   data-testid={`bg-job-switch-${row.id}`}
                   onClick={() => void toggle(row.id, !job.enabled)}
                   className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${job.enabled ? "bg-[var(--coral-bright)]" : "bg-white/15"}`}

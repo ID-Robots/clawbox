@@ -2565,15 +2565,24 @@ except (OSError, json.JSONDecodeError):
     print("")
     raise SystemExit(0)
 
-try:
-    with open(os.environ["CLAWBOX_OPTOUT_STATE"], encoding="utf-8") as fh:
-        seeded = set(json.load(fh).get("seeded") or [])
-except (OSError, json.JSONDecodeError):
-    # An absent record is the normal first-boot state. An UNREADABLE one is read
-    # the same way on purpose: the cost is one `config set` of values the config
-    # may already carry, which is a no-op, while reading it as "everything is
-    # seeded" would leave a fresh box with its noisy defaults for good.
-    seeded = set()
+def read_seeded(path):
+    # An absent record is the normal first-boot state. An UNREADABLE or UNUSABLE
+    # one is read the same way on purpose: the cost is one `config set` of
+    # values the config may already carry, which is a no-op, while reading it as
+    # "everything is seeded" would leave a fresh box with its noisy defaults for
+    # good. Valid JSON that is not the shape we write (`[1,2]`, `"x"`,
+    # `{"seeded": 5}`) raises AttributeError/TypeError, which neither `except`
+    # catches — and `|| true` below then swallowed it, so the box never seeded
+    # and never said why.
+    try:
+        with open(path, encoding="utf-8") as fh:
+            record = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return set()
+    rows = record.get("seeded") if isinstance(record, dict) else None
+    return set(rows) if isinstance(rows, list) else set()
+
+seeded = read_seeded(os.environ["CLAWBOX_OPTOUT_STATE"])
 
 def present(path):
     node = cfg
@@ -2620,11 +2629,16 @@ SEEDPY
 import json, os, tempfile
 
 path = os.environ["CLAWBOX_OPTOUT_STATE"]
+# Same tolerance as the reader above: a record that is valid JSON but not the
+# shape we write is replaced rather than raised over, so the seeding is still
+# recorded and the next boot does not offer it again.
 try:
     with open(path, encoding="utf-8") as fh:
-        seeded = set(json.load(fh).get("seeded") or [])
+        record = json.load(fh)
 except (OSError, json.JSONDecodeError):
-    seeded = set()
+    record = None
+rows = record.get("seeded") if isinstance(record, dict) else None
+seeded = set(rows) if isinstance(rows, list) else set()
 seeded.update(json.loads(os.environ["CLAWBOX_OPTOUT_BATCH"])["settled"])
 
 directory = os.path.dirname(path) or "."

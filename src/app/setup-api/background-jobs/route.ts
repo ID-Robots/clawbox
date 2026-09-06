@@ -37,20 +37,27 @@ export async function POST(req: Request) {
   if (!(await hasOwnerSession(req))) {
     return NextResponse.json({ ok: false, code: "owner_only" }, { status: 403 });
   }
-  let body: { id?: unknown; enabled?: unknown };
+  // `null`, `[]` and `"x"` are all valid JSON, and the cast changes nothing at
+  // runtime, so reading `.id` off any of them threw out of the handler as an
+  // unstructured 500 instead of the 400 this branch is for.
+  let body: unknown;
   try {
-    body = (await req.json()) as { id?: unknown; enabled?: unknown };
+    body = await req.json();
   } catch {
     return NextResponse.json({ ok: false, code: "bad_request" }, { status: 400 });
   }
-  const id = IDS.find((candidate) => candidate === body.id);
-  if (!id || typeof body.enabled !== "boolean") {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ ok: false, code: "bad_request" }, { status: 400 });
+  }
+  const asked = body as { id?: unknown; enabled?: unknown };
+  const id = IDS.find((candidate) => candidate === asked.id);
+  if (!id || typeof asked.enabled !== "boolean") {
     return NextResponse.json({ ok: false, code: "bad_request" }, { status: 400 });
   }
 
   let status;
   try {
-    status = await setBackgroundJob(id, body.enabled);
+    status = await setBackgroundJob(id, asked.enabled);
   } catch (err) {
     if (err instanceof BackgroundJobError) {
       return NextResponse.json(
