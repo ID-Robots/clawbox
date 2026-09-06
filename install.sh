@@ -1490,10 +1490,18 @@ forget_paused_engines() {
 # server down nothing can pull a model back in behind us.
 #
 # "With the web server down" is best-effort, not a guarantee, and it is worth
-# knowing which: clawbox-gateway.service carries `Wants=clawbox-setup.service`,
-# so a gateway (re)start during the build starts the unit do_rebuild had just
-# stopped and the proxy is reachable again. The stop still removes the common
-# case; it does not fence the window.
+# knowing which. The routine breaker was clawbox-gateway.service's
+# `Wants=clawbox-setup.service`, which started the unit do_rebuild had just
+# stopped on every gateway (re)start; that line is gone (TASK-728), so a
+# crash-looping gateway no longer reopens the proxy behind the build — including
+# on the update that DELIVERS the change, because the new unit file is installed
+# and daemon-reloaded before this function runs (step_rebuild_reboot calls
+# step_systemd_services seven lines above do_rebuild, and the updater's
+# gateway_setup step, which cps the same file, is the step immediately before
+# the rebuild). What is still not fenced: `install.sh --step rebuild` run by
+# hand, a box where gateway_setup was skipped (the unit is absent on the hermes
+# SKU) or step_systemd_services failed non-fatally, and an operator or the
+# sudoers grant restarting clawbox-setup inside the window.
 #
 # Stop, never disable — the same rule the idle standby follows, and the reason
 # it is safe: every engine here is meant to come back on demand. An update that
@@ -1928,13 +1936,21 @@ restore_previous_build() {
   fi
 
   # `restart`, not `start`: `start` on a unit that is already active is a no-op,
-  # and the unit CAN be active here. do_rebuild stopped it, but
-  # clawbox-gateway.service carries `Wants=clawbox-setup.service`, so any
-  # gateway (re)start pulls it back up mid-rebuild — and once `next build` has
-  # written the standalone entry, the restart loop latches onto whatever tree is
-  # in place. A `start` would then be a no-op over a process serving the build
-  # that just FAILED verification, curl would answer 200 from it, and the line
-  # below would report a rollback that never happened.
+  # and the unit CAN be active here. do_rebuild stopped it, and once anything
+  # brings it back the restart loop latches onto whatever tree is in place from
+  # the moment `next build` writes the standalone entry. A `start` would then be
+  # a no-op over a process serving the build that just FAILED verification, curl
+  # would answer 200 from it, and the line below would report a rollback that
+  # never happened.
+  #
+  # What used to bring it back routinely was clawbox-gateway.service's
+  # `Wants=clawbox-setup.service`, removed in TASK-728. This stays `restart`
+  # regardless, because the ways in are fewer rather than none: `install.sh
+  # --step rebuild` by hand, a box where gateway_setup was skipped or
+  # step_systemd_services failed non-fatally, and an operator or the sudoers
+  # grant restarting clawbox-setup inside the window. A rollback that reports
+  # itself wrongly is the expensive failure here; a redundant restart costs
+  # nothing.
   # `reset-failed` first, as both gateway recovery paths do. The reclaim in
   # production-server.js is now correctly refused for the length of the build,
   # so clawbox-setup crash-loops on `require`ing a build that is not there yet;
@@ -2086,11 +2102,15 @@ do_rebuild() {
   # back before the rename below would delete it. After the stop, never before
   # it: the rename moves the tree the running server is loading from.
   #
-  # The stop is what makes that ordering worth having, but it does not keep the
-  # dashboard down for the length of the rebuild — clawbox-gateway.service's
-  # `Wants=clawbox-setup.service` starts it again on any gateway (re)start. That
-  # is why the park stamps the tree it sets aside, and why the two `systemctl`
-  # calls that end a rebuild use `restart` rather than `start`.
+  # The stop is what makes that ordering worth having. It did not keep the
+  # dashboard down for the length of the rebuild, because clawbox-gateway.service
+  # carried `Wants=clawbox-setup.service` and started it again on any gateway
+  # (re)start; that line is gone (TASK-728), and it is already gone for THIS
+  # rebuild — step_systemd_services runs seven lines above the do_rebuild in
+  # step_rebuild_reboot. The park still stamps the tree it sets aside and the two
+  # `systemctl` calls that end a rebuild still use `restart` rather than `start`:
+  # a hand-run `--step rebuild`, a skipped gateway_setup and an operator restart
+  # all still land in the window, and neither guard costs anything.
   promote_parked_build "$build_dir" "$kept_dir"
 
   # After the stop, never before it — see free_memory_for_build.
@@ -7605,6 +7625,16 @@ step_rebuild_reboot() {
   fi
   if is_test_mode; then
     echo "CLAWBOX_TEST_MODE=1, restarting clawbox-setup.service in lieu of reboot"
+    # `reset-failed` first, as the other two rebuild-ending restarts already do
+    # (step_rebuild, restore_previous_build). With no start dependency left,
+    # nothing starts clawbox-setup DURING a rebuild any more, so it can no
+    # longer crash-loop on the missing standalone entry from that source — but a
+    # hand restart or the sudoers grant can still land in the window and latch
+    # the unit's inherited 5-in-10 s start limit, and a latched limit would turn
+    # this restart into a failure over a build that is fine. This is the branch
+    # e2e-install takes, and it is bare under `set -euo pipefail`, so that
+    # failure would end the step.
+    systemctl reset-failed clawbox-setup.service 2>/dev/null || true
     systemctl restart clawbox-setup.service
     return 0
   fi

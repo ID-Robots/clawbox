@@ -854,10 +854,15 @@ try {
   // this block repairs. It is ALSO the normal state of a rebuild in flight, for
   // the whole length of the build: install.sh's do_rebuild renames `.next` to
   // `.next-old` and `next build` writes the standalone entry last. This process
-  // is started inside that window as a matter of routine — clawbox-gateway.service
-  // carries `Wants=clawbox-setup.service`, so every gateway (re)start starts the
+  // was started inside that window as a matter of routine — clawbox-gateway.service
+  // carried `Wants=clawbox-setup.service`, so every gateway (re)start started the
   // service do_rebuild had just stopped (e2e-install run 33971129750: four
-  // seconds after the stop). Reclaiming there `rm -rf`s the half-written build
+  // seconds after the stop). That line is gone (TASK-728), which removes the
+  // routine trigger and not the case: `install.sh --step rebuild` run by hand, a
+  // box where the gateway unit was never installed so gateway_setup is skipped,
+  // and an operator (or the sudoers grant) restarting clawbox-setup all still
+  // land inside the window. Reclaiming
+  // there `rm -rf`s the half-written build
   // out from under `next build` and renames the previous one on top of it, and
   // the box comes back on the build the update was replacing.
   //
