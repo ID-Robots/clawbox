@@ -197,7 +197,10 @@ describe("an update whose process was replaced is reported, not forgotten", () =
     await updater.checkContinuation();
     expect(updater.getUpdateState().phase).toBe("failed");
 
-    diskState({ locked: false });
+    // The record the line above wrote is what the verdict rests on, so the
+    // next poll's disk still carries it — a `set` this file mocks away is
+    // still a `set` the box made.
+    diskState({ locked: false, interruptedAt: "2026-09-06T09:00:00.000Z" });
     await updater.checkContinuation();
 
     expect(

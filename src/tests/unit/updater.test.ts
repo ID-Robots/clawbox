@@ -318,19 +318,23 @@ describe("updater", () => {
         expect(updater.getUpdateState().phase).toBe("failed");
       });
 
-      await vi.waitFor(() => {
-        expect(updater.dismissSettledUpdate()).toBe(true);
+      await vi.waitFor(async () => {
+        expect((await updater.dismissSettledUpdate()).dismissed).toBe(true);
       });
       const state = updater.getUpdateState();
       expect(state.phase).toBe("idle");
       expect(state.steps.every((step) => step.status === "pending")).toBe(true);
     });
 
-    it("refuses while a run owns the box, so it cannot clear a live run's state", () => {
+    it("refuses while a run owns the box, so it cannot clear a live run's state", async () => {
       updater.resetUpdateState();
       updater.startUpdate();
 
-      expect(updater.dismissSettledUpdate()).toBe(false);
+      expect(await updater.dismissSettledUpdate()).toEqual({
+        dismissed: false,
+        reason: "in-progress",
+        error: "An update is in progress",
+      });
       expect(updater.getUpdateState().phase).toBe("running");
     });
   });
@@ -588,6 +592,32 @@ describe("updater", () => {
       expect(firstUnmaskIndex).toBeGreaterThan(settleIndex);
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_completed: true }),
+      );
+    });
+
+    it("clears the interruption record in the same write that records the completion", async () => {
+      // Any reader that finds "locked, nothing left to resume, not completed"
+      // stamps `update_interrupted_at` — and that is exactly what the SECOND
+      // half of an ordinary update looks like from a process that is not the
+      // one running it. A completion that leaves the record standing is the
+      // false failure of 2026-09-06: the box answered "Update failed", every
+      // step pending, over an update that had finished 71 seconds later.
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_completed: true, update_interrupted_at: undefined }),
       );
     });
 
@@ -1849,7 +1879,26 @@ describe("updater", () => {
       const result = await updater.checkContinuation();
 
       expect(result).toBe(true);
-      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_needs_continuation: undefined }),
+      );
+    });
+
+    it("treats the restart it asked for as expected, not as an interruption", async () => {
+      // The continuation flag IS the proof that the web server was replaced on
+      // purpose. Anything a reader stamped while that restart was under way
+      // describes this update's own normal path, so it goes with the flag.
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+
+      await updater.checkContinuation();
+
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update_needs_continuation: undefined,
+          update_interrupted_at: undefined,
+        }),
+      );
     });
 
     it("resumes once when a boot check and a status poll overlap, and tells both", async () => {
@@ -1870,7 +1919,9 @@ describe("updater", () => {
       flagRead.resolve();
 
       expect(await Promise.all([fromBoot, fromPoll])).toEqual([true, true]);
-      expect(mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+      expect(
+        mockSetMany.mock.calls.filter(([entries]) => "update_needs_continuation" in entries),
+      ).toHaveLength(1);
       expect(mockGet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
     });
 
@@ -1915,7 +1966,9 @@ describe("updater", () => {
 
       expect(result).toBe(false);
       // Flag still cleared — the failure must not replay on every poll.
-      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", undefined);
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ update_needs_continuation: undefined }),
+      );
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toBe("ConfigMutationConflictError: config changed since last load");

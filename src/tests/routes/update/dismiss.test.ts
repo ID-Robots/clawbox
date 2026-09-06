@@ -31,7 +31,7 @@ describe("POST /setup-api/update/dismiss", () => {
     vi.resetModules();
     vi.clearAllMocks();
     session = installSessionFixture();
-    mockDismiss.mockReturnValue(true);
+    mockDismiss.mockResolvedValue({ dismissed: true });
 
     const mod = await import("@/app/setup-api/update/dismiss/route");
     dismissPost = mod.POST;
@@ -51,12 +51,35 @@ describe("POST /setup-api/update/dismiss", () => {
   });
 
   it("answers 409 rather than pretending, while a run owns the box", async () => {
-    mockDismiss.mockReturnValue(false);
+    mockDismiss.mockResolvedValue({
+      dismissed: false,
+      reason: "in-progress" as const,
+      error: "An update is in progress",
+    });
 
     const res = await dismissPost(request(session.cookie));
 
     expect(res.status).toBe(409);
     expect((await res.json()).dismissed).toBe(false);
+  });
+
+  it("says the write failed rather than reporting a dismissal that did not happen", async () => {
+    // `void set(...)` and `return true` meant a store that refused the write
+    // still answered 200: the owner's Dismiss looked like it took, and the
+    // record was still there for the next poll to raise the same failure from.
+    // It is not a 409 either — nothing is in progress.
+    mockDismiss.mockResolvedValue({
+      dismissed: false,
+      reason: "not-written" as const,
+      error: "EACCES: data/config.json",
+    });
+
+    const res = await dismissPost(request(session.cookie));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.dismissed).toBe(false);
+    expect(body.error).toMatch(/EACCES/);
   });
 
   it("refuses a caller with no session", async () => {

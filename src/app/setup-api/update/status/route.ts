@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
-import { getUpdateState, isUpdateCompleted, checkContinuation, getVersionInfo } from "@/lib/updater";
+import {
+  getUpdateState,
+  isUpdateCompleted,
+  checkContinuation,
+  getVersionInfo,
+  isInterruptedVerdict,
+} from "@/lib/updater";
 import { collectBuildIdentity, type DriftReport } from "@/lib/build-identity";
 
 export const dynamic = "force-dynamic";
@@ -32,13 +38,25 @@ async function readDrift(): Promise<DriftReport | null> {
 
 export async function GET() {
   try {
-    const state = getUpdateState();
+    let state = getUpdateState();
 
-    if (state.phase === "idle") {
+    // A REMEMBERED interruption is re-asked, not latched. The verdict is
+    // decided from two durable records, and this process is not necessarily the
+    // one that wrote them: on the Hermes box the boot hook resumed the second
+    // half of an update while this route's copy of the updater sat idle, read
+    // "locked, nothing to resume, not completed" off the disk and answered
+    // `failed` — with every step pending — over an update that finished 71
+    // seconds later, for the life of the web server. Every other failure has a
+    // cause of its own and is left exactly as it is.
+    if (state.phase === "idle" || isInterruptedVerdict(state)) {
       // Check if we need to continue post-restart steps
-      const continued = await checkContinuation();
-      if (continued) {
-        return NextResponse.json(getUpdateState());
+      await checkContinuation();
+      // Re-read: the call above can resume a run, void the interruption, or
+      // DECIDE one. Answering from the state it was called with hid a real
+      // failure for a whole polling interval and a resolved one indefinitely.
+      state = getUpdateState();
+      if (state.phase !== "idle") {
+        return NextResponse.json(state);
       }
 
       const [versions, drift] = await Promise.all([getVersionInfo(), readDrift()]);

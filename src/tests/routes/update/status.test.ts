@@ -6,13 +6,20 @@ vi.mock("@/lib/updater", () => ({
   isUpdateCompleted: vi.fn(),
   checkContinuation: vi.fn(),
   getVersionInfo: vi.fn(),
+  isInterruptedVerdict: vi.fn(),
 }));
 
 vi.mock("@/lib/build-identity", () => ({
   collectBuildIdentity: vi.fn(),
 }));
 
-import { getUpdateState, isUpdateCompleted, checkContinuation, getVersionInfo } from "@/lib/updater";
+import {
+  getUpdateState,
+  isUpdateCompleted,
+  checkContinuation,
+  getVersionInfo,
+  isInterruptedVerdict,
+} from "@/lib/updater";
 import { collectBuildIdentity } from "@/lib/build-identity";
 
 const mockCollectBuildIdentity = vi.mocked(collectBuildIdentity);
@@ -20,6 +27,7 @@ const mockGetUpdateState = vi.mocked(getUpdateState);
 const mockIsUpdateCompleted = vi.mocked(isUpdateCompleted);
 const mockCheckContinuation = vi.mocked(checkContinuation);
 const mockGetVersionInfo = vi.mocked(getVersionInfo);
+const mockIsInterruptedVerdict = vi.mocked(isInterruptedVerdict);
 
 
 /**
@@ -75,6 +83,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetUpdateState.mockReturnValue(defaultState);
     mockIsUpdateCompleted.mockResolvedValue(false);
     mockCheckContinuation.mockResolvedValue(false);
+    mockIsInterruptedVerdict.mockReturnValue(false);
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.0.0", target: "1.1.0" },
       openclaw: { current: "0.5.0", target: "0.5.1" },
@@ -257,6 +266,84 @@ describe("GET /setup-api/update/status", () => {
 
       expect(res.status).toBe(200);
       expect((await res.json()).phase).toBe("completed");
+    });
+  });
+
+  /**
+   * TASK-731 follow-up. The interruption verdict lives in the web server's
+   * memory as well as on disk, and the process that decided it is not
+   * necessarily the process that ran the update — so this route latched a
+   * `failed` it could never revisit: the gate below was `phase === "idle"`, and
+   * a state that had already gone `failed` never asked the updater anything
+   * again. On the Hermes box that meant "Update failed", every step pending,
+   * over an update that finished 71 seconds later.
+   */
+  describe("a remembered interruption is re-judged, not latched", () => {
+    const interrupted = {
+      phase: "failed" as const,
+      steps: defaultState.steps.map((s) => ({ ...s, status: "pending" as const })),
+      currentStepIndex: -1,
+      error: "The update was interrupted before it could finish: the web server was replaced while it ran, "
+        + "and no step is left to resume. Nothing was rolled back — start the update again.",
+    };
+
+    it("reports the completion that overtook it", async () => {
+      mockIsInterruptedVerdict.mockReturnValue(true);
+      // The updater voids the record and resets its state; this route has to
+      // ask it, and then read the answer rather than the state it came in with.
+      mockGetUpdateState
+        .mockReturnValueOnce(interrupted)
+        .mockReturnValue(defaultState);
+      mockIsUpdateCompleted.mockResolvedValue(true);
+      mockGetVersionInfo.mockResolvedValue({
+        clawbox: { current: "3.9.0", target: null, updateAvailable: false },
+        openclaw: { current: "2026.7.1-2", target: null, updateAvailable: false },
+        edition: "hermes", remote: { reachable: true },
+      });
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(mockCheckContinuation).toHaveBeenCalled();
+      expect(body.phase).toBe("completed");
+      expect(body.steps.every((s: { status: string }) => s.status === "completed")).toBe(true);
+    });
+
+    it("keeps reporting an interruption the box still has evidence for", async () => {
+      mockIsInterruptedVerdict.mockReturnValue(true);
+      mockGetUpdateState.mockReturnValue(interrupted);
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(body.phase).toBe("failed");
+      expect(body.error).toMatch(/interrupted before it could finish/);
+    });
+
+    it("leaves a failure that is not that verdict alone", async () => {
+      // A rebuild that failed is a different finding with its own cause, and
+      // nothing about the markers may re-open it.
+      mockIsInterruptedVerdict.mockReturnValue(false);
+      mockGetUpdateState.mockReturnValue({
+        ...interrupted,
+        error: "The device restarted without producing a new build",
+      });
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(mockCheckContinuation).not.toHaveBeenCalled();
+      expect(body.error).toMatch(/without producing a new build/);
+    });
+
+    it("returns a verdict reached during this poll, not one poll later", async () => {
+      // checkContinuation can DECIDE the failure — that is where the marker is
+      // read. Returning the idle state it was called with hid a real failure
+      // for a whole polling interval.
+      mockGetUpdateState
+        .mockReturnValueOnce(defaultState)
+        .mockReturnValue(interrupted);
+
+      const body = await (await updateStatusGet()).json();
+
+      expect(body.phase).toBe("failed");
     });
   });
 });
