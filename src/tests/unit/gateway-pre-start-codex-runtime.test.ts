@@ -180,10 +180,40 @@ interface PluginFlowOptions {
   peerHealthy?: boolean;
   layout?: "flat-managed" | "project-managed" | "registry";
   registryDependenciesOk?: boolean;
+  /**
+   * Exit code for `plugins enable codex --accept-capabilities`.
+   *
+   * 124/137 are the kill at the deadline — the one failure that says nothing
+   * about whether the consent was written.
+   */
+  consentExit?: number;
+  /**
+   * `plugins inspect --all --json` stdout; omitted = the CLI cannot answer.
+   *
+   * The consent answer is the `diagnostics` array. `status`/`activated` are the
+   * config's own `enabled` bit under another name and cannot carry it.
+   */
+  inspectJson?: string;
 }
 
 /** Execute the shipped shell command flow against a fake OpenClaw binary. */
 function runPluginFlow(options: PluginFlowOptions): string[] {
+  return runPluginFlowFull(options).argv;
+}
+
+/**
+ * The same run, with everything it said and everything it recorded.
+ *
+ * The consent arm now has a third outcome that is defined by what it does NOT
+ * do — no switch-off, no marker — so a case for it has to see the marker file
+ * and stderr, not only the argv log.
+ */
+function runPluginFlowFull(options: PluginFlowOptions): {
+  argv: string[];
+  stdout: string;
+  stderr: string;
+  marker: Record<string, { stage?: string; disabled?: boolean }>;
+} {
   const pluginDir = path.join(dir, "plugin", "node_modules", "@openclaw", "codex");
   if (options.installedVersion) {
     mkdirSync(pluginDir, { recursive: true });
@@ -200,10 +230,25 @@ function runPluginFlow(options: PluginFlowOptions): string[] {
 
   const log = path.join(dir, "openclaw-commands.log");
   const fakeOpenClaw = path.join(dir, "openclaw");
-  writeFileSync(fakeOpenClaw, '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "$CODEX_TEST_LOG"\n');
+  writeFileSync(
+    fakeOpenClaw,
+    [
+      "#!/usr/bin/env bash",
+      'printf \'%s\\n\' "$*" >> "$CODEX_TEST_LOG"',
+      ...(options.consentExit
+        ? [`if [ "$2" = "enable" ]; then exit ${options.consentExit}; fi`]
+        : []),
+      'if [ "$2" = "inspect" ]; then',
+      ...(options.inspectJson
+        ? [`  printf '%s' '${options.inspectJson}'; exit 0`]
+        : ["  exit 1"]),
+      "fi",
+    ].join("\n"),
+  );
   chmodSync(fakeOpenClaw, 0o755);
 
-  execFileSync("bash", ["-c", `set -euo pipefail\n${PLUGIN_FLOW}`], {
+  const result = spawnSync("bash", ["-c", `set -euo pipefail\n${PLUGIN_FLOW}`], {
+    encoding: "utf-8",
     env: {
       ...process.env,
       // The prepended repair helpers write `$CLAWBOX_ROOT/data/plugin-repair.json`:
@@ -222,10 +267,22 @@ function runPluginFlow(options: PluginFlowOptions): string[] {
     },
     stdio: "pipe",
   });
+  if (result.status !== 0) throw new Error(`plugin flow exited ${result.status}: ${result.stderr}`);
 
-  return existsSync(log)
-    ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean)
-    : [];
+  let marker: Record<string, { stage?: string; disabled?: boolean }> = {};
+  try {
+    marker = JSON.parse(readFileSync(path.join(dir, "data", "plugin-repair.json"), "utf-8"));
+  } catch {
+    /* no marker was written */
+  }
+  return {
+    argv: existsSync(log)
+      ? readFileSync(log, "utf-8").trim().split("\n").filter(Boolean)
+      : [],
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    marker,
+  };
 }
 
 /**
@@ -509,6 +566,59 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       installedVersion: "2026.8.1",
       peerHealthy: true,
     })).toEqual(["plugins enable codex --accept-capabilities"]);
+  });
+
+  // ── The consent verb killed at its deadline (TASK-606 follow-up) ─────────
+  //
+  // The codex twin of the managed loop's cases in
+  // gateway-pre-start-managed-plugin-payload.test.ts. Same verb, same ceiling,
+  // same sibling defect: every non-zero exit was read as a refusal, so a kill
+  // at the deadline switched Codex off over a consent that may well have been
+  // written — `plugins enable` records it and only then loads the gateway SDK.
+  const CONSENTED = { v2: true, needsCodex: false, enabledByConfig: true,
+    installedVersion: "2026.8.1", peerHealthy: true } as const;
+
+  it.each([124, 137])("keeps Codex on when a killed verb had recorded the consent (exit %i)", (code) => {
+    const { argv, stdout, marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: code,
+      inspectJson: '{"diagnostics":[]}',
+    });
+    expect(argv).toContain("plugins inspect --all --json");
+    expect(stdout).toContain("Codex runtime plugin capabilities accepted/current");
+    expect(stdout).not.toContain("booting without Codex");
+    expect(marker).toEqual({});
+  });
+
+  it("still boots without Codex when a killed verb had NOT recorded the consent", () => {
+    const { stdout, marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: 124,
+      inspectJson:
+        '{"diagnostics":[{"level":"warn","pluginId":"codex",'
+        + '"message":"Plugin codex requires capability consent; run openclaw plugins enable"}]}',
+    });
+    expect(stdout).toContain("booting without Codex");
+    expect(marker.codex?.stage).toBe("consent");
+  });
+
+  it("still boots without Codex when the core cannot be asked at all", () => {
+    // Never leaves an unresolved plugin enabled: readiness refusal burns
+    // StartLimitBurst=20 and the unit is then FAILED, not retried.
+    const { stdout, marker } = runPluginFlowFull({ ...CONSENTED, consentExit: 137 });
+    expect(stdout).toContain("booting without Codex");
+    expect(marker.codex?.stage).toBe("consent");
+  });
+
+  it("still boots without Codex when the core actually refused the consent", () => {
+    const { argv, stdout, marker } = runPluginFlowFull({ ...CONSENTED, consentExit: 1 });
+    expect(stdout).toContain("booting without Codex");
+    // The marker is what Settings renders the Retry from. The switch-off half
+    // needs an openclaw.json this fragment's environment does not set, and is
+    // pinned in gateway-pre-start-managed-plugin-payload.test.ts.
+    expect(marker.codex?.stage).toBe("consent");
+    // A refusal the core chose never pays for the second question.
+    expect(argv.some((line) => line.startsWith("plugins inspect"))).toBe(false);
   });
 
   it("leaves an explicitly disabled unused plugin alone", () => {
