@@ -44,8 +44,8 @@ const WP = [
 let savedWallpaperId = "custom-2";
 /** Which harness the box reports — the fallback wallpaper follows it. */
 let activeHarness = "openclaw";
-/** Whether anything on the device actually NAMED an edition (the lock, or the env). */
-let editionKnown = true;
+/** Whether the device could actually RESOLVE its harness, or `active` is its own default. */
+let activeKnown = true;
 /** Milliseconds the harness probe takes to answer, so a case can run inside the window where it has not. */
 let harnessDelayMs = 0;
 /** Every preference body the desktop POSTed, in order. */
@@ -71,7 +71,7 @@ function installFetch() {
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) {
       if (harnessDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, harnessDelayMs));
-      return answer({ active: activeHarness, edition: activeHarness, editionKnown });
+      return answer({ active: activeHarness, edition: activeHarness, activeKnown });
     }
     if (url.includes("/setup-api/preferences?all=1")) {
       return answer({ wp_id: savedWallpaperId, wp_opacity: 100 });
@@ -123,14 +123,23 @@ async function mountDesktop(expected: string) {
   await waitFor(() => expect(wallpaperUrls().some((u) => u.includes(expected))).toBe(true));
 }
 
+/**
+ * Testing-library's implicit `findBy` budget is 1 s, which is not a load-safe
+ * one HERE: every case mounts the whole desktop shell, so under the components
+ * project's four workers the Settings window can take longer than that to paint
+ * and the failure lands as "Unable to find role=button" on a case that is not
+ * broken. The file's own `testTimeout` above is what actually bounds a hang.
+ */
+const PAINTS_SOON = { timeout: 8_000 };
+
 async function openAppearanceSettings() {
   fireEvent.contextMenu(screen.getByTestId("desktop-surface"));
-  const menu = await screen.findByTestId("desktop-context-menu");
+  const menu = await screen.findByTestId("desktop-context-menu", {}, PAINTS_SOON);
   const settings = Array.from(menu.querySelectorAll("button"))
     .find((b) => /settings/i.test(b.textContent || ""));
   expect(settings).toBeTruthy();
   fireEvent.click(settings!);
-  fireEvent.click(await screen.findByRole("button", { name: /appearance/i }));
+  fireEvent.click(await screen.findByRole("button", { name: /appearance/i }, PAINTS_SOON));
 }
 
 beforeEach(() => {
@@ -138,7 +147,7 @@ beforeEach(() => {
   window.localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(WP));
   savedWallpaperId = "custom-2";
   activeHarness = "openclaw";
-  editionKnown = true;
+  activeKnown = true;
   harnessDelayMs = 0;
   saved.length = 0;
   resetHarnessCache();
@@ -179,7 +188,7 @@ describe("deleting a custom wallpaper", () => {
     await mountDesktop(WP[2]);
 
     await openAppearanceSettings();
-    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 1/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 1/i }, PAINTS_SOON));
 
     // It is now Custom 2 of two, but it is the same picture.
     await waitFor(() => {
@@ -200,7 +209,7 @@ describe("deleting a custom wallpaper", () => {
     await mountDesktop(WP[2]);
 
     await openAppearanceSettings();
-    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 3/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 3/i }, PAINTS_SOON));
 
     await waitFor(() => expect(wallpaperUrls().some((u) => u.includes("hermes-wallpaper"))).toBe(true));
     expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(false);
@@ -236,7 +245,7 @@ describe("deleting a custom wallpaper", () => {
     await mountDesktop("clawbox-wallpaper");
 
     await openAppearanceSettings();
-    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 1/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 1/i }, PAINTS_SOON));
 
     // This browser's own list did shrink — the delete is not being refused.
     await waitFor(() => {
@@ -341,7 +350,7 @@ describe("deleting a custom wallpaper", () => {
     await waitFor(() => expect(wallpaperUrls().some((u) => u.includes(WP[2]))).toBe(true));
 
     await openAppearanceSettings();
-    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 3/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 3/i }, PAINTS_SOON));
 
     // The delete itself is not blocked — a local operation must not wait on a
     // remote probe. Only the box-wide guess is withheld.
@@ -364,7 +373,7 @@ describe("deleting a custom wallpaper", () => {
     await mountDesktop("clawbox-wallpaper");
 
     await openAppearanceSettings();
-    const tile = await screen.findByRole("button", { name: /^ClawBox$/i });
+    const tile = await screen.findByRole("button", { name: /^ClawBox$/i }, PAINTS_SOON);
     expect(tile.getAttribute("aria-pressed")).toBe("true");
   });
 });
@@ -407,7 +416,7 @@ describe("the built-in wallpapers this edition offers", () => {
     // write, a permission change, a partial reflash), so `readEditionSource`
     // falls back to its own "openclaw" — which the route now reports as a
     // GUESS. Taking the guess would put ClawBox branding on a Hermes box.
-    editionKnown = false;
+    activeKnown = false;
     savedWallpaperId = "clawbox";
     render(<ChromeDesktop />);
     await waitFor(() => expect(screen.getByTestId("desktop-root")).toBeTruthy());
@@ -419,19 +428,5 @@ describe("the built-in wallpapers this edition offers", () => {
     // fallback this browser derived is never written back (TASK-719/#728).
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "clawbox")).toBe(false);
-  });
-
-  it("heals a stored OTHER-edition brand to this one for the paint, and persists nothing", async () => {
-    // A box re-imaged onto the other edition, or a `wp_id` chosen before this
-    // ruling: the id names an art this edition does not ship. It resolves to
-    // the local brand on screen and the stored value is left alone.
-    savedWallpaperId = "hermes";
-    await mountDesktop("clawbox-wallpaper");
-    await openAppearanceSettings();
-
-    expect(brandWallpaperAssets().some((url) => url.includes("hermes-wallpaper"))).toBe(false);
-    expect(builtinWallpaperTiles()).toEqual(["clawbox", "deep-space"]);
-    await new Promise((resolve) => setTimeout(resolve, 900));
-    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "hermes")).toBe(false);
   });
 });

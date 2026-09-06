@@ -9,23 +9,37 @@ import path from "node:path";
  * 2026-09-06) it is also where the browser learns whether that answer is worth
  * believing.
  *
- * `edition` and `active` both resolve through `readEditionSource()`, which
- * collapses "nobody said" into its own "openclaw" default — the safe way to be
- * wrong for "which SKU is this", since openclaw is the non-premium one, and the
- * wrong way round for anything that BRANDS the box: a Hermes device whose lock
- * is unreadable would be dressed as a ClawBox. `editionKnown` is what lets a
- * caller tell the two apart, so the route reports the doubt instead of hiding
- * it behind a default.
+ * `active` is resolved from the root-owned edition lock and, on the one SKU the
+ * lock deliberately leaves open, from `data/config.json`. Both of those reads
+ * fall back to "openclaw" when nothing could answer — the safe way to be wrong
+ * for "which SKU is this", since openclaw is the non-premium one, and the wrong
+ * way round for anything that BRANDS the box: a Hermes device whose lock is
+ * unreadable, or a licensed `dual` running Hermes whose config store a `sudo`
+ * script left root-owned, would be dressed as a ClawBox. `activeKnown` is what
+ * lets a caller tell a fact from a fallback, so the route reports the doubt
+ * instead of hiding it behind a default.
  */
+
+interface Answer {
+  active: string;
+  edition: string;
+  activeKnown: boolean;
+}
 
 let lockPath: string;
 let previousEditionFile: string | undefined;
 let previousEdition: string | undefined;
 
-async function get(): Promise<{ active: string; edition: string; editionKnown: boolean }> {
+/** The route, freshly imported — `edition-source` captures its path at load. */
+async function get(): Promise<Answer> {
   vi.resetModules();
   const mod = await import("@/app/setup-api/harness/active/route");
   return (await mod.GET()).json();
+}
+
+/** The premium SKU actually unlocked: the licence is not env-overridable. */
+function licenseDual(): void {
+  vi.doMock("@/lib/edition-license", () => ({ verifyDualLicense: () => true }));
 }
 
 beforeEach(() => {
@@ -42,6 +56,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.doUnmock("@/lib/edition-license");
+  vi.doUnmock("@/lib/config-store");
   if (previousEditionFile === undefined) delete process.env.CLAWBOX_EDITION_FILE;
   else process.env.CLAWBOX_EDITION_FILE = previousEditionFile;
   if (previousEdition === undefined) delete process.env.CLAWBOX_EDITION;
@@ -49,34 +65,80 @@ afterEach(() => {
   fs.rmSync(path.dirname(lockPath), { recursive: true, force: true });
 });
 
-describe("GET /setup-api/harness/active — is the edition a fact or a default?", () => {
-  it("says the edition is known when the root-owned lock names one", async () => {
+describe("GET /setup-api/harness/active — is `active` a fact or a default?", () => {
+  it("resolves a single-harness edition from the root-owned lock", async () => {
     fs.writeFileSync(lockPath, "CLAWBOX_EDITION=hermes\n");
-    expect(await get()).toMatchObject({ active: "hermes", edition: "hermes", editionKnown: true });
+    expect(await get()).toEqual({ active: "hermes", edition: "hermes", activeKnown: true });
   });
 
-  it("says the edition is known when only the environment names one", async () => {
-    // Dev machines, CI and pre-3.x installs never had the lock file, and the
-    // documented env fallback is still an answer somebody gave.
+  it("takes the environment's word when there is no lock file", async () => {
+    // Dev machines, CI and pre-3.x installs never had one, and the documented
+    // env fallback is still an answer somebody gave.
     process.env.CLAWBOX_EDITION = "openclaw";
-    expect(await get()).toMatchObject({ edition: "openclaw", editionKnown: true });
+    expect(await get()).toMatchObject({ edition: "openclaw", activeKnown: true });
   });
 
-  it("says the edition is NOT known when the lock carries none", async () => {
+  it("says the harness is NOT resolved when the lock carries no edition", async () => {
     // A truncated write, a permission change, a partial reflash. `edition` and
     // `active` still answer "openclaw" — every other caller of this route
-    // depends on that default — and `editionKnown` is what says it was a guess.
+    // depends on that default — and `activeKnown` is what says it was a guess.
     fs.writeFileSync(lockPath, "# ClawBox edition lock\n# (truncated)\n");
-    expect(await get()).toEqual({ active: "openclaw", edition: "openclaw", editionKnown: false });
+    expect(await get()).toEqual({ active: "openclaw", edition: "openclaw", activeKnown: false });
   });
 
-  it("says the edition is NOT known when nothing on the device names one", async () => {
-    expect(await get()).toMatchObject({ editionKnown: false });
+  it("says the harness is NOT resolved when nothing on the device names an edition", async () => {
+    expect(await get()).toMatchObject({ activeKnown: false });
   });
 
-  it("says the edition is not known for a lock naming something unrecognised", async () => {
-    // "openclaw" here is this module's default, not the file's word.
+  it("says the harness is not resolved for a lock naming something unrecognised", async () => {
+    // "openclaw" here is edition-source's default, not the file's word.
     fs.writeFileSync(lockPath, "CLAWBOX_EDITION=enterprise\n");
-    expect(await get()).toMatchObject({ edition: "openclaw", editionKnown: false });
+    expect(await get()).toMatchObject({ edition: "openclaw", activeKnown: false });
+  });
+});
+
+describe("GET /setup-api/harness/active — the dual SKU, whose harness is a runtime choice", () => {
+  beforeEach(() => {
+    fs.writeFileSync(lockPath, "CLAWBOX_EDITION=dual\n");
+  });
+
+  it("pins an UNLICENSED dual to the default harness, and that is a fact", async () => {
+    // No licence, so the switcher never unlocks and the stored value is ignored
+    // outright — the box really is on the default, not guessed onto it.
+    expect(await get()).toEqual({ active: "openclaw", edition: "dual", activeKnown: true });
+  });
+
+  it("resolves a licensed dual from the config store", async () => {
+    licenseDual();
+    vi.doMock("@/lib/config-store", async (orig) => ({
+      ...(await orig<typeof import("@/lib/config-store")>()),
+      getKnown: async () => ({ value: "hermes", known: true }),
+    }));
+    expect(await get()).toEqual({ active: "hermes", edition: "dual", activeKnown: true });
+  });
+
+  it("treats a licensed dual nobody has switched as a fact, not a doubt", async () => {
+    // An ABSENT key is a real answer: that box runs the default harness. Calling
+    // it unknown would strip the branding from every healthy dual box.
+    licenseDual();
+    vi.doMock("@/lib/config-store", async (orig) => ({
+      ...(await orig<typeof import("@/lib/config-store")>()),
+      getKnown: async () => ({ value: undefined, known: true }),
+    }));
+    expect(await get()).toEqual({ active: "openclaw", edition: "dual", activeKnown: true });
+  });
+
+  it("says the harness is NOT resolved when the config store cannot be read", async () => {
+    // The gap this pair of tests exists for. `data/config.json` left root-owned
+    // by a `sudo` script: the forgiving reader answers "openclaw" for a box
+    // that is running Hermes, and taking that as a fact paints the ClawBox art
+    // on it — and, on a box that had never chosen, writes `wp_id: "clawbox"`
+    // box-wide. The edition is perfectly readable here; only the harness is not.
+    licenseDual();
+    vi.doMock("@/lib/config-store", async (orig) => ({
+      ...(await orig<typeof import("@/lib/config-store")>()),
+      getKnown: async () => ({ value: undefined, known: false }),
+    }));
+    expect(await get()).toEqual({ active: "openclaw", edition: "dual", activeKnown: false });
   });
 });

@@ -155,11 +155,15 @@ function usePreferenceWriter(loadedRef: { current: boolean }) {
       map.clear();
     };
   }, []);
-  return useCallback((body: Record<string, unknown>) => {
+  return useCallback((body: Record<string, unknown>, slotKey?: string) => {
     // Nothing is written before the saved preferences have been read: until
     // then the state is the defaults, and writing them would erase the device's.
     if (!loadedRef.current) return;
-    const slot = Object.keys(body).join(",");
+    // The key set names the slot, so a body whose SHAPE changes over the life
+    // of the page would debounce against itself: the appearance write drops
+    // `wp_id` until something has chosen one, and without an explicit slot the
+    // pending short write and the long one that replaced it would both fire.
+    const slot = slotKey ?? Object.keys(body).join(",");
     const pending = timers.current.get(slot);
     if (pending) clearTimeout(pending);
     timers.current.set(slot, setTimeout(() => {
@@ -384,6 +388,12 @@ function ChromeDesktopInner() {
   const [wallpaperHarness, setWallpaperHarness] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
+    // Backing off and giving up, shared by the two ways this can fail to
+    // answer: no reply at all, and a reply that could not name the harness.
+    const retry = (attempt: number) => {
+      if (!alive || attempt >= 2) return; // stay unresolved = stay closed
+      setTimeout(() => { if (alive) load(attempt + 1); }, 500 * (attempt + 1));
+    };
     const load = async (attempt: number): Promise<void> => {
       try {
         const d = await fetchHarness({ force: attempt > 0 });
@@ -403,12 +413,19 @@ function ChromeDesktopInner() {
             wallpaperChosen.current = true;
             setWallpaperId(brand);
           }
+          // A device that could not name its harness has not given a settled
+          // answer, only the honest one for now — and `force` re-reads the
+          // route rather than the cache, so asking again is not asking the same
+          // stale reply. install.sh truncates and rewrites the edition lock on
+          // EVERY update and the desktop reloads right after it, so a mount
+          // inside that window would otherwise wear no branding, and write no
+          // `wp_id`, for the life of the tab: the probe-once class.
+          if (!branding) retry(attempt);
           return;
         }
         throw new Error("no harness");
       } catch {
-        if (!alive || attempt >= 2) return; // stay unresolved = stay closed
-        setTimeout(() => { if (alive) load(attempt + 1); }, 500 * (attempt + 1));
+        retry(attempt);
       }
     };
     load(0);
@@ -674,7 +691,7 @@ function ChromeDesktopInner() {
   // — the value the debounced write sends — only ever changes on an explicit
   // choice: picking a tile, uploading, or deleting the picture in use.
   const renderedWallpaperId = resolveRenderedWallpaperId(
-    wallpaperId ?? "",
+    wallpaperId,
     wallpaperHarness,
     customWallpapersLoaded ? customWallpapers.length : null,
   );
@@ -838,9 +855,13 @@ function ChromeDesktopInner() {
     // `wp_id` is left OUT while nothing has chosen one. The rest of the card is
     // still the owner's to change: a box whose edition never resolved must be
     // able to set its fit and opacity, and must not have a wallpaper picked for
-    // it box-wide by the browser that happened to open first.
+    // it box-wide by the browser that happened to open first. One slot for both
+    // shapes, so the transition does not cost a second POST.
     const appearance = { wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity };
-    savePreferences(wallpaperId === null ? appearance : { ...appearance, wp_id: wallpaperId });
+    savePreferences(
+      wallpaperId === null ? appearance : { ...appearance, wp_id: wallpaperId },
+      "appearance",
+    );
   }, [wallpaperId, wpFit, wpBgColor, wpOpacity, savePreferences]);
   useEffect(() => { savePreferences({ desktop_apps: desktopApps }); }, [desktopApps, savePreferences]);
   useEffect(() => { savePreferences({ hidden_installed: hiddenInstalledApps }); }, [hiddenInstalledApps, savePreferences]);

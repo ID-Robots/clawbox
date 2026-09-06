@@ -93,9 +93,11 @@ function usePreferenceSaver(loadedRef: { current: boolean }) {
       map.clear();
     };
   }, []);
-  return useCallback((body: Record<string, unknown>) => {
+  return useCallback((body: Record<string, unknown>, slotKey?: string) => {
     if (!loadedRef.current) return;
-    const slot = Object.keys(body).join(",");
+    // An explicit slot where the body's SHAPE changes over the life of the page
+    // — see the desktop's copy.
+    const slot = slotKey ?? Object.keys(body).join(",");
     const pending = timers.current.get(slot);
     if (pending) clearTimeout(pending);
     timers.current.set(slot, setTimeout(() => {
@@ -192,7 +194,7 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
   // never "not read yet" here — the desktop's third argument is what carries
   // that case.
   const renderedWallpaperId = resolveRenderedWallpaperId(
-    wallpaperId ?? "",
+    wallpaperId,
     wallpaperHarness,
     customWallpapers.length,
   );
@@ -201,9 +203,9 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
   useEffect(() => {
     // `wp_id` is left out while nothing has chosen one — the desktop's rule and
     // for the same reason: this page must not pick a wallpaper box-wide for a
-    // box whose edition it could not read.
+    // box whose edition it could not read. One slot for both shapes.
     const appearance = { wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity };
-    save(wallpaperId === null ? appearance : { ...appearance, wp_id: wallpaperId });
+    save(wallpaperId === null ? appearance : { ...appearance, wp_id: wallpaperId }, "appearance");
   }, [wallpaperId, wpFit, wpBgColor, wpOpacity, save]);
   useEffect(() => { save({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, save]);
   // Declared AFTER both save effects, deliberately. `loaded.current = true`

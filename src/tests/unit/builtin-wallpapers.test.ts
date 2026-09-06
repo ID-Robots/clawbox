@@ -37,7 +37,9 @@ describe("which built-ins an edition offers", () => {
 
   it("does not carry the other edition's image file at all", () => {
     // The tile is an <img src>, so an entry that is merely unselectable would
-    // still fetch the picture. This is the asset half of the ruling.
+    // still fetch the picture. This is about what the PAGE requests — both
+    // files ship on both editions and stay fetchable by URL, which the ruling
+    // does not ask about.
     expect(builtinWallpapers("openclaw").map((wp) => wp.image)).not.toContain("/hermes-wallpaper.jpeg");
     expect(builtinWallpapers("hermes").map((wp) => wp.image)).not.toContain("/clawbox-wallpaper.jpeg");
     expect(builtinWallpapers(null).every((wp) => wp.image === "")).toBe(true);
@@ -53,17 +55,16 @@ describe("which built-ins an edition offers", () => {
 
 describe("which harness's branding the device wears", () => {
   it("follows the ACTIVE harness, so the dual SKU shows the one that is running", () => {
-    expect(brandingHarness({ active: "hermes", editionKnown: true })).toBe("hermes");
-    expect(brandingHarness({ active: "openclaw", editionKnown: true })).toBe("openclaw");
+    expect(brandingHarness({ active: "hermes", activeKnown: true })).toBe("hermes");
+    expect(brandingHarness({ active: "openclaw", activeKnown: true })).toBe("openclaw");
   });
 
-  it("discards `active` entirely when no edition could be read", () => {
-    // On an unreadable lock `active` is not an independent answer:
-    // getActiveHarness() -> lockedHarness() -> readEdition() is the same file,
-    // so it can only echo "openclaw", on a Hermes box as readily as on an
-    // OpenClaw one. Taking it would brand a Hermes device as a ClawBox.
-    expect(brandingHarness({ active: "openclaw", editionKnown: false })).toBeNull();
-    expect(brandingHarness({ active: "hermes", editionKnown: false })).toBeNull();
+  it("discards `active` entirely when the device could not resolve it", () => {
+    // Where `active` is a fallback it is a fallback to "openclaw" whatever the
+    // box really is — an unreadable edition lock, or an unreadable config store
+    // on a licensed `dual`. Taking it would brand a Hermes device as a ClawBox.
+    expect(brandingHarness({ active: "openclaw", activeKnown: false })).toBeNull();
+    expect(brandingHarness({ active: "hermes", activeKnown: false })).toBeNull();
   });
 
   it("says nothing for a probe that has not answered, or a server that predates the field", () => {

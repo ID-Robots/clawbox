@@ -27,10 +27,10 @@ vi.mock("next/image", () => ({ default: () => null }));
 // Hoisted so a case can decide what the probe answers — including answering
 // without an `active`, which is what a failed probe looks like to this route.
 const harnessMock = vi.hoisted(() =>
-  vi.fn(async (): Promise<{ active?: string; edition?: string; editionKnown?: boolean }> => ({
+  vi.fn(async (): Promise<{ active?: string; edition?: string; activeKnown?: boolean }> => ({
     active: "openclaw",
     edition: "openclaw",
-    editionKnown: true,
+    activeKnown: true,
   })),
 );
 vi.mock("@/lib/client-harness", () => ({ fetchHarness: harnessMock }));
@@ -89,7 +89,7 @@ let posts: Record<string, unknown>[];
 beforeEach(() => {
   posts = [];
   localStorage.clear();
-  harnessMock.mockResolvedValue({ active: "openclaw", edition: "openclaw", editionKnown: true });
+  harnessMock.mockResolvedValue({ active: "openclaw", edition: "openclaw", activeKnown: true });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -350,7 +350,7 @@ describe("/app/settings — Appearance", () => {
     // The built-in list is edition-scoped (owner ruling 2026-09-06). This route
     // is the phone's Settings, so it must scope it the same way the desktop
     // does — one source of truth, not a second copy that drifts.
-    harnessMock.mockResolvedValue({ active: "hermes", edition: "hermes", editionKnown: true });
+    harnessMock.mockResolvedValue({ active: "hermes", edition: "hermes", activeKnown: true });
     render(<StandaloneAppPage />);
     // `wp_fit` proves the box's answer landed, as elsewhere in this file.
     await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
@@ -358,10 +358,11 @@ describe("/app/settings — Appearance", () => {
   });
 
   it("offers only the neutral wallpaper while no edition could be read", async () => {
-    // An unreadable lock reads as OpenClaw in `readEditionSource`, and the
-    // route reports that as a guess. Neither brand may be offered on a guess:
-    // one of the two answers is another product's artwork.
-    harnessMock.mockResolvedValue({ active: "openclaw", edition: "openclaw", editionKnown: false });
+    // An unreadable edition lock — or, on the dual SKU, an unreadable config
+    // store — resolves to OpenClaw, and the route reports that as a guess.
+    // Neither brand may be offered on a guess: one of the two answers is
+    // another product's artwork.
+    harnessMock.mockResolvedValue({ active: "openclaw", edition: "openclaw", activeKnown: false });
     render(<StandaloneAppPage />);
     await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
     expect(screen.getByTestId("ui-wallpapers").textContent).toBe("deep-space");

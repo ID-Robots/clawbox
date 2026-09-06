@@ -22,7 +22,7 @@ describe("client harness cache", () => {
       calls++;
       return {
         ok: true,
-        json: async () => ({ active: "hermes", edition: "hermes", editionKnown: true }),
+        json: async () => ({ active: "hermes", edition: "hermes", activeKnown: true }),
       } as Response;
     }));
   });
@@ -34,16 +34,16 @@ describe("client harness cache", () => {
   });
 
   it("serves repeat callers from cache instead of re-fetching", async () => {
-    const answer = { active: "hermes", edition: "hermes", editionKnown: true };
+    const answer = { active: "hermes", edition: "hermes", activeKnown: true };
     expect(await fetchHarness()).toEqual(answer);
-    // From the cache, and carrying the same `editionKnown`: a caller that must
+    // From the cache, and carrying the same `activeKnown`: a caller that must
     // not brand the box on a guess reads it, and a cached answer that dropped
     // it would silently turn a fact back into a doubt on the second mount.
     expect(await fetchHarness()).toEqual(answer);
     expect(calls).toBe(1);
   });
 
-  it("reports the edition as NOT known when the device did not say", async () => {
+  it("reports the harness as NOT resolved when the device did not say", async () => {
     // A server that predates the field. Absent is not "true": the field exists
     // because an unreadable lock answers "openclaw" like a real OpenClaw box,
     // and reading silence as a fact is the failure it was added to stop.
@@ -54,9 +54,9 @@ describe("client harness cache", () => {
     expect(await fetchHarness()).toEqual({
       active: "openclaw",
       edition: "openclaw",
-      editionKnown: false,
+      activeKnown: false,
     });
-    expect(await fetchHarness()).toMatchObject({ editionKnown: false });
+    expect(await fetchHarness()).toMatchObject({ activeKnown: false });
     expect(calls).toBe(1);
   });
 

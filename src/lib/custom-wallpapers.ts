@@ -53,13 +53,16 @@ export function isCustomWallpaperInRange(wallpaperId: string, count: number): bo
  *
  * `null` there means the edition is NOT KNOWN YET, and then this returns the id
  * unchanged rather than guessing. The guess would be persisted box-wide and is
- * wrong half the time: `activeHarness` unresolved reads as OpenClaw everywhere
- * it is turned into a wallpaper, so a Hermes box whose probe was slow or failed
- * would write the ClawBox art over the owner's selection, permanently, on a
- * delete that had nothing to do with the edition. The desktop already refuses
- * that write on the MOUNT path; this is the same refusal on the delete path.
- * What the owner sees meanwhile is the render fallback, which costs nothing and
- * corrects itself the moment the probe lands.
+ * wrong half the time: every read that resolves the edition falls back to
+ * OpenClaw when nothing on the device could answer, so a Hermes box whose probe
+ * was slow or failed would write the ClawBox art over the owner's selection,
+ * permanently, on a delete that had nothing to do with the edition. Callers get
+ * the null from `brandWallpaperId` (src/lib/builtin-wallpapers.ts), which is the
+ * one place that decides whether this device may be branded at all. The desktop
+ * already refuses that write on the MOUNT path; this is the same refusal on the
+ * delete path. What the owner sees meanwhile is the render fallback — the
+ * NEUTRAL wallpaper while the edition is unknown, never the other edition's
+ * brand — which costs nothing and corrects itself the moment the probe lands.
  *
  * `before` is the list as it stood BEFORE the removal, and it is what decides
  * whether the rule applies at all: renumbering only makes sense for a selection

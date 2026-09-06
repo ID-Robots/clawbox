@@ -26,31 +26,28 @@ export type HarnessInfo = {
   active: string;
   edition: string;
   /**
-   * Whether anything on the device actually NAMED an edition, or `edition`
-   * above is `readEditionSource()`'s own "openclaw" default (no lock file, no
-   * `CLAWBOX_EDITION`, or a lock that could not be parsed).
+   * Whether `active` is the device's own answer, or the default it falls back
+   * to when nothing could answer — an unreadable edition lock, or an unreadable
+   * config store on the one SKU whose harness is a runtime choice. The server
+   * owns the distinction (`getActiveHarnessSource`); this only carries it.
    *
-   * Cached with `edition` and for the same reason: both come from a root-owned
-   * file that only an edition switch rewrites. A caller that must not guess —
-   * anything that BRANDS the box — reads this before believing `active` either,
-   * since on an unreadable lock that field traces back through
-   * `lockedHarness()` to the very same file and can only echo "openclaw".
-   *
-   * False for a server that predates the field, which is the honest reading: it
-   * did not say.
+   * A caller that must not guess — anything that BRANDS the box — reads this
+   * before believing `active`. False for a server that predates the field,
+   * which is the honest reading: it did not say.
    */
-  editionKnown: boolean;
+  activeKnown: boolean;
 };
 
 const ACTIVE_TTL_MS = 5_000;
 
-let editionCache: { value: string; known: boolean } | null = null;
+let editionCache: string | null = null;
+let activeKnownCache: boolean | null = null;
 let activeCache: { value: string; at: number } | null = null;
 let inFlight: Promise<HarnessInfo | null> | null = null;
 
 /** The edition if it is already known, else null. Never triggers a fetch. */
 export function cachedEdition(): string | null {
-  return editionCache?.value ?? null;
+  return editionCache;
 }
 
 /** The active harness if a fresh value is cached, else null. Never fetches. */
@@ -62,12 +59,14 @@ export function cachedActiveHarness(): string | null {
 /** Drop the cached active harness — call after switching harnesses. */
 export function invalidateActiveHarness(): void {
   activeCache = null;
+  activeKnownCache = null;
 }
 
 /** Test seam: forget everything, including the immutable edition. */
 export function resetHarnessCache(): void {
   editionCache = null;
   activeCache = null;
+  activeKnownCache = null;
   inFlight = null;
 }
 
@@ -82,8 +81,8 @@ export function fetchHarness(options?: {
   force?: boolean;
 }): Promise<HarnessInfo | null> {
   const active = options?.force ? null : cachedActiveHarness();
-  if (active !== null && editionCache !== null) {
-    return Promise.resolve({ active, edition: editionCache.value, editionKnown: editionCache.known });
+  if (active !== null && editionCache !== null && activeKnownCache !== null) {
+    return Promise.resolve({ active, edition: editionCache, activeKnown: activeKnownCache });
   }
   if (inFlight && !options?.force) return inFlight;
 
@@ -93,16 +92,20 @@ export function fetchHarness(options?: {
   })
     .then((r) => (r.ok ? r.json() : null))
     .then((d: unknown) => {
-      const data = (d ?? {}) as { active?: unknown; edition?: unknown; editionKnown?: unknown };
-      if (typeof data.edition === "string") {
-        editionCache = { value: data.edition, known: data.editionKnown === true };
+      const data = (d ?? {}) as { active?: unknown; edition?: unknown; activeKnown?: unknown };
+      if (typeof data.edition === "string") editionCache = data.edition;
+      if (typeof data.active === "string") {
+        activeCache = { value: data.active, at: Date.now() };
+        // Cached beside `active`, not beside `edition`: it certifies THAT
+        // value, and a cached answer that dropped it would turn a fact into a
+        // doubt on the second mount.
+        activeKnownCache = data.activeKnown === true;
       }
-      if (typeof data.active === "string") activeCache = { value: data.active, at: Date.now() };
       if (typeof data.active !== "string" && typeof data.edition !== "string") return null;
       return {
         active: typeof data.active === "string" ? data.active : "",
         edition: typeof data.edition === "string" ? data.edition : "",
-        editionKnown: data.editionKnown === true,
+        activeKnown: data.activeKnown === true,
       };
     })
     .catch(() => null)

@@ -20,18 +20,20 @@
  *
  * `harness` here is the device's OWN answer — `/setup-api/harness/active`,
  * which resolves through the root-owned edition lock (src/lib/edition-source.ts)
- * — and `null` means NOBODY HAS SAID YET, which covers three real states: the
- * probe is still in flight, the probe failed, and the lock exists but no edition
- * could be read out of it. All three are the same question to this module, and
- * the answer is the same: show the neutral wallpaper only.
+ * and, on the one SKU that leaves the harness open, the config store — and
+ * `null` means NOBODY HAS SAID YET. That covers four real states: the probe is
+ * still in flight, the probe failed, the lock exists but no edition could be
+ * read out of it, and a licensed `dual` box whose config store could not be
+ * read. All four are the same question to this module, and the answer is the
+ * same: show the neutral wallpaper only.
  *
  * That is the fail-closed direction, and it is chosen rather than inherited.
- * `readEditionSource()` collapses "nobody said" into its own "openclaw" default
- * — the right default for "which SKU is this", where guessing the non-premium
- * answer is the safe way to be wrong, and the WRONG one here, where the guess is
- * a competitor's picture across the customer's screen. So the route reports
- * whether anything actually named an edition (`editionKnown`) and this module
- * refuses to brand a box on a guess.
+ * Both of those reads collapse "nobody could answer" into "openclaw" — the
+ * right default for "which SKU is this", where guessing the non-premium answer
+ * is the safe way to be wrong, and the WRONG one here, where the guess is a
+ * competitor's picture across the customer's screen. So the route reports
+ * whether `active` is a fact (`activeKnown`, from `getActiveHarnessSource`) and
+ * this module refuses to brand a box on a guess.
  *
  * PAINTING vs PERSISTING is the rule PR #728 established for the same values
  * and it holds here: a guess is fine to paint, because the paint corrects itself
@@ -47,14 +49,19 @@ import { customWallpaperIndex } from "@/lib/custom-wallpapers";
 /** The neutral wallpaper. On every edition, and the only one on an unknown box. */
 export const DEEP_SPACE_WALLPAPER_ID = "deep-space";
 
+/**
+ * Deeply readonly: the three entries below are module-level singletons handed to
+ * every surface at once, so a field write would corrupt the painted background,
+ * both Appearance grids and the Appearance subtitle together.
+ */
 export interface BuiltinWallpaper {
-  id: string;
-  name: string;
+  readonly id: string;
+  readonly name: string;
   /** The image file, or "" when the tile is painted from `gradient`/`stars`. */
-  image: string;
-  gradient: string;
-  stars: boolean;
-  nebula: boolean;
+  readonly image: string;
+  readonly gradient: string;
+  readonly stars: boolean;
+  readonly nebula: boolean;
 }
 
 const CLAWBOX_WALLPAPER: BuiltinWallpaper = {
@@ -93,22 +100,20 @@ const HERMES_WALLPAPERS: readonly BuiltinWallpaper[] = [HERMES_WALLPAPER, DEEP_S
  * known — from the answer `fetchHarness()` gives.
  *
  * `active` rather than `edition` because the ruling says the dual SKU shows the
- * ACTIVE edition's brand, and `getActiveHarness()` is already that value on
- * every SKU: a single-harness edition is locked to itself, and only an unlocked
+ * ACTIVE edition's brand, and that value is already the active edition on every
+ * SKU: a single-harness edition is locked to itself, and only an unlocked
  * `dual` resolves a runtime choice.
  *
- * Anything but `editionKnown === true` discards `active` entirely — an absent
- * field included, since a server that predates it did not say. On a box whose
- * lock cannot be read that field is not an independent answer either:
- * `getActiveHarness()` traces back through `lockedHarness()` to the very same
- * file, so it can only echo "openclaw", on a Hermes box as readily as on an
- * OpenClaw one. Taking it would put ClawBox branding on a Hermes device, which
- * is the one outcome the ruling names.
+ * Anything but `activeKnown === true` discards `active` entirely — an absent
+ * field included, since a server that predates it did not say. Where `active`
+ * is a fallback it is a fallback to "openclaw" whatever the box really is, so
+ * taking it would put ClawBox branding on a Hermes device, which is the one
+ * outcome the ruling names.
  */
 export function brandingHarness(
-  info: { active?: string | null; editionKnown?: boolean } | null | undefined,
+  info: { active?: string | null; activeKnown?: boolean } | null | undefined,
 ): string | null {
-  if (info?.editionKnown !== true) return null;
+  if (info?.activeKnown !== true) return null;
   return info.active === "hermes" || info.active === "openclaw" ? info.active : null;
 }
 
@@ -162,14 +167,15 @@ export function defaultWallpaperId(harness: string | null): string {
  *    It resolves to this edition's own art, and the stored value stays put —
  *    the owner's next explicit pick is what replaces it.
  *
- * An empty `savedId` — nothing chosen yet — takes the same path as an unknown
- * one and lands on the default.
+ * A null `savedId` — nothing chosen yet — takes the same path as an unknown one
+ * and lands on the default.
  */
 export function renderedWallpaperId(
-  savedId: string,
+  savedId: string | null,
   harness: string | null,
   customWallpaperCount: number | null,
 ): string {
+  if (savedId === null) return defaultWallpaperId(harness);
   const customIndex = customWallpaperIndex(savedId);
   if (customIndex !== null) {
     if (customWallpaperCount === null) return savedId;
