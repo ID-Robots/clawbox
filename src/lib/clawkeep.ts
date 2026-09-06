@@ -23,7 +23,11 @@ import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
-import { BACKUP_RUN_CAP_MS, expectedBackupWindowMs } from "@/lib/clawkeep-protection";
+import {
+  BACKUP_RUN_CAP_MS,
+  RESTORE_RUN_CAP_MS,
+  expectedBackupWindowMs,
+} from "@/lib/clawkeep-protection";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { get as configGet, set as configSet } from "@/lib/config-store";
 import { getEdition } from "@/lib/harness";
@@ -1210,7 +1214,7 @@ export class RestoreNeedsPassphraseError extends ClawKeepError {
   }
 }
 
-const RESTORE_TIMEOUT_MS = 30 * 60 * 1000; // hard cap matches openclaw verify + multipart download
+const RESTORE_TIMEOUT_MS = RESTORE_RUN_CAP_MS;
 // Generous cap for a full backup (openclaw backup create + multipart upload).
 // A hung clawkeepd must not hold a Next.js worker open forever. Shared with
 // the UI's "is this `running` heartbeat still alive" rule, which is only

@@ -104,8 +104,35 @@ export const MAX_BACKUP_WINDOW_MS = 7 * DAY_MS + BACKUP_GRACE_MS;
  * in-Next scheduler drives runs instead — and SIGKILLs the daemon at this mark.
  * Declared here, where nothing is imported, so the kill timer and the UI's
  * liveness rule below are the same number by construction.
+ *
+ * It is ClawKeep's own number, not one ClawBox picked: `clawkeep/systemd/
+ * clawkeepd.service` declares `TimeoutStartSec=4h` for this very binary, which
+ * is the daemon's answer to "how long may one backup take". Because those
+ * timers are not installed, this cap is the ONLY ceiling any run on a ClawBox
+ * gets, so a shorter one here is the box overruling the daemon.
+ *
+ * It was 60 minutes, written when a Jetson backup took 2-5 minutes. TASK-675
+ * made 10 GB+ archives the supported case and the validated 12 GiB run took
+ * ~86 minutes — so the box SIGKILLed, around 70% of the upload, the very run
+ * the multipart chunking and the portal's credential-TTL fix had gone to work
+ * to make possible, and answered "backup timed out" over a healthy transfer.
+ * `clawkeep-backup-run-cap.test.ts` reads the unit file and pins the two
+ * together so they cannot drift apart again.
  */
-export const BACKUP_RUN_CAP_MS = 60 * MINUTE_MS;
+export const BACKUP_RUN_CAP_MS = 4 * HOUR_MS;
+
+/**
+ * The hard cap on a single RESTORE. Declared beside the backup's for the same
+ * reason the module gives above: the two are one number by construction.
+ *
+ * A restore does strictly more work than the backup that produced the archive
+ * — multipart download, decrypt, extract, then `openclaw backup verify` — on
+ * the same bytes, so a shorter cap is the same false failure with a worse
+ * ending: a box SIGKILLed part-way through having its state replaced. It was
+ * 30 minutes while the backup had 60, which put a 12 GB restore out of reach
+ * before TASK-675's archives existed.
+ */
+export const RESTORE_RUN_CAP_MS = BACKUP_RUN_CAP_MS;
 
 /**
  * How long a `"running"` status may stand before the run behind it is a corpse
@@ -125,13 +152,18 @@ export const BACKUP_RUN_CAP_MS = 60 * MINUTE_MS;
  * and, on a box whose first backup it was, turning the shelf shield red while
  * the upload was fine.
  *
- * What this deliberately does NOT do is invent a looser window than the cap.
- * TASK-675 made 10 GB+ archives the supported case, and such a run plausibly
- * does not fit in 60 minutes — but that is the cap's problem, not this
- * constant's: pulsing past the cap would be a progress indicator for a process
- * that no longer exists. Raising the cap (and giving `_on_upload_progress` a
- * liveness stamp so the window can be measured from real progress rather than
- * from run duration) belongs with the large-backup work, on hardware.
+ * What this deliberately does NOT do is invent a looser window than the cap:
+ * pulsing past it would be a progress indicator for a process that no longer
+ * exists. It follows the cap instead, which is why raising the cap for
+ * TASK-675's 10 GB+ archives also fixed the other half of that defect — at 60
+ * minutes the shelf went dark on a 12 GB upload that was still going.
+ *
+ * The remaining looseness is that the heartbeat measures DURATION, not
+ * progress: a run SIGKILLed at the cap leaves `"running"` behind and the pulse
+ * stays on until the window closes, now four hours rather than one. Measuring
+ * it from real progress needs `_on_upload_progress` in `runner.py` to stamp a
+ * liveness field — a daemon-side change that has to reach the boxes before
+ * this side can read it, so it ships separately.
  *
  * Two edges this leaves open, neither of which touches the protection verdict —
  * `lastBackupAtMs` stops moving either way, so the age term below still lapses

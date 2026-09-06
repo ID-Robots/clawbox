@@ -11,9 +11,12 @@ export const dynamic = "force-dynamic";
 //
 // On Jetson a real backup can take minutes — the request stays open until the
 // daemon finishes. The UI should call this with no client-side timeout: the
-// bridge's own kill timer (BACKUP_RUN_CAP_MS, 60 minutes) is the real ceiling
-// and now has an owner-facing answer of its own, 504 `timed_out`. The systemd
-// unit's TimeoutStartSec=4h applies to the SCHEDULED run, not to this one.
+// bridge's own kill timer (BACKUP_RUN_CAP_MS) is the real ceiling and has an
+// owner-facing answer of its own, 504 `timed_out`. It is now the same four
+// hours `clawkeep/systemd/clawkeepd.service` declares: those timers are not
+// installed on a ClawBox, so this timer is the only ceiling ANY run gets —
+// scheduled or by hand — and at the old 60 minutes it killed the 12 GB
+// backups TASK-675 exists to support.
 //
 // A box with no pairing is refused with 409 `not_paired` before the daemon is
 // started: `clawkeepd` would have loaded the token, failed and exited 65, and
