@@ -124,8 +124,12 @@ export async function set(key: string, value: unknown): Promise<void> {
  *
  * `get` then `set` is not the same thing. The `await` between them is a point
  * where another request can land its own write, and the caller then reasons
- * about a predecessor its call never actually replaced. There is no await
- * between the read and the write here, so nothing can interleave.
+ * about a predecessor its call never actually replaced. Here the read and the
+ * write are in the same event-loop turn, so no other caller IN THIS PROCESS can
+ * land a config write between them. It says nothing about another process
+ * writing the same file — the rename in `writeConfig` is what covers that.
+ *
+ * Replaces only. To delete a key, `set` it to `undefined`.
  *
  * Same strict read as `set`, for the same reason: a write over a store nobody
  * can read must throw rather than replace it with the one key being saved.
@@ -133,11 +137,7 @@ export async function set(key: string, value: unknown): Promise<void> {
 export async function swap(key: string, value: unknown): Promise<unknown> {
   const config = readConfigStrict();
   const previous = config[key];
-  if (value === undefined) {
-    delete config[key];
-  } else {
-    config[key] = value;
-  }
+  config[key] = value;
   writeConfig(config);
   return previous;
 }

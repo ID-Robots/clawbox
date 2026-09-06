@@ -73,12 +73,14 @@ export async function POST(request: Request) {
   // failure the device is in an uncertain state (synced but maybe not flipped);
   // return the JSON error contract and tell the client to re-read status rather
   // than letting a framework-generated 500 leak through.
-  // The harness this call REPLACED, answered by the write itself so the refresh
+  // The harness this call REPLACED, answered by the write itself, so the refresh
   // below can tell a real flip from a re-select of the one already running.
-  // Read separately up here it was read before the identity sync above, which
-  // has a 60 s budget: two switches in opposite directions both saw the same
-  // predecessor, and the second one persisted its harness and then decided
-  // nothing had moved.
+  //
+  // It has to come from the persist rather than from a read of our own: a read
+  // would sit above the identity sync and its 60 s budget, and two switches in
+  // opposite directions inside that window both see the same predecessor — the
+  // second persists its harness, concludes nothing moved, and leaves the box on
+  // one harness with the agent's whole tool list built for the other.
   let previous: Harness;
   try {
     previous = await setActiveHarness(harness);

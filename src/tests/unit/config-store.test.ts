@@ -125,6 +125,33 @@ describe("config-store", () => {
     });
   });
 
+  describe("swap", () => {
+    it("writes the new value and answers with the one it replaced", async () => {
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "openclaw", keep: "kept" }), "utf-8");
+
+      await expect(configStore.swap("active_harness", "hermes")).resolves.toBe("openclaw");
+      const content = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"));
+      expect(content.active_harness).toBe("hermes");
+      expect(content.keep).toBe("kept");
+    });
+
+    it("answers undefined for a key the store did not hold", async () => {
+      await expect(configStore.swap("neverSet", "first")).resolves.toBeUndefined();
+      expect(await configStore.get("neverSet")).toBe("first");
+    });
+
+    it("throws over a store it could not read, like `set`", async () => {
+      // The invariant this shares with `set`: `swap` is a second write path
+      // into the file holding the mailbox password and both bot tokens, and a
+      // forgiving read would rebuild it from `{}` and REPLACE it with the one
+      // key being written. Pinned here because the caller cannot see it.
+      await fs.writeFile(CONFIG_PATH, "{ half written", "utf-8");
+
+      await expect(configStore.swap("telegram_bot_token", "111:x")).rejects.toThrow();
+      expect(await fs.readFile(CONFIG_PATH, "utf-8")).toBe("{ half written");
+    });
+  });
+
   describe("setMany", () => {
     it("sets multiple keys atomically", async () => {
       await configStore.setMany({ x: 1, y: 2, z: 3 });
