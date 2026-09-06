@@ -295,7 +295,12 @@ export async function offerReplyApproval(
       // Checked BEFORE each send rather than after: the point is not to start a
       // request whose own timeout would carry the caller past its budget.
       if (outOfTime()) break;
-      if (await sendOwnerTelegramText(chatId, text)) delivered += 1;
+      // The remaining budget goes WITH the send, not just around it. The Hermes
+      // leg spawns a CLI with its own 90 s ceiling, so a request started a
+      // moment before the deadline could still carry the caller far past it —
+      // a check before each send bounds when one may START and nothing else.
+      const timeoutMs = typeof deadlineAt === "number" ? Math.max(1, deadlineAt - Date.now()) : undefined;
+      if (await sendOwnerTelegramText(chatId, text, { timeoutMs })) delivered += 1;
     }
 
     if (delivered === 0) {
@@ -384,6 +389,6 @@ export async function applyReplyApproval(input: {
   // claim the message silently (the mail may already be going), so the box has
   // to be the one telling him either way. One path is the only way both
   // editions and both timings say the same thing once.
-  await sendOwnerTelegramText(senderId, settled.note, input.harness);
+  await sendOwnerTelegramText(senderId, settled.note, { harness: input.harness });
   return { handled: true, reply: settled.note, outcome: settled.outcome };
 }

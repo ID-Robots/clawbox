@@ -117,14 +117,18 @@ let cachedToken = null;
  */
 function apiToken() {
   if (cachedToken) return cachedToken;
+  // CHECKED BEFORE IT IS CACHED, never after. A token that fails the shape can
+  // never be sent, so caching one would pin this process to a value it will
+  // refuse for the life of the gateway — and the stale-token retry, which
+  // re-reads the file, would get the same bad value back and give up.
   const fromEnv = (process.env.CLAWBOX_MCP_TOKEN || "").trim();
-  if (fromEnv.length >= MIN_TOKEN_LEN) {
+  if (fromEnv.length >= MIN_TOKEN_LEN && TOKEN_RE.test(fromEnv)) {
     cachedToken = fromEnv;
     return cachedToken;
   }
   try {
     const raw = readFileSync(join(CLAWBOX_ROOT, "data", ".mcp-token"), "utf-8").trim();
-    if (raw.length >= MIN_TOKEN_LEN) {
+    if (raw.length >= MIN_TOKEN_LEN && TOKEN_RE.test(raw)) {
       cachedToken = raw;
       return cachedToken;
     }

@@ -298,7 +298,7 @@ describe("who may say send", () => {
     expect(settled.handled).toBe(true);
     // ...and the verdict goes back on the Hermes bot.
     expect(vi.mocked(ownerSend.sendOwnerTelegramText).mock.calls).toEqual([
-      ["7002", settled.reply, "hermes"],
+      ["7002", settled.reply, { harness: "hermes" }],
     ]);
   });
 
@@ -346,7 +346,7 @@ describe("the verdict", () => {
     // about a decision one of them made, and not a second copy beside a hook
     // that could have rendered it in-thread.
     expect(vi.mocked(ownerSend.sendOwnerTelegramText).mock.calls).toEqual([
-      [OWNER, result.reply, undefined],
+      [OWNER, result.reply, { harness: undefined }],
     ]);
   });
 });

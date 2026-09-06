@@ -278,6 +278,38 @@ describe("an approval turn from the owner's own conversation", () => {
     expect(vi.mocked(smtp.sendMail)).not.toHaveBeenCalled();
   });
 
+  it("refuses a body larger than anything this route can carry", async () => {
+    // Everything legitimate here is a few hundred bytes; without a bound a
+    // caller holding the device bearer could stream megabytes into the parse,
+    // which necessarily runs ahead of the attempt budget.
+    const huge = "x".repeat(5_000);
+    for (const headers of [
+      { "content-type": "application/json", authorization: `Bearer ${MCP_TOKEN}`, "content-length": "5100" },
+      { "content-type": "application/json", authorization: `Bearer ${MCP_TOKEN}` },
+    ]) {
+      const res = await POST(
+        new Request("http://127.0.0.1/setup-api/email/chat-reply", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ senderId: OWNER, text: huge, channel: "telegram", harness: "openclaw" }),
+        }),
+      );
+      expect(res.status).toBe(413);
+    }
+    expect(vi.mocked(smtp.sendMail)).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body that is not an object", async () => {
+    const res = await POST(
+      new Request("http://127.0.0.1/setup-api/email/chat-reply", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${MCP_TOKEN}` },
+        body: '"a string"',
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
   it("refuses a body it cannot read rather than guessing", async () => {
     const res = await POST(
       new Request("http://127.0.0.1/setup-api/email/chat-reply", {

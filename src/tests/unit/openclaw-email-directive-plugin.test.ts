@@ -323,6 +323,15 @@ describe("before_dispatch — the owner's approval reply", () => {
       await fresh.onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
     ).toBeUndefined();
     expect(calls).toHaveLength(0);
+
+    // And it was not CACHED either: a token that can never be sent must not pin
+    // this process to itself for the life of the gateway. Put a good one where
+    // it can be re-read and the very next message goes through.
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    expect(
+      await fresh.onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+    ).toEqual({ handled: true });
+    expect(calls).toHaveLength(1);
   });
 
   it("leaves the message to the agent on every not-ours answer", async () => {

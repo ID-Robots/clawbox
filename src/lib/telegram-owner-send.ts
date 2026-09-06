@@ -120,22 +120,40 @@ export async function sendTelegramBotMessage(token: string, chatId: string, text
 export async function sendOwnerTelegramText(
   chatId: string,
   text: string,
-  /**
-   * Which harness's bot to speak on. Defaults to the active one; the reply
-   * path passes the harness the owner's message actually arrived on, because on
-   * a dual box the verdict has to land in the conversation he typed in.
-   */
-  harnessOverride?: "openclaw" | "hermes",
+  opts: {
+    /**
+     * Which harness's bot to speak on. Defaults to the active one; the reply
+     * path passes the harness the owner's message actually arrived on, because
+     * on a dual box the verdict has to land in the conversation he typed in.
+     */
+     harness?: "openclaw" | "hermes";
+    /**
+     * A ceiling for a caller that is itself inside somebody's budget. Only
+     * SHORTENS: the Hermes leg spawns a CLI whose own default is 90 s, which is
+     * right for a notice nothing waits on and far too long inside a request
+     * that is given 60.
+     */
+    timeoutMs?: number;
+  } = {},
 ): Promise<boolean> {
   if (!TELEGRAM_CHAT_ID_RE.test(chatId)) return false;
   const body = text.slice(0, MAX_TELEGRAM_CHARS);
   if (!body) return false;
 
-  if ((harnessOverride ?? (await getActiveHarness())) === "hermes") {
-    return notifyHermesTelegramUser(chatId, body);
-  }
+  // NEVER THROWS is this file's whole contract, and the readers below can:
+  // `hermesSecretsPresent` raises on an unreadable harness store (EACCES after
+  // a root-run `hermes config set`, a non-regular file), and an unhandled throw
+  // here would turn a notice beside work that SUCCEEDED into a failed request.
+  try {
+    if ((opts.harness ?? (await getActiveHarness())) === "hermes") {
+      return await notifyHermesTelegramUser(chatId, body, opts.timeoutMs);
+    }
 
-  const { token } = await readActiveTelegramBot("openclaw");
-  if (typeof token !== "string" || !token.trim()) return false;
-  return sendTelegramBotMessage(token, chatId, body);
+    const { token } = await readActiveTelegramBot("openclaw");
+    if (typeof token !== "string" || !token.trim()) return false;
+    return await sendTelegramBotMessage(token, chatId, body);
+  } catch (err) {
+    console.error("[telegram] could not resolve this device's bot:", err instanceof Error ? err.message : err);
+    return false;
+  }
 }

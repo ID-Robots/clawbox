@@ -110,6 +110,18 @@ const APPROVAL_CHANNEL = "telegram";
 /** The harnesses whose hooks may speak here. */
 const HARNESSES = new Set(["openclaw", "hermes"]);
 
+/**
+ * The largest body this route will read.
+ *
+ * Everything it can legitimately carry is a chat id, a short message, a channel
+ * name and a harness name — a few hundred bytes. Without a bound, a caller
+ * holding the device bearer could stream megabytes into `request.json()` before
+ * anything here got a chance to refuse it, and the parse happens ahead of the
+ * attempt budget by necessity (the budget is spent per approval ATTEMPT, which
+ * cannot be known until the body is read).
+ */
+const MAX_BODY_BYTES = 4_096;
+
 export async function POST(request: Request) {
   if (!verifyMcpBearer(request.headers.get("authorization"))) {
     // Identical to what an unknown code gets, and on purpose: a caller that can
@@ -119,11 +131,26 @@ export async function POST(request: Request) {
     return NextResponse.json({ handled: false }, { status: 403 });
   }
 
+  // The declared length first, so an honest oversized body costs nothing...
+  const declared = Number(request.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    return NextResponse.json({ handled: false, error: "Body too large" }, { status: 413 });
+  }
+
   let body: ChatReplyBody;
   try {
-    body = (await request.json()) as ChatReplyBody;
+    // ...and then the bytes themselves, because the header is the caller's
+    // claim and a chunked request carries none at all.
+    const raw = await request.text();
+    if (raw.length > MAX_BODY_BYTES) {
+      return NextResponse.json({ handled: false, error: "Body too large" }, { status: 413 });
+    }
+    body = JSON.parse(raw) as ChatReplyBody;
   } catch {
     return NextResponse.json({ handled: false, error: "Expected a JSON body" }, { status: 400 });
+  }
+  if (typeof body !== "object" || body === null) {
+    return NextResponse.json({ handled: false, error: "Expected a JSON object" }, { status: 400 });
   }
 
   const senderId = typeof body.senderId === "string" ? body.senderId : "";

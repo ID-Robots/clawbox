@@ -136,14 +136,18 @@ def _api_token() -> str | None:
     global _cached_token
     if _cached_token:
         return _cached_token
+    # CHECKED BEFORE IT IS CACHED, never after. A token that fails the shape can
+    # never be sent, so caching one would pin this process to a value it will
+    # refuse for the life of the gateway — and the stale-token retry, which
+    # re-reads the file, would get the same bad value back and give up.
     from_env = (os.environ.get("CLAWBOX_MCP_TOKEN") or "").strip()
-    if len(from_env) >= MIN_TOKEN_LEN:
+    if len(from_env) >= MIN_TOKEN_LEN and TOKEN_RE.fullmatch(from_env):
         _cached_token = from_env
         return _cached_token
     try:
         with open(os.path.join(CLAWBOX_ROOT, "data", ".mcp-token"), encoding="utf-8") as handle:
             raw = handle.read().strip()
-        if len(raw) >= MIN_TOKEN_LEN:
+        if len(raw) >= MIN_TOKEN_LEN and TOKEN_RE.fullmatch(raw):
             _cached_token = raw
             return _cached_token
     except OSError:
