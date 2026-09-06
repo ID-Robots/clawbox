@@ -1288,31 +1288,6 @@ function describeDoctorFailure(err: unknown): string {
 }
 
 /**
- * Ask the CORE whether it will accept this device's configuration.
- *
- * HARNESS FIRST. `openclaw config validate --json` is the core's own answer to
- * "would the gateway start?" — `{valid, path, issues[]}` — and until TASK-737
- * nothing in ClawBox ever asked it: not the updater, not install.sh, not the
- * boot script. That gap is the whole of the incident: OpenClaw 2026.8 REFUSES
- * a 2026.7-layout config instead of migrating it on load (`Unrecognized
- * keys`, gateway exit 78), so a box whose migration did not run has a gateway
- * that provably cannot start — and ClawBox reported "not listening on port
- * 18789", which is true, unactionable, and indistinguishable from a dozen
- * other causes.
- *
- * `--json`, not the human output: that goes to stderr and marks each issue
- * with a themed `×` glyph any `FORCE_COLOR` in the environment repaints, so
- * scraping it would be reading presentation as a contract.
- *
- * Returns the core's own reasons when it refuses, and null when it accepts,
- * when there is no core to ask (Hermes), or when the validator could not be
- * run at all. Null is deliberately the "say nothing" answer: this is a
- * DIAGNOSIS of an update that has already failed, so a validator we could not
- * reach must never invent a cause of its own — a half-installed core whose
- * node engine is wrong exits non-zero here too, and calling that a bad config
- * would be a false failure over a config that is fine.
- */
-/**
  * The core's own verdict object, or null when it could not be asked.
  *
  * One place, because the answer has two readers with opposite interests: the
@@ -1362,6 +1337,31 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
   return { accepted, payload };
 }
 
+/**
+ * Ask the CORE whether it will accept this device's configuration.
+ *
+ * HARNESS FIRST. `openclaw config validate --json` is the core's own answer to
+ * "would the gateway start?" — `{valid, path, issues[]}` — and until TASK-737
+ * nothing in ClawBox ever asked it: not the updater, not install.sh, not the
+ * boot script. That gap is the whole of the incident: OpenClaw 2026.8 REFUSES
+ * a 2026.7-layout config instead of migrating it on load (`Unrecognized
+ * keys`, gateway exit 78), so a box whose migration did not run has a gateway
+ * that provably cannot start — and ClawBox reported "not listening on port
+ * 18789", which is true, unactionable, and indistinguishable from a dozen
+ * other causes.
+ *
+ * `--json`, not the human output: that goes to stderr and marks each issue
+ * with a themed `×` glyph any `FORCE_COLOR` in the environment repaints, so
+ * scraping it would be reading presentation as a contract.
+ *
+ * Returns the core's own reasons when it refuses, and null when it accepts,
+ * when there is no core to ask (Hermes), or when the validator could not be
+ * run at all. Null is deliberately the "say nothing" answer: this is a
+ * DIAGNOSIS of an update that has already failed, so a validator we could not
+ * reach must never invent a cause of its own — a half-installed core whose
+ * node engine is wrong exits non-zero here too, and calling that a bad config
+ * would be a false failure over a config that is fine.
+ */
 async function getOpenclawConfigRefusal(): Promise<string | null> {
   const verdict = await askCoreToValidateConfig();
   // EXIT 0 IS ACCEPTANCE, and it is answered without reading the payload — the
@@ -1728,38 +1728,6 @@ async function clawboxSwitchedPluginOff(pluginId: string): Promise<boolean> {
 }
 
 /**
- * Repair every ClawBox-managed plugin a concrete gateway refusal names.
- *
- * WHY THIS IS NOT CODEX-ONLY ANY MORE (TASK-603). The gateway refuses readiness
- * for ANY enabled plugin whose declared capability surface has not been
- * consented to, and it names the plugin in the refusal. Until now this repair
- * matched the literal word `codex`, so a box blocked on `discord` or `whatsapp`
- * — the channel plugins the Settings panel installs — went through the whole
- * recovery untouched and ended at `getGatewayFailureDetail`, which handed the
- * owner the core's own sentence: "rerun with --accept-capabilities". That is
- * advice about a CLI he never ran, over a box that will not come back until
- * somebody runs it for him. This is the tool doing the thing itself.
- *
- * WHY THERE ARE TWO REFUSALS (TASK-602). Consent is the refusal a plugin gets
- * when its package is on disk and its reviewed surface is stale. A CORE UPGRADE
- * produces the other one: plugin payloads live in npm project directories keyed
- * to the core generation, so a bump strands the packages installed under the
- * old one and the core's startup verification refuses over a payload that is
- * not there. `plugins enable` cannot answer that, which is why the outage of
- * 2026-09-01 survived a repair that only knew the consent sentence — the
- * gateway then failed 21 times, systemd gave up, and the owner was left on
- * "Connecting to gateway…" with no route back short of a hand-run CLI.
- *
- * WHY NOT `openclaw update repair --accept-capabilities`, which IS the harness's
- * own post-core convergence and DOES take that flag on the pinned 2026.8.1: it
- * consents for everything blocked, the owner's own plugins included. The
- * whitelist is the point, so ClawBox drives the same underlying verbs per
- * plugin instead. The core runs that convergence itself at startup
- * (`runStartupUpgradeConvergence`), and it is exactly the capability-consent
- * callback it has no way to answer there; the installed bundle exposes no
- * config key and no environment variable for it, only the CLI flag.
- */
-/**
  * `plugin not installed: <id>` — the core's own warning, and the only thing on
  * the box that can tell "this plugin's package is not here" from "this
  * plugin's reviewed capability surface is stale".
@@ -1939,6 +1907,38 @@ async function disableStrandedPluginEntries(blockingIds: Iterable<string>): Prom
   }
 }
 
+/**
+ * Repair every ClawBox-managed plugin a concrete gateway refusal names.
+ *
+ * WHY THIS IS NOT CODEX-ONLY ANY MORE (TASK-603). The gateway refuses readiness
+ * for ANY enabled plugin whose declared capability surface has not been
+ * consented to, and it names the plugin in the refusal. Until now this repair
+ * matched the literal word `codex`, so a box blocked on `discord` or `whatsapp`
+ * — the channel plugins the Settings panel installs — went through the whole
+ * recovery untouched and ended at `getGatewayFailureDetail`, which handed the
+ * owner the core's own sentence: "rerun with --accept-capabilities". That is
+ * advice about a CLI he never ran, over a box that will not come back until
+ * somebody runs it for him. This is the tool doing the thing itself.
+ *
+ * WHY THERE ARE TWO REFUSALS (TASK-602). Consent is the refusal a plugin gets
+ * when its package is on disk and its reviewed surface is stale. A CORE UPGRADE
+ * produces the other one: plugin payloads live in npm project directories keyed
+ * to the core generation, so a bump strands the packages installed under the
+ * old one and the core's startup verification refuses over a payload that is
+ * not there. `plugins enable` cannot answer that, which is why the outage of
+ * 2026-09-01 survived a repair that only knew the consent sentence — the
+ * gateway then failed 21 times, systemd gave up, and the owner was left on
+ * "Connecting to gateway…" with no route back short of a hand-run CLI.
+ *
+ * WHY NOT `openclaw update repair --accept-capabilities`, which IS the harness's
+ * own post-core convergence and DOES take that flag on the pinned 2026.8.1: it
+ * consents for everything blocked, the owner's own plugins included. The
+ * whitelist is the point, so ClawBox drives the same underlying verbs per
+ * plugin instead. The core runs that convergence itself at startup
+ * (`runStartupUpgradeConvergence`), and it is exactly the capability-consent
+ * callback it has no way to answer there; the installed bundle exposes no
+ * config key and no environment variable for it, only the CLI flag.
+ */
 interface PluginRepairOptions {
   /**
    * Consent only — no npm install.
