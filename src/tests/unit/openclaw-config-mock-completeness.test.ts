@@ -258,7 +258,13 @@ function returnedObjectStart(factory: string, from: number): number {
     }
     if (ch === "{" || ch === "[" || ch === "(") { depth += 1; continue; }
     if (ch === "}" || ch === "]" || ch === ")") { depth -= 1; if (depth === 0) return -1; continue; }
-    if (depth !== 1 || ch !== "r" || !/^return\b/.test(factory.slice(i))) continue;
+    if (ch !== "r" || !/^return\b/.test(factory.slice(i))) continue;
+    // A CONDITIONAL return makes the factory unreadable, not merely different.
+    // `() => { if (partial) return { set }; return { get, set }; }` has a path
+    // that omits an export, and answering from the unconditional one would
+    // clear it — the gate passing over the hole it exists for, for the third
+    // time in this review. Reported instead, so a human reads the factory.
+    if (depth !== 1) return -1;
     const after = skipTrivia(factory, i + "return".length);
     if (factory[after] === "{") return after;
     if (factory[after] === "(") {
@@ -459,6 +465,12 @@ describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller
       .toEqual(["set"]);
     // …and a parenthesised return object is still read.
     expect([...exportsOf("() => { return ({ get: vi.fn(), set: vi.fn() }); }")!].sort()).toEqual(["get", "set"]);
+
+    // A BRANCH-DEPENDENT factory is unreadable, not "whatever the last return
+    // says": one path here omits `get`, and answering from the unconditional
+    // return would clear it.
+    expect(exportsOf("() => { if (p) { return { set: vi.fn() }; } return { get: vi.fn(), set: vi.fn() }; }"))
+      .toBeNull();
 
     // And the omission the gate exists for.
     expect([...exportsOf("() => ({ getAll: vi.fn(), setMany: vi.fn() })")!].sort()).toEqual(["getAll", "setMany"]);
