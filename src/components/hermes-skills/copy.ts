@@ -9,7 +9,7 @@ import { useT } from '@/lib/i18n';
 // still reads `COPY.installTitle(name)` rather than a key literal, so the shape
 // the store was written against survives translation — and a new string has
 // exactly one place to land. The catalogue lives in
-// lib/hermes-translations/en-skills.ts under `skills.*`.
+// lib/edition-translations/en-skills.ts under `skills.*`.
 //
 // Plurals branch HERE, in TypeScript, with one key per branch: the catalogue is
 // a flat string map and encoding plural rules in it would make every translator

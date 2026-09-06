@@ -1,7 +1,7 @@
 import type { Locale } from "./i18n";
 import { clawkeepTranslations } from "./clawkeep-translations";
 import { desktopTranslations } from "./desktop-translations";
-import { hermesTranslations } from "./hermes-translations";
+import { editionTranslations } from "./edition-translations";
 
 // Merge setup + desktop + clawkeep translations per locale.
 // Order matters: later sources override earlier ones, so a clawkeep-specific
@@ -8127,5 +8127,5 @@ export const translations = mergeTranslations(
   setupTranslations,
   desktopTranslations,
   clawkeepTranslations,
-  hermesTranslations,
+  editionTranslations,
 );

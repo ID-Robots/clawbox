@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import HermesSkillsStore from "@/components/HermesSkillsStore";
-import { bg } from "@/lib/hermes-translations/bg";
+import { bg } from "@/lib/edition-translations/bg";
 
 /**
  * HERMES-04. The install and uninstall routes name every refusal with a machine
@@ -19,7 +19,7 @@ import { bg } from "@/lib/hermes-translations/bg";
 
 vi.mock("@/lib/i18n", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/i18n")>();
-  const { bg: table } = await import("@/lib/hermes-translations/bg");
+  const { bg: table } = await import("@/lib/edition-translations/bg");
   return {
     ...actual,
     useT: () => ({
