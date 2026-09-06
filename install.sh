@@ -3147,7 +3147,22 @@ step_hermes_install() {
     # right here — before the reachability check, before any repair, printing
     # nothing — taking `install.sh --step hermes_install` (the documented
     # repair command) and every later step of a full install down with it.
-    installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+    # TASK-613: remove once hermes-agent#104275 lands
+    # (HERMES_DISABLE_UPDATE_CHECK / updates.check). `hermes --version` also
+    # runs the agent's passive update check — `git fetch origin main` plus an
+    # unauthenticated GitHub compare, 10 s each — and on a box being installed
+    # or repaired that six-hour cache is always cold, so both probes in this
+    # step pay for a network round trip whose only output `head -1` throws
+    # away. Upstream's own printer takes `check_updates=False`
+    # (hermes_cli/_startup_fast.py) and no CLI flag or env var reaches it, so
+    # ask the interpreter the shim execs. Fails OPEN: anything wrong here
+    # leaves `installed` empty and the shim probe below answers exactly as it
+    # always did.
+    installed=$(runuser -u "$CLAWBOX_USER" -- env -u PYTHONHOME HOME="$CLAWBOX_HOME" \
+      PYTHONPATH="$agent_dir" "$venv_python" -c \
+      'from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)' \
+      2>/dev/null | head -1) || installed=""
+    [ -n "$installed" ] || installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
       "$shim" --version 2>/dev/null | head -1) || installed=""
   fi
 
@@ -3270,7 +3285,16 @@ step_hermes_install() {
   # the owner as a crash-looping dashboard. `|| installed=""` for the same
   # errexit reason as the first probe: when the install laid down nothing, this
   # runs a shim that does not exist and exits 127.
-  installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+  #
+  # Silenced the same way as the probe above, and for the same reason: this one
+  # runs seconds after a fresh checkout, when the update check has nothing
+  # cached and everything to fetch. TASK-613: remove once
+  # hermes-agent#104275 lands (HERMES_DISABLE_UPDATE_CHECK / updates.check).
+  installed=$(runuser -u "$CLAWBOX_USER" -- env -u PYTHONHOME HOME="$CLAWBOX_HOME" \
+    PYTHONPATH="$agent_dir" "$venv_python" -c \
+    'from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)' \
+    2>/dev/null | head -1) || installed=""
+  [ -n "$installed" ] || installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
     "$shim" --version 2>/dev/null | head -1) || installed=""
   if [ -n "$installed" ]; then
     at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \

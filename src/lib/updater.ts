@@ -2466,10 +2466,21 @@ async function readClawboxVersion(): Promise<string> {
  * the venv the shim execs) should report an unknown version for a few
  * seconds, not fail the whole version endpoint that ClawBox's own update
  * tile also depends on.
+ *
+ * TASK-613: remove once hermes-agent#104275 lands (HERMES_DISABLE_UPDATE_CHECK
+ * / updates.check). `hermes --version` is the one hermes call that runs the
+ * agent's passive update check, and every six hours the first probe pays for a
+ * `git fetch` plus a GitHub compare inside the 10 s allowed for the whole call
+ * — after which this reads a timeout and answers null over an agent that is
+ * running perfectly. `silenceUpdateCheck` asks for the same banner without it,
+ * and falls back to the plain call if it cannot.
  */
 async function readHermesVersion(): Promise<string | null> {
   try {
-    const { code, stdout } = await runHermesCli(["--version"], { timeoutMs: 10_000 });
+    const { code, stdout } = await runHermesCli(["--version"], {
+      timeoutMs: 10_000,
+      silenceUpdateCheck: true,
+    });
     if (code !== 0) return null;
     return parseHermesVersion(stdout);
   } catch {

@@ -2423,7 +2423,15 @@ describe("getVersionInfo harness reporting", () => {
 
     expect(info.edition).toBe("hermes");
     expect(info.hermes?.current).toBe("v0.20.5");
-    expect(mockRunHermesCli).toHaveBeenCalledWith(["--version"], expect.anything());
+    // TASK-613: and it asks for the banner WITHOUT the agent's passive update
+    // check. `--version` is the only hermes call that runs one, and on a
+    // six-hourly cache miss that check does a `git fetch` plus a GitHub
+    // compare inside the 10 s this probe allows for the whole call — after
+    // which the About screen reports no Hermes version at all.
+    expect(mockRunHermesCli).toHaveBeenCalledWith(
+      ["--version"],
+      expect.objectContaining({ silenceUpdateCheck: true }),
+    );
   });
 
   it("never spawns hermes on the openclaw edition, and reports no hermes field", async () => {
