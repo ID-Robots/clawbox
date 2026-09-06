@@ -21,8 +21,7 @@ import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib
 // rendered `EMAIL:<uid>` as text because only one of the two chats had learned
 // to lift the directive out, and sharing the pieces is what stops them drifting
 // apart again.
-import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective } from '@/lib/chat-email-refs'
-import { parseEmailUid } from '@/lib/chat-email-refs'
+import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective, parseEmailUid } from '@/lib/chat-email-refs'
 import { CONTROL_UI_EMAIL_PARAM } from '@/lib/control-ui-email-directives'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
 // Same reason, one convention over: a generated picture and a spoken reply are
@@ -158,8 +157,14 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
   // render would make it unclosable while the query string is still there.
   useEffect(() => {
     if (typeof window === 'undefined') return
-    const named = new URLSearchParams(window.location.search).get(CONTROL_UI_EMAIL_PARAM)
+    const url = new URL(window.location.href)
+    const named = url.searchParams.get(CONTROL_UI_EMAIL_PARAM)
     if (named === null) return
+    // Taken OUT of the address once it has been read. Left in, a reload, a Back,
+    // or any remount reopens the panel the owner just closed — and the id sits
+    // in history and in anything he bookmarks or pastes.
+    url.searchParams.delete(CONTROL_UI_EMAIL_PARAM)
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
     const uid = parseEmailUid(named)
     if (uid !== null) setOpenEmailUid(uid)
   }, [])

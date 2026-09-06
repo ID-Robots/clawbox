@@ -410,6 +410,16 @@ describe("opening one message by link", () => {
     await screen.findByTestId("email-full-view");
     await screen.findByText("Wednesday plan");
     expect(mailboxReads()).toBe(1);
+    // The stub answers every unmatched URL with the same message, so the panel
+    // rendering proves nothing about WHICH message was asked for.
+    const asked = vi
+      .mocked(globalThis.fetch)
+      .mock.calls.map((call) => String(call[0]))
+      .filter((url) => url.includes("/setup-api/email/messages"));
+    expect(asked[0]).toContain("uid=4471");
+    // And the id is taken back out of the address, so a reload does not reopen
+    // the panel the owner has just closed.
+    expect(window.location.search).not.toContain("email=");
   });
 
   it("opens nothing at all when the link names no usable id", async () => {

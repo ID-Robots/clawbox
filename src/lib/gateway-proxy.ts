@@ -11,8 +11,7 @@ import {
   normalizeOrigin,
   resolveOriginsPath,
 } from "./control-ui-origins";
-import { controlUiEmailDirectiveScript } from "./control-ui-email-directives";
-import * as configStore from "./config-store";
+import { controlUiEmailDirectiveScript, controlUiLocale } from "./control-ui-email-directives";
 
 const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 const OPENCLAW_CONFIG_PATH = `${
@@ -220,26 +219,10 @@ export async function getOrGenerateGatewayToken(): Promise<string | null> {
 }
 
 /**
- * The language the owner picked, or undefined when nothing has been picked or
- * the store cannot be read.
- *
- * The card injected below carries a label, and this page is the one place
- * ClawBox draws UI it does not own — `i18n.tsx` and its provider are not loaded
- * here. Read on the server rather than fetched by the injected script: the
- * script would need a second request on every page load to say three words.
- */
-async function uiLocale(): Promise<string | undefined> {
-  try {
-    const value = await configStore.get("pref:ui_language");
-    return typeof value === "string" && value ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Fetches the gateway SPA HTML and injects the ClawBox bar + auth token.
- * Used by both the root route and the catch-all gateway route.
+ * Fetches the gateway SPA HTML and injects the ClawBox bar, the auth token and
+ * the `EMAIL:` directive handling. Its one caller is the catch-all gateway
+ * route (`src/app/[...gateway]/route.ts`), which reaches it only for a
+ * NAVIGATION — a script `fetch()` for the same path is proxied as bytes.
  */
 export async function serveGatewayHTML(
   request: NextRequest
@@ -315,9 +298,14 @@ export async function serveGatewayHTML(
     // in with the bar — on the page ClawBox already serves and already injects
     // into. Not gated on the owner session: the shell is served without one and
     // an id on screen is not a credential.
+    const emailDirectives = controlUiEmailDirectiveScript(await controlUiLocale());
+    // A replacer FUNCTION, not a string: `$&`, `` $` ``, `$'` and `$1` are
+    // substitutions inside a replacement string, and the injected script now
+    // carries a translated label — one `$'` from a translator would otherwise
+    // duplicate the rest of the document into the page.
     html = html.replace(
       /<body\b[^>]*>/i,
-      `$&${CLAWBOX_BAR}${wsScript}${controlUiEmailDirectiveScript(await uiLocale())}`,
+      (match) => `${match}${CLAWBOX_BAR}${wsScript}${emailDirectives}`,
     );
     return new NextResponse(html, {
       status: 200,

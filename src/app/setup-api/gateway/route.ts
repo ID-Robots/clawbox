@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
-import { controlUiEmailDirectiveScript } from "@/lib/control-ui-email-directives";
-import * as configStore from "@/lib/config-store";
+import { controlUiEmailDirectiveScript, controlUiLocale } from "@/lib/control-ui-email-directives";
 import { getGatewayServiceHealth, type GatewayServiceHealth } from "@/lib/gateway-health";
 import { envPort } from "@/lib/port-probe";
 import { readEditionSource } from "@/lib/edition-source";
@@ -81,8 +80,11 @@ export async function GET(request: NextRequest) {
     // From `<head>` the observer is what does the work: `document.body` is null
     // this early, `scan(null)` returns, and `document.documentElement` already
     // exists, so every node the SPA adds afterwards is still seen.
-    const emailDirectives = controlUiEmailDirectiveScript(await uiLocale());
-    html = html.replace(/<head\b[^>]*>/i, '$&' + autoConnect + emailDirectives);
+    const emailDirectives = controlUiEmailDirectiveScript(await controlUiLocale());
+    // A replacer FUNCTION: the injected script carries a translated label, and
+    // `$&` / `` $` `` / `$'` / `$1` are substitutions inside a replacement
+    // string. Same reason as `serveGatewayHTML`.
+    html = html.replace(/<head\b[^>]*>/i, (match) => match + autoConnect + emailDirectives);
     return new NextResponse(html, {
       status: 200,
       headers: {
@@ -94,16 +96,6 @@ export async function GET(request: NextRequest) {
     });
   } catch {
     return gatewayOfflineResponse(await getGatewayServiceHealth());
-  }
-}
-
-/** The language the owner picked; see the twin in `gateway-proxy.ts`. */
-async function uiLocale(): Promise<string | undefined> {
-  try {
-    const value = await configStore.get("pref:ui_language");
-    return typeof value === "string" && value ? value : undefined;
-  } catch {
-    return undefined;
   }
 }
 
