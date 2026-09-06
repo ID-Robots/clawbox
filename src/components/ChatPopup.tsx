@@ -24,8 +24,7 @@ import {
   markApprovalBusy,
   mergeApprovalCard,
   readApproval,
-  readApprovalReplay,
-  sessionApprovalSubscribeParams,
+  subscribeSessionApprovals,
   type ApprovalCard,
   type ApprovalDecision,
 } from '@/lib/gateway-approvals'
@@ -684,50 +683,6 @@ const MIN_CHAT_WIDTH = 340
 // desktop brings a chat in that state back.
 const VIEWPORT_MARGIN = 8
 
-/**
- * Subscribe to one session's transcript AND its approvals, and take the
- * authoritative pending set the response carries.
- *
- * ONE function for BOTH subscribes on purpose. The opt-in is not sticky — the
- * core's own protocol note says re-subscribing to the same session without
- * `includeApprovals: true` REMOVES an existing approval subscription — so a
- * second call that forgot the flag would turn the cards off on the next tab
- * switch, silently, with nothing on screen to say so.
- *
- * Never throws: a gateway without the RPC, or a socket that has gone, leaves
- * the chat exactly as it was.
- */
-async function subscribeSessionWithApprovals(
-  request: (method: string, params: unknown) => Promise<unknown>,
-  key: string,
-  applyReplay: (replay: ReturnType<typeof readApprovalReplay>) => void,
-): Promise<void> {
-  try {
-    const payload = await request('sessions.messages.subscribe', sessionApprovalSubscribeParams(key))
-    applyReplay(readApprovalReplay((payload as { approvalReplay?: unknown } | null)?.approvalReplay))
-    return
-  } catch {
-    // THE OPT-IN IS NOT A SOFT ONE, and this is the whole reason for the second
-    // call below. The core refuses the ENTIRE `sessions.messages.subscribe` —
-    // and rolls the message subscription back — when the client may not review
-    // approvals (`operator.admin`, or `operator.approvals` on a paired device,
-    // and GRANTED scopes are emptied for a connect frame that carried no device
-    // identity) or when it cannot read the pending set. Before the opt-in the
-    // plain frame succeeded in every one of those cases.
-    //
-    // Losing the cards is a blemish. Losing the transcript subscription is the
-    // chat silently missing every `session.message` push — a reply that lands
-    // from Telegram, or a picture whose `MEDIA:` line only the stored
-    // transcript carries, would not appear until the owner reloads — and it
-    // would look exactly like a chat that works.
-  }
-  try {
-    await request('sessions.messages.subscribe', { key })
-  } catch {
-    // A gateway that refuses the plain frame too. The chat still sends and
-    // streams; the transcript reconciles on the next history read.
-  }
-}
 
 /**
  * Is this tool call the one that queues outgoing mail?
@@ -2122,7 +2077,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // needs `operator.approvals` on a paired device, which this connect
           // frame already is — so an approve/deny card costs one flag on a call
           // that was being made anyway, and no poll.
-          void subscribeSessionWithApprovals(wsRequest, boundKey, replay => {
+          void subscribeSessionApprovals(wsRequest, boundKey, (replay, forKey) => {
+            if (forKey !== sessionKeyRef.current) return
             setApprovals(prev => approvalsAfterReplay(prev, replay))
           })
           // Only a provider change or a plain gateway restart gets here: those
@@ -2944,7 +2900,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Blanks the view and marks the greet done, so an empty new tab does not
     // greet itself with an unasked-for "hi".
     clearTranscript()
-    void subscribeSessionWithApprovals(wsRequest, key, replay => {
+    void subscribeSessionApprovals(wsRequest, key, (replay, forKey) => {
+      if (forKey !== sessionKeyRef.current) return
       setApprovals(prev => approvalsAfterReplay(prev, replay))
     })
     lastSentThinkingRef.current = undefined

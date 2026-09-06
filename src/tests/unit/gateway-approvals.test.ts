@@ -26,6 +26,7 @@ import {
   readApproval,
   readApprovalReplay,
   sessionApprovalSubscribeParams,
+  subscribeSessionApprovals,
 } from "@/lib/gateway-approvals";
 
 const NOW = 1_788_300_000_000;
@@ -79,6 +80,83 @@ describe("the subscription this rides on", () => {
       includeApprovals: true,
     });
     expect(APPROVAL_SESSION_EVENT).toBe("session.approval");
+  });
+});
+
+describe("the subscribe itself", () => {
+  function replayResponse(approvals: unknown[], truncated = false) {
+    return { approvalReplay: { sessionKey: "main", updatedAtMs: NOW, approvals, truncated } };
+  }
+
+  it("takes the authoritative pending set, once, on the call the chat already makes", async () => {
+    const calls: Array<{ method: string; params: unknown }> = [];
+    const seen: Array<{ ids: string[]; forKey: string }> = [];
+    await subscribeSessionApprovals(
+      async (method, params) => {
+        calls.push({ method, params });
+        return replayResponse([pendingExec()]);
+      },
+      "main",
+      (replay, forKey) => seen.push({ ids: replay.cards.map((c) => c.id), forKey }),
+    );
+    expect(calls).toEqual([
+      { method: "sessions.messages.subscribe", params: { key: "main", includeApprovals: true } },
+    ]);
+    expect(seen).toEqual([{ ids: ["exec:3f1c"], forKey: "main" }]);
+  });
+
+  it("hands the KEY back with the answer, because nothing cancels a slow one", () => {
+    // The call is not cancelled when the owner switches conversation, so a
+    // subscribe for the tab they left can resolve after the next one. The
+    // caller needs to know which conversation the cards belong to.
+    expect.assertions(1);
+    return subscribeSessionApprovals(
+      async () => replayResponse([pendingExec()]),
+      "the-tab-they-left",
+      (_replay, forKey) => expect(forKey).toBe("the-tab-they-left"),
+    );
+  });
+
+  it("keeps the transcript subscription when the approval opt-in is refused", async () => {
+    // The opt-in is not soft: the core refuses the WHOLE subscribe — and rolls
+    // the message subscription back — when the client may not review approvals.
+    // Losing the cards is a blemish; losing the pushes is a chat that silently
+    // stops showing what lands in it.
+    const calls: unknown[] = [];
+    await subscribeSessionApprovals(
+      async (_method, params) => {
+        calls.push(params);
+        if ((params as { includeApprovals?: unknown }).includeApprovals === true) {
+          throw new Error("operator approvals not permitted");
+        }
+        return {};
+      },
+      "main",
+      () => {},
+    );
+    expect(calls).toEqual([{ key: "main", includeApprovals: true }, { key: "main" }]);
+  });
+
+  it("takes the cards away when it is refused, and keeps what already happened", async () => {
+    // This connection can no longer be told what became of them, so a live
+    // button over one would be "waiting" over something already decided.
+    const seen: Array<{ truncated: boolean; count: number }> = [];
+    await subscribeSessionApprovals(
+      async () => { throw new Error("nope"); },
+      "main",
+      (replay) => seen.push({ truncated: replay.truncated, count: replay.cards.length }),
+    );
+    // An AUTHORITATIVE empty replay: `approvalsAfterReplay` drops the pending
+    // cards on it and keeps the terminal ones.
+    expect(seen).toEqual([{ truncated: false, count: 0 }]);
+    const before = [readApproval(pendingExec())!, readApproval({ ...pendingExec(), id: "exec:done", status: "denied", reason: "user" })!];
+    expect(approvalsAfterReplay(before, { cards: [], truncated: false }).map((c) => c.id)).toEqual(["exec:done"]);
+  });
+
+  it("never throws, whatever the gateway does", async () => {
+    await expect(
+      subscribeSessionApprovals(async () => { throw new Error("gone"); }, "main", () => {}),
+    ).resolves.toBeUndefined();
   });
 });
 

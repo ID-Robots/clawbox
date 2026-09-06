@@ -138,7 +138,15 @@ export function ApprovalPrompt({ card, nowMs, onDecide }: ApprovalPromptProps) {
         </div>
       ) : (
         <>
-          <div style={{ color: MUTED_FG, fontSize: 12, lineHeight: 1.4 }}>
+          {/* The one state that needs the owner to DO something is the one
+              that arrives on its own — from the replay or from a
+              `session.approval` push — so it is the one that has to announce
+              itself. The terminal line and the failure line already do. */}
+          <div
+            role="status"
+            aria-live="polite"
+            style={{ color: MUTED_FG, fontSize: 12, lineHeight: 1.4 }}
+          >
             {t("chat.approval.summary")}
           </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>

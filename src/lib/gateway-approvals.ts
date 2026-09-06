@@ -316,6 +316,63 @@ export function approvalsAfterReplay(
   );
 }
 
+/**
+ * Subscribe to one session's transcript AND its approvals, and take the
+ * authoritative pending set the response carries.
+ *
+ * ONE function for BOTH subscribes on purpose. The opt-in is not sticky — the
+ * core's own protocol note says re-subscribing to the same session without
+ * `includeApprovals: true` REMOVES an existing approval subscription — so a
+ * second call that forgot the flag would turn the cards off on the next tab
+ * switch, silently, with nothing on screen to say so.
+ *
+ * Never throws: a gateway without the RPC, or a socket that has gone, leaves
+ * the chat exactly as it was.
+ */
+export async function subscribeSessionApprovals(
+  request: (method: string, params: unknown) => Promise<unknown>,
+  key: string,
+  applyReplay: (replay: ApprovalReplay, forKey: string) => void,
+): Promise<void> {
+  try {
+    const payload = await request("sessions.messages.subscribe", sessionApprovalSubscribeParams(key))
+    // The key travels WITH the answer. This call is not cancelled when the
+    // owner switches conversation, so a slow subscribe for the tab they left
+    // can resolve after the next one and put its cards under the tab they are
+    // looking at — cards that belong to another conversation, actionable.
+    applyReplay(readApprovalReplay((payload as { approvalReplay?: unknown } | null)?.approvalReplay), key)
+    return
+  } catch {
+    // THE OPT-IN IS NOT A SOFT ONE, and this is the whole reason for the second
+    // call below. The core refuses the ENTIRE `sessions.messages.subscribe` —
+    // and rolls the message subscription back — when the client may not review
+    // approvals (`operator.admin`, or `operator.approvals` on a paired device,
+    // and GRANTED scopes are emptied for a connect frame that carried no device
+    // identity) or when it cannot read the pending set. Before the opt-in the
+    // plain frame succeeded in every one of those cases.
+    //
+    // Losing the cards is a blemish. Losing the transcript subscription is the
+    // chat silently missing every `session.message` push — a reply that lands
+    // from Telegram, or a picture whose `MEDIA:` line only the stored
+    // transcript carries, would not appear until the owner reloads — and it
+    // would look exactly like a chat that works.
+    //
+    // And the cards go. This connection can no longer be told what became of
+    // them, so leaving them on screen would offer live buttons over approvals
+    // nothing will ever update — the "waiting" over something already decided
+    // that this card exists to prevent. An AUTHORITATIVE EMPTY replay is
+    // exactly that statement: it drops the pending ones and keeps the terminal
+    // ones, which are the record of what happened.
+    applyReplay({ cards: [], truncated: false }, key)
+  }
+  try {
+    await request("sessions.messages.subscribe", { key })
+  } catch {
+    // A gateway that refuses the plain frame too. The chat still sends and
+    // streams; the transcript reconciles on the next history read.
+  }
+}
+
 /** `next` replacing any card with the same id, or appended, order preserved. */
 export function mergeApprovalCard(
   cards: readonly ApprovalCard[],
