@@ -21,7 +21,9 @@ vi.mock("@/lib/config-store", () => ({
 
 const recordFile = () => path.join(dataDir, "catalog-cache", "_enumerations.json");
 
-function writeRecord(providers: Record<string, { models: number; atMs: number }>) {
+function writeRecord(
+  providers: Record<string, { models: number; available?: number; atMs: number }>,
+) {
   mkdirSync(path.dirname(recordFile()), { recursive: true });
   writeFileSync(recordFile(), JSON.stringify({ providers }), "utf8");
 }
@@ -43,13 +45,41 @@ afterEach(() => rmSync(dataDir, { recursive: true, force: true }));
 
 describe("the recorded model count", () => {
   it("says `some` for a provider that enumerated rows and `none` for a clean zero", async () => {
-    writeRecord({ google: { models: 0, atMs: Date.now() }, anthropic: { models: 9, atMs: Date.now() } });
+    writeRecord({
+      google: { models: 0, available: 0, atMs: Date.now() },
+      anthropic: { models: 9, available: 9, atMs: Date.now() },
+    });
     const { readProviderRunnable } = await load();
 
     const verdicts = await readProviderRunnable();
 
     expect(verdicts.get("google")).toBe("none");
     expect(verdicts.get("anthropic")).toBe("some");
+  });
+
+  it("says `none` when the box listed rows and could route none of them", async () => {
+    // The harness's own statement, and the one that fires while the catalogue
+    // is still full: ten rows listed, every one `available: false`.
+    writeRecord({ google: { models: 10, available: 0, atMs: Date.now() } });
+    const { readProviderRunnable } = await load();
+
+    expect((await readProviderRunnable()).get("google")).toBe("none");
+  });
+
+  it("says `some` when even one listed row is routable", async () => {
+    writeRecord({ google: { models: 10, available: 1, atMs: Date.now() } });
+    const { readProviderRunnable } = await load();
+
+    expect((await readProviderRunnable()).get("google")).toBe("some");
+  });
+
+  it("says `some` when the enumeration said nothing about routability", async () => {
+    // `available` absent — an older record, or a catalogue whose rows carry no
+    // such field. Absent is not zero.
+    writeRecord({ google: { models: 10, atMs: Date.now() } });
+    const { readProviderRunnable } = await load();
+
+    expect((await readProviderRunnable()).get("google")).toBe("some");
   });
 
   it("says nothing at all about a provider with no record", async () => {
@@ -107,9 +137,9 @@ describe("the recorded model count", () => {
     const { recordProviderEnumeration } = await load();
 
     await Promise.all([
-      recordProviderEnumeration("google", 0),
-      recordProviderEnumeration("anthropic", 9),
-      recordProviderEnumeration("openai", 2),
+      recordProviderEnumeration("google", 0, 0),
+      recordProviderEnumeration("anthropic", 9, 9),
+      recordProviderEnumeration("openai", 2, 2),
     ]);
 
     expect(Object.keys(readRecord()).sort()).toEqual(["anthropic", "google", "openai"]);
@@ -123,7 +153,7 @@ describe("the recorded model count", () => {
     vi.resetModules();
     const { recordProviderEnumeration, readProviderRunnable } = await load();
 
-    await expect(recordProviderEnumeration("google", 0)).resolves.toBeUndefined();
+    await expect(recordProviderEnumeration("google", 0, 0)).resolves.toBeUndefined();
     expect([...(await readProviderRunnable())]).toEqual([]);
   });
 });

@@ -59,7 +59,7 @@ function mockList(json: unknown, stderr = ""): void {
 
 const RECORD = path.join(DATA_DIR, "catalog-cache", "_enumerations.json");
 
-function readRecord(): Record<string, { models: number }> {
+function readRecord(): Record<string, { models: number; available?: number }> {
   const parsed = JSON.parse(fs.readFileSync(RECORD, "utf8")) as {
     providers?: Record<string, { models: number }>;
   };
@@ -96,7 +96,13 @@ beforeEach(() => {
 
 describe("catalog — a clean empty enumeration is an answer, not a failure", () => {
   it("records zero when the CLI answers with no rows at all", async () => {
-    mockList({ count: 0, models: [] });
+    // With an unrelated warning on stderr, deliberately. Every `openclaw models
+    // list` on the shipped boxes prints `[agents/model-registry] model catalog
+    // load issue: … gpt-image-1-mini: no "api" specified` — on every provider's
+    // enumeration, exit code 0 — so requiring an empty stderr made this whole
+    // rule dead code there. What says the answer is untrustworthy is the CLI
+    // refusing, not the CLI grumbling.
+    mockList({ count: 0, models: [] }, "[agents/model-registry] model catalog load issue: …");
     await get("google", "&refresh=1");
 
     expect(await recordedCount("google")).toBe(0);
@@ -125,6 +131,45 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
 
     const recorded = fs.existsSync(RECORD) ? readRecord() : {};
     expect(recorded.google).toBeUndefined();
+  });
+
+  it("records how many listed rows the harness said it cannot route", async () => {
+    // The second thing that hides a provider row: the CLI lists a full
+    // catalogue and marks every row `available: false`. Tristate, so only an
+    // explicit `false` counts — see the next case.
+    mockList({
+      count: 2,
+      models: [
+        { key: "anthropic/claude-opus-5", name: "Claude Opus 5", contextWindow: 1_000_000, available: false, tags: [] },
+        { key: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", contextWindow: 1_000_000, available: false, tags: [] },
+      ],
+    });
+    await get("anthropic", "&refresh=1");
+    await settle();
+
+    await vi.waitFor(() => {
+      expect(readRecord().anthropic?.available).toBe(0);
+    }, { timeout: 4000, interval: 25 });
+  });
+
+  it("counts a row the harness did not judge as routable, never against it", async () => {
+    // Measured on the OpenClaw box: with no Google credential all ten google
+    // rows come back `available: null`, while every row of the LINKED deepseek
+    // provider on the same box comes back `true`. `null` is "not determined",
+    // and writing a provider off for it would hide every one a box has not
+    // finished setting up.
+    mockList({
+      count: 2,
+      models: [
+        { key: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 400_000, available: null, tags: [] },
+        { key: "openai/gpt-5.4", name: "GPT-5.4", contextWindow: 400_000, tags: [] },
+      ],
+    });
+    await get("openai", "&refresh=1");
+
+    await vi.waitFor(() => {
+      expect(readRecord().openai?.available).toBe(2);
+    }, { timeout: 4000, interval: 25 });
   });
 
   it("records NOTHING when the CLI refused — an error is not an empty catalogue", async () => {

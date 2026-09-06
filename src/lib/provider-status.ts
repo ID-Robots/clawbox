@@ -534,15 +534,14 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
       : new Map<string, ProviderRunnable>();
     const unrunnable = summary.providers
       .filter((row) => {
-        // A row the owner has NOT connected is never hidden, whatever the
-        // count says — that row IS the fix. Connecting a cloud provider writes
-        // its configured model rows and `models.mode: "merge"`
-        // (`writeOpenAICompatProvider` in the configure route), which is
-        // exactly what turns a zero-row provider back into a routable one, so
-        // hiding it would leave the box with no way out of the state that hid
-        // it. What this hides is the other case: a provider the box IS set up
-        // for and still cannot run a single model from.
-        if (row.state !== "connected" && row.state !== "needs-reauth") return false;
+        // The connection state is NOT consulted, and that is a change of mind
+        // with a reason. It was, so that hiding a row could never take away the
+        // way out of the state that hid it — but the way out is the "Connect AI
+        // Provider" list, and that list no longer hides anything (see
+        // `AIModelsStep`). This strip answers "what is this box set up with and
+        // can it run"; a provider it can run nothing from does not belong in
+        // that answer whether or not a credential is sitting there.
+        //
         // The provider the box is POINTED AT is never hidden. It is the reason
         // chat is broken, and a row nobody can see is a row nobody can change.
         if (row.isDefault) return false;

@@ -27,12 +27,16 @@ let probeStillOwed: Mock;
 let clawaiTokenRejectedByPortal: Mock;
 
 /** What the catalog route records after an enumeration answers for a provider. */
-function recordEnumerations(counts: Record<string, number>) {
+function recordEnumerations(
+  counts: Record<string, number | { models: number; available: number }>,
+) {
   const dir = path.join(dataDir, "catalog-cache");
   mkdirSync(dir, { recursive: true });
-  const providers: Record<string, { models: number; atMs: number }> = {};
-  for (const [provider, models] of Object.entries(counts)) {
-    providers[provider] = { models, atMs: Date.now() };
+  const providers: Record<string, { models: number; available?: number; atMs: number }> = {};
+  for (const [provider, value] of Object.entries(counts)) {
+    providers[provider] = typeof value === "number"
+      ? { models: value, atMs: Date.now() }
+      : { ...value, atMs: Date.now() };
   }
   writeFileSync(path.join(dir, "_enumerations.json"), JSON.stringify({ providers }), "utf8");
 }
@@ -89,6 +93,43 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     expect(ids(body)).toEqual(expect.arrayContaining(["clawai", "openai", "anthropic", "openrouter"]));
   });
 
+  it("drops the row when the box lists rows but can route NONE of them", async () => {
+    // The other way the harness says "this box can run nothing here", and the
+    // one that is true on a box with no Google credential: `openclaw models
+    // list --provider google --all --json` answers with the plugin's whole
+    // static catalogue and marks every row `available: false`. Ten rows and no
+    // route is the same fact as no rows at all — the owner's ruling covers
+    // both, and the count alone did not.
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
+      agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
+    });
+    recordEnumerations({ google: { models: 10, available: 0 } });
+    const body = await (await GET()).json();
+
+    expect(ids(body)).not.toContain("google");
+    expect(body.unrunnable).toEqual(["google"]);
+  });
+
+  it("keeps the row when even ONE listed row is routable", async () => {
+    boxWithGoogleKey();
+    recordEnumerations({ google: { models: 10, available: 1 } });
+    const body = await (await GET()).json();
+
+    expect(ids(body)).toContain("google");
+    expect(body.unrunnable).toEqual([]);
+  });
+
+  it("keeps the row when the enumeration said nothing about routability", async () => {
+    // An older record, or a catalogue whose rows carry no `available` field at
+    // all. Absent is not `false`.
+    boxWithGoogleKey();
+    recordEnumerations({ google: 10 });
+    const body = await (await GET()).json();
+
+    expect(ids(body)).toContain("google");
+  });
+
   it("keeps the row on a box that can run at least one of that provider's models", async () => {
     boxWithGoogleKey();
     recordEnumerations({ google: 10 });
@@ -109,11 +150,13 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     expect(body.unrunnable).toEqual([]);
   });
 
-  it("never hides a provider the owner has not connected", async () => {
-    // That row IS the fix: connecting a cloud provider writes its configured
-    // model rows and `models.mode: "merge"`, which is exactly what turns a
-    // zero-row provider back into a routable one. Hiding it would leave the box
-    // with no way out of the state that hid it.
+  it("hides a provider the box can run nothing from even before it is connected", async () => {
+    // The strip answers "what is this box set up with and can it run". A
+    // provider it can run nothing from does not belong in that answer whether
+    // or not a credential is sitting there — and the way OUT of that state is
+    // the "Connect AI Provider" list, which offers every provider
+    // unconditionally (see `AIModelsStep`). This is the pair: the strip may
+    // drop the row only because that list never does.
     readConfig.mockResolvedValue({
       auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
       agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
@@ -121,9 +164,8 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     recordEnumerations({ google: 0 });
     const body = await (await GET()).json();
 
-    expect(ids(body)).toContain("google");
-    expect(body.providers.find((p: Row) => p.id === "google")!.state).toBe("disconnected");
-    expect(body.unrunnable).toEqual([]);
+    expect(ids(body)).not.toContain("google");
+    expect(body.unrunnable).toEqual(["google"]);
   });
 
   it("stops trusting a count older than the catalogue's own refresh interval", async () => {

@@ -575,7 +575,7 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
     // today — no `SUBSCRIPTION_SURFACE` entry names a separate provider — and
     // closed rather than left for the day one does, like every other rule this
     // function had to be taught twice.
-    await recordProviderEnumeration(surfaceProvider, payload.models.length);
+    await recordProviderEnumeration(surfaceProvider, payload.models.length, models.length);
     return new Set(payload.models.map((m) => m.id));
   } catch (err) {
     console.warn(
@@ -999,8 +999,9 @@ interface CatalogFetchResult {
   diagnostic: string;
   /**
    * True when an empty `models` is THE BOX'S ANSWER rather than a failure to
-   * get one — the CLI ran, refused nothing, printed nothing on stderr and
-   * listed no rows at all.
+   * get one: the CLI ran, refused nothing, and either listed no rows at all
+   * (`count: 0`) or listed rows and marked every one of them
+   * `available: false`.
    *
    * The distinction is the whole false-failure guard for TASK-668: a refusal, a
    * timeout, a plugin that is gone, or rows that our own chat-model filter ate
@@ -1009,6 +1010,18 @@ interface CatalogFetchResult {
    * zero is recorded, and only it stops the row being offered.
    */
   emptyIsAnswer: boolean;
+  /** How many rows the CLI listed, before any filter of ours. */
+  listedRows: number;
+  /**
+   * Of those, how many the harness did NOT say it cannot route — every row
+   * except the ones explicitly `available: false`.
+   *
+   * Zero WITH rows listed is the harness's own statement that this box can take
+   * no route here, and the second thing that hides a provider row. `null` and
+   * absent count as available on purpose: they mean "not determined", which is
+   * what an unconfigured provider answers on a live box.
+   */
+  availableRows: number;
 }
 
 function toFetchResult(
@@ -1030,6 +1043,17 @@ function toFetchResult(
   const models = transformOpenclawEntries(provider, rows);
   const refusal = parsed.ok === false ? parsed.error?.message?.trim() : "";
   let diagnostic = refusal || stderr.trim();
+  // How many listed rows the harness did NOT say it cannot route.
+  //
+  // TRISTATE, and only `false` counts against a row — see the long note above
+  // `transformOpenclawEntries`. `null`/absent is "the harness did not
+  // determine", which is what an unconfigured provider answers, and counting
+  // that as unavailable would write off every provider on a box that has not
+  // finished being set up. Measured on the OpenClaw box (2026.8.1): with no
+  // Google credential all ten google rows come back `available: null`, while
+  // every deepseek row on the same box — that one is linked — comes back
+  // `true`. So `false` is a statement and `null` is a shrug.
+  const availableRows = rows.length - rows.filter((row) => row.available === false).length;
   if (!diagnostic && models.length === 0 && rows.length > 0) {
     // The CLI answered, listed rows, and none of them survived. Which filter
     // ate them decides what an operator does next — "sign in" is a different
@@ -1047,17 +1071,33 @@ function toFetchResult(
   // row. `diagnostic` covers the rest: a refusal or stderr fills it above, and
   // rows that were all filtered out by OUR chat rule fill it just now.
   //
-  // Deliberately NOT extended to "rows listed, every one `available: false`",
-  // which the core does report and which is the other way a box says it can
-  // route nothing here. It is also exactly what a provider with no credential
-  // looks like, and the two cannot be told apart from the payload — so that
-  // case keeps beta's behaviour and records nothing.
+  // STDERR IS NOT A FAILURE on these boxes, and requiring it to be empty made
+  // this whole rule dead code on the ones that ship. Measured on the OpenClaw
+  // box: every `openclaw models list` invocation, exit code 0, prints
+  // `[agents/model-registry] model catalog load issue: … Provider openai, model
+  // gpt-image-1-mini: no "api" specified` — a warning about an unrelated
+  // provider's catalogue, on every provider's enumeration. With `!diagnostic`
+  // in the condition, a genuine `count: 0` answer could never be recorded
+  // there. What actually says the answer is untrustworthy is the CLI REFUSING
+  // (`ok: false`, which it reports on stdout while still exiting 0) or the
+  // process failing outright — and that second one rejects long before here.
+  //
+  // The positive statement is what is required instead: `count: 0` present in a
+  // payload that parsed. A truncated or shape-shifted body has no count and is
+  // still not an answer.
+  //
+  // TWO shapes of the same answer, and the second is the one that fires while
+  // the CLI still has a catalogue to print: it listed rows and marked every one
+  // of them `available: false`. Our own transform drops those rows, so `models`
+  // is empty either way — what tells them apart from a failure is that the
+  // command ran and refused nothing.
+  const noRowsAtAll = rows.length === 0 && parsed.count === 0;
+  const noRoutableRows = rows.length > 0 && availableRows === 0;
   const emptyIsAnswer = models.length === 0
-    && rows.length === 0
     && parsed.ok !== false
-    && parsed.count === 0
-    && !diagnostic;
-  return { models, diagnostic, emptyIsAnswer };
+    && !refusal
+    && (noRowsAtAll || noRoutableRows);
+  return { models, diagnostic, emptyIsAnswer, listedRows: rows.length, availableRows };
 }
 
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
@@ -1148,7 +1188,8 @@ async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
   // Never an authoritative empty: this is openrouter.ai's catalogue, not this
   // box's answer about what it can route, and an empty `data` from a REST
   // endpoint is far more likely to be a bad hour upstream than a fact.
-  return { models: transformOpenRouterEntries(data.data ?? []), diagnostic: "", emptyIsAnswer: false };
+  const models = transformOpenRouterEntries(data.data ?? []);
+  return { models, diagnostic: "", emptyIsAnswer: false, listedRows: models.length, availableRows: models.length };
 }
 
 // Refresh the catalog for `provider` in the background. Returns
@@ -1323,7 +1364,13 @@ export function refreshInBackground(
     // The only catalogue with no upstream to ask: Mike's gateway routes the
     // two device tiers and nothing else, so these two rows ARE the device's
     // answer rather than a stand-in for one.
-    fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, diagnostic: "", emptyIsAnswer: false });
+    fetcher = Promise.resolve({
+      models: CLAWAI_STATIC_MODELS,
+      diagnostic: "",
+      emptyIsAnswer: false,
+      listedRows: CLAWAI_STATIC_MODELS.length,
+      availableRows: CLAWAI_STATIC_MODELS.length,
+    });
   } else {
     fetcher = fetchOpenclawCatalog(provider);
   }
@@ -1346,7 +1393,11 @@ export function refreshInBackground(
   // inside it is not itself inside a `try`.
   const surface = fetchSubscriptionSurfaceIds(provider).catch(() => null);
 
-  const publish = async (models: CatalogModel[], surfaceIds: Set<string> | null) => {
+  const publish = async (
+    models: CatalogModel[],
+    surfaceIds: Set<string> | null,
+    availableRows: number,
+  ) => {
     // The CLI answered, so the provider is enumerable — that much is true
     // whatever generation this is, and it is what the backoff tracks.
     recordSuccessfulRefresh(provider);
@@ -1379,7 +1430,7 @@ export function refreshInBackground(
     // the raw one, so the number and the catalogue the picker is offered cannot
     // disagree. Reached only past the generation guard above, so a fork from
     // before the box changed records nothing.
-    await recordProviderEnumeration(provider, payload.models.length);
+    await recordProviderEnumeration(provider, payload.models.length, availableRows);
     console.log(
       `[catalog] refreshed ${provider}: ${models.length} models`
       + (surfaceIds ? ` (${surfaceIds.size} on the subscription surface)` : ""),
@@ -1401,7 +1452,7 @@ export function refreshInBackground(
   };
 
   fetcher
-    .then(async ({ models, diagnostic, emptyIsAnswer }) => {
+    .then(async ({ models, diagnostic, emptyIsAnswer, availableRows }) => {
       if (models.length === 0) {
         // NOT a success, and every line of beta's handling stands: nothing is
         // published, the previous catalogue is kept, and `markStale` records
@@ -1422,7 +1473,7 @@ export function refreshInBackground(
         // no longer exists, and its zero would hide the provider the customer
         // just connected.
         if (emptyIsAnswer && forkSeq >= currentSeq(provider)) {
-          await recordProviderEnumeration(provider, 0);
+          await recordProviderEnumeration(provider, 0, 0);
         }
         console.warn(
           `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
@@ -1431,9 +1482,9 @@ export function refreshInBackground(
         markStale();
         return;
       }
-      await publish(models, null);
+      await publish(models, null, availableRows);
       const surfaceIds = await surface;
-      if (surfaceIds) await publish(models, surfaceIds);
+      if (surfaceIds) await publish(models, surfaceIds, availableRows);
     })
     .catch((err: unknown) => {
       console.error(`[catalog] refresh failed for ${provider}:`, err instanceof Error ? err.message : err);

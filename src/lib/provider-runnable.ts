@@ -51,6 +51,15 @@ function recordPath(): string | null {
 interface EnumerationRecord {
   /** How many models the box listed. Zero is an ANSWER, not a failure. */
   models: number;
+  /**
+   * Of the rows the CLI listed, how many the harness did not say it cannot
+   * route — every row except the ones explicitly `available: false`.
+   *
+   * Absent on a record written before this was carried, and on a catalogue
+   * whose rows say nothing about routability. Absent is UNKNOWN and decides
+   * nothing; only an explicit zero beside a non-zero `models` hides a row.
+   */
+  available?: number;
   atMs: number;
 }
 
@@ -123,9 +132,17 @@ async function mutate(fn: (providers: Record<string, EnumerationRecord>) => void
  * gave: a refusal, a timeout, or a payload whose rows were all filtered out by
  * our own chat-model rule is NOT an answer and must not reach here.
  */
-export function recordProviderEnumeration(provider: string, models: number): Promise<void> {
+export function recordProviderEnumeration(
+  provider: string,
+  models: number,
+  available: number,
+): Promise<void> {
   return mutate((providers) => {
-    providers[provider] = { models: Math.max(0, Math.trunc(models)), atMs: Date.now() };
+    providers[provider] = {
+      models: Math.max(0, Math.trunc(models)),
+      available: Math.max(0, Math.trunc(available)),
+      atMs: Date.now(),
+    };
   });
 }
 
@@ -193,7 +210,15 @@ export async function readProviderRunnable(): Promise<Map<string, ProviderRunnab
       ? now - record.atMs
       : Number.POSITIVE_INFINITY;
     if (ageMs > RECORD_TTL_MS) continue;
-    verdicts.set(provider, record.models > 0 ? "some" : "none");
+    // TWO ways the box says it can run nothing here, and the second is the one
+    // that fires while a catalogue is still full: the CLI listed rows and the
+    // harness marked every one of them `available: false`. A row it did not
+    // determine (`null`, or a catalogue that reports nothing at all) counts as
+    // available and leaves the verdict alone — see the note on the field.
+    const noneRoutable = typeof record.available === "number"
+      && Number.isFinite(record.available)
+      && record.available === 0;
+    verdicts.set(provider, record.models > 0 && !noneRoutable ? "some" : "none");
   }
   return verdicts;
 }

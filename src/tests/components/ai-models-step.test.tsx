@@ -108,10 +108,15 @@ describe("AIModelsStep variants", () => {
   });
 
   /**
-   * TASK-668. The Providers page decides server-side which providers this box
-   * can run a model from; this list must not go on offering the ones it
-   * dropped. `unrunnable` is what carries that decision — an empty array (and
-   * a status call that has not landed) hides nothing.
+   * TASK-668. This is the CONNECT list, and it offers every provider it was
+   * asked to — including one the Providers strip has dropped because the box
+   * can currently run no model from it.
+   *
+   * That is not an oversight, it is the pair: connecting is the way OUT of that
+   * state (saving a cloud provider writes its configured model rows and
+   * `models.mode: "merge"`), so the strip may drop such a row only because this
+   * list never does. An earlier revision filtered here too and left a box with
+   * no door.
    */
   describe("a provider the box can run no model from", () => {
     function stubStatus(unrunnable: string[]) {
@@ -158,19 +163,14 @@ describe("AIModelsStep variants", () => {
       return getByRole("radiogroup", { name: "AI Provider" }).textContent ?? "";
     }
 
-    it("is not offered", async () => {
+    it("is still offered, because connecting is the way out", async () => {
       const text = await providerGroupText(["google"]);
 
-      expect(text).not.toContain("Google Gemini");
+      expect(text).toContain("Google Gemini");
       expect(text).toContain("Anthropic");
     });
 
-    it("keeps the row the panel is CURRENTLY on, whatever the box says about it", async () => {
-      // Everything else here that decides what to render — the "keep the
-      // selection valid" effect, the credential panel, the deep-link handler —
-      // resolves against the unfiltered list. Dropping the selected row would
-      // leave its form on screen with no radio above it and no "show more"
-      // toggle to get back.
+    it("is offered when the panel is currently ON it, too", async () => {
       const text = await providerGroupText(["google"], "google");
 
       expect(text).toContain("Google Gemini");
