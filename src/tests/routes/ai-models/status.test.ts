@@ -399,6 +399,36 @@ describe("/setup-api/ai-models/status", () => {
       );
     });
 
+    it("does not let a slow portal answer erase a refusal recorded since it was asked", async () => {
+      // The re-link race, the other half. The poll asks about the credential the
+      // box held when the request started; four seconds later the device has
+      // been re-linked and the NEW credential refused. A clear here would be a
+      // verdict about a token the box no longer holds erasing one about the
+      // token it does — and the next gateway start would re-arm the image path
+      // over a credential the proxy refuses.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      const stamps: Record<string, unknown> = { clawai_tier: "pro" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key]);
+      mockSetConfigValue.mockImplementation(async (key: string, value: unknown) => {
+        if (value === undefined) delete stamps[key];
+        else stamps[key] = value;
+      });
+      fetchSpy.mockImplementation(async () => {
+        // A refusal of the credential the box holds NOW lands while this
+        // lookup is still on the wire.
+        stamps.clawai_credential_refused_at = Date.now() + 1;
+        return new Response(JSON.stringify({ tier: "max", deviceTier: "pro" }), { status: 200 });
+      });
+
+      await GET();
+
+      expect(stamps.clawai_credential_refused_at).toBeTypeOf("number");
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        undefined,
+      );
+    });
+
     it("records nothing when the portal merely failed to answer", async () => {
       // The false-failure half of the persisted fact: an unreachable portal
       // would stand the image path down at the next boot on a box whose

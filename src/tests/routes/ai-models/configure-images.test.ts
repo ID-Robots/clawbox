@@ -790,6 +790,18 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
         else keys[key] = value;
       });
       mockGetAll.mockImplementation(async () => ({ ...keys }));
+      // `setMany` MUST land in the same store, or the fixture models a box the
+      // route never sees: the handler writes the new `clawai_token` well before
+      // `configureClawboxAi` runs, so a `setMany` that changed nothing would let
+      // a "did the credential change?" read taken inside that function answer
+      // correctly by accident. It is answered from the handler's pre-write
+      // snapshot precisely because the store no longer holds the old value.
+      mockSetMany.mockImplementation(async (entries: Record<string, unknown>) => {
+        for (const [key, value] of Object.entries(entries)) {
+          if (value === undefined) delete keys[key];
+          else keys[key] = value;
+        }
+      });
     }
 
     it("writes no image ops while a refusal is on record", async () => {

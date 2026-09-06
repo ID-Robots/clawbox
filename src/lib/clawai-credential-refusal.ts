@@ -106,10 +106,25 @@ export async function persistClawaiCredentialRefusal(): Promise<void> {
  * Read before write, so the overwhelmingly common path (nothing recorded) never
  * opens the store for writing at all, and a box whose `data/config.json` cannot
  * be written is not made to fail on every re-link.
+ *
+ * `notRecordedSince` is what keeps a SLOW answer from erasing a FRESH verdict.
+ * The portal poll asks about the credential the box held when its request
+ * started, and up to four seconds can pass before it answers; in that window
+ * the device can be re-linked and the NEW credential refused. Clearing then
+ * would be a verdict about a token the box no longer holds erasing one about
+ * the token it does. Callers that learned something at a known moment pass that
+ * moment and a stamp written since is left alone. A caller that WROTE the
+ * credential passes nothing: an explicit re-link retires every refusal on
+ * record, whenever it was written, because it is the event this whole mark
+ * exists to end.
  */
-export async function clearPersistedClawaiCredentialRefusal(): Promise<void> {
+export async function clearPersistedClawaiCredentialRefusal(
+  notRecordedSince?: number,
+): Promise<void> {
   try {
-    if (!isRecordedRefusal(await get(CLAWAI_CREDENTIAL_REFUSED_KEY))) return;
+    const at = await get(CLAWAI_CREDENTIAL_REFUSED_KEY);
+    if (!isRecordedRefusal(at)) return;
+    if (notRecordedSince !== undefined && (at as number) >= notRecordedSince) return;
     await set(CLAWAI_CREDENTIAL_REFUSED_KEY, undefined);
   } catch {
     // Bounded, in the same boot-scoped way as the write above: an uncleared

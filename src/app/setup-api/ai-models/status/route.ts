@@ -220,6 +220,11 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     // mapPortalTier now gates non-null returns on a paid plan, so
     // a bogus deviceTier stamp can no longer promote a Free user.
     if (state.clawaiToken) {
+      // When this poll's question was ASKED. The answer can take up to the
+      // portal fetch's four-second timeout, and a re-link plus a refusal of the
+      // NEW credential can both land inside that window — see
+      // `clearPersistedClawaiCredentialRefusal`.
+      const askedAt = Date.now();
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
@@ -243,7 +248,7 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         // refusal recorded against it is over. Same poll, same store, same
         // "write only on change" discipline as the tier stamp above — the
         // helper reads before it writes.
-        await clearPersistedClawaiCredentialRefusal();
+        await clearPersistedClawaiCredentialRefusal(askedAt);
       } else {
         clawaiTokenRejected = lookup.rejected;
         // `rejected` is the PORTAL naming this credential as the reason, never
