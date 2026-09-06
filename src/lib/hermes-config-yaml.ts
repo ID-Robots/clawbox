@@ -201,8 +201,12 @@ async function applyViaCli(patch: HermesConfigPatch): Promise<void> {
     }
   }
   for (const key of patch.unset ?? []) {
-    // `unset` on an absent key is a no-op, so a partial registration cleans up
-    // as happily as a complete one.
+    // The exit code is DISCARDED, and that is what makes a partial registration
+    // clean up as happily as a complete one — not the CLI being forgiving.
+    // Measured on the pinned 0.20.5: `unset_config_value` prints "Config key
+    // not set" and EXITS 1 when the key was not there (`_unset_nested` returns
+    // false), so a loop that started checking `r.code` would break every
+    // partial cleanup. TASK-745 disproved the older reading of this line.
     await runHermesCli(["config", "unset", key], { timeoutMs: 15_000 });
   }
 }
