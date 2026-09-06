@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -152,23 +154,24 @@ describe("an update whose process was replaced is reported, not forgotten", () =
     expect(updater.getUpdateState().phase).toBe("failed");
   });
 
-  it("clears the completion markers when a new run starts, so the next verdict is not swallowed", () => {
+  it("clears the completion markers in the same awaited prologue as the lock", () => {
     // update_completed is the discriminator the branch above uses. Left
     // standing, a FORCED run after a successful one — which is exactly what
     // e2e-install's upgrade spec does, twice — would be read as the finished
     // one if it died before the rebuild wrote its continuation flag.
-    updater.resetUpdateState();
-    diskState({ locked: false, completed: true });
-
-    expect(updater.startUpdate()).toEqual({ started: true });
-
-    expect(mockSetMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        update_completed: undefined,
-        update_completed_at: undefined,
-        update_interrupted_at: undefined,
-      }),
-    );
+    //
+    // Asserted as TEXT because driving it means driving a whole run: what
+    // matters is that the clear is awaited, is in the branch that takes the
+    // lock, and is reported rather than swallowed when it fails.
+    const src = readFileSync(path.join(process.cwd(), "src/lib/updater.ts"), "utf-8");
+    const prologue = src.slice(src.indexOf("const ownsTheDesktop"), src.indexOf("let failed = false;"));
+    expect(prologue).toContain("await setUpdateLock();");
+    expect(prologue).toContain("await setMany({");
+    expect(prologue).toContain("update_completed: undefined");
+    expect(prologue).toContain("update_completed_at: undefined");
+    expect(prologue).toContain("[UPDATE_INTERRUPTED_KEY]: undefined");
+    // Reported, never fatal — the same rule setUpdateLock follows.
+    expect(prologue).toMatch(/catch \(err\)[\s\S]*console\.warn/);
   });
 
   it("says nothing about a run that FINISHED and only failed to release its lock", async () => {

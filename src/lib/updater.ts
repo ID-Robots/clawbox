@@ -2928,26 +2928,6 @@ export function startUpdate(): { started: boolean; error?: string } {
   state.phase = "running";
   state.currentStepIndex = 0;
 
-  // A new run supersedes what the last one left behind — the interrupted record
-  // AND the completion markers.
-  //
-  // `update_completed` is the discriminator resumeContinuation uses to tell "an
-  // update was interrupted" from "one finished and only failed to release its
-  // lock". Left standing, a FORCED run started after a successful one (which is
-  // exactly what e2e-install's upgrade spec does, twice) would take the lock,
-  // die before the rebuild writes its continuation flag, and be read as the
-  // finished one — swallowing the very report this branch exists to make. The
-  // box is not "completed" while it is updating, and runUpdate writes both
-  // again when it is.
-  //
-  // Fired rather than awaited, like the lock release it mirrors: refusing to
-  // start an update because a marker could not be cleared would be the worse
-  // outcome.
-  void setMany({
-    [UPDATE_INTERRUPTED_KEY]: undefined,
-    update_completed: undefined,
-    update_completed_at: undefined,
-  });
   launchUpdate(steps, 0, { markCompleted: true });
   return { started: true };
 }
@@ -3043,6 +3023,40 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   const ownsTheDesktop = steps.some((s) => s.id === RESTART_STEP_ID);
   if (ownsTheDesktop) {
     await setUpdateLock();
+    // AND clear what the last run left behind, in the same awaited prologue.
+    //
+    // `update_completed` is the discriminator resumeContinuation uses to tell
+    // "an update was interrupted" from "one finished and only failed to release
+    // its lock". Left standing, a FORCED run started after a successful one
+    // (exactly what e2e-install's upgrade spec does, twice) would take the
+    // lock, die before the rebuild writes its continuation flag, and be read as
+    // the finished one — swallowing the very report the branch exists to make.
+    // The box is not "completed" while it is updating, and the run writes both
+    // again when it is.
+    //
+    // HERE rather than in startUpdate, and awaited: the window this whole
+    // change is about begins when the first step runs, and by then the markers
+    // are gone. A restart in the microseconds before this line finds no lock
+    // either — both are written in the same prologue — so resumeContinuation
+    // correctly says nothing.
+    //
+    // Reported and not fatal, the same rule setUpdateLock follows: refusing to
+    // update a box because a marker could not be cleared is the worse outcome
+    // by some way, and a config store that cannot be written is exactly the
+    // state an update exists to repair. What it costs, said out loud, is that a
+    // later interrupted run may be read as this one having finished.
+    try {
+      await setMany({
+        [UPDATE_INTERRUPTED_KEY]: undefined,
+        update_completed: undefined,
+        update_completed_at: undefined,
+      });
+    } catch (err) {
+      console.warn(
+        "[Updater] Could not clear the previous run's markers - an interruption of THIS run may be reported as a completed update:",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   if (startFrom === 0 && !(await checkInternet())) {
