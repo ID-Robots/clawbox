@@ -220,6 +220,13 @@ async function ensureDataDir(): Promise<void> {
 // and never cleaned up. Treat as not-restoring so the shield stops glowing.
 const RESTORING_FLAG_MAX_AGE_MS = 30 * 60 * 1000;
 
+/**
+ * "HH:MM", 24-hour, and a time that exists. Kept in step with the memory
+ * index's own schedule (`clawkeep-memory.ts`): both are read by a scheduler
+ * that arms nothing for an hour outside 00:00-23:59.
+ */
+const TIME_OF_DAY_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   // Coerce-and-default: tolerate a missing/partial schedule file rather than
   // crash the daemon. Only the four well-known fields are honoured; anything
@@ -227,7 +234,14 @@ function sanitiseSchedule(input: unknown): ClawKeepSchedule {
   const r = (input ?? {}) as Record<string, unknown>;
   const frequency: ScheduleFrequency =
     r.frequency === "weekly" ? "weekly" : "daily";
-  const time = typeof r.timeOfDay === "string" && /^\d{2}:\d{2}$/.test(r.timeOfDay)
+  // Range, not just shape. `/^\d{2}:\d{2}$/` accepted "99:99", "24:00" and
+  // "00:60" — and `computeNextRunMs` answers 0 for exactly those, so the file
+  // kept `enabled: true` over a schedule the scheduler could never arm: the
+  // panel said auto-backup was on and no backup ever ran (TASK-433). Same
+  // expression as `clawkeep-memory.ts`, which got this right for the memory
+  // index; a value this rejects falls back to the default, so a box with a
+  // hand-edited or half-written file still backs itself up.
+  const time = typeof r.timeOfDay === "string" && TIME_OF_DAY_RE.test(r.timeOfDay)
     ? r.timeOfDay
     : DEFAULT_SCHEDULE.timeOfDay;
   const weekdayRaw = Number(r.weekday);
@@ -331,10 +345,6 @@ export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> 
   };
 }
 
-export async function readSchedule(): Promise<ClawKeepSchedule> {
-  return (await readScheduleSnapshot()).schedule;
-}
-
 /**
  * The stamp given to a schedule that was armed before stamps existed. Any
  * value above 0 answers "a window has been started on this box"; 1 ms past the
@@ -432,7 +442,7 @@ export async function writeSchedule(next: ClawKeepSchedule): Promise<{
   // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
   // a read-modify-write now, and two saves from the same card must not
   // interleave into one temp file and rename a torn schedule into place —
-  // readSchedule() would then fall back to DEFAULT_SCHEDULE and silently turn
+  // readScheduleSnapshot() would then fall back to DEFAULT_SCHEDULE and silently turn
   // auto-backup off.
   const tmp = `${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`;
   // `armedAtMs` rides alongside the schedule rather than in it: it is not a

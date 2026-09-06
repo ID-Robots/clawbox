@@ -139,7 +139,12 @@ describe("/setup-api/clawkeep/schedule", () => {
         weekday: 4,
         retentionKeepLast: 7,
       });
+      // WITH the schedule it just wrote, not just "called". Re-reading the
+      // file the PUT has only now renamed can fail, and a failure there leaves
+      // the OLD cadence armed under this 200 — the box goes on backing up
+      // after the owner switched auto-backup off.
       expect(scheduler.refresh).toHaveBeenCalledTimes(1);
+      expect(scheduler.refresh).toHaveBeenCalledWith(body.schedule);
 
       // Round-trip: GET should see the same thing.
       const after = await (await GET()).json();
@@ -158,6 +163,52 @@ describe("/setup-api/clawkeep/schedule", () => {
       expect(body.schedule.timeOfDay).toBe(clawkeep.DEFAULT_SCHEDULE.timeOfDay);
       expect(body.schedule.weekday).toBe(0);
       expect(scheduler.refresh).toHaveBeenCalledTimes(1);
+      expect(scheduler.refresh).toHaveBeenCalledWith(body.schedule);
+    });
+
+    // TASK-433 — "the ClawKeep cron is not backing up".
+    //
+    // `sanitiseSchedule` checked the SHAPE of `timeOfDay` (`/^\d{2}:\d{2}$/`)
+    // and not its RANGE, so "not-a-time" was correctly coerced to the default
+    // while "99:99" — which matches that regex — was persisted verbatim with
+    // `enabled: true`. `computeNextRunMs` then answers 0 for exactly those
+    // values (it *does* range-check), `arm()` returns on `next <= 0`, and the
+    // box arms nothing: the panel says auto-backup is on, the PUT answered
+    // 200, and no backup ever runs. The false-success class, in the one place
+    // where the cost of it is an unprotected box.
+    //
+    // The range-correct regex already exists one file away, in
+    // `clawkeep-memory.ts` — the memory-index schedule got it right.
+    it.each(["99:99", "24:00", "00:60", "2:5"])(
+      "does not persist an unarmable time of day (%s)",
+      async (timeOfDay) => {
+        const res = await PUT(jsonReq({ ...ARMED_DAILY, timeOfDay }));
+        const body = await res.json();
+
+        // Whatever it stores, it must be a schedule the scheduler can arm:
+        // an enabled schedule that computes no next run is auto-backup that
+        // silently never happens.
+        expect(body.schedule.enabled).toBe(true);
+        expect(clawkeep.computeNextRunMs(body.schedule, new Date())).toBeGreaterThan(0);
+        expect(body.nextRunAtMs).toBeGreaterThan(0);
+
+        // And the persisted file must say the same, so a reboot re-arms it.
+        const persisted = await (await GET()).json();
+        expect(clawkeep.computeNextRunMs(persisted.schedule, new Date())).toBeGreaterThan(0);
+      },
+    );
+
+    it("re-arms a box whose schedule.json was hand-edited to an impossible hour", async () => {
+      // A file written by an older build, a hand edit, or a half-flushed
+      // write. The read path is deliberately tolerant — it must not leave the
+      // box enabled-but-unarmable, which is worse than either extreme.
+      await fs.writeFile(
+        SCHEDULE_FILE,
+        JSON.stringify({ ...ARMED_DAILY, timeOfDay: "27:00", armedAtMs: Date.now() }),
+      );
+      const body = await (await GET()).json();
+      expect(body.schedule.enabled).toBe(true);
+      expect(body.nextRunAtMs).toBeGreaterThan(0);
     });
 
     it("treats an empty body as a disable + defaults", async () => {
@@ -212,7 +263,7 @@ describe("/setup-api/clawkeep/schedule", () => {
     it("does not read an unreadable schedule.json as 'never armed'", async () => {
       const now = Date.now();
       // A truncated write or a power cut mid-rename leaves the file there and
-      // unparseable, and `readSchedule()` falls back to DEFAULT_SCHEDULE —
+      // unparseable, and the read falls back to DEFAULT_SCHEDULE —
       // which says auto-backup is off. But a file nobody can read is evidence
       // of NOTHING, not evidence that this box never armed a schedule, and the
       // owner's re-arming click must not buy 36 h of green on a box whose
