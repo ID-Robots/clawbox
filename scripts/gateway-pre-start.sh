@@ -2651,18 +2651,28 @@ clawbox_plugin_boot_without() {
 # FAILED, not retried — the measured TASK-606 outage — and nothing running as
 # `clawbox` clears a start limit at boot.
 #
-# The one case that changes nothing either way is a plugin the core can see and
-# would load but keeps NO install record for — `clawbox-email-directives` is
-# exactly that on a box today: copied out of the checkout by the block below, so
-# it is in `~/.openclaw/extensions/` with nothing in the installed index to own
-# it. (`deepseek` lives in the same directory and is NOT this case — its ClawHub
+# The one case that changes nothing either way is a plugin the report names but
+# keeps NO install record for — `clawbox-email-directives` is exactly that on a
+# box today: copied out of the checkout by the block below, so it sits in
+# `~/.openclaw/extensions/` with nothing in the installed index to own it.
+# (`deepseek` lives in the same directory and is NOT this case — its ClawHub
 # install does write a record, and the box's own report says `consented`. The
-# directory is not the test; the install record is.) The core cannot emit a
-# consent diagnostic for one, so it can never refuse readiness over its consent:
-# switching it off would be a false failure over a plugin that is working, and
-# calling it accepted/current a false success. The boot says so in one line and
-# leaves the entry and any existing marker exactly as it found them, for the
-# next boot or the Settings Retry to resolve.
+# directory is not the test; the install record is.)
+#
+# WHY IT IS SAFE TO LEAVE THAT ONE ENABLED, and the reason is the install record
+# and nothing else. It is NOT `status: "loaded"` — that field is read here only
+# to withhold evidence, never to grant it, for exactly the reason fifteen lines
+# above. It is that every mechanism in 2026.8.1 which can refuse gateway
+# readiness over a plugin is gated on an install record: both consent emitters
+# (`collectPluginCapabilityConsentDiagnostics`, and the management service's
+# `ownership.ok && installRecord`) and the startup payload verification, which
+# is driven entirely by `loadInstalledPluginIndexInstallRecords`. A plugin the
+# core keeps no record for can therefore neither have its consent reported nor
+# block readiness — so switching it off would be a false failure over a plugin
+# that cannot be the problem, and calling it accepted/current a false success.
+# The boot says which of the two it is in one line and leaves the entry and any
+# existing marker exactly as it found them, for the next boot or the Settings
+# Retry to resolve.
 
 # The consent question is asked at most ONCE per boot, for every id at once:
 # the CLI start is the dominant cost and this runs inside a blocking
@@ -2670,10 +2680,17 @@ clawbox_plugin_boot_without() {
 #
 # ONE SNAPSHOT, TAKEN AT THE FIRST KILL OF THE BOOT, and memoised. A consent
 # recorded by a LATER killed verb is not in it, so that plugin is still named
-# and is switched off — beta's behaviour, conservative, and the reason this
-# reads as a fix for a consent that was ALREADY current before the boot (the
-# common shape: `plugins enable` is idempotent, so it is a slow no-op that gets
-# killed) rather than for one written inside the verb that was then killed.
+# and is switched off — beta's behaviour, and the reason this reads as a fix for
+# a consent that was ALREADY current before the boot (the common shape:
+# `plugins enable` is idempotent, so it is a slow no-op that gets killed) rather
+# than for one written inside the verb that was then killed. The codex verb runs
+# before the managed loop, so on a boot whose codex verb is killed the snapshot
+# predates every managed plugin's own consent write.
+#
+# STALE IN ONE DIRECTION ONLY, which is what makes it safe rather than merely
+# cautious: `plugins enable --accept-capabilities` only ever ADDS consent, so an
+# old snapshot can be wrong by naming a plugin that has since been consented — a
+# false failure, identical to beta — and a stale `consented` is unreachable.
 #
 # The memoisation is not only cost. Measured on a box, this call is ~10 s
 # against its 60 s ceiling, so re-reading it per verb would be affordable on a
@@ -2692,8 +2709,16 @@ CLAWBOX_CONSENT_STATES_READY=0
 # alias-keyed entry would match nothing in the report and be switched off on
 # every killed verb.
 clawbox_plugin_canonical_id() {
-  local id="${1#@openclaw/}"
-  printf '%s' "${id#openclaw-}"
+  # The FIRST matching prefix only, because the reader's `canonical()` below
+  # returns on its first match too: stripping both here would answer `discord`
+  # for `@openclaw/openclaw-discord` where python answers `openclaw-discord`,
+  # and two functions written in one commit to implement one rule must not
+  # disagree about it.
+  case "$1" in
+    @openclaw/*) printf '%s' "${1#@openclaw/}" ;;
+    openclaw-*) printf '%s' "${1#openclaw-}" ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
 # What the core's own report says about each plugin, as ` <state>:<id> ` tokens
@@ -2800,7 +2825,7 @@ for pid in pending:
 
 print(" ".join(["ok"] + sorted(f"{state}:{pid}" for pid, state in states.items())))
 PY
-  )" || CLAWBOX_CONSENT_STATES=""
+  )"
   rm -f "$file" 2>/dev/null || true
   case "$CLAWBOX_CONSENT_STATES" in
     ok|"ok "*)
@@ -2817,8 +2842,9 @@ PY
 # What the core's report positively says about one plugin's consent.
 #   0  it adjudicated the plugin and raised no consent diagnostic — recorded
 #   1  it says the plugin still requires consent
-#   2  it can see the plugin and would load it, but keeps no consent record
-#      for it — the question cannot be answered and does not arise
+#   2  it names the plugin but keeps no install record for it — the question
+#      cannot be answered, and cannot arise either (nothing that refuses
+#      readiness applies to a plugin with no record)
 #   3  it does not name the plugin, names it in a state it would not load, or
 #      could not be asked at all
 clawbox_plugin_consent_state() {
@@ -2840,8 +2866,8 @@ CLAWBOX_CONSENT_DETAIL=""
 # The verdict on one consent attempt.
 #   0  consented, or already current — clear any repair marker
 #   1  not established — the caller's existing refusal path, unchanged
-#   2  cannot be established, and the plugin is one the core sees and would
-#      load — change nothing at all and say so
+#   2  cannot be established, and the plugin is one the core keeps no install
+#      record for — change nothing at all and say so
 #
 # Only a kill at the deadline asks the second question, and only a definite
 # "the core has the consent recorded" changes the answer. 124 is `timeout`
@@ -3408,11 +3434,12 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
     echo "  Codex runtime plugin capabilities accepted/current$CLAWBOX_CONSENT_DETAIL"
     clawbox_plugin_repair_clear codex
   elif [ "$CODEX_CONSENT_VERDICT" = "2" ]; then
-    # The core sees the plugin and would load it but keeps no install record for
-    # it, so it can neither report the consent nor refuse readiness over it.
-    # Nothing is switched off and nothing is cleared: an existing repair row is
-    # still the truest thing on the screen, and the next boot or the Retry it
-    # offers resolves this.
+    # The core names the plugin but keeps no install record for it, so it can
+    # neither report the consent nor refuse readiness over it — see the block
+    # above for why that, and not anything `status` says, is what makes leaving
+    # it enabled safe. Nothing is switched off and nothing is cleared: an
+    # existing repair row is still the truest thing on the screen, and the next
+    # boot or the Retry it offers resolves this.
     echo "  Codex runtime plugin capabilities are still unknown (the consent verb was killed at its deadline and the core keeps no consent record for this plugin); leaving it as it is"
   else
     echo "  WARN: could not confirm Codex plugin capabilities; booting without Codex"
@@ -3491,12 +3518,12 @@ MANAGEDPY
       continue
     fi
     if [ "$MANAGED_PLUGIN_VERDICT" = "2" ]; then
-      # Same as the codex arm above: the core sees this plugin and would load
-      # it, but keeps no install record for it — `clawbox-email-directives`, the
-      # one this script copies out of the checkout rather than installing, is
-      # exactly this on a box today — so the core can neither report the consent
-      # nor refuse readiness over it. Change nothing, clear nothing, say which
-      # of the two it is.
+      # Same as the codex arm above: the core names this plugin but keeps no
+      # install record for it — `clawbox-email-directives`, the one this script
+      # copies out of the checkout rather than installing, is exactly this on a
+      # box today — so the core can neither report its consent nor refuse
+      # readiness over it. Change nothing, clear nothing, say which of the two
+      # it is.
       echo "  $MANAGED_PLUGIN plugin capabilities are still unknown (the consent verb was killed at its deadline and the core keeps no consent record for this plugin); leaving it as it is"
       continue
     fi

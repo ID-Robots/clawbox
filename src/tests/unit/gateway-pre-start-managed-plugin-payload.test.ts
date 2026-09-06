@@ -135,6 +135,28 @@ function run(opts: RunOptions): {
         ? ["  exit 1"]
         : [`  printf '%s' '${opts.inspectJson}'; exit 0`]),
       "fi",
+      // `config set plugins.entries["<id>"].enabled <bool>` must REALLY write
+      // the file. `clawbox_plugin_disable` proves its result by re-reading the
+      // config, so a fake that only logged the call sent every switch-off case
+      // through "could not switch the plugin off" — and any assertion that
+      // reads the config back could not fail.
+      'if [ "$1" = "config" ] && [ "$2" = "set" ]; then',
+      `  CFG_KEY="$3" CFG_VALUE="$4" python3 - "${config}" <<'CFGPY'`,
+      "import json, os, sys",
+      "",
+      "PREFIX, SUFFIX = 'plugins.entries[\"', '\"].enabled'",
+      "key = os.environ['CFG_KEY']",
+      "if not (key.startswith(PREFIX) and key.endswith(SUFFIX)):",
+      "    raise SystemExit(0)",
+      "with open(sys.argv[1], encoding='utf-8') as fh:",
+      "    doc = json.load(fh)",
+      "entries = doc.setdefault('plugins', {}).setdefault('entries', {})",
+      "entries.setdefault(key[len(PREFIX):-len(SUFFIX)], {})['enabled'] = os.environ['CFG_VALUE'] == 'true'",
+      "with open(sys.argv[1], 'w', encoding='utf-8') as fh:",
+      "    json.dump(doc, fh)",
+      "CFGPY",
+      "  exit 0",
+      "fi",
       'if [ "$2" = "install" ]; then',
       `  for r in ${(opts.installFails ?? []).map((s) => `'${s}'`).join(" ")}; do`,
       '    if [ "$3" = "$r" ]; then exit 1; fi',
@@ -265,7 +287,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     // — and reading it as "consented" left an unloadable plugin enabled, which
     // is the readiness refusal, the burnt StartLimitBurst and the TASK-606
     // outage.
-    const { argv, stdout, marker } = run({
+    const { argv, stdout, marker, entries } = run({
       entries: { discord: { enabled: true } },
       enableKilled: { discord: 124 },
       inspectJson: inspectAllJson([{ id: "whatsapp" }]),
@@ -273,6 +295,10 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     expect(stdout).not.toContain("discord plugin capabilities accepted/current");
     expect(argv).toContain('config set plugins.entries["discord"].enabled false --strict-json');
     expect(stdout).toContain("booting without it");
+    // The write LANDED, not just the call: the entry is off in the file the
+    // next boot's loop selects on, and the marker says ClawBox did it.
+    expect(entries.discord?.enabled).toBe(false);
+    expect(marker.discord?.disabled).toBe(true);
     expect(marker.discord?.stage).toBe("consent");
   });
 
@@ -325,7 +351,10 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       inspectJson: inspectAllJson([{ id: "deepseek", installed: false }]),
     } as const;
     const first = run(opts);
+    // A real assertion: the suite's fake CLI honours `config set … .enabled`,
+    // so a boot that took the refusal path leaves `false` here.
     expect(first.entries.deepseek?.enabled).toBe(true);
+    expect(first.argv.some((line) => line.startsWith("config set"))).toBe(false);
     // The same directory, so this argv log carries BOTH boots.
     const second = run(opts);
     expect(second.argv.filter((line) => line === "plugins enable deepseek --accept-capabilities"))
