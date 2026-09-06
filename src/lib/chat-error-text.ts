@@ -61,6 +61,25 @@ function isRateLimit(raw: string): boolean {
     || /(^|[^0-9])429([^0-9]|$)/.test(raw);
 }
 
+/**
+ * The AI provider refused this box's credential.
+ *
+ * The customer-visible shape of a revoked, expired or rotated ClawBox AI token
+ * (TASK-419): Settings shows a healthy paid badge, and the chat answers
+ * "Error: HTTP 403: Invalid token" — true, unactionable, and pointing at a CLI
+ * the customer has no reason to open. The remedy is a screen they already have.
+ *
+ * Matched on the wire wording, like the two predicates above, and deliberately
+ * NARROW: a bare "token" is an ordinary word in this codebase's errors
+ * ("context window exceeded: 403000 tokens" must not match), so the number has
+ * to stand alone as a status and the auth words have to be auth words.
+ */
+function isCredentialRejected(raw: string): boolean {
+  return /\b(?:401|403)\b(?!\s*\d)/.test(raw)
+    && /\b(?:invalid[ _-]?token|missing[ _-]?token|unauthor(?:ized|ised)|forbidden|invalid[ _-]?api[ _-]?key|auth(?:entication|orization)?[ _-]?(?:error|failed))\b/i.test(raw)
+    || /\b(?:401|403)\s+(?:unauthor(?:ized|ised)|forbidden)\b/i.test(raw);
+}
+
 /** Something went wrong and we will not say what, because we cannot say it safely. */
 const GENERIC = "That message did not go through. Send it again — the details stayed in this box's log.";
 
@@ -71,6 +90,14 @@ const GENERIC = "That message did not go through. Send it again — the details 
  * Settings. No "check the log": there is nothing there to act on.
  */
 const RATE_LIMIT = "That message did not go through — the AI provider is rate-limiting this box right now. Nothing is broken. Wait a minute and send it again, or switch to a different provider in Settings.";
+
+/**
+ * The credential is the problem, and re-linking is the fix — so the sentence
+ * names the screen that does it rather than the status code that revealed it.
+ * No status number: "403" tells the customer nothing they can act on, and the
+ * one thing they can act on is two taps away.
+ */
+const CREDENTIAL_REJECTED = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect the provider in Settings, under AI Models, and send it again.";
 
 /** The conversation changed under the turn; retry may work, New chat always does. */
 const TAKEOVER = "That message did not go through. That can happen when this chat is open in another tab or on Telegram — or when the session gets stuck. Send it again, and if it keeps failing, start a New chat — that clears it.";
@@ -92,6 +119,11 @@ export function describeChatFailure(raw: unknown): string {
   // actionable one — and a 429 buried in an otherwise unsafe string would be
   // dropped to the generic fallback, losing the one fact that explains it.
   if (isRateLimit(text)) return RATE_LIMIT;
+  // Before the sanitizer for the same reason as the rate limit: "HTTP 403:
+  // Invalid token" carries no path or handle, so it would otherwise pass the
+  // leak rules and be relayed verbatim — which is exactly the bubble TASK-419
+  // is about.
+  if (isCredentialRejected(text)) return CREDENTIAL_REJECTED;
   const safe = sanitizeErrorMessage(text);
   // A message that passes the leak rules is worth showing: "Request exceeds the
   // size limit" tells the customer what to change, and replacing it with the

@@ -82,7 +82,22 @@ export type PortalLookup =
       /** Entitled model ids, or null when the portal published none. */
       allowedModels: string[] | null;
     }
-  | { source: "unreachable" };
+  | {
+      source: "unreachable";
+      /**
+       * The portal ANSWERED and refused this credential (401/403), as opposed
+       * to not answering at all.
+       *
+       * The tier is preserved either way — see the non-200 branch below, and
+       * TASK-468: a revoked token on a still-paid account must not demote the
+       * badge. But "the portal said no" and "the portal said nothing" are not
+       * the same fact, and collapsing them is what let Settings paint
+       * "Connected · Pro" over a credential the box had just been told was
+       * dead (TASK-419). Callers that report health must read this; callers
+       * that report the TIER must keep ignoring it.
+       */
+      rejected: boolean;
+    };
 
 interface PortalCacheEntry {
   tier: ClawboxAiTier | null;
@@ -92,10 +107,11 @@ interface PortalCacheEntry {
 }
 
 const portalTierCache = new Map<string, PortalCacheEntry>();
-// token → epoch-ms timestamp when its unreachable verdict expires.
+// token → when its unreachable verdict expires, and whether that verdict was
+// the portal REFUSING the credential rather than failing to answer.
 // Separate from portalTierCache because the value is "we tried and
 // it failed, don't try again yet" rather than "the answer is null".
-const portalUnreachableCache = new Map<string, number>();
+const portalUnreachableCache = new Map<string, { until: number; rejected: boolean }>();
 const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
 
 /**
@@ -197,11 +213,14 @@ export function mapPortalPlanTier(body: DeviceInfoResponse): ClawboxAiTier | nul
  *
  * 401/403 are deliberately treated the same as 5xx/network errors
  * (unreachable) rather than as a definitive "Free" verdict — see
- * the non-200 branch in the body for the rationale.
+ * the non-200 branch in the body for the rationale. They are still
+ * DISTINGUISHABLE: the unreachable verdict carries `rejected`, which says
+ * whether the portal refused the credential or simply never answered.
  *
  * @param token The bearer token to look up.
  * @returns Either a definitive `{ source: "portal", tier }` answer or
- *   `{ source: "unreachable" }` when the portal couldn't respond.
+ *   `{ source: "unreachable", rejected }` when it couldn't be trusted —
+ *   `rejected` true only when the portal itself refused the credential.
  */
 export async function fetchPortalTier(token: string): Promise<PortalLookup> {
   const now = Date.now();
@@ -215,18 +234,21 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
     };
   }
 
-  const unreachableUntil = portalUnreachableCache.get(token);
-  if (unreachableUntil !== undefined && unreachableUntil > now) {
-    return { source: "unreachable" };
+  const negative = portalUnreachableCache.get(token);
+  if (negative !== undefined && negative.until > now) {
+    return { source: "unreachable", rejected: negative.rejected };
   }
 
   const existing = inFlightPortalLookups.get(token);
   if (existing) return existing;
 
   const promise = (async (): Promise<PortalLookup> => {
-    const markUnreachable = (): PortalLookup => {
-      portalUnreachableCache.set(token, now + PORTAL_UNREACHABLE_TTL_MS);
-      return { source: "unreachable" };
+    const markUnreachable = (rejected: boolean): PortalLookup => {
+      portalUnreachableCache.set(token, {
+        until: now + PORTAL_UNREACHABLE_TTL_MS,
+        rejected,
+      });
+      return { source: "unreachable", rejected };
     };
     try {
       const res = await fetch(PORTAL_DEVICE_INFO_URL, {
@@ -242,15 +264,24 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
         portalUnreachableCache.delete(token);
         return { source: "portal", tier, planTier, allowedModels };
       }
-      // 401/403 is ambiguous: it can mean genuinely Free OR token
+      // 401/403 is ambiguous AS A TIER: it can mean genuinely Free OR token
       // revoked / migrated / corrupted on a still-paid account. We
       // can't tell from the response alone, and treating it as
       // "Free" silently downgrades paid users with broken auth (and
       // fires the downgrade-celebration popup). Mark unreachable
       // instead so callers preserve localTier.
-      return markUnreachable();
+      //
+      // It is NOT ambiguous as a CREDENTIAL: whatever the plan is, the portal
+      // has just refused this token, and a box that says nothing about that
+      // reports itself healthy while every turn 403s. So the verdict carries
+      // the distinction and each caller reads the half it is entitled to.
+      return markUnreachable(res.status === 401 || res.status === 403);
     } catch {
-      return markUnreachable();
+      // A timeout, a dead uplink, a DNS failure: the portal said nothing at
+      // all, so it said nothing about the credential either. Reporting this as
+      // a rejection would tell a customer on a train to re-link a device that
+      // is perfectly fine.
+      return markUnreachable(false);
     }
   })();
 

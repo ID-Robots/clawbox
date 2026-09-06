@@ -1193,7 +1193,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
-  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
+  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiTokenRejected?: boolean } | null>(null);
   useEffect(() => {
     if (section !== "ai" && !isMobile) return;
     const load = () => {
@@ -6233,6 +6233,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       case "ai": {
         if (aiProvider === null) return { subtitle: null };
         if (!aiProvider.connected) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        // The portal has told this box its ClawBox AI credential is refused, so
+        // the provider's NAME is no longer the useful thing to print here: it
+        // reads as health, and every turn is about to fail (TASK-419). Optional
+        // on the type because an older /status response does not carry it, and
+        // absent must mean "nobody said", never "rejected". `needsReauth` is
+        // the catalogue's existing "Needs sign-in", already in all ten locales.
+        if (aiProvider.clawaiTokenRejected) return { subtitle: t("settings.providers.needsReauth") };
         return { subtitle: aiProvider.providerLabel || (aiProvider.model ? aiProvider.model.split("/").pop() ?? null : null) };
       }
       case "localAi": {
