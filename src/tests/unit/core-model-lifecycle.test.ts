@@ -191,6 +191,20 @@ describe("coreModelRetired", () => {
     expect(broken.coreModelRetired("gemini", "anything")).toBe(false);
   });
 
+  it("refuses a provider id that could name anything but a directory", async () => {
+    // The id reaches this module from a request query string by way of the
+    // catalogue payload and is joined into a filesystem path. Nothing the core
+    // ships is outside `[a-z0-9-]`, so anything else cannot have a manifest —
+    // and refusing here closes the traversal class rather than relying on the
+    // caller to have validated first.
+    writeManifest("anthropic", ANTHROPIC);
+    const { coreModelRetired, coreRetiredModels } = await load();
+    for (const bad of ["../anthropic", "a/b", "..", "anthropic\u0000", "-leading"]) {
+      expect(coreModelRetired(bad, "claude-opus-4-8")).toBe(false);
+      expect(coreRetiredModels(bad).size).toBe(0);
+    }
+  });
+
   it("never reports a model the manifest does not name", async () => {
     writeManifest("anthropic", ANTHROPIC);
     const { coreModelRetired } = await load();

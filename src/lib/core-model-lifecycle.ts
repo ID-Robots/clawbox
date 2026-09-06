@@ -75,6 +75,16 @@ const cache = new Map<string, CachedManifest>();
  * them: bundled in the core's `dist/extensions`, or beside the config once
  * OpenClaw 2 unbundled the provider into its own installed plugin.
  */
+/**
+ * A provider id that can only ever name a directory, never traverse out of one.
+ *
+ * The id reaches this module from a request query string by way of the catalogue
+ * payload, and it is joined into a filesystem path below. Everything the core
+ * ships is `[a-z0-9-]`, so anything else is not a provider we could have a
+ * manifest for anyway — refusing here costs nothing and closes the class.
+ */
+const SAFE_PROVIDER_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+
 function manifestPaths(provider: string): string[] {
   const bin = findOpenclawBin();
   const paths: string[] = [];
@@ -146,6 +156,7 @@ function catalogueFor(manifest: unknown, provider: string): unknown {
 }
 
 function retiredFor(provider: string): Set<string> {
+  if (!SAFE_PROVIDER_RE.test(provider)) return new Set();
   const cached = cache.get(provider);
   if (cached) {
     const now = Date.now();
@@ -168,13 +179,32 @@ function retiredFor(provider: string): Set<string> {
     cache.delete(provider);
   }
   for (const file of manifestPaths(provider)) {
+    // Opened ONCE and both stat and read taken from the descriptor. A
+    // `statSync` followed by a `readFileSync` of the same path is two lookups
+    // of a name that can change between them — and the whole point of the stat
+    // is to decide whether the bytes that follow are still the ones it
+    // described. `npm install -g openclaw@latest` renaming `dist/extensions`
+    // underneath is exactly that window, and it is the window this module
+    // exists to survive.
+    let fd: number;
+    try {
+      fd = fsSync.openSync(file, "r");
+    } catch {
+      continue;
+    }
     let stat: fsSync.Stats;
     let raw: string;
     try {
-      stat = fsSync.statSync(file);
-      raw = fsSync.readFileSync(file, "utf-8");
+      stat = fsSync.fstatSync(fd);
+      raw = fsSync.readFileSync(fd, "utf-8");
     } catch {
       continue;
+    } finally {
+      try {
+        fsSync.closeSync(fd);
+      } catch {
+        // Already gone; nothing to release.
+      }
     }
     const retired = new Set<string>();
     try {
