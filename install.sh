@@ -697,6 +697,12 @@ is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
 harness_has_no_gpu() {
   [ "${CLAWBOX_TEST_NO_GPU:-0}" = "1" ]
 }
+# The disk-backed swap step's numbers (see step_swapfile): the file's size, the
+# free space that must remain after it, and its priority — BELOW zram's 5, so
+# the compressed devices stay the kernel's first choice.
+SWAPFILE_SIZE_GB="${CLAWBOX_SWAPFILE_SIZE_GB:-8}"
+SWAPFILE_DISK_RESERVE_GB="${CLAWBOX_SWAPFILE_RESERVE_GB:-20}"
+SWAPFILE_PRIORITY=1
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
@@ -4660,11 +4666,106 @@ step_directories_permissions() {
   echo "  Done"
 }
 
+step_swapfile() {
+  # Disk-backed swap, beside the zram the Jetson image already configures.
+  #
+  # WHY BOTH. `nvzramconfig` gives the board one compressed swap device per
+  # core, half of RAM in total. zram is a compression ratio, never capacity:
+  # its pages live IN RAM (measured on an Orin Nano, 2026-09-06: 1.12 GB of
+  # pages held in 0.35 GB, 3.47x). It is the right first tier and it cannot
+  # save a box that genuinely needs more memory than it has. On 2026-09-05 a
+  # `next build` was OOM-killed on an owner's box at 4.6 GB resident with the
+  # desktop session and an agent also resident; the update ended on a restored
+  # previous build and a red step. A file on the disk is the tier that has an
+  # answer for that, and at priority 1 against zram's 5 the kernel still fills
+  # the compressed devices first — the file stays at 0 bytes used until
+  # something big actually arrives.
+  #
+  # Idempotent: an existing /swapfile is swapped on (never re-created, never
+  # resized — the owner may have chosen their own size), and an fstab line is
+  # written once.
+  local file=/swapfile size_gb avail_gb
+
+  if is_test_mode; then
+    echo "  Skipping swapfile: test mode (a container cannot swapon)"
+    return 0
+  fi
+
+  if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$file"; then
+    echo "  Swapfile already active: $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | awk -v f="$file" '$1 == f {print $2}')"
+    ensure_swapfile_fstab "$file"
+    return 0
+  fi
+
+  if [ -e "$file" ]; then
+    # Left from an earlier install or a reboot that has not mounted it yet.
+    if swapon --priority "$SWAPFILE_PRIORITY" "$file" 2>/dev/null; then
+      echo "  Swapfile re-enabled: $file"
+      ensure_swapfile_fstab "$file"
+      return 0
+    fi
+    echo "  Warning: $file exists but could not be enabled; leaving it alone"
+    return 0
+  fi
+
+  # A box whose disk is nearly full must not be handed a swapfile instead of
+  # room to update itself. The reserve is deliberately larger than the file.
+  avail_gb="$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')"
+  [ -n "$avail_gb" ] || avail_gb=0
+  size_gb=0
+  for candidate in "$SWAPFILE_SIZE_GB" 4; do
+    if [ "$avail_gb" -ge $((candidate + SWAPFILE_DISK_RESERVE_GB)) ]; then
+      size_gb="$candidate"
+      break
+    fi
+  done
+  if [ "$size_gb" = "0" ]; then
+    echo "  Skipping swapfile: only ${avail_gb}G free on / (want ${SWAPFILE_SIZE_GB}G plus a ${SWAPFILE_DISK_RESERVE_GB}G reserve)"
+    return 0
+  fi
+
+  echo "  Creating a ${size_gb}G swapfile at $file..."
+  # `fallocate` is instant on ext4; `dd` is the fallback for a filesystem whose
+  # allocation swapon would refuse (and for one without fallocate at all).
+  if ! fallocate -l "${size_gb}G" "$file" 2>/dev/null; then
+    if ! dd if=/dev/zero of="$file" bs=1M count=$((size_gb * 1024)) status=none 2>/dev/null; then
+      rm -f "$file"
+      echo "  Warning: could not write $file; leaving the box on zram alone"
+      return 0
+    fi
+  fi
+  chmod 600 "$file"
+  chown root:root "$file"
+  if ! mkswap "$file" >/dev/null 2>&1; then
+    rm -f "$file"
+    echo "  Warning: mkswap failed; leaving the box on zram alone"
+    return 0
+  fi
+  if ! swapon --priority "$SWAPFILE_PRIORITY" "$file" 2>/dev/null; then
+    rm -f "$file"
+    echo "  Warning: swapon failed; leaving the box on zram alone"
+    return 0
+  fi
+  ensure_swapfile_fstab "$file"
+  echo "  Swap is now $(free -h | awk '/^Swap:/{print $2}') ($(swapon --show=NAME --noheadings | wc -l) devices)"
+}
+
+# One fstab line, written once, so the file comes back after a reboot.
+ensure_swapfile_fstab() {
+  local file="$1"
+  grep -qs "^$file[[:space:]]" /etc/fstab && return 0
+  printf '%s none swap sw,pri=%s 0 0\n' "$file" "$SWAPFILE_PRIORITY" >> /etc/fstab
+  echo "  Recorded $file in /etc/fstab"
+}
+
 step_system_config() {
   step_systemd_services
   step_polkit_rules
   step_nm_dispatcher
   step_sysctl_linkdown
+  # Non-fatal: a box that cannot take a swapfile still installs and runs, it
+  # just keeps the zram it came with.
+  step_swapfile || echo "  Warning: swapfile step failed (non-fatal)"
   # Non-fatal here too, matching step_post_update. This runs under install.sh's
   # `set -euo pipefail` on the fresh-flash path, so an unguarded failure would
   # abort a first install before ollama, llama.cpp, Chromium, VNC and
@@ -5389,6 +5490,10 @@ step_post_update() {
   step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
+  # Without this call the swapfile would be fresh-install-only, and every box
+  # already in the field would keep facing a rebuild with zram alone — which is
+  # the box the 2026-09-05 OOM happened on.
+  step_swapfile || echo "  Warning: swapfile step failed (non-fatal)"
   # Without this call the firewall would be fresh-install-only and every box
   # already in the field would keep its wide-open INPUT policy — which is the
   # entire finding. Idempotent: the script converges its own rules on each run.

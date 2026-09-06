@@ -1,0 +1,196 @@
+/**
+ * @vitest-environment node
+ *
+ * Disk-backed swap, added to every install and every update on 2026-09-06.
+ *
+ * The board ships with zram alone (nvzramconfig: one compressed device per
+ * core, half of RAM). zram is a compression ratio and never capacity — its
+ * pages live in RAM — so a box that genuinely needs more memory than it has
+ * still dies: on 2026-09-05 an owner's in-app update was OOM-killed at
+ * `next build`, 4.6 GB resident, with the desktop session also up, and the
+ * update ended on a restored previous build.
+ *
+ * `step_swapfile` adds a file on the disk at a priority BELOW zram's, so the
+ * compressed devices stay the kernel's first choice and the file is reserve.
+ * What is pinned here: it runs on both flows, it is idempotent, it never
+ * fails the install, it refuses a disk that cannot spare the room, and it
+ * survives a reboot through /etc/fstab. The behaviour is exercised against a
+ * REAL bash with swapon/mkswap/df stubbed — a container cannot swap.
+ */
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import fs, { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+// Starts a real bash: vitest's 5 s test and 10 s hook defaults are not enough
+// on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+const REPO = process.cwd();
+const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
+const NL = String.fromCharCode(10);
+
+function extractShellFunction(name: string): string {
+  const start = INSTALL_SH.indexOf(`${name}() {`);
+  if (start < 0) throw new Error(`${name} not found in install.sh`);
+  const end = INSTALL_SH.indexOf(`${NL}}`, start);
+  if (end < 0) throw new Error(`${name} has no closing brace`);
+  return INSTALL_SH.slice(start, end + 2);
+}
+
+/** Comments quote the failure being prevented; assertions must not read them. */
+function shellCode(fn: string): string {
+  return fn.split(NL).filter((line) => !line.trim().startsWith("#")).join(NL);
+}
+
+const STEP = extractShellFunction("step_swapfile");
+const FSTAB_FN = extractShellFunction("ensure_swapfile_fstab");
+
+let tmp: string;
+
+/**
+ * Run step_swapfile against a sandbox: its own fstab and root, with swapon,
+ * mkswap, df and free stubbed on PATH. `swapState` seeds what swapon reports.
+ */
+function runStep(opts: {
+  availGb: number;
+  existingFile?: "active" | "present" | "none";
+  swaponFails?: boolean;
+  testMode?: boolean;
+  fstab?: string;
+}) {
+  const bin = path.join(tmp, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  // One test runs the step twice; each run's calls are its own.
+  fs.rmSync(path.join(tmp, "calls"), { force: true });
+  const fstab = path.join(tmp, "fstab");
+  fs.writeFileSync(fstab, opts.fstab ?? "/dev/nvme0n1p1 / ext4 defaults 0 1\n");
+  const swapfile = path.join(tmp, "swapfile");
+  if (opts.existingFile && opts.existingFile !== "none") fs.writeFileSync(swapfile, "x");
+
+  const stub = (name: string, body: string) => {
+    const p = path.join(bin, name);
+    fs.writeFileSync(p, `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
+  };
+  stub("swapon", opts.existingFile === "active"
+    ? `if [ "$1" = "--show=NAME" ]; then echo "${swapfile}"; exit 0; fi\nif [ "$1" = "--show=NAME,SIZE" ]; then echo "${swapfile} 8G"; exit 0; fi\nif [ "$1" = "--show=NAME,SIZE,USED,PRIO" ]; then echo "${swapfile} 8G 0B 1"; exit 0; fi\necho "swapon $*" >> "${tmp}/calls"; exit 0`
+    : `if [[ "$1" == --show* ]]; then exit 0; fi\necho "swapon $*" >> "${tmp}/calls"; exit ${opts.swaponFails ? 1 : 0}`);
+  stub("mkswap", `echo "mkswap $*" >> "${tmp}/calls"; exit 0`);
+  stub("df", `echo "Avail"; echo "${opts.availGb}G"`);
+  stub("free", `echo "Swap: 11Gi 1Gi 10Gi"`);
+  stub("fallocate", `echo "fallocate $*" >> "${tmp}/calls"; : > "\${!#}"; exit 0`);
+
+  const script = [
+    "set -uo pipefail",
+    `CLAWBOX_TEST_MODE=${opts.testMode ? 1 : 0}`,
+    "is_test_mode() { [ \"$CLAWBOX_TEST_MODE\" = \"1\" ]; }",
+    'SWAPFILE_SIZE_GB=8',
+    'SWAPFILE_DISK_RESERVE_GB=20',
+    'SWAPFILE_PRIORITY=1',
+    // The helper reads /etc/fstab too; the sandbox owns both paths.
+    shellCode(FSTAB_FN).replace(/\/etc\/fstab/g, fstab),
+    // The step's own path constants are the box's; the sandbox rewrites them.
+    shellCode(STEP).replace(/\/swapfile/g, swapfile).replace(/\/etc\/fstab/g, fstab),
+    "step_swapfile",
+  ].join(NL);
+
+  const res = spawnSync("bash", ["-c", script], {
+    encoding: "utf-8",
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+  });
+  return {
+    status: res.status,
+    out: `${res.stdout}${res.stderr}`,
+    calls: fs.existsSync(path.join(tmp, "calls")) ? fs.readFileSync(path.join(tmp, "calls"), "utf-8") : "",
+    fstab: fs.readFileSync(fstab, "utf-8"),
+    fileExists: fs.existsSync(swapfile),
+  };
+}
+
+beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-swapfile-")); });
+afterEach(() => { fs.rmSync(tmp, { recursive: true, force: true }); });
+
+describe("step_swapfile runs on both flows and never fails them", () => {
+  it("is called by a fresh install and by an in-app update, both non-fatally", () => {
+    // Fresh-install-only would leave every box already in the field facing a
+    // rebuild with zram alone, which is the box the OOM happened on.
+    for (const caller of ["step_system_config", "step_post_update"]) {
+      const body = shellCode(extractShellFunction(caller));
+      expect(body, `${caller} must call step_swapfile`).toContain("step_swapfile");
+      expect(body).toMatch(/step_swapfile \|\| echo/);
+    }
+  });
+
+  it("puts the file BELOW zram in priority, so the compressed devices stay first", () => {
+    // nvzramconfig gives its devices priority 5. A file at a higher priority
+    // would take the pages zram compresses for free.
+    expect(INSTALL_SH).toMatch(/SWAPFILE_PRIORITY=1\b/);
+    expect(shellCode(STEP)).toContain('swapon --priority "$SWAPFILE_PRIORITY"');
+  });
+});
+
+describe("step_swapfile on a box that can take it", () => {
+  it("creates the file, makes it swap, enables it and records it in fstab", () => {
+    const r = runStep({ availGb: 400 });
+    expect(r.status).toBe(0);
+    expect(r.calls).toMatch(/fallocate -l 8G/);
+    expect(r.calls).toMatch(/mkswap/);
+    expect(r.calls).toMatch(/swapon --priority 1/);
+    expect(r.fstab).toMatch(/swapfile none swap sw,pri=1 0 0/);
+  });
+
+  it("writes exactly one fstab line however often it runs", () => {
+    // The update calls it on every run; a duplicate line is a boot warning at
+    // best and a double swapon at worst.
+    const first = runStep({ availGb: 400 });
+    expect(first.fstab.match(/swapfile none swap/g) ?? []).toHaveLength(1);
+    const again = runStep({ availGb: 400, existingFile: "active", fstab: first.fstab });
+    expect(again.status).toBe(0);
+    expect(again.fstab.match(/swapfile none swap/g) ?? []).toHaveLength(1);
+    expect(again.calls).not.toMatch(/mkswap/);
+  });
+
+  it("re-enables a file that exists but is not swapped on, and never re-makes it", () => {
+    // After a reboot on a box whose fstab predates this step.
+    const r = runStep({ availGb: 400, existingFile: "present" });
+    expect(r.status).toBe(0);
+    expect(r.calls).toMatch(/swapon --priority 1/);
+    expect(r.calls).not.toMatch(/mkswap/);
+    expect(r.fstab).toMatch(/swapfile none swap/);
+  });
+});
+
+describe("step_swapfile stands down rather than harming the box", () => {
+  it("refuses a disk that cannot spare the room, and leaves no file behind", () => {
+    // 8 GB plus a 20 GB reserve; 4 GB plus the reserve is the fallback.
+    const r = runStep({ availGb: 10 });
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/Skipping swapfile: only 10G free/);
+    expect(r.fileExists).toBe(false);
+    expect(r.fstab).not.toMatch(/swapfile/);
+  });
+
+  it("falls back to a smaller file when the disk is tight but usable", () => {
+    const r = runStep({ availGb: 25 });
+    expect(r.status).toBe(0);
+    expect(r.calls).toMatch(/fallocate -l 4G/);
+  });
+
+  it("skips in test mode: a container cannot swapon", () => {
+    const r = runStep({ availGb: 400, testMode: true });
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/Skipping swapfile: test mode/);
+    expect(r.calls).toBe("");
+  });
+
+  it("removes the file and carries on when swapon refuses it", () => {
+    // A half-made swapfile left on disk is worse than none: it wastes the
+    // space and the next run would adopt it.
+    const r = runStep({ availGb: 400, swaponFails: true });
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/Warning: swapon failed/);
+    expect(r.fileExists).toBe(false);
+    expect(r.fstab).not.toMatch(/swapfile/);
+  });
+});
