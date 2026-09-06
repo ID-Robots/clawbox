@@ -1,3 +1,4 @@
+import { createHash } from "crypto";
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { get } from "@/lib/config-store";
 import { readConfig } from "@/lib/openclaw-config";
@@ -62,4 +63,92 @@ export async function resolveClawaiToken(): Promise<string | null> {
 /** Whether this box holds a ClawBox AI credential at all. */
 export async function hasClawaiToken(): Promise<boolean> {
   return (await resolveClawaiToken()) !== null;
+}
+
+/* ---------------------------------------------------------------------------
+ * A credential the proxy has already refused
+ * ------------------------------------------------------------------------ */
+
+/**
+ * How long a refusal of a given credential is believed.
+ *
+ * A 401/403 from our own proxy, identified as such by the proxy (see
+ * `noteClawaiCredentialRefused`), means the credential is not accepted, and
+ * nothing the box can do makes the next identical request succeed — so the
+ * honest expiry is "until the credential changes", which is what the
+ * fingerprint keys on. The timer covers only the case the box cannot observe:
+ * a token the PORTAL restores (a mis-revocation put back, a plan reinstated)
+ * without the device being re-linked. Fifteen minutes is short enough that
+ * such a box heals on its own and long enough that being wrong costs four
+ * requests an hour instead of two thousand.
+ */
+const CREDENTIAL_REFUSAL_TTL_MS = 15 * 60_000;
+
+/**
+ * Bounded, and keyed by FINGERPRINT rather than a single slot.
+ *
+ * One slot would be silently disabled by two credentials in alternation, which
+ * is reachable: `resolveClawaiToken` falls through to the Hermes store whenever
+ * `readConfig()` cannot read `openclaw.json` — a permission error, or a file
+ * caught half-written by a concurrent `openclaw config set` — so a box whose
+ * two stores hold different strings flips per read. Four entries is more than
+ * any real box has and the map is pruned on every write.
+ */
+const MAX_REMEMBERED_REFUSALS = 4;
+const refusals = new Map<string, { status: number; until: number }>();
+
+/**
+ * A hash, never the token. The value is only ever compared, and a bare secret
+ * sitting in module state is one stack trace away from a log line.
+ */
+function fingerprintOf(token: string): string {
+  return createHash("sha256").update(token).digest("hex").slice(0, 16);
+}
+
+/**
+ * Has the ClawBox AI proxy already refused THIS credential? Returns the status
+ * it refused with, so the caller words the failure exactly as it would have
+ * worded the real one. Expired entries are dropped on the way past.
+ */
+export function clawaiCredentialRefused(token: string): number | null {
+  const entry = refusals.get(fingerprintOf(token));
+  if (!entry) return null;
+  if (Date.now() >= entry.until) {
+    refusals.delete(fingerprintOf(token));
+    return null;
+  }
+  return entry.status;
+}
+
+/**
+ * Note that the proxy refused this credential, so the next caller does not
+ * spend a request — or an upload — finding out again.
+ *
+ * ONLY the caller may decide this: a bare 401/403 on the wire can come from an
+ * edge rule, an interception proxy or a plan gate, and treating one of those as
+ * "your device is unlinked" would hide a working feature and send a customer to
+ * re-pair a healthy box. Callers arm this from the proxy's OWN identification
+ * of the credential as the problem (`error.code` = `missing_token` /
+ * `invalid_token`), never from the status alone.
+ *
+ * NOT 429: a spent daily allowance is refused for the same reason every time
+ * too, but it belongs to a plan rather than to a credential and it resets on a
+ * clock this module cannot see.
+ */
+export function noteClawaiCredentialRefused(token: string, status: number): void {
+  const now = Date.now();
+  for (const [key, entry] of refusals) {
+    if (entry.until <= now) refusals.delete(key);
+  }
+  while (refusals.size >= MAX_REMEMBERED_REFUSALS) {
+    const oldest = refusals.keys().next().value;
+    if (oldest === undefined) break;
+    refusals.delete(oldest);
+  }
+  refusals.set(fingerprintOf(token), { status, until: now + CREDENTIAL_REFUSAL_TTL_MS });
+}
+
+/** Test seam: forget every remembered refusal. */
+export function resetClawaiCredentialRefusals(): void {
+  refusals.clear();
 }

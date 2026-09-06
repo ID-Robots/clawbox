@@ -368,6 +368,27 @@ describe("generateClawaiImage", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps asking when the 403 did not come from the proxy", async () => {
+    // The false-failure guard, and the reason the memo reads `error.code` at
+    // all. An edge rule, a rate-limit page or an interception proxy can answer
+    // 403 to a box whose credential is perfectly good — remembering one of
+    // those would hide the picture button and tell that customer to re-pair a
+    // working device. Only the proxy's own `invalid_token` / `missing_token`
+    // is proof, so anything else costs a retry rather than a feature.
+    const edge = vi.fn(async () => new Response("<html>403 Forbidden</html>", { status: 403 }));
+    for (let i = 0; i < 3; i++) {
+      await expect(generateClawaiImage("x", { fetchImpl: edge })).rejects.toMatchObject({ status: 503 });
+    }
+    expect(edge).toHaveBeenCalledTimes(3);
+
+    // A 403 the proxy DID attribute to the credential still stops the loop,
+    // and a plan gate that answers some other code still does not.
+    const gated = vi.fn(async () => jsonResponse({ error: { code: "model_not_allowed" } }, 403));
+    await expect(generateClawaiImage("x", { fetchImpl: gated })).rejects.toMatchObject({ status: 503 });
+    await expect(generateClawaiImage("x", { fetchImpl: gated })).rejects.toMatchObject({ status: 503 });
+    expect(gated).toHaveBeenCalledTimes(2);
+  });
+
   it("asks again the moment the device is re-linked", async () => {
     // The other half, and the reason this is a memory of ONE credential rather
     // than a flag on the box: re-linking is the fix the error tells the

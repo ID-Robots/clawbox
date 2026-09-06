@@ -183,3 +183,49 @@ describe("the credential module stays on the server", () => {
     }
   });
 });
+
+describe("a credential the ClawBox AI proxy has refused", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    readConfig.mockReset();
+    configStoreGet.mockReset();
+  });
+
+  /** The memory, freshly imported so each case starts with none. */
+  async function memo() {
+    const mod = await import("@/lib/harness/credentials");
+    mod.resetClawaiCredentialRefusals();
+    return mod;
+  }
+
+  it("remembers by credential, so a re-link is believed at once", async () => {
+    const { clawaiCredentialRefused, noteClawaiCredentialRefused } = await memo();
+    noteClawaiCredentialRefused(OPENCLAW_TOKEN, 403);
+    expect(clawaiCredentialRefused(OPENCLAW_TOKEN)).toBe(403);
+    // A different credential is a different question, and it has not been
+    // asked. This is what makes "re-link the device" an instruction that works
+    // rather than one the box then ignores for a quarter of an hour.
+    expect(clawaiCredentialRefused(HERMES_TOKEN)).toBeNull();
+  });
+
+  it("holds more than one, so two stores in alternation cannot disable it", async () => {
+    // `resolveClawaiToken` falls through to the Hermes store whenever
+    // `openclaw.json` cannot be read — a permission error, or a file caught
+    // half-written by a concurrent `openclaw config set` — so a box whose two
+    // stores hold different strings flips per read. A single slot would be
+    // overwritten on every flip and the box would be back to asking forever.
+    const { clawaiCredentialRefused, noteClawaiCredentialRefused } = await memo();
+    noteClawaiCredentialRefused(OPENCLAW_TOKEN, 403);
+    noteClawaiCredentialRefused(HERMES_TOKEN, 401);
+    expect(clawaiCredentialRefused(OPENCLAW_TOKEN)).toBe(403);
+    expect(clawaiCredentialRefused(HERMES_TOKEN)).toBe(401);
+  });
+
+  it("never keeps the credential itself", async () => {
+    // The value is only ever compared, and a bare secret in module state is one
+    // stack trace away from a log line.
+    const mod = await memo();
+    mod.noteClawaiCredentialRefused(OPENCLAW_TOKEN, 403);
+    expect(JSON.stringify(mod)).not.toContain(OPENCLAW_TOKEN);
+  });
+});
