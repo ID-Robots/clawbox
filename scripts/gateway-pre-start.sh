@@ -1860,6 +1860,46 @@ def _same_endpoint(_a, _b):
     return _without_one_trailing_slash(_a) == _without_one_trailing_slash(_b)
 
 
+def _clawai_route_is_ours(_base_url, _api_key, _stamped, _proxy_base_url):
+    """Is a configured media route OURS — ours to refresh, ours to take back?
+
+    THE CURRENT PROXY URL IS NOT THE QUESTION, and asking it as though it were
+    is what this replaces. `CLAWBOX_AI_PROXY_URL` is env-overridable and moves
+    between releases, so a box we linked under a previous address carries an
+    entry we wrote, pointing at an endpoint that has since been retired — and
+    an equality test reads that as the OWNER'S own speech server and skips it,
+    while the chat provider and the image row are repaired in the same boot.
+    The customer's transcription and voice stay pointed at a dead host and
+    nothing says so: the false-failure class.
+
+    Ownership needs POSITIVE evidence, in the same three shapes the Hermes half
+    of this uses (`hermesCloudRouteIsOurs`, src/lib/hermes-tts.ts — one rule,
+    two editions, and TASK-726 is this half of it):
+
+      - our own stamp on the entry (`clawboxManaged`);
+      - or a `claw_` portal token on it, which is what survives the proxy URL
+        moving;
+      - or the endpoint names our proxy;
+      - or the slot is genuinely EMPTY — no endpoint AND no key. An unset
+        endpoint alone says nothing: the canonical way an owner uses the
+        generic `openai` slot is their key with no URL at all.
+
+    The transcription block above deliberately does NOT use this: nothing it
+    writes carries a stamp or a credential, so its endpoint really is the only
+    evidence it has, and treating its seeded model list as one would claim an
+    owner's own route on our host that happens to serve the same model (two
+    cases in gateway-pre-start-clawai-audio.test.ts pin exactly that). Stamping
+    what it writes, so the same repair becomes possible there, is its own card.
+    """
+    if _stamped:
+        return True
+    if isinstance(_api_key, str) and _api_key.startswith("claw_"):
+        return True
+    if not (isinstance(_base_url, str) and _base_url.strip()):
+        return not (isinstance(_api_key, str) and _api_key.strip())
+    return _same_endpoint(_base_url, _proxy_base_url)
+
+
 if _clawai_openai_route_is_ours:
     # Anything already under tools.media.audio that is not what we would write
     # is the owner's own transcription setup: a self-hosted Whisper, a Deepgram
@@ -2028,10 +2068,11 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
     # same one-trailing-slash rule the transcription migration uses, for the
     # same reason: `.../api/ai//` is a deliberate route, not a typo to tidy.
     _speech_base_url = _speech.get("baseUrl")
-    _speech_route_taken = bool(
-        isinstance(_speech_base_url, str)
-        and _speech_base_url.strip()
-        and not _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
+    _speech_route_taken = not _clawai_route_is_ours(
+        _speech_base_url,
+        _speech.get("apiKey"),
+        _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True,
+        _clawai_proxy_base_url,
     )
     if _speech_route_taken:
         print(
@@ -2079,11 +2120,18 @@ elif _clawai_openai_route_is_ours:
     _speech = _tts_providers.get("openai") if isinstance(_tts_providers, dict) else None
     if isinstance(_speech, dict):
         _speech_base_url = _speech.get("baseUrl")
+        # The STAMP is the authorisation, not the address. Requiring the
+        # current proxy URL as well left a downgraded box that had been linked
+        # under a previous address holding our own dead entry for good — every
+        # spoken reply buying a refused round trip, and the panel calling the
+        # cloud voice configured while it did. The stamp still has to be there:
+        # this is the one place in the file that destroys configuration, and an
+        # unstamped entry is somebody's hand-written config whatever it points
+        # at.
         if (
             _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True
             and isinstance(_speech_base_url, str)
             and _speech_base_url.strip()
-            and _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
         ):
             del _tts_providers["openai"]
             print(

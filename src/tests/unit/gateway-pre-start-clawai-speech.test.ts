@@ -298,6 +298,66 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     });
   });
 
+  describe("a box we linked under a previous proxy address (TASK-726)", () => {
+    // CLAWBOX_AI_PROXY_URL is env-overridable and moves between releases, so
+    // an entry WE wrote can name an endpoint that has since been retired. The
+    // rule used to be equality with the CURRENT url, which reads our own entry
+    // as the owner's own speech server: the box was skipped and left on a dead
+    // route for the life of that address, while the chat provider and the
+    // image row were repaired in the same boot.
+    const RETIRED = "https://clawbox.com/api/ai-2025";
+
+    it("re-points our own stamped entry at the address that serves today", () => {
+      const { cfg, changed, log } = migrate({
+        messages: { tts: { providers: { openai: { baseUrl: RETIRED, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED } } } },
+      });
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
+      expect(log).not.toContain("already names its own speech route");
+    });
+
+    it("recognises one by its claw_ token even without the stamp", () => {
+      // What a box carries when it was written before the stamp existed. The
+      // portal token is ours whatever address it was pointed at.
+      const { cfg, changed } = migrate({
+        messages: { tts: { providers: { openai: { baseUrl: RETIRED, model: "gpt-4o-mini-tts", apiKey: TOKEN } } } },
+      });
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)?.baseUrl).toBe(PROXY);
+      expect(speech(cfg)).toMatchObject(MANAGED);
+    });
+
+    it("takes its own entry back on a downgrade even though the address moved", () => {
+      // The mirror image, and the worse half: a box that was Max and is not
+      // any more kept OUR dead entry for good, so every spoken reply bought a
+      // refused round trip and the panel called the cloud voice configured
+      // while it did.
+      const { cfg, changed, log } = migrate(
+        { messages: { tts: { providers: { openai: { baseUrl: RETIRED, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED } } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toBeUndefined();
+      expect(log).toContain("no longer includes it");
+    });
+
+    it("still refuses to take an UNSTAMPED entry on a moved address", () => {
+      // The destructive path keeps its positive evidence: the stamp is the
+      // authorisation, and an entry we did not write is somebody's own.
+      const own = { baseUrl: RETIRED, model: "tts-1", apiKey: "sk-owner" };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: own } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+  });
+
   it("does not touch a box whose openai slot belongs to its owner", () => {
     // Same handover the transcription migration uses: when the image migration
     // decided the slot is not ours, our token must not be written anywhere
@@ -321,6 +381,16 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       // A host-only match would stamp over a deliberate path. Same rule the
       // transcription migration applies, from the same helper.
       const own = { baseUrl: "https://clawbox.com/their-own-route", model: "tts-1" };
+      const { cfg, changed } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+
+    it("is left alone when it carries the owner's own key on a route of ours that has moved", () => {
+      // The credential is what decides after the stamp, and `sk-` is not ours
+      // however the endpoint reads.
+      const own = { baseUrl: "https://clawbox.com/api/ai-2025", model: "tts-1", apiKey: "sk-owner" };
       const { cfg, changed } = migrate({ messages: { tts: { providers: { openai: own } } } });
 
       expect(changed).toBe(false);
