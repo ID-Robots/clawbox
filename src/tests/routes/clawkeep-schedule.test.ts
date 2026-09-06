@@ -139,7 +139,12 @@ describe("/setup-api/clawkeep/schedule", () => {
         weekday: 4,
         retentionKeepLast: 7,
       });
+      // WITH the schedule it just wrote, not just "called". Re-reading the
+      // file the PUT has only now renamed can fail, and a failure there leaves
+      // the OLD cadence armed under this 200 — the box goes on backing up
+      // after the owner switched auto-backup off.
       expect(scheduler.refresh).toHaveBeenCalledTimes(1);
+      expect(scheduler.refresh).toHaveBeenCalledWith(body.schedule);
 
       // Round-trip: GET should see the same thing.
       const after = await (await GET()).json();
@@ -158,6 +163,7 @@ describe("/setup-api/clawkeep/schedule", () => {
       expect(body.schedule.timeOfDay).toBe(clawkeep.DEFAULT_SCHEDULE.timeOfDay);
       expect(body.schedule.weekday).toBe(0);
       expect(scheduler.refresh).toHaveBeenCalledTimes(1);
+      expect(scheduler.refresh).toHaveBeenCalledWith(body.schedule);
     });
 
     // TASK-433 — "the ClawKeep cron is not backing up".
@@ -257,7 +263,7 @@ describe("/setup-api/clawkeep/schedule", () => {
     it("does not read an unreadable schedule.json as 'never armed'", async () => {
       const now = Date.now();
       // A truncated write or a power cut mid-rename leaves the file there and
-      // unparseable, and `readSchedule()` falls back to DEFAULT_SCHEDULE —
+      // unparseable, and the read falls back to DEFAULT_SCHEDULE —
       // which says auto-backup is off. But a file nobody can read is evidence
       // of NOTHING, not evidence that this box never armed a schedule, and the
       // owner's re-arming click must not buy 36 h of green on a box whose

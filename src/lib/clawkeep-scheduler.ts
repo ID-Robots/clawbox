@@ -66,10 +66,10 @@ function clearRetry() {
 
 function fireBackup(): void {
   // The slot is being consumed now, so stop claiming it is still ahead:
-  // `armed` would otherwise hold an expired handle and `armedFor` a time in
-  // the past, both truthy and neither live — which is what `rearm()` below
-  // and `nextRunAtMs()` are asked about. Same reason
-  // `clawkeep-memory-scheduler.ts` clears at the top of its own `fire()`.
+  // without this, `armedFor` names a time in the past for as long as the
+  // backup runs, and `nextRunAtMs()` — the number an admin surface prints as
+  // "next run" — reports it. Same reason `clawkeep-memory-scheduler.ts`
+  // clears at the top of its own `fire()`.
   clear();
   // Best-effort: if a manual backup is already running the daemon will
   // serialise via its own heartbeat lock, so we don't gate here.
@@ -154,7 +154,12 @@ function onUnreadableSchedule(): void {
     "[clawkeep-scheduler] schedule.json could not be read — "
       + (armedFor > 0
         ? `keeping the last schedule that was (next run ${new Date(armedFor).toISOString()})`
-        : "nothing is armed")
+        // Nothing armed is two different facts and only one is an alarm: a box
+        // whose owner switched auto-backup off is behaving correctly, a box
+        // that has never managed to read the file is not.
+        : lastGood
+          ? "auto-backup was last known to be off"
+          : "nothing is armed and nothing has been read yet")
       + `; trying again in ${Math.round(UNREADABLE_RETRY_MS / 60_000)} min`,
   );
   clearRetry();

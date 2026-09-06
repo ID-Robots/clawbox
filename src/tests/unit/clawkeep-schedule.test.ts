@@ -103,10 +103,9 @@ describe("the ClawKeep backup scheduler", () => {
   });
 
   /**
-   * Both reads are stubbed on purpose. The real ones resolve
-   * `CLAWKEEP_DATA_DIR` at import time, so a scheduler test that left either
-   * of them real would read — and the write path would write — the developer's
-   * own `~/.clawkeep`.
+   * Stubbed on purpose: the real read resolves `CLAWKEEP_DATA_DIR` at import
+   * time, so a scheduler test that left it real would read the developer's own
+   * `~/.clawkeep`.
    */
   function mockClawkeep(
     runBackup: ReturnType<typeof vi.fn>,
@@ -117,7 +116,6 @@ describe("the ClawKeep backup scheduler", () => {
       return {
         ...actual,
         runBackup,
-        readSchedule: vi.fn(async () => snapshot.schedule),
         readScheduleSnapshot: vi.fn(async () => snapshot),
       };
     });
@@ -214,6 +212,12 @@ describe("the ClawKeep backup scheduler", () => {
     await vi.advanceTimersByTimeAsync(16 * 60_000);
 
     expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+
+    // And it stops asking.
+    warn.mockClear();
+    await vi.advanceTimersByTimeAsync(46 * 60_000);
+    expect(warn).not.toHaveBeenCalled();
+
     await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
     expect(runBackup).toHaveBeenCalled();
     warn.mockRestore();
@@ -233,7 +237,103 @@ describe("the ClawKeep backup scheduler", () => {
 
     // The file read would now fail; the route does not need it.
     snapshot.unreadable = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await sched.refresh({ ...SCHEDULE, enabled: false });
+
+    expect(sched.nextRunAtMs()).toBe(0);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(runBackup).not.toHaveBeenCalled();
+    // A save also settles any outstanding re-read: the route's answer is
+    // newer than anything the file could say, so a retry must not survive it
+    // and re-arm the cadence the owner has just switched off.
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("stops re-reading once any successful read gets in first", async () => {
+    // A pending 15-minute retry that a successful read does not cancel keeps
+    // firing for the life of the process, tearing the armed backup timer down
+    // and rebuilding it from `lastGood` — which may be staler than whatever
+    // set the schedule in between. Permanent background churn nothing notices,
+    // so it is pinned on the read itself rather than on a symptom.
+    const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const snapshot = { schedule: { ...actualDefaultSchedule }, armedAtMs: 0, unreadable: true };
+    const read = vi.fn(async () => snapshot);
+    vi.doMock("@/lib/clawkeep", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep")>("@/lib/clawkeep");
+      return { ...actual, runBackup, readScheduleSnapshot: read };
+    });
+    const sched = await import("@/lib/clawkeep-scheduler");
+
+    await sched.start();          // unreadable: arms a retry
+    snapshot.schedule = SCHEDULE;
+    snapshot.unreadable = false;
+    await sched.refresh();        // a good read lands inside the retry window
+    const readsSoFar = read.mock.calls.length;
+
+    // Three retry windows, and deliberately short of 06:00: the scheduled
+    // backup re-reads on its own `.finally(rearm)`, which would mask this.
+    await vi.advanceTimersByTimeAsync(50 * 60_000);
+    expect(read).toHaveBeenCalledTimes(readsSoFar);
+    warn.mockRestore();
+  });
+
+  it("stops re-reading when the route saves inside the retry window", async () => {
+    // The same, through the door the owner actually uses. `refresh(schedule)`
+    // reads nothing at all, so a retry it left behind would re-read and re-arm
+    // over the save that had just replaced it.
+    const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const snapshot = { schedule: { ...actualDefaultSchedule }, armedAtMs: 0, unreadable: true };
+    const read = vi.fn(async () => snapshot);
+    vi.doMock("@/lib/clawkeep", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep")>("@/lib/clawkeep");
+      return { ...actual, runBackup, readScheduleSnapshot: read };
+    });
+    const sched = await import("@/lib/clawkeep-scheduler");
+
+    await sched.start();          // unreadable: arms a retry
+    await sched.refresh(SCHEDULE);
+    const readsSoFar = read.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(50 * 60_000);
+    expect(read).toHaveBeenCalledTimes(readsSoFar);
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+    warn.mockRestore();
+  });
+
+  it("lets the newer read win when a save lands during one that is in flight", async () => {
+    // `start()` and `rearm()` no longer clear synchronously before their
+    // await — that is what stops an unreadable read disarming a live timer —
+    // so two rearms can be in flight at once. Without the generation guard the
+    // OLDER read arms last, and the box keeps backing up on the cadence the
+    // owner has already replaced. Silent, and gone by the next reboot, so it
+    // never reproduces on demand.
+    const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    let releaseSlowRead: (() => void) | null = null;
+    const slowRead = new Promise<void>((resolve) => { releaseSlowRead = resolve; });
+    const snapshot = { schedule: SCHEDULE, armedAtMs: Date.now(), unreadable: false };
+
+    vi.doMock("@/lib/clawkeep", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep")>("@/lib/clawkeep");
+      return {
+        ...actual,
+        runBackup,
+        readScheduleSnapshot: vi.fn(async () => { await slowRead; return snapshot; }),
+      };
+    });
+    const sched = await import("@/lib/clawkeep-scheduler");
+
+    // A boot read that has not answered yet...
+    const booting = sched.start();
+    // ...and the owner saves while it is still out.
+    await sched.refresh({ ...SCHEDULE, enabled: false });
+    expect(sched.nextRunAtMs()).toBe(0);
+
+    // The stale read now answers with the schedule the save replaced.
+    releaseSlowRead!();
+    await booting;
 
     expect(sched.nextRunAtMs()).toBe(0);
     await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);

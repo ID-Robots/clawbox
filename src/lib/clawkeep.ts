@@ -345,10 +345,6 @@ export async function readScheduleSnapshot(): Promise<ClawKeepScheduleSnapshot> 
   };
 }
 
-export async function readSchedule(): Promise<ClawKeepSchedule> {
-  return (await readScheduleSnapshot()).schedule;
-}
-
 /**
  * The stamp given to a schedule that was armed before stamps existed. Any
  * value above 0 answers "a window has been started on this box"; 1 ms past the
@@ -446,7 +442,7 @@ export async function writeSchedule(next: ClawKeepSchedule): Promise<{
   // Per-call temp name (pid + monotonic counter), like writeStateFile: this is
   // a read-modify-write now, and two saves from the same card must not
   // interleave into one temp file and rename a torn schedule into place —
-  // readSchedule() would then fall back to DEFAULT_SCHEDULE and silently turn
+  // readScheduleSnapshot() would then fall back to DEFAULT_SCHEDULE and silently turn
   // auto-backup off.
   const tmp = `${SCHEDULE_PATH}.tmp.${process.pid}.${++scheduleWriteSeq}`;
   // `armedAtMs` rides alongside the schedule rather than in it: it is not a

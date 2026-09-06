@@ -30,15 +30,15 @@ beforeEach(async () => {
   }
 });
 
-describe("readSchedule / writeSchedule", () => {
+describe("readScheduleSnapshot / writeSchedule", () => {
   it("returns DEFAULT_SCHEDULE when no file exists", async () => {
-    const s = await clawkeep.readSchedule();
+    const s = (await clawkeep.readScheduleSnapshot()).schedule;
     expect(s).toEqual(clawkeep.DEFAULT_SCHEDULE);
   });
 
   it("returns DEFAULT_SCHEDULE when the file is corrupt", async () => {
     await fs.writeFile(path.join(DATA_DIR, "schedule.json"), "{not-json", { mode: 0o600 });
-    const s = await clawkeep.readSchedule();
+    const s = (await clawkeep.readScheduleSnapshot()).schedule;
     expect(s).toEqual(clawkeep.DEFAULT_SCHEDULE);
   });
 
@@ -57,7 +57,7 @@ describe("readSchedule / writeSchedule", () => {
       weekday: 3,
       retentionKeepLast: 5,
     });
-    const reread = await clawkeep.readSchedule();
+    const reread = (await clawkeep.readScheduleSnapshot()).schedule;
     expect(reread).toEqual(written);
   });
 
