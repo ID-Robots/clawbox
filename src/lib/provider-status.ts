@@ -17,6 +17,7 @@
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import { hasClawaiToken } from "@/lib/harness/credentials";
+import { clawaiTokenRejectedByPortal } from "@/lib/clawbox-ai-portal-tier";
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue } from "@/lib/config-store";
 import {
@@ -204,6 +205,25 @@ interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
  * Painting "not connected" over a provider we simply failed to ask about is the
  * failure mode most likely to send someone to re-enter a key that was fine.
  */
+/**
+ * Has the portal already refused THIS box's ClawBox AI token?
+ *
+ * CACHE-ONLY, which is the whole point: this reader probes nothing and is
+ * polled, so it answers from what `/setup-api/ai-models/status` has already
+ * asked (every 30 s, while any client is open) and says "nobody has asked" on a
+ * cold process — no request, and not even a credential read. A cold answer
+ * keeps beta's row exactly as it was.
+ *
+ * Why it belongs here at all: `credentialed` is credential PRESENCE, so a
+ * revoked token painted the cyan dot and the word "Connected" on the one screen
+ * the chat's own "reconnect it in Settings" sends the customer to (TASK-419).
+ * `needs-reauth` is the state that was written for exactly this — "the box is
+ * pointed at this provider and cannot authenticate to it".
+ */
+function clawaiTokenRefused(): boolean {
+  return clawaiTokenRejectedByPortal();
+}
+
 function stateFor(
   credentialed: boolean | null,
   isDefault: boolean,
@@ -236,6 +256,7 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   // Asked once, outside the loop: it reads config and the config store, and the
   // answer is the same for every row that consults it.
   const clawaiLinked = await hasClawaiToken();
+  const clawaiRefused = clawaiTokenRefused();
 
   // Did the live dashboard actually answer? `stale` is set on every fallback
   // path (dashboard down, disk-catalog cold start). It draws the line between
@@ -286,7 +307,9 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
     return {
       id,
       label: hermesProviderLabel(id, byId.get(id)?.name),
-      state: stateFor(credentialed, isDefault, awaitingProbe),
+      state: id === CLAWAI_PROVIDER && clawaiRefused && credentialed === true
+        ? "needs-reauth"
+        : stateFor(credentialed, isDefault, awaitingProbe),
       isDefault,
       section: sectionFor(id),
     };
@@ -331,7 +354,8 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
   // The ClawBox AI credential can live in the config store instead of the
   // config file (a box migrated from a Hermes install), and `hasClawaiToken`
   // is the helper that knows both homes.
-  if (await hasClawaiToken()) credentialed.add("clawai");
+  const clawaiRefused = clawaiTokenRefused();
+  if (await hasClawaiToken()) credentialed.add(CLAWAI_PROVIDER);
 
   const primary = config.agents?.defaults?.model?.primary ?? null;
   const defaultProvider = normalizeProviderId(primary ? primary.split("/")[0] : null);
@@ -376,7 +400,9 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
       // summary's own doc promises. Same shape of false failure as the one
       // this fix addresses, different reader, and it needs `readConfigStrict`
       // rather than a probe state.
-      state: stateFor(credentialed.has(id), isDefault),
+      state: id === CLAWAI_PROVIDER && clawaiRefused && credentialed.has(id)
+        ? "needs-reauth"
+        : stateFor(credentialed.has(id), isDefault),
       isDefault,
       section: sectionFor(id),
     };
