@@ -16,7 +16,7 @@
 // decision is a different one.
 
 import { spawn } from "child_process";
-import { realpathSync } from "fs";
+import { realpathSync, statSync } from "fs";
 import { basename, dirname, join, resolve, isAbsolute, normalize } from "path";
 import { isProtectedFilePath } from "../../src/lib/file-guard";
 // TASK-605's protected-path rule, from the module the OpenClaw hook plugin
@@ -224,6 +224,38 @@ export interface SpawnOptions {
 }
 
 /**
+ * Where a child runs when the caller named no directory.
+ *
+ * `DEFAULT_CWD` is the project root, and it is the right answer for RESOLVING
+ * a relative path (see resolveUserPath). It is NOT a precondition of running a
+ * program: when that directory is absent, `spawn` fails ENOENT before the
+ * binary is ever reached and `spawnArgv` settles at 127 — which `hasBinary()`
+ * reads as "not installed" and `probeJournal()` as "no journal". The whole
+ * capability sweep then answers false at once and the MCP server drops
+ * disk_usage, disk_cleanup, logs_tail and screen_capture from its tool list
+ * with nothing said (TASK-722, the false-failure class). On a box the tree is
+ * normally there; this bites exactly when it briefly is not — mid-update, a
+ * failed mount, a mis-set CLAWBOX_ROOT — which is when those tools are wanted.
+ *
+ * `/` is the fallback because it is the one directory that cannot be missing
+ * and cannot be a surprise: every argument these tools pass is already an
+ * absolute path (`resolveUserPath` guarantees it), so nothing changes meaning.
+ *
+ * Asked per spawn rather than once at import: the tree comes BACK after an
+ * update, and a capability answered once and kept for the process lifetime is
+ * the probe-once class this codebase keeps producing.
+ */
+const FALLBACK_CWD = "/";
+
+function defaultSpawnCwd(): string {
+  try {
+    return statSync(DEFAULT_CWD).isDirectory() ? DEFAULT_CWD : FALLBACK_CWD;
+  } catch {
+    return FALLBACK_CWD;
+  }
+}
+
+/**
  * The ONLY process entry point outside the `bash` tool. Argv array, never a
  * shell string — so no argument, however hostile, can be re-parsed as a
  * command. Output is capped and the child is killed at the cap so a runaway
@@ -234,11 +266,15 @@ export function spawnArgv(
   args: string[],
   options: SpawnOptions = {},
 ): Promise<SpawnResult> {
-  const { timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024, cwd = DEFAULT_CWD, input, extraEnv } = options;
+  const { timeoutMs = 15_000, maxBytes = 4 * 1024 * 1024, cwd, input, extraEnv } = options;
+  // A cwd the CALLER named is honoured exactly as given, missing or not: that
+  // directory is the caller's meaning, and running somewhere else instead
+  // would be the false-success mirror of the bug the fallback above fixes.
+  const effectiveCwd = cwd ?? defaultSpawnCwd();
   return new Promise((resolveP) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(bin, args, { cwd, env: { ...process.env, HOME, ...extraEnv }, shell: false });
+      child = spawn(bin, args, { cwd: effectiveCwd, env: { ...process.env, HOME, ...extraEnv }, shell: false });
     } catch (err) {
       resolveP({
         stdout: "",

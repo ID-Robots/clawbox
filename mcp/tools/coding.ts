@@ -31,6 +31,7 @@ import {
   assertPathAllowed,
   assertWritePathAllowed,
   commandDeniedByPathGuard,
+  hasBinary,
   resolveUserPath,
   spawnArgv,
 } from "../lib/guard";
@@ -674,7 +675,11 @@ export function registerCodingTools(reg: Registrar): void {
       const target = path ? resolveUserPath(path) : DEFAULT_CWD;
       assertPathAllowed(target);
 
-      const useRg = (await spawnArgv("/usr/bin/env", ["which", "rg"], { timeoutMs: 3_000 })).exitCode === 0;
+      // The shared probe, not a second copy of it: this was an inlined
+      // `env which rg` that inherited the same missing-cwd false-failure
+      // hasBinary() was just fixed for (TASK-722), and it degraded a box with
+      // ripgrep installed to `grep -r` silently.
+      const useRg = await hasBinary("rg");
       const args: string[] = [];
       if (useRg) {
         // --null / -Z make the searcher terminate every printed FILE NAME with a
