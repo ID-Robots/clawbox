@@ -37,6 +37,7 @@
 // a cloud voice on this edition is out of reach of both.
 
 import { stripEmailDirectives } from "./email-directives.mjs";
+import { onBeforeDispatch } from "./email-approvals.mjs";
 
 /** The plugin id, which must match `openclaw.plugin.json` and the config key. */
 const PLUGIN_ID = "clawbox-email-directives";
@@ -185,10 +186,15 @@ export function onReplyPayloadSending(event, ctx) {
 
 const clawboxEmailDirectivesPlugin = {
   id: PLUGIN_ID,
-  name: "ClawBox email directives",
-  description: "Removes EMAIL: card directives from replies leaving the box for a channel.",
+  name: "ClawBox email hooks",
+  description:
+    "Removes EMAIL: card directives from replies leaving the box for a channel, and takes the owner's emailed-draft approval off the inbound stream.",
   register(api) {
     api.on("reply_payload_sending", onReplyPayloadSending);
+    // The inbound half. See email-approvals.mjs: it claims ONLY a message that
+    // is exactly a verb and a code, so every other message reaches the agent
+    // untouched, and it fails open on anything unexpected.
+    api.on("before_dispatch", onBeforeDispatch);
   },
 };
 

@@ -47,6 +47,7 @@ import { OPEN_EMAIL_SETTINGS } from "@/lib/notify-action";
 // approve anything, and the agent reading the answer cannot press the button.
 // See src/lib/email-approval.ts.
 import { sendApprovalPrompt } from "@/lib/email-approval";
+import { offerReplyApproval } from "@/lib/email-approval-reply";
 // The message limits live with the queue that has the final say on them, so a
 // route that accepts a message the queue then refuses cannot drift into
 // existence — the caller would have spent the send budget on a 400.
@@ -159,6 +160,19 @@ export async function POST(request: Request) {
       // the person the same thing, and they will wait for a message that never
       // arrives. Never throws; see sendApprovalPrompt.
       const prompt = await sendApprovalPrompt(queued.draft);
+      // ...and, when that did not put a question in front of him, ask in the
+      // conversation he is already in. Second, never instead: an approvals bot
+      // gives him a BUTTON, and a device that has one should not also send a
+      // line to type. It self-sequences rather than branching on a flag —
+      // `offerReplyApproval` shares the one prompt-per-draft store, so a
+      // question the approvals bot has just posted is found and nothing is sent
+      // — which also means a prompt that FAILED to deliver falls through to
+      // here rather than leaving the owner with nothing at all.
+      //
+      // Awaited for the same reason the line above is: the agent is told which
+      // question was actually asked, and an agent told the wrong one tells the
+      // person to look somewhere nothing arrived.
+      const reply = queued.deduped ? null : await offerReplyApproval(queued.draft);
       // Best effort: a notification that does not appear must not turn a
       // successfully-queued draft into a failed send.
       //
@@ -188,8 +202,14 @@ export async function POST(request: Request) {
           pendingId: queued.draft.id,
           recipients: recipients.length,
           // What the agent may say to the person. A kind, never a chat id and
-          // never the button — there is nothing here the agent can act on.
+          // never the code — there is nothing here the agent can act on, and
+          // the code is the owner's to type, not the agent's to relay.
           approvalPrompt: prompt.kind,
+          // Whether the owner can answer by REPLYING in this conversation.
+          // Deliberately not the code itself: an agent that could read it could
+          // repeat it back, and a person could not then tell his own approval
+          // from one composed for him.
+          replyApproval: reply?.kind ?? "off",
         },
         { status: 202 },
       );

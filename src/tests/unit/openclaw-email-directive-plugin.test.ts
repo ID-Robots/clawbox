@@ -206,7 +206,9 @@ describe("OpenClaw reply_payload_sending plugin — EMAIL: directives", () => {
   it("registers reply_payload_sending under the id its manifest declares", () => {
     const registered: string[] = [];
     plugin.register({ on: (name: string) => registered.push(name) });
-    expect(registered).toEqual(["reply_payload_sending"]);
+    // BOTH, and in this order: the outbound strip this plugin was built for,
+    // and the inbound approval claim that now rides on it.
+    expect(registered).toEqual(["reply_payload_sending", "before_dispatch"]);
 
     const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "openclaw.plugin.json"), "utf-8"));
     expect(manifest.id).toBe(plugin.id);
