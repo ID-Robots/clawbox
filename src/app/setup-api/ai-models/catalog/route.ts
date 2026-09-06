@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { coreModelLifecycle } from "@/lib/core-model-lifecycle";
+import { coreModelRetired } from "@/lib/core-model-lifecycle";
 import { spawn } from "child_process";
 import { promises as fsp } from "fs";
 import path from "path";
@@ -673,13 +673,49 @@ function isOfferableModelId(provider: string, id: string): boolean {
   // segment is one of these two, and none carries `deprecated: true` — so this
   // is the set doing what it says rather than a change in what is offered.
   if (DEPRECATED_MODEL_IDS.has(lastModelSegment(id))) return false;
-  // And whatever the INSTALLED core says, which is the answer that cannot go
-  // stale: the set above is a hand-kept list, this is the harness's own
-  // catalogue. Fails open — a box with no core, no plugin manifest or a shape
-  // the reader does not recognise answers null and the row is offered, which
-  // is exactly what beta does today.
-  if (coreModelLifecycle(provider, lastModelSegment(id))?.deprecated) return false;
   return true;
+}
+
+/**
+ * The payload as the PICKER should see it: without the models the installed
+ * core has retired.
+ *
+ * Applied when a payload is SERVED, never when one is stored, and that
+ * distinction is the whole of it. `subscription-surface.ts` reads the cache
+ * file back as the set of ids this box will ACCEPT — "a row the picker offers
+ * must be a row that route accepts" — so filtering the stored payload would not
+ * merely stop recommending a retired model, it would start REFUSING one the
+ * customer is already on, with `… is not in the Anthropic model catalogue this
+ * box enumerated`. That sentence would be untrue on both halves: the box did
+ * enumerate it, and the core still routes it by exact reference. What we
+ * recommend and what we accept are two questions, and only the first one has a
+ * new answer.
+ *
+ * The default is re-resolved, because dropping rows can drop the one the
+ * payload named — and a `defaultModelId` outside `models` is a picker with
+ * nothing selected.
+ *
+ * ASYMMETRY, deliberate and worth naming: the lookup is keyed on the CATALOGUE
+ * provider, and the core ships no `codex` extension — so the openai picker
+ * loses `gpt-5.5` while the codex picker keeps it as its default. That is the
+ * same upstream model, hidden on one auth mode and offered on the other, and it
+ * is the behaviour we want today: the core's replacement, `gpt-5.6-sol`, is
+ * plan-gated, and a Free ChatGPT account handed it as the only row AND as the
+ * saved default would 400 on every turn. If a `codex` manifest ever appears, or
+ * the mapping is "fixed" to consult openai's, that default moves silently —
+ * which is what `curated-defaults-offerable.test.ts` is there to notice.
+ */
+function withoutRetiredModels(payload: CatalogResponse): CatalogResponse {
+  const models = payload.models.filter((m) => !coreModelRetired(payload.provider, m.id));
+  if (models.length === payload.models.length) return payload;
+  // Never to empty. If the core has retired everything this box enumerated,
+  // the honest picker is the one the box actually has — an empty one offers
+  // the customer nothing to do.
+  if (models.length === 0) return payload;
+  const defaultModelId = models.some((m) => m.id === payload.defaultModelId)
+    ? payload.defaultModelId
+    : (models.find((m) => m.isDefault)?.id ?? models[0].id);
+  return { ...payload, models, defaultModelId };
 }
 
 function sanitizeCatalogModels(provider: string, models: CatalogModel[]): CatalogModel[] {
@@ -1532,7 +1568,7 @@ export async function GET(req: NextRequest) {
         ? { warming: true }
         : {}),
     };
-    return NextResponse.json(payload, { headers: noStore() });
+    return NextResponse.json(withoutRetiredModels(payload), { headers: noStore() });
   }
 
   // Nothing cached yet — the first picker open after a restart. Serve the
@@ -1542,5 +1578,5 @@ export async function GET(req: NextRequest) {
     ...buildFallbackPayload(provider),
     ...(enumerating ? { warming: true } : {}),
   };
-  return NextResponse.json(payload, { headers: noStore() });
+  return NextResponse.json(withoutRetiredModels(payload), { headers: noStore() });
 }

@@ -86,10 +86,8 @@ describe("catalog: a model the core's own catalogue has retired", () => {
       () => okChild(ANTHROPIC_LIVE) as unknown as ReturnType<typeof childProcess.spawn>,
     );
     const lifecycle = await import("@/lib/core-model-lifecycle");
-    vi.spyOn(lifecycle, "coreModelLifecycle").mockImplementation((provider, id) =>
-      provider === "anthropic" && id === "claude-opus-4-8"
-        ? { deprecated: true, replacedBy: "claude-opus-5" }
-        : null,
+    vi.spyOn(lifecycle, "coreModelRetired").mockImplementation(
+      (provider: string, id: string) => provider === "anthropic" && id === "claude-opus-4-8",
     );
     ({ GET } = await import("@/app/setup-api/ai-models/catalog/route"));
   });
@@ -111,15 +109,37 @@ describe("catalog: a model the core's own catalogue has retired", () => {
     expect(ids).not.toContain("claude-opus-4-8");
   });
 
-  it("keeps it out of the cached payload it serves later too", async () => {
-    // The sanitiser re-applies the current rules to a payload written by an
-    // older build, so a rule that lived only in the transform would let a
-    // retired row survive a core upgrade in the cache on disk.
+  it("leaves it in the cache the box will still ACCEPT it from", async () => {
+    // The distinction the whole change turns on. `subscription-surface.ts`
+    // reads this file back as the set of ids the box accepts, so filtering it
+    // would not merely stop recommending a retired model — it would start
+    // REFUSING one the customer is already on, with "…is not in the Anthropic
+    // model catalogue this box enumerated", which the box plainly did.
     await models();
     await settle();
     const cache = JSON.parse(
       fs.readFileSync(path.join(DATA_DIR, "catalog-cache", "anthropic.json"), "utf8"),
     ) as { models: { id: string }[] };
-    expect(cache.models.map((m) => m.id)).not.toContain("claude-opus-4-8");
+    expect(cache.models.map((m) => m.id)).toContain("claude-opus-4-8");
+  });
+
+  it("re-resolves the default when the retired row was it", async () => {
+    // Dropping rows can drop the one the payload named, and a defaultModelId
+    // outside `models` is a picker with nothing selected.
+    mockSpawn.mockImplementation(() => okChild({
+      count: 2,
+      models: [
+        { key: "anthropic/claude-opus-4-8", name: "Claude Opus 4.8", contextWindow: 1_000_000, available: null, tags: ["default"] },
+        { key: "anthropic/claude-opus-5", name: "Claude Opus 5", contextWindow: 1_000_000, available: null, tags: [] },
+      ],
+    }) as unknown as ReturnType<typeof childProcess.spawn>);
+    await models();
+    await settle();
+    const res = await GET(new NextRequest(
+      "http://clawbox.local/setup-api/ai-models/catalog?provider=anthropic",
+    ));
+    const body = (await res.json()) as { models: { id: string }[]; defaultModelId: string };
+    expect(body.models.map((m) => m.id)).toEqual(["claude-opus-5"]);
+    expect(body.defaultModelId).toBe("claude-opus-5");
   });
 });

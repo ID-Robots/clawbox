@@ -11,44 +11,49 @@ import { findOpenclawBin } from "@/lib/openclaw-config";
  * carries a lifecycle:
  *
  *   { "id": "claude-opus-4-8", "status": "deprecated",
- *     "replacedBy": "claude-opus-5", … }
+ *     "replacedBy": "claude-opus-5",
+ *     "statusReason": "Still available by exact reference; use … for new setups." }
  *
  * WHY THIS FILE EXISTS AT ALL, given `models list --json` is right there.
- * Measured against the pinned core (2026.8.1) with an isolated
- * `OPENCLAW_HOME`:
+ * Measured against the pinned core (2026.8.1) with an isolated `OPENCLAW_HOME`:
  *
  *   $ openclaw models list --provider anthropic --all --json
  *   … { "key": "anthropic/claude-opus-4-8", "name": "Claude Opus 4.8",
  *       "contextWindow": 1000000, "available": null, "tags": [] } …
  *
  * The row is enumerated and its lifecycle is NOT projected — `toModelRow`
- * carries `tags` (which come from configured entries and aliases) and drops
- * `status` / `replacedBy` entirely. So the catalogue route's own
- * `entry.tags?.includes("deprecated")` guard could never fire on this core: a
- * filter that reads as deference to the harness, deferring to nothing. That
- * projection gap is worth reporting upstream; until it closes, the manifest is
- * where the answer lives and this reads it there.
+ * builds `tags` from configured entries and aliases and never carries `status`.
+ * So the catalogue route's own `entry.tags?.includes("deprecated")` guard could
+ * never fire on this core: a filter that reads as deference to the harness,
+ * deferring to nothing. The core DOES model the lifecycle internally and its
+ * gateway `models.list` RPC projects it; ClawBox has no client for that RPC, so
+ * reading the shipped manifest is the cheapest way to ask the same question —
+ * and it is not a new trick here: `scripts/gateway-pre-start.sh` resolves the
+ * same file for deepseek on every boot, from the same two places.
  *
- * Reading the shipped manifest is not a new trick in this repo:
- * `scripts/gateway-pre-start.sh` resolves the same file for deepseek on every
- * boot, from the same two places, and `ai-models/configure` stats it.
+ * THE PREDICATE IS THE CORE'S OWN, not an invention: `deprecated` OR `disabled`
+ * — `catalog.filter(e => … e.status !== "deprecated" && e.status !== "disabled")`
+ * in the installed core's own list probe.
  *
  * FAILS OPEN, everywhere. A box with no core, an unreadable manifest, a plugin
- * that ships none, a shape this does not recognise — all answer "not
- * deprecated", so the picker keeps offering exactly what it offers today. The
- * failure this must never have is the other one: a parse slip that empties a
- * customer's model list.
+ * that ships none, a shape this does not recognise — all answer "not retired",
+ * so the picker keeps offering exactly what it offers today. The failure this
+ * must never have is the other one: a parse slip that empties a model list.
  */
 
-export interface ModelLifecycle {
-  /** The core marks this model retired. */
-  deprecated: boolean;
-  /** What it says to use instead, when it says. */
-  replacedBy: string | null;
+/** What the harness treats as "do not offer this any more". */
+const RETIRED_STATUSES: ReadonlySet<string> = new Set(["deprecated", "disabled"]);
+
+interface CachedManifest {
+  /** Retired ids, indexed under BOTH the raw manifest id and its last segment. */
+  retired: Set<string>;
+  /** The file this was read from, and what it looked like when it was read. */
+  file: string;
+  mtimeMs: number;
+  size: number;
 }
 
-/** Cached per provider for the process: a manifest changes only with a core upgrade, which restarts this server. */
-const cache = new Map<string, Map<string, ModelLifecycle>>();
+const cache = new Map<string, CachedManifest>();
 
 /**
  * The two places the manifest lives, in the order `gateway-pre-start.sh` tries
@@ -64,79 +69,119 @@ function manifestPaths(provider: string): string[] {
       "dist", "extensions", provider, "openclaw.plugin.json",
     ));
   }
-  // Resolved from the environment rather than from `CONFIG_PATH`, which is a
-  // module constant frozen at import: the same shape `harness/credentials.ts`
-  // and `local-ai-token.ts` already use for this directory.
-  const openclawHome = process.env.OPENCLAW_HOME
+  // `CLAWBOX_OPENCLAW_HOME` first, because that is the order every other reader
+  // in this repo spells (`openclaw-config.ts`, `ai-models/configure`,
+  // `gateway-proxy.ts`, `updater.ts`) and the one the test config neutralises.
+  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
     || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
   paths.push(path.join(openclawHome, "extensions", provider, "openclaw.plugin.json"));
   return paths;
 }
 
 /**
- * Every `{id, status, replacedBy}` anywhere in the manifest.
+ * Every retired `{id, status}` in one catalogue block.
  *
- * Walked rather than addressed by a fixed path on purpose: the shape has moved
- * between core generations (a provider block, a `modelCatalog`, per-auth-mode
- * variants), the ids are the same in all of them, and a path that goes stale
- * would silently answer "nothing is deprecated" — the exact failure this file
- * replaces. Anything without an `id` string is not a model row and is skipped.
+ * Walked rather than addressed by a fixed path: the shape has moved between
+ * core generations (a provider block, a `modelCatalog`, per-auth-mode variants),
+ * the ids are the same in all of them, and a path that went stale would
+ * silently answer "nothing is retired" — the exact failure this file replaces.
+ *
+ * Indexed under the raw id AND its last segment, because both forms are real:
+ * the anthropic and openai manifests carry bare ids while the nvidia one ships
+ * slashed ones (`z-ai/glm-5.1`), and the caller holds whichever form its
+ * catalogue uses.
  */
-function collect(node: unknown, out: Map<string, ModelLifecycle>): void {
+function collect(node: unknown, out: Set<string>): void {
   if (Array.isArray(node)) {
     for (const item of node) collect(item, out);
     return;
   }
   if (!node || typeof node !== "object") return;
-  const row = node as { id?: unknown; status?: unknown; replacedBy?: unknown };
-  if (typeof row.id === "string" && row.id.trim()) {
-    const deprecated = typeof row.status === "string" && row.status.trim().toLowerCase() === "deprecated";
-    const replacedBy = typeof row.replacedBy === "string" && row.replacedBy.trim() ? row.replacedBy.trim() : null;
-    const id = row.id.trim();
-    const existing = out.get(id);
-    // A manifest names the same model more than once (once per auth mode). Any
-    // occurrence marking it retired retires it — that is the conservative
-    // direction, and the observed manifests agree with themselves anyway.
-    out.set(id, {
-      deprecated: deprecated || (existing?.deprecated ?? false),
-      replacedBy: replacedBy ?? existing?.replacedBy ?? null,
-    });
+  const row = node as { id?: unknown; status?: unknown };
+  if (typeof row.id === "string" && row.id.trim() && typeof row.status === "string") {
+    if (RETIRED_STATUSES.has(row.status.trim().toLowerCase())) {
+      const id = row.id.trim();
+      out.add(id);
+      const slash = id.lastIndexOf("/");
+      if (slash > 0) out.add(id.slice(slash + 1));
+    }
   }
   for (const value of Object.values(node as Record<string, unknown>)) collect(value, out);
 }
 
-function lifecycleFor(provider: string): Map<string, ModelLifecycle> {
+/**
+ * The block that belongs to THIS provider, when the manifest separates them.
+ *
+ * The anthropic manifest ships two catalogues under `modelCatalog.providers` —
+ * `claude-cli` and `anthropic` — and they are genuinely different surfaces, not
+ * copies (`provider-models.ts` documents `claude-cli` as the narrower one). A
+ * flat walk would let a model retired on one route disappear from the other,
+ * where the core still lists and routes it. So the provider's own block is read
+ * when there is one, and the whole manifest only when there is not.
+ */
+function catalogueFor(manifest: unknown, provider: string): unknown {
+  const modelCatalog = (manifest as { modelCatalog?: unknown } | null)?.modelCatalog;
+  const providers = (modelCatalog as { providers?: unknown } | null)?.providers;
+  if (providers && typeof providers === "object" && !Array.isArray(providers)) {
+    const own = (providers as Record<string, unknown>)[provider];
+    if (own !== undefined) return own;
+  }
+  return manifest;
+}
+
+function retiredFor(provider: string): Set<string> {
   const cached = cache.get(provider);
-  if (cached) return cached;
-  const found = new Map<string, ModelLifecycle>();
+  if (cached) {
+    // Re-stat rather than trust the process lifetime. The in-app OpenClaw-only
+    // update (`openclaw_install` → `openclaw_patch` → `gateway_restart`) runs
+    // INSIDE this server and deliberately does not touch ClawBox, so a core
+    // upgrade can and does happen under a live process — and a manifest read
+    // during `npm install -g`, while `dist/extensions` is half-renamed, would
+    // otherwise pin "nothing is retired" for the rest of that process's life.
+    try {
+      const stat = fsSync.statSync(cached.file);
+      if (stat.mtimeMs === cached.mtimeMs && stat.size === cached.size) return cached.retired;
+    } catch {
+      // The file went away: fall through and look again.
+    }
+    cache.delete(provider);
+  }
   for (const file of manifestPaths(provider)) {
+    let stat: fsSync.Stats;
     let raw: string;
     try {
+      stat = fsSync.statSync(file);
       raw = fsSync.readFileSync(file, "utf-8");
     } catch {
       continue;
     }
+    const retired = new Set<string>();
     try {
-      collect(JSON.parse(raw), found);
+      collect(catalogueFor(JSON.parse(raw), provider), retired);
     } catch {
-      // A manifest we cannot parse is a manifest we know nothing from.
+      // A manifest we cannot parse is a manifest we know nothing from — and it
+      // is NOT cached, so a half-written file is re-read rather than believed.
+      return new Set();
     }
-    break;
+    cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size });
+    return retired;
   }
-  cache.set(provider, found);
-  return found;
+  // Nothing found. Deliberately NOT cached: on a box with no core yet, or one
+  // mid-upgrade, the answer is "ask again", not "there is nothing".
+  return new Set();
 }
 
 /**
- * What the installed core says about this model, or null when it says nothing —
- * which is also the answer on a box with no core installed.
+ * Has the installed core retired this model? False on a box that cannot say —
+ * including one with no core installed.
  *
- * `id` is the BARE id (`claude-opus-4-8`), the same form the catalogue route
- * carries after `modelIdFromKey`.
+ * `id` may be the bare id (`claude-opus-4-8`) or the fully-qualified one
+ * (`z-ai/glm-5.1`); both forms are indexed.
  */
-export function coreModelLifecycle(provider: string, id: string): ModelLifecycle | null {
-  if (!provider || !id) return null;
-  return lifecycleFor(provider).get(id.trim()) ?? null;
+export function coreModelRetired(provider: string, id: string): boolean {
+  if (!provider || !id) return false;
+  return retiredFor(provider).has(id.trim());
 }
 
 /** Test seam: forget the manifests so the next call reads them again. */
