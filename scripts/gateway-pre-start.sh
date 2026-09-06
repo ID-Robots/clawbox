@@ -3492,10 +3492,11 @@ MANAGEDPY
     fi
     if [ "$MANAGED_PLUGIN_VERDICT" = "2" ]; then
       # Same as the codex arm above: the core sees this plugin and would load
-      # it, but keeps no install record for it — deepseek and
-      # clawbox-email-directives live in `~/.openclaw/extensions/` and are
-      # exactly this — so it can neither report the consent nor refuse readiness
-      # over it. Change nothing, clear nothing, and say which of the two it is.
+      # it, but keeps no install record for it — `clawbox-email-directives`, the
+      # one this script copies out of the checkout rather than installing, is
+      # exactly this on a box today — so the core can neither report the consent
+      # nor refuse readiness over it. Change nothing, clear nothing, say which
+      # of the two it is.
       echo "  $MANAGED_PLUGIN plugin capabilities are still unknown (the consent verb was killed at its deadline and the core keeps no consent record for this plugin); leaving it as it is"
       continue
     fi
