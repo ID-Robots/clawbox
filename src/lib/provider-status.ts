@@ -551,7 +551,8 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
         return providerRowRunnable(row.id, verdicts) === "none";
       })
       .map((row) => row.id);
-    // ...and if that would be EVERY row but the default, it is none of them.
+    // ...and if that would leave the strip showing the default row alone, it is
+    // none of them.
     //
     // The counts come from `openclaw models list`, and one failure can answer
     // `count: 0` for several providers at once — a models.json the core cannot
@@ -562,13 +563,32 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
     // never the honest reading, and the owner's connected key would be nowhere
     // on the screen for the six hours a record lives.
     //
+    // MEASURED AGAINST THE ROWS THE STRIP RENDERS, not against every row in this
+    // summary, and that is the whole of whether the rule works. Counting all of
+    // them made it unsatisfiable on every box: three of the five panel rows can
+    // never be candidates — `openai` stands for the `codex` catalogue too and
+    // that one is never enumerated, `clawai` is served from a two-row literal,
+    // and `openrouter`'s REST fetcher never records an authoritative empty — so
+    // "every non-default row is a candidate" could not happen while the harm it
+    // guards against (default + one connected provider, that one hidden) could.
+    //
+    // The filter mirrors `AiProviderList`'s, deliberately and with the coupling
+    // named: that component decides what the strip shows, and this decides what
+    // may be taken away from it. A change to one is a change to both. It cannot
+    // be shared as code — this module reads the config off disk and the
+    // component is a client one.
+    //
     // The chat picker carries the same refusal in its own words
     // (`chat/model/route.ts`, "if every cloud option would go, none does"). This
     // is that rule on the surface that had none.
-    const hideable = summary.providers.filter((row) => !row.isDefault).length;
-    const unrunnable = candidates.length > 0 && candidates.length >= hideable
-      ? []
-      : candidates;
+    const stripHideable = summary.providers
+      .filter((row) => (row.state === "connected" || row.state === "needs-reauth")
+        && row.section !== "localAi"
+        && !row.isDefault)
+      .map((row) => row.id);
+    const wouldEmptyTheStrip = stripHideable.length > 0
+      && stripHideable.every((id) => candidates.includes(id));
+    const unrunnable = wouldEmptyTheStrip ? [] : candidates;
     // The rows no provider or channel row will draw. Split here rather than in
     // the panel so the two surfaces cannot disagree about which is which: the
     // badge below and this list are fed from one read and one rule.

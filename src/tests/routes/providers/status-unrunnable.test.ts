@@ -37,11 +37,17 @@ function recordEnumerations(counts: Record<string, number>) {
   writeFileSync(path.join(dir, "_enumerations.json"), JSON.stringify({ providers }), "utf8");
 }
 
-/** A box with an Anthropic key and a Google key, pointed at Anthropic. */
+/**
+ * A box pointed at Anthropic, with a Google key and ClawBox AI linked.
+ *
+ * Three connected rows on purpose: hiding Google has to leave the strip with
+ * something other than the default, or the "would this empty the strip?"
+ * refusal takes over and these cases would be testing that instead.
+ */
 function boxWithGoogleKey() {
   readConfig.mockResolvedValue({
     auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
-    models: { providers: { google: { apiKey: "AIza-secret" } } },
+    models: { providers: { google: { apiKey: "AIza-secret" }, deepseek: { apiKey: "claw_token" } } },
     agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
   });
 }
@@ -99,36 +105,72 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     expect(body.unrunnable).toEqual([]);
   });
 
-  it("names NONE of them when the answer would be every row but the default", async () => {
-    // One failure answers `count: 0` for several providers at once — a
-    // models.json the core cannot load, a config caught half-written, a gateway
-    // restart mid-refresh. Each is a clean zero per provider and none of them is
-    // a fact about what the box can run, so the strip declines to act on
-    // "everything" rather than guess which. A whole panel reduced to the default
-    // row is never the honest reading, and the owner's connected key would be
-    // nowhere on screen for the six hours a record lives.
-    readConfig.mockResolvedValue({
-      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
-      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+  /**
+   * The refusal, measured against the rows the STRIP renders.
+   *
+   * Every record below is one the catalog route can actually write. Counting
+   * every row in the summary instead made this unsatisfiable on every box —
+   * `openai` stands for the never-enumerated `codex` catalogue, `clawai` is a
+   * two-row literal and `openrouter` never records a zero — while the harm it
+   * guards against stayed perfectly reachable.
+   */
+  describe("when hiding would leave the strip with the default row alone", () => {
+    /** ClawBox AI is the default and connected; `keys` name the other connected rows. */
+    function boxWithConnected(keys: string[]) {
+      const providers: Record<string, { apiKey: string }> = { deepseek: { apiKey: "claw_token" } };
+      for (const key of keys) providers[key] = { apiKey: `${key}-secret` };
+      readConfig.mockResolvedValue({
+        auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+        models: { providers },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      });
+    }
+
+    it("names none — the box with one connected provider that answered zero", async () => {
+      // The reachable harm: ClawBox AI the default, a Google key pasted, google
+      // enumerating nothing. Hiding it leaves the panel showing ClawBox AI and
+      // nothing else, which is never the honest reading of one zero.
+      boxWithConnected(["google"]);
+      recordEnumerations({ google: 0 });
+      const body = await (await GET()).json();
+
+      expect(body.unrunnable).toEqual([]);
+      expect(ids(body)).toContain("google");
     });
-    // `codex` too: the OpenAI ROW stands for both catalogues and is only
-    // written off when each of them has answered none.
-    recordEnumerations({ google: 0, anthropic: 0, openai: 0, codex: 0, openrouter: 0 });
-    const body = await (await GET()).json();
 
-    expect(body.unrunnable).toEqual([]);
-    expect(ids(body)).toEqual(expect.arrayContaining(["clawai", "openai", "anthropic", "google", "openrouter"]));
-  });
+    it("still names the one that answered zero when another connected row survives", async () => {
+      // Anthropic is connected and enumerated fine, so hiding google leaves the
+      // strip with something to show and the rule does its job.
+      boxWithConnected(["google", "anthropic"]);
+      recordEnumerations({ google: 0, anthropic: 15 });
+      const body = await (await GET()).json();
 
-  it("still names them when one row would survive", async () => {
-    readConfig.mockResolvedValue({
-      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
-      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      expect(body.unrunnable).toEqual(["google"]);
     });
-    recordEnumerations({ google: 0, anthropic: 0 });
-    const body = await (await GET()).json();
 
-    expect(body.unrunnable.sort()).toEqual(["anthropic", "google"]);
+    it("names none when BOTH connected providers answered zero", async () => {
+      // One catalogue-load failure answers `count: 0` for several providers at
+      // once. Each is a clean zero per provider and none is a fact about what
+      // the box can run.
+      boxWithConnected(["google", "anthropic"]);
+      recordEnumerations({ google: 0, anthropic: 0 });
+      const body = await (await GET()).json();
+
+      expect(body.unrunnable).toEqual([]);
+    });
+
+    it("names nothing at all on the box's own catalogue", async () => {
+      // The counts this box really records (measured read-only, `merge` mode).
+      // Nothing is hidden, and the rule is silent.
+      boxWithConnected(["google", "anthropic"]);
+      recordEnumerations({ google: 10, anthropic: 15, openai: 27, clawai: 2, openrouter: 417 });
+      const body = await (await GET()).json();
+
+      expect(body.unrunnable).toEqual([]);
+      expect(ids(body)).toEqual(
+        expect.arrayContaining(["clawai", "openai", "anthropic", "google", "openrouter"]),
+      );
+    });
   });
 
   it("keeps the row when no enumeration has answered yet — unknown is not empty", async () => {
