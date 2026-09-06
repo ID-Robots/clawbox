@@ -48,6 +48,24 @@ const STEP = extractShellFunction("step_swapfile");
 const FSTAB_FN = extractShellFunction("ensure_swapfile_fstab");
 const IN_CONTAINER = extractShellFunction("in_container");
 
+/**
+ * The real binaries the step shells out to, resolved ONCE against this
+ * machine's PATH. The sandbox's PATH is built from these rather than
+ * inherited, so the only `systemd-detect-virt` a case can reach is the stub it
+ * asked for — and `spawnSync` resolves the shell itself through the CHILD's
+ * PATH, which is why bash is on the list too.
+ */
+const REAL_TOOLS: Record<string, string> = (() => {
+  const found: Record<string, string> = {};
+  for (const tool of ["bash", "sh", "grep", "awk", "tail", "tr", "dd", "chmod", "chown", "rm", "wc", "cat"]) {
+    const probe = spawnSync("/usr/bin/env", ["sh", "-c", `command -v ${tool}`], { encoding: "utf-8" });
+    const real = probe.stdout.trim();
+    if (real) found[tool] = real;
+  }
+  return found;
+})();
+const BASH = REAL_TOOLS.bash ?? "/bin/bash";
+
 let tmp: string;
 
 /**
@@ -60,6 +78,13 @@ function runStep(opts: {
   swaponFails?: boolean;
   testMode?: boolean;
   container?: boolean;
+  /**
+   * Which of the configured marker paths actually exists. Default: both.
+   * A case that writes every marker cannot tell a probe that reads the whole
+   * list from one that stops at the first path, so the fallback cases name
+   * one marker each.
+   */
+  containerMarkers?: number[];
   detectVirtMissing?: boolean;
   readOnlyFstab?: boolean;
   fstab?: string;
@@ -92,8 +117,24 @@ function runStep(opts: {
   const markerDir = path.join(tmp, "markers");
   fs.mkdirSync(markerDir, { recursive: true });
   const markers = [path.join(markerDir, "dockerenv"), path.join(markerDir, "containerenv")];
-  if (opts.container) for (const m of markers) fs.writeFileSync(m, "");
+  if (opts.container) {
+    const present = opts.containerMarkers ?? markers.map((_, i) => i);
+    for (const i of present) fs.writeFileSync(markers[i], "");
+  }
   if (opts.readOnlyFstab) fs.chmodSync(fstab, 0o444);
+
+  // A PATH of exactly two directories: the stubs, and symlinks to the real
+  // tools the step shells out to. The inherited PATH is deliberately NOT on it
+  // — with it, `detectVirtMissing` only removed our stub while the box's own
+  // systemd-detect-virt stayed reachable, so the marker fallback the case is
+  // named for was never the branch that answered.
+  const sysbin = path.join(tmp, "sysbin");
+  fs.mkdirSync(sysbin, { recursive: true });
+  // One test calls runStep twice against the same sandbox.
+  for (const [tool, real] of Object.entries(REAL_TOOLS)) {
+    const link = path.join(sysbin, tool);
+    if (!fs.existsSync(link)) fs.symlinkSync(real, link);
+  }
 
   const script = [
     "set -uo pipefail",
@@ -112,9 +153,9 @@ function runStep(opts: {
     "step_swapfile",
   ].join(NL);
 
-  const res = spawnSync("bash", ["-c", script], {
+  const res = spawnSync(BASH, ["-c", script], {
     encoding: "utf-8",
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+    env: { ...process.env, PATH: `${bin}:${sysbin}` },
   });
   return {
     status: res.status,
@@ -194,13 +235,26 @@ describe("step_swapfile stands down rather than harming the box", () => {
     expect(r.calls).toMatch(/fallocate -l 4G/);
   });
 
-  it("answers the marker files as well as systemd-detect-virt", () => {
-    // The fallback path is what a box without systemd-detect-virt uses; the
-    // probe must not depend on the one binary.
-    const r = runStep({ availGb: 400, container: true, detectVirtMissing: true });
+  it.each([[0, "the docker marker"], [1, "the podman marker"]])(
+    "answers marker %i (%s) on its own, with no systemd-detect-virt to ask",
+    (index) => {
+      // The fallback path is what a box without systemd-detect-virt uses; the
+      // probe must not depend on the one binary, and it must read the whole
+      // marker list rather than stopping at the first path.
+      const r = runStep({ availGb: 400, container: true, containerMarkers: [index], detectVirtMissing: true });
+      expect(r.status).toBe(0);
+      expect(r.out).toMatch(/Skipping swapfile: running in a container/);
+      expect(r.calls).toBe("");
+    },
+  );
+
+  it("provisions normally when neither marker is there and the probe is missing", () => {
+    // The other half of the fallback: no binary and no marker is a real box,
+    // and the step must go on to make the file rather than skip on a doubt.
+    const r = runStep({ availGb: 400, detectVirtMissing: true });
     expect(r.status).toBe(0);
-    expect(r.out).toMatch(/Skipping swapfile: running in a container/);
-    expect(r.calls).toBe("");
+    expect(r.out).toMatch(/Creating a 8G swapfile/);
+    expect(r.calls).toMatch(/swapon --priority 1/);
   });
 
   it("skips a container BEFORE writing anything, test flag or not", () => {
