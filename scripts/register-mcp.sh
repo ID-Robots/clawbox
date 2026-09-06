@@ -1022,10 +1022,23 @@ fi
 # state the card is about: `install.sh` selects `clawbox-local` whatever the
 # engine answered, so an engineless box reads as a chosen local voice. A box on
 # `elevenlabs`, `piper` or anything else the owner picked is left alone.
-# And the withdrawal deliberately does NOT reset `tts.provider` either — the
-# same ruling the OpenClaw arm records: the panel's job is to show that the
-# choice is no longer available, and silently rewriting it would hide the
-# downgrade. Removing the DEFINITION is what stops the refused calls.
+# The WITHDRAWAL does reset it, and that is where this edition parts company
+# with the OpenClaw arm on purpose (TASK-745). There the delete removes a NAMED
+# provider entry ClawBox created, so the surviving selection names nothing and
+# the panel shows the choice is gone — leaving it is honest. Here `openai` is
+# the harness's own BUILT-IN provider (`BUILTIN_TTS_PROVIDERS` in
+# `tools/tts_tool.py`), so emptying the three keys removes nothing: the
+# selection still resolves, to a provider with no `base_url`, which is
+# api.openai.com. That is a 401 instead of the 403 at our own proxy, and the
+# owner's text sent to a third party on every spoken reply. So the box is handed
+# back to the voice it had — `clawbox-local` when it has a definition for one —
+# and only ever from `openai`, never from a provider the owner chose.
+#
+# `hermes config unset tts.provider` is NOT the stand-down it looks like:
+# `_get_provider` falls back to `DEFAULT_PROVIDER = "edge"`, Microsoft's cloud,
+# which is exactly what `install.sh` selects `clawbox-local` on every Hermes box
+# to avoid. A box with no local definition therefore keeps a selection that
+# fails at the harness, and the boot says so.
 #
 # IMAGES ARE NOT PART OF THIS, and that is measured rather than assumed: the
 # proxy publishes `modelTiers: {"gpt-image-1-mini": ["free","pro","max"]}`, so
@@ -1061,14 +1074,46 @@ CLAWBOX_VOICE_PLAN=$(
   CLAWBOX_AI_PROXY_URL="$CLAWBOX_VOICE_PROXY" \
   CLAWBOX_VOICE_MODEL="$CLAWBOX_VOICE_MODEL" \
   CLAWBOX_KOKORO_STAMP="$HOME_DIR/.cache/clawbox/kokoro-installed" \
-  python3 - <<'PY' 2>/dev/null || echo "hold the voice plan could not be computed"
-import json, os
+  python3 - <<'PY' || echo "hold the voice plan could not be computed"
+import json, os, sys, traceback
 
-# One verdict on stdout: `arm`, `withdraw`, or `hold <why>`. Everything this
-# block decides is decided here, so the shell below is only the writes.
+# One verdict on stdout: `arm <target>`, `withdraw <target>`, or `hold <why>`.
+# Everything this block decides is decided here, so the shell below is only the
+# writes.
 def say(verdict):
     print(verdict)
     raise SystemExit(0)
+
+
+def _plan_failed(_kind, _exc, _tb):
+    """An exception this block did not expect, NAMED on the boot log.
+
+    The `2>/dev/null` this heredoc used to carry meant a genuine bug in here
+    reached the operator as `hold the voice plan could not be computed` and
+    nothing else — it failed in the safe direction, silently, and the journal
+    could not say why. Dropping the redirect is what makes a compile-time error
+    visible: a SyntaxError reaches the journal in full and only ever quotes this
+    script's own source.
+
+    A RUNTIME failure is not allowed to do the same, and that is what this hook
+    is for. Such a traceback can be raised from inside a VALUE — a YAML error
+    quotes the offending line, and the line it would quote is
+    `tts.openai.api_key`. So the operator gets the exception type and the line
+    number in this block, which is what says where to look, and nothing that
+    was read off a file reaches the journal.
+
+    `os._exit(0)` rather than a raise: the shell reads this program's whole
+    stdout as the verdict, so a non-zero exit would add the `|| echo` fallback
+    line underneath this one.
+    """
+    _frames = traceback.extract_tb(_tb)
+    _where = " at line %d" % _frames[-1].lineno if _frames else ""
+    sys.stdout.write("hold the voice plan could not be computed (%s%s)\n" % (_kind.__name__, _where))
+    sys.stdout.flush()
+    os._exit(0)
+
+
+sys.excepthook = _plan_failed
 
 try:
     import yaml
@@ -1281,7 +1326,34 @@ if plan_tier and plan_tier != ENTITLED_TIER:
     # still recognisably ours.
     if base_url.rstrip("/") not in OUR_PROXIES:
         say("hold tts.openai names an address that is not ours — not ours to withdraw")
-    say("withdraw")
+    # WHERE THE BOX SPEAKS FROM AFTERWARDS, decided here with the rest of the
+    # verdict so the shell below is only the writes.
+    #
+    # On Hermes `openai` is the harness's own BUILT-IN provider — it is in
+    # `BUILTIN_TTS_PROVIDERS` in `tools/tts_tool.py` — not a named entry ClawBox
+    # created, so emptying the three keys does not remove it the way deleting
+    # `messages.tts.providers.openai` does on the OpenClaw side. A selection
+    # left naming it resolves to the built-in with no `base_url`, which is
+    # api.openai.com: a 401 instead of the 403 at our own proxy, and the owner's
+    # text sent to a third party on every spoken reply. So the selection moves.
+    #
+    # It moves ONLY when it is OURS to move. An owner speaking through
+    # elevenlabs or a provider of their own has chosen that, and emptying our
+    # slot beside it says nothing about their choice.
+    if provider != CLOUD_PROVIDER:
+        say("withdraw keep")
+    # `hermes config unset tts.provider` is NOT a stand-down: `_get_provider`
+    # falls back to `DEFAULT_PROVIDER = "edge"`, Microsoft's cloud, which is
+    # exactly what `install.sh` selects `clawbox-local` on every Hermes box to
+    # avoid — "an engineless box is left honestly mute rather than speaking
+    # through a third party". So the box goes back to its own voice when it has
+    # a definition for one, and otherwise keeps a selection that fails at the
+    # harness rather than one that speaks to Microsoft.
+    providers = tts.get("providers")
+    providers = providers if isinstance(providers, dict) else {}
+    if isinstance(providers.get(LOCAL_PROVIDER), dict):
+        say("withdraw %s" % LOCAL_PROVIDER)
+    say("withdraw mute")
 
 if not arm_tier:
     say("hold no plan has been recorded for this box yet")
@@ -1358,9 +1430,9 @@ TOKENPY
     elif ! hermes_voice_write config set tts.openai.model "$CLAWBOX_VOICE_MODEL"; then
       log "could not write tts.openai.model (exit $CLAWBOX_VOICE_RC) — the cloud voice is NOT selected; the next start will try again"
     elif [ "$CLAWBOX_VOICE_VERDICT" = refresh ]; then
-      # The selection is already ours and is NOT rewritten: one writer of
-      # `tts.provider`, and this path is only here to keep the credential and
-      # the endpoint current.
+      # The selection is already ours and is NOT rewritten: this path is only
+      # here to keep the credential and the endpoint current, and re-selecting
+      # would buy a fourth CLI spawn for nothing.
       log "refreshed the ClawBox AI speech credential"
     elif ! hermes_voice_write config set tts.provider openai; then
       log "wrote the ClawBox AI speech endpoint but could not select it (exit $CLAWBOX_VOICE_RC) — the next start will try again"
@@ -1369,22 +1441,40 @@ TOKENPY
     fi
     ;;
   withdraw)
-    # `tts.provider` is deliberately left where it is — see the block comment.
-    # Removing the DEFINITION is what stops the refused round trips; the panel
-    # then reports the cloud voice unconfigured, which is the truth.
-    #
     # The CREDENTIAL first, and every step reported rather than collapsed into
     # one verdict: a partial withdrawal announced as a whole one is exactly the
     # false success this arm exists to end.
+    #
+    # `voice` goes with the other three. It is the Voice tab's own key
+    # (`KEYS.cloudVoice` in src/lib/hermes-tts.ts) and leaving it behind kept a
+    # voice name for a provider this box may no longer call — which a later arm
+    # would then inherit from the plan that is being withdrawn.
     CLAWBOX_VOICE_WITHDRAWN=true
-    for CLAWBOX_VOICE_KEY in tts.openai.api_key tts.openai.base_url tts.openai.model; do
+    for CLAWBOX_VOICE_KEY in tts.openai.api_key tts.openai.base_url tts.openai.model tts.openai.voice; do
       if ! hermes_voice_write config unset "$CLAWBOX_VOICE_KEY"; then
         log "could not remove $CLAWBOX_VOICE_KEY (exit $CLAWBOX_VOICE_RC) — this box may still be calling a speech endpoint its plan no longer includes; the next start will try again"
         CLAWBOX_VOICE_WITHDRAWN=false
       fi
     done
-    if [ "$CLAWBOX_VOICE_WITHDRAWN" = true ]; then
-      log "removed the ClawBox AI cloud voice: this box's plan no longer includes it"
+    # THE SELECTION, and only after the definition is actually gone: moving the
+    # box off a route that is still armed would be a downgrade it had not had
+    # yet, and a failed unset above means the endpoint is still there to speak
+    # through. The plan step decided WHERE — see its comment for why `unset` is
+    # not the stand-down it looks like.
+    CLAWBOX_VOICE_TARGET="${CLAWBOX_VOICE_PLAN#* }"
+    if [ "$CLAWBOX_VOICE_WITHDRAWN" != true ]; then
+      :
+    elif [ "$CLAWBOX_VOICE_TARGET" = keep ]; then
+      log "removed the ClawBox AI cloud voice: this box's plan no longer includes it (it speaks through a voice of its own, which is left alone)"
+    elif [ "$CLAWBOX_VOICE_TARGET" = mute ]; then
+      # Nothing to fall back to. Said out loud rather than silently leaving a
+      # selection that cannot work: this box has no voice until its owner
+      # installs one, and the panel will report the cloud voice unconfigured.
+      log "removed the ClawBox AI cloud voice: this box's plan no longer includes it — and there is no on-device voice to fall back to, so it stays quiet until one is installed"
+    elif ! hermes_voice_write config set tts.provider "$CLAWBOX_VOICE_TARGET"; then
+      log "removed the ClawBox AI cloud voice but could not select $CLAWBOX_VOICE_TARGET (exit $CLAWBOX_VOICE_RC) — this box may still name a speech provider it can no longer reach; the next start will try again"
+    else
+      log "removed the ClawBox AI cloud voice: this box's plan no longer includes it, and it speaks from the box again"
     fi
     ;;
   *)

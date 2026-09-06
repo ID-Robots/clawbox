@@ -567,6 +567,136 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     });
   });
 
+  // TASK-745. On Hermes `tts.openai` is the HARNESS's built-in generic OpenAI
+  // slot, not a named entry ClawBox created — `BUILTIN_TTS_PROVIDERS` in
+  // `tools/tts_tool.py` lists it — so emptying its three keys does not remove
+  // the provider the way deleting `messages.tts.providers.openai` does on
+  // OpenClaw. With `tts.provider` still naming it, Hermes' own speech path
+  // resolves to that built-in and goes to api.openai.com, which is a 401 and a
+  // round trip carrying the owner's text to a third party — where before the
+  // withdrawal it was a 403 at our own proxy. The withdrawal has to hand the
+  // box back to something real.
+  describe("standing the box down, not just emptying the slot (TASK-745)", () => {
+    /** A box on the cloud voice, as the arm leaves it, with a local engine defined. */
+    function armedWithLocalEngine(extra = "") {
+      writeYaml(
+        `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: ${PROXY}\n`
+        + `    api_key: ${TOKEN}\n    model: ${CLOUD_MODEL}\n${extra}`
+        + `  providers:\n    clawbox-local:\n      type: command\n      command: /usr/bin/true\n`,
+      );
+    }
+
+    /** The plan is below the entitlement on beta AND after TASK-744. */
+    function downgraded() {
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
+    }
+
+    it("selects the box's own voice instead of leaving a name over an emptied slot", () => {
+      armedWithLocalEngine();
+      downgraded();
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBeUndefined();
+      // The point of the card: `openai` here is the harness's own built-in, so
+      // the selection has to move or every spoken reply goes to api.openai.com.
+      expect(at("tts.provider")).toBe("clawbox-local");
+      expect(r.stdout).toContain("no longer includes it");
+    });
+
+    it("drops the cloud voice name with the rest of the definition", () => {
+      // `tts.openai.voice` is written by the Voice tab (`KEYS.cloudVoice`) and
+      // was left behind: a voice name for a provider this box may no longer
+      // call, which the next arm would then inherit from the previous plan.
+      armedWithLocalEngine("    voice: shimmer\n");
+      downgraded();
+
+      run();
+
+      expect(at("tts.openai.voice")).toBeUndefined();
+    });
+
+    it("leaves an owner's own SELECTION alone while still emptying our slot", () => {
+      // The box speaks through something the owner chose; our slot is armed
+      // beside it. Emptying the slot is ours to do and the selection is not.
+      writeYaml(
+        `${BASE_CONFIG}tts:\n  provider: elevenlabs\n  openai:\n    base_url: ${PROXY}\n`
+        + `    api_key: ${TOKEN}\n    model: ${CLOUD_MODEL}\n`,
+      );
+      downgraded();
+
+      run();
+
+      expect(at("tts.openai.api_key")).toBeUndefined();
+      expect(at("tts.provider")).toBe("elevenlabs");
+    });
+
+    it("does not hand a box with no local engine to Microsoft's cloud", () => {
+      // `hermes config unset tts.provider` is NOT a stand-down: `_get_provider`
+      // in tools/tts_tool.py falls back to `DEFAULT_PROVIDER = "edge"`, which
+      // is Microsoft's cloud — install.sh selects `clawbox-local` on every
+      // Hermes box precisely so an engineless board is honestly mute instead.
+      writeYaml(
+        `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: ${PROXY}\n`
+        + `    api_key: ${TOKEN}\n    model: ${CLOUD_MODEL}\n`,
+      );
+      downgraded();
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBeUndefined();
+      expect(configCalls()).not.toContain("config unset tts.provider");
+      expect(configCalls()).not.toContain("config set tts.provider edge");
+      expect(r.stdout).toContain("no on-device voice to fall back to");
+    });
+  });
+
+  // TASK-745. `python3 - <<'PY' 2>/dev/null` meant a genuine bug inside the
+  // plan step reached the operator as `hold the voice plan could not be
+  // computed` and nothing else: it failed in the safe direction, silently, and
+  // the boot log could not say why.
+  describe("a plan step that crashes says so on the boot log", () => {
+    /**
+     * A `python3` that fails ONLY for the plan step.
+     *
+     * `CLAWBOX_KOKORO_STAMP` is set for that one invocation and for no other,
+     * so every other `python3` in the script — the token re-read, §4b's
+     * seeding — still runs the real interpreter.
+     */
+    function shadowPython(): string {
+      // The REAL interpreter, resolved before the stub shadows it — an `exec
+      // python3` inside the stub would find the stub again and fork bomb.
+      const real = execFileSync("sh", ["-c", "command -v python3"], { encoding: "utf-8" }).trim();
+      const dir = path.join(home, "shadow-bin");
+      fs.mkdirSync(dir, { recursive: true });
+      const stub = path.join(dir, "python3");
+      fs.writeFileSync(stub, `#!/bin/sh
+if [ -n "\${CLAWBOX_KOKORO_STAMP:-}" ]; then
+  echo "Traceback (most recent call last):" >&2
+  echo "ZeroDivisionError: division by zero" >&2
+  exit 1
+fi
+exec ${real} "$@"
+`);
+      fs.chmodSync(stub, 0o755);
+      return dir;
+    }
+
+    it("lets the traceback reach the journal instead of /dev/null", () => {
+      writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
+      const dir = shadowPython();
+
+      const r = run({ PATH: `${dir}:${process.env.PATH ?? ""}` });
+
+      // The script still stands down — a plan it could not compute writes
+      // nothing — and now it says what happened.
+      expect(r.status).toBe(0);
+      expect(configCalls()).toEqual([]);
+      expect(r.stdout).toContain("the voice plan could not be computed");
+      expect(`${r.stdout}${r.stderr}`).toContain("ZeroDivisionError");
+    });
+  });
+
   describe("not knowing is not an answer", () => {
     it("holds, and says why, when there is no device store at all", () => {
       const r = run();
