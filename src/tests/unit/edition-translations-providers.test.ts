@@ -29,7 +29,7 @@ import type { Locale } from "@/lib/i18n";
  *
  * One string on the card is NOT this catalogue's: the "Default" badge reads
  * `settings.providers.default`, which desktop-translations already carries for
- * ProviderDefaultHero's badge. The hermes catalogue merges last in
+ * ProviderDefaultHero's badge. The edition catalogue merges last in
  * translations.ts, so a second copy here would silently shadow the hero's and
  * the two would drift — the last block below keeps every edition key out of
  * the other catalogues for exactly that reason.
@@ -95,10 +95,10 @@ describe("the cloud-provider list is translated everywhere", () => {
 });
 
 describe("the edition catalogue shadows nothing", () => {
-  // translations.ts merges hermes LAST, so a edition key that also exists in
-  // desktop or clawkeep silently wins for EVERY consumer of that key — the
-  // per-catalogue parity suites only compare locales within one catalogue and
-  // would never notice. Keep the collision set empty.
+  // translations.ts merges the edition catalogue LAST, so an edition key that
+  // also exists in desktop or clawkeep silently wins for EVERY consumer of
+  // that key — the per-catalogue parity suites only compare locales within one
+  // catalogue and would never notice. Keep the collision set empty.
   it("no edition key also exists in the desktop or clawkeep catalogue", () => {
     const editionKeys = Object.keys(editionEn);
     const inDesktop = editionKeys.filter((k) => k in desktopTranslations.en);
