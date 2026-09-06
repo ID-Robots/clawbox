@@ -2465,15 +2465,29 @@ describe("updater", () => {
    *                   not listening".
    */
   describe("a core the config no longer suits", () => {
-    /** What `openclaw config validate` says about a 2026.7-layout config. */
-    const validateRefusal = Object.assign(new Error("Command failed: openclaw config validate"), {
-      stdout: [
-        "OpenClaw config is invalid: /home/clawbox/.openclaw/openclaw.json",
-        '  \u00d7 openclaw.json:4 \u2014 agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"',
-        '  \u00d7 openclaw.json:11 \u2014 messages: Unrecognized key: "tts"',
-        "",
-        "Run `openclaw doctor --fix` to repair, or fix the keys above manually.",
-      ].join("\n"),
+    // The mock matches on `key.includes(k) || k.includes(cmd)`, and `cmd` is
+    // whatever `findOpenclawBin()` resolved — the bare string `openclaw` on a
+    // machine with no core installed, which is every CI runner. Keyed on the
+    // argv SUFFIX so `openclaw config validate --json` cannot fall through to
+    // the `openclaw doctor --fix` entry via `k.includes("openclaw")`, which is
+    // what made these cases pass only on a developer PC that happened to have
+    // the core installed.
+    const DOCTOR = " doctor --fix";
+    const VALIDATE = " config validate";
+
+    /** `openclaw config validate --json` on a 2026.7-layout config. */
+    const validateRefusal = Object.assign(new Error("Command failed: openclaw config validate --json"), {
+      // The core's own shape, measured on 2026.8.1: the verdict is JSON on
+      // stdout and the exit code is 1.
+      stdout: JSON.stringify({
+        error: { type: "cli_error", message: "OpenClaw config is invalid" },
+        valid: false,
+        path: "/home/clawbox/.openclaw/openclaw.json",
+        issues: [
+          { path: "agents.defaults", message: 'Unrecognized keys: "memorySearch", "imageGenerationModel"' },
+          { path: "messages", message: 'Unrecognized key: "tts"' },
+        ],
+      }),
       stderr: "",
     });
 
@@ -2504,8 +2518,12 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
-        "openclaw doctor --fix": new Error("Command failed: openclaw doctor --fix"),
-        "openclaw config validate": validateRefusal,
+        [DOCTOR]: Object.assign(new Error("Command failed: openclaw doctor --fix"), {
+          stdout: "Legacy exec approvals exist at /home/clawbox/.openclaw/exec-approvals.json."
+            + " Run `openclaw doctor --fix` before using exec approvals.\n",
+          stderr: "",
+        }),
+        [VALIDATE]: validateRefusal,
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -2524,8 +2542,12 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
-        "openclaw doctor --fix": new Error("Command failed: openclaw doctor --fix"),
-        "openclaw config validate": validateRefusal,
+        [DOCTOR]: Object.assign(new Error("Command failed: openclaw doctor --fix"), {
+          stdout: "Legacy exec approvals exist at /home/clawbox/.openclaw/exec-approvals.json."
+            + " Run `openclaw doctor --fix` before using exec approvals.\n",
+          stderr: "",
+        }),
+        [VALIDATE]: validateRefusal,
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -2534,6 +2556,31 @@ describe("updater", () => {
       const state = await runContinuation();
 
       expect(state.warnings?.map((w) => w.code)).toContain("openclaw-doctor-fix-failed");
+      // The warning exists to name the reason, so it must carry doctor's own
+      // sentence and not node's `Command failed: <argv>`, which names the
+      // command back at the owner and nothing else.
+      const doctorWarning = state.warnings?.find((w) => w.code === "openclaw-doctor-fix-failed");
+      expect(doctorWarning?.message).toContain("Legacy exec approvals exist at");
+      expect(doctorWarning?.message).not.toContain("Command failed:");
+    });
+
+    it("keys the mock on argv that cannot collide with the binary's own path", () => {
+      // NOT decoration. `setupExecFileMock` matches on
+      // `key.includes(k) || k.includes(cmd)`, and `cmd` is whatever
+      // `findOpenclawBin()` resolved: an absolute path on a machine with the
+      // core installed, and the BARE string `openclaw` on one without — which
+      // is every CI runner, and not the PC these cases were written on. A key
+      // containing "openclaw" would then swallow the bare `cmd` and route
+      // `config validate` to the doctor's fixture, so the case above would
+      // pass here and fail in CI over a diagnosis that was never exercised.
+      // Keys that never mention the binary cannot do that under either shape.
+      expect(DOCTOR).not.toContain("openclaw");
+      expect(VALIDATE).not.toContain("openclaw");
+      expect("/usr/bin/openclaw config validate --json").toContain(VALIDATE);
+      expect("openclaw config validate --json").toContain(VALIDATE);
+      expect("/usr/bin/openclaw doctor --fix --yes --non-interactive").toContain(DOCTOR);
+      expect("openclaw doctor --fix --yes --non-interactive").toContain(DOCTOR);
+      expect("openclaw config validate --json").not.toContain(DOCTOR);
     });
 
     it("says nothing when the validator itself could not run", async () => {
@@ -2546,8 +2593,8 @@ describe("updater", () => {
           stdout: "gateway crashed for an unrelated reason\n",
           stderr: "",
         },
-        "openclaw doctor --fix": new Error("Command failed: openclaw doctor --fix"),
-        "openclaw config validate": Object.assign(new Error("Command failed"), {
+        [DOCTOR]: new Error("Command failed: openclaw doctor --fix"),
+        [VALIDATE]: Object.assign(new Error("Command failed"), {
           stdout: "",
           stderr: "node: bad option: --experimental-strip-types\n",
         }),
@@ -2573,8 +2620,8 @@ describe("updater", () => {
           stdout: "gateway crashed for an unrelated reason\n",
           stderr: "",
         },
-        "openclaw doctor --fix": new Error("Command failed: openclaw doctor --fix"),
-        "openclaw config validate": { stdout: "Config valid\n", stderr: "" },
+        [DOCTOR]: new Error("Command failed: openclaw doctor --fix"),
+        [VALIDATE]: { stdout: JSON.stringify({ valid: true, warnings: [] }), stderr: "" },
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
