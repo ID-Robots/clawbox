@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "fs";
 
 const execFileMock = vi.hoisted(() => vi.fn((file: string, args?: unknown, options?: unknown, callback?: unknown) => {
   const cb = [args, options, callback].find((value) => typeof value === "function") as ((err: Error | null, stdout: string, stderr: string) => void) | undefined;
@@ -196,6 +197,9 @@ describe("/setup-api/browser", () => {
     mockOwnedBrowser.isConnected.mockReturnValue(true);
     launchChromium.mockResolvedValue(mockOwnedBrowser);
     probeVerdict.value = null;
+    // The install writes this into the web server's env on a test box; the
+    // sandbox cases below drive it, so every other case starts from "off".
+    delete process.env.CLAWBOX_TEST_MODE;
     chromiumPath.value = "/home/clawbox/.cache/ms-playwright/chromium/chrome";
     realBrowser.value = true;
     getRealBrowser.mockImplementation(async () => realBrowser.value);
@@ -541,18 +545,58 @@ describe("/setup-api/browser", () => {
     expect(launchChromium).not.toHaveBeenCalled();
   });
 
-  it("keeps Chromium's sandbox on where the kernel allows it", async () => {
+  describe("Chromium's sandbox on the browser we launch ourselves", () => {
     // The same test scripts/launch-browser.sh makes for the window on the
     // screen: this browser opens pages a run or the assistant chose, and a
     // blanket --no-sandbox gave a renderer exploit the clawbox user's
-    // privileges. There is no apparmor_restrict_unprivileged_userns on a
-    // Jetson, so nothing is added here.
-    realBrowser.value = false;
-    await launchSession();
-    expect(launchChromium).toHaveBeenCalledTimes(1);
-    const options = launchChromium.mock.calls[0][0] as { args: string[]; executablePath: string };
-    expect(options.args).not.toContain("--no-sandbox");
-    expect(options.executablePath).toBe("/home/clawbox/.cache/ms-playwright/chromium/chrome");
+    // privileges. Both inputs are driven here rather than read off whatever
+    // host the suite happens to run on — a CI runner with the AppArmor knob
+    // set would otherwise fail the case that proves the sandbox stays on.
+    const KNOB = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+    /** Answer the kernel knob with `value`, or ENOENT when it is null. */
+    function withKernelKnob(value: string | null) {
+      const real = fs.readFileSync;
+      vi.spyOn(fs, "readFileSync").mockImplementation(((target: Parameters<typeof fs.readFileSync>[0], options?: unknown) => {
+        if (String(target) === KNOB) {
+          if (value === null) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          return value;
+        }
+        return (real as (t: unknown, o?: unknown) => unknown)(target, options);
+      }) as typeof fs.readFileSync);
+    }
+    const launchArgs = () => (launchChromium.mock.calls[0][0] as { args: string[]; executablePath: string });
+
+    afterEach(() => { vi.restoreAllMocks(); });
+
+    it("stays ON where the kernel allows it — a Jetson has no such knob", async () => {
+      process.env.CLAWBOX_TEST_MODE = "0";
+      withKernelKnob(null);
+      realBrowser.value = false;
+      await launchSession();
+      expect(launchChromium).toHaveBeenCalledTimes(1);
+      expect(launchArgs().args).not.toContain("--no-sandbox");
+      expect(launchArgs().executablePath).toBe("/home/clawbox/.cache/ms-playwright/chromium/chrome");
+    });
+
+    it("comes OFF where the kernel restricts unprivileged user namespaces", async () => {
+      // Ubuntu 23.10+ through AppArmor, and the e2e container. Chromium cannot
+      // start its namespace sandbox there, so a browser with it on is no
+      // browser at all.
+      process.env.CLAWBOX_TEST_MODE = "0";
+      withKernelKnob("1\n");
+      realBrowser.value = false;
+      await launchSession();
+      expect(launchArgs().args).toContain("--no-sandbox");
+      expect(launchArgs().args).toContain("--disable-setuid-sandbox");
+    });
+
+    it("comes OFF under the install's own test flag", async () => {
+      process.env.CLAWBOX_TEST_MODE = "1";
+      withKernelKnob("0\n");
+      realBrowser.value = false;
+      await launchSession();
+      expect(launchArgs().args).toContain("--no-sandbox");
+    });
   });
 
 });
