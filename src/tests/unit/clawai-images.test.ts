@@ -328,6 +328,10 @@ describe("generateClawaiImage", () => {
       { upstream: 502, body: {}, status: 502, says: /Generating the picture failed/ },
     ];
     for (const c of cases) {
+      // Each case is its own box: the 401/403 arms leave a remembered refusal
+      // behind (see "stops asking once the proxy has refused…"), and the point
+      // here is what each STATUS is translated to.
+      resetClawaiImageProbe();
       const fetchImpl = vi.fn(async () => jsonResponse(c.body, c.upstream));
       const err = await generateClawaiImage("x", { fetchImpl }).catch((e) => e);
       expect(err).toBeInstanceOf(ClawaiImageError);
@@ -337,6 +341,66 @@ describe("generateClawaiImage", () => {
       expect(err.message).not.toContain("Invalid token");
       expect(err.message).not.toContain("gpt-image-1-mini");
     }
+  });
+
+  it("stops asking once the proxy has refused this device's credential", async () => {
+    // TASK-727. The proxy answers 403 `invalid_token` to a credential it no
+    // longer accepts, and that answer cannot change while the credential does
+    // not: nothing the box can do makes the next identical request succeed.
+    // Beta asked anyway, on every trigger, forever — 6,554 refused POSTs from
+    // one box in twelve hours and ~68 per e2e-install run, all of them
+    // guaranteed 403 before they were sent.
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ error: { message: "Invalid token", code: "invalid_token" } }, 403),
+    );
+    await expect(generateClawaiImage("x", { fetchImpl })).rejects.toMatchObject({ status: 503 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // Every later attempt still FAILS, with the same actionable sentence — the
+    // customer is told the truth each time. What must not happen is another
+    // request going out to be refused again.
+    for (let i = 0; i < 20; i++) {
+      await expect(generateClawaiImage("x", { fetchImpl })).rejects.toMatchObject({
+        status: 503,
+        message: expect.stringContaining("Re-link the device"),
+      });
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("asks again the moment the device is re-linked", async () => {
+    // The other half, and the reason this is a memory of ONE credential rather
+    // than a flag on the box: re-linking is the fix the error tells the
+    // customer to apply, so it has to work without a restart and without
+    // waiting out any timer.
+    const refuse = vi.fn(async () => jsonResponse({ error: { code: "invalid_token" } }, 403));
+    await expect(generateClawaiImage("x", { fetchImpl: refuse })).rejects.toMatchObject({ status: 503 });
+    await expect(generateClawaiImage("x", { fetchImpl: refuse })).rejects.toMatchObject({ status: 503 });
+    expect(refuse).toHaveBeenCalledTimes(1);
+
+    linkDevice("claw_freshtoken000000000000000000");
+    const accept = vi.fn(async () => jsonResponse(imageResponse()));
+    const result = await generateClawaiImage("x", { fetchImpl: accept });
+    expect(accept).toHaveBeenCalledTimes(1);
+    expect(result.media).toContain("/setup-api/chat/media");
+  });
+
+  it("stops offering the picture button while the credential is refused", async () => {
+    // The capability is `route is up` AND `credential works`, and beta could
+    // only ever answer the first half, so a box with a dead token kept showing
+    // a button whose every press ends in the same error bubble.
+    const refuse = vi.fn(async () => jsonResponse({ error: { code: "invalid_token" } }, 403));
+    await expect(generateClawaiImage("x", { fetchImpl: refuse })).rejects.toMatchObject({ status: 503 });
+
+    const probe = vi.fn(async () =>
+      jsonResponse({ status: "ok", models: [IMAGE_MODEL], defaultModel: IMAGE_MODEL }),
+    );
+    await expect(clawaiImageRouteReachable(probe)).resolves.toBe(false);
+    expect(probe).not.toHaveBeenCalled();
+
+    // And it comes back with a working credential, without a restart.
+    linkDevice("claw_freshtoken000000000000000000");
+    await expect(clawaiImageRouteReachable(probe)).resolves.toBe(true);
   });
 
   it("gives up rather than hanging, and says which kind of failure it was", async () => {
