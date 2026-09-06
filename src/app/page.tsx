@@ -46,7 +46,7 @@ import type { InstalledMeta } from "@/lib/store-categories";
 import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
-import { customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import { customWallpaperId, customWallpaperIndex, isCustomWallpaperInRange, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import { TOAST_EVENT } from "@/components/ToastHost";
 import {
   layoutIcons,
@@ -470,7 +470,6 @@ function ChromeDesktopInner() {
   // one a device that has never chosen starts on. A Hermes box opens on the
   // Hermes art; OpenClaw is untouched.
   const [wallpaperId, setWallpaperId] = useState("clawbox");
-  const currentWallpaper = wallpapers.find(w => w.id === wallpaperId) || wallpapers[0];
   type WpFit = "fill" | "fit" | "center";
   const [wpFit, setWpFit] = useState<WpFit>("fill");
   const [wpBgColor, setWpBgColor] = useState("#000000");
@@ -596,15 +595,34 @@ function ChromeDesktopInner() {
   // What a box with no custom wallpaper selected shows — the harness's own
   // art, the same default the mount path above picks for a first boot.
   const harnessDefaultWallpaperId = activeHarness === "hermes" ? "hermes" : "clawbox";
-  // The repair effect below has to be able to tell "no custom wallpapers" from
-  // "not read yet": firing against the empty initial state would reset a
-  // perfectly good `custom-<n>` selection on every load.
+  // The fallback below has to be able to tell "no custom wallpapers" from "not
+  // read yet": an empty initial state puts every `custom-<n>` out of range, so
+  // without this a perfectly good selection flashes the default on every load.
   const [customWallpapersLoaded, setCustomWallpapersLoaded] = useState(false);
   const customWallpapersRef = useRef<string[]>([]);
   const applyCustomWallpapers = useCallback((next: string[]) => {
     customWallpapersRef.current = next;
     setCustomWallpapersState(next);
   }, []);
+  // The STORED list is the OUTCOME of an upload or a delete, so it is written
+  // first and its failure is the whole operation's.
+  //
+  // It is what the next load paints, and `wp_id` — box-wide, in SQLite — is a
+  // position into it. Moving the state and the id over a list that never
+  // actually changed (site data blocked, a locked-down profile, quota) leaves
+  // the three disagreeing and a DIFFERENT picture on screen after a reload,
+  // with nothing said. So the operation simply does not happen and the owner
+  // is told why. The same rule is in src/app/app/[id]/page.tsx.
+  const storeCustomWallpapers = useCallback((next: string[], failure: string) => {
+    try {
+      localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next));
+    } catch {
+      window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: { message: failure } }));
+      return false;
+    }
+    applyCustomWallpapers(next);
+    return true;
+  }, [applyCustomWallpapers]);
   // Wallpapers are large base64 blobs — keep in localStorage to avoid
   // bloating the KV JSON file that gets read/written on every state save.
   useEffect(() => {
@@ -617,22 +635,25 @@ function ChromeDesktopInner() {
     } catch {}
     setCustomWallpapersLoaded(true);
   }, [applyCustomWallpapers]);
-  // A selection that names a picture this browser does not have.
+  // What is PAINTED, which is not always what the box holds.
   //
   // `wp_id` is box-wide (SQLite, read by every browser that opens the desktop)
-  // while the pictures are per-browser `localStorage`, so a delete on the
-  // laptop leaves the box's own screen holding a position past the end of its
-  // own list — and so does every box that hit TASK-719 before it was fixed.
-  // The desktop already paints the default there; without this, Settings goes
-  // on claiming a slot that does not exist and the stale id is written back on
-  // every preference save. Reset to what is actually on screen and let the
-  // existing debounced write persist the repair.
-  useEffect(() => {
-    if (!customWallpapersLoaded || !prefsLoaded.current) return;
-    const index = customWallpaperIndex(wallpaperId);
-    if (index === null || index < customWallpapers.length) return;
-    setWallpaperId(harnessDefaultWallpaperId);
-  }, [customWallpapersLoaded, customWallpapers, wallpaperId, harnessDefaultWallpaperId]);
+  // while the pictures are per-browser `localStorage`. So a `custom-<n>` this
+  // browser cannot answer is not a wrong selection to be repaired — it is
+  // almost always ANOTHER browser's, still resolving perfectly on the laptop
+  // that chose it. This browser has no standing to overwrite it: healing it
+  // box-wide would mean the box's own screen, or a phone, silently destroying
+  // the owner's wallpaper by being opened.
+  //
+  // So the fallback lives here, in the render, and nowhere else. `wallpaperId`
+  // — the value the debounced write sends — only ever changes on an explicit
+  // choice: picking a tile, uploading, or deleting the picture in use.
+  const renderedWallpaperId =
+    customWallpapersLoaded && customWallpaperIndex(wallpaperId) !== null
+      && !isCustomWallpaperInRange(wallpaperId, customWallpapers.length)
+      ? harnessDefaultWallpaperId
+      : wallpaperId;
+  const currentWallpaper = wallpapers.find(w => w.id === renderedWallpaperId) || wallpapers[0];
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -651,14 +672,16 @@ function ChromeDesktopInner() {
       // (or an upload and a delete) can both run before React commits, and both
       // would otherwise read the same list and the second would discard the
       // first — from the state AND from localStorage.
-      applyCustomWallpapers(next);
-      try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
-      setWallpaperId(`custom-${next.length - 1}`);
+      // Nothing was stored, so there is no picture to select: showing it and
+      // pointing the box-wide `wp_id` at it would put a slot on the card that
+      // the next load cannot paint.
+      if (!storeCustomWallpapers(next, "Could not save that wallpaper — this browser is not letting the page store them.")) return;
+      setWallpaperId(customWallpaperId(next.length - 1));
       setWpOpacity(100);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
-  }, [applyCustomWallpapers]);
+  }, [storeCustomWallpapers]);
 
   // ─── Chat (mascot click toggles chat popup) ───
   const [chatOpen, setChatOpen] = useState(false);
@@ -1964,7 +1987,9 @@ function ChromeDesktopInner() {
         return (
           <div className="h-full overflow-y-auto">
             <SettingsApp ui={{
-              wallpaperId,
+              // What is on screen, not what the box holds: the panel must not
+              // highlight — or name — a slot this browser cannot show.
+              wallpaperId: renderedWallpaperId,
               wpFit,
               wpBgColor,
               wpOpacity,
@@ -1981,28 +2006,17 @@ function ChromeDesktopInner() {
                 // Same as the upload above: outside the updater, and off the
                 // ref rather than off `prev`.
                 const next = customWallpapersRef.current.filter((_, i) => i !== idx);
-                // The stored list FIRST, because it is what the next load
-                // paints and what `wp_id` is a position into. A swallowed
-                // write (site data blocked, a locked-down profile) with the
-                // other two already moved would leave the three disagreeing
-                // and a DIFFERENT picture on screen after a reload, with
-                // nothing said. So the delete simply does not happen, and the
-                // owner is told why.
-                try {
-                  localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next));
-                } catch {
-                  window.dispatchEvent(new CustomEvent(TOAST_EVENT, {
-                    detail: { message: "Could not remove that wallpaper — this browser is not letting the page store them." },
-                  }));
-                  return;
-                }
-                applyCustomWallpapers(next);
+                // Nothing was removed, so nothing is renumbered.
+                if (!storeCustomWallpapers(next, "Could not remove that wallpaper — this browser is not letting the page store them.")) return;
                 // `custom-<n>` is an INDEX into that list, so deleting one
                 // renumbers every picture after it. Through the SHARED rule,
                 // which is also what src/app/app/[id]/page.tsx's handler and
                 // the background below now use — and the fallback is the
                 // harness's own art, so a Hermes box does not land on the
                 // ClawBox wallpaper.
+                // Off the STORED id, not the rendered one: this is the write
+                // that goes to the box, and it must renumber what the box
+                // actually holds.
                 setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, harnessDefaultWallpaperId));
               },
             }} />
@@ -2505,7 +2519,7 @@ function ChromeDesktopInner() {
       )}
       {/* Desktop wallpaper background */}
       {(() => {
-        const customIdx = customWallpaperIndex(wallpaperId);
+        const customIdx = customWallpaperIndex(renderedWallpaperId);
         const customWp = customIdx === null ? undefined : customWallpapers[customIdx];
         return customWp ? (
           <>

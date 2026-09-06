@@ -6,7 +6,12 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
-import { wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import {
+  customWallpaperId,
+  customWallpaperIndex,
+  isCustomWallpaperInRange,
+  wallpaperIdAfterDelete,
+} from "@/lib/custom-wallpapers";
 import { apps } from "@/lib/desktop-apps";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
@@ -117,8 +122,11 @@ function usePreferenceSaver(loadedRef: { current: boolean }) {
  * from a phone is the change the desktop would have made.
  */
 function useAppearance(enabled: boolean, activeHarness: string | null) {
-  // What a box with no custom wallpaper selected shows. `null` — the harness
-  // is still being resolved — keeps the neutral default rather than guessing.
+  // What a box with no custom wallpaper selected shows: the harness's own art,
+  // the same default the desktop opens a first boot on. An unresolved harness
+  // reads as ClawBox, which is also this page's initial `wallpaperId` — the
+  // probe is a same-origin call that answers long before a card can be opened
+  // and a picture deleted on it.
   const harnessDefaultWallpaperId = activeHarness === "hermes" ? "hermes" : "clawbox";
   const [wallpaperId, setWallpaperId] = useState("clawbox");
   const [wpFit, setWpFit] = useState<WpFit>("fill");
@@ -140,8 +148,23 @@ function useAppearance(enabled: boolean, activeHarness: string | null) {
   const applyCustomWallpapers = useCallback((next: string[]) => {
     customRef.current = next;
     setCustomWallpapers(next);
-    try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
   }, []);
+  // The STORED list is the OUTCOME of an upload or a delete, so it is written
+  // first and its failure is the whole operation's — the desktop's rule, and
+  // the same reasoning: it is what the next load paints and `wp_id` is a
+  // box-wide position into it, so moving the card over a list that never
+  // changed leaves a DIFFERENT picture on screen after a reload. There is no
+  // toast surface on this route (ToastHost is the desktop's), and the picture
+  // staying put is the honest answer: the operation did not happen.
+  const storeCustomWallpapers = useCallback((next: string[]) => {
+    try {
+      localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next));
+    } catch {
+      return false;
+    }
+    applyCustomWallpapers(next);
+    return true;
+  }, [applyCustomWallpapers]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -164,6 +187,12 @@ function useAppearance(enabled: boolean, activeHarness: string | null) {
       .finally(() => { if (alive) setHydrated(true); });
     return () => { alive = false; };
   }, [enabled]);
+
+  const renderedWallpaperId =
+    customWallpaperIndex(wallpaperId) !== null
+      && !isCustomWallpaperInRange(wallpaperId, customWallpapers.length)
+      ? harnessDefaultWallpaperId
+      : wallpaperId;
 
   const save = usePreferenceSaver(loaded);
   useEffect(() => {
@@ -188,19 +217,25 @@ function useAppearance(enabled: boolean, activeHarness: string | null) {
     const reader = new FileReader();
     reader.onload = () => {
       const next = [...customRef.current, reader.result as string];
-      applyCustomWallpapers(next);
-      setWallpaperId(`custom-${next.length - 1}`);
+      // The picture is not there to be selected unless it was stored.
+      if (!storeCustomWallpapers(next)) return;
+      setWallpaperId(customWallpaperId(next.length - 1));
       setWpOpacity(100);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
-  }, [applyCustomWallpapers]);
+  }, [storeCustomWallpapers]);
 
   return {
     uploadRef,
     onUploadFile,
     ui: {
-      wallpaperId,
+      // What is on screen, not what the box holds. `wp_id` is box-wide and the
+      // pictures are this browser's, so a `custom-<n>` a phone cannot answer
+      // is the laptop's selection, still valid there — the card shows the
+      // fallback and leaves the box's own value alone. Only an explicit choice
+      // below ever writes it.
+      wallpaperId: renderedWallpaperId,
       wpFit,
       wpBgColor,
       wpOpacity,
@@ -215,7 +250,8 @@ function useAppearance(enabled: boolean, activeHarness: string | null) {
       onWallpaperUpload: () => uploadRef.current?.click(),
       onCustomWallpaperDelete: (idx: number) => {
         const next = customRef.current.filter((_, i) => i !== idx);
-        applyCustomWallpapers(next);
+        // Nothing was removed, so nothing is renumbered.
+        if (!storeCustomWallpapers(next)) return;
         // `custom-<n>` is an INDEX into that list, so deleting one renumbers
         // every picture after it. Through the SHARED rule, not a fourth
         // spelling of it: this handler and the desktop's write the same

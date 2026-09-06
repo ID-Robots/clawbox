@@ -207,6 +207,36 @@ describe("deleting a custom wallpaper", () => {
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
   });
 
+  it("does not select an UPLOAD it could not store", async () => {
+    // The upload had the delete's bug the other way round: the list moved in
+    // memory, the `setItem` failure was swallowed, and the box-wide `wp_id`
+    // was then pointed at a slot the next load cannot paint — the owner's
+    // wallpaper replaced, box-wide, by one that does not exist. Both writers
+    // now go through the same store-first rule.
+    await mountDesktop(WP[2]);
+    saved.length = 0;
+
+    const input = document.querySelector<HTMLInputElement>("input[type='file'][accept='image/*']");
+    expect(input).toBeTruthy();
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    try {
+      fireEvent.change(input!, {
+        target: { files: [new File([new Uint8Array([1, 2, 3])], "wp.png", { type: "image/png" })] },
+      });
+      await screen.findByText(/not letting the page store them/i);
+    } finally {
+      setItem.mockRestore();
+    }
+
+    // Nothing moved: not the stored list, not what is on screen, not the box.
+    expect(JSON.parse(window.localStorage.getItem("clawbox-custom-wallpapers") || "[]")).toEqual(WP);
+    expect(wallpaperUrls().some((u) => u.includes(WP[2]))).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
+  });
+
   it("does not offer a phantom slot for a picture this browser does not have", async () => {
     // Settings used to claim "Custom 3" over a grid of none, with no tile
     // highlighted. The panel is handed what is ON SCREEN, so the fallback tile

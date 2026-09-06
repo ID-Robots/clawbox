@@ -6222,18 +6222,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return { subtitle: null };
       }
       case "appearance": {
+        // `ui.wallpaperId` is what the page is PAINTING, so a slot named here
+        // is one the grid below can highlight — the row used to print
+        // "Custom 3" over a grid of two with nothing selected. Through `t()`,
+        // like the tile it names: this was the last name on the card that
+        // never followed the UI language.
         const customIdx = customWallpaperIndex(ui.wallpaperId);
-        // A slot number is only printable when the slot EXISTS. `wp_id` is
-        // box-wide while the pictures are this browser's `localStorage`, so an
-        // id can name a position the list no longer holds — and printing
-        // "Custom 3" beside a grid of two, with none of them highlighted, is
-        // the panel asserting a selection it never checked. The desktop paints
-        // the first built-in there, so that is what the row says.
         const sub = customIdx === null
           ? ui.wallpaperId
-          : customIdx < ui.customWallpapers.length
-            ? `Custom ${customIdx + 1}`
-            : (ui.wallpapers[0]?.name ?? ui.wallpaperId);
+          : t("settings.customWallpaper", { n: customIdx + 1 });
         return { subtitle: sub };
       }
       case "wifi":
