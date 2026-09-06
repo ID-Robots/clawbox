@@ -2768,8 +2768,6 @@ for report in reports:
     if not isinstance(pid, str) or not pid:
         continue
     pid = canonical(pid)
-    if pid in pending:
-        continue
     # `status` is NOT evidence of a consent — it is the config's own enablement
     # bit under another name — and is read here only to WITHHOLD one: a plugin
     # the core would not load must never be left enabled on a "cannot tell".
@@ -2783,6 +2781,9 @@ for report in reports:
     install = report.get("install")
     states[pid] = "consented" if isinstance(install, dict) and install else "seen"
 
+# LAST, so it overrides: a diagnostic is the core speaking, and it outranks
+# anything read off the same plugin's own entry — including an entry the report
+# does not carry at all.
 for pid in pending:
     states[pid] = "pending"
 
