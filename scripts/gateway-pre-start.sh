@@ -2346,12 +2346,16 @@ def _clawai_route_is_ours(_base_url, _api_key, _stamped, _proxy_base_url):
     Ownership needs POSITIVE evidence, in the four shapes below. The Hermes half
     (`hermesCloudRouteIsOurs`, src/lib/hermes-tts.ts — TASK-726 is this half of
     it) asks the same question with the arms IT has: it writes no stamp, so it
-    has three, and it needs no delete arm at all because it HAS no destructive
-    path — `writeHermesCloudTarget` is the only writer of `tts.openai.*` and a
-    downgrade there just stops exposing the endpoint. The consequence is one
-    real divergence, and it is deliberate: our own `claw_` token at an address
-    of the owner's reads as OURS on Hermes and as THEIRS here, which is what
-    beta did and what the suite pins.
+    has three. Its looser reading — our own `claw_` token at an address of the
+    owner's counts as OURS there and as THEIRS here — used to rest on Hermes
+    having no destructive path at all. That premise is gone as of TASK-718:
+    `scripts/register-mcp.sh` §4a now withdraws the cloud voice on a box that
+    has left the entitled tier. So the DELETE on that edition is held to this
+    rule rather than to the refresh rule beside it — it requires a positive
+    ADDRESS of ours (the current proxy or one of the retired hosts) and never
+    the credential alone, exactly as the arm below does. The divergence that
+    remains is only in what may be REFRESHED, where the worst case is our own
+    fields rewritten to our own values.
 
       - our own stamp on the entry (`clawboxManaged`);
       - or a `claw_` portal token on it, which is what survives the proxy URL
