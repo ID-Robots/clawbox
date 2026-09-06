@@ -365,30 +365,82 @@ async function getDesktopBrowser(): Promise<import("playwright").Browser> {
   return desktopBrowserPromise;
 }
 
+/**
+ * A refusal the caller can act on, rather than a launch stack trace.
+ *
+ * `chromium_not_installed` is the code `browser/manage` already answers and
+ * the wizard, `browser-actions.ts` and all ten locales already word — so a
+ * missing runtime says the same sentence whichever door it is met at.
+ */
+class BrowserUnavailableError extends Error {
+  constructor(readonly code: "chromium_not_installed", message: string) {
+    super(message);
+    this.name = "BrowserUnavailableError";
+  }
+}
+
+/**
+ * Chromium's namespace sandbox, on or off — the same test
+ * `scripts/launch-browser.sh` makes for the window on the screen, so the two
+ * Chromiums on this box are not hardened differently by accident.
+ *
+ * It cannot initialise where the kernel restricts unprivileged user
+ * namespaces (Ubuntu 23.10+ through AppArmor, and the e2e container), and a
+ * blanket `--no-sandbox` gave a page this browser opens — which can be any
+ * address a run or the assistant types — a renderer running with the whole
+ * `clawbox` user's privileges. So the flag is now the exception it is in the
+ * launcher: on a real Jetson the sandbox stays ON.
+ */
+function chromiumSandboxArgs(): string[] {
+  if (process.env.CLAWBOX_TEST_MODE === "1") return ["--no-sandbox", "--disable-setuid-sandbox"];
+  try {
+    const restricted = fs.readFileSync("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "utf-8").trim();
+    if (restricted === "1") return ["--no-sandbox", "--disable-setuid-sandbox"];
+  } catch {
+    // No such knob on this kernel: nothing is restricting the sandbox.
+  }
+  return [];
+}
+
 /** Launch a headless Chromium of our own, once, and keep the handle. */
 async function getOwnBrowser(): Promise<import("playwright").Browser> {
   if (ownBrowser?.isConnected()) return ownBrowser;
   if (ownBrowserPromise) return ownBrowserPromise;
 
-  ownBrowserPromise = (async () => {
+  // Held in a local and compared before every clear. `closeOwnedBrowserIfIdle`
+  // does not await `browser.close()`, so a request arriving in that window
+  // starts launch B while A is still closing — and A's `disconnected` handler
+  // (or its own `finally`) would then throw B's promise away, leaving the next
+  // caller to start a third browser nobody closes.
+  let launch: Promise<import("playwright").Browser> | null = null;
+  launch = (async () => {
     const pw = await getPlaywright();
     try {
       // Explicit executable: Playwright's own lookup has answered "" inside
       // the standalone server, while the runtime sits in ~/.cache/ms-playwright.
-      const executablePath = findPlaywrightChromium() ?? undefined;
-      const browser = await pw.chromium.launch({ headless: true, args: ["--no-sandbox"], ...(executablePath ? { executablePath } : {}) });
+      // No runtime at all is a stated refusal, not a launch that throws
+      // whatever Playwright's default lookup happens to say.
+      const executablePath = findPlaywrightChromium();
+      if (!executablePath) {
+        throw new BrowserUnavailableError(
+          "chromium_not_installed",
+          "Chromium is not installed on this box, so there is no browser to verify anything in.",
+        );
+      }
+      const browser = await pw.chromium.launch({ headless: true, args: chromiumSandboxArgs(), executablePath });
       browser.on("disconnected", () => {
         if (ownBrowser === browser) ownBrowser = null;
-        ownBrowserPromise = null;
+        if (ownBrowserPromise === launch) ownBrowserPromise = null;
       });
       ownBrowser = browser;
       return browser;
     } finally {
-      ownBrowserPromise = null;
+      if (ownBrowserPromise === launch) ownBrowserPromise = null;
     }
   })();
+  ownBrowserPromise = launch;
 
-  return ownBrowserPromise;
+  return launch;
 }
 
 /**
@@ -679,6 +731,11 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
     }
   } catch (err) {
+    // A box with no Chromium is not a server fault: it is a state the caller
+    // can fix, and the code is the one every other surface already words.
+    if (err instanceof BrowserUnavailableError) {
+      return NextResponse.json({ error: err.message, code: err.code }, { status: 400 });
+    }
     const message = err instanceof Error ? err.message : "Internal error";
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -390,7 +390,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_open",
-    "Open the web browser on the ClawBox desktop and optionally go to a page. Use this whenever the user asks to open the browser, open a site, or look something up on the web. It drives the real window on the desktop, and an invisible browser only when that window cannot be used — the reply says which. It returns a picture of the page.",
+    "Open the web browser and optionally go to a page. Use this whenever the user asks to open the browser, open a site, or look something up on the web. It drives the real window on the ClawBox desktop when the owner has left that switched on and the window can be used, and an invisible browser otherwise — the reply says which one took the page. It returns a picture of the page.",
     { url: zText(2_000, "Page to open, starting with http:// or https://. Omit to just open the browser.").optional() },
     { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, openWorld: true },
     async ({ url }: { url?: string }) => {
@@ -408,7 +408,11 @@ export function registerBrowserTools(reg: Registrar): void {
       }
       const id = await ensureSession(url, true);
       const reply = await browserCall("screenshot", { sessionId: id, ...describeParam() });
-      return pageResult(url ? `Opened ${url} in the browser on the desktop.` : "Opened the browser on the desktop.", reply);
+      // Backend-neutral: `browserLine(reply)` on the next line is the one
+      // place that says WHICH browser took the page, and a sentence here
+      // promising the desktop would contradict a `browser: "headless"` reply
+      // and send the owner to a window nothing opened.
+      return pageResult(url ? `Opened ${url} in the browser.` : "Opened the browser.", reply);
     },
   );
 
@@ -443,8 +447,15 @@ export function registerBrowserTools(reg: Registrar): void {
         await browserCall("close", { sessionId }).catch(() => { /* already gone */ });
         sessionId = null;
       }
+      // What is left behind depends on which browser was driving: the desktop
+      // window stays up for the owner, the invisible one is nobody's to look
+      // at. `statedBrowser` is the last kind a reply named, read BEFORE it is
+      // cleared for the next session.
+      const wasDesktop = statedBrowser === "desktop";
       statedBrowser = null;
-      return text("Stopped controlling the browser. The window is still open on the desktop.");
+      return text(wasDesktop
+        ? "Stopped controlling the browser. The window is still open on the desktop."
+        : "Stopped controlling the browser.");
     },
   );
 

@@ -56,6 +56,8 @@ const mockOwnedBrowser = vi.hoisted(() => ({
   on: vi.fn(),
 }));
 const launchChromium = vi.hoisted(() => vi.fn().mockResolvedValue(mockOwnedBrowser));
+// Where Playwright's Chromium lives, or null for a box that never installed it.
+const chromiumPath = vi.hoisted(() => ({ value: "/home/clawbox/.cache/ms-playwright/chromium/chrome" as string | null }));
 // A probe verdict a test forces, ahead of what the fetch stub would imply.
 const probeVerdict = vi.hoisted(() => ({ value: null as "ours" | "foreign" | "down" | null }));
 // The owner's "verify on my screen" switch, as the route reads it per session.
@@ -90,7 +92,11 @@ vi.mock("@/lib/cdp-probe", () => ({
     }
   },
   describePortOwner: async () => "",
-  findPlaywrightChromium: () => null,
+  // A path by default: the route now REFUSES to launch without one (there is
+  // no Chromium to launch), and every headless case here is about a box that
+  // has the runtime. The one case that is about a box without it sets this to
+  // null itself.
+  findPlaywrightChromium: () => chromiumPath.value,
 }));
 
 // The switch the route reads for every session. Mocked rather than written
@@ -190,6 +196,7 @@ describe("/setup-api/browser", () => {
     mockOwnedBrowser.isConnected.mockReturnValue(true);
     launchChromium.mockResolvedValue(mockOwnedBrowser);
     probeVerdict.value = null;
+    chromiumPath.value = "/home/clawbox/.cache/ms-playwright/chromium/chrome";
     realBrowser.value = true;
     getRealBrowser.mockImplementation(async () => realBrowser.value);
     writeBrowserLaunchEnv.mockResolvedValue(undefined);
@@ -521,4 +528,31 @@ describe("/setup-api/browser", () => {
       await sendAction("close", desktop.sessionId);
     });
   });
+  it("refuses with chromium_not_installed rather than throwing a launch error", async () => {
+    // The standalone server cannot resolve Playwright's runtime through its own
+    // lookup, so an absent executable used to surface as a 500 with whatever
+    // Playwright said. `chromium_not_installed` is the code browser/manage
+    // already answers and the wizard and all ten locales already word.
+    realBrowser.value = false;
+    chromiumPath.value = null;
+    const { res, body } = await launchSession();
+    expect(res.status).toBe(400);
+    expect(body.code).toBe("chromium_not_installed");
+    expect(launchChromium).not.toHaveBeenCalled();
+  });
+
+  it("keeps Chromium's sandbox on where the kernel allows it", async () => {
+    // The same test scripts/launch-browser.sh makes for the window on the
+    // screen: this browser opens pages a run or the assistant chose, and a
+    // blanket --no-sandbox gave a renderer exploit the clawbox user's
+    // privileges. There is no apparmor_restrict_unprivileged_userns on a
+    // Jetson, so nothing is added here.
+    realBrowser.value = false;
+    await launchSession();
+    expect(launchChromium).toHaveBeenCalledTimes(1);
+    const options = launchChromium.mock.calls[0][0] as { args: string[]; executablePath: string };
+    expect(options.args).not.toContain("--no-sandbox");
+    expect(options.executablePath).toBe("/home/clawbox/.cache/ms-playwright/chromium/chrome");
+  });
+
 });

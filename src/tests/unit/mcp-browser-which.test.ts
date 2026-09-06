@@ -134,4 +134,38 @@ describe("the browser the tools actually drove", () => {
     expect(out.text).toContain("the owner can watch this page");
     expect(out.text).toContain("Say so when you report what you verified");
   });
+  it("does not promise a desktop window the open text never used", async () => {
+    // browser_open's own sentence is backend-neutral; the ONE place that says
+    // which browser took the page is browserLine. A sentence here claiming the
+    // desktop would contradict a `browser: "headless"` reply in the same
+    // message and send the owner to a window nothing opened.
+    answering = "headless";
+    const h = await browserTools();
+    const out = await h.call("browser_open", { url: "https://example.test/" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("Opened https://example.test/ in the browser.");
+    expect(out.text).not.toContain("in the browser on the desktop");
+  });
+
+  it("only tells the owner a window is still open when one is", async () => {
+    // browser_close on the invisible browser used to say "The window is still
+    // open on the desktop" — a window nobody could ever find.
+    answering = "headless";
+    const h = await browserTools();
+    await h.call("browser_open", { url: "https://example.test/" });
+    const closed = await h.call("browser_close");
+    expect(closed.isError).toBe(false);
+    if (closed.isError) return;
+    expect(closed.text).toBe("Stopped controlling the browser.");
+
+    answering = "desktop";
+    const h2 = await browserTools();
+    await h2.call("browser_open", { url: "https://example.test/" });
+    const closedDesktop = await h2.call("browser_close");
+    expect(closedDesktop.isError).toBe(false);
+    if (closedDesktop.isError) return;
+    expect(closedDesktop.text).toContain("still open on the desktop");
+  });
+
 });
