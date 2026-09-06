@@ -124,6 +124,12 @@ export const PROTECTED_PATH_COMMAND_CASES: ProtectedPathCommandCase[] = [
   // same way. With only a space in pathTerminators the root stopped ending a
   // path segment the moment anything but a space followed it, and the whole
   // tree — the most destructive spelling there is — was allowed.
+  //
+  // Both editions are held to every case, but they were not open to the same
+  // ones: Hermes strips each variant before matching, so it already caught a
+  // TRAILING newline or CR and let the mid-script and tab spellings through,
+  // while the OpenClaw hook matches the parameter as typed and let all of them
+  // through. The terminator class is the one fix for both.
   {
     command: "rm -rf ~/clawbox\n",
     denied: true,

@@ -62,14 +62,17 @@
     "matter most: a newline is not an exotic spelling, it is how a typed command",
     "is DELIVERED. process({action:'write', data:'rm -rf ~/clawbox\\n'}) types",
     "exactly that into a live pty and a script body separates its commands the",
-    "same way, so with only a space here the whole checkout - the most",
-    "destructive spelling there is - was allowed on both editions.",
+    "same way. With only a space here the whole checkout - the most destructive",
+    "spelling there is - was allowed: on OpenClaw in every one of those",
+    "spellings, and on Hermes wherever the whitespace is not the last character",
+    "(hermes strips each variant before matching, so a TRAILING newline it",
+    "already caught and a mid-script one it did not).",
     "Both readers splice this string in verbatim: the plugin as a JavaScript Set",
     "and register-mcp.sh as an fnmatch class '[' + this + ']'. Python's fnmatch",
     "carries literal control characters inside a class and PyYAML round-trips",
-    "them as \\t \\n \\r escapes, so no character here needs escaping on either",
-    "side - but a character that is special to fnmatch WOULD, so weigh that",
-    "before adding one."
+    "them as \\t \\n \\r escapes, so nothing here needs escaping on either side -",
+    "but a character that is special to fnmatch WOULD, so weigh that before",
+    "adding one."
   ],
   "pathTerminators": "/ \t\n\r;&|'\")",
 
