@@ -1900,7 +1900,7 @@ def _clawai_credential_refused():
     """Has the proxy refused this box's ClawBox AI credential?
 
     Unreadable, absent, malformed and non-numeric all collapse to False on
-    purpose, exactly as `_clawai_device_tier()` collapses them to None: every
+    purpose, exactly as `_clawai_stamped_tier()` collapses them to None: every
     one of them means "nobody has told us this credential is dead", and a box
     we have not been told about is left armed. Failing the other way would take
     the picture button off every box whose Next app has never written a
@@ -2169,9 +2169,10 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             #
             # SCOPE, stated plainly rather than implied: this arm covers the
             # IMAGE path only. Neither of those two migrations reads the
-            # refusal — the cloud voice gates on `clawai_tier`, which a box with
-            # a dead credential can never refresh because only a portal-ANSWERED
-            # poll writes it — so a refused Max box still buys one refused round
+            # refusal — the cloud voice gates on the tier stamps
+            # (`clawai_plan_tier`, then `clawai_tier`), which a box with a dead
+            # credential can never refresh because only a portal-ANSWERED poll
+            # writes them — so a refused Max box still buys one refused round
             # trip per spoken reply and per voice note. Lower volume than the
             # image storm by orders of magnitude, and its own change.
             def _slot_is_ours(_cfg):
@@ -2625,13 +2626,14 @@ if _clawai_openai_route_is_ours:
 # than leaving it alone: the panel would call the cloud voice configured, Auto
 # would move the primary onto it, and every spoken reply would pay a failed
 # round trip before falling back to the voice the box already had. So the
-# stamp the status route persists from a live portal answer is the gate.
-# `clawai_tier` is a DEVICE tier, and "pro" is the device tier of the MAX
-# plan — the two names are off by one on purpose (see CLAWBOX_AI_MODEL_BY_TIER
-# in src/lib/clawbox-ai-models.ts). Anything else, including a missing stamp,
-# means we have not been told this box is entitled, and an unentitled box is
-# left exactly as it was. A customer who upgrades gets the cloud voice at the
-# next gateway start, once the status route has refreshed the stamp.
+# stamp the status route persists from a live portal answer is the gate —
+# `clawai_plan_tier`, the PLAN, with `clawai_tier` behind it for a box the poll
+# has not answered for yet (see `_clawai_entitlement_tier` below). "pro" is the
+# tier of the MAX plan; the two names are off by one on purpose (see
+# CLAWBOX_AI_MODEL_BY_TIER in src/lib/clawbox-ai-models.ts). Anything else means
+# we have not been told this box is entitled, and an unentitled box is left
+# exactly as it was. A customer who upgrades gets the cloud voice at the next
+# gateway start, once the status route has refreshed the stamp.
 #
 # The customer-facing "your plan speaks locally, Max speaks in the cloud" line
 # is TASK-486 and deliberately not written here.
@@ -2651,12 +2653,12 @@ CLAWBOX_SPEECH_MANAGED_KEY = "clawboxManaged"
 # via globals() because the unit tests run this block extracted from the file.
 _clawbox_v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
 
-def _clawai_device_tier():
-    """The portal-confirmed plan stamp, or None when the store cannot be read.
+def _clawai_stamped_tier(_key):
+    """One tier stamp out of the device store, or None when it cannot be read.
 
     Unreadable, absent and malformed all collapse to None on purpose: every one
-    of them means "nobody has told us this box is on Max", and the gate below
-    treats not-knowing exactly like not-entitled.
+    of them means "nobody has told us", which is what the gate below has to be
+    able to tell apart from "we were told, and the answer is no".
     """
     _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
     if not _store_path:
@@ -2668,11 +2670,31 @@ def _clawai_device_tier():
         return None
     if not isinstance(_store, dict):
         return None
-    _tier = _store.get("clawai_tier")
-    return _tier.strip() if isinstance(_tier, str) else None
+    _tier = _store.get(_key)
+    _tier = _tier.strip().lower() if isinstance(_tier, str) else ""
+    # Only the two tiers this enum has. `normalizeClawboxAiTier` admits exactly
+    # these and answers null to everything else, and a stamp we do not
+    # recognise is not evidence of anything — least of all of a downgrade.
+    return _tier if _tier in ("flash", CLAWBOX_SPEECH_DEVICE_TIER) else None
 
 
-_clawai_speech_entitled = _clawai_device_tier() == CLAWBOX_SPEECH_DEVICE_TIER
+# THE ENTITLEMENT IS THE PLAN, and the device stamp only when the plan is
+# unknown — `clawaiEntitlementTier` in src/lib/clawai-plan-tier.ts, transcribed
+# because a shell cannot import it and the suite pins the two together.
+#
+# `clawai_tier` is `mapPortalTier`'s answer, and that function prefers the
+# portal's `deviceTier` STAMP deliberately: it answers "what should this box
+# DEFAULT to", and a Max subscriber is allowed to run Flash here.
+# `clawai_plan_tier` is `mapPortalPlanTier`'s — "what does this ACCOUNT pay
+# for" — and `clawbox-ai-portal-tier.ts` states the rule in as many words:
+# "Read the first for a default to write; read this one before refusing
+# anything." This block both refuses AND deletes, so it reads the second, and
+# falls back to the first only where the status poll has not answered yet —
+# which is every box in the field until it has run once (TASK-744).
+_clawai_entitlement_tier = (
+    _clawai_stamped_tier("clawai_plan_tier") or _clawai_stamped_tier("clawai_tier")
+)
+_clawai_speech_entitled = _clawai_entitlement_tier == CLAWBOX_SPEECH_DEVICE_TIER
 
 if _clawai_openai_route_is_ours and _clawai_speech_entitled:
     _messages = cfg.get("messages")
@@ -2773,7 +2795,16 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
                     cfg["messages"] = _messages
                 changed = True
 
-elif _clawai_openai_route_is_ours:
+elif _clawai_openai_route_is_ours and _clawai_entitlement_tier:
+    # ONLY OVER A TIER WE HAVE ACTUALLY BEEN TOLD. This condition used to be
+    # `_clawai_openai_route_is_ours` alone, so every reading that was not a
+    # positive "pro" reached the delete: a device store that was absent, or
+    # unreadable, or carried no stamp yet, took a working cloud voice away —
+    # not knowing read as a downgrade, which is the false failure this file
+    # warns about everywhere else. The Hermes arm in `register-mcp.sh` has
+    # required a tier it was TOLD since it was written; this is that same
+    # requirement, on the edition that shipped first (TASK-744).
+    #
     # The other direction, and it has to exist or this migration is one-way.
     # A box that was Max and is not any more keeps an entry pointing at an
     # endpoint that now answers 403, so every spoken reply buys a refused round

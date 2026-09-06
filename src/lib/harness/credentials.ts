@@ -9,6 +9,9 @@ import {
   clearPersistedClawaiCredentialRefusal,
   persistClawaiCredentialRefusal,
 } from "@/lib/clawai-credential-refusal";
+// The other mark about a credential this box holds — the PLAN the portal
+// reported for it. Retired by the same funnel below, for the same reason.
+import { clearClawaiPlanTier } from "@/lib/clawai-plan-tier";
 
 export {
   CLAWAI_CREDENTIAL_REFUSED_KEY,
@@ -199,6 +202,14 @@ export async function forgetClawaiCredentialRefusal(): Promise<void> {
   // would leave a freshly re-linked box standing its image path down at the
   // very restart the re-link triggers.
   await clearPersistedClawaiCredentialRefusal();
+  // And so does the recorded PLAN, which is a fact about the ACCOUNT behind the
+  // credential that has just been replaced. Left standing, the previous
+  // account's Max plan would keep the cloud voice armed on a box re-linked to a
+  // lower one — a refused round trip per spoken reply, with the panel calling
+  // the voice configured while it happens. Clearing it puts both boot scripts
+  // back on the device stamp until the next status poll answers for the
+  // credential this box now holds.
+  await clearClawaiPlanTier();
 }
 
 /** Test seam: forget every remembered refusal. */

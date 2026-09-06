@@ -324,6 +324,21 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     expect(configStoreSet).not.toHaveBeenCalled();
   });
 
+  it("retires the recorded PLAN with it, because that is a fact about the same credential", async () => {
+    // TASK-744. Two boot scripts prefer `clawai_plan_tier` over the device
+    // badge, and one of them deletes the cloud voice when the plan does not
+    // cover it. Left standing across a re-link, the PREVIOUS account's Max plan
+    // would keep the voice armed on a box now holding a lower plan's token —
+    // a refused round trip per spoken reply, with the panel calling the voice
+    // configured while it happens.
+    const mod = await memo();
+    configStoreGet.mockResolvedValue("pro");
+
+    await mod.forgetClawaiCredentialRefusal();
+
+    expect(configStoreSet).toHaveBeenCalledWith("clawai_plan_tier", undefined);
+  });
+
   it("still forgets in memory when the store cannot be written", async () => {
     // A root-owned data/config.json is a state this repo has seen. Losing the
     // hint must not cost the caller its own answer.

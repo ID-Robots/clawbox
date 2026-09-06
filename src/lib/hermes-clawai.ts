@@ -1683,9 +1683,20 @@ async function selectHermesCloudVoiceIfUnvoiced(token: string, tier: ClawboxAiTi
     ]);
     // The tier just linked, not a re-read: `setMany` wrote `clawai_tier` a
     // moment ago, but the argument is the same fact without a second round trip
-    // and without a window where the store has not settled. It is already the
-    // DEVICE tier — the same value `speechEntitledTier()` reads back — so it is
-    // compared with the constant directly.
+    // and without a window where the store has not settled. It is the DEVICE
+    // tier, and the PLAN stamp `speechEntitledTier()` and both boot scripts
+    // prefer (`clawai_plan_tier`, TASK-744) is deliberately not read here:
+    // `forgetClawaiCredentialRefusal` retires it a few lines up as part of
+    // writing this very credential, so there is nothing on record to prefer.
+    // The device tier is the only answer this call has, and it is the one it
+    // has always used.
+    //
+    // What that costs is bounded and one-directional: a Max subscriber whose
+    // box is stamped Flash is not handed the cloud voice by the LINK. He is
+    // handed it by `register-mcp.sh` at the next web-server boot, once the
+    // status poll has recorded the plan — and the Voice tab offers it in the
+    // meantime, because the panel reads the pair. Nothing here can take a voice
+    // away; this function only ever selects one on a box that had none.
     if (tier !== CLAWBOX_AI_SPEECH_TIER) {
       console.log(
         `[hermes-clawai] this plan does not include the cloud voice — leaving tts.provider alone`,

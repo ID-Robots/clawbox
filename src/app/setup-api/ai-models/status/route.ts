@@ -21,6 +21,10 @@ import {
   clearPersistedClawaiCredentialRefusal,
   persistClawaiCredentialRefusal,
 } from "@/lib/clawai-credential-refusal";
+// The portal's PLAN, written where the same two boot scripts can read it. The
+// tier stamp beside it is a device DEFAULT and may not be refused on — see
+// `clawai-plan-tier.ts` and TASK-744.
+import { persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
 
 export const dynamic = "force-dynamic";
 
@@ -244,6 +248,15 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         if (lookup.tier !== localTier) {
           await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
         }
+        // The PLAN, beside the badge and never instead of it. The two boot
+        // scripts decide an ENTITLEMENT — whether this box may keep a cloud
+        // voice at all, and one of them DELETES the definition when it may not
+        // — and the badge above is a device DEFAULT that a Max subscriber is
+        // allowed to have set to Flash. Written only here, in the
+        // portal-ANSWERED branch: the wizard's plan picker is a guess the
+        // account has not been consulted about (TASK-481), and an `unreachable`
+        // verdict is the not-knowing the key exists to keep distinguishable.
+        await persistClawaiPlanTier(lookup.planTier);
         // The portal ANSWERED about the credential this box holds, so any
         // refusal recorded against it is over. Same poll, same store, same
         // "write only on change" discipline as the tier stamp above — the

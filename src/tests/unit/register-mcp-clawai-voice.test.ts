@@ -449,6 +449,95 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     });
   });
 
+  // TASK-744. `clawai_tier` is `mapPortalTier`'s answer, and that function
+  // prefers the portal's `deviceTier` STAMP on purpose — it answers "what
+  // should this box default to", and a Max subscriber is allowed to run Flash
+  // here. `clawbox-ai-portal-tier.ts` states the rule: "Read the first for a
+  // default to write; read this one [`mapPortalPlanTier`] before refusing
+  // anything." This block both refuses and WITHDRAWS on the device default, so
+  // a Max subscriber whose box is stamped `deviceTier: flash` had the cloud
+  // voice taken away at every web-server boot.
+  describe("the entitlement is the PLAN, and the device stamp only when the plan is unknown (TASK-744)", () => {
+    /** Leave the box on the cloud voice, as the arm does. */
+    function armedYaml() {
+      writeYaml(
+        `${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: ${PROXY}\n    api_key: ${TOKEN}\n    model: ${CLOUD_MODEL}\n`,
+      );
+    }
+
+    it("keeps the cloud voice of a Max subscriber whose device is stamped flash", () => {
+      armedYaml();
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: ENTITLED_TIER });
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBe(TOKEN);
+      expect(at("tts.openai.base_url")).toBe(PROXY);
+      expect(configCalls()).toEqual([]);
+      expect(r.stdout).toContain("the cloud voice is already armed");
+    });
+
+    it("arms one for that box in the first place", () => {
+      writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: ENTITLED_TIER });
+
+      const r = run();
+
+      expect(at("tts.openai.base_url")).toBe(PROXY);
+      expect(at("tts.openai.api_key")).toBe(TOKEN);
+      expect(at("tts.provider")).toBe("openai");
+      expect(r.stdout).toContain("armed the ClawBox AI cloud voice");
+    });
+
+    it("still withdraws when the PLAN itself has dropped", () => {
+      // The mirror case: the plan is Pro, which the proxy answers 403 to,
+      // whatever this box's device stamp says.
+      armedYaml();
+      writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER, clawai_plan_tier: "flash" });
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBeUndefined();
+      expect(at("tts.openai.base_url")).toBeUndefined();
+      expect(r.stdout).toContain("no longer includes it");
+    });
+
+    it("falls back to the device stamp when no plan has been recorded", () => {
+      // Every box in the field is in this state until the status poll has
+      // written the plan once, so the old rule has to keep answering there.
+      writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
+
+      const r = run();
+
+      expect(at("tts.openai.base_url")).toBe(PROXY);
+      expect(r.stdout).toContain("armed the ClawBox AI cloud voice");
+    });
+
+    it("ignores a plan stamp that is not a tier we recognise", () => {
+      // NOT KNOWING IS NOT AN ANSWER. A junk value is not evidence that the
+      // plan has dropped, so it falls through to the stamp rather than
+      // withdrawing a working voice over it.
+      armedYaml();
+      writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER, clawai_plan_tier: "enterprise" });
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBe(TOKEN);
+      expect(configCalls()).toEqual([]);
+      expect(r.stdout).toContain("the cloud voice is already armed");
+    });
+
+    it("does not withdraw over a plan stamp alone when neither is recognisable", () => {
+      armedYaml();
+      writeStore({ clawai_token: TOKEN, clawai_plan_tier: "enterprise" });
+
+      const r = run();
+
+      expect(at("tts.openai.api_key")).toBe(TOKEN);
+      expect(configCalls()).toEqual([]);
+      expect(r.stdout).toContain("no plan has been recorded for this box yet");
+    });
+  });
+
   describe("not knowing is not an answer", () => {
     it("holds, and says why, when there is no device store at all", () => {
       const r = run();

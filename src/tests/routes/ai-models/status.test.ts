@@ -228,6 +228,54 @@ describe("/setup-api/ai-models/status", () => {
       expect(mockSetConfigValue).not.toHaveBeenCalled();
     });
 
+    // TASK-744. The badge above is `mapPortalTier`, which prefers the portal's
+    // `deviceTier` stamp on purpose — it answers "what should this box default
+    // to", and a Max subscriber is allowed to run Flash here. Two boot scripts
+    // decide an ENTITLEMENT from a stamp in this store and one of them DELETES
+    // the cloud voice when it is not met, so the PLAN has to be written down
+    // beside the badge; this poll is the only thing on the box that ever gets a
+    // portal answer to write.
+    it("records the PLAN beside the device badge", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response(
+        // The exact shape TASK-744 is about: Max plan, box stamped Flash.
+        JSON.stringify({ tier: "max", deviceTier: "flash" }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_tier", "flash");
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", "pro");
+    });
+
+    it("clears the recorded plan when the portal answers that the account is unpaid", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "free", deviceTier: null }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", undefined);
+    });
+
+    it("records no plan at all when the portal did not answer", async () => {
+      // The false-failure guard, at the writer. An unreachable portal must not
+      // put a plan on record, because the boot scripts read a recorded plan as
+      // having been TOLD — and one of them deletes a working voice over it.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response("nope", { status: 503 }));
+
+      await GET();
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
+    });
+
     it("queries the portal even when local picker is unset so Free → Paid upgrades are visible without re-login", async () => {
       // Free users who paired without picking a paid pill ALSO need the
       // portal lookup so a later upgrade is detected without forcing

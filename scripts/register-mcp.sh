@@ -992,12 +992,13 @@ fi
 # forgets it on every web-server boot on hermes|dual. A Node boot hook would be a
 # second, unlocked writer racing this one.
 #
-# THE ENTITLEMENT IS THE PORTAL'S, not a guess: `clawai_tier` in
-# `data/config.json`, which `/setup-api/ai-models/status` refreshes from
-# `device-info` on its 30-second poll — the same stamp `speechEntitledTier()`
-# reads for the panel and `CLAWBOX_SPEECH_DEVICE_TIER` reads on the OpenClaw
-# side. `"pro"` is the DEVICE tier of the MAX plan; the two names are off by one
-# on purpose (CLAWBOX_AI_MODEL_BY_TIER in src/lib/clawbox-ai-models.ts).
+# THE ENTITLEMENT IS THE PORTAL'S, not a guess: `clawai_plan_tier` in
+# `data/config.json`, with `clawai_tier` behind it, both refreshed from
+# `device-info` by `/setup-api/ai-models/status` on its 30-second poll — the
+# same pair `speechEntitledTier()` reads for the panel and
+# `_clawai_entitlement_tier` reads on the OpenClaw side. `"pro"` is the tier of
+# the MAX plan; the two names are off by one on purpose
+# (CLAWBOX_AI_MODEL_BY_TIER in src/lib/clawbox-ai-models.ts).
 #
 # NOT KNOWING IS NOT AN ANSWER, in either direction, and that is the whole
 # false-success/false-failure guard here. A device store that is absent,
@@ -1141,8 +1142,34 @@ if not isinstance(store, dict):
     say("hold the device store is not an object")
 
 token = text(store.get("clawai_token"))
-tier = store.get("clawai_tier")
-tier = tier.strip() if isinstance(tier, str) else ""
+
+
+def stamped_tier(key):
+    """One tier stamp out of the device store, normalised, or "" for unknown.
+
+    `normalizeClawboxAiTier` admits exactly `flash` and `pro` and answers null
+    to everything else; a stamp we do not recognise is not evidence of anything,
+    least of all of a downgrade, so it collapses to the same "" as an absent one.
+    """
+    value = store.get(key)
+    value = value.strip().lower() if isinstance(value, str) else ""
+    return value if value in ("flash", ENTITLED_TIER) else ""
+
+
+# THE ENTITLEMENT IS THE PLAN, and the device stamp only when the plan is
+# unknown — `clawaiEntitlementTier` in src/lib/clawai-plan-tier.ts, transcribed
+# because a shell cannot import it and the suite pins the two together.
+#
+# `clawai_tier` is `mapPortalTier`'s answer and prefers the portal's
+# `deviceTier` STAMP deliberately: it answers "what should this box DEFAULT to",
+# and a Max subscriber is allowed to run Flash here. `clawai_plan_tier` is
+# `mapPortalPlanTier`'s — "what does this ACCOUNT pay for" — and
+# `clawbox-ai-portal-tier.ts` states the rule outright: "Read the first for a
+# default to write; read this one before refusing anything." This block both
+# refuses and WITHDRAWS, so it reads the plan, and falls back to the device
+# stamp only where the status poll has not answered yet — which is every box in
+# the field until it has run once (TASK-744).
+tier = stamped_tier("clawai_plan_tier") or stamped_tier("clawai_tier")
 
 cfg, why = load(os.environ["CLAWBOX_HERMES_CONFIG"], yaml.safe_load)
 if why == "absent":
