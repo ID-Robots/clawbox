@@ -2635,7 +2635,9 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(body.success).toBe(true);
       // Said, not swallowed: a clean `{success:true}` would leave the owner
       // wondering why the provider needs a restart before it answers.
-      expect(body.warning).toMatch(/legacy approvals file/i);
+      expect(body.warning).toMatch(/legacy exec-approvals file is blocking/i);
+      // And honest about the one case the boot path cannot clear on its own.
+      expect(body.warning).toMatch(/if it cannot/i);
       // And the credential it wrote is still where it wrote it.
       expect(mockFs.rename).not.toHaveBeenCalledWith(
         expect.stringMatching(/auth-profiles\.json$/),

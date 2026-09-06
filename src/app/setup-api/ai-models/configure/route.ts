@@ -2583,8 +2583,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             "[configure] doctor --fix is blocked by a legacy exec-approvals file, so the credential store"
             + " migration is deferred to the gateway's next start; the sign-in was written and is kept",
           );
-          credentialMigrationWarning = "Saved. Moving the sign-in into OpenClaw's credential store is waiting on"
-            + " a legacy approvals file; the gateway clears it and finishes the move on its next start.";
+          // Honest about the one case the boot path CANNOT clear: an approvals
+          // file that provably holds a decision of the owner's is left alone by
+          // design (TASK-737), and then the migration waits for him. The boot
+          // log carries the actionable NOTE; this says where to look.
+          credentialMigrationWarning = "Saved. A legacy exec-approvals file is blocking the move of this sign-in"
+            + " into OpenClaw's credential store; the gateway clears that on its next start, and says in the"
+            + " boot log what to move aside if it cannot.";
         }
       } catch (doctorErr) {
         const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
