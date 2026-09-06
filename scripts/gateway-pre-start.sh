@@ -220,6 +220,14 @@ export CLAWBOX_OPENCLAW_V2
 # box pays nothing and only a core bump — the state this exists for — pays the
 # CLI. The stamp is written only on success, so a failed repair is retried on
 # the next boot instead of being remembered as done.
+#
+# BUDGET. This is a blocking ExecStartPre under TimeoutStartSec=600
+# (config/clawbox-gateway.service), and the rest of the pre-start can itself
+# spend two minutes on a cold box. 60 + 180 + 60 is the whole of the worst
+# case here, and the doctor bound is the one the auth-profile repair below
+# already uses. Overrunning the unit's ceiling would have systemd kill a
+# migration halfway, which is worse than the refused config it is fixing —
+# so an overrun leaves the stamp unwritten and the next boot tries again.
 CLAWBOX_OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
 CLAWBOX_CONFIG_VALIDATED_STAMP="$CLAWBOX_ROOT/data/openclaw-config-validated"
 # Read by the plugin-entry pass further down, which reuses this run's warnings
@@ -299,17 +307,17 @@ then
   # "accepted". Time-boxed for the same reason as the version probe above — a
   # wedged CLI must cost this boot ten seconds of budget, not the unit's whole
   # TimeoutStartSec.
-  CLAWBOX_CONFIG_VALIDATE_OUTPUT="$(timeout -k 5 90 "$OPENCLAW_BIN" config validate 2>&1)" \
+  CLAWBOX_CONFIG_VALIDATE_OUTPUT="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate 2>&1)" \
     && CLAWBOX_CONFIG_ACCEPTED=1 || CLAWBOX_CONFIG_ACCEPTED=0
   if [ "$CLAWBOX_CONFIG_ACCEPTED" = "0" ]; then
     echo "  The installed OpenClaw core ($CLAWBOX_OPENCLAW_EFFECTIVE) refuses this config; running its own migrations..."
     printf '%s\n' "$CLAWBOX_CONFIG_VALIDATE_OUTPUT" | sed -n 's/^[[:space:]]*×[[:space:]]*/  refused: /p' >&2
     cp -p "$OPENCLAW_CONFIG" "$OPENCLAW_CONFIG.pre-v2-migration-$(date +%Y%m%d-%H%M%S)" 2>/dev/null \
       || echo "  WARN: could not back up $OPENCLAW_CONFIG before migrating it" >&2
-    if ! timeout -k 10 300 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
+    if ! timeout -k 10 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
       echo "  WARN: openclaw doctor --fix did not complete" >&2
     fi
-    CLAWBOX_CONFIG_VALIDATE_OUTPUT="$(timeout -k 5 90 "$OPENCLAW_BIN" config validate 2>&1)" \
+    CLAWBOX_CONFIG_VALIDATE_OUTPUT="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate 2>&1)" \
       && CLAWBOX_CONFIG_ACCEPTED=1 || CLAWBOX_CONFIG_ACCEPTED=0
     if [ "$CLAWBOX_CONFIG_ACCEPTED" = "1" ]; then
       echo "  Config migrated to the $CLAWBOX_OPENCLAW_EFFECTIVE layout"
