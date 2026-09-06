@@ -56,17 +56,31 @@ async function load() {
   return mod;
 }
 
-/** The anthropic manifest's real shape on 2026.8.1, cut to what matters. */
+/**
+ * The anthropic manifest's REAL nesting on 2026.8.1, cut to what matters:
+ * `modelCatalog.providers.<route>.models`, with the two routes the core ships.
+ * Copied from the installed file rather than invented, so these cases exercise
+ * the path a real manifest takes.
+ */
 const ANTHROPIC = {
   name: "anthropic",
-  providers: {
-    anthropic: {
-      modelCatalog: [
-        { id: "claude-opus-5", contextWindow: 1_000_000 },
-        { id: "claude-sonnet-5", contextWindow: 1_000_000 },
-        { id: "claude-opus-4-8", contextWindow: 1_000_000, status: "deprecated", replacedBy: "claude-opus-5" },
-        { id: "claude-haiku-4-5", contextWindow: 200_000 },
-      ],
+  modelCatalog: {
+    discovery: { anthropic: "refreshable" },
+    providers: {
+      "claude-cli": {
+        models: [
+          { id: "claude-opus-5", contextWindow: 1_000_000 },
+          { id: "claude-sonnet-5", contextWindow: 1_000_000 },
+        ],
+      },
+      anthropic: {
+        models: [
+          { id: "claude-opus-5", contextWindow: 1_000_000 },
+          { id: "claude-sonnet-5", contextWindow: 1_000_000 },
+          { id: "claude-opus-4-8", contextWindow: 1_000_000, status: "deprecated", replacedBy: "claude-opus-5" },
+          { id: "claude-haiku-4-5", contextWindow: 200_000 },
+        ],
+      },
     },
   },
 };
@@ -127,9 +141,16 @@ describe("coreModelRetired", () => {
     const { coreModelRetired } = await load();
     expect(coreModelRetired("openai", "gpt-5.5")).toBe(false);
 
-    await new Promise((r) => setTimeout(r, 12));
     writeManifest("openai", { models: [{ id: "gpt-5.5", status: "deprecated" }, { id: "gpt-5.6-sol" }] });
-    expect(coreModelRetired("openai", "gpt-5.5")).toBe(true);
+    // Past the stat floor, which exists so a payload of hundreds of rows costs
+    // one syscall rather than hundreds — not to hold an answer for a minute.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + 10_000);
+      expect(coreModelRetired("openai", "gpt-5.5")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not remember having found no manifest at all", async () => {

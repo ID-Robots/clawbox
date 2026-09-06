@@ -86,8 +86,8 @@ describe("catalog: a model the core's own catalogue has retired", () => {
       () => okChild(ANTHROPIC_LIVE) as unknown as ReturnType<typeof childProcess.spawn>,
     );
     const lifecycle = await import("@/lib/core-model-lifecycle");
-    vi.spyOn(lifecycle, "coreModelRetired").mockImplementation(
-      (provider: string, id: string) => provider === "anthropic" && id === "claude-opus-4-8",
+    vi.spyOn(lifecycle, "coreRetiredModels").mockImplementation(
+      (provider: string) => (provider === "anthropic" ? new Set(["claude-opus-4-8"]) : new Set()),
     );
     ({ GET } = await import("@/app/setup-api/ai-models/catalog/route"));
   });
@@ -141,5 +141,22 @@ describe("catalog: a model the core's own catalogue has retired", () => {
     const body = (await res.json()) as { models: { id: string }[]; defaultModelId: string };
     expect(body.models.map((m) => m.id)).toEqual(["claude-opus-5"]);
     expect(body.defaultModelId).toBe("claude-opus-5");
+  });
+
+  it("never filters the picker empty", async () => {
+    // The one failure this whole module must not have. If the core has retired
+    // everything this box enumerated, the honest picker is the one the box
+    // actually has — an empty one offers the customer nothing to do, and the
+    // lifecycle reader's own header names an emptied model list as the outcome
+    // it fails open to avoid.
+    const lifecycle = await import("@/lib/core-model-lifecycle");
+    vi.mocked(lifecycle.coreRetiredModels).mockImplementation(
+      () => new Set(["claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5"]),
+    );
+    await models();
+    await settle();
+    expect(await models()).toEqual(
+      expect.arrayContaining(["claude-opus-5", "claude-opus-4-8", "claude-haiku-4-5"]),
+    );
   });
 });

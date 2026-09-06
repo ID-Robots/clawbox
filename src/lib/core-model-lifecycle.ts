@@ -44,6 +44,19 @@ import { findOpenclawBin } from "@/lib/openclaw-config";
 /** What the harness treats as "do not offer this any more". */
 const RETIRED_STATUSES: ReadonlySet<string> = new Set(["deprecated", "disabled"]);
 
+/**
+ * How long a manifest read stands before the file is re-stat'ed.
+ *
+ * The re-stat exists because the in-app OpenClaw update runs inside this server
+ * (see `retiredFor`), and that is a once-in-a-while event — while
+ * `withoutRetiredModels` asks about every row of a payload, and the OpenRouter
+ * catalogue is ~423 rows. One `statSync` per row per request is a blocking
+ * syscall storm on a Jetson for a file that changes when someone taps Update.
+ * Five seconds is far shorter than any update takes and turns the storm into
+ * one stat per provider per five seconds.
+ */
+const STAT_FLOOR_MS = 5_000;
+
 interface CachedManifest {
   /** Retired ids, indexed under BOTH the raw manifest id and its last segment. */
   retired: Set<string>;
@@ -51,6 +64,8 @@ interface CachedManifest {
   file: string;
   mtimeMs: number;
   size: number;
+  /** When the file was last stat'ed, so a burst of lookups costs one syscall. */
+  checkedAt: number;
 }
 
 const cache = new Map<string, CachedManifest>();
@@ -133,6 +148,8 @@ function catalogueFor(manifest: unknown, provider: string): unknown {
 function retiredFor(provider: string): Set<string> {
   const cached = cache.get(provider);
   if (cached) {
+    const now = Date.now();
+    if (now - cached.checkedAt < STAT_FLOOR_MS) return cached.retired;
     // Re-stat rather than trust the process lifetime. The in-app OpenClaw-only
     // update (`openclaw_install` → `openclaw_patch` → `gateway_restart`) runs
     // INSIDE this server and deliberately does not touch ClawBox, so a core
@@ -141,7 +158,10 @@ function retiredFor(provider: string): Set<string> {
     // otherwise pin "nothing is retired" for the rest of that process's life.
     try {
       const stat = fsSync.statSync(cached.file);
-      if (stat.mtimeMs === cached.mtimeMs && stat.size === cached.size) return cached.retired;
+      if (stat.mtimeMs === cached.mtimeMs && stat.size === cached.size) {
+        cached.checkedAt = now;
+        return cached.retired;
+      }
     } catch {
       // The file went away: fall through and look again.
     }
@@ -164,7 +184,7 @@ function retiredFor(provider: string): Set<string> {
       // is NOT cached, so a half-written file is re-read rather than believed.
       return new Set();
     }
-    cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size });
+    cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
     return retired;
   }
   // Nothing found. Deliberately NOT cached: on a box with no core yet, or one
@@ -181,8 +201,23 @@ function retiredFor(provider: string): Set<string> {
  */
 export function coreModelRetired(provider: string, id: string): boolean {
   if (!provider || !id) return false;
-  return retiredFor(provider).has(id.trim());
+  return coreRetiredModels(provider).has(id.trim());
 }
+
+/**
+ * Every id the installed core has retired for this provider, in both the raw
+ * and last-segment forms.
+ *
+ * For a caller with a LIST to filter: resolve the set once and test against it,
+ * rather than asking per row. `withoutRetiredModels` filters payloads that run
+ * to hundreds of rows.
+ */
+export function coreRetiredModels(provider: string): ReadonlySet<string> {
+  if (!provider) return EMPTY;
+  return retiredFor(provider);
+}
+
+const EMPTY: ReadonlySet<string> = new Set();
 
 /** Test seam: forget the manifests so the next call reads them again. */
 export function resetCoreModelLifecycle(): void {

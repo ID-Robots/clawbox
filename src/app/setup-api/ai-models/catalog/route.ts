@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { coreModelRetired } from "@/lib/core-model-lifecycle";
+import { coreRetiredModels } from "@/lib/core-model-lifecycle";
 import { spawn } from "child_process";
 import { promises as fsp } from "fs";
 import path from "path";
@@ -706,7 +706,12 @@ function isOfferableModelId(provider: string, id: string): boolean {
  * which is what `curated-defaults-offerable.test.ts` is there to notice.
  */
 function withoutRetiredModels(payload: CatalogResponse): CatalogResponse {
-  const models = payload.models.filter((m) => !coreModelRetired(payload.provider, m.id));
+  // Resolved ONCE. A payload can run to hundreds of rows (the OpenRouter
+  // catalogue was measured at 423), and asking per row would put one blocking
+  // stat per row on the request thread.
+  const retired = coreRetiredModels(payload.provider);
+  if (retired.size === 0) return payload;
+  const models = payload.models.filter((m) => !retired.has(m.id));
   if (models.length === payload.models.length) return payload;
   // Never to empty. If the core has retired everything this box enumerated,
   // the honest picker is the one the box actually has — an empty one offers
