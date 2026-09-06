@@ -71,8 +71,16 @@ function fireBackup(): void {
   // "next run" — reports it. Same reason `clawkeep-memory-scheduler.ts`
   // clears at the top of its own `fire()`.
   clear();
-  // Best-effort: if a manual backup is already running the daemon will
-  // serialise via its own heartbeat lock, so we don't gate here.
+  // NOT gated on a run already being in flight, and the reason given here
+  // used to be false: "the daemon will serialise via its own heartbeat lock".
+  // There is no such lock — no pidfile, no flock, nothing in `daemon.py`,
+  // `runner.py` or `state.py` — so two `clawkeepd` processes will happily
+  // stage two multi-GB archives and upload both. It has been survivable
+  // because the window is small; raising the run cap to four hours for
+  // TASK-675's 12 GB archives widens it, since a manual backup started late
+  // in the evening can still be running when the nightly slot fires. Closing
+  // it properly is the daemon's own single-instance guard rather than a
+  // check here, which could only ever narrow the race.
   //
   // A scheduled run must create + upload a REAL backup — `idle: true` only
   // sends a heartbeat ping (and short-circuits within the heartbeat interval),
