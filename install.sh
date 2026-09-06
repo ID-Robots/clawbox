@@ -1882,6 +1882,134 @@ step_set_hostname() {
   apply_hostname "$(read_configured_hostname)"
 }
 
+# The owner's timezone, as the web server recorded it. TASK-514.
+#
+# PARSED, never sourced — same rule and the same reason as
+# read_configured_hostname: data/ is clawbox-writable and this runs as root from
+# the granted clawbox-root-update@set_timezone.service, so a `.` on this file
+# would be arbitrary root code execution for anything that can already run code
+# as clawbox.
+#
+# read_untrusted_env_value cannot be reused: its character class deliberately
+# excludes `/`, and every IANA zone but `UTC` contains one. The gate here is
+# therefore its own — the same shape rule as src/lib/timezone.ts's
+# canonicalTimeZone (Area/Location over a small alphabet, no `..`, no leading
+# `/`, no leading `-` so nothing reaches `timedatectl` as an option) — and then
+# the ONLY authority worth trusting for "is this a real zone": the zoneinfo
+# database on this device. That is not the same authority the route asked:
+# Node's ICU is case-insensitive and may carry a NEWER tzdata than a Jetson
+# image, so `europe/sofia` or `America/Ciudad_Juarez` can pass there and fail
+# here. The route canonicalises for that reason; this side still refuses, and
+# says so.
+#
+# FOUR outcomes, not two, because "no value", "a value this device refuses" and
+# "the file is not the one the route writes" call for different behaviour and
+# different remedies: 0 with the zone, 1 for "nothing recorded" (a genuine
+# no-op), 2 for "a value was recorded and this device will not take it", 3 for
+# "data/timezone.env is not the plain file the route writes". A step that
+# discards its input must not exit 0, and an operator reading the journal must
+# be able to tell `rm data/timezone.env` from "pick a zone this tzdata has".
+#
+# CLAWBOX_ZONEINFO_DIR is a TEST seam only: it is read in a root step whose
+# environment comes from systemd, never from the clawbox-writable tree, so it
+# cannot be used to widen what this accepts on a device.
+read_configured_timezone() {
+  local tz_env="$PROJECT_DIR/data/timezone.env" line tz
+  local zoneinfo="${CLAWBOX_ZONEINFO_DIR:-/usr/share/zoneinfo}"
+  # NOT A PLAIN FILE, first and loudly. `[ -f ]` FOLLOWS a symlink and is false
+  # for a directory, a FIFO, a socket and a device node, so the old order let
+  # every one of those shapes answer 1 — "nothing recorded", the one outcome
+  # step_set_timezone treats as a legitimate no-op and exits 0 on. data/ is
+  # clawbox-writable and this runs as ROOT: anything but the plain file the
+  # route writes is tampering, not silence. A FIFO matters twice over — the
+  # `grep` below would block on it for ever.
+  if [ -L "$tz_env" ] || { [ -e "$tz_env" ] && [ ! -f "$tz_env" ]; }; then
+    echo "Error: $tz_env is not the plain file the timezone route writes — refusing to read it." >&2
+    return 3
+  fi
+  [ -f "$tz_env" ] || return 1
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TIMEZONE=" "$tz_env" 2>/dev/null)" || return 1
+  tz="${line#*=}"
+  case "$tz" in
+    \"*\") tz="${tz#\"}"; tz="${tz%\"}" ;;
+    \'*\') tz="${tz#\'}"; tz="${tz%\'}" ;;
+  esac
+  [ -n "$tz" ] || return 1
+  case "$tz" in
+    /*|-*|*..*|*[!A-Za-z0-9._/+-]*) return 2 ;;
+  esac
+  # `timedatectl list-timezones` is systemd's OWN list and the exact set
+  # `set-timezone` will accept, so it is asked first and nothing here maintains
+  # a list of its own. The zoneinfo fallback covers a container without systemd
+  # (and is the seam the guard tests drive) — it needs its own exclusions,
+  # because `/usr/share/zoneinfo` is a directory of files rather than a list of
+  # zones: `zone.tab`, `iso3166.tab`, `leapseconds` and `tzdata.zi` are all
+  # regular files and none is a zone, and `posix/` and `right/` are mirror trees
+  # `timedatectl` refuses by name. Letting one through means a step that fails
+  # on every start for anything that can write data/timezone.env.
+  local list
+  if [ -z "${CLAWBOX_ZONEINFO_DIR:-}" ] && list="$(timedatectl list-timezones 2>/dev/null)" && [ -n "$list" ]; then
+    printf '%s\n' "$list" | grep -qxF -- "$tz" || return 2
+  else
+    case "$tz" in
+      *.*|leapseconds|posix/*|right/*) return 2 ;;
+    esac
+    [ -f "$zoneinfo/$tz" ] || return 2
+  fi
+  printf '%s' "$tz"
+}
+
+apply_timezone() {
+  local tz="${1:-}" out
+  if [ -z "$tz" ]; then
+    # Not an error: a box whose owner has never answered simply keeps the image
+    # default, and this step is a no-op rather than a red line in the update.
+    echo "  No timezone recorded, leaving the system zone alone"
+    return 0
+  fi
+  if [ "$(timedatectl show -p Timezone --value 2>/dev/null)" = "$tz" ]; then
+    echo "  System timezone already $tz"
+    return 0
+  fi
+  # stderr is CAPTURED, not discarded: `timedatectl`'s own refusal is the one
+  # line that says why, and throwing it away leaves a red step with no reason.
+  if out="$(timedatectl set-timezone "$tz" 2>&1)"; then
+    echo "  System timezone set to $tz"
+    return 0
+  fi
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, timedatectl unavailable — skipping"
+    return 0
+  fi
+  echo "  Warning: timedatectl set-timezone $tz failed: $out" >&2
+  return 1
+}
+
+step_set_timezone() {
+  local tz rc=0
+  tz="$(read_configured_timezone)" || rc=$?
+  case "$rc" in
+    0) apply_timezone "$tz" ;;
+    1) echo "  No timezone recorded, leaving the system zone alone" ;;
+    3)
+      # The file itself is wrong — a symlink, a directory, a FIFO. The reader
+      # has already said which path; the remedy is to remove it, which is a
+      # different action from the one below, so it gets its own line.
+      echo "Error: the timezone file was refused — leaving the system zone alone." >&2
+      return 1
+      ;;
+    *)
+      # A value WAS recorded and this device will not take it — a newer zone
+      # name than its tzdata, a spelling its filesystem does not match, or
+      # something that is not a zone at all. Failing loudly is the point: this
+      # used to print "no timezone recorded" and exit 0, so every layer above
+      # reported the change as applied while the box stayed on Etc/UTC.
+      echo "Error: the recorded timezone is not one this device carries — leaving the system zone alone." >&2
+      return 1
+      ;;
+  esac
+}
+
 is_safe_git_ref() {
   local ref="${1:-}"
   [ -n "$ref" ] || return 1
@@ -6974,7 +7102,7 @@ DISPATCH_STEPS=(
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
   # box ended up running edition-blind updates that reinstalled OpenClaw.
   edition_lock edition_foreign_teardown hermes_install hermes_edition
-  network_setup set_hostname setup_config system_config
+  network_setup set_hostname set_timezone setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme

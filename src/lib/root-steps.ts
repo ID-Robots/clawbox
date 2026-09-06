@@ -57,6 +57,27 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "rebuild_reboot",
   "restart_ap",
   "set_hostname",
+  // The owner's timezone, applied to the OS with `timedatectl set-timezone`.
+  //
+  // Read this as the privilege decision it is. `config/clawbox-sudoers` grants
+  // the launcher with NO argument spec (deliberately — the comment there says
+  // so), so adding a name to this list grants the capability to the `clawbox`
+  // ACCOUNT, not to one route: anything running as `clawbox` — the agent's
+  // shell, the Terminal app, the coding agent — can start
+  // `clawbox-run-root-step.sh set_timezone`, and it can write
+  // `data/timezone.env` too. What bounds it is the VALUE gate, not
+  // unreachability: install.sh's `read_configured_timezone` parses that file
+  // (never sources it), refuses traversal, absolute paths, option injection and
+  // shell metacharacters, and then requires the name to be one systemd's own
+  // `timedatectl list-timezones` carries — and it refuses the file outright if
+  // it is not the plain file the route writes. The worst outcome is a wrong
+  // clock: the value gate bounds what can reach `timedatectl`, and this API's
+  // GET reports the live `/etc/localtime` rather than the recorded value, so a
+  // wrong one is visible instead of silent.
+  //
+  // Off UI_ROOT_STEPS, like set_hostname, so `install/run-step` — the endpoint
+  // the agent's bearer reaches with a step NAME — cannot start it. TASK-514.
+  "set_timezone",
   "vnc_install",
   "vnc_refresh",
 ];
