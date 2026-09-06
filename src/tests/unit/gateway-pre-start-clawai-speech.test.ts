@@ -436,6 +436,46 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       expect(speech(cfg)).toEqual(own);
     });
 
+    it("is left alone when the owner has repointed it at a KEYLESS server of their own", () => {
+      // The keyed case above is the easy one. A local speech server — Kokoro,
+      // Piper — needs NO credential, so the address is the only thing that
+      // speaks for it. `openclaw config set` edits in place, which is why our
+      // `clawboxManaged` stamp is still sitting on an entry that has been
+      // theirs since the day they pointed it at their box.
+      const own = { baseUrl: "https://kokoro.local/v1", model: "kokoro", clawboxManaged: true };
+      const { cfg, changed, log } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+      expect(log).toContain("already names its own speech route");
+    });
+
+    it("does not delete that KEYLESS entry on a downgrade either", () => {
+      // The one irreversible action in the file. A stamp on an address that
+      // was never ours is not a licence to destroy the owner's configuration —
+      // and this is the case the keyed pair above cannot see.
+      const own = { baseUrl: "https://kokoro.local/v1", model: "kokoro", clawboxManaged: true };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: own } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+
+    it("still repairs our own stamped entry left on a RETIRED proxy address", () => {
+      // The reason the rule stopped being an equality test against the current
+      // URL: a box linked under a previous address carries an entry WE wrote,
+      // pointing at an endpoint that no longer answers. That address is still
+      // one of ours, so it is still ours to repair.
+      const own = { baseUrl: "https://openclawhardware.dev/api/ai", model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED };
+      const { cfg, changed } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
+    });
+
     it("is left alone when it carries the owner's own key on a route of ours that has moved", () => {
       // The credential is what decides after the stamp, and `sk-` is not ours
       // however the endpoint reads.
