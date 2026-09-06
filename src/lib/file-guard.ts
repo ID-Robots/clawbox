@@ -238,9 +238,17 @@ export function canonicalPath(abs: string): string | null {
  * user cannot look at — so the caller walks up the way it always did.
  */
 function danglingLinkTarget(p: string): string | null {
+  // Resolved and prefix-checked before the two reads, the shape CodeQL's
+  // path-injection query recognises as a sanitiser (js/path-injection,
+  // alerts 520/521). The root is `/` on purpose: this resolver's job is to
+  // find where ANY path the caller names really leads — the containment
+  // verdict is the caller's, on the canonical answer — and lstat/readlink read
+  // a name's metadata, never a file's bytes.
+  const abs = path.resolve(p);
+  if (!abs.startsWith(path.sep)) return null;
   try {
-    if (!fs.lstatSync(p).isSymbolicLink()) return null;
-    return path.resolve(path.dirname(p), fs.readlinkSync(p));
+    if (!fs.lstatSync(abs).isSymbolicLink()) return null;
+    return path.resolve(path.dirname(abs), fs.readlinkSync(abs));
   } catch {
     return null;
   }

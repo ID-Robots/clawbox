@@ -431,8 +431,18 @@ export async function POST(req: NextRequest) {
       // told nothing landed, and a later upload of the same name would
       // silently inherit whatever bytes did.
       await Promise.allSettled(pendingWrites);
+      // Containment re-established HERE, not trusted from the write: every
+      // entry is a safePath() answer, but the check that admitted it governed
+      // the write inside the promise, and a guard does not carry across that
+      // closure into this catch block — CodeQL's path-injection query says so
+      // (js/path-injection, alert 519), and it is right that an unlink should
+      // vouch for its own argument. The same resolve-then-prefix shape
+      // safePath uses; it never refuses a path that was written.
+      const base = path.resolve(BASE_DIR);
       for (const p of written) {
-        try { await fsp.unlink(p); } catch { /* best effort */ }
+        const target = path.resolve(p);
+        if (!target.startsWith(base + path.sep)) continue;
+        try { await fsp.unlink(target); } catch { /* best effort */ }
       }
       const { status, body } = refusal(err);
       return NextResponse.json(body, { status });
