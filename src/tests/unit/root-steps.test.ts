@@ -2,7 +2,7 @@ import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   SELF_UPDATING_ROOT_STEPS,
   UI_ROOT_STEPS,
@@ -10,6 +10,10 @@ import {
   isUiRootStep,
   maySelfUpdate,
 } from "@/lib/root-steps";
+
+// The libexec test below runs the real install_root_libexec under bash; a
+// spawning test carries both ceilings (src/tests/unit/test-timeout-hygiene.test.ts).
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 /**
  * The root-privilege boundary is: clawbox-setup (User=clawbox) →
