@@ -13,6 +13,14 @@ import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 // configure route can reach the same answer from the same cache (TASK-481).
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import { profileProviderId } from "@/lib/chatgpt-subscription";
+// The portal's verdict on this box's credential, written where the ROOT boot
+// script can read it: `scripts/gateway-pre-start.sh` decides on every gateway
+// start whether to declare the agent's image path, and the pinned core has no
+// back-off of its own to fall back on (TASK-727).
+import {
+  clearPersistedClawaiCredentialRefusal,
+  persistClawaiCredentialRefusal,
+} from "@/lib/clawai-credential-refusal";
 
 export const dynamic = "force-dynamic";
 
@@ -231,8 +239,18 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         if (lookup.tier !== localTier) {
           await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
         }
+        // The portal ANSWERED about the credential this box holds, so any
+        // refusal recorded against it is over. Same poll, same store, same
+        // "write only on change" discipline as the tier stamp above — the
+        // helper reads before it writes.
+        await clearPersistedClawaiCredentialRefusal();
       } else {
         clawaiTokenRejected = lookup.rejected;
+        // `rejected` is the PORTAL naming this credential as the reason, never
+        // a bare 401/403 off the wire (see `portalRefusedTheToken`) — the same
+        // bar `noteClawaiCredentialRefused` insists on. `unreachable` without
+        // it says nothing about the credential and records nothing.
+        if (lookup.rejected) await persistClawaiCredentialRefusal();
       }
     }
   }

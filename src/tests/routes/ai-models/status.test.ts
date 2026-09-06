@@ -325,6 +325,59 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("picker");
     });
 
+    it("writes the portal's refusal where the root boot script can read it", async () => {
+      // TASK-727. The pre-start decides on every gateway start whether to
+      // declare the agent's image path, and the pinned core has no back-off to
+      // fall back on — so "the portal refused this credential" has to leave
+      // this process. `clawai_credential_refused_at` is the same store the tier
+      // stamp above uses, and `CLAWBOX_DEVICE_STORE` is the same file.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token", type: "auth_error" } }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.any(Number),
+      );
+    });
+
+    it("clears it again the moment the portal accepts the credential", async () => {
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      // A refusal is on record; the tier is the one the portal is about to
+      // confirm, so the tier write below cannot be what is asserted.
+      mockGetConfigValue.mockImplementation(async (key: string) =>
+        key === "clawai_credential_refused_at" ? 1_788_000_000_000 : "pro");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      await GET();
+
+      expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_credential_refused_at", undefined);
+    });
+
+    it("records nothing when the portal merely failed to answer", async () => {
+      // The false-failure half of the persisted fact: an unreachable portal
+      // would stand the image path down at the next boot on a box whose
+      // credential is perfectly good.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(undefined);
+      fetchSpy.mockResolvedValue(new Response("upstream is down", { status: 503 }));
+
+      await GET();
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith(
+        "clawai_credential_refused_at",
+        expect.anything(),
+      );
+    });
+
     it("does not call an unreachable portal a rejection", async () => {
       // The false-failure half. A 500, a timeout or a dead uplink says nothing
       // about the credential, and telling a customer on a train to re-link a

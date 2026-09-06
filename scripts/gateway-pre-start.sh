@@ -1830,6 +1830,42 @@ def _is_our_image_row(_row):
     return _url_host(_row_base_url) in _clawbox_proxy_hosts
 
 
+# Device-store key holding "the proxy has refused this box's ClawBox AI
+# credential", written by `/setup-api/ai-models/status` on the same 30-second
+# poll that stamps `clawai_tier`, from the portal's own `invalid_token` /
+# `missing_token` verdict — and cleared by every path that writes a new
+# credential (`forgetClawaiCredentialRefusal`). The stamp is a millisecond
+# timestamp so an operator reading data/config.json can see WHEN, but nothing
+# here reads the value beyond "is it a positive number": the fact does not
+# decay, and a TTL in the boot script would re-arm a path the proxy still
+# refuses, which is the storm this stand-down exists to end.
+CLAWBOX_CREDENTIAL_REFUSED_KEY = "clawai_credential_refused_at"
+
+
+def _clawai_credential_refused():
+    """Has the proxy refused this box's ClawBox AI credential?
+
+    Unreadable, absent, malformed and non-numeric all collapse to False on
+    purpose, exactly as `_clawai_device_tier()` collapses them to None: every
+    one of them means "nobody has told us this credential is dead", and a box
+    we have not been told about is left armed. Failing the other way would take
+    the picture button off every box whose Next app has never written a
+    setting.
+    """
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return False
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(_store, dict):
+        return False
+    _at = _store.get(CLAWBOX_CREDENTIAL_REFUSED_KEY)
+    return isinstance(_at, (int, float)) and not isinstance(_at, bool) and _at > 0
+
+
 # Only boxes that actually have ClawBox AI get an image provider — the token is
 # the entitlement. Read it from where the configure route already put it rather
 # than re-reading data/config.json, and take the proxy URL off the same entry so
@@ -1921,36 +1957,11 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             openai_provider["apiKey"] = _clawai_token
             changed = True
 
-        # Upsert our entry, preserving any other model entries the box carries.
-        _openai_models = openai_provider.get("models")
-        if not isinstance(_openai_models, list):
-            _openai_models = []
-            openai_provider["models"] = _openai_models
-        _our_entries = [m for m in _openai_models if _is_our_image_row(m)]
-        if not _our_entries:
-            _openai_models.append({
-                "id": CLAWBOX_IMAGE_MODEL_ID,
-                "name": CLAWBOX_IMAGE_MODEL_NAME,
-                "baseUrl": _image_base_url,
-            })
-            changed = True
-        # Every duplicate of our row is repaired the same way: a stale copy
-        # left by an older upsert is offered by the same pickers as the live one.
-        for _entry in _our_entries:
-            if not isinstance(_entry.get("name"), str) or not _entry.get("name").strip():
-                _entry["name"] = CLAWBOX_IMAGE_MODEL_NAME
-                changed = True
-            if _entry.get("baseUrl") != _image_base_url:
-                _entry["baseUrl"] = _image_base_url
-                changed = True
-            # An `api` here widens where the image model is offered as a
-            # conversational model that fails on every turn — see the header
-            # above for why removing it narrows rather than closes that. Only
-            # ever ours to remove, so drop it wherever it appears.
-            if "api" in _entry:
-                del _entry["api"]
-                changed = True
-
+        # Resolved before EITHER arm below, because both ask the same question
+        # of the slot: the upsert claims only an empty one, and the stand-down
+        # takes back only one still holding exactly what it wrote into an empty
+        # one.
+        #
         # Only claim the slot when it is empty. A box whose owner pointed image
         # generation at their own provider keeps that choice.
         #
@@ -1987,13 +1998,103 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
                 and any(isinstance(ref, str) and ref.strip() for ref in _image_model_fallbacks)
             )
         )
-        if not _has_image_model:
-            if _clawbox_v2:
-                _media_models["image"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
-                agents_defaults["mediaModels"] = _media_models
-            else:
-                agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
-            changed = True
+        _openai_models = openai_provider.get("models")
+        _our_entries = (
+            [m for m in _openai_models if _is_our_image_row(m)]
+            if isinstance(_openai_models, list)
+            else []
+        )
+
+        if _clawai_credential_refused():
+            # THE OTHER DIRECTION, and it has to exist or this migration is
+            # one-way — the same shape the cloud voice below already has, and
+            # for a sharper reason. There is no back-off anywhere downstream of
+            # this file: the pinned core's `openai` extension declares an image
+            # provider with nothing beside it but `authSignals`, and
+            # `authSignals` is a static availability gate (it asks whether a
+            # credential is CONFIGURED, never what a response said); the request
+            # is the bundled OpenAI SDK's, whose `shouldRetry` covers
+            # 408/409/429/5xx and is false for 401 and 403. So the only lever
+            # the harness gives us is whether the path is declared at all, and
+            # a box left armed over a refused credential spends refused calls
+            # for as long as it is switched on (6,554 in twelve hours from one
+            # box, TASK-727).
+            #
+            # Take back ONLY what we wrote, and nothing that has since become
+            # somebody's configuration:
+            #   - the slot, when it still holds exactly the one key we write
+            #     into an empty one. An owner who added fallbacks beside our
+            #     primary owns the object now, and deleting the key would take
+            #     their fallbacks with it.
+            #   - our own rows, positively identified by `_is_our_image_row` —
+            #     never every row that happens to share the id — and only on a
+            #     boot where the slot was ours or absent, because a slot the
+            #     owner aimed at that id would be left naming a row we had
+            #     removed.
+            # `models.providers.openai.apiKey` is deliberately NOT removed: the
+            # channel-audio and cloud-voice migrations below take their bearer
+            # from that same field, and their own gates decide their fate.
+            # Ownership of the slot is unchanged by a dead credential either,
+            # so `_clawai_openai_route_is_ours` stays true.
+            _slot_is_ours = (
+                isinstance(_image_model_cfg, dict)
+                and set(_image_model_cfg.keys()) == {"primary"}
+                and _image_model_cfg.get("primary") == CLAWBOX_IMAGE_MODEL_REF
+            )
+            if _slot_is_ours or _image_model_cfg is None:
+                _stood_down = False
+                if _slot_is_ours:
+                    if _clawbox_v2 and isinstance(_media_models.get("image"), dict):
+                        del _media_models["image"]
+                    else:
+                        del agents_defaults["imageGenerationModel"]
+                    _stood_down = True
+                if _our_entries:
+                    openai_provider["models"] = [
+                        m for m in _openai_models if not _is_our_image_row(m)
+                    ]
+                    _stood_down = True
+                if _stood_down:
+                    print(
+                        "  Removed the ClawBox AI image model: the proxy has refused this box's credential"
+                    )
+                    changed = True
+        else:
+            # Upsert our entry, preserving any other model entries the box carries.
+            if not isinstance(_openai_models, list):
+                _openai_models = []
+                openai_provider["models"] = _openai_models
+            if not _our_entries:
+                _openai_models.append({
+                    "id": CLAWBOX_IMAGE_MODEL_ID,
+                    "name": CLAWBOX_IMAGE_MODEL_NAME,
+                    "baseUrl": _image_base_url,
+                })
+                changed = True
+            # Every duplicate of our row is repaired the same way: a stale copy
+            # left by an older upsert is offered by the same pickers as the live one.
+            for _entry in _our_entries:
+                if not isinstance(_entry.get("name"), str) or not _entry.get("name").strip():
+                    _entry["name"] = CLAWBOX_IMAGE_MODEL_NAME
+                    changed = True
+                if _entry.get("baseUrl") != _image_base_url:
+                    _entry["baseUrl"] = _image_base_url
+                    changed = True
+                # An `api` here widens where the image model is offered as a
+                # conversational model that fails on every turn — see the header
+                # above for why removing it narrows rather than closes that. Only
+                # ever ours to remove, so drop it wherever it appears.
+                if "api" in _entry:
+                    del _entry["api"]
+                    changed = True
+
+            if not _has_image_model:
+                if _clawbox_v2:
+                    _media_models["image"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
+                    agents_defaults["mediaModels"] = _media_models
+                else:
+                    agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
+                changed = True
 
 # Migration: ClawBox AI speech to text.
 #

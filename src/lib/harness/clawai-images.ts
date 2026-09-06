@@ -386,7 +386,7 @@ export async function generateClawaiImageBytes(
     // can come from an edge rule, a rate-limit page, an interception proxy or
     // a plan gate, and remembering one of those would hide the button and tell
     // a customer with a perfectly good credential to re-pair the device.
-    if (await proxyRefusedClawaiCredential(res)) noteClawaiCredentialRefused(res.status, generation);
+    if (await proxyRefusedClawaiCredential(res)) await noteClawaiCredentialRefused(res.status, generation);
     // The STATUS decides what is SAID, never the body. An upstream error body is allowed to
     // quote the request that caused it, and this request carried a bearer
     // token — the same reason the transcription route relays a status and

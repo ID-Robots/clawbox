@@ -169,7 +169,7 @@ export async function POST(request: Request) {
     // A refusal the proxy gave the token being replaced is about that token,
     // not this one. Dropped here as well as in `applyClawaiToHermes`, because a
     // paste that never reaches the apply still changed the credential.
-    forgetClawaiCredentialRefusal();
+    await forgetClawaiCredentialRefusal();
   }
 
   const token = suppliedToken || (await readToken());

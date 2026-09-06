@@ -309,7 +309,7 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
     // `missing_token` / `invalid_token`; a bare 401/403 can be an edge rule or
     // a plan gate, and remembering one of those would mute the microphone on a
     // box whose credential is fine. Only the proxy's own verdict is recorded.
-    if (await proxyRefusedClawaiCredential(res)) noteClawaiCredentialRefused(res.status, generation);
+    if (await proxyRefusedClawaiCredential(res)) await noteClawaiCredentialRefused(res.status, generation);
     const status = res.status === 401 || res.status === 403
       ? 503
       : res.status >= 400 && res.status < 500 ? 400 : 502;

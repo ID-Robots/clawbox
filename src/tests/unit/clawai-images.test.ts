@@ -412,7 +412,7 @@ describe("generateClawaiImage", () => {
     expect(refuse).toHaveBeenCalledTimes(1);
 
     linkDevice("claw_freshtoken000000000000000000");
-    (await import("@/lib/harness/credentials")).forgetClawaiCredentialRefusal();
+    await (await import("@/lib/harness/credentials")).forgetClawaiCredentialRefusal();
     const accept = vi.fn(async () => jsonResponse(imageResponse()));
     const result = await generateClawaiImage("x", { fetchImpl: accept });
     expect(accept).toHaveBeenCalledTimes(1);
@@ -434,7 +434,7 @@ describe("generateClawaiImage", () => {
 
     // And it comes back with a working credential, without a restart.
     linkDevice("claw_freshtoken000000000000000000");
-    (await import("@/lib/harness/credentials")).forgetClawaiCredentialRefusal();
+    await (await import("@/lib/harness/credentials")).forgetClawaiCredentialRefusal();
     await expect(clawaiImageRouteReachable(probe)).resolves.toBe(true);
   });
 

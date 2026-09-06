@@ -77,11 +77,11 @@ type OpenAiModelEntry = { id?: string; name?: string; baseUrl?: string; api?: st
  * `changed`) — mock at that boundary and nothing else, so the migration logic
  * under test is 100% the shipped bytes.
  */
-function migrate(cfg: Config, v2 = false): { cfg: Config; changed: boolean; log: string } {
+function migrate(cfg: Config, v2 = false, store?: DeviceStore): { cfg: Config; changed: boolean; log: string } {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(cfg));
   const program = [
-    "import json, sys",
+    "import json, os, sys",
     "cfg = json.load(open(sys.argv[1]))",
     'models_providers = cfg.setdefault("models", {}).setdefault("providers", {})',
     'agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})',
@@ -94,8 +94,32 @@ function migrate(cfg: Config, v2 = false): { cfg: Config; changed: boolean; log:
   // The block prints progress lines of its own (the real script's stdout is the
   // boot log), so the result is the LAST line and everything before it is what
   // the operator would read. Both are asserted on below.
-  const lines = execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim().split("\n");
+  const lines = execFileSync("python3", ["-c", program, file], {
+    encoding: "utf-8",
+    env: { ...process.env, CLAWBOX_DEVICE_STORE: deviceStorePath(store) },
+  }).trim().split("\n");
   return { ...JSON.parse(lines[lines.length - 1]), log: lines.slice(0, -1).join("\n") };
+}
+
+/**
+ * The device store `CLAWBOX_DEVICE_STORE` points at, as this block reads it.
+ *
+ * `undefined` writes no file at all — a box whose Next app has never saved a
+ * setting, which is the state every case above this one runs in and the state
+ * the migration has always been exercised against.
+ */
+type DeviceStore = { body: string } | Record<string, unknown>;
+
+function deviceStorePath(store?: DeviceStore): string {
+  const file = path.join(dir, "device-store.json");
+  // Removed rather than skipped: a test that migrates twice in one `dir` would
+  // otherwise keep whatever the FIRST call wrote, and "no store" would silently
+  // mean "the previous store".
+  if (store === undefined) { rmSync(file, { force: true }); return file; }
+  writeFileSync(file, typeof (store as { body?: unknown }).body === "string"
+    ? (store as { body: string }).body
+    : JSON.stringify(store));
+  return file;
 }
 
 /** A box provisioned with ClawBox AI: portal token + proxy on the deepseek entry. */
@@ -746,5 +770,151 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
       true,
     );
     expect(mediaImage(cfg)).toEqual({ primary: "openai/their-pick" });
+  });
+});
+
+/**
+ * TASK-727, second half: the agent's own image path.
+ *
+ * The pinned core has no back-off and no disable-on-refusal for image
+ * generation — measured against openclaw@2026.8.1 on a box: the `openai`
+ * extension declares `contracts.imageGenerationProviders` with nothing beside
+ * it but `imageGenerationProviderMetadata.openai.authSignals`, and that is a
+ * static AVAILABILITY gate (`toolMetadataPasses` asks whether a credential is
+ * configured, never what a response said); the request itself is the bundled
+ * OpenAI SDK's, whose `shouldRetry` covers 408/409/429/5xx and returns false
+ * for 401 and 403. So nothing downstream of this script ever stops asking, and
+ * the only lever the harness gives us is the one this block pulls: whether the
+ * image path is declared at all.
+ *
+ * Which made this migration's one-wayness the whole defect. It armed
+ * `models.providers.openai` and the image slot on any `claw_`-prefixed token,
+ * every boot, forever — with no arm in the other direction, unlike the cloud
+ * voice forty lines below it. A box whose credential the proxy has PERMANENTLY
+ * refused therefore had the picture path re-declared at every gateway start,
+ * and the agent went on spending refused calls on it (6,554 in twelve hours
+ * from one box, ~34/min at the peak).
+ */
+describe.skipIf(!hasPython3)("standing down when the credential has been refused", () => {
+  const REFUSED = { clawai_credential_refused_at: 1_788_000_000_000 };
+
+  /** The box as this migration leaves an entitled one: our row, our slot. */
+  function armedBox(v2 = false): Config {
+    return migrate(pairedBox(), v2).cfg;
+  }
+
+  function mediaImage(cfg: Config): unknown {
+    const agents = (cfg.agents ?? {}) as { defaults?: { mediaModels?: { image?: unknown } } };
+    return agents.defaults?.mediaModels?.image;
+  }
+
+  it("does not arm the image path on a box whose credential the proxy has refused", () => {
+    const { cfg, changed } = migrate(pairedBox(), false, REFUSED);
+
+    expect(imageGenerationModel(cfg)).toBeUndefined();
+    expect(imageEntry(cfg)).toBeUndefined();
+    // `changed` is still true: the credential refresh onto
+    // models.providers.openai.apiKey happens either way, because that field is
+    // the bearer for channel audio and the cloud voice, not just for pictures.
+    expect(changed).toBe(true);
+  });
+
+  it("takes back the row and the slot it wrote itself", () => {
+    const { cfg, changed, log } = migrate(armedBox(), false, REFUSED);
+
+    expect(imageGenerationModel(cfg)).toBeUndefined();
+    expect(imageEntry(cfg)).toBeUndefined();
+    expect(changed).toBe(true);
+    expect(log).toContain("Removed the ClawBox AI image model");
+  });
+
+  it("takes back the v2 home too", () => {
+    const { cfg, changed } = migrate(armedBox(true), true, REFUSED);
+
+    expect(mediaImage(cfg)).toBeUndefined();
+    expect(imageEntry(cfg)).toBeUndefined();
+    expect(changed).toBe(true);
+  });
+
+  it("re-arms once the refusal is cleared — a re-linked box gets its pictures back", () => {
+    const stoodDown = migrate(armedBox(), false, REFUSED).cfg;
+    const { cfg, changed } = migrate(stoodDown);
+
+    expect(changed).toBe(true);
+    expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+    expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
+  });
+
+  it("is idempotent — a second refused boot reports no change", () => {
+    const once = migrate(armedBox(), false, REFUSED);
+    const twice = migrate(once.cfg, false, REFUSED);
+
+    expect(twice.changed).toBe(false);
+    expect(twice.cfg).toEqual(once.cfg);
+  });
+
+  it("leaves the provider apiKey alone — the channel-audio surface reads the same slot", () => {
+    // `tools.media.audio` takes its bearer from models.providers.openai.apiKey
+    // (the migration below this one relies on it). Taking the picture path back
+    // must not silently take voice transcription with it.
+    const { cfg } = migrate(armedBox(), false, REFUSED);
+
+    expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
+  });
+
+  it("leaves an image model the owner chose", () => {
+    const { cfg } = migrate(
+      pairedBox({ agents: { defaults: { imageGenerationModel: { primary: "openai/their-pick" } } } }),
+      false,
+      REFUSED,
+    );
+
+    expect(imageGenerationModel(cfg)).toEqual({ primary: "openai/their-pick" });
+    expect(imageEntry(cfg)).toBeUndefined();
+  });
+
+  it("leaves our primary alone once the owner has added fallbacks to it", () => {
+    // We only ever wrote `{primary: <our ref>}` into an EMPTY slot. Anything
+    // else in the object is theirs, and deleting the key would take it with us.
+    const owned = { primary: CLAWBOX_AI_IMAGE_MODEL, fallbacks: ["openai/their-backup"] };
+    const { cfg } = migrate(
+      pairedBox({ agents: { defaults: { imageGenerationModel: owned } } }),
+      false,
+      REFUSED,
+    );
+
+    expect(imageGenerationModel(cfg)).toEqual(owned);
+  });
+
+  it("leaves an owner's own gpt-image-1-mini row on their own endpoint", () => {
+    const theirs = { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "Mine", baseUrl: "https://llm.home.lan/v1" };
+    const { cfg, changed } = migrate(
+      pairedBox({
+        models: {
+          providers: {
+            deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+            openai: { apiKey: "claw_token123", models: [theirs] },
+          },
+        },
+      }),
+      false,
+      REFUSED,
+    );
+
+    expect(openaiModels(cfg)).toEqual([theirs]);
+    expect(changed).toBe(false);
+  });
+
+  it.each([
+    ["a store that is not there at all", undefined],
+    ["a store that is not JSON", { body: "{" } as DeviceStore],
+    ["a store that is not an object", { body: "[]" } as DeviceStore],
+    ["a store with no refusal recorded", {} as DeviceStore],
+    ["a refusal stamp that is not a number", { clawai_credential_refused_at: "yes" } as DeviceStore],
+  ])("arms as before over %s — not knowing is not a refusal", (_label, store) => {
+    const { cfg } = migrate(pairedBox(), false, store);
+
+    expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+    expect(imageEntry(cfg)?.id).toBe(CLAWBOX_AI_IMAGE_MODEL_ID);
   });
 });

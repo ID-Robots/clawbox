@@ -1241,7 +1241,7 @@ async function configureClawboxAi(
   // against the very token that was refused. This is what makes "re-link the
   // device" — the instruction every refusal prints — take effect on the next
   // call rather than after a timer. See src/lib/harness/credentials.ts.
-  forgetClawaiCredentialRefusal();
+  await forgetClawaiCredentialRefusal();
 
   let snapshot: OpenClawConfig | null = null;
   try {

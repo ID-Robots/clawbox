@@ -344,7 +344,7 @@ export async function applyClawaiToHermes(
     // costs nothing; this one asserts something FAILED, so dropping it early
     // costs traffic.
     if (r.code === 0 && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
-      forgetClawaiCredentialRefusal();
+      await forgetClawaiCredentialRefusal();
     }
     // `unset` of an absent key is a no-op; only a failing `set` is fatal.
     if (r.code !== 0 && args[1] === "set") {
