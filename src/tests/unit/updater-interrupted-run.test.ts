@@ -23,14 +23,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  *   … every step "pending", "currentStepIndex":-1,
  *   "drift":{…"codes":["checkout-dirty"]}}
  *
- * `checkout-dirty` is part of the signature rather than a symptom of the branch
- * under test: the checkout had already been synced to the new commit while the
- * build on disk was still the old one — i.e. the first half HAD run, and then
- * the process was gone.
+ * `checkout-dirty` is part of the signature and NOT evidence about the run: it
+ * comes from `git status --porcelain` being non-empty (src/lib/build-identity.ts),
+ * which the e2e container permanently is, and says nothing about whether the
+ * checkout moved — that would be `build-predates-checkout` or
+ * `build-from-other-commit`, and neither is in the captured state. No artefact
+ * from those six runs records whether `update_in_progress` was set, so this file
+ * pins the BEHAVIOUR — an interrupted run is no longer silent — rather than
+ * claiming to be the cause of them.
  *
  * The lock is the evidence and it is already on disk. Held with nothing to
- * resume means an update was interrupted, and the honest answer is a failure
- * with that cause — not silence.
+ * resume, and no completed run to explain it, means an update was interrupted —
+ * and the verdict is written back, because the fault being detected is "the web
+ * server keeps being replaced" and a verdict kept in memory is one the next
+ * replacement erases.
  */
 
 vi.mock("@/lib/config-store", () => ({
@@ -48,10 +54,17 @@ const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
 
 /** The disk as this box would have it after the run was lost. */
-function diskState({ locked, continuation }: { locked: boolean; continuation?: string }) {
+function diskState({
+  locked,
+  continuation,
+  completed = false,
+  interruptedAt,
+}: { locked: boolean; continuation?: string; completed?: boolean; interruptedAt?: string }) {
   mockGet.mockImplementation(async (key: string) => {
     if (key === "update_in_progress") return locked ? true : undefined;
     if (key === "update_needs_continuation") return continuation;
+    if (key === "update_completed") return completed ? true : undefined;
+    if (key === "update_interrupted_at") return interruptedAt;
     return undefined;
   });
 }
@@ -118,6 +131,37 @@ describe("an update whose process was replaced is reported, not forgotten", () =
   // src/tests/unit/updater.test.ts ("resumes the second half…", and the three
   // refusals around it). It is deliberately not re-driven here: it launches a
   // real run, which this file's `exec` mock never settles.
+
+  it("remembers it, so a second restart does not return the box to silence", async () => {
+    // The fault being detected is "the web server keeps being replaced". A
+    // process that reports the verdict in memory and then dies takes the only
+    // record with it, and the next one finds a clean disk and answers idle —
+    // for good. So the release WRITES the verdict.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: true });
+    await updater.checkContinuation();
+    expect(mockSet).toHaveBeenCalledWith("update_interrupted_at", expect.any(String));
+
+    // The next process: a clean disk except for the record.
+    updater.resetUpdateState();
+    diskState({ locked: false, interruptedAt: "2026-09-06T09:00:00.000Z" });
+    await updater.checkContinuation();
+    expect(updater.getUpdateState().phase).toBe("failed");
+  });
+
+  it("says nothing about a run that FINISHED and only failed to release its lock", async () => {
+    // clearUpdateLock is documented to fail softly and launchUpdate fires it
+    // unawaited, so a leftover flag over a completed run is a real state.
+    // Reporting there would tell the owner to re-run an update that worked.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({ locked: true, completed: true });
+
+    await updater.checkContinuation();
+
+    expect(updater.getUpdateState().phase).toBe("idle");
+    expect(err).not.toHaveBeenCalled();
+    expect(mockSet).not.toHaveBeenCalledWith("update_interrupted_at", expect.any(String));
+  });
 
   it("does not report a box whose update finished and left the lock behind as interrupted twice", async () => {
     // The verdict is a state, not a marker, so a second poll on the same boot

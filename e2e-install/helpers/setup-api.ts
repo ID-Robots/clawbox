@@ -412,16 +412,22 @@ async function diagnoseLostUpdate(): Promise<string> {
     "systemctl", "show", "clawbox-setup.service",
     "-p", "NRestarts", "-p", "ActiveEnterTimestamp", "-p", "ExecMainStartTimestamp", "-p", "Result",
   ]);
-  await ask("the update lock and continuation flag on disk", [
+  await ask("the updater's own keys on disk", [
     "bash", "-lc",
     "python3 -c \"import json;d=json.load(open('/home/clawbox/clawbox/data/config.json'));"
-    + "print({k:d.get(k) for k in ('update_in_progress','update_needs_continuation')})\" 2>&1 || true",
+    + "print({k:d.get(k) for k in ('update_in_progress','update_needs_continuation',"
+    + "'update_interrupted_at','update_completed','update_completed_at')})\" 2>&1 || true",
   ]);
-  await ask("the last 40 web-server journal lines", [
-    "bash", "-lc", "journalctl -u clawbox-setup.service -n 40 --no-pager 2>&1 || true",
-  ]);
-  await ask("root update steps this boot", [
-    "bash", "-lc", "journalctl -u 'clawbox-root-update@*' -n 40 --no-pager 2>&1 || true",
+  // REDACTED, and only the web server's own unit. This message becomes a
+  // Playwright error and is uploaded as a CI artifact on a PUBLIC repository,
+  // where GitHub's `***` masking does not reach; the container is started with
+  // real provider keys in its environment (e2e-install/.env.test). Anything
+  // that looks like a token is replaced before it can be written down, and the
+  // `clawbox-root-update@*` journal — the unit that runs install.sh, which
+  // handles four provider keys — is deliberately not dumped at all.
+  await ask("the last 40 web-server journal lines (redacted)", [
+    "bash", "-lc",
+    "journalctl -u clawbox-setup.service -n 40 --no-pager 2>&1 | sed -E 's/[A-Za-z0-9_-]{20,}/[redacted]/g' || true",
   ]);
   return parts.join("\n\n");
 }
@@ -453,10 +459,21 @@ export async function waitForUpdate(
       if (looksUnstarted(state)) {
         unstartedSince ??= Date.now();
         if (Date.now() - unstartedSince > unstartedBudgetMs) {
+          // The headline says what was OBSERVED, not what caused it. This shape
+          // has two causes and the poller cannot tell them apart: a run that
+          // lost its process (TASK-731), and a run that FINISHED whose status
+          // the container cannot synthesise as `completed` — the e2e box is
+          // permanently `checkout-dirty`, which forces drift and disables that
+          // synthesis for the whole run, so a web-server restart after a good
+          // update lands here too. The disk keys below say which: an
+          // `update_interrupted_at` is the first, an `update_completed` with no
+          // lock is the second.
           throw new Error(
-            `the update was accepted but never started: the box has reported "nothing is running" for `
-            + `${Math.round((Date.now() - unstartedSince) / 1000)}s. This is the TASK-731 shape — the web `
-            + `server that owned the run was replaced, and its successor had nothing to resume.\n`
+            `the box has reported "nothing is running" for `
+            + `${Math.round((Date.now() - unstartedSince) / 1000)}s after the update was accepted. `
+            + `Either the web server that owned the run was replaced and its successor had nothing to `
+            + "resume (TASK-731), or the run finished and this container cannot report completed "
+            + "because it is permanently drifted. The updater's own keys below say which.\n"
             + `last state: ${JSON.stringify(lastState)}\n\n${await diagnoseLostUpdate()}`,
           );
         }
@@ -465,7 +482,7 @@ export async function waitForUpdate(
       }
     } catch (err) {
       // Our own verdict is not a fetch failure; it must not be counted as one.
-      if (err instanceof Error && err.message.startsWith("the update was accepted")) throw err;
+      if (err instanceof Error && err.message.startsWith("the box has reported")) throw err;
       consecutiveErrors += 1;
       if (consecutiveErrors > maxConsecutiveFetchErrors) {
         throw new Error(`update status unreachable for ${consecutiveErrors * 3}s — giving up`);
