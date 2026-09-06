@@ -2986,6 +2986,44 @@ describe("updater", () => {
       expect(state.error).not.toContain("refuses this device's configuration");
     });
 
+    it("acts on nothing a validator that OVERFLOWED its buffer had written", async () => {
+      // The sibling of the case above, and the one the two-flag test missed.
+      // Node kills a child whose stdout passes `maxBuffer` and rejects with
+      // `code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"` — with `killed` and
+      // `signal` both `undefined` (measured), so the guard above did not fire
+      // and the TRUNCATED buffer went to the parser. The cut is not always
+      // unparseable: a payload sliced between its first `{` and its last `}`
+      // can still be valid JSON carrying half a verdict, and this reader takes
+      // `warnings[]` off it whatever the exit was.
+      setupBox([notInstalledWarning("byteplus")]);
+      const overflowed = Object.assign(new Error("stdout maxBuffer length exceeded"), {
+        code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        killed: undefined,
+        signal: undefined,
+        stdout: JSON.stringify({ valid: true, warnings: [notInstalledWarning("byteplus")] }),
+        stderr: "",
+      });
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        [VALIDATE]: overflowed,
+        [CONFIG_SET]: { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(disableRan("byteplus")).toBe(false);
+      expect(mockRecordPluginRepair).not.toHaveBeenCalled();
+      // Positively, like its sibling: the box is still reported dead on the
+      // journal's own words rather than on a verdict nobody finished giving.
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("OpenClaw gateway is not listening on port 18789");
+      expect(state.error).not.toContain("refuses this device's configuration");
+    });
+
     it("leaves a plugin the core does not call not-installed to its owner", async () => {
       // A genuinely installed plugin whose reviewed surface is stale is a
       // consent question, and consenting for a plugin ClawBox did not install

@@ -57,6 +57,13 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
   setMany: vi.fn(),
+  // `get`/`set` are how `@/lib/clawai-credential-refusal` reads and clears the
+  // persisted ClawBox AI credential refusal. Both of its calls sit inside a
+  // catch that answers a DEFAULT, so omitting them here would not fail this
+  // file — it would quietly make every case take the "no refusal on record"
+  // branch. Guarded by openclaw-config-mock-completeness.test.ts.
+  get: vi.fn(async () => undefined),
+  set: vi.fn(async () => {}),
 }));
 
 vi.mock("@/lib/clawkeep", () => ({

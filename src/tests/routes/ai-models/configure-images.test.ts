@@ -649,8 +649,18 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
   });
 
   describe("does not steal an image model the owner already chose", () => {
-    async function connectWithImageModel(imageGenerationModel: unknown) {
-      mockReadConfig.mockResolvedValue({ agents: { defaults: { imageGenerationModel } } } as never);
+    /**
+     * `undefined` means the KEY IS ABSENT, not present holding undefined.
+     * openclaw.json is JSON, so a key can be missing or `null` and never
+     * `undefined` — and since TASK-743 the difference decides the answer: a
+     * legacy key that is THERE, whatever it holds, is a migration the core
+     * still owes this box.
+     */
+    async function connectWithImageModel(imageGenerationModel?: unknown) {
+      const defaults = arguments.length === 0
+        ? {}
+        : { imageGenerationModel };
+      mockReadConfig.mockResolvedValue({ agents: { defaults } } as never);
       await connectClawai();
     }
 
@@ -692,8 +702,68 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
     });
 
+    /**
+     * The V2 home, seeded directly — which no case in this file did before
+     * TASK-743, and every case that seeded the LEGACY key now stops at the new
+     * key-presence stand-down BEFORE `hasToolModelConfig` is consulted. Without
+     * this case, deleting the `hasToolModelConfig(existingImageModel)` early
+     * return would leave the whole suite green and the next Save on a v2 box
+     * would replace a customer's own `mediaModels.image` with ours.
+     */
+    it("leaves an owner's own mediaModels.image alone", async () => {
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { mediaModels: { image: { primary: "replicate/flux-pro" } } } },
+      } as never);
+      await connectClawai();
+
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+      // The provider block is still ours to write; only the slot is not.
+      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+    });
+
+    it("leaves an owner's fallbacks-only mediaModels.image alone", async () => {
+      // `hasToolModelConfig` accepts a non-empty fallback, and the write would
+      // replace the whole object and take the owner's fallbacks with it.
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { mediaModels: { image: { fallbacks: ["replicate/flux-pro"] } } } },
+      } as never);
+      await connectClawai();
+
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+    });
+
+    it("claims the slot when the legacy key is absent altogether", async () => {
+      await connectWithImageModel();
+
+      expect(JSON.parse(callFor("agents.defaults.mediaModels.image")?.[1] ?? "null")).toEqual({
+        primary: CLAWBOX_AI_IMAGE_MODEL,
+      });
+    });
+
+    /**
+     * TASK-743 — the same stand-down `scripts/gateway-pre-start.sh` gained, in
+     * the OTHER writer of this slot.
+     *
+     * These shapes resolve no model, so this route used to claim the slot and
+     * write `agents.defaults.mediaModels.image` — beside a legacy
+     * `agents.defaults.imageGenerationModel` that is still on the box. Both
+     * homes present is what OpenClaw 2026.8 refuses outright
+     * (`agents.defaults: Unrecognized key: "imageGenerationModel"`, gateway
+     * exit 78), and it also strands the box for good: the core's own loader
+     * migration moves the legacy key only into a home that is EMPTY, so a
+     * `mediaModels.image` written here is what stops it ever being moved.
+     *
+     * Nothing is lost by waiting. The next gateway start runs the core's
+     * `doctor --fix` over a config it will not load, and the save after that
+     * claims the slot as this route always did — except on a box whose doctor
+     * is itself blocked, which stays refused either way.
+     *
+     * "Resolve no model" is `hasToolModelConfig`'s rule, not the core's: the
+     * core coerces a bare string, so the last case below is an owner's
+     * configured model that this route reads as empty. Separate defect, its own
+     * card; the guard covers it either way.
+     */
     it.each<[string, unknown]>([
-      ["absent", undefined],
       ["null", null],
       ["an empty object", {}],
       ["a blank primary", { primary: "   " }],
@@ -702,12 +772,16 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       ["fallbacks that is not a list", { fallbacks: "replicate/flux-pro" }],
       ["a non-string primary", { primary: 42 }],
       ["a plain string", "openai/gpt-image-1-mini"],
-    ])("claims the slot when it holds %s — OpenClaw resolves no model from it", async (_label, existing) => {
+    ])("stands down while a legacy key holding %s is still on the box", async (_label, existing) => {
       await connectWithImageModel(existing);
 
-      expect(JSON.parse(callFor("agents.defaults.mediaModels.image")?.[1] ?? "null")).toEqual({
-        primary: CLAWBOX_AI_IMAGE_MODEL,
-      });
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+      // The provider block is still ours to write — only the slot waits.
+      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+      expect(callFor("models.providers.openai.models")).toBeDefined();
+      // …and nothing writes the legacy key back: this route is not the
+      // migrator either.
+      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
     });
   });
 

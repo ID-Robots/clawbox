@@ -351,4 +351,27 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2 homes", () => {
     expect(media?.models).toEqual(foreign);
     expect(media?.audio).toBeUndefined();
   });
+
+  /**
+   * TASK-743 — the in-flight guard here read the KEY's contents, and a JSON
+   * `null` slipped past it.
+   *
+   * `tools.media.audio.models: null` is PRESENT and is refused by the core
+   * (`tools.media.audio: Unrecognized key: "models"`, measured on 2026.8.1),
+   * but `_audio.get("models") is not None` reads it as absent — so the block
+   * seeded `tools.media.models` beside the surviving legacy key, which is the
+   * dual-home write the image guard in the same file stands down over. The
+   * test on the sibling image key is what found this one.
+   */
+  it("does not seed the shared list beside a legacy audio.models key holding null", () => {
+    const { cfg } = migrate({ tools: { media: { audio: { models: null } } } }, true, true);
+
+    const media = (cfg.tools as { media?: { models?: unknown; audio?: AudioConfig } }).media;
+    expect(media?.models).toBeUndefined();
+    // The legacy key is left exactly as it was — this block is not the migrator.
+    expect((media?.audio as { models?: unknown } | undefined)?.models).toBeNull();
+    // `baseUrl` lives at the same address in both generations and is still
+    // written, which is what the in-flight comment says.
+    expect((media?.audio as { baseUrl?: unknown } | undefined)?.baseUrl).toBe(PROXY);
+  });
 });

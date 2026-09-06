@@ -1771,9 +1771,12 @@ _clawai_proxy_base_url = ""
 # so its own surfaces can still offer our image model (see the docblock in
 # src/lib/clawbox-ai-models.ts for the measurement and the two source paths);
 # ClawBox's own surfaces are closed separately. `name` is required or the
-# config will not validate, and the `imageGenerationModel` write is what
-# actually makes the tool appear: `imageModel` is a different key that selects
-# the vision model.
+# config will not validate, and the IMAGE-GENERATION SLOT write is what
+# actually makes the tool appear — `agents.defaults.mediaModels.image` on a v2
+# core, the legacy `agents.defaults.imageGenerationModel` on a v1 one, and on a
+# box still carrying the legacy key under v2 neither, because the block stands
+# down there (see the guard's own note). `imageModel` is a different key again
+# and selects the vision model.
 #
 # The model id is duplicated from CLAWBOX_AI_IMAGE_MODEL_ID in
 # src/lib/clawbox-ai-models.ts because a shell migration cannot import it. It
@@ -2079,6 +2082,51 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
                 and any(isinstance(ref, str) and ref.strip() for ref in _image_model_fallbacks)
             )
         )
+        # STAND DOWN on the image SLOT while the core's own migration still owes
+        # this box a move — the same shape #751 gave the cloud voice, on the key
+        # this file's own header names first (`agents.defaults.imageGenerationModel`
+        # -> `agents.defaults.mediaModels.image`), and link 1 of the incident
+        # TASK-737 is about.
+        #
+        # WHAT THIS BUYS, stated exactly, because the first draft of this
+        # comment claimed more and the core contradicts it. Measured against
+        # 2026.8.1 (`migrateFinalLayoutRenames`, dist/legacy-*.js): the core's
+        # migration deletes the legacy key on BOTH branches — it moves the value
+        # into `mediaModels.image` when that home is empty and merely REMOVES it
+        # when the home is taken. So writing the v2 home here does not strand a
+        # box, and it does not cause the exit 78: `agents.defaults` is
+        # `.strict()`, so the legacy key ALONE is already
+        # `agents.defaults: Unrecognized key: "imageGenerationModel"` and the
+        # gateway was refusing this config before this block ran.
+        #
+        # What the write DOES cost is the owner's own value. On the shapes
+        # `_has_image_model` reads as empty — `{}`, `{"primary": ""}`,
+        # `{"fallbacks": []}`, a JSON `null`, and a bare string, which the core
+        # resolves as a model even though the test above does not — claiming the
+        # v2 home first means the core's migration finds it taken and discards
+        # what the owner had. Standing down leaves the one shape the core can
+        # carry across, and makes one fewer write into a config it refuses.
+        #
+        # ON THE KEY, NOT ON ITS CONTENTS: `in` rather than
+        # `.get() is not None`, because a key whose value is `null` is present
+        # and is refused just the same.
+        #
+        # IT DOES NOT RESCUE THE BLOCKED BOX, and nothing here should be read as
+        # claiming it does. The only box that reaches this guard is one whose
+        # `doctor --fix` did not run the migration — the block at the top of this
+        # script runs it whenever the core refuses the config, and a non-empty
+        # legacy `exec-approvals.json` is what stops it. That box stays refused
+        # with this guard and without it; performing the move here instead is a
+        # real option and a decision for its own card.
+        #
+        # NARROWER THAN #751's GUARD, deliberately. There the whole block wrote
+        # ONE object into one of two homes, so standing down had to mean writing
+        # nothing. Here the block writes two independent things: the `models[]`
+        # ROW, which has one home on both cores and whose repair keeps a box
+        # bootable, and the SLOT, which is the half with two homes. Only the
+        # slot stands down; the row is still written and repaired, so the boot
+        # after the migration lands has nothing left to do.
+        _image_move_in_flight = _clawbox_v2 and "imageGenerationModel" in agents_defaults
         _openai_models = openai_provider.get("models")
         _our_entries = (
             [m for m in _openai_models if _is_our_image_row(m)]
@@ -2141,11 +2189,42 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             # the stand-down undone, pointing at a model that is gone.
             _legacy_is_ours = _slot_is_ours(agents_defaults.get("imageGenerationModel"))
             _v2_is_ours = _clawbox_v2 and _slot_is_ours(_media_models.get("image"))
-            # Anything in either home that is NOT ours is the owner's image
-            # configuration, and it may well name our row — so the rows stay too.
+
+            def _slot_holds_a_decision(_cfg):
+                """Has the owner put something here the CORE would resolve?
+
+                WIDER than `_has_image_model` on purpose, and the asymmetry is
+                the file's own rule: claiming a slot is recoverable, deleting
+                the row a slot points at is not. So this accepts a bare string
+                too — `hasExplicitToolModelConfig` coerces one — where the
+                upsert's test does not.
+
+                NARROWER than `is not None`, which is what it replaces. That
+                test read `{}`, `{"primary": ""}`, `{"fallbacks": []}` and `[]`
+                as the owner's configuration, so a leftover empty key vetoed the
+                whole take-back and a box whose credential the proxy had
+                permanently refused kept the image path declared — the TASK-727
+                storm — for as long as that key survived.
+                """
+                if isinstance(_cfg, str):
+                    return bool(_cfg.strip())
+                if not isinstance(_cfg, dict):
+                    return False
+                _fallbacks = _cfg.get("fallbacks")
+                return bool(
+                    (isinstance(_cfg.get("primary"), str) and _cfg.get("primary").strip())
+                    or (
+                        isinstance(_fallbacks, list)
+                        and any(isinstance(_ref, str) and _ref.strip() for _ref in _fallbacks)
+                    )
+                )
+
+            # Anything in either home that is NOT ours and NAMES a model is the
+            # owner's image configuration, and it may well name our row — so the
+            # rows stay too.
             _slot_is_theirs = (
-                (not _legacy_is_ours and agents_defaults.get("imageGenerationModel") is not None)
-                or (_clawbox_v2 and not _v2_is_ours and _media_models.get("image") is not None)
+                (not _legacy_is_ours and _slot_holds_a_decision(agents_defaults.get("imageGenerationModel")))
+                or (_clawbox_v2 and not _v2_is_ours and _slot_holds_a_decision(_media_models.get("image")))
             )
             if not _slot_is_theirs:
                 _stood_down = False
@@ -2200,12 +2279,18 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
                     changed = True
 
             if not _has_image_model:
-                if _clawbox_v2:
+                if _image_move_in_flight:
+                    print(
+                        "  Skipped the ClawBox AI image model: a legacy"
+                        " agents.defaults.imageGenerationModel key is still waiting for the core's own migration"
+                    )
+                elif _clawbox_v2:
                     _media_models["image"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
                     agents_defaults["mediaModels"] = _media_models
+                    changed = True
                 else:
                     agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
-                changed = True
+                    changed = True
 
 # Migration: ClawBox AI speech to text.
 #
@@ -2446,7 +2531,13 @@ if _clawai_openai_route_is_ours:
     # tagged capabilities: ["audio"]).
     _audio_models = _media.get("models") if _clawbox_v2 else _audio.get("models")
     _audio_models_move_in_flight = False
-    if _clawbox_v2 and _audio_models is None and _audio.get("models") is not None:
+    # ON THE KEY, like the image guard above and for the same measured reason: a
+    # `tools.media.audio.models: null` is PRESENT and is refused
+    # (`tools.media.audio: Unrecognized key: "models"` on 2026.8.1), while
+    # `.get("models") is not None` reads it as absent — and the `elif` below
+    # then seeds the v2 home beside a legacy key that is still there, which is
+    # the write this whole shape exists to avoid (TASK-743).
+    if _clawbox_v2 and _audio_models is None and "models" in _audio:
         # A legacy tools.media.audio.models list the loader migration has not
         # moved yet. Seeding the v2 home beside it would duplicate the rows the
         # moment the migration runs, so the LIST is left exactly as it is and
@@ -2482,7 +2573,15 @@ if _clawai_openai_route_is_ours:
         _audio["baseUrl"] = _clawai_proxy_base_url
         # Seed the list only where there is none. A list this migration
         # recognises is left exactly as Settings wrote it, order included.
-        if _audio_models is None:
+        #
+        # …and never where the LEGACY key is still present, whatever it holds.
+        # A `tools.media.audio.models: null` leaves `_audio_models` None, so the
+        # bare `is None` test above seeded the v2 home beside a key the core
+        # refuses — the same dual-home write the image guard in this file now
+        # stands down over (TASK-743). `baseUrl` is still written either way:
+        # it lives at the same address in both generations, which is what the
+        # comment on the in-flight flag says.
+        if _audio_models is None and not _audio_models_move_in_flight:
             _seed = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
             if _clawbox_v2:
                 for _row in _seed:
@@ -2692,11 +2791,27 @@ elif _clawai_openai_route_is_ours:
     # them that their choice is no longer available and that the box is speaking
     # locally instead — which is precisely what it does once the entry is gone.
     # Silently rewriting their pick would hide the downgrade.
+    #
+    # BOTH HOMES on v2, not the one the arming half writes (TASK-743). A box
+    # that was Max under a v1 core wrote its stamped entry into `messages.tts`,
+    # and a v2 core whose loader migration has not run yet — or whose
+    # `doctor --fix` aborted before its state migrations, which is how the
+    # legacy image key survives one link earlier in this same file — still has
+    # it sitting there. Reading only `cfg["tts"]` left exactly that box holding
+    # our own dead entry for good, buying a refused round trip per spoken reply
+    # while the panel called the cloud voice configured: the case this arm
+    # exists for, and the one it could not see. Deleting from the legacy home is
+    # safe where WRITING to it would not be — a removal cannot create the
+    # dual-home shape the guard above stands down over, and it leaves the core's
+    # own migration less to move, not more.
     _messages = cfg.get("messages")
-    _tts = (cfg.get("tts") if _clawbox_v2 else (_messages.get("tts") if isinstance(_messages, dict) else None))
-    _tts_providers = _tts.get("providers") if isinstance(_tts, dict) else None
-    _speech = _tts_providers.get("openai") if isinstance(_tts_providers, dict) else None
-    if isinstance(_speech, dict):
+    _legacy_tts = _messages.get("tts") if isinstance(_messages, dict) else None
+    _tts_homes = ([cfg.get("tts"), _legacy_tts] if _clawbox_v2 else [_legacy_tts])
+    for _tts in _tts_homes:
+        _tts_providers = _tts.get("providers") if isinstance(_tts, dict) else None
+        _speech = _tts_providers.get("openai") if isinstance(_tts_providers, dict) else None
+        if not isinstance(_speech, dict):
+            continue
         _speech_base_url = _speech.get("baseUrl")
         # The STAMP is the authorisation, not the address. Requiring the
         # current proxy URL as well left a downgraded box that had been linked

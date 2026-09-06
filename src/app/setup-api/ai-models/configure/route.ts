@@ -1216,10 +1216,44 @@ function buildClawboxAiImageOps(
     );
     return ops;
   }
+  // STAND DOWN while a legacy `agents.defaults.imageGenerationModel` is still
+  // on the box (TASK-743) — the same guard `scripts/gateway-pre-start.sh` now
+  // carries, and this is the half an owner reaches by pressing Save rather than
+  // by rebooting.
+  //
+  // WHAT IT BUYS, measured against 2026.8.1 rather than assumed: the core's own
+  // `migrateFinalLayoutRenames` moves the legacy value into `mediaModels.image`
+  // when that home is EMPTY and merely deletes it when the home is taken. So
+  // claiming the home first does not strand the box — `agents.defaults` is
+  // `.strict()`, so the legacy key alone is already `Unrecognized key` and
+  // gateway exit 78 before this route runs — it throws away what the OWNER had.
+  // The shapes this covers are the ones `hasToolModelConfig` reads as empty
+  // (`{}`, `{"primary": ""}`, `{"fallbacks": []}`, `null`, and a bare string,
+  // which the core resolves as a model even though that test does not).
+  //
+  // ON THE KEY, NOT ITS CONTENTS: `Object.hasOwn`, because a key whose value is
+  // `null` is present and is refused just the same. `!= null` on `defaults`
+  // rather than `!== undefined`, because `"defaults": null` would otherwise
+  // reach `Object.hasOwn(null, …)`, which throws — and the caller's catch would
+  // then discard the provider key and the model row this function is still
+  // allowed to write.
+  //
+  // Not permanent, and not a rescue either: the next gateway start runs the
+  // core's `doctor --fix` over a config it refuses and the save after that
+  // writes the slot as usual — EXCEPT on a box whose doctor is itself blocked,
+  // which stays refused with this guard and without it.
+  if (defaults != null && Object.hasOwn(defaults, "imageGenerationModel")) {
+    console.log(
+      "[AI Config] Left the image-generation model alone: a legacy agents.defaults.imageGenerationModel key is still waiting for the core's own migration",
+    );
+    return ops;
+  }
   ops.push([
-    // OpenClaw 2's home for the image-generation model. gateway-pre-start.sh
-    // writes the same key under the same version gate; the two must stay in
-    // step.
+    // OpenClaw 2's home for the image-generation model, and this route writes it
+    // on every core: unlike the boot script, which has a `_clawbox_v2` arm, this
+    // function has no version gate and never had one. Fine while the pin is
+    // 2026.8.x, wrong the day a v1 box saves — its own card, named here so the
+    // next reader does not read the sibling's gate as parity.
     "agents.defaults.mediaModels.image",
     JSON.stringify({ primary: CLAWBOX_AI_IMAGE_MODEL }),
     "--json",

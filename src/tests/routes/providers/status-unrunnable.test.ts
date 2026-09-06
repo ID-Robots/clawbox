@@ -11,7 +11,7 @@ let dataDir = "";
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: vi.fn() }));
-vi.mock("@/lib/config-store", () => ({ get: vi.fn(), get DATA_DIR() { return dataDir; } }));
+vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn(async () => {}), get DATA_DIR() { return dataDir; } }));
 vi.mock("@/lib/hermes-model-options", () => ({
   getModelOptions: vi.fn(),
   probeStillOwed: vi.fn(),
