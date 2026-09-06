@@ -34,18 +34,28 @@ const repoFile = (rel: string) => readFile(path.join(process.cwd(), rel), "utf8"
  * reply and a resolved review thread while the source kept the old sentence.
  *
  * The search window is `backup_now`'s OWN registration — from its `reg.tool(`
- * to the next one — for two reasons. It must not run on to the
- * `ENDPOINT_DOWN` handler below, which names `backup_status` for its own good
- * reasons; and `ApiOptions.onTimeout` exists so other routes can adopt it, so
- * a second tool taking it must not silently become what this test asserts
- * about while `backup_now` quietly ships none.
+ * to the next `reg.tool(` at any indentation — and comments are stripped from
+ * it first. `ApiOptions.onTimeout` exists so other routes can adopt it, so a
+ * sibling tool taking it must not silently become what this test asserts
+ * about while `backup_now` ships none; and an example of the literal written
+ * in a comment must not stand in for the real one. Both were reproduced
+ * against earlier versions of this helper, which is why the bound is here.
+ *
+ * The `ENDPOINT_DOWN` handler further down — which names `backup_status` for
+ * its own good reasons — is INSIDE this window and stays there. What keeps it
+ * out of the match is the literal's shape: a `message` key immediately
+ * followed by a `next` key inside braces, which the handler's positional
+ * `new ToolError(...)` cannot satisfy.
  */
 async function shippedBackupNowAdvice(): Promise<{ description: string; message: string; next: string }> {
   const src = await repoFile("mcp/tools/system.ts");
   const tool = /reg\.tool\(\s*"backup_now",\s*"([^"]+)"/.exec(src);
   expect(tool, "system.ts must register backup_now with a description").not.toBeNull();
-  const nextTool = src.indexOf("\n  reg.tool(", tool!.index + 1);
-  const scope = src.slice(tool!.index, nextTool === -1 ? undefined : nextTool);
+  const rest = src.slice(tool!.index + 1);
+  const nextTool = /\n\s*reg\.tool\(/.exec(rest);
+  const scope = (nextTool ? rest.slice(0, nextTool.index) : rest)
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^[ \t]*\/\/.*$/gm, "");
   const block = /onTimeout:\s*\{\s*message:\s*"([^"]+)"\s*,\s*next:\s*"([^"]+)"\s*,?\s*\}/.exec(scope);
   expect(block, "backup_now itself must pass onTimeout, with a message and a next").not.toBeNull();
   return { description: tool![1], message: block![1], next: block![2] };
