@@ -3,6 +3,7 @@ import { POST as configureAiModelsPost } from "@/app/setup-api/ai-models/configu
 import { getActiveHarness } from "@/lib/harness";
 import { ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
+import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import {
   type ClawAiConnectSession,
   clearClawAiSession,
@@ -87,8 +88,24 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
     // device, so the OpenClaw path below is untouched.
     if ((await getActiveHarness()) === "hermes") {
       const uiTier = normalizeClawaiUiTier(session.tier) ?? "flash";
+      // THE PLAN, asked here as well, because this is the primary link path on
+      // this edition and nothing else on it holds a portal answer. The OpenClaw
+      // branch below reaches `/setup-api/ai-models/configure`, which records
+      // the plan itself; without this the two editions' own device-code flows
+      // would disagree, and a Hermes box would finish the link with no plan on
+      // record — so no withdrawal would be reachable at all until a BROWSER
+      // happened to poll `/setup-api/ai-models/status` (TASK-744).
+      //
+      // Costs nothing the wizard was not already paying: `fetchPortalTier`
+      // caches for 120 s and de-duplicates in flight, and the wizard polls the
+      // status route every 30 s while this runs.
+      const lookup = await fetchPortalTier(accessToken).catch(() => null);
       try {
-        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier));
+        await applyClawaiToHermes(accessToken, uiTierToDeviceTier(uiTier), {
+          // Absent unless the portal ANSWERED — an unreachable lookup or a
+          // probe that threw retires the plan rather than recording a guess.
+          portalPlan: lookup?.source === "portal" ? { verdict: lookup.planVerdict } : undefined,
+        });
       } catch (err) {
         // Only our own message is safe to store/show — a raw spawn failure can
         // carry the hermes binary path.

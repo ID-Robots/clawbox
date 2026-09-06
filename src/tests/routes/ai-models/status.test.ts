@@ -261,8 +261,10 @@ describe("/setup-api/ai-models/status", () => {
       // word the two are indistinguishable and neither boot script can ever
       // withdraw a cancelled subscription's cloud voice.
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
-      mockGetConfigValue.mockImplementation(async (key: string) =>
-        key === "clawai_plan_tier" ? "pro" : "pro");
+      // Key-keyed, like its sibling above: both arms answering the same value
+      // would let this pass over a writer that read the wrong key.
+      const stamps: Record<string, unknown> = { clawai_tier: "pro", clawai_plan_tier: "pro" };
+      mockGetConfigValue.mockImplementation(async (key: string) => stamps[key] ?? null);
       fetchSpy.mockResolvedValue(new Response(
         JSON.stringify({ tier: "free", deviceTier: null }),
         { status: 200 },
@@ -271,6 +273,23 @@ describe("/setup-api/ai-models/status", () => {
       await GET();
 
       expect(mockSetConfigValue).toHaveBeenCalledWith("clawai_plan_tier", "free");
+    });
+
+    it.each([
+      ["a plan name this build has never seen", { tier: "enterprise" }],
+      ["a response with no tier field at all", { deviceTier: "pro" }],
+    ])("records NO plan for %s", async (_label, body) => {
+      // The other half of the unpaid word. `mapPortalPlanTier` cannot tell a
+      // cancelled account from a response this build cannot read, and only the
+      // first may reach the store: both boot scripts treat a recorded plan as
+      // one they were told, and one of them deletes the cloud voice over it.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue(null);
+      fetchSpy.mockResolvedValue(new Response(JSON.stringify(body), { status: 200 }));
+
+      await GET();
+
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
     });
 
     it("does not write a plan for a credential the box no longer holds", async () => {
@@ -304,6 +323,11 @@ describe("/setup-api/ai-models/status", () => {
       await GET();
 
       expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_plan_tier", expect.anything());
+      // AND the badge beside it. The two are read together by both boot scripts
+      // and one of them deletes on the pair, so writing the RETIRED account's
+      // badge while correctly skipping its plan would leave the arm falling
+      // back to a badge belonging to a token this box no longer holds.
+      expect(mockSetConfigValue).not.toHaveBeenCalledWith("clawai_tier", expect.anything());
     });
 
     it("queries the portal even when local picker is unset so Free → Paid upgrades are visible without re-login", async () => {

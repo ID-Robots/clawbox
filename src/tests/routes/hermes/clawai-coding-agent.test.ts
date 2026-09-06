@@ -199,6 +199,49 @@ describe("POST /setup-api/hermes/clawai", () => {
     expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({});
   });
 
+  it("retires the previous account's PLAN even when the apply then FAILS", async () => {
+    // TASK-744, the same shape as the pick above and for the same reason: the
+    // plan is retired inside `applyClawaiToHermes`'s final `setMany`, behind a
+    // step loop that is fatal on any failing `hermes config set`. A step that
+    // failed after the token write left account B's token beside account A's
+    // plan — and both boot scripts read that plan as this box's entitlement, so
+    // a Free box would go on arming and keeping a cloud voice its credential is
+    // answered 403 for.
+    store.clawai_token = "claw_ACCOUNT_A0000000";
+    store.clawai_tier = "flash";
+    store.clawai_plan_tier = "pro";
+    cliMock.mockImplementation(async (args: string[]) => (
+      args[1] === "set" && args[2] === "model.default"
+        ? { code: 1, stdout: "", stderr: "config store is locked by another writer" }
+        : { code: 0, stdout: "", stderr: "" }
+    ));
+
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+
+    expect(response.status).toBe(502);
+    expect(store.clawai_token).toBe(PASTED);
+    expect(store.clawai_plan_tier).toBeUndefined();
+  });
+
+  it("keeps a plan that is still true when the SAME account re-applies", async () => {
+    // The mirror: a re-paste of the identical token is not an account change,
+    // and throwing the plan away there would put the box back on its device
+    // badge — which is the default this card exists to stop deciding things.
+    store.clawai_token = PASTED;
+    store.clawai_tier = "flash";
+    store.clawai_plan_tier = "pro";
+    cliMock.mockImplementation(async (args: string[]) => (
+      args[1] === "set" && args[2] === "model.default"
+        ? { code: 1, stdout: "", stderr: "config store is locked by another writer" }
+        : { code: 0, stdout: "", stderr: "" }
+    ));
+
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+
+    expect(response.status).toBe(502);
+    expect(store.clawai_plan_tier).toBe("pro");
+  });
+
   it("keeps the pick when the SAME account re-applies its tier", async () => {
     store.clawai_token = PASTED;
     store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };

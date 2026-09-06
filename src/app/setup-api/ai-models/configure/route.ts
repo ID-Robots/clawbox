@@ -2216,7 +2216,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // has to retire a previous account's Max plan rather than leave it
         // standing over the token this save is writing — and the one that lets
         // a CANCELLED subscription's cloud voice be withdrawn at all.
-        if (lookup.source === "portal") portalPlan = { tier: lookup.planTier };
+        // `planVerdict`, not `planTier`: that one answers `null` to a
+        // genuinely unpaid account, to an absent `tier` and to a plan word this
+        // build has never seen alike, and only the first of the three is a
+        // downgrade something may later be deleted over.
+        if (lookup.source === "portal") portalPlan = { verdict: lookup.planVerdict };
         if (lookup.source === "portal" && lookup.tier) {
           portalConfirmedTier = lookup.tier;
           if (requestedClawboxAiTier && requestedClawboxAiTier !== lookup.tier) {

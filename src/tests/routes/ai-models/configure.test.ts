@@ -2376,6 +2376,28 @@ describe("POST /setup-api/ai-models/configure", () => {
         expect(plansWritten()).toEqual(["free"]);
       });
 
+      it.each([
+        ["a plan name this build has never seen", { tier: "enterprise" }],
+        ["a response with no tier field at all", { deviceTier: "pro" }],
+      ])("records NO plan for %s", async (_label, body) => {
+        // `mapPortalPlanTier` answers null to a genuinely unpaid account, to an
+        // absent `tier` and to an unknown plan word alike, and only the first
+        // is a downgrade. Recording the other two as unpaid hands both boot
+        // scripts a licence to DELETE a Max subscriber's cloud voice over a
+        // response shape this build simply predates — the same bug class this
+        // card exists to close, pointing the other way.
+        vi.stubGlobal("fetch", deviceInfo(body));
+
+        const res = await configurePost(jsonRequest({
+          provider: "clawai",
+          apiKey: "claw_an_answer_we_cannot_read",
+          clawaiTier: "pro",
+        }));
+
+        expect(res.status).toBe(200);
+        expect(plansWritten()).toEqual([undefined]);
+      });
+
       it("retires the previous account's plan when the portal did not answer", async () => {
         // The false-failure guard AND the staleness rule in one: an outage may
         // not put a plan on record, and this save has just rewritten the badge

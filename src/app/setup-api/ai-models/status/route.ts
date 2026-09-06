@@ -249,7 +249,14 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         // fallback reflects the last *confirmed* tier, not a stale
         // configure-time value (which flapped a Free badge to Pro and
         // re-fired the celebration). Write only on change to avoid churn.
-        if (lookup.tier !== localTier) {
+        //
+        // GUARDED THE SAME WAY as the plan below, and by the same snapshot. The
+        // two stamps are read together by both boot scripts and one of them
+        // deletes on the pair, so they have to describe the same ACCOUNT: an
+        // unguarded badge write would land the RETIRED account's badge beside a
+        // plan write that was correctly skipped, and the arm would then fall
+        // back to a badge belonging to a token this box no longer holds.
+        if (askedAtGeneration === clawaiPlanGeneration() && lookup.tier !== localTier) {
           await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
         }
         // The PLAN, beside the badge and never instead of it. The two boot
@@ -259,10 +266,11 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         // allowed to have set to Flash. Only the portal-ANSWERED branch writes
         // it: the wizard's plan picker is a guess the account has not been
         // consulted about (TASK-481), and an `unreachable` verdict is the
-        // not-knowing the key exists to keep distinguishable. `null` here is
-        // "answered: no paid plan" and is stored as such, which is what lets a
-        // CANCELLED subscription still withdraw the voice.
-        await persistClawaiPlanTier(lookup.planTier, askedAtGeneration);
+        // not-knowing the key exists to keep distinguishable. `planVerdict`
+        // rather than `planTier`, because that one answers `null` to a
+        // genuinely unpaid account, to an ABSENT `tier` and to a plan word this
+        // build has never seen alike — and only the first is a downgrade.
+        await persistClawaiPlanTier({ verdict: lookup.planVerdict }, askedAtGeneration);
         // The portal ANSWERED about the credential this box holds, so any
         // refusal recorded against it is over. Same poll, same store, same
         // "write only on change" discipline as the tier stamp above — the

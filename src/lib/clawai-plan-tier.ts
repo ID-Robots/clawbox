@@ -1,5 +1,10 @@
 import { get, set } from "@/lib/config-store";
-import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
+import {
+  CLAWBOX_AI_PLAN_UNPAID,
+  normalizeClawboxAiPlanTier,
+  normalizeClawboxAiTier,
+  type ClawboxAiPlanTier,
+} from "@/lib/clawbox-ai-models";
 
 /**
  * The subscription PLAN the portal reports for this box's credential, written
@@ -49,37 +54,14 @@ export const CLAWAI_PLAN_TIER_KEY = "clawai_plan_tier";
 const CLAWAI_DEVICE_TIER_KEY = "clawai_tier";
 
 /**
- * "The portal answered, and this account has no paid plan."
- *
- * A THIRD value, and it has to exist. `mapPortalTier` and `mapPortalPlanTier`
- * both answer `null` for an unpaid account, and an absent key already means
- * "the portal has never answered for this box" — so without a positive word
- * for it, a CANCELLED subscription is indistinguishable from a box nobody has
- * ever asked about, and the withdrawal below can never fire on the commoner of
- * the two downgrade paths. `clawai_tier` cannot carry it (the badge's enum is
- * the two paid tiers and `null`), which is the other reason this is a separate
- * key rather than a widened one.
+ * The unpaid word and the plan vocabulary, re-exported from their one home so
+ * the boot scripts' parity test and every caller here name the same values.
+ * `mapPortalPlanVerdict` is the only thing allowed to DECIDE that a portal
+ * answer means unpaid — see its docblock for why `mapPortalPlanTier`'s `null`
+ * may not be read as one.
  */
-export const CLAWAI_PLAN_UNPAID = "free";
-
-/** What the portal can tell us a plan IS: the two paid tiers, or unpaid. */
-export type ClawaiPlanTier = ClawboxAiTier | typeof CLAWAI_PLAN_UNPAID;
-
-/**
- * The recorded plan, or `null` for a value no writer of ours produces.
- *
- * `normalizeClawboxAiTier`'s vocabulary plus {@link CLAWAI_PLAN_UNPAID}, and
- * nothing else: an unrecognised string is a store somebody edited or a build we
- * have not seen, and reading it as a plan would let a value we cannot interpret
- * decide an entitlement.
- */
-export function normalizeClawaiPlanTier(value: unknown): ClawaiPlanTier | null {
-  const paid = normalizeClawboxAiTier(value);
-  if (paid) return paid;
-  return typeof value === "string" && value.trim().toLowerCase() === CLAWAI_PLAN_UNPAID
-    ? CLAWAI_PLAN_UNPAID
-    : null;
-}
+export { CLAWBOX_AI_PLAN_UNPAID as CLAWAI_PLAN_UNPAID } from "@/lib/clawbox-ai-models";
+export type { ClawboxAiPlanTier as ClawaiPlanTier } from "@/lib/clawbox-ai-models";
 
 /**
  * ARM side: the tier a box may be GIVEN the cloud voice on — the plan when the
@@ -99,8 +81,8 @@ export function normalizeClawaiPlanTier(value: unknown): ClawaiPlanTier | null {
 export function clawaiEntitlementTier(
   planTier: unknown,
   deviceTier: unknown,
-): ClawaiPlanTier | null {
-  return normalizeClawaiPlanTier(planTier) ?? normalizeClawboxAiTier(deviceTier);
+): ClawboxAiPlanTier | null {
+  return normalizeClawboxAiPlanTier(planTier) ?? normalizeClawboxAiTier(deviceTier);
 }
 
 /**
@@ -120,7 +102,7 @@ export function clawaiEntitlementTier(
  *   imported so this module does not pull `hermes-tts.ts`'s graph behind it.
  */
 export function clawaiSpeechWithdrawable(planTier: unknown, entitledTier: string): boolean {
-  const plan = normalizeClawaiPlanTier(planTier);
+  const plan = normalizeClawboxAiPlanTier(planTier);
   return plan !== null && plan !== entitledTier;
 }
 
@@ -131,7 +113,7 @@ export function clawaiSpeechWithdrawable(planTier: unknown, entitledTier: string
  * both keys, because "the plan is unknown" is a fact about the store rather
  * than about either value on its own.
  */
-export async function readClawaiEntitlementTier(): Promise<ClawaiPlanTier | null> {
+export async function readClawaiEntitlementTier(): Promise<ClawboxAiPlanTier | null> {
   const [planTier, deviceTier] = await Promise.all([
     get(CLAWAI_PLAN_TIER_KEY),
     get(CLAWAI_DEVICE_TIER_KEY),
@@ -142,13 +124,17 @@ export async function readClawaiEntitlementTier(): Promise<ClawaiPlanTier | null
 /**
  * A portal answer about this box's plan, or the absence of one.
  *
- * `tier` is `mapPortalPlanTier`'s value: a paid tier, or `null` for an account
- * with no paid plan. The OBJECT's presence is what says the portal answered at
- * all — an `unreachable` lookup, a probe that threw, and a caller that never
- * asked all pass nothing, and are all "we do not know".
+ * `verdict` is `mapPortalPlanVerdict`'s value — a paid tier, the unpaid word,
+ * or `null` for an answer this build cannot interpret. NOT `mapPortalPlanTier`,
+ * whose `null` also covers an absent field and an unknown plan name; recording
+ * either of those as unpaid hands the boot scripts a licence to delete.
+ *
+ * The OBJECT's presence says the portal answered at all — an `unreachable`
+ * lookup, a probe that threw, and a caller that never asked all pass nothing,
+ * and are all "we do not know".
  */
 export interface ClawaiPortalPlan {
-  tier: ClawboxAiTier | null;
+  verdict: ClawboxAiPlanTier | null;
 }
 
 /**
@@ -162,9 +148,13 @@ export interface ClawaiPortalPlan {
  */
 export function clawaiPlanTierForStore(
   portalPlan: ClawaiPortalPlan | undefined,
-): ClawaiPlanTier | undefined {
-  if (!portalPlan) return undefined;
-  return portalPlan.tier ?? CLAWAI_PLAN_UNPAID;
+): ClawboxAiPlanTier | undefined {
+  // An answer we could not interpret is a DELETE too, not an unpaid plan: the
+  // boot scripts read a recorded plan as one they were told, and one of them
+  // destroys configuration on it. Falling back to the badge for the ARM is the
+  // right cost of not understanding the portal; deleting a Max subscriber's
+  // voice is not.
+  return portalPlan?.verdict ?? undefined;
 }
 
 /**
@@ -192,6 +182,13 @@ export function clawaiPlanGeneration(): number {
  * delete the plan in the same store write as the badge, so there is never a
  * moment where one describes a different account than the other. This only
  * stops an answer that was already in flight from landing afterwards.
+ *
+ * DELIBERATELY OVER-APPROXIMATE. Two of that funnel's three callers reach it on
+ * any credential WRITE, a re-paste of the identical token included, so the
+ * counter moves more often than the credential really changes. That is the safe
+ * direction and the reason it is not narrowed: bumping too often defers one
+ * poll's plan write by 30 seconds, and bumping too seldom records a retired
+ * account's plan and lets the next boot decide this box's entitlement from it.
  */
 export function noteClawaiCredentialReplaced(): void {
   credentialGeneration += 1;
@@ -205,12 +202,12 @@ export function _resetClawaiPlanGeneration(): void {
 /**
  * Record what the portal said this account's plan is.
  *
- * ONLY a portal-ANSWERED lookup may call this. `planTier` is
- * `mapPortalPlanTier`'s value, so `null` here means "the portal answered and
- * this account has no paid plan" and is stored as {@link CLAWAI_PLAN_UNPAID} —
- * NOT as an absent key, which means the opposite. The wizard's plan picker is a
+ * ONLY a portal-ANSWERED lookup may call this, and it passes
+ * `mapPortalPlanVerdict`'s three-valued reading: a paid tier, the unpaid word,
+ * or `null` for an answer this build cannot interpret — which is stored as an
+ * absent key, exactly like never having asked. The wizard's plan picker is a
  * guess the account has not been consulted about (TASK-481) and an
- * `unreachable` verdict is the not-knowing this key exists to keep
+ * `unreachable` lookup is the not-knowing this key exists to keep
  * distinguishable; neither may reach this function.
  *
  * `askedAtGeneration` is the credential counter as it stood when the lookup was
@@ -227,13 +224,13 @@ export function _resetClawaiPlanGeneration(): void {
  * scripts go on reading the badge for the ARM and withdraw nothing at all.
  */
 export async function persistClawaiPlanTier(
-  planTier: ClawboxAiTier | null,
+  portalPlan: ClawaiPortalPlan,
   askedAtGeneration?: number,
 ): Promise<void> {
   if (askedAtGeneration !== undefined && askedAtGeneration !== credentialGeneration) return;
   try {
-    const next = planTier ?? CLAWAI_PLAN_UNPAID;
-    if (normalizeClawaiPlanTier(await get(CLAWAI_PLAN_TIER_KEY)) === next) return;
+    const next = clawaiPlanTierForStore(portalPlan);
+    if (normalizeClawboxAiPlanTier(await get(CLAWAI_PLAN_TIER_KEY)) === (next ?? null)) return;
     await set(CLAWAI_PLAN_TIER_KEY, next);
   } catch {
     // See the docblock. The next poll writes it again.

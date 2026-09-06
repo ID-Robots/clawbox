@@ -102,6 +102,40 @@ export function normalizeClawboxAiTier(value: unknown): ClawboxAiTier | null {
 }
 
 /**
+ * "The portal answered, and this account has no paid plan."
+ *
+ * The third thing a PLAN can be, beside the two paid tiers. It exists because
+ * `mapPortalTier` and `mapPortalPlanTier` both answer `null` for an unpaid
+ * account, and an absent stamp already means "the portal has never answered
+ * for this box" — so without a positive word a CANCELLED subscription is
+ * indistinguishable from a box nobody has asked about, and nothing can ever be
+ * withdrawn from it (TASK-744).
+ *
+ * It is a value that AUTHORISES A DELETE, which is why it is written only for a
+ * plan word this build positively recognises as unpaid. See
+ * `mapPortalPlanVerdict`.
+ */
+export const CLAWBOX_AI_PLAN_UNPAID = "free";
+
+/** What a PLAN can be: the two paid tiers, or positively unpaid. */
+export type ClawboxAiPlanTier = ClawboxAiTier | typeof CLAWBOX_AI_PLAN_UNPAID;
+
+/**
+ * The plan vocabulary, and `null` for anything outside it.
+ *
+ * {@link normalizeClawboxAiTier}'s two values plus {@link CLAWBOX_AI_PLAN_UNPAID}.
+ * A string outside the set is a store somebody edited or a build we have not
+ * seen: not evidence of anything, and least of all of a downgrade.
+ */
+export function normalizeClawboxAiPlanTier(value: unknown): ClawboxAiPlanTier | null {
+  const paid = normalizeClawboxAiTier(value);
+  if (paid) return paid;
+  return typeof value === "string" && value.trim().toLowerCase() === CLAWBOX_AI_PLAN_UNPAID
+    ? CLAWBOX_AI_PLAN_UNPAID
+    : null;
+}
+
+/**
  * True if `model` is a fully-qualified ClawBox AI Pro slug
  * (`clawai/deepseek-v4-pro` or `deepseek/deepseek-v4-pro`).
  *

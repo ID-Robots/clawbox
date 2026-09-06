@@ -1792,6 +1792,14 @@ async function selectHermesCloudVoiceIfUnvoiced(
     // the portal had just rotated was never refreshed, and every utterance
     // 401'd, which is the hole this function's own docblock describes.
     //
+    // WHAT THE ORDER COSTS, stated rather than implied: an UNENTITLED box
+    // already on our own route now pays three `hermes config set` spawns to
+    // write a fresh credential into a slot the next boot will take away. That
+    // is the trade — a 401 is a worse answer than the 403 the plan has earned,
+    // and the box is calling that endpoint on every spoken reply until the boot
+    // script gets to it. An owner's own speech server is untouched either way:
+    // `hermesCloudRouteIsOurs` gates the write above.
+    //
     // The PLAN with the badge behind it — `clawaiEntitlementTier`, the same
     // rule the Voice panel and both boot scripts read, resolved by the caller.
     // Reading the badge alone is TASK-744: a Max subscriber whose box is
