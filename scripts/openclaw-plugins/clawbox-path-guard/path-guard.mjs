@@ -170,26 +170,34 @@ function trimTrailingSlashes(text) {
 }
 
 /**
- * Put a RELATIVE path back on a root, so canonicalising cannot lose one.
+ * The first protected root in a candidate whose leading `/` THIS MODULE added,
+ * ignoring a hit at position 0 that only a non-`/` terminator ends.
  *
- * Every entry in `pathRoots` starts with `/`, and `posix.normalize` drops a
- * leading `./` — so `./clawbox/data/config.json` becomes
- * `clawbox/data/config.json`, which no longer CONTAINS `/clawbox`. Without this
- * step, canonicalising would have opened the hole it was added to close.
+ * Anchoring is what makes a relative path testable (see `pathDenyReason`), and
+ * it must not also make PROSE testable. `pathLikeValues` hands this function
+ * every single-line string parameter of `write` and `edit` — OpenClaw's
+ * `deriveToolParams` returns nothing for those two tools, so there is no
+ * host-derived path to prefer — and `pathTerminators` counts a space, a tab, a
+ * quote, `;`, `&`, `|` and `)` as ending a path segment. Without this,
+ * `new_string: "ClawBox Dashboard"` became `/clawbox dashboard`: a protected
+ * root followed by a space, so renaming a heading in the owner's own web app
+ * was refused, by a deny whose text says no approval can lift it, in the very
+ * carve-out `writableSubpaths` exists to keep working.
  *
- * A relative path is resolved by the host against a working directory this rule
- * is not told, so the safe reading of a leading `clawbox` segment is that it IS
- * the tree — and on the appliance it is: the gateway unit runs with
- * `WorkingDirectory=/home/clawbox` (`config/clawbox-gateway.service`), which is
- * exactly where `./clawbox` is the checkout. `~` is already an anchor and is
- * left alone.
- *
- * This cannot over-refuse a look-alike, because a root must still END a path
- * segment afterwards: `clawbox-backup/x` becomes `/clawbox-backup/x` and stays
- * allowed.
+ * At the ANCHORED position only `/` or the end of the string counts — the same
+ * rule the writable carve-out already applies — and every LATER hit is judged
+ * normally. So a real relative path keeps its answer (`clawbox`,
+ * `./clawbox/data/config.json`, `llamacpp/models/x.gguf`,
+ * `a/b/../../clawbox/x` are all still refused) while a sentence that merely
+ * BEGINS with the product's name is not a path.
  */
-function anchorRelative(text) {
-  return text.startsWith("/") || text.startsWith("~") ? text : `/${text}`;
+function findRootPastAnchor(text) {
+  const hit = findRoot(text);
+  // `end === root.length` is `at === 0`: this hit IS the anchor we added.
+  if (!hit || hit.end !== hit.root.length) return hit;
+  const next = text[hit.end];
+  if (next === undefined || next === "/") return hit;
+  return findRoot(text, 1);
 }
 
 /** True when `text` at `at` starts a protected root that ends a path segment. */
@@ -339,16 +347,28 @@ export function commandDenyReason(command, home = os.homedir()) {
  */
 export function pathDenyReason(candidate, home = os.homedir()) {
   if (typeof candidate !== "string" || !candidate) return null;
-  const text = anchorRelative(
-    trimTrailingSlashes(foldHome(posixPath.normalize(candidate), home).toLowerCase()),
+  const folded = trimTrailingSlashes(
+    foldHome(posixPath.normalize(candidate), home).toLowerCase(),
   );
+  // ANCHOR a relative candidate, because every entry in `pathRoots` starts with
+  // `/` and `posix.normalize` drops a leading `./` — so without this,
+  // `./clawbox/data/config.json` arrives as `clawbox/data/config.json` and no
+  // longer CONTAINS `/clawbox`, and canonicalising would have opened a worse
+  // hole than it closed. A relative path is resolved by the host against a
+  // working directory this rule is not told, and on the appliance that is
+  // `WorkingDirectory=/home/clawbox` (`config/clawbox-gateway.service`), which
+  // is exactly where `./clawbox` is the checkout. `~` is already an anchor.
+  // `anchored` is remembered because the root it creates at position 0 has to
+  // be read more strictly than a real one — see `findRootPastAnchor`.
+  const anchored = !folded.startsWith("/") && !folded.startsWith("~");
+  const text = anchored ? `/${folded}` : folded;
   for (const allowed of loadTable().writableSubpaths) {
     const at = text.indexOf(allowed.toLowerCase());
     if (at < 0) continue;
     const next = text[at + allowed.length];
     if (next === undefined || next === "/") return null;
   }
-  const hit = findRoot(text);
+  const hit = anchored ? findRootPastAnchor(text) : findRoot(text);
   return hit ? hit.root : null;
 }
 

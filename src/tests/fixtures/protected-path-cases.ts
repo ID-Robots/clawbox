@@ -445,9 +445,9 @@ export const PROTECTED_PATH_TOOL_CASES: ProtectedPathToolCase[] = [
   },
   {
     toolName: "write",
-    params: { path: "a/b/../../clawbox/data/llamacpp/models/x.gguf", content: "x" },
+    params: { path: "a/b/../../clawbox/x", content: "x" },
     denied: true,
-    why: "…and one whose dot segments cancel down to the root at position 0",
+    why: "…and one whose dot segments cancel down to the root at position 0 — deliberately NOT a path that also names the model store further along, or it would pass with the anchor removed and pin nothing",
   },
   {
     toolName: "write",
@@ -460,5 +460,49 @@ export const PROTECTED_PATH_TOOL_CASES: ProtectedPathToolCase[] = [
     params: { path: "./clawbox-backup/x", content: "x" },
     denied: false,
     why: "and the look-alike sibling stays allowed: anchoring restores the root, it does not loosen what counts as one",
+  },
+
+  // ── The anchor must not read PROSE as a path ─────────────────────────────
+  // The host derives no paths for `write` and `edit`, so every single-line
+  // string parameter reaches the path rule — and a space ends a path segment.
+  // An anchored root is therefore only a root when `/` or the end of the
+  // string follows it, or the device refuses to rename a heading in the
+  // owner's own web app, with a message saying no approval can lift it.
+  {
+    toolName: "write",
+    params: {
+      path: "/home/clawbox/clawbox/data/code-projects/app/title.txt",
+      content: "ClawBox Dashboard",
+    },
+    denied: false,
+    why: "THE FALSE FAILURE: a one-line body that merely BEGINS with the product's name, written into the carve-out that exists so web apps keep working",
+  },
+  {
+    toolName: "edit",
+    params: {
+      file_path: "/home/clawbox/clawbox/data/webapps/site/index.html",
+      old_string: "ClawBox Dashboard",
+      new_string: "Home",
+    },
+    denied: false,
+    why: "the same through `edit`, whose old/new strings are top-level parameters and reach the rule exactly like a target would",
+  },
+  {
+    toolName: "write",
+    params: { path: "/tmp/cfg.json", content: "llamacpp/models is the store" },
+    denied: false,
+    why: "…and prose that begins with either model root is prose too",
+  },
+  {
+    toolName: "write",
+    params: { path: "/tmp/cfg.json", content: "clawbox/data/config.json holds the token" },
+    denied: true,
+    why: "…but a value that begins with a real relative path INTO the tree is still refused — the accepted cost of judging a one-line parameter without being told which one is the target",
+  },
+  {
+    toolName: "write",
+    params: { path: "/tmp/cfg.json", content: "embed/models" },
+    denied: true,
+    why: "…and so is a value that IS exactly a relative protected root, since nothing tells it apart from a target — the same trade that lets a bare `clawbox` workdir be refused",
   },
 ];
