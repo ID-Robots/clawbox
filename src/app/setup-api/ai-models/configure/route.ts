@@ -115,22 +115,18 @@ const OPENCLAW_HOME_DIR =
   || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
 const CLAWBOX_HOME_DIR = process.env.HOME ?? "/home/clawbox";
 /**
- * The agent whose store ClawBox owns.
+ * The agent whose LEGACY credential file ClawBox writes, pre-v2.
  *
- * Named once and used for BOTH the credential path below and every `models
- * auth …` call, because the CLI resolves its own target when `--agent` is
- * omitted: `resolveModelsTargetAgent` → `resolveSoleAgentId`, which throws
- * "Pass --agent <id>." on a box with more than one configured agent and
- * otherwise resolves whichever sole agent is declared. Either way the order
- * write could address a different store than this path — and did, silently.
- * `main` is the core's own implicit agent id (LEGACY_IMPLICIT_AGENT_ID) and
- * the directory it resolves for a config with no agent roster.
+ * `main` is the core's implicit agent (`LEGACY_IMPLICIT_AGENT_ID`) and the
+ * directory it resolves for a config with no roster, which is every box that
+ * still has a legacy `auth-profiles.json` to write. Deliberately NOT used for
+ * the `models auth …` calls any more — see `pasteAuthApiKey`.
  */
-const CLAWBOX_AGENT_ID = "main";
+const LEGACY_AGENT_ID = "main";
 const AUTH_PROFILES_PATH = path.join(
   OPENCLAW_HOME_DIR,
   "agents",
-  CLAWBOX_AGENT_ID,
+  LEGACY_AGENT_ID,
   "agent",
   "auth-profiles.json",
 );
@@ -399,12 +395,26 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
   await spawnOpenclawCli(
     [
       "models", "auth", "paste-api-key",
-      // `--agent` omitted means "the configured default agent", which is not
-      // necessarily the one ClawBox operates on. `applyOpenAiAuthOrder` already
-      // pins CLAWBOX_AGENT_ID for the order over these same profiles, and
-      // `assertNoSignInAt` reads with the same pin — a guard that read one
-      // store while the paste wrote another would be no guard at all.
-      "--agent", CLAWBOX_AGENT_ID,
+      // NO `--agent`. ClawBox used to pin `main` here — and in the sign-in
+      // guard and the order write — on the argument that the CLI resolves a
+      // READ and a WRITE differently, so an unpinned pair could address two
+      // stores. Measured against the installed core (2026.8.1) with a sole
+      // `pro-agent` roster and the flag omitted, that is not what happens:
+      //
+      //   models auth list --json     -> "agentId": "pro-agent"
+      //   paste-api-key …             -> agents/pro-agent/agent/openclaw-agent.sqlite
+      //
+      // The two resolvers only diverge on a roster with SEVERAL agents, and
+      // there `main` was never the right answer either. What the pin actually
+      // did was write this device's ClawBox AI credential into an agent store
+      // the gateway does not read — leaving whatever the real store held,
+      // however stale, to keep serving turns, which is TASK-730 — or, when
+      // `main` is not in the roster at all, fail the whole save outright:
+      //
+      //   $ openclaw models auth paste-api-key --agent main …
+      //   Unknown agent id "main". Use "openclaw agents list" to see configured agents.
+      //
+      // So the target is the harness's to choose, and this asks it to.
       "--provider", provider,
       "--profile-id", profileId,
     ],
@@ -471,10 +481,21 @@ async function assertNoSignInAt(profileId: string): Promise<void> {
   if (openclawIsAbsent()) return;
   let raw: string;
   try {
-    // Same agent as the paste this guards and as the auth order beside it: the
-    // store `--agent` selects is the whole subject of the question.
+    // Unpinned, like the paste this guards and the auth order beside it: all
+    // three let the core pick the agent, so all three address one store on
+    // every box where a save can succeed (see `pasteAuthApiKey`). The response
+    // names the agent it answered for (`agentId`, `agentDir`), so a box that
+    // disagrees can still be told apart in a log.
+    //
+    // KNOWN LIMIT, measured: before an agent has a store of its own the core
+    // answers from the shared one (`authStatePath` pointed at `agents/main/`
+    // while `agentId` was `pro-agent`), so this can see an inherited profile
+    // the paste would only have shadowed. It refuses in that case, which is
+    // the safe direction — and strictly better than what it replaces, since
+    // the same box previously failed the whole save with
+    // `Unknown agent id "main"`.
     raw = await spawnOpenclawCli(
-      ["models", "auth", "list", "--agent", CLAWBOX_AGENT_ID, "--json"],
+      ["models", "auth", "list", "--json"],
       { captureStdout: true, timeoutMs: 60_000 },
     );
   } catch (err) {
@@ -561,8 +582,8 @@ async function applyOpenAiAuthOrder(
   const shouldSet = order.length > 1;
   if (!shouldSet && !clawboxWroteOrder) return undefined;
   const args = shouldSet
-    ? ["models", "auth", "order", "set", "--agent", CLAWBOX_AGENT_ID, "--provider", CHATGPT_PROVIDER, ...order]
-    : ["models", "auth", "order", "clear", "--agent", CLAWBOX_AGENT_ID, "--provider", CHATGPT_PROVIDER];
+    ? ["models", "auth", "order", "set", "--provider", CHATGPT_PROVIDER, ...order]
+    : ["models", "auth", "order", "clear", "--provider", CHATGPT_PROVIDER];
   try {
     await spawnOpenclawCli(args, { timeoutMs: 60_000 });
     // The marker follows the write that succeeded, so a later save knows
@@ -3183,13 +3204,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           error: "This box is signed in to that provider, and the sign-in is stored in the same "
             + `credential slot (${err.profileId}). Saving an API key here would delete it. `
             + "Remove the sign-in first — in the Terminal: "
-            // The same `--agent` the guard read with and the paste writes to.
-            // Without it the CLI takes the configured default agent, so on a
-            // multi-agent box the owner's command clears a different store and
-            // the refusal never goes away. Argument order is the command's own
+            // Unpinned, exactly as the guard read and the paste wrote: the
+            // core resolves the same agent for all three, and naming one here
+            // would send the owner at a store none of them touched. Argument
+            // order is the command's own
             // (`models auth logout [options] <profileId>`, read from its
             // --help on 2026.8.1).
-            + `openclaw models auth logout --agent ${CLAWBOX_AGENT_ID} ${err.profileId}`
+            + `openclaw models auth logout ${err.profileId}`
             + " — then paste the key.",
           code: "sign_in_would_be_lost",
           profileId: err.profileId,

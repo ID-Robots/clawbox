@@ -808,16 +808,15 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     expect(vi.mocked(spawnOpenclawCli)).toHaveBeenCalledWith(
-      ["models", "auth", "order", "clear", "--agent", "main", "--provider", "openai"],
+      ["models", "auth", "order", "clear", "--provider", "openai"],
       expect.anything(),
     );
   });
 
   // The order write and the credential write must address the SAME agent
-  // store. `models auth order` resolves its own target when `--agent` is
-  // omitted (resolveSoleAgentId), which throws on a box with more than one
-  // configured agent and otherwise resolves whichever sole agent is declared
-  // — not necessarily `main`, the directory the credential was written into.
+  // store. Both now let the core resolve it, which is the only answer that is
+  // right on a box whose roster names something other than `main` — see
+  // "lets the core pick the agent…" below for the measurement.
   it("addresses the same agent store the credential was written to", async () => {
     // Two openai profiles, so an order IS written — and it must name the agent
     // whose store the credential went to.
@@ -837,7 +836,63 @@ describe("POST /setup-api/ai-models/configure", () => {
     const orderCall = vi.mocked(spawnOpenclawCli).mock.calls.find(
       ([args]) => Array.isArray(args) && args[2] === "order",
     );
-    expect(orderCall?.[0]).toEqual(expect.arrayContaining(["--agent", "main"]));
+    expect(orderCall?.[0]).not.toContain("--agent");
+    expect(pasteCallFor("openai:chatgpt")?.[0] ?? []).not.toContain("--agent");
+  });
+
+  it("lets the core pick the agent when it writes the ClawBox AI credential", async () => {
+    // TASK-730. A customer was dead for two days on HTTP 403 because his box
+    // held TWO ClawBox AI credentials and the gateway served the revoked one:
+    //   deepseek:default = claw_bd1…  <- sent, revoked, 403
+    //   models.json      = claw_c98…  <- present, ignored
+    // with the profile read out of `agents/main/agent/…` while the box's own
+    // models.json lived under `agents/pro-agent/`. ClawBox pinned `--agent
+    // main` on every `models auth …` call, so the credential it wrote went
+    // into a store the gateway does not read — and on a box whose roster does
+    // not name `main` at all, the save fails outright:
+    //
+    //   $ openclaw models auth paste-api-key --agent main …
+    //   Unknown agent id "main". Use "openclaw agents list" to see configured agents.
+    //
+    // Measured on the pinned core (2026.8.1) with a sole `pro-agent` roster
+    // and NO flag: `models auth list --json` answers `"agentId":"pro-agent"`
+    // and the paste lands in `agents/pro-agent/agent/openclaw-agent.sqlite`.
+    // So the agent is the harness's to resolve, and ClawBox asks it to.
+    await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "claw_c98000000000000000000000000000",
+      authMode: "subscription",
+    }));
+
+    expect(pasteCallFor("deepseek:default")?.[0]).not.toContain("--agent");
+  });
+
+  it("lets it pick for the guard and the order too, so all three address one store", async () => {
+    // The invariant the old pin existed to protect, and the reason this is one
+    // change rather than three: `models auth list` is a READ and resolves
+    // through a different path from a WRITE, so an unpinned pair COULD have
+    // addressed two stores. Measured, on every box where a save can succeed,
+    // it does not — and where the two would diverge (several agents declared)
+    // the write refuses loudly rather than picking one.
+    mockGetAll.mockResolvedValue({ openai_auth_order_written: true } as never);
+    mockReadOpenClawConfig.mockResolvedValue({
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
+    } as never);
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "access.token.jwt",
+      idToken: "id.token.jwt",
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+
+    const calls = vi.mocked(spawnOpenclawCli).mock.calls
+      .map(([args]) => args)
+      .filter((args): args is string[] => Array.isArray(args) && args[0] === "models" && args[1] === "auth");
+    expect(calls.length).toBeGreaterThan(0);
+    for (const args of calls) expect(args).not.toContain("--agent");
   });
 
   it("names both OpenAI profiles, the sign-in first, when the box holds an API key too", async () => {
@@ -859,7 +914,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     expect(vi.mocked(spawnOpenclawCli)).toHaveBeenCalledWith(
-      ["models", "auth", "order", "set", "--agent", "main", "--provider", "openai",
+      ["models", "auth", "order", "set", "--provider", "openai",
         "openai:chatgpt", "openai:default"],
       expect.anything(),
     );
@@ -878,7 +933,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     expect(vi.mocked(spawnOpenclawCli)).toHaveBeenCalledWith(
-      ["models", "auth", "order", "set", "--agent", "main", "--provider", "openai",
+      ["models", "auth", "order", "set", "--provider", "openai",
         "openai:default", "openai:chatgpt"],
       expect.anything(),
     );
@@ -1022,7 +1077,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
-    expect(body.warning).toMatch(/models auth order set --agent main --provider openai/);
+    expect(body.warning).toMatch(/models auth order set --provider openai/);
   });
 
   // A Pro account used to land on gpt-5.5 after sign-in and had to know to
