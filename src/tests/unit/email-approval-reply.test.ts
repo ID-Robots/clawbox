@@ -285,6 +285,8 @@ describe("the record every surface reads", () => {
 describe("no false success", () => {
   it("has written no receipt at the moment the mail server is called", async () => {
     const { id, code } = await offered();
+    // "not called" is a third state on purpose: a null here would otherwise
+    // also be what an unreached mock leaves behind.
     let receiptDuringSend: unknown = "not called";
     vi.mocked(smtp.sendMail).mockImplementation(async () => {
       receiptDuringSend = outcomes.getOutcome(id);
@@ -294,7 +296,7 @@ describe("no false success", () => {
     await reply.applyReplyApproval({ senderId: OWNER, text: `send ${code}` });
 
     // Nothing may claim the message has gone while it is still going.
-    expect(receiptDuringSend).toBeUndefined();
+    expect(receiptDuringSend).toBeNull();
     expect(outcomes.getOutcome(id)?.kind).toBe("sent");
   });
 

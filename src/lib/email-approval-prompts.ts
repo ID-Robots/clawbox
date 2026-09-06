@@ -13,6 +13,15 @@
 // email-approval.ts. This store exists so the press can be tied to ONE draft
 // with the exact content that was on screen when the question was asked.
 //
+// ONE PROMPT, TWO NAMES, NEITHER OF THEM A SECRET. A question can also be asked
+// in the owner's ORDINARY conversation with the box, where there is no button
+// to press and the answer is a line he TYPES (email-approval-reply.ts). A
+// 16-character handle is not a thing anyone types, so a prompt carries a short
+// `code` beside it. It is the same kind of thing as the handle — a name for one
+// draft, so that "send" can never mean "whatever is in the queue now" — and it
+// is authorised the same way, by the sender id the harness itself reports. Read
+// with `findPromptByCode`; nothing here decides who may use it.
+//
 // WHY THE FINGERPRINT IS COPIED IN HERE. The prompt freezes what the owner is
 // being asked about, exactly as the desktop batch card does (#498). The agent
 // keeps running while the owner reads; a draft queued during that pause has a
@@ -56,6 +65,15 @@ export const PROMPT_TTL_MS = 24 * 60 * 60 * 1000;
 export interface ApprovalPrompt {
   /** Short opaque key carried in callback_data. Not a credential. */
   handle: string;
+  /**
+   * The same prompt, named in something a person can type into a chat.
+   *
+   * OPTIONAL because a prompt written by an older build has none: it is still
+   * answerable with its button, and only unreachable by typing — which is the
+   * right way for this to degrade, and better than regenerating a record whose
+   * button is already live in somebody's chat.
+   */
+  code?: string;
   draftId: string;
   /** draftFingerprint() of the draft AT THE MOMENT THE QUESTION WAS ASKED. */
   fingerprint: string;
@@ -94,6 +112,7 @@ function isPrompt(value: unknown): value is ApprovalPrompt {
   const v = value as Record<string, unknown>;
   return (
     typeof v.handle === "string"
+    && (v.code === undefined || typeof v.code === "string")
     && typeof v.draftId === "string"
     && typeof v.fingerprint === "string"
     && typeof v.createdAt === "number"
@@ -146,6 +165,69 @@ function writeStore(store: PromptStore): void {
 }
 
 /**
+ * The alphabet a code is spelled in, and why it is this one.
+ *
+ * Upper case, digits, and no `O`/`0`, `I`/`1`, `L` or `U`: the code is read off
+ * a phone screen and typed back by hand, and a person who mistypes it is told
+ * "that request has already been answered or has expired" about a draft that is
+ * sitting right there. `U` is out for the reason Crockford leaves it out.
+ */
+const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/**
+ * How long a code is.
+ *
+ * Five characters of this alphabet is a little over 24 million — plenty to keep
+ * two of at most twenty live questions apart, which is the whole job. It is
+ * deliberately NOT sized as a secret: the gate on an approval is the sender id
+ * the harness reports, exactly as it is for the button, and a code long enough
+ * to be a password would be one nobody types.
+ */
+export const CODE_LEN = 5;
+
+/** A code as it may be written back — the parser upper-cases before it asks. */
+export const CODE_RE = new RegExp(`^[${CODE_ALPHABET}]{${CODE_LEN}}$`);
+
+/**
+ * A code no live prompt is already using.
+ *
+ * Rejection sampling over `randomBytes` rather than `% alphabet.length`, which
+ * would make the first two characters of the alphabet fractionally likelier —
+ * irrelevant to security here, and the kind of thing that gets copied into a
+ * file where it is not.
+ */
+function mintCode(taken: ReadonlySet<string>): string {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    let code = "";
+    while (code.length < CODE_LEN) {
+      for (const byte of randomBytes(CODE_LEN * 2)) {
+        if (byte >= 256 - (256 % CODE_ALPHABET.length)) continue;
+        code += CODE_ALPHABET[byte % CODE_ALPHABET.length];
+        if (code.length === CODE_LEN) break;
+      }
+    }
+    if (!taken.has(code)) return code;
+  }
+  // Twenty collisions against at most twenty live prompts is not a state this
+  // reaches; the caller treats a null the way it treats a full store.
+  return "";
+}
+
+/**
+ * The prompt a typed code names, WITHOUT consuming it.
+ *
+ * Consuming belongs to `claimPrompt`, which the caller reaches through the
+ * handle once it has decided the sender may answer at all — so a stranger who
+ * guesses a code cannot burn the owner's question, exactly as the button path
+ * checks the presser before it claims.
+ */
+export function findPromptByCode(code: string, now = Date.now()): ApprovalPrompt | null {
+  const wanted = code.trim().toUpperCase();
+  if (!CODE_RE.test(wanted)) return null;
+  return readStore(now).prompts.find((p) => p.code === wanted) ?? null;
+}
+
+/**
  * Ask about one draft.
  *
  * Returns null when the store is full rather than evicting: the same reasoning
@@ -166,11 +248,14 @@ export function createPrompt(
   if (existing) return { prompt: existing, created: false };
   if (store.prompts.length >= MAX_PROMPTS) return null;
 
+  const code = mintCode(new Set(store.prompts.map((p) => p.code).filter((c): c is string => !!c)));
+  if (!code) return null;
   const prompt: ApprovalPrompt = {
     // 8 bytes. This is a lookup key in a file of at most twenty entries, not a
     // secret — but it is random rather than sequential so that nothing about
     // one handle tells you another one exists.
     handle: randomBytes(8).toString("hex"),
+    code,
     draftId: input.draftId,
     fingerprint: input.fingerprint,
     messages: [],

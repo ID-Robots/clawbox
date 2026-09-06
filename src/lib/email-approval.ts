@@ -105,8 +105,12 @@ const MAX_PROMPT_CHATS = 5;
  * Telegram's hard limit is 4096 characters for a message. The margin is for the
  * header lines this file adds around the draft; a draft that only fits because
  * the header was short is a draft one edit away from being silently truncated.
+ *
+ * Exported because email-approval-reply.ts asks the same question of a message
+ * built from the same `buildPromptText`, and two numbers would mean one surface
+ * standing down where the other did not.
  */
-const MAX_PROMPT_CHARS = 3_800;
+export const MAX_PROMPT_CHARS = 3_800;
 
 const APPROVE_PREFIX = "ea:";
 const REJECT_PREFIX = "er:";
@@ -365,10 +369,9 @@ function staleTapAnswer(draftId: string): string {
  *      stays live for the person it was meant for.
  *   3. The prompt is claimed — read-and-removed in one synchronous step, so a
  *      double tap finds nothing the second time.
- *   4. The DRAFT is claimed with the fingerprint recorded in step 3, which is
- *      what stops a draft queued after the question from riding along, and is
- *      the authoritative single-send lock (email-pending.ts:302).
- *   5. Only then is the SMTP client handed anything.
+ *   4. What is left — the freeze check, the send and the receipt — is
+ *      `settlePrompt`, shared with the reply path so the two surfaces cannot
+ *      write different records for the same decision.
  */
 export async function applyApprovalCallback(query: TelegramCallbackQuery): Promise<CallbackOutcome> {
   const token = await approvalBotToken();
@@ -407,7 +410,48 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
     return "expired";
   }
 
-  if (reject) {
+  const settled = await settlePrompt(prompt, !reject);
+  await say(settled.answer);
+  await settle(token, prompt, settled.note);
+  return settled.outcome;
+}
+
+/**
+ * What one settled question leaves behind: a verdict for the log and two
+ * sentences for the owner.
+ *
+ * TWO sentences and not one because the button path says them in two places —
+ * a `answerCallbackQuery` toast, which is short and disappears, and a reply
+ * posted under the question, which stays. The reply path posts `note` only.
+ */
+export interface PromptSettlement {
+  outcome: CallbackOutcome;
+  /** The short answer. */
+  answer: string;
+  /** The lasting one, under the question. */
+  note: string;
+}
+
+/**
+ * DECIDE ONE CLAIMED PROMPT — the step every approval surface shares.
+ *
+ * It starts AFTER the two checks that differ per surface: the prompt has been
+ * claimed (read-and-removed, so one question answers once) and the person
+ * asking has been recognised. What is left is the same on all of them, and it
+ * has to be, because they write the records the chat card and Settings → Email
+ * both render: the freeze check, the send, and the receipt.
+ *
+ * THE ORDER IS THE CONTRACT, and it is the one applyApprovalCallback documents:
+ * the draft is claimed with the fingerprint recorded when the question was
+ * posted (so a draft queued during the reading pause cannot ride along, and one
+ * whose text changed is refused rather than sent), then — and only then — the
+ * SMTP client is handed anything, and the "sent" receipt is written after that
+ * call has come back. Nothing here may report a send before it happened; the
+ * one case this device genuinely cannot know either way is `unconfirmed`, and
+ * both the receipt and the sentence say so in the same words.
+ */
+export async function settlePrompt(prompt: ApprovalPrompt, approve: boolean): Promise<PromptSettlement> {
+  if (!approve) {
     // The same rule the approve path uses, and for the same reason: a draft
     // whose text changed is not the draft the owner read, and throwing away
     // words they never agreed to lose is not ours to do. There is no edit path
@@ -419,35 +463,35 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
         dropped.reason === "gone"
           ? staleTapAnswer(prompt.draftId)
           : "That draft changed after this message was posted, so it was NOT deleted. Handle it in Settings → Email.";
-      await say(text);
-      await settle(token, prompt, text);
-      return dropped.reason === "gone" ? "gone" : "changed";
+      return { outcome: dropped.reason === "gone" ? "gone" : "changed", answer: text, note: text };
     }
     recordOutcome(dropped.draft, "rejected");
-    await say("Draft deleted. Nothing was sent.");
-    await settle(token, prompt, "Deleted. This message was not sent.");
-    return "rejected";
+    return {
+      outcome: "rejected",
+      answer: "Draft deleted. Nothing was sent.",
+      note: "Deleted. This message was not sent.",
+    };
   }
 
   const settings = await getEmailCredentials();
   if (!settings) {
-    await say("This ClawBox has no email account connected.");
-    await settle(token, prompt, "Not sent: this ClawBox has no email account connected.");
-    return "unconfigured";
+    return {
+      outcome: "unconfigured",
+      answer: "This ClawBox has no email account connected.",
+      note: "Not sent: this ClawBox has no email account connected.",
+    };
   }
 
-  // (4) The authoritative claim. A mismatch leaves the draft IN the queue —
-  // it has not been consented to, and deleting text the owner never agreed to
-  // lose is not ours to do.
+  // The authoritative claim. A mismatch leaves the draft IN the queue — it has
+  // not been consented to, and deleting text the owner never agreed to lose is
+  // not ours to do.
   const claim = claimPendingIfUnchanged(prompt.draftId, prompt.fingerprint);
   if (!claim.ok) {
     const text =
       claim.reason === "gone"
         ? staleTapAnswer(prompt.draftId)
         : "That draft changed after this message was posted, so it was NOT sent. Approve it in Settings → Email.";
-    await say(text);
-    await settle(token, prompt, text);
-    return claim.reason === "gone" ? "gone" : "changed";
+    return { outcome: claim.reason === "gone" ? "gone" : "changed", answer: text, note: text };
   }
 
   const draft = claim.draft;
@@ -465,9 +509,11 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
     // them still asking to be sent after the other had gone.
     const twins = resolveSent(draft);
     for (const twin of twins) await retireChatPrompt(twin.id);
-    await say("Sent.");
-    await settle(token, prompt, `Sent to ${draft.to.length} recipient(s).`);
-    return "sent";
+    return {
+      outcome: "sent",
+      answer: "Sent.",
+      note: `Sent to ${draft.to.length} recipient(s).`,
+    };
   } catch (err) {
     const kind = err instanceof SmtpError ? err.kind : "network";
     // Never the recipient, never the subject, never a line of the body — the
@@ -484,19 +530,16 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
     // AND THE SAME JUDGEMENT IN THE WORDS HE READS. The receipt has said
     // `unconfirmed` since this feature shipped; the sentence in the owner's own
     // chat still said "Not sent", two lines under the comment above explaining
-    // why it must not. Telegram is where the tap happened, so it is the surface
-    // he acts on — a receipt no one is looking at cannot correct it.
+    // why it must not.
     const verdict =
       ending === "unconfirmed"
         ? "Handed to the mail server, and the answer never came back — check your Sent folder before sending it again."
         : `Not sent: ${reason}`;
-    await say(verdict);
     // The draft was claimed before the send and is out of the queue — the same
     // trade the desktop path makes, for the same reason (never send twice). It
     // is not lost: the message above this reply still holds the whole draft,
     // which is exactly why the question is never overwritten with its verdict.
-    await settle(token, prompt, `${verdict} The draft above is no longer queued.`);
-    return "send_failed";
+    return { outcome: "send_failed", answer: verdict, note: `${verdict} The draft above is no longer queued.` };
   }
 }
 

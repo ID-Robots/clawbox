@@ -31,6 +31,7 @@ vi.mock("@/lib/email-config", async (importOriginal) => ({
 
 const OWNER = "6001";
 const MCP_TOKEN = "t".repeat(32);
+const SESSION_SECRET = "a".repeat(64);
 
 let root: string;
 let POST: typeof import("@/app/setup-api/email/chat-reply/route").POST;
@@ -41,6 +42,8 @@ let card: typeof import("@/lib/chat-email-batch");
 let smtp: typeof import("@/lib/smtp-client");
 let emailConfig: typeof import("@/lib/email-config");
 let ownerSend: typeof import("@/lib/telegram-owner-send");
+/** /email/pending takes a browser session and nothing else — see owner-session.ts. */
+let cookie: string;
 
 const CREDENTIALS = {
   address: "box@example.com",
@@ -80,7 +83,7 @@ async function offered(subject = "Invoice"): Promise<{ id: string; code: string 
  */
 async function surfaces(cardIds: string[]) {
   const res = await pendingGET(
-    new Request("http://127.0.0.1/setup-api/email/pending", { headers: { authorization: `Bearer ${MCP_TOKEN}` } }),
+    new Request("http://127.0.0.1/setup-api/email/pending", { headers: { cookie } }),
   );
   const body = (await res.json()) as {
     pending: { id: string }[];
@@ -110,7 +113,10 @@ beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-chat-reply-"));
   process.env.CLAWBOX_ROOT = root;
   process.env.CLAWBOX_MCP_TOKEN = MCP_TOKEN;
+  process.env.SESSION_SECRET = SESSION_SECRET;
   vi.resetModules();
+  const auth = await import("@/lib/auth");
+  cookie = `clawbox_session=${auth.createSessionCookie(3600, SESSION_SECRET, 0)}`;
   pending = await import("@/lib/email-pending");
   card = await import("@/lib/chat-email-batch");
   smtp = await import("@/lib/smtp-client");
@@ -128,6 +134,7 @@ beforeEach(async () => {
 afterEach(() => {
   delete process.env.CLAWBOX_ROOT;
   delete process.env.CLAWBOX_MCP_TOKEN;
+  delete process.env.SESSION_SECRET;
   fs.rmSync(root, { recursive: true, force: true });
 });
 
