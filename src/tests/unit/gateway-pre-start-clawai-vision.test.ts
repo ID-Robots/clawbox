@@ -322,3 +322,22 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision migration",
     expect(imageModel(kept.cfg)).toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
   });
 });
+
+describe.skipIf(!hasPython3)("a bare string is a vision model too (TASK-755)", () => {
+  it("leaves agents.defaults.imageModel alone when it holds a bare string", () => {
+    // The sibling of the image-generation slot, read by the SAME core helper:
+    // `hasExplicitToolModelConfig` coerces the value before testing it, so
+    // `{"agents":{"defaults":{"imageModel":"openai/gpt-4o"}}}` is `valid:true`
+    // on 2026.8.1. Replacing it takes away the model the owner chose for
+    // looking at the pictures he sends.
+    const { cfg } = migrate(pairedBox({ defaults: { imageModel: "openai/gpt-4o" } }));
+
+    expect(imageModel(cfg)).toBe("openai/gpt-4o");
+  });
+
+  it("still claims the slot when it holds a blank string", () => {
+    const { cfg } = migrate(pairedBox({ defaults: { imageModel: "   " } }));
+
+    expect(imageModel(cfg)).toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
+  });
+});

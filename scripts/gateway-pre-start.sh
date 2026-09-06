@@ -2048,13 +2048,29 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
     _vision_fallbacks = (
         _vision_model_cfg.get("fallbacks") if isinstance(_vision_model_cfg, dict) else None
     )
-    _has_vision_model = isinstance(_vision_model_cfg, dict) and bool(
-        (isinstance(_vision_model_cfg.get("primary"), str) and _vision_model_cfg.get("primary").strip())
+    # A BARE STRING IS A MODEL HERE TOO (TASK-755) — the sibling of the image
+    # slot below, read by the same core helper: `hasExplicitToolModelConfig`
+    # coerces the value (`resolvePrimaryStringValue` answers a string with
+    # itself) before the primary/fallbacks test. Measured on 2026.8.1:
+    # `{"agents":{"defaults":{"imageModel":"openai/gpt-4o"}}}` is `valid:true`.
+    # Reading it as empty replaces the model the owner chose for LOOKING at the
+    # pictures he sends.
+    _has_vision_model = bool(
+        (isinstance(_vision_model_cfg, str) and _vision_model_cfg.strip())
         or (
-            isinstance(_vision_fallbacks, list)
-            and any(isinstance(ref, str) and ref.strip() for ref in _vision_fallbacks)
+            isinstance(_vision_model_cfg, dict)
+            and (
+                (isinstance(_vision_model_cfg.get("primary"), str) and _vision_model_cfg.get("primary").strip())
+                or (
+                    isinstance(_vision_fallbacks, list)
+                    and any(isinstance(ref, str) and ref.strip() for ref in _vision_fallbacks)
+                )
+            )
         )
     )
+    # The MOVE arm below rewrites `_vision_model_cfg["primary"]` in place, so it
+    # may only ever consider a dict: a bare string is left exactly as the owner
+    # wrote it, which is what `_vision_primary = ""` achieves here.
     _vision_primary = (
         _vision_model_cfg.get("primary") if isinstance(_vision_model_cfg, dict) else None
     )
@@ -2403,11 +2419,27 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         _image_model_fallbacks = (
             _image_model_cfg.get("fallbacks") if isinstance(_image_model_cfg, dict) else None
         )
-        _has_image_model = isinstance(_image_model_cfg, dict) and bool(
-            (isinstance(_image_model_cfg.get("primary"), str) and _image_model_cfg.get("primary").strip())
+        # A BARE STRING IS A MODEL (TASK-755). The core reaches this slot through
+        # `hasExplicitToolModelConfig`, which COERCES the value first
+        # (`coerceFactoryToolModelConfig` -> `resolvePrimaryStringValue`, which
+        # answers a bare string with itself) and only then applies the
+        # primary/fallbacks test mirrored below. Measured on 2026.8.1:
+        # `mediaModels.image: "replicate/flux-pro"` is `valid:true` with no
+        # warnings. Reading it as an empty slot is how an owner-authored model
+        # was replaced on a boot that had nothing to do with image generation —
+        # and it is the rule the take-back arm below already applies to a
+        # string, so the two halves now agree about what a string means.
+        _has_image_model = bool(
+            (isinstance(_image_model_cfg, str) and _image_model_cfg.strip())
             or (
-                isinstance(_image_model_fallbacks, list)
-                and any(isinstance(ref, str) and ref.strip() for ref in _image_model_fallbacks)
+                isinstance(_image_model_cfg, dict)
+                and (
+                    (isinstance(_image_model_cfg.get("primary"), str) and _image_model_cfg.get("primary").strip())
+                    or (
+                        isinstance(_image_model_fallbacks, list)
+                        and any(isinstance(ref, str) and ref.strip() for ref in _image_model_fallbacks)
+                    )
+                )
             )
         )
         # STAND DOWN on the image SLOT while the core's own migration still owes

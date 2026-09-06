@@ -147,6 +147,14 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   ),
 }));
 
+// The INSTALLED core decides which of the two image-model homes is written
+// (TASK-755), and on a machine with no core the honest answer is `unknown`,
+// which writes neither. Every case here is about a box that HAS one, so the
+// generation is stated rather than inherited from wherever the suite runs.
+vi.mock("@/lib/openclaw-core-generation", () => ({
+  installedOpenclawCoreGeneration: vi.fn(async () => "v2"),
+}));
+
 vi.mock("@/lib/local-ai-token", () => ({
   getLocalAiToken: vi.fn().mockReturnValue("a".repeat(64)),
   verifyLocalAiBearer: vi.fn().mockReturnValue(true),

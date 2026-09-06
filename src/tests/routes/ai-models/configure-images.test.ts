@@ -131,6 +131,14 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   ),
 }));
 
+// The INSTALLED core decides which of the two image-model homes is written
+// (TASK-755), and on a machine with no core the honest answer is `unknown`,
+// which writes neither. Every case here is about a box that HAS one, so the
+// generation is stated rather than inherited from wherever the suite runs.
+vi.mock("@/lib/openclaw-core-generation", () => ({
+  installedOpenclawCoreGeneration: vi.fn(async () => "v2"),
+}));
+
 vi.mock("@/lib/local-ai-token", () => ({
   getLocalAiToken: vi.fn().mockReturnValue("a".repeat(64)),
   verifyLocalAiBearer: vi.fn().mockReturnValue(true),
@@ -150,6 +158,7 @@ import {
   parseFullyQualifiedModel,
 } from "@/lib/openclaw-config";
 import { configSetCalls as recordedConfigSetCalls, failConfigSetsMatching } from "./config-set-calls";
+import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -691,6 +700,60 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       expect(callFor("models.providers.openai.models")).toBeDefined();
     });
 
+    it("leaves a BARE STRING in the v2 home alone — the core resolves one (TASK-755)", async () => {
+      // Measured on 2026.8.1: `resolvePrimaryStringValue` returns the string
+      // itself, so `hasExplicitToolModelConfig` answers true and
+      // `mediaModels.image: "replicate/flux-pro"` is `valid:true` with no
+      // warnings. A dict-only test reads that as an empty slot and replaces it
+      // — an owner-authored model gone, on a save about some other provider.
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { mediaModels: { image: "replicate/flux-pro" } } },
+      } as never);
+
+      await connectClawai();
+
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+      // …and the provider block is still ours to write.
+      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+    });
+
+    it("leaves a bare string in the LEGACY home alone for the same reason", async () => {
+      // Distinct from the TASK-743 stand-down below, which fires on the key's
+      // PRESENCE whatever it holds: this is about what the value means, and it
+      // is what makes the take-back arm and the upsert agree about a string.
+      await connectWithImageModel("replicate/flux-pro");
+
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+    });
+
+    it("leaves a bare string in agents.defaults.imageModel alone", async () => {
+      // The SAME helper reads the vision slot, and the core coerces a string
+      // there too — `{"agents":{"defaults":{"imageModel":"openai/gpt-4o"}}}` is
+      // `valid:true`. Claiming it would overrule the model the owner chose for
+      // looking at pictures he sends.
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { imageModel: "openai/gpt-4o" } },
+      } as never);
+
+      await connectClawai();
+
+      expect(callFor("agents.defaults.imageModel")).toBeUndefined();
+    });
+
+    it.each<[string, unknown]>([
+      ["a blank string", "   "],
+      ["an empty string", ""],
+    ])("still claims the v2 home when it holds %s", async (_label, existing) => {
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { mediaModels: { image: existing } } },
+      } as never);
+
+      await connectClawai();
+
+      expect(callFor("agents.defaults.mediaModels.image")).toBeDefined();
+    });
+
     it("does not steal it on the fallback path either", async () => {
       mockGetAll.mockResolvedValue({ clawai_token: CLAWAI_TOKEN });
       mockReadConfig.mockResolvedValue({
@@ -782,6 +845,55 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       // …and nothing writes the legacy key back: this route is not the
       // migrator either.
       expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+    });
+  });
+
+  describe("which home the installed core decides (TASK-755)", () => {
+    /**
+     * The sibling in `scripts/gateway-pre-start.sh` has carried a `_clawbox_v2`
+     * arm all along; this function wrote OpenClaw 2's home on every core.
+     * `agents.defaults` is `.strict()` on BOTH generations, so the wrong name
+     * is `Unrecognized key` and gateway exit 78 — not a key quietly ignored.
+     */
+    it("writes the legacy home on a v1 core", async () => {
+      vi.mocked(installedOpenclawCoreGeneration).mockResolvedValueOnce("v1");
+
+      await connectClawai();
+
+      expect(callFor("agents.defaults.imageGenerationModel")?.[1])
+        .toBe(JSON.stringify({ primary: CLAWBOX_AI_IMAGE_MODEL }));
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+    });
+
+    it("writes NEITHER home when the installed core cannot be identified", async () => {
+      // The boot script's own rule, in the other language: a half-finished
+      // update is exactly the state in which the core cannot be read AND in
+      // which a guess from the repository pin would be wrong.
+      vi.mocked(installedOpenclawCoreGeneration).mockResolvedValueOnce("unknown");
+
+      const res = await connectClawai();
+
+      expect(res.status).toBe(200);
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+      // …and the provider block and the model row are written regardless: they
+      // have one home on both generations.
+      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+      expect(callFor("models.providers.openai.models")).toBeDefined();
+    });
+
+    it("does not ask the core at all when the slot is already configured", async () => {
+      // The probe sits below every early return on purpose: the ordinary save
+      // must not pay a file read for a decision it never reaches.
+      vi.mocked(installedOpenclawCoreGeneration).mockClear();
+
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { mediaModels: { image: { primary: "replicate/flux-pro" } } } },
+      } as never);
+
+      await connectClawai();
+
+      expect(installedOpenclawCoreGeneration).not.toHaveBeenCalled();
     });
   });
 
