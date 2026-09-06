@@ -47,6 +47,14 @@ function slice(from: string, to: string): string {
  * block precisely so both migrations answer that question the same way, so
  * this test takes it from there rather than restating the rule.
  */
+/**
+ * The hosts ClawBox has ever written as its AI proxy — the live one plus the
+ * retired ones — and the URL normaliser that builds them, taken from the
+ * shipped script rather than restated here. `_clawai_host_is_ours` is the arm
+ * that decides whether a route the owner did not key is theirs, and a second
+ * copy of that list would let the two answers drift.
+ */
+const PROXY_HOSTS = hasPython3 ? slice("from urllib.parse import urlsplit", "def _is_our_image_row(_row):") : "";
 const SAME_ENDPOINT = hasPython3 ? slice("def _same_endpoint(_a, _b):", "if _clawai_openai_route_is_ours:") : "";
 const POLICY = hasPython3
   ? slice("# Migration: ClawBox AI cloud voice (text to speech).", "if isinstance(ds_models, list):")
@@ -95,6 +103,10 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
     `_clawai_openai_route_is_ours = ${routeIsOurs ? "True" : "False"}`,
     `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
     `_clawai_token = ${JSON.stringify(TOKEN)}`,
+    // The ClawBox AI provider entry the image migration read the live proxy
+    // off; the only binding the host set above needs.
+    `deepseek_provider = {"baseUrl": ${JSON.stringify(PROXY)}}`,
+    PROXY_HOSTS,
     SAME_ENDPOINT,
     ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
