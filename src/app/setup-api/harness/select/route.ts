@@ -4,7 +4,8 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
-import { setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition } from "@/lib/harness";
+import { getActiveHarness, setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition } from "@/lib/harness";
+import { refreshHarnessToolsIfSwitched } from "@/lib/harness-mcp-refresh";
 import { CONFIG_ROOT } from "@/lib/config-store";
 
 const exec = promisify(execFile);
@@ -48,6 +49,11 @@ export async function POST(request: Request) {
     );
   }
 
+  // Read BEFORE the switch, so the refresh below can tell a real flip from a
+  // re-select of the harness already running. Unreadable answers null, which
+  // that guard treats as "not a flip" rather than as a change.
+  const previous = await getActiveHarness().catch(() => null);
+
   // Propagate the canonical identity to both harnesses (OpenClaw real copies +
   // gateway refresh; Hermes FTS5 reindex) BEFORE flipping the active one, so we
   // never complete a switch that leaves the selected harness without its shared
@@ -81,5 +87,10 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
+  // The agent's own tool list is built from a startup probe of which harness is
+  // active, and nothing here bounces it — so ask the harness to rebuild it. Best
+  // effort, after the write: see harness-mcp-refresh.ts for why it is the whole
+  // MCP reload and not a poll in the two handlers whose answer is visible.
+  await refreshHarnessToolsIfSwitched(previous, harness);
   return NextResponse.json({ success: true, active: harness });
 }
