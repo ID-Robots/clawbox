@@ -26,6 +26,7 @@ vi.mock("@/lib/plugin-repair", async () => {
 //     goes and the plugin still never loads;
 //   * and it must restart the gateway, which is what actually loads it.
 
+let GET: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let execFile: Mock;
 let getActiveHarness: Mock;
@@ -93,7 +94,7 @@ beforeEach(async () => {
   runOpenclawConfigSet.mockResolvedValue(undefined);
   clearPluginRepair.mockResolvedValue(true);
   readPluginRepairs.mockResolvedValue(marker());
-  ({ POST } = await import("@/app/setup-api/plugins/repair/route"));
+  ({ GET, POST } = await import("@/app/setup-api/plugins/repair/route"));
 });
 
 describe("plugins/repair — the Retry", () => {
@@ -289,5 +290,38 @@ describe("plugins/repair — the Retry", () => {
       'plugins.entries["codex"].enabled false --strict-json',
     ]);
     expect(clearPluginRepair).not.toHaveBeenCalled();
+  });
+  it("refuses the agent on the read too", async () => {
+    // Same gate as the write. Middleware admits the MCP bearer to `/setup-api`,
+    // and which of the box's plugins ClawBox had to switch off is the owner's
+    // business, not the agent's.
+    hasOwnerSession.mockResolvedValue(false);
+    const r = await GET(new Request("http://x/setup-api/plugins/repair"));
+    expect(r.status).toBe(403);
+    expect(await r.json()).toMatchObject({ ok: false, code: "owner_only" });
+  });
+
+  it("lists what needs repair, projected rather than passed through", async () => {
+    readPluginRepairs.mockResolvedValue(marker());
+    const r = await GET(new Request("http://x/setup-api/plugins/repair"));
+    expect(r.status).toBe(200);
+    // Never cached: the panel polls this to decide whether to draw a badge, and
+    // a cached answer would keep one on a row that has since been repaired.
+    expect(r.headers.get("Cache-Control")).toBe("no-store");
+    const body = await r.json() as { ok: boolean; repairs: Record<string, unknown>[] };
+    expect(body.ok).toBe(true);
+    // The FIELDS THE PANEL DRAWS, and only those. `spec` and `disabled` are
+    // this script's own bookkeeping — the install spec in particular names
+    // internal package coordinates — and the browser has no use for either.
+    expect(body.repairs).toEqual([
+      { pluginId: "codex", stage: "install", reason: "offline", atMs: 1 },
+    ]);
+  });
+
+  it("answers an empty list rather than an error on a box with nothing wrong", async () => {
+    readPluginRepairs.mockResolvedValue({});
+    const r = await GET(new Request("http://x/setup-api/plugins/repair"));
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ ok: true, repairs: [] });
   });
 });
