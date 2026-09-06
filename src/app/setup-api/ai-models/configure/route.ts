@@ -2875,6 +2875,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         local_ai_configured_at: new Date().toISOString(),
         // Consumed by shouldPromoteLocalToPrimary above.
         local_ai_was_default: undefined,
+        // UNREACHABLE today, and it must stay that way or be given the pick
+        // clear its sibling batch below carries: `isLocalScope` with neither
+        // Ollama nor llama.cpp is refused with a 400 long before this, so
+        // `isClawAI && isLocalScope` cannot happen. If that guard ever loosens,
+        // this becomes a ClawBox AI token write with no `ai_model_explicit_picks`
+        // beside it — the previous account's model choice surviving into the
+        // next account's box (TASK-713).
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });

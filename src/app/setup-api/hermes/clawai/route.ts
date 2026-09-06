@@ -1,7 +1,12 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { clawboxAiModelIdOf, readExplicitModelPicks } from "@/lib/explicit-model-pick";
+import {
+  EXPLICIT_MODEL_PICKS_KEY,
+  clawboxAiModelIdOf,
+  picksWithoutProvider,
+  readExplicitModelPicks,
+} from "@/lib/explicit-model-pick";
 import { get, setMany } from "@/lib/config-store";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 import { hermesConfigGet } from "@/lib/hermes-config-cache";
@@ -146,7 +151,21 @@ export async function POST(request: Request) {
       .then((status) => status.ready)
       .catch(() => undefined);
     previousClawaiToken = await readToken();
-    await setMany({ clawai_token: suppliedToken });
+    // The pick goes with the account, and it goes in THIS write. The apply
+    // below clears it too, but only in its own final `setMany`, behind a step
+    // loop that is fatal on any failing `hermes config set` — so a step that
+    // fails after this line would answer 502 having stored account B's token
+    // beside account A's pick, and this route never rolls the token back. Every
+    // later link would then read `previousToken === trimmed`, see no account
+    // change, and write A's model as B's default for good (TASK-713).
+    const replacedAccount = Boolean(previousClawaiToken && previousClawaiToken !== suppliedToken);
+    const picksWithoutClawai = replacedAccount
+      ? picksWithoutProvider(await readExplicitModelPicks(), CLAWAI_PROVIDER)
+      : null;
+    await setMany({
+      clawai_token: suppliedToken,
+      ...(picksWithoutClawai ? { [EXPLICIT_MODEL_PICKS_KEY]: picksWithoutClawai } : {}),
+    });
     // A refusal the proxy gave the token being replaced is about that token,
     // not this one. Dropped here as well as in `applyClawaiToHermes`, because a
     // paste that never reaches the apply still changed the credential.

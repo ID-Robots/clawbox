@@ -35,7 +35,8 @@ const hermesConfig: Record<string, string> = {};
 vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGet: vi.fn(async (key: string) => hermesConfig[key] ?? ""),
 }));
-const cliMock = vi.hoisted(() => vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })));
+const cliMock = vi.hoisted(() =>
+  vi.fn(async (_args: string[]) => ({ code: 0, stdout: "", stderr: "" })));
 vi.mock("@/lib/hermes-cli", () => ({
   runHermesCli: cliMock,
 }));
@@ -171,6 +172,31 @@ describe("POST /setup-api/hermes/clawai", () => {
     // ...and the badge, not the replaced account's pick, decided the model.
     const modelWrite = modelDefaultWrite();
     expect(modelWrite).toBe("deepseek-v4-flash");
+  });
+
+  it("clears the previous account's pick even when the apply then FAILS", async () => {
+    // This route stores the pasted token ITSELF and never rolls it back, while
+    // the apply's own clear rides its final `setMany` — behind a step loop that
+    // is fatal on any failing `hermes config set`. So a step that fails after
+    // the token write answered 502 with account B's token stored beside account
+    // A's pick, and every later link then read `previousToken === trimmed`, saw
+    // no account change, and wrote A's model as B's default for good. The two
+    // writes are one write now (TASK-713).
+    store.clawai_token = "claw_ACCOUNT_A0000000";
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+    cliMock.mockImplementation(async (args: string[]) => (
+      args[1] === "set" && args[2] === "model.default"
+        ? { code: 1, stdout: "", stderr: "config store is locked by another writer" }
+        : { code: 0, stdout: "", stderr: "" }
+    ));
+
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+
+    expect(response.status).toBe(502);
+    // The token landed, as it does on beta — and the pick it replaced did not
+    // survive it.
+    expect(store.clawai_token).toBe(PASTED);
+    expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({});
   });
 
   it("keeps the pick when the SAME account re-applies its tier", async () => {

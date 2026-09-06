@@ -232,6 +232,30 @@ export async function recordExplicitModelPick(model: string): Promise<void> {
   });
 }
 
+/**
+ * The picks map without one provider's entry, or null when it had none.
+ *
+ * The shape every ClawBox AI token writer needs: a pick belongs to the ACCOUNT
+ * that made it, so a token change must drop it — and must drop it in the SAME
+ * `setMany` that stores the replacement token, or a failure between the two
+ * leaves the new account's token beside the old account's choice and every
+ * later comparison reads them as the same account. Returning null says "nothing
+ * to write", so a caller can spread it conditionally into the batch it is
+ * already making.
+ *
+ * One helper because there are three such writers. The fourth to be added
+ * should find this rather than re-derive it.
+ */
+export function picksWithoutProvider(
+  picks: ExplicitModelPicks,
+  provider: string,
+): ExplicitModelPicks | null {
+  if (!(provider in picks)) return null;
+  const next = { ...picks };
+  delete next[provider];
+  return next;
+}
+
 /** The stored picks, for a caller that has not already loaded the whole store. */
 export async function readExplicitModelPicks(): Promise<ExplicitModelPicks> {
   const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);

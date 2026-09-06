@@ -2,6 +2,7 @@ import { getKnown, setMany } from "@/lib/config-store";
 import {
   EXPLICIT_MODEL_PICKS_KEY,
   decideClawboxAiModelId,
+  picksWithoutProvider,
   readExplicitModelPicks,
 } from "@/lib/explicit-model-pick";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
@@ -175,12 +176,12 @@ export async function applyClawaiToHermes(
   const previousToken = options.previousClawaiToken?.trim() ?? await getStoredClawaiToken();
   const accountChanged = Boolean(previousToken && previousToken !== trimmed);
   const storedPicks = await readExplicitModelPicks();
-  let picksToStore: Record<string, string> | null = null;
-  if (accountChanged && storedPicks[CLAWAI_PROVIDER]) {
-    const next = { ...storedPicks };
-    delete next[CLAWAI_PROVIDER];
-    picksToStore = next;
-  }
+  // Null whenever there is nothing to drop — including when the CALLER has
+  // already dropped it, which `/setup-api/hermes/clawai` does in the same write
+  // that stores the token it supplies.
+  const picksToStore = accountChanged
+    ? picksWithoutProvider(storedPicks, CLAWAI_PROVIDER)
+    : null;
   const clawaiDecision = decideClawboxAiModelId({
     picks: accountChanged ? {} : storedPicks,
     tierModelId: clawaiModelForTier(tier),
