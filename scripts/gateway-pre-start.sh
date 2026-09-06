@@ -1873,18 +1873,27 @@ def _clawai_credential_refused():
     if not isinstance(_store, dict):
         return False
     _at = _store.get(CLAWBOX_CREDENTIAL_REFUSED_KEY)
-    # `math.isfinite` because Python's `json` accepts `Infinity` and `NaN` where
-    # `JSON.parse` does not, and the TypeScript writer's `isRecordedRefusal`
-    # rejects them with `Number.isFinite`. Nothing ClawBox writes can produce
-    # one — `JSON.stringify` maps a non-finite number to `null` — but a
-    # hand-edited `data/config.json` can, and the two readers of this key must
-    # agree on every value either can meet, not only on the ones we write.
-    return (
-        isinstance(_at, (int, float))
-        and not isinstance(_at, bool)
-        and math.isfinite(_at)
-        and _at > 0
-    )
+    # THE SAME ANSWER AS `isRecordedRefusal`, over every value either language
+    # can parse — not only over the ones ClawBox writes.
+    #
+    # Nothing here can produce a value this predicate would meet: `JSON.stringify`
+    # maps a non-finite number to `null`. A hand-edited `data/config.json` can,
+    # and this predicate runs inside the one python heredoc invoked bare under
+    # `set -euo pipefail`, so an exception escaping it leaves the box with NO
+    # gateway. Two shapes matter and neither is exotic:
+    #   - `Infinity` / `NaN`, which Python's `json` accepts and `JSON.parse` does
+    #     not, and which `Number.isFinite` rejects;
+    #   - an integer too large for a double. Python parses it exactly, JS reads
+    #     the same bytes as `Infinity`, and `math.isfinite()` on it raises
+    #     OverflowError rather than answering.
+    # So: floats are tested with `math.isfinite`, integers are never converted,
+    # and the range is bounded by `Number.MAX_VALUE` — an int/float comparison
+    # in Python is exact and cannot overflow.
+    if isinstance(_at, bool) or not isinstance(_at, (int, float)):
+        return False
+    if isinstance(_at, float) and not math.isfinite(_at):
+        return False
+    return 0 < _at <= 1.7976931348623157e308
 
 
 # Only boxes that actually have ClawBox AI get an image provider — the token is

@@ -923,6 +923,11 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     // this key have to agree on every value either can meet.
     ["a non-finite stamp", { body: '{"clawai_credential_refused_at": Infinity}' } as DeviceStore],
     ["a NaN stamp", { body: '{"clawai_credential_refused_at": NaN}' } as DeviceStore],
+    // An integer too large for a double: Python parses it exactly, `JSON.parse`
+    // reads the same bytes as `Infinity`, and `math.isfinite()` on it raises
+    // OverflowError instead of answering — which, escaping this heredoc, would
+    // leave the box with no gateway at all.
+    ["an integer past Number.MAX_VALUE", { body: `{"clawai_credential_refused_at": ${"9".repeat(400)}}` } as DeviceStore],
   ])("arms as before over %s — not knowing is not a refusal", (_label, store) => {
     const { cfg } = migrate(pairedBox(), false, store);
 
