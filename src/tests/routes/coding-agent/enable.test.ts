@@ -23,6 +23,7 @@ const getStatus = vi.hoisted(() => vi.fn());
 const setEffort = vi.hoisted(() => vi.fn());
 const setGenerateImages = vi.hoisted(() => vi.fn());
 const setGenerateAudio = vi.hoisted(() => vi.fn());
+const setRealBrowser = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   setCodingAgentEnabled: setEnabled,
@@ -30,6 +31,7 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   setEffort,
   setGenerateImages,
   setGenerateAudio,
+  setRealBrowser,
 }));
 
 // The reload is mocked at its own seam rather than at the refresh helper's, so
@@ -78,6 +80,7 @@ beforeEach(async () => {
   setEffort.mockResolvedValue("low");
   setGenerateImages.mockResolvedValue(false);
   setGenerateAudio.mockResolvedValue(false);
+  setRealBrowser.mockResolvedValue(false);
   const route = await import("@/app/setup-api/coding-agent/enable/route");
   POST = route.POST;
 });
@@ -141,6 +144,29 @@ describe("the body", () => {
     const message = (await empty.json()).error as string;
     expect(message).toContain("{ generateImages: boolean }");
     expect(message).toContain("{ generateAudio: boolean }");
+  });
+
+  it("takes the real-browser switch, and names it in the refusal too", async () => {
+    // The setup wizard's browser step writes exactly this, both ways: Enable
+    // sends true, Skip sends false, and neither may be answered 400.
+    const off = await POST(request({ cookie: ownerCookie(), body: { realBrowser: false } }));
+    expect(off.status).toBe(200);
+    expect(setRealBrowser).toHaveBeenCalledWith(false);
+    const on = await POST(request({ cookie: ownerCookie(), body: { realBrowser: true } }));
+    expect(on.status).toBe(200);
+    expect(setRealBrowser).toHaveBeenCalledWith(true);
+
+    const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
+    expect((await empty.json()).error as string).toContain("{ realBrowser: boolean }");
+  });
+
+  it("refuses the agent this switch like every other", async () => {
+    // Middleware admits the MCP bearer to /setup-api/*, and this route's whole
+    // job is that the agent cannot change the owner's mind for them — the
+    // browser it is watched in included.
+    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { realBrowser: false } }));
+    expect(res.status).toBe(403);
+    expect(setRealBrowser).not.toHaveBeenCalled();
   });
 
   it("rejects non-JSON", async () => {
@@ -211,6 +237,9 @@ describe("telling the running agent", () => {
     // the assistant's own long-lived server either.
     await POST(request({ cookie: ownerCookie(), body: { generateImages: false } }));
     await POST(request({ cookie: ownerCookie(), body: { generateAudio: false } }));
+    // The real-browser switch moves no tool either: browser_open and its
+    // siblings exist whichever Chromium answers them.
+    await POST(request({ cookie: ownerCookie(), body: { realBrowser: false } }));
     expect(reloadMcp).not.toHaveBeenCalled();
   });
 

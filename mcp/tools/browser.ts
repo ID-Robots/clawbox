@@ -9,6 +9,14 @@
 //
 // browser_launch is gone: it was a byte-identical alias of browser_open, and
 // two tools with one behaviour is precisely the tie a small model breaks wrongly.
+//
+// WHICH Chromium answers is the owner's choice, not the agent's: the route
+// drives the desktop's own window while the Coding Agent's real-browser
+// setting is on (absent means on, and its first-run wizard offers the step),
+// and an invisible one of its own when the setting is off or the window cannot
+// be brought up. There is no tool for the switch — flipping the owner's screen
+// on is a consent, not an argument — so the tools only RELAY the route's
+// `browser` field; see statedBrowser.
 
 import fs from "fs";
 import path from "path";
@@ -28,6 +36,8 @@ interface BrowserReply {
   error?: string;
   description?: string | null;
   descriptionError?: string | null;
+  /** Which Chromium answered — see statedBrowser. Absent from a server that predates the field. */
+  browser?: "desktop" | "headless";
 }
 
 // ── Coding-agent run context ─────────────────────────────────────────────────
@@ -147,6 +157,43 @@ const DESCRIBE_RULES: ErrorRule[] = [
 
 let sessionId: string | null = null;
 
+/**
+ * Which Chromium the last reply came from, once it has been said.
+ *
+ * The route drives the DESKTOP's own window while the owner's real-browser
+ * setting is on and that window can be brought up, and an invisible Chromium
+ * of its own otherwise — and from here the two are indistinguishable. A run
+ * that verified a page on a screen nobody could see must not report that the
+ * owner watched it, and the assistant must not send the owner to look at a
+ * window that was never opened, so every reply's `browser` field is relayed.
+ *
+ * Said ONCE per session and again whenever it changes: it is a property of the
+ * browser behind the session, not of the individual call, and a fact repeated
+ * on every click is exactly the per-call spend briefResult exists to avoid.
+ */
+let statedBrowser: "desktop" | "headless" | null = null;
+
+/** The relay line, or null when there is nothing new (or nothing) to say. */
+function browserLine(reply: BrowserReply): string | null {
+  const which = reply.browser;
+  // A server from before the field names nothing, and nothing is claimed for
+  // it: either browser could have taken the page, and a guess here is exactly
+  // the false report this relay exists to prevent.
+  if (which !== "desktop" && which !== "headless") return null;
+  if (which === statedBrowser) return null;
+  statedBrowser = which;
+  if (which === "desktop") {
+    return runContext()
+      ? "Browser: the device's own window on the desktop — the owner can watch this page. Say so when you report what you verified."
+      : "Browser: the device's own window on the desktop — the user can watch this page.";
+  }
+  const why =
+    "an invisible one — nothing of this reaches the screen (the Coding Agent's real-browser setting is off, or the desktop window could not be used)";
+  return runContext()
+    ? `Browser: ${why}. Say so when you report what you verified.`
+    : `Browser: ${why}. Describe the page to the user rather than pointing them at the screen.`;
+}
+
 /** A plain browser action: the route's 15 s page load plus the capture, with room. */
 const ACTION_TIMEOUT_MS = 45_000;
 
@@ -183,6 +230,9 @@ async function ensureSession(url?: string, opening = false): Promise<string> {
     }
     sessionId = null;
   }
+  // A fresh launch may land on the other Chromium — the desktop window can
+  // have gone away, or come back — so the next reply says which one again.
+  statedBrowser = null;
   let reply: BrowserReply;
   try {
     reply = await browserCall("launch", { ...(url ? { url } : {}) }, LAUNCH_RULES);
@@ -204,6 +254,8 @@ async function act(action: string, params: Record<string, unknown> = {}): Promis
 
 function headerLines(message: string, reply: BrowserReply): string[] {
   const lines = [message];
+  const which = browserLine(reply);
+  if (which) lines.push(which);
   if (reply.url) lines.push(`URL: ${reply.url}`);
   if (reply.title) lines.push(`Title: ${reply.title}`);
   return lines;
@@ -279,7 +331,7 @@ export function registerBrowserTools(reg: Registrar): void {
     ];
     reg.tool(
       "browser_view_local",
-      "Open a page from this run's working folder in the device browser and get a written description of what actually renders. Use it to verify every page you build before reporting done. Pass the path of an HTML file inside your folder.",
+      "Open a page from this run's working folder in the device browser and get a written description of what actually renders. Use it to verify every page you build before reporting done. The reply says whether the page was on the owner's own screen or in an invisible browser. Pass the path of an HTML file inside your folder.",
       { path: zText(512, "HTML file to view, relative to the working folder (e.g. index.html) or absolute inside it.") },
       { editions: ["openclaw", "hermes"], family: "browser", readOnly: false },
       async ({ path: given }: { path: string }) => {
@@ -338,7 +390,7 @@ export function registerBrowserTools(reg: Registrar): void {
 
   reg.tool(
     "browser_open",
-    "Open the web browser on the ClawBox desktop and optionally go to a page. Use this whenever the user asks to open the browser, open a site, or look something up on the web. It drives the real window the user can see, and returns a picture of the page.",
+    "Open the web browser on the ClawBox desktop and optionally go to a page. Use this whenever the user asks to open the browser, open a site, or look something up on the web. It drives the real window on the desktop, and an invisible browser only when that window cannot be used — the reply says which. It returns a picture of the page.",
     { url: zText(2_000, "Page to open, starting with http:// or https://. Omit to just open the browser.").optional() },
     { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, openWorld: true },
     async ({ url }: { url?: string }) => {
@@ -391,6 +443,7 @@ export function registerBrowserTools(reg: Registrar): void {
         await browserCall("close", { sessionId }).catch(() => { /* already gone */ });
         sessionId = null;
       }
+      statedBrowser = null;
       return text("Stopped controlling the browser. The window is still open on the desktop.");
     },
   );

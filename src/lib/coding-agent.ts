@@ -275,6 +275,28 @@ export const CODING_AGENT_GEN_IMAGES_CONFIG_KEY = "coding_agent_generate_images"
  */
 export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
 
+/**
+ * Does a run verify its work in the Chromium on the owner's own SCREEN?
+ *
+ * /setup-api/browser can drive either of two browsers: the desktop window the
+ * owner can watch (attached over CDP on port 18800, started if it is not
+ * running) or a headless Chromium of the web server's own. The screen is the
+ * point — the owner watches the page the run is checking, live, and the run
+ * screenshots exactly what they see.
+ *
+ * ON when the key is absent, like the two media switches and for the same
+ * reason: it is a preference, not a consent. The desktop browser is what the
+ * device already reaches for, so a box that has never seen this switch must
+ * behave exactly as it does today. `false` is for the owner who wants their
+ * screen left alone while a run works.
+ *
+ * Read for EVERY browser session rather than frozen on the run record: unlike
+ * the media tools, which must not appear or vanish under a run, this decides
+ * only WHICH browser answers — and every answer names it, so a run that asked
+ * for the screen and was given the headless one can say so.
+ */
+export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
+
 /** Every key the reset clears. The switch is last: it is the consent, and a
  *  half-cleared box that is still switched on would be the one state where the
  *  wizard shows over a live delegated shell. */
@@ -287,6 +309,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
+  CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
   CODING_AGENT_SETUP_CONFIG_KEY,
   CODING_AGENT_CONFIG_KEY,
 ] as const;
@@ -889,6 +912,8 @@ export interface CodingAgentStatus {
   generateImages: boolean;
   /** May a run have this box speak a clip into its project? */
   generateAudio: boolean;
+  /** Does a run verify its work in the browser on the owner's screen? */
+  realBrowser: boolean;
   harnessCommand: string;
   maxTaskChars: number;
   /** How hard a run thinks per turn. */
@@ -1180,6 +1205,28 @@ export async function setGenerateAudio(on: unknown): Promise<boolean> {
     throw new CodingAgentError("invalid", "The voice switch must be true or false.");
   }
   await configSet(CODING_AGENT_GEN_AUDIO_CONFIG_KEY, on);
+  return on;
+}
+
+/** The browser switch. ON when absent — see its config key. */
+function realBrowserFrom(raw: unknown): boolean {
+  return raw !== false;
+}
+
+/**
+ * Whether a browser session should be opened on the desktop Chromium the owner
+ * can see. /setup-api/browser asks per session; nothing else reads it, because
+ * which browser answered is then a property of the session, not of the run.
+ */
+export async function getRealBrowser(): Promise<boolean> {
+  return realBrowserFrom(await configGet(CODING_AGENT_REAL_BROWSER_CONFIG_KEY));
+}
+
+export async function setRealBrowser(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") {
+    throw new CodingAgentError("invalid", "The browser switch must be true or false.");
+  }
+  await configSet(CODING_AGENT_REAL_BROWSER_CONFIG_KEY, on);
   return on;
 }
 
@@ -1699,6 +1746,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     autoPr: config[CODING_AGENT_AUTO_PR_CONFIG_KEY] === true,
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
+    realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     effort,

@@ -57,6 +57,7 @@ function stubFetch(
     reviewPass?: boolean;
     generateImages?: boolean;
     generateAudio?: boolean;
+    realBrowser?: boolean;
   },
   opts: {
     resolveTo?: string;
@@ -66,6 +67,9 @@ function stubFetch(
     /** How the GitHub read fails: a non-2xx answer, or no answer at all. */
     gitStatus?: number;
     gitThrows?: boolean;
+    /** A server from before the browser switch existed: it answers with no
+     *  such field at all, which is the state the panel's `?? true` is for. */
+    noRealBrowser?: boolean;
   } = {},
 ) {
   posts = [];
@@ -77,6 +81,7 @@ function stubFetch(
   // The two that are ON when the device has never stored them.
   let generateImages = status.generateImages ?? true;
   let generateAudio = status.generateAudio ?? true;
+  let realBrowser = status.realBrowser ?? true;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -96,6 +101,7 @@ function stubFetch(
     reviewPass,
     generateImages,
     generateAudio,
+    ...(opts.noRealBrowser ? {} : { realBrowser }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -132,6 +138,7 @@ function stubFetch(
       if (typeof body.reviewPass === "boolean") reviewPass = body.reviewPass;
       if (typeof body.generateImages === "boolean") generateImages = body.generateImages;
       if (typeof body.generateAudio === "boolean") generateAudio = body.generateAudio;
+      if (typeof body.realBrowser === "boolean") realBrowser = body.realBrowser;
       return json(payload());
     }
     return json({ error: "unexpected" }, 404);
@@ -397,6 +404,39 @@ describe("the media switches", () => {
     expect(screen.getByText(translations.en["codingAgent.genImagesHint"])).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("coding-agent-gen-audio-help"));
     expect(screen.getByText(translations.en["codingAgent.genAudioHint"])).toBeInTheDocument();
+  });
+});
+
+describe("the browser a run verifies its work in", () => {
+  const BROWSER = translations.en["codingAgent.realBrowserLabel"];
+
+  it("renders ON for a device that answers with no such field", async () => {
+    // A box updated into this feature has nothing stored, and nothing stored
+    // means the screen's Chromium — the same rule the media switches use. A
+    // panel that fell back to `false` would show every existing box as
+    // switched off and invite the owner to turn on what was never off.
+    stubFetch({ enabled: true, readiness: READY }, { noRealBrowser: true });
+    render(<CodingAgentSettingsPanel />);
+    expect(await screen.findByRole("switch", { name: BROWSER })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("posts the field the route reads and renders what it answers", async () => {
+    stubFetch({ enabled: true, readiness: READY, realBrowser: true });
+    render(<CodingAgentSettingsPanel />);
+    const toggle = await screen.findByRole("switch", { name: BROWSER });
+    expect(toggle).toHaveAttribute("data-testid", "coding-agent-real-browser");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { realBrowser: false } }]));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+  });
+
+  it("shows what the device has stored, and keeps its hint one tap away", async () => {
+    stubFetch({ enabled: true, readiness: READY, realBrowser: false });
+    render(<CodingAgentSettingsPanel />);
+    expect(await screen.findByRole("switch", { name: BROWSER })).toHaveAttribute("aria-checked", "false");
+    expect(screen.queryByText(translations.en["codingAgent.realBrowserHint"])).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-real-browser-help"));
+    expect(screen.getByText(translations.en["codingAgent.realBrowserHint"])).toBeInTheDocument();
   });
 });
 

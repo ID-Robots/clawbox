@@ -237,6 +237,10 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // puts a reset box back to "yes, draw and speak for my projects".
       "coding_agent_generate_images",
       "coding_agent_generate_audio",
+      // Same rule for the browser switch: absent means "verify on my screen",
+      // and a reset that left an explicit false behind would send the owner
+      // through the wizard's browser step and then ignore what they chose.
+      "coding_agent_real_browser",
       "coding_agent_setup_complete",
       "coding_agent_enabled",
     ]);

@@ -58,6 +58,10 @@ const mockOwnedBrowser = vi.hoisted(() => ({
 const launchChromium = vi.hoisted(() => vi.fn().mockResolvedValue(mockOwnedBrowser));
 // A probe verdict a test forces, ahead of what the fetch stub would imply.
 const probeVerdict = vi.hoisted(() => ({ value: null as "ours" | "foreign" | "down" | null }));
+// The owner's "verify on my screen" switch, as the route reads it per session.
+const realBrowser = vi.hoisted(() => ({ value: true }));
+const getRealBrowser = vi.hoisted(() => vi.fn(async () => realBrowser.value));
+const writeBrowserLaunchEnv = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock("child_process", () => ({
   execFile: execFileMock,
@@ -87,6 +91,22 @@ vi.mock("@/lib/cdp-probe", () => ({
   },
   describePortOwner: async () => "",
   findPlaywrightChromium: () => null,
+}));
+
+// The switch the route reads for every session. Mocked rather than written
+// into a config store so a test can move it BETWEEN two launches, which is the
+// property that matters: it is read per session, not once per process.
+vi.mock("@/lib/coding-agent", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
+  getRealBrowser,
+}));
+
+// The desktop launch writes the owner's start page where scripts/launch-browser.sh
+// reads it — ~/.cache/clawbox/browser.env, which on this box is the REAL file the
+// running Chromium was started from. Never from a test.
+vi.mock("@/lib/browser-setup", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/browser-setup")>()),
+  writeBrowserLaunchEnv,
 }));
 
 function cdpVersionResponse() {
@@ -170,6 +190,9 @@ describe("/setup-api/browser", () => {
     mockOwnedBrowser.isConnected.mockReturnValue(true);
     launchChromium.mockResolvedValue(mockOwnedBrowser);
     probeVerdict.value = null;
+    realBrowser.value = true;
+    getRealBrowser.mockImplementation(async () => realBrowser.value);
+    writeBrowserLaunchEnv.mockResolvedValue(undefined);
     execFileMock.mockImplementation((file: string, args?: unknown, options?: unknown, callback?: unknown) => {
       const cb = [args, options, callback].find((value) => typeof value === "function") as ((err: Error | null, stdout: string, stderr: string) => void) | undefined;
       cb?.(null, "", "");
@@ -385,11 +408,17 @@ describe("/setup-api/browser", () => {
     expect(body.screenshot).toBeNull();
   });
 
-  it("returns an error if desktop Chromium never becomes available", async () => {
+  it("falls back to a headless Chromium when the desktop one never comes up, and says so", async () => {
+    // It used to answer 500 here. A window that will not start is a reason to
+    // verify somewhere else, not a reason to lose the run's verification —
+    // and `browser: "headless"` is how the run learns nobody is watching.
     setDesktopBrowserReady(Number.POSITIVE_INFINITY);
 
-    const { res } = await launchSession();
-    expect(res.status).toBe(500);
+    const { res, body } = await launchSession();
+    expect(res.status).toBe(200);
+    expect(body.browser).toBe("headless");
+    expect(launchChromium).toHaveBeenCalledTimes(1);
+    expect(connectOverCDP).not.toHaveBeenCalled();
   }, 15000);
 
   it("handles invalid JSON", async () => {
@@ -399,5 +428,97 @@ describe("/setup-api/browser", () => {
     });
     const res = await POST(req);
     expect(res.status).toBe(500);
+  });
+
+  /**
+   * The Coding Agent's "verify your work on my screen" switch, as this route
+   * obeys it: which Chromium a session is opened on, and the answer that says
+   * which one it turned out to be.
+   */
+  describe("the owner's real-browser switch", () => {
+    it("drives the desktop Chromium when it is on, and names it in every answer", async () => {
+      const { body } = await launchSession();
+      expect(connectOverCDP).toHaveBeenCalledTimes(1);
+      expect(launchChromium).not.toHaveBeenCalled();
+      expect(body.browser).toBe("desktop");
+
+      // Not only the launch reply: an action on the session says it too.
+      const { body: shot } = await sendAction("screenshot", body.sessionId);
+      expect(shot.browser).toBe("desktop");
+      const { body: closed } = await sendAction("close", body.sessionId);
+      expect(closed.browser).toBe("desktop");
+    });
+
+    it("goes straight to the headless Chromium when it is off, without touching the owner's screen", async () => {
+      realBrowser.value = false;
+
+      const { body } = await launchSession();
+
+      expect(body.browser).toBe("headless");
+      expect(launchChromium).toHaveBeenCalledTimes(1);
+      // Not attached to, not probed, and above all not STARTED: "off" means
+      // the desktop is left exactly as the owner left it.
+      expect(connectOverCDP).not.toHaveBeenCalled();
+      expect(execFileMock).not.toHaveBeenCalled();
+      expect(writeBrowserLaunchEnv).not.toHaveBeenCalled();
+    });
+
+    it("starts the desktop browser when it is on and nothing is up yet", async () => {
+      setDesktopBrowserReady(2);
+
+      const { body } = await launchSession();
+
+      expect(body.browser).toBe("desktop");
+      expect(execFileMock).toHaveBeenCalledWith(
+        "/usr/bin/sudo",
+        ["/usr/bin/systemctl", "start", "clawbox-browser.service"],
+        expect.any(Object),
+        expect.any(Function),
+      );
+      // systemd starts Chromium, not this server, so the start page has to be
+      // on disk first — the same write the manage route's "open" makes.
+      expect(writeBrowserLaunchEnv).toHaveBeenCalledTimes(1);
+    });
+
+    it("tells a run that asked for the screen that it got the headless browser", async () => {
+      // Somebody else's Chromium on the CDP port. The session still works —
+      // and the only sign of where it is happening is this field.
+      probeVerdict.value = "foreign";
+
+      const { body } = await launchSession();
+      expect(body.browser).toBe("headless");
+      const { body: navigated } = await sendAction("navigate", body.sessionId, { url: "https://example.com" });
+      expect(navigated.browser).toBe("headless");
+    });
+
+    it("is read for every session, so a flip does not wait for a restart", async () => {
+      const desktop = (await launchSession()).body;
+      expect(desktop.browser).toBe("desktop");
+
+      realBrowser.value = false;
+      const headless = (await launchSession()).body;
+      expect(headless.browser).toBe("headless");
+
+      // Both browsers are live at once, and each session keeps answering for
+      // the one it is actually in: closing the headless page must not claim
+      // the desktop, and the desktop page must not claim the screen is off.
+      expect((await sendAction("screenshot", desktop.sessionId)).body.browser).toBe("desktop");
+      expect((await sendAction("screenshot", headless.sessionId)).body.browser).toBe("headless");
+    });
+
+    it("closes its own Chromium on ITS count, while a desktop session is still open", async () => {
+      // The count that decides is the headless one's own. Counting every
+      // session would leave ours resident for as long as any desktop tab is,
+      // and closing at any zero would kill it under a live headless page.
+      realBrowser.value = false;
+      const headless = (await launchSession()).body;
+      realBrowser.value = true;
+      const desktop = (await launchSession()).body;
+
+      await sendAction("close", headless.sessionId);
+      expect(mockOwnedBrowser.close).toHaveBeenCalledTimes(1);
+      expect(mockBrowser.close).not.toHaveBeenCalled();
+      await sendAction("close", desktop.sessionId);
+    });
   });
 });

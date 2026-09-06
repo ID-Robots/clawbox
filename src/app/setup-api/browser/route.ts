@@ -9,8 +9,10 @@ import net from "net";
 import fs from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
 import { lookup as dnsLookup } from "dns/promises";
-import { activeRunDirectory, activeRunId } from "@/lib/coding-agent";
+import { activeRunDirectory, activeRunId, getRealBrowser } from "@/lib/coding-agent";
+import type { BrowserKind } from "@/lib/browser-sessions";
 import { closeSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
+import { getBrowserStartUrl, writeBrowserLaunchEnv } from "@/lib/browser-setup";
 import { isInside } from "@/lib/file-guard";
 import { ensureArtifactsDir } from "@/lib/coding-agent-artifacts";
 import { describeImage } from "@/lib/vision-describe";
@@ -229,24 +231,29 @@ setInterval(() => {
   closeOwnedBrowserIfIdle();
 }, 60_000);
 
-// Shared Playwright Browser handle, reused across sessions. Recreated on
+// Shared Playwright Browser handles, reused across sessions. Recreated on
 // next access if the underlying Chromium disconnects (e.g. service restart).
-let cachedBrowser: import("playwright").Browser | null = null;
-let cachedBrowserPromise: Promise<import("playwright").Browser> | null = null;
-// Whether cachedBrowser is a Chromium WE launched — the fallback for a
-// foreign CDP port — rather than the desktop's, which is only attached to
-// and must never be closed from here. Ours is headless and invisible, so
-// with only pages ever closed it stayed resident for the life of the web
-// server; it is closed once the last session is gone instead, and the next
-// launch starts a fresh one.
-let ownedBrowser = false;
+//
+// One slot per KIND, because the owner's switch can move between two sessions
+// and a page already open on the other browser has to keep working: closing
+// the handle a live session is driving to honour a preference change would
+// take that session's page down with it.
+let desktopBrowser: import("playwright").Browser | null = null;
+let desktopBrowserPromise: Promise<import("playwright").Browser> | null = null;
+// The Chromium WE launched — for a foreign CDP port, a desktop launch that
+// failed, or an owner who switched the screen off. The desktop's is only
+// attached to and must never be closed from here. Ours is headless and
+// invisible, so with only pages ever closed it stayed resident for the life of
+// the web server; it is closed once the last session is gone instead, and the
+// next launch starts a fresh one.
+let ownBrowser: import("playwright").Browser | null = null;
+let ownBrowserPromise: Promise<import("playwright").Browser> | null = null;
 
 /** Close the Chromium of our own once no session refers to it. Never the desktop's. */
 function closeOwnedBrowserIfIdle(): void {
-  if (!ownedBrowser || sessionCount() > 0 || !cachedBrowser) return;
-  const browser = cachedBrowser;
-  ownedBrowser = false;
-  cachedBrowser = null;
+  if (sessionCount("headless") > 0 || !ownBrowser) return;
+  const browser = ownBrowser;
+  ownBrowser = null;
   browser.close().catch(() => {});
   console.log("[Browser] Closed the headless Chromium of our own: no session left");
 }
@@ -262,11 +269,14 @@ async function isDesktopBrowserReady(): Promise<boolean> {
 }
 
 /**
- * Resolves "desktop" when ClawBox's own Chromium is up, "foreign" when the
- * port is held by somebody else's — our service cannot bind it, so starting
- * it would only fail — and throws when nothing can be brought up.
+ * Bring ClawBox's own Chromium up unless it already is.
+ *
+ * "desktop" — it is up (or came up); "foreign" — the port is held by somebody
+ * else's Chromium, so our service could not bind it and starting it would only
+ * fail; "unavailable" — the launch produced nothing. The last two are not
+ * errors here: the caller answers them with the headless browser and says so.
  */
-async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign"> {
+async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign" | "unavailable"> {
   const state = await probeCdp(CDP_ENDPOINT, CDP_ENDPOINT);
   if (state === "ours") return "desktop";
   if (state === "foreign") {
@@ -276,6 +286,16 @@ async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign"> {
       console.warn(`[Browser] CDP port ${CDP_PORT} is held by another program's Chromium${owner}; using a headless Chromium of our own instead`);
     });
     return "foreign";
+  }
+
+  // systemd starts Chromium, not this server, so the start page has to be on
+  // disk before the unit runs — the same write the manage route's "open" makes,
+  // for the same reason (scripts/launch-browser.sh sources browser.env). Best
+  // effort: a window on the wrong page still beats no window at all.
+  try {
+    await writeBrowserLaunchEnv(await getBrowserStartUrl());
+  } catch (err) {
+    console.warn("[Browser] could not write the browser launch environment:", err instanceof Error ? err.message : err);
   }
 
   try {
@@ -292,7 +312,8 @@ async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign"> {
     if (await isDesktopBrowserReady()) return "desktop";
   }
 
-  throw new Error(`Desktop Chromium is not available on CDP port ${CDP_PORT}`);
+  console.warn(`[Browser] Desktop Chromium did not come up on CDP port ${CDP_PORT}; using a headless Chromium of our own instead`);
+  return "unavailable";
 }
 
 async function getPlaywright() {
@@ -303,35 +324,14 @@ async function getPlaywright() {
   }
 }
 
-async function getSharedBrowser(): Promise<import("playwright").Browser> {
-  if (cachedBrowser?.isConnected()) return cachedBrowser;
-  if (cachedBrowserPromise) return cachedBrowserPromise;
+/** Attach to the desktop Chromium over CDP, once, and keep the handle. */
+async function getDesktopBrowser(): Promise<import("playwright").Browser> {
+  if (desktopBrowser?.isConnected()) return desktopBrowser;
+  if (desktopBrowserPromise) return desktopBrowserPromise;
 
-  cachedBrowserPromise = (async () => {
+  desktopBrowserPromise = (async () => {
     const pw = await getPlaywright();
-    const where = await ensureDesktopBrowserRunning();
     try {
-      if (where === "foreign") {
-        // The desktop port is somebody else's browser. Rather than fail
-        // every screenshot until it exits, drive a headless Chromium of our
-        // own: coding runs verify their pages exactly as before; only the
-        // visible desktop window is not involved, and the warning above
-        // says so. It is closed on disconnect like the shared handle.
-        // Explicit executable: Playwright's own lookup has answered "" inside
-        // the standalone server, while the runtime sits in ~/.cache/ms-playwright.
-        const executablePath = findPlaywrightChromium() ?? undefined;
-        const browser = await pw.chromium.launch({ headless: true, args: ["--no-sandbox"], ...(executablePath ? { executablePath } : {}) });
-        browser.on("disconnected", () => {
-          if (cachedBrowser === browser) {
-            cachedBrowser = null;
-            ownedBrowser = false;
-          }
-          cachedBrowserPromise = null;
-        });
-        cachedBrowser = browser;
-        ownedBrowser = true;
-        return browser;
-      }
       // 30 s matches Playwright's own default — previously 10 s to fail fast
       // against the Bun-WS hang, which is no longer relevant now that we
       // run under Node.
@@ -345,25 +345,83 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
         headers: { Origin: CDP_ENDPOINT },
       });
       browser.on("disconnected", () => {
-        if (cachedBrowser === browser) cachedBrowser = null;
+        if (desktopBrowser === browser) desktopBrowser = null;
         // Also drop a stale in-flight promise so a disconnect that races
         // with another caller doesn't hand out a promise for a dead browser.
-        cachedBrowserPromise = null;
+        desktopBrowserPromise = null;
         console.log("[Browser] Shared CDP connection disconnected; will reconnect on next launch");
       });
-      cachedBrowser = browser;
-      ownedBrowser = false;
+      desktopBrowser = browser;
       return browser;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[Browser] connectOverCDP(${CDP_ENDPOINT}) failed:`, msg);
       throw new Error(`Failed to attach to desktop Chromium via CDP at ${CDP_ENDPOINT}: ${msg}`);
     } finally {
-      cachedBrowserPromise = null;
+      desktopBrowserPromise = null;
     }
   })();
 
-  return cachedBrowserPromise;
+  return desktopBrowserPromise;
+}
+
+/** Launch a headless Chromium of our own, once, and keep the handle. */
+async function getOwnBrowser(): Promise<import("playwright").Browser> {
+  if (ownBrowser?.isConnected()) return ownBrowser;
+  if (ownBrowserPromise) return ownBrowserPromise;
+
+  ownBrowserPromise = (async () => {
+    const pw = await getPlaywright();
+    try {
+      // Explicit executable: Playwright's own lookup has answered "" inside
+      // the standalone server, while the runtime sits in ~/.cache/ms-playwright.
+      const executablePath = findPlaywrightChromium() ?? undefined;
+      const browser = await pw.chromium.launch({ headless: true, args: ["--no-sandbox"], ...(executablePath ? { executablePath } : {}) });
+      browser.on("disconnected", () => {
+        if (ownBrowser === browser) ownBrowser = null;
+        ownBrowserPromise = null;
+      });
+      ownBrowser = browser;
+      return browser;
+    } finally {
+      ownBrowserPromise = null;
+    }
+  })();
+
+  return ownBrowserPromise;
+}
+
+/**
+ * The browser a session is opened on, and which one that turned out to be.
+ *
+ * The owner's switch is read HERE, for every session: it is the Coding Agent's
+ * "verify your work on my screen" preference (ON when the key is absent), and
+ * a run that started before the owner flipped it must not go on driving a
+ * window they just asked to be left alone.
+ *
+ * Wanting the screen is not the same as getting it. Somebody else's Chromium
+ * on the CDP port, or a desktop launch that never comes up, both leave the
+ * headless browser as the only way to verify anything — and failing the whole
+ * call instead would cost the run its verification for a window it does not
+ * need. So we fall back, and the answer names the browser that served it.
+ */
+async function acquireBrowser(): Promise<{ browser: import("playwright").Browser; kind: BrowserKind }> {
+  if (await getRealBrowser()) {
+    // A handle we already hold is proof the window is up: skip the probe (two
+    // round trips, one of them a WebSocket upgrade) on every session but the
+    // first.
+    const where = desktopBrowser?.isConnected() || desktopBrowserPromise
+      ? "desktop"
+      : await ensureDesktopBrowserRunning();
+    if (where === "desktop") {
+      try {
+        return { browser: await getDesktopBrowser(), kind: "desktop" };
+      } catch (err) {
+        console.warn("[Browser] the desktop Chromium could not be driven; using a headless Chromium of our own instead:", err instanceof Error ? err.message : err);
+      }
+    }
+  }
+  return { browser: await getOwnBrowser(), kind: "headless" };
 }
 
 interface DownloadablePage {
@@ -403,7 +461,7 @@ export async function POST(req: Request) {
     const { action, sessionId } = body;
 
     if (action === "launch") {
-      const browser = await getSharedBrowser();
+      const { browser, kind } = await acquireBrowser();
       const context = browser.contexts()[0] ?? await browser.newContext();
       if (!context) {
         throw new Error("Desktop Chromium did not expose a browser context");
@@ -431,7 +489,7 @@ export async function POST(req: Request) {
         await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
       }
 
-      const id = openSession(page, runId);
+      const id = openSession(page, runId, kind);
 
       const screenshot = await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
 
@@ -440,6 +498,10 @@ export async function POST(req: Request) {
         url: page.url(),
         title: await page.title().catch(() => ""),
         screenshot: screenshot ? screenshot.toString("base64") : null,
+        // Which Chromium answered. On by default is the desktop one, so a
+        // "headless" here is the caller's only sign that the screen it was
+        // told to verify on was not available — see acquireBrowser.
+        browser: kind,
       });
     }
 
@@ -459,6 +521,10 @@ export async function POST(req: Request) {
         title: await page.title().catch(() => ""),
         screenshot: screenshot ? screenshot.toString("base64") : null,
         canGoBack: await page.evaluate(() => window.history.length > 1).catch(() => false),
+        // Every answer, not only the launch: a caller that reconnects to a
+        // session it did not open — or one whose model kept nothing from the
+        // launch reply — can still tell whether the owner is watching this.
+        browser: session.browser,
       };
     };
 
@@ -529,7 +595,7 @@ export async function POST(req: Request) {
         if (!validCoord(x) || !validCoord(y)) return NextResponse.json({ error: "Invalid coordinates" }, { status: 400 });
         await page.mouse.move(x, y);
         // No screenshot for hover — too frequent
-        return NextResponse.json({ ok: true });
+        return NextResponse.json({ ok: true, browser: session.browser });
       }
 
       case "keydown": {
@@ -607,7 +673,7 @@ export async function POST(req: Request) {
         // A Chromium of our OWN is the exception: nobody else sees it.
         await closeSession(sessionId as string);
         closeOwnedBrowserIfIdle();
-        return NextResponse.json({ ok: true });
+        return NextResponse.json({ ok: true, browser: session.browser });
 
       default:
         return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
