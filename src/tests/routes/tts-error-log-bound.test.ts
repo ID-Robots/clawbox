@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * TASK-742 — what `POST /setup-api/tts` writes into the journal when a write
@@ -67,6 +67,14 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
+// Explicit, though `restoreMocks` in vitest.config.ts already restores every
+// spy between tests and the first case pins `toHaveBeenCalledTimes(1)`, which
+// is what would fail if history carried over. Stated here so the file does not
+// depend on a global setting it does not own.
+afterEach(() => {
+  warnSpy.mockRestore();
+});
+
 describe("a failed voice write writes one bounded journal line", () => {
   it("logs the harness's message as one capped, quoted value", async () => {
     writeStateMock.mockRejectedValue(new Error(CLI_STDERR));
@@ -101,7 +109,7 @@ describe("a failed voice write writes one bounded journal line", () => {
     const res = await POST(post({ action: "language", language: "en" }));
     expect(res.status).toBe(500);
 
-    const line = String((warnSpy.mock.calls[0] as [string, unknown])[1]);
+    const line = String((warnSpy.mock.calls.at(-1) as [string, unknown])[1]);
     expect(line.split(String.fromCharCode(10))).toHaveLength(1);
     expect(line).not.toContain(`${String.fromCharCode(10)}WARN`);
   });
