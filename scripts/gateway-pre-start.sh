@@ -189,6 +189,147 @@ if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_V2
 
+# ── First boot on a NEW OpenClaw core: make the config loadable again ───────
+#
+# THE INCIDENT (TASK-737). A customer box was dark for 25 hours after the
+# 2026.7.1 → 2026.8.1 core upgrade. OpenClaw 2026.8 does NOT migrate a 2026.7
+# config on load: its startup guard runs the preflight with
+# `migrateLegacyConfig: false` and exits 78 with `Unrecognized keys`. The
+# migrations exist (`LEGACY_CONFIG_MIGRATIONS`, "applied by doctor") but only
+# `openclaw doctor --fix` performs them, and nothing on the boot path ran it
+# for THIS reason — the block further down is gated on an auth-profiles
+# sentinel, and the updater's own call happens after the gateway has already
+# failed.
+#
+# HARNESS FIRST, TWICE. The question "will the core load this?" is answered by
+# the core (`openclaw config validate`), and the repair is the core's own
+# (`openclaw doctor --fix`). This script does not carry a rename table: the
+# four moves the 2026.8 core makes are its business, and a table here would be
+# a second, staler copy of it.
+#
+# AND THE THING THAT BLOCKS THE REPAIR. Measured against 2026.8.1 on
+# 2026-09-06: with an EMPTY legacy `exec-approvals.json` in the state
+# directory, `doctor --fix --yes --non-interactive` exits 1 having migrated
+# NOTHING, and its last line is `Legacy exec approvals exist at … Run
+# \`openclaw doctor --fix\`` — advice for the command that just ran. Move that
+# one empty file aside and the same command exits 0 and migrates everything.
+# So it is cleared FIRST, and only when it is provably empty.
+#
+# COST. Gated on the installed core's version, not run every boot: the stamp
+# below records the version whose config the core last ACCEPTED, so a steady
+# box pays nothing and only a core bump — the state this exists for — pays the
+# CLI. The stamp is written only on success, so a failed repair is retried on
+# the next boot instead of being remembered as done.
+CLAWBOX_OPENCLAW_STATE_DIR="$(dirname "$OPENCLAW_CONFIG")"
+CLAWBOX_CONFIG_VALIDATED_STAMP="$CLAWBOX_ROOT/data/openclaw-config-validated"
+# Read by the plugin-entry pass further down, which reuses this run's warnings
+# rather than paying for a second `config validate`.
+CLAWBOX_CONFIG_VALIDATE_OUTPUT=""
+export CLAWBOX_CONFIG_VALIDATE_OUTPUT
+
+# Does this file hold any approval at all? Exit 0 = provably empty, 1 = holds
+# something, 2 = could not tell. Only 0 may lead to a move: an approval is an
+# owner decision and an unreadable file is not evidence of anything.
+clawbox_exec_approvals_are_empty() {
+  python3 - "$1" <<'PY'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(2)
+if not isinstance(doc, dict):
+    sys.exit(2)
+# The three homes an approval can live in, per the core's own schema
+# (exec-approvals config: only `version` is required, the rest are maps).
+for key in ("socket", "defaults", "agents"):
+    node = doc.get(key)
+    if node in (None, {}, []):
+        continue
+    sys.exit(1)
+# Anything the core added that this predicate does not understand is content.
+if set(doc) - {"version", "socket", "defaults", "agents"}:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+clawbox_stamp_read() {
+  [ -f "$CLAWBOX_CONFIG_VALIDATED_STAMP" ] || return 0
+  head -c 64 "$CLAWBOX_CONFIG_VALIDATED_STAMP" 2>/dev/null | tr -d '[:space:]' || true
+}
+
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] \
+  && [ -x "$OPENCLAW_BIN" ] \
+  && [ -f "$OPENCLAW_CONFIG" ] \
+  && [ "$(clawbox_stamp_read)" != "$CLAWBOX_OPENCLAW_EFFECTIVE" ]
+then
+  # An empty legacy approvals file makes every doctor run below exit 1 before
+  # it migrates anything, so it goes first — and only when it is provably
+  # empty. A file with approvals in it is the owner's, and the core imports it
+  # itself; saying so is the whole of what this script may do about it.
+  CLAWBOX_LEGACY_EXEC_APPROVALS="$CLAWBOX_OPENCLAW_STATE_DIR/exec-approvals.json"
+  if [ -f "$CLAWBOX_LEGACY_EXEC_APPROVALS" ]; then
+    # Captured, not read from `$?` after a bare call: under `set -e` a bare
+    # call that answers "holds approvals" (exit 1) would abort the whole
+    # pre-start, which is the opposite of leaving the owner's file alone.
+    _ea_verdict=0
+    clawbox_exec_approvals_are_empty "$CLAWBOX_LEGACY_EXEC_APPROVALS" || _ea_verdict=$?
+    case "$_ea_verdict" in
+      0)
+        _ea_moved="$CLAWBOX_LEGACY_EXEC_APPROVALS.legacy-$(date +%Y%m%d-%H%M%S)"
+        if mv "$CLAWBOX_LEGACY_EXEC_APPROVALS" "$_ea_moved" 2>/dev/null; then
+          echo "  Moved an empty legacy exec-approvals.json aside ($_ea_moved): it holds no approvals, and its presence stops openclaw doctor before it migrates anything"
+        else
+          echo "  WARN: could not move the empty legacy exec-approvals.json aside; openclaw doctor will refuse to migrate this config" >&2
+        fi
+        ;;
+      1)
+        echo "  NOTE: $CLAWBOX_LEGACY_EXEC_APPROVALS holds approvals — left in place for the core to import; doctor refuses config migrations until it has" >&2
+        ;;
+      *)
+        echo "  WARN: could not read $CLAWBOX_LEGACY_EXEC_APPROVALS — leaving it alone" >&2
+        ;;
+    esac
+  fi
+
+  # Ask the core, then let the core repair itself, then ask again.
+  #
+  # `|| true` on the assignment and not on the test: the exit code is the
+  # answer here, and losing it under `set -e` would turn "refused" into
+  # "accepted". Time-boxed for the same reason as the version probe above — a
+  # wedged CLI must cost this boot ten seconds of budget, not the unit's whole
+  # TimeoutStartSec.
+  CLAWBOX_CONFIG_VALIDATE_OUTPUT="$(timeout -k 5 90 "$OPENCLAW_BIN" config validate 2>&1)" \
+    && CLAWBOX_CONFIG_ACCEPTED=1 || CLAWBOX_CONFIG_ACCEPTED=0
+  if [ "$CLAWBOX_CONFIG_ACCEPTED" = "0" ]; then
+    echo "  The installed OpenClaw core ($CLAWBOX_OPENCLAW_EFFECTIVE) refuses this config; running its own migrations..."
+    printf '%s\n' "$CLAWBOX_CONFIG_VALIDATE_OUTPUT" | sed -n 's/^[[:space:]]*×[[:space:]]*/  refused: /p' >&2
+    cp -p "$OPENCLAW_CONFIG" "$OPENCLAW_CONFIG.pre-v2-migration-$(date +%Y%m%d-%H%M%S)" 2>/dev/null \
+      || echo "  WARN: could not back up $OPENCLAW_CONFIG before migrating it" >&2
+    if ! timeout -k 10 300 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
+      echo "  WARN: openclaw doctor --fix did not complete" >&2
+    fi
+    CLAWBOX_CONFIG_VALIDATE_OUTPUT="$(timeout -k 5 90 "$OPENCLAW_BIN" config validate 2>&1)" \
+      && CLAWBOX_CONFIG_ACCEPTED=1 || CLAWBOX_CONFIG_ACCEPTED=0
+    if [ "$CLAWBOX_CONFIG_ACCEPTED" = "1" ]; then
+      echo "  Config migrated to the $CLAWBOX_OPENCLAW_EFFECTIVE layout"
+    else
+      # Not fatal: everything below still runs on a config the core will
+      # refuse, exactly as it did before this block existed, and the gateway's
+      # own exit 78 stays the authority. What changes is that the keys are
+      # named HERE, in the boot log, instead of only in a gateway journal
+      # nobody reads until an owner calls.
+      echo "  ERROR: the core still refuses this config — the gateway will exit 78 until these keys are fixed:" >&2
+      printf '%s\n' "$CLAWBOX_CONFIG_VALIDATE_OUTPUT" | sed -n 's/^[[:space:]]*×[[:space:]]*/  refused: /p' >&2
+    fi
+  fi
+  if [ "$CLAWBOX_CONFIG_ACCEPTED" = "1" ]; then
+    mkdir -p "$(dirname "$CLAWBOX_CONFIG_VALIDATED_STAMP")" 2>/dev/null || true
+    printf '%s\n' "$CLAWBOX_OPENCLAW_EFFECTIVE" > "$CLAWBOX_CONFIG_VALIDATED_STAMP" 2>/dev/null || true
+  fi
+  export CLAWBOX_CONFIG_VALIDATE_OUTPUT
+fi
+
 # Resolve configured mDNS hostname (defaults to "clawbox" if unset/invalid)
 CONFIGURED_HOSTNAME="clawbox"
 if [ -f "$HOSTNAME_ENV" ]; then

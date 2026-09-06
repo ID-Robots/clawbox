@@ -1194,17 +1194,94 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
   });
 }
 
-async function runOpenclawDoctorFix(): Promise<void> {
+/**
+ * Run the core's own repair, and REMEMBER whether it worked.
+ *
+ * Still non-fatal, and that is load-bearing: doctor exiting non-zero because
+ * the gateway holds its state directory is the gateway proving it is alive
+ * (install.sh:step_gateway_legacy_state_recovery, measured 2026-09-06), so the
+ * restart + positive port probe that follows remains the verdict, not the exit
+ * code. What changed is that the exit code is no longer DISCARDED: a doctor
+ * that could not finish is the single most useful fact about an update that
+ * then finds no gateway, and swallowing it silently is what left a customer
+ * box dark for 25 hours with "Applying system fixups — completed" on screen
+ * (TASK-737).
+ */
+async function runOpenclawDoctorFix(): Promise<boolean> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
-  if (openclawIsAbsent()) return;
+  if (openclawIsAbsent()) return true;
   try {
     await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
       timeout: 90_000,
       maxBuffer: 2 * 1024 * 1024,
     });
-  } catch {
-    // Doctor can still repair some state before exiting non-zero. Continue
-    // into a restart + positive gateway probe rather than trusting exit code.
+    return true;
+  } catch (err) {
+    warnUpdate(
+      "openclaw-doctor-fix-failed",
+      "`openclaw doctor --fix` did not complete. Config and session migrations it "
+      + `performs may still be pending: ${firstLineOf(err)}`,
+    );
+    return false;
+  }
+}
+
+/** The first meaningful line of a failure, for a one-line warning or error. */
+function firstLineOf(err: unknown): string {
+  const text = err instanceof Error ? (err.message ?? "") : String(err);
+  const line = text.split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+  return line ?? "no output";
+}
+
+/**
+ * Ask the CORE whether it will accept this device's configuration.
+ *
+ * HARNESS FIRST. `openclaw config validate` is the core's own answer to
+ * "would the gateway start?", and until TASK-737 nothing in ClawBox ever
+ * asked it — not the updater, not install.sh, not the boot script. That gap
+ * is the whole of the incident: OpenClaw 2026.8 REFUSES a 2026.7-layout
+ * config instead of migrating it on load (`Unrecognized keys`, gateway exit
+ * 78), so a box whose migration did not run has a gateway that provably
+ * cannot start, and ClawBox reported "not listening on port 18789" — true,
+ * unactionable, and indistinguishable from a dozen other causes.
+ *
+ * Returns the validator's own words when it refuses, and null when it
+ * accepts, when there is no core to ask (Hermes), or when the validator
+ * itself could not be run. Null is deliberately the "say nothing" answer:
+ * this is a DIAGNOSIS of an update that has already failed, so a validator we
+ * could not reach must never invent a cause of its own.
+ */
+async function getOpenclawConfigRefusal(): Promise<string | null> {
+  if (openclawIsAbsent()) return null;
+  try {
+    await execFile(OPENCLAW_BIN, ["config", "validate"], {
+      timeout: 60_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    return null;
+  } catch (err) {
+    // The validator prints the offending keys on stdout and exits non-zero.
+    // execFile's rejection carries both streams; the keys are what matters.
+    const detail = err as { stdout?: unknown; stderr?: unknown; message?: unknown };
+    const text = [detail.stdout, detail.stderr, detail.message]
+      .map((part) => (typeof part === "string" ? part : ""))
+      .join("\n");
+    const offending = text
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      // The core marks each rejected key with a leading `×`. Nothing else in
+      // its output is a reason, and the trailing "Run `openclaw doctor --fix`"
+      // advice is the line ClawBox must NOT hand back as the cause: doctor is
+      // exactly what just ran and failed.
+      .filter((line) => line.startsWith("\u00d7"))
+      .map((line) => line.replace(/^\u00d7\s*/, ""));
+    if (offending.length === 0) {
+      // Non-zero for a reason the validator did not phrase as a key: keep the
+      // first line rather than claiming to know more than it said.
+      const first = text.split(/\r?\n/).map((l) => l.trim()).find(Boolean);
+      return first ?? null;
+    }
+    return offending.join("; ");
   }
 }
 
@@ -2083,12 +2160,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
-    const lastLog = getGatewayFailureDetail(beforeRecoveryLog);
-    throw new Error(
-      lastLog
-        ? `OpenClaw gateway is not listening on port ${GATEWAY_PORT}: ${lastLog}`
-        : `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
-    );
+    throw new Error(await describeDeadGateway(beforeRecoveryLog));
   }
 
   await withGatewayQuiesced(async () => {
@@ -2099,12 +2171,36 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
-  const lastLog = getGatewayFailureDetail(afterRecoveryLog);
   throw new Error(
-    lastLog
-      ? `OpenClaw gateway still offline after legacy state recovery: ${lastLog}`
-      : "OpenClaw gateway still offline after legacy state recovery",
+    await describeDeadGateway(afterRecoveryLog, "OpenClaw gateway still offline after legacy state recovery"),
   );
+}
+
+/**
+ * Say WHY the gateway is not there, in the order of what the owner can act on.
+ *
+ * A configuration the core refuses outranks anything in the journal, because
+ * it is a cause rather than a symptom and it is the one the journal states
+ * worst. On a 2026.7 → 2026.8 core upgrade whose migration did not run, the
+ * gateway's own last line is `Run "openclaw doctor --fix" to repair the
+ * config, then retry.` — advice for a command ClawBox has just run and that
+ * has just failed — and `getGatewayFailureDetail` hands exactly that line back
+ * as the cause (measured against 2026.8.1 on 2026-09-06). The keys the core
+ * actually named are three lines further up and were never reported at all.
+ *
+ * Asked only here, on a path where the update has already failed: a healthy
+ * update never pays for the extra CLI call.
+ */
+async function describeDeadGateway(
+  journal: string,
+  prefix = `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
+): Promise<string> {
+  const refusal = await getOpenclawConfigRefusal();
+  if (refusal) {
+    return `${prefix}: OpenClaw refuses this device's configuration — ${refusal}`;
+  }
+  const lastLog = getGatewayFailureDetail(journal);
+  return lastLog ? `${prefix}: ${lastLog}` : prefix;
 }
 
 const UPDATE_STEPS: UpdateStepDef[] = [

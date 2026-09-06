@@ -2443,6 +2443,124 @@ describe("updater", () => {
       );
     });
   });
+
+  /**
+   * TASK-737 — a customer box was dark for 25 hours after the OpenClaw
+   * 2026.7.1 → 2026.8.1 core upgrade.
+   *
+   * 2026.8 does not migrate a 2026.7 config on load, it REFUSES it and exits
+   * 78. Measured against 2026.8.1 on 2026-09-06, the gateway's LAST journal
+   * line in that state is `Run "openclaw doctor --fix" to repair the config,
+   * then retry.` — advice for the command the updater has just run and that
+   * has just failed — and `getGatewayFailureDetail` hands exactly that line
+   * back as the cause. The keys the core actually named are three lines
+   * further up and were never reported at all.
+   *
+   * Two shapes pinned here:
+   *   false success — a doctor that could not finish was swallowed whole, so
+   *                   the single most useful fact about the update never
+   *                   reached the owner.
+   *   false lead    — the reported cause was advice that could not work,
+   *                   which is how a config refusal reads as "the gateway is
+   *                   not listening".
+   */
+  describe("a core the config no longer suits", () => {
+    /** What `openclaw config validate` says about a 2026.7-layout config. */
+    const validateRefusal = Object.assign(new Error("Command failed: openclaw config validate"), {
+      stdout: [
+        "OpenClaw config is invalid: /home/clawbox/.openclaw/openclaw.json",
+        '  \u00d7 openclaw.json:4 \u2014 agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"',
+        '  \u00d7 openclaw.json:11 \u2014 messages: Unrecognized key: "tts"',
+        "",
+        "Run `openclaw doctor --fix` to repair, or fix the keys above manually.",
+      ].join("\n"),
+      stderr: "",
+    });
+
+    /** The gateway's own journal in that state — advice line last, on purpose. */
+    const refusedJournal = [
+      "Gateway failed to start: Invalid config at /home/clawbox/.openclaw/openclaw.json:",
+      'openclaw.json:4 \u2014 agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"',
+      'Run "openclaw doctor --fix" to repair, then retry.',
+      'Run "openclaw doctor --fix" to repair the config, then retry.',
+      "",
+    ].join("\n");
+
+    async function runContinuation() {
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      return updater.getUpdateState();
+    }
+
+    it("names the keys the core refused instead of repeating its own advice", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        "openclaw doctor --fix": new Error("Command failed: openclaw doctor --fix"),
+        "openclaw config validate": validateRefusal,
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.error).toContain('agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"');
+      expect(state.error).toContain('messages: Unrecognized key: "tts"');
+      // The line that is true and useless. Handing it back as the cause tells
+      // the owner to run the command that has just failed.
+      expect(state.error).not.toContain("to repair the config, then retry");
+    });
+
+    it("records that doctor could not finish rather than swallowing it", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        "openclaw doctor --fix": new Error("Command failed: openclaw doctor --fix"),
+        "openclaw config validate": validateRefusal,
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.warnings?.map((w) => w.code)).toContain("openclaw-doctor-fix-failed");
+    });
+
+    it("still blames the journal when the core ACCEPTS the config", async () => {
+      // The load-bearing half: doctor exiting non-zero is not by itself proof
+      // of anything — it is what a doctor that lost a lock to a LIVE gateway
+      // does — so a config the core accepts must leave the existing diagnosis
+      // exactly as it was.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        "openclaw doctor --fix": new Error("Command failed: openclaw doctor --fix"),
+        "openclaw config validate": { stdout: "Config valid\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.error).toContain("OpenClaw gateway is not listening on port 18789");
+      expect(state.error).toContain("gateway crashed for an unrelated reason");
+      expect(state.error).not.toContain("refuses this device's configuration");
+    });
+  });
 });
 
 /**
