@@ -1542,8 +1542,10 @@ def _url_host(_url):
 # install.sh's CLAWBOX_AI_API_KEY branch provisions a RAW DeepSeek key at
 # api.deepseek.com, and admitting that host would make a genuine third party
 # "not foreign". Here that is already true without a test of its own — every
-# reader of this set (`_is_our_image_row`, `_is_foreign`) sits inside the
-# `claw_` gate below, so on a raw-DeepSeek box the set is never consulted.
+# reader of this set (`_is_our_image_row`, `_is_foreign`, `_clawai_host_is_ours`)
+# sits inside the `claw_` gate below — the speech migration through
+# `_clawai_openai_route_is_ours`, which is only set there — so on a raw-DeepSeek
+# box the set is never consulted.
 # clawboxProxyHosts() in src/app/setup-api/ai-models/configure/route.ts DOES
 # test it, because its call site is not gated; the two therefore agree on
 # every box. If a reader of this set is ever moved ABOVE that gate, the
@@ -1860,6 +1862,112 @@ def _same_endpoint(_a, _b):
     return _without_one_trailing_slash(_a) == _without_one_trailing_slash(_b)
 
 
+def _clawai_host_is_ours(_url):
+    """Does this address name a host CLAWBOX ITSELF has written?
+
+    The same `_clawbox_proxy_hosts` the image row's ownership test uses — the
+    live proxy (so a staging box names its staging host) plus the retired ones —
+    rather than a second list, so "is this row mine to repair" and "is this
+    speech route mine" cannot drift into two answers.
+
+    Host, not full address, and deliberately: the arms below that ask this one
+    are looking for a route of OURS that has MOVED, and a move is exactly the
+    case an equality test cannot see. The arms that need the precise address
+    still ask `_same_endpoint`.
+
+    Same gate caveat as the set it reads: every caller must sit inside the
+    `claw_` test above it, or a raw-DeepSeek box would admit api.deepseek.com as
+    ours. This one does — the speech migration runs only when
+    `_clawai_openai_route_is_ours`, which is set inside that gate.
+    """
+    return _url_host(_url) in _clawbox_proxy_hosts if isinstance(_url, str) else False
+
+
+def _clawai_route_is_ours(_base_url, _api_key, _stamped, _proxy_base_url):
+    """Is a configured media route OURS — ours to refresh, ours to take back?
+
+    THE CURRENT PROXY URL IS NOT THE QUESTION, and asking it as though it were
+    is what this replaces. `CLAWBOX_AI_PROXY_URL` is env-overridable and moves
+    between releases, so a box we linked under a previous address carries an
+    entry we wrote, pointing at an endpoint that has since been retired — and
+    an equality test reads that as the OWNER'S own speech server and skips it,
+    while the chat provider and the image row are repaired in the same boot.
+    The customer's transcription and voice stay pointed at a dead host and
+    nothing says so: the false-failure class.
+
+    Ownership needs POSITIVE evidence, in the four shapes below. The Hermes half
+    (`hermesCloudRouteIsOurs`, src/lib/hermes-tts.ts — TASK-726 is this half of
+    it) asks the same question with the arms IT has: it writes no stamp, so it
+    has three, and it needs no delete arm at all because it HAS no destructive
+    path — `writeHermesCloudTarget` is the only writer of `tts.openai.*` and a
+    downgrade there just stops exposing the endpoint. The consequence is one
+    real divergence, and it is deliberate: our own `claw_` token at an address
+    of the owner's reads as OURS on Hermes and as THEIRS here, which is what
+    beta did and what the suite pins.
+
+      - our own stamp on the entry (`clawboxManaged`);
+      - or a `claw_` portal token on it, which is what survives the proxy URL
+        moving;
+      - or the endpoint names our proxy, or a host of ours it has moved from;
+      - or the slot is genuinely EMPTY — no endpoint AND no key. An unset
+        endpoint alone says nothing: the canonical way an owner uses the
+        generic `openai` slot is their key with no URL at all.
+
+    FOREIGN EVIDENCE IS ASKED FIRST, and it comes in two kinds. A host that is
+    none of ours is decisive on its own: no stamp and no token of ours outranks
+    it. Their CREDENTIAL is weighed against the address rather than over it — an
+    `sk-` key on one of our own addresses still reads as ours, which is what beta
+    did and what this deliberately does not change (see the delete arm below).
+
+    The key was the only evidence this asked for at first. But a speech server on
+    the LAN needs no key at all, so on the shape an owner is most likely to run,
+    THE ADDRESS IS THE ONLY THING THAT SPEAKS FOR IT. This is
+    the only generic OpenAI-compatible speech slot OpenClaw has, so an owner who
+    wants their own speech server has to edit the entry we already wrote — which
+    `openclaw config set` does in place, leaving our `clawboxManaged` key behind
+    on a route that is now theirs. Trusting a stamp on its own would overwrite
+    their server, their key and their model at the next gateway start, and
+    DELETE the whole entry on a downgrade. `hermesCloudRouteIsOurs` refuses that
+    same entry, and so did the rule this replaces.
+
+    ONE WIDENING, recorded rather than hidden: an entry carrying our stamp or our
+    token on a DIFFERENT PATH of one of our own hosts (`clawbox.com/api/ai-2025`)
+    reads as ours here, where the equality test called it theirs. That is the
+    card — it is how an entry we wrote under a moved proxy is recognised — and it
+    needs TWO pieces of our-ness at once, which a customer serving from their own
+    machine cannot produce. It does sit against the premise
+    gateway-pre-start-clawai-audio.test.ts:167 pins for the transcription block,
+    where another route on our own host IS the owner's; the difference is that
+    that block has no stamp and no credential to ask about.
+
+    The transcription block above deliberately does NOT use this: nothing it
+    writes carries a stamp or a credential, so its endpoint really is the only
+    evidence it has, and treating its seeded model list as one would claim an
+    owner's own route on our host that happens to serve the same model (two
+    cases in gateway-pre-start-clawai-audio.test.ts pin exactly that). Stamping
+    what it writes, so the same repair becomes possible there, is its own card.
+    """
+    _key = _api_key.strip() if isinstance(_api_key, str) else ""
+    _has_endpoint = isinstance(_base_url, str) and bool(_base_url.strip())
+    if _key and not _key.startswith("claw_"):
+        # Somebody else's credential on the entry: only the endpoint can still
+        # say it is ours, and a stale stamp cannot.
+        return _has_endpoint and _same_endpoint(_base_url, _proxy_base_url)
+    if _has_endpoint and not _clawai_host_is_ours(_base_url):
+        # Somebody else's HOST. The same kind of evidence as somebody else's
+        # key, and the only kind a KEYLESS speech server ever produces — a
+        # Kokoro or a Piper on the LAN has no credential to speak for it, and
+        # asking only about the key claimed it, overwrote it, and deleted it on
+        # a downgrade. Retired addresses of ours are still ours, so this costs
+        # the repair below nothing.
+        return False
+    if _stamped or _key.startswith("claw_"):
+        return True
+    if not _has_endpoint:
+        return not _key
+    return _same_endpoint(_base_url, _proxy_base_url)
+
+
 if _clawai_openai_route_is_ours:
     # Anything already under tools.media.audio that is not what we would write
     # is the owner's own transcription setup: a self-hosted Whisper, a Deepgram
@@ -2022,16 +2130,20 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
     if not isinstance(_speech, dict):
         _speech = {}
 
-    # An entry pointing somewhere that is not our proxy is the owner's own
+    # Whose entry is this? `_clawai_route_is_ours` above holds the whole rule —
+    # a foreign credential takes the slot back whatever else says, then our own
+    # stamp or a `claw_` token claims it wherever it points, then the endpoint,
+    # then an empty slot. An entry that is not ours is the owner's own
     # OpenAI-compatible voice — a self-hosted Kokoro, an OpenAI key of their
-    # own, a different route on our host. Leave every field of it alone. The
-    # same one-trailing-slash rule the transcription migration uses, for the
-    # same reason: `.../api/ai//` is a deliberate route, not a typo to tidy.
+    # own, a different route on our host — and every field of it is left alone.
+    # The endpoint arm keeps the one-trailing-slash rule the transcription
+    # migration uses: `.../api/ai//` is a deliberate route, not a typo to tidy.
     _speech_base_url = _speech.get("baseUrl")
-    _speech_route_taken = bool(
-        isinstance(_speech_base_url, str)
-        and _speech_base_url.strip()
-        and not _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
+    _speech_route_taken = not _clawai_route_is_ours(
+        _speech_base_url,
+        _speech.get("apiKey"),
+        _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True,
+        _clawai_proxy_base_url,
     )
     if _speech_route_taken:
         print(
@@ -2042,9 +2154,10 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
         _speech["baseUrl"] = _clawai_proxy_base_url
         _speech["model"] = CLAWBOX_SPEECH_MODEL_ID
         _speech["apiKey"] = _clawai_token
-        # Adopt and normalise an unmarked entry that already points at us — a
-        # hand repair, or one written before this stamp existed — rather than
-        # leave a box with a half-configured voice. Writing is recoverable and
+        # Adopt and normalise an unmarked entry that is ours by any of the other
+        # arms — a hand repair, one written before this stamp existed, or one
+        # still naming an address we have since retired — rather than leave a
+        # box with a half-configured voice. Writing is recoverable and
         # deleting is not, which is why only the delete below insists on it.
         _speech[CLAWBOX_SPEECH_MANAGED_KEY] = True
         if _speech != _speech_before:
@@ -2062,11 +2175,13 @@ elif _clawai_openai_route_is_ours:
     # A box that was Max and is not any more keeps an entry pointing at an
     # endpoint that now answers 403, so every spoken reply buys a refused round
     # trip before falling back — and the panel calls the cloud voice configured
-    # while it does it. Take back only what we wrote, and "what we wrote" means
-    # our own stamp plus our own proxy, not the proxy alone: an entry pointing
-    # at this host that we did not stamp is somebody's hand-written config, and
-    # this is the one place in the file that destroys configuration. An owner's
-    # own voice is theirs whatever their ClawBox AI plan says.
+    # while it does it. Take back only what we wrote: our own STAMP — whatever
+    # address it names, which is the half this fixes — and not an entry the
+    # owner has since re-aimed with a credential of their own. An entry
+    # pointing at this host that we did not stamp is somebody's hand-written
+    # config, and this is the one place in the file that destroys
+    # configuration. An owner's own voice is theirs whatever their ClawBox AI
+    # plan says.
     #
     # `messages.tts.provider` is deliberately NOT touched here either. If the
     # customer had explicitly chosen the cloud voice, the panel's job is to show
@@ -2079,11 +2194,43 @@ elif _clawai_openai_route_is_ours:
     _speech = _tts_providers.get("openai") if isinstance(_tts_providers, dict) else None
     if isinstance(_speech, dict):
         _speech_base_url = _speech.get("baseUrl")
+        # The STAMP is the authorisation, not the address. Requiring the
+        # current proxy URL as well left a downgraded box that had been linked
+        # under a previous address holding our own dead entry for good — every
+        # spoken reply buying a refused round trip, and the panel calling the
+        # cloud voice configured while it did. The stamp still has to be there:
+        # this is the one place in the file that destroys configuration, and an
+        # unstamped entry is somebody's hand-written config whatever it points
+        # at.
+        # THE STAMP, and only the stamp, opens this door — narrower than the
+        # adopt path above on purpose, and the difference is that this one
+        # cannot be undone. A `claw_` token is enough to REFRESH an entry
+        # because the worst case is our own fields rewritten to our own values;
+        # it is not enough to DELETE one, because an owner can point our own
+        # token at our own proxy with a model of their choosing, and that entry
+        # is theirs (the suite pins it).
+        #
+        # `_clawai_route_is_ours` is still asked, for its FOREIGN arms: a
+        # stamped entry the owner has since re-aimed is not ours to take,
+        # whatever the stamp says — and it is re-aimed whether or not they put a
+        # credential of their own on it. The address has to still be one of
+        # OURS, because this is the one place in the file that destroys
+        # configuration.
+        #
+        # Residual, and unchanged either way by this rule: a FOREIGN credential
+        # sitting on our own CURRENT proxy address still reads as ours, so such
+        # an entry is still overwritten and, here, deleted. Narrowing that is a
+        # behaviour change beyond this card.
         if (
             _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True
             and isinstance(_speech_base_url, str)
             and _speech_base_url.strip()
-            and _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
+            and _clawai_route_is_ours(
+                _speech_base_url,
+                _speech.get("apiKey"),
+                True,
+                _clawai_proxy_base_url,
+            )
         ):
             del _tts_providers["openai"]
             print(
