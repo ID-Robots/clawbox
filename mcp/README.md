@@ -341,11 +341,25 @@ Discord). The spoken reply is covered at its own entry point,
 before any outbound hook runs — a cloud voice there is out of reach of both
 halves.
 
+**The same two plugins now carry an INBOUND hook, and it is what lets the owner
+approve a queued email from his own Telegram conversation.** The harness is the
+single consumer of the main bot's `getUpdates` long poll, so ClawBox cannot read
+that stream — but both harnesses hand a plugin the message before the model sees
+it, and both take a claim: OpenClaw's `before_dispatch` (`{ handled: true, text }`,
+which answers on the originating route with no model call; it is NOT in the core's
+`conversationHookNameSet`, so no conversation-access grant is needed) and Hermes'
+`pre_gateway_dispatch` (`{"action": "skip"}`; it fires BEFORE the harness's own
+auth, so ClawBox does its own). Each plugin matches one strict shape locally — a
+verb and a short code, nothing else — and posts to `/setup-api/email/chat-reply`;
+every gate is on the ClawBox side, and `src/lib/email-approval-reply.ts` says why
+there is still no approve verb on the tool surface. `email_send` tells the agent
+that the owner has a code and deliberately does NOT tell it what the code is.
+
 Every claim in the paragraph above about the harness's own internals —
 `transform_llm_output`, `PLATFORM_HINTS`, `reply_payload_sending`,
-`message_sending`'s "legacy" label, the hook context fields and the
-`### Message Context` field list — was read off the running core, not from this
-repository. Nothing here can check them: there is no vendored core and no
+`message_sending`'s "legacy" label, `before_dispatch`, `pre_gateway_dispatch`,
+the hook context fields and the `### Message Context` field list — was read off
+the running core, not from this repository. Nothing here can check them: there is no vendored core and no
 `node_modules/@openclaw`, and `config/openclaw-target.txt` holds a version
 string and nothing else. Treat them as a note of where to look, not as verified
 fact, and re-read them against the core before building on them — TASK-697 did
