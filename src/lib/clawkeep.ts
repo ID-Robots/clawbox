@@ -528,21 +528,22 @@ export async function readToken(): Promise<string | null> {
     if (!raw.startsWith("claw_")) return null;
     return raw;
   } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return null;
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
     // A token that exists and cannot be READ is not "not paired" — saying so
     // would send the owner to re-pair over a permissions problem — but the raw
-    // error carries the token's absolute path, and `clawKeepErrorBody` puts
-    // whatever it is handed into the response of all seven ClawKeep routes.
-    // One fixed sentence, no path.
-    if (code === "EACCES" || code === "EPERM") {
-      throw new ClawKeepError(
-        "The ClawKeep pairing file cannot be read — check its permissions",
-        500,
-        "token_unreadable",
-      );
-    }
-    throw e;
+    // error carries the token's absolute path, and most of the ClawKeep routes
+    // put whatever they are handed into the response through
+    // `clawKeepErrorBody`. Default-deny rather than a list of errnos: EACCES and
+    // EPERM are the likely ones, but ENOTDIR (a botched install leaving
+    // `~/.clawkeep` a regular file), ELOOP and ENAMETOOLONG all carry the path
+    // in `e.message` too. One fixed sentence, no path; the real error goes to
+    // the server log where an operator can read it.
+    console.warn("[clawkeep] could not read the pairing token:", e);
+    throw new ClawKeepError(
+      "The ClawKeep pairing file could not be read — check that it exists and is mode 600",
+      409,
+      "token_unreadable",
+    );
   }
 }
 
@@ -1044,8 +1045,11 @@ export function backupExitError(exitCode: number): ClawKeepError | null {
       return new ClawKeepError("The ClawKeep portal returned an error", 502, "portal_error");
     case 6: // EXIT_NETWORK
       return new ClawKeepError("Could not reach the ClawKeep portal", 504, "offline");
-    case 7: // EXIT_OPENCLAW — building the archive failed, on either edition
-      return new ClawKeepError("The backup archive could not be built", 502, "archive_failed");
+    case 7:
+      // EXIT_OPENCLAW — building the archive failed, on either edition. The
+      // failure is the BOX's own, so 500 rather than 502: nothing upstream was
+      // even reached.
+      return new ClawKeepError("The backup archive could not be built", 500, "archive_failed");
     case 8: // EXIT_UPLOAD
       return new ClawKeepError("The backup could not be uploaded", 502, "upload_failed");
     case 9: // EXIT_NEED_PASSPHRASE — the UI already has the modal for this
@@ -1059,11 +1063,22 @@ export function backupExitError(exitCode: number): ClawKeepError | null {
     case 64: // daemon.py, EX_USAGE — a bad config, before the run begins
       return new ClawKeepError("The ClawKeep configuration is unusable", 500, "config_error");
     case 65:
-      // daemon.py, EX_DATAERR — the token could not be read. F-35's pre-flight
-      // catches the common case before the spawn; this is the narrow one where
-      // the file went away in between, and it deserves the same answer the
-      // pre-flight gives rather than a generic 502.
-      return new ClawKeepNotPairedError();
+      // daemon.py, EX_DATAERR — `token.read_token` raised. It raises for THREE
+      // conditions and the pre-flight already refuses two of them before the
+      // spawn (`readToken` answers null for a missing file and for a body that
+      // is not `claw_*`), so the one that actually reaches here in the field is
+      // the third: `assert_perms` refusing a token with `0o077` bits — a 0644
+      // file restored from a backup, or a hand-edit under a loose umask. That
+      // is a `chmod 600`, not a re-pairing, and answering `not_paired` would
+      // walk the owner through a full unpair/re-pair for it. (The narrow race
+      // where the file is deleted between the pre-flight and the spawn lands
+      // here too and is served the same sentence, which names the file rather
+      // than the account.)
+      return new ClawKeepError(
+        "The ClawKeep pairing file could not be read — check that it exists and is mode 600",
+        409,
+        "token_unreadable",
+      );
     case 124:
       // runBackup's own kill timer. Not the daemon's word — ours.
       return new ClawKeepError("The backup ran out of time and was stopped", 504, "timed_out");

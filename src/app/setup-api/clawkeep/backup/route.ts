@@ -9,9 +9,11 @@ export const dynamic = "force-dynamic";
 // runs a full backup synchronously (openclaw backup create + S3 PUT) and
 // returns the daemon's exit code.
 //
-// On Jetson a real backup can take minutes — the request stays open until
-// the daemon finishes. The UI should call this with no client-side timeout
-// (or an explicit one matching the systemd unit's TimeoutStartSec=4h).
+// On Jetson a real backup can take minutes — the request stays open until the
+// daemon finishes. The UI should call this with no client-side timeout: the
+// bridge's own kill timer (BACKUP_RUN_CAP_MS, 60 minutes) is the real ceiling
+// and now has an owner-facing answer of its own, 504 `timed_out`. The systemd
+// unit's TimeoutStartSec=4h applies to the SCHEDULED run, not to this one.
 //
 // A box with no pairing is refused with 409 `not_paired` before the daemon is
 // started: `clawkeepd` would have loaded the token, failed and exited 65, and
@@ -22,9 +24,17 @@ export const dynamic = "force-dynamic";
 // maps the daemon's own `EXIT_*` taxonomy — plus the two codes the bridge
 // synthesises itself, 124 for our kill timer and 127 for a daemon that could
 // not be started — onto a status, a stable `code` and one owner-facing
-// sentence. No failure leaves here as 2xx, and none of them carries
-// `stderrTail`: that is the daemon's log line, written for an operator, and it
-// has put an absolute device path in front of the customer.
+// sentence. No failure leaves here as 2xx, and no FAILURE carries `stderrTail`:
+// that is the daemon's log line, written for an operator, and it has put an
+// absolute device path in front of the customer.
+//
+// The 200 still carries it, deliberately and with a known cost: `clawkeepd`
+// logs through `logging.basicConfig`, i.e. stderr, so a backup that SUCCEEDED
+// after warning ("failed to remove staging archive /home/…", "retention prune
+// failed (continuing)") still shows that line inside the panel's green card.
+// Whether the owner should see the daemon's tail on a run that worked is a
+// product decision, not a bug fix — TASK-672 says so in as many words — so it
+// is left alone here rather than changed in passing.
 export async function POST(request: NextRequest) {
   try {
     let body: unknown = {};

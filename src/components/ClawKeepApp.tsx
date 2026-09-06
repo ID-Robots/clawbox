@@ -131,6 +131,46 @@ interface PairPollResponse {
 }
 
 /**
+ * The owner-facing sentence for a failed backup, in the owner's own language.
+ *
+ * The route classifies `clawkeepd`'s `EXIT_*` taxonomy into a stable `code`
+ * (TASK-672); this is the one place that turns a code into words. Several codes
+ * share a sentence on purpose — "the archive could not be built" and "openssl
+ * refused" are the same fact to the person looking at the panel, and inventing
+ * a distinct line per exit code in ten languages would say less, not more. The
+ * server's English sentence is the fallback, for a code from a newer build.
+ */
+function backupErrorText(
+  code: string | undefined,
+  serverSentence: string | undefined,
+  t: (key: string) => string,
+): string {
+  switch (code) {
+    case "quota_full":
+      return t("clawkeep.error.outOfSpace");
+    case "pairing_revoked":
+      return t("clawkeep.error.pairingRejected");
+    case "token_unreadable":
+      return t("clawkeep.error.pairingFile");
+    case "offline":
+    case "timed_out":
+    case "portal_error":
+      return t("clawkeep.error.cannotReach");
+    case "backup_failed":
+    case "archive_failed":
+    case "upload_failed":
+    case "encryption_failed":
+    case "config_error":
+    case "daemon_missing":
+      return t("clawkeep.error.didNotFinish");
+    default:
+      // `not_paired` keeps the server's sentence: it is the one failure the
+      // panel already had words for, and its own card says the same thing.
+      return serverSentence || t("clawkeep.error.didNotFinish");
+  }
+}
+
+/**
  * A backup that WORKED. Since TASK-672 a failed run is a non-2xx carrying one
  * owner-facing sentence and a stable `code`, so `jsonOrError` throws it into
  * the page's error banner — the same place every other ClawKeep failure lands
@@ -375,21 +415,39 @@ export default function ClawKeepApp() {
     setBackupResult(null);
     try {
       const trimmed = label?.trim();
-      const result = await jsonOrError<BackupResponse>(
-        await fetch("/setup-api/clawkeep/backup", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(trimmed ? { label: trimmed } : {}),
-        }),
-      );
-      setBackupResult(result);
+      const res = await fetch("/setup-api/clawkeep/backup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(trimmed ? { label: trimmed } : {}),
+      });
+      if (!res.ok) {
+        // The route answers a stable `code` beside its English sentence
+        // precisely so a client never has to read the English — and this panel
+        // is otherwise entirely in the owner's language, so it must not be the
+        // one client that discards it. The server's own sentence is the LAST
+        // resort, for a code this build does not know.
+        const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        if (body.code === "needs_passphrase") {
+          // There is a modal for exactly this, reached today only by a status
+          // check that can be seconds stale. The failure itself can open it.
+          setPassphraseSetup({ onSaved: () => { void runBackupNowRef.current(label); } });
+          return;
+        }
+        setError(backupErrorText(body.code, body.error, t));
+        return;
+      }
+      setBackupResult((await res.json()) as BackupResponse);
       await refresh();
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy("");
     }
-  }, [refresh]);
+  }, [refresh, t]);
+  // `needs_passphrase` re-runs the backup after the modal saves, and the
+  // callback cannot name itself.
+  const runBackupNowRef = useRef(runBackupNow);
+  useEffect(() => { runBackupNowRef.current = runBackupNow; }, [runBackupNow]);
 
   const onResetStuck = useCallback(() => {
     // Surface a dire-warning confirm because a stuck heartbeat *might*

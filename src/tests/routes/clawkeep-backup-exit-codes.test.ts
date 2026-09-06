@@ -121,13 +121,14 @@ describe("POST /setup-api/clawkeep/backup maps the daemon's EXIT_* taxonomy", ()
     for (const exitCode of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 64, 65, 99, 124, 127]) {
       daemon.exitCode = exitCode;
       daemon.stderr = `daemon said something about ${exitCode}`;
+      daemon.spawns.length = 0;
       const res = await backupPOST(post({}));
       const body = (await res.json()) as Record<string, unknown>;
-      expect({ exitCode, status: res.status, ok: res.ok }).toEqual({
-        exitCode,
-        status: res.status,
-        ok: false,
-      });
+      // The daemon really ran — the route did not short-circuit before it and
+      // answer for some other reason.
+      expect(daemon.spawns).toHaveLength(1);
+      expect({ exitCode, ok: res.ok }).toEqual({ exitCode, ok: false });
+      expect(res.status).toBeGreaterThanOrEqual(400);
       // Every one carries a stable code a caller can branch on, and none of
       // them carries the raw daemon output.
       expect(typeof body.code).toBe("string");
@@ -140,7 +141,7 @@ describe("POST /setup-api/clawkeep/backup maps the daemon's EXIT_* taxonomy", ()
       2: { status: 507, code: "quota_full" },
       6: { status: 504, code: "offline" },
       9: { status: 409, code: "needs_passphrase" },
-      65: { status: 409, code: "not_paired" },
+      65: { status: 409, code: "token_unreadable" },
       124: { status: 504, code: "timed_out" },
     };
     for (const [exit, want] of Object.entries(expected)) {

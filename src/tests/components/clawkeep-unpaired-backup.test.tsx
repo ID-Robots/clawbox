@@ -42,6 +42,9 @@ const STATUS = {
 };
 
 const NOT_PAIRED = "ClawKeep is not paired with an account";
+/** A daemon log line of the shape that used to reach the panel, path and all. */
+const DAEMON_TAIL =
+  "token error: No token at /home/clawbox/clawbox/data/clawkeep/token; run 'clawkeep pair' first";
 
 beforeEach(() => {
   vi.stubGlobal(
@@ -52,7 +55,10 @@ beforeEach(() => {
         return {
           ok: false,
           status: 409,
-          json: async () => ({ error: NOT_PAIRED, code: "not_paired" }),
+          // `stderrTail` is what the route used to answer WITH, inside a 200.
+          // It is in the fixture so the assertion below can fail: nothing may
+          // put it on screen, whatever header it might appear under.
+          json: async () => ({ error: NOT_PAIRED, code: "not_paired", stderrTail: DAEMON_TAIL }),
         };
       }
       if (url.includes("/setup-api/clawkeep")) {
@@ -81,9 +87,12 @@ describe("ClawKeep's backup button when the pairing is gone mid-session", () => 
     // `BackupResultCard` was the only component that rendered the daemon's
     // `stderrTail`, and "Failed (exit {code})" was its header. Since TASK-672
     // the card has no failure branch at all — a failed backup is a non-2xx
-    // whose sentence goes to the page's error banner — so this now asserts
-    // that the removed header cannot come back rather than that this
-    // particular failure avoided it.
+    // whose sentence goes to the page's error banner. Asserting the absent
+    // header alone would be unfalsifiable now that the string is deleted from
+    // every locale, so the fixture carries a daemon-shaped tail with a device
+    // path in it and the real assertion is that NOTHING put it on screen.
     expect(screen.queryByText(/Failed \(exit/)).toBeNull();
+    expect(document.body.textContent).not.toContain(DAEMON_TAIL);
+    expect(document.body.textContent).not.toContain("/home/clawbox");
   }, 15_000);
 });

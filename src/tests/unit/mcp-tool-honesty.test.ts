@@ -826,6 +826,43 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(out.error.next).toMatch(/do not retry/i);
   });
 
+  it("does not read the MCP's own stale bearer as a revoked ClawKeep pairing", async () => {
+    // `/setup-api/*` answers a JSON 401 whenever the bearer is missing or
+    // stale, and `matchRule` runs before `classifyError`. A BARE `status: 401`
+    // rule in BACKUP_RULES would therefore turn a local token problem into
+    // "ClawKeep removed this device at the portal — pair it again, do not
+    // retry": the owner is walked through tearing down a working pairing, and
+    // "do not retry" stops the agent reaching the tool that would have found
+    // the real fault. Every rule that names a status the middleware can also
+    // produce is gated on the route's own `code`.
+    apiPost.mockRejectedValue(new ApiError(401, JSON.stringify({ error: "Authentication required" })));
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("AUTH_FAILED");
+    expect(out.error.message).not.toMatch(/pairing/i);
+    expect(out.error.next).not.toMatch(/do not retry/i);
+  });
+
+  it("keeps a missing daemon out of the retry advice", async () => {
+    // 503 `daemon_missing` had no rule, so it fell to the catch-all's "retry
+    // once" — while the block's own comment says none of these is worth
+    // retrying. A daemon that is not installed will not install itself.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        503,
+        JSON.stringify({ error: "The ClawKeep daemon could not be started", code: "daemon_missing" }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.message).toMatch(/not installed/i);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
   it("tells the owner the account is full rather than retrying into it", async () => {
     apiPost.mockRejectedValue(
       new ApiError(

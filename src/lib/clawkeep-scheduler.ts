@@ -53,13 +53,13 @@ function fireBackup(): void {
       if (result.exitCode !== 0) {
         const tail = result.stderr.trim().slice(-500);
         // Same classification the route answers with (TASK-672), so an
-        // operator reading this log and an owner reading the panel are told
-        // the same thing about the same run.
-        const classified = backupExitError(result.exitCode);
+        // operator reading this log and an owner reading the panel are told the
+        // same thing about the same run. Non-null by construction here — the
+        // only exit code it answers `null` for is 0.
+        const classified = backupExitError(result.exitCode)!;
         console.warn(
           "[clawkeep-scheduler] auto-backup failed:",
-          `clawkeepd exited ${result.exitCode}`
-            + (classified ? ` (${classified.code}: ${classified.message})` : "")
+          `clawkeepd exited ${result.exitCode} (${classified.code}: ${classified.message})`
             + (tail ? ` — ${tail}` : ""),
         );
       }

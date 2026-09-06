@@ -162,17 +162,32 @@ function coercePreference(key: string, value: string): string | number {
 // not REGISTERED on Hermes (see the registrations below); backup_status stays,
 // because the agent still has to be able to answer "do you back up?" honestly.
 const BACKUP_RULES: ErrorRule[] = [
-  // Ordered: the first match wins, so the two 409s that mean different things
-  // are told apart by the `code` in the body before the general one is reached.
-  // Since TASK-672 the daemon's whole `EXIT_*` taxonomy reaches this tool as a
-  // real status instead of a 200 with `ok:false`, and none of these failures is
-  // worth retrying — every one of them needs the owner.
+  // Ordered: the first match wins. Since TASK-672 the daemon's whole `EXIT_*`
+  // taxonomy reaches this tool as a real status instead of a 200 with
+  // `ok:false`, and none of these failures is worth retrying — every one of
+  // them needs the owner.
+  //
+  // Every rule that names a status this MIDDLEWARE can also produce is gated on
+  // the route's own `code` as well. A bare `status: 401` would swallow the
+  // MCP's own auth failure: `/setup-api/*` answers a JSON 401 whenever the
+  // bearer is missing or stale, `matchRule` runs before `fromApiError`, and the
+  // agent would be told to tear down a perfectly good ClawKeep pairing — with
+  // "do not retry" stopping it from reaching the tool that would have found the
+  // real fault. `mcp-tool-honesty.test.ts` pins that principle for the sibling
+  // route already.
   {
     status: 409,
     match: /"code"\s*:\s*"needs_passphrase"/,
     code: "CONFLICT",
     message: "Cloud backup needs an encryption passphrase before it can run.",
     next: "Tell the user to set one in Settings -> Backup. Do not retry.",
+  },
+  {
+    status: 409,
+    match: /"code"\s*:\s*"token_unreadable"/,
+    code: "CONFLICT",
+    message: "The ClawKeep pairing file on this device could not be read.",
+    next: "Tell the user to check that it exists and is mode 600 — this is not a re-pairing. Do not retry.",
   },
   {
     status: 409,
@@ -188,30 +203,52 @@ const BACKUP_RULES: ErrorRule[] = [
   },
   {
     status: 401,
+    match: /"code"\s*:\s*"pairing_revoked"/,
     code: "CONFLICT",
     message: "ClawKeep rejected this device's pairing — it was probably removed at the portal.",
     next: "Tell the user to pair the device again in Settings -> Backup. Do not retry.",
   },
   {
     status: 402,
+    match: /"code"\s*:\s*"tier_limit"/,
     code: "CONFLICT",
     message: "This ClawKeep plan does not allow that backup.",
     next: "Tell the user what their plan does not cover. Do not retry.",
   },
   {
     status: 507,
+    match: /"code"\s*:\s*"quota_full"/,
     code: "CONFLICT",
     message: "The ClawKeep account is out of space.",
     next: "Tell the user to free some snapshots or upgrade the plan. Do not retry.",
   },
   {
+    status: 503,
+    match: /"code"\s*:\s*"daemon_missing"/,
+    code: "ENDPOINT_DOWN",
+    message: "The ClawKeep daemon is not installed on this device.",
+    next: "Tell the user cloud backup is not installed here. Do not retry.",
+  },
+  {
     status: 504,
+    match: /"code"\s*:\s*"(offline|timed_out)"/,
     code: "ENDPOINT_DOWN",
     message: "The backup could not reach the ClawKeep portal, or ran out of time.",
     next: "Do not start another one. Call backup_status, and tell the user what it reports.",
   },
   {
+    // 500 is the box's own fault — a corrupt config, a broken openssl, an
+    // archiver that failed. Retrying the same backup cannot help, which is what
+    // the catch-all in `fromApiError` would otherwise advise.
+    status: 500,
+    match: /"code"\s*:\s*"(config_error|encryption_failed|archive_failed)"/,
+    code: "ENDPOINT_DOWN",
+    message: "The backup failed on the device itself.",
+    next: "Do not start another one. Call backup_status, and tell the user what it reports.",
+  },
+  {
     status: 502,
+    match: /"code"\s*:\s*"(backup_failed|portal_error|upload_failed)"/,
     code: "ENDPOINT_DOWN",
     message: "The backup did not finish.",
     next: "Do not start another one. Call backup_status, and tell the user what it reports.",
