@@ -1232,6 +1232,12 @@ export async function POST(request: Request) {
     if (targetOffSurface) return targetOffSurface;
 
     if (state.activeModel === targetModel) {
+      // The owner just chose the model the box already runs, and that IS a
+      // choice: without recording it, someone deliberately settled on the
+      // tier-default model has no way to say so, and the badge moves them off
+      // it the day their plan changes (TASK-713). The Hermes picker records the
+      // same no-op for the same reason.
+      if (!automaticSwitch) await recordExplicitModelPick(targetModel);
       // Already the primary — but a ChatGPT pick can arrive as `codex/<id>`
       // and remap onto a primary that IS `openai/<id>` already, on a box whose
       // Codex runtime entry is missing (written by an older ClawBox, or lost).

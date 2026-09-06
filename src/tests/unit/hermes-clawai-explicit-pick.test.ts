@@ -13,16 +13,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const cliMock = vi.hoisted(() => vi.fn());
-const configGetMock = vi.hoisted(() => vi.fn());
-const storeGetMock = vi.hoisted(() => vi.fn());
+const getKnownMock = vi.hoisted(() => vi.fn());
 const setManyMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
-vi.mock("@/lib/hermes-config-cache", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/hermes-config-cache")>()),
-  hermesConfigGet: configGetMock,
-}));
-vi.mock("@/lib/config-store", () => ({ setMany: setManyMock, get: storeGetMock }));
+vi.mock("@/lib/config-store", () => ({ setMany: setManyMock, getKnown: getKnownMock }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn() }));
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: false })) }));
@@ -38,7 +33,7 @@ vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
 
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID } from "@/lib/clawbox-ai-models";
-import { EXPLICIT_MODEL_PICK_KEY } from "@/lib/explicit-model-pick";
+import { EXPLICIT_MODEL_PICKS_KEY } from "@/lib/explicit-model-pick";
 
 /** What `model.default` was set to, or undefined when it was never written. */
 function modelDefaultWrite(): string | undefined {
@@ -48,15 +43,18 @@ function modelDefaultWrite(): string | undefined {
   return call?.[3];
 }
 
+/** The config store this box holds. */
+function store(values: Record<string, unknown>) {
+  getKnownMock.mockImplementation(async (key: string) => ({ value: values[key], known: true }));
+}
+
 beforeEach(() => {
   cliMock.mockReset();
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-  configGetMock.mockReset();
-  configGetMock.mockResolvedValue("");
-  storeGetMock.mockReset();
-  storeGetMock.mockResolvedValue(null);
+  getKnownMock.mockReset();
   setManyMock.mockReset();
   setManyMock.mockResolvedValue(undefined);
+  store({});
 });
 
 describe("a Hermes re-pair and the owner's own model", () => {
@@ -67,8 +65,7 @@ describe("a Hermes re-pair and the owner's own model", () => {
   });
 
   it("keeps the owner's Max model when the badge says Flash", async () => {
-    storeGetMock.mockImplementation(async (key: string) =>
-      key === EXPLICIT_MODEL_PICK_KEY ? CLAWBOX_AI_PRO_MODEL_ID : null);
+    store({ [EXPLICIT_MODEL_PICKS_KEY]: { clawai: CLAWBOX_AI_PRO_MODEL_ID } });
 
     await applyClawaiToHermes("claw_token_abc", "flash");
 
@@ -76,47 +73,63 @@ describe("a Hermes re-pair and the owner's own model", () => {
   });
 
   it("reads a pick the OpenClaw picker wrote fully qualified", async () => {
-    // The marker is one key for both editions, and the two pickers spell the
+    // The marker is one store for both editions, and the two pickers spell the
     // same model differently — a box migrated between them must not lose the
     // choice to a slash.
-    storeGetMock.mockImplementation(async (key: string) =>
-      key === EXPLICIT_MODEL_PICK_KEY ? `deepseek/${CLAWBOX_AI_PRO_MODEL_ID}` : null);
+    store({ [EXPLICIT_MODEL_PICKS_KEY]: { clawai: `deepseek/${CLAWBOX_AI_PRO_MODEL_ID}` } });
 
     await applyClawaiToHermes("claw_token_abc", "flash");
 
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
   });
 
-  it("treats a running model that differs from the badge as the pick, and writes it down", async () => {
-    // The migration: boxes in the field are in exactly this state and carry no
-    // marker, because none existed.
-    configGetMock.mockImplementation(async (key: string) =>
-      key === "model.default" ? CLAWBOX_AI_PRO_MODEL_ID : "");
+  it("is not moved by a pick the owner made for a DIFFERENT provider", async () => {
+    // Connecting ClawBox AI is itself a provider choice, and the Anthropic slot
+    // says nothing about which ClawBox AI model to run — but it must not erase
+    // the ClawBox AI slot either, which is why the picks are keyed per provider.
+    store({
+      [EXPLICIT_MODEL_PICKS_KEY]: {
+        anthropic: "anthropic/claude-opus-5",
+        clawai: CLAWBOX_AI_PRO_MODEL_ID,
+      },
+    });
 
     await applyClawaiToHermes("claw_token_abc", "flash");
 
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
-    expect(setManyMock).toHaveBeenCalledWith(
-      expect.objectContaining({ [EXPLICIT_MODEL_PICK_KEY]: CLAWBOX_AI_PRO_MODEL_ID }),
-    );
   });
 
-  it("lets the badge decide when the config could not be read at all", async () => {
-    // An unreadable `model.default` is not evidence of a choice. The badge
-    // fills the gap, exactly as on beta.
-    configGetMock.mockRejectedValue(new Error("hermes config get failed"));
+  it("drops the pick when the box is linked to a DIFFERENT ClawBox AI account", async () => {
+    // The choice belonged to the account that has just been replaced. Imposing
+    // it on the next one hands the new owner a model their plan may refuse —
+    // and every turn fails on a box they have only just paired.
+    store({
+      clawai_token: "claw_token_ACCOUNT_A",
+      [EXPLICIT_MODEL_PICKS_KEY]: { clawai: CLAWBOX_AI_PRO_MODEL_ID },
+    });
 
-    await applyClawaiToHermes("claw_token_abc", "pro");
+    await applyClawaiToHermes("claw_token_ACCOUNT_B", "flash");
+
+    expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+    expect(setManyMock).toHaveBeenCalledWith({ [EXPLICIT_MODEL_PICKS_KEY]: {} });
+  });
+
+  it("keeps the pick when the same account re-pairs", async () => {
+    store({
+      clawai_token: "claw_token_ACCOUNT_A",
+      [EXPLICIT_MODEL_PICKS_KEY]: { clawai: CLAWBOX_AI_PRO_MODEL_ID },
+    });
+
+    await applyClawaiToHermes("claw_token_ACCOUNT_A", "flash");
 
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_PRO_MODEL_ID);
-    expect(setManyMock).not.toHaveBeenCalledWith(
-      expect.objectContaining({ [EXPLICIT_MODEL_PICK_KEY]: expect.anything() }),
-    );
   });
 
-  it("ignores a pick that belongs to another provider", async () => {
-    storeGetMock.mockImplementation(async (key: string) =>
-      key === EXPLICIT_MODEL_PICK_KEY ? "anthropic/claude-opus-5" : null);
+  it("lets the badge decide when the store could not be read at all", async () => {
+    // Beta's answer, kept on purpose: a link that writes no model is a box with
+    // no working chat, and bookkeeping we could not read is not worth holding a
+    // pairing hostage to.
+    getKnownMock.mockResolvedValue({ value: undefined, known: false });
 
     await applyClawaiToHermes("claw_token_abc", "pro");
 

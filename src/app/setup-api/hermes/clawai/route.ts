@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { decideClawboxAiModelId, readExplicitModelPick } from "@/lib/explicit-model-pick";
+import { clawboxAiModelIdOf, readExplicitModelPicks } from "@/lib/explicit-model-pick";
 import { get, setMany } from "@/lib/config-store";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 import { hermesConfigGet } from "@/lib/hermes-config-cache";
@@ -52,10 +52,10 @@ export async function GET() {
   const blocked = await requireHermes();
   if (blocked) return blocked;
 
-  const [token, tierStored, storedPick] = await Promise.all([
+  const [token, tierStored, picks] = await Promise.all([
     readToken(),
     readStoredTier(),
-    readExplicitModelPick(),
+    readExplicitModelPicks(),
   ]);
   const tier: ClawboxAiTier = tierStored ?? "flash";
   // Memoised against config.yaml's mtime: this GET runs on every chat open and
@@ -73,14 +73,14 @@ export async function GET() {
     active,
     // The model this box RUNS for ClawBox AI, which is no longer the same
     // question as which tier the badge shows: an explicit pick outlives the
-    // badge (TASK-713), and the panel renders this string as "Model: …". The
-    // decision is read-only here — the migration it can suggest belongs to the
-    // link that writes, not to a GET the chat makes on every open.
-    model: decideClawboxAiModelId({
-      storedPick,
-      currentPrimary: active ? storedModel : null,
-      tierModelId: clawaiModelForTier(tier),
-    }).modelId,
+    // badge (TASK-713), and the panel renders this string as "Model: …".
+    // While ClawBox AI is the ACTIVE provider the harness's own `model.default`
+    // is the answer — no derivation can beat what the box is configured with.
+    // Otherwise it is what a link would write: the owner's pick if there is one,
+    // else the badge's default.
+    model: (active && storedModel.trim())
+      || clawboxAiModelIdOf(picks.clawai)
+      || clawaiModelForTier(tier),
   });
 }
 

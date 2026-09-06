@@ -43,10 +43,13 @@ vi.mock("@/lib/coding-agent-mcp-refresh", () => ({
   refreshCodingAgentToolsIfReadinessChanged: vi.fn(),
 }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
-// `get` too: the link reads the owner's explicit model pick before deciding
-// what the tier badge may write (TASK-713). Nothing stored here, so the badge
-// decides, exactly as it did before the marker existed.
-vi.mock("@/lib/config-store", () => ({ setMany: vi.fn(), get: vi.fn(async () => null) }));
+// `getKnown` too: the link reads the owner's explicit model picks before
+// deciding what the tier badge may write (TASK-713). Nothing stored here, so the
+// badge decides, exactly as it did before the marker existed.
+vi.mock("@/lib/config-store", () => ({
+  setMany: vi.fn(),
+  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+}));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: envMock }));
 // The vision probe reaches the proxy over the network and waits seconds for it.
 // Nothing in this file is about vision; stubbing it keeps the suite hermetic.

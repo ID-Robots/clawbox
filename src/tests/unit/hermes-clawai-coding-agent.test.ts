@@ -32,10 +32,13 @@ const resolveVisionMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: drawsMock }));
-// `get` too: the link reads the owner's explicit model pick before deciding
-// what the tier badge may write (TASK-713). Nothing stored here, so the badge
-// decides, exactly as it did before the marker existed.
-vi.mock("@/lib/config-store", () => ({ setMany: vi.fn(), get: vi.fn(async () => null) }));
+// `getKnown` too: the link reads the owner's explicit model picks before
+// deciding what the tier badge may write (TASK-713). Nothing stored here, so the
+// badge decides, exactly as it did before the marker existed.
+vi.mock("@/lib/config-store", () => ({
+  setMany: vi.fn(),
+  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+}));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn() }));
 vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({

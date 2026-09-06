@@ -1,6 +1,5 @@
-import { setMany } from "@/lib/config-store";
-import { decideClawboxAiModelId, readExplicitModelPick, recordExplicitModelPick } from "@/lib/explicit-model-pick";
-import { hermesConfigGet } from "@/lib/hermes-config-cache";
+import { getKnown, setMany } from "@/lib/config-store";
+import { decideClawboxAiModelId, forgetExplicitModelPick, readExplicitModelPicks } from "@/lib/explicit-model-pick";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
@@ -60,7 +59,10 @@ export const CLAWBOX_AI_PROXY_URL = (
 /** BARE model id (no `deepseek/` vendor prefix) — the proxy returns
  *  "HTTP 400: Model not allowed" for a prefixed slug. */
 export function clawaiModelForTier(tier: ClawboxAiTier): string {
-  return CLAWBOX_AI_MODEL_ID_BY_TIER[tier];
+  // Total, as the ternary it replaced was: every caller normalises the tier
+  // first, but this value goes straight into `config set model.default` argv and
+  // an `undefined` there would be a broken write rather than a wrong one.
+  return CLAWBOX_AI_MODEL_ID_BY_TIER[tier] ?? CLAWBOX_AI_MODEL_ID_BY_TIER.flash;
 }
 
 export class ClawaiApplyError extends Error {}
@@ -114,6 +116,18 @@ export interface ApplyClawaiOptions {
  * @param tier  device tier — decides which bare deepseek id becomes model.default
  * @param options see `ApplyClawaiOptions`
  */
+/**
+ * The ClawBox AI token this box already holds, or "".
+ *
+ * Read to spot an ACCOUNT switch — the same thing the OpenClaw configure route
+ * compares to unpair ClawKeep. An unreadable store answers "" and nothing is
+ * dropped, which is the direction that keeps a working link working.
+ */
+async function getStoredClawaiToken(): Promise<string> {
+  const { value } = await getKnown("clawai_token");
+  return typeof value === "string" ? value.trim() : "";
+}
+
 export async function applyClawaiToHermes(
   token: string,
   tier: ClawboxAiTier,
@@ -129,15 +143,18 @@ export async function applyClawaiToHermes(
   // Same rule and same decision function as the OpenClaw route — a re-pair
   // reaches both editions carrying a tier it cannot be told apart from a plan
   // press, so what settles it is whether the owner has ever picked a ClawBox AI
-  // model here. `model.default` is read for the MIGRATION only, and through the
-  // mtime-keyed cache the rest of this function already uses; an unreadable one
-  // simply leaves the question open and the badge fills it in, as on beta.
+  // model here.
+  //
+  // A pick belongs to the ACCOUNT that made it, so a token change drops it
+  // before it is read: the previous owner's Max choice must not be imposed on
+  // the Pro plan the new one is paying for. Read before the first write, like
+  // every other before/after fact this function samples.
+  const previousToken = await getStoredClawaiToken();
+  if (previousToken && previousToken !== trimmed) await forgetExplicitModelPick(CLAWAI_PROVIDER);
   const clawaiDecision = decideClawboxAiModelId({
-    storedPick: await readExplicitModelPick(),
-    currentPrimary: await hermesConfigGet("model.default").catch(() => null),
+    picks: previousToken && previousToken !== trimmed ? {} : await readExplicitModelPicks(),
     tierModelId: clawaiModelForTier(tier),
   });
-  if (clawaiDecision.migrate) await recordExplicitModelPick(clawaiDecision.migrate);
   if (clawaiDecision.explicit) {
     console.log(
       `[Hermes ClawAI] keeping the owner's own model ${clawaiDecision.modelId} over the ${tier} badge default`,

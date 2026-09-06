@@ -1,48 +1,77 @@
 // "Did the OWNER choose this model, or did we fill one in for them?"
 //
-// WHY IT EXISTS (TASK-713). The ClawBox AI tier badge is a device DEFAULT —
-// the portal's `deviceTier`, which a Max subscriber may deliberately leave on
-// Flash for one box — and every pair, re-pair and wizard finalise wrote
-// `CLAWBOX_AI_MODEL_BY_TIER[badge]` straight over
-// `agents.defaults.model.primary`. On a Max account whose box is stamped
-// `flash`, an entitled Max primary was replaced by Flash on the next re-pair,
-// and the chat's own entitlement guard could not undo it: that one only ever
-// moves DOWN. The owner's ruling is that a default fills a gap and never
-// overwrites a choice.
+// WHY IT EXISTS (TASK-713). The ClawBox AI tier badge is a device DEFAULT — the
+// portal's `deviceTier`, which a Max subscriber may deliberately leave on Flash
+// for one box — and every pair, re-pair, wizard finalise and plan press wrote
+// `CLAWBOX_AI_MODEL_BY_TIER[badge]` straight over the primary model. On a Max
+// account whose box is stamped `flash`, an entitled Max primary was replaced by
+// Flash on the next re-pair, and the chat's own entitlement guard could not undo
+// it: that one only ever moves DOWN. The owner's ruling is that a default fills
+// a gap and never overwrites a choice.
 //
 // WHY IT CANNOT BE ANSWERED FROM THE REQUEST. A re-pair reaches the configure
-// route through `ai-models/clawai/poll`, which sends `clawaiTier:
-// session.tier` — the same field the plan cards send. The two are
-// indistinguishable on the wire, so "was a tier named?" cannot be the test.
-// What the box CAN know is the other half: whether the owner has ever picked a
-// ClawBox AI model themselves. That is what this records.
+// route through `ai-models/clawai/poll`, which sends `clawaiTier: session.tier`
+// — the same field the plan cards send. The two are indistinguishable on the
+// wire, so "was a tier named?" cannot be the test. What the box CAN know is the
+// other half: whether the owner has ever picked a ClawBox AI model themselves.
+// That is what this records.
+//
+// WHY THERE IS NO INFERENCE FROM THE RUNNING MODEL, and why nobody should add
+// one back. An earlier revision read "the primary is a ClawBox AI model and is
+// not the one the badge implies" as evidence of a choice. It is not: the badge
+// and the model move at different times. `/setup-api/ai-models/status` persists
+// a new portal tier on its 30-second poll while nothing rewrites the model until
+// the next configure, so the FIRST configure after any plan change sees exactly
+// that mismatch. It would mint a Flash "pick" on an upgrade — the customer pays
+// for Max and the box can never default to it again — and a Max "pick" on a
+// downgrade, which the plan then refuses on every turn while the chat guard
+// drops it back and the next re-pair re-breaks it. A pick is recorded where a
+// pick is MADE, or not at all.
 //
 // WHAT IS NOT A PICK. A switch the BOX made — the chat's entitlement guard
 // dropping a refused Max model to Flash — is not the owner choosing Flash, and
 // recording it would pin the box there for good. Those writes carry
-// `automatic: true` and are not recorded.
+// `automatic: true`. Nor is a model DERIVED from a provider-only switch: "make
+// ClawBox AI the default" and the MCP `ai_set_provider` tool both resolve the
+// provider's own recommended model, which is another default.
+//
+// HARNESS-FIRST. There is nothing native to borrow. OpenClaw records
+// `modelOverrideSource: "user"` per SESSION and deletes the override when it
+// equals the agent default, so it can never answer this about the primary;
+// Hermes' `model.default` carries no provenance; the portal publishes a per-device
+// `deviceTier` (a default) and `allowedModels` (the entitlement, which
+// `portalDeniesClawboxAiModel` already honours) but no per-device model. The
+// marker is ClawBox's own, in ClawBox's own store, beside `clawai_tier`.
 
-import { get as getConfigValue, setMany } from "@/lib/config-store";
+import { getKnown, setMany } from "@/lib/config-store";
 import { CLAWBOX_AI_CHAT_MODEL_IDS, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 
 /**
- * Config-store key holding the last model the owner chose themselves, as the
- * picker wrote it — `deepseek/deepseek-v4-pro` on OpenClaw, the bare
- * `deepseek-v4-pro` on Hermes, whose config takes ids unprefixed.
+ * Config-store key: `{ <canonical provider>: <model as the picker wrote it> }`.
  *
- * One key for every provider, not one per provider: the question it answers is
- * "what did the owner last choose", and the readers below decide for themselves
- * whether that answer is about them.
+ * PER PROVIDER, not one slot for the box. The readers each ask a
+ * provider-specific question ("which ClawBox AI model did the owner choose"),
+ * and a single slot answered it wrong in the obvious case: pick ClawBox AI Max,
+ * try Anthropic for a day, re-pair ClawBox AI — the Anthropic pick is not a
+ * ClawBox AI answer, so the badge would overwrite a Max choice nobody revoked.
+ *
+ * The provider keys are the canonical UI ids (`clawai`, `anthropic`, …), and the
+ * values keep the spelling the surface that wrote them uses:
+ * `deepseek/deepseek-v4-pro` from the OpenClaw picker, the bare
+ * `deepseek-v4-pro` from Hermes, whose config takes ids unprefixed.
  */
-export const EXPLICIT_MODEL_PICK_KEY = "ai_model_explicit_pick";
+export const EXPLICIT_MODEL_PICKS_KEY = "ai_model_explicit_picks";
+
+/** Canonical provider id -> the model reference the owner chose for it. */
+export type ExplicitModelPicks = Record<string, string>;
 
 /**
- * The ClawBox AI chat model this reference names, bare, or null when it names
- * something else.
+ * The ClawBox AI chat model this reference names, bare, or null.
  *
- * The provider half is CHECKED rather than stripped. `openrouter/…` slugs keep
- * a vendor inside the id, so a bare "does the last segment match" test would
- * one day read an OpenRouter row as a ClawBox AI pick and pin a re-pair to it.
+ * The id allowlist is what actually decides — `CLAWBOX_AI_CHAT_MODEL_IDS` is a
+ * closed set of two. The provider half is checked only to reject a foreign
+ * vendor that happens to serve a same-named id, which is not idle: OpenRouter
+ * slugs carry their vendor INSIDE the id, and `deepseek/` is one of them.
  */
 export function clawboxAiModelIdOf(ref: unknown): string | null {
   if (typeof ref !== "string") return null;
@@ -51,79 +80,118 @@ export function clawboxAiModelIdOf(ref: unknown): string | null {
   const slash = trimmed.indexOf("/");
   const provider = slash === -1 ? null : trimmed.slice(0, slash).trim().toLowerCase();
   const id = slash === -1 ? trimmed : trimmed.slice(slash + 1).trim();
-  // `clawai` is the UI's name for the same provider openclaw.json calls
-  // `deepseek`; both spellings reach this from different surfaces.
+  // `clawai` is the UI's name for the provider openclaw.json calls `deepseek`;
+  // both spellings reach this from different surfaces.
   if (provider && provider !== CLAWBOX_AI_PROVIDER && provider !== "clawai") return null;
   return (CLAWBOX_AI_CHAT_MODEL_IDS as readonly string[]).includes(id) ? id : null;
 }
 
+/**
+ * Which provider slot a model reference belongs in.
+ *
+ * ClawBox AI's two spellings collapse onto `clawai`; everything else is keyed by
+ * the vendor prefix it carries, and a reference with no prefix at all (a local
+ * model id) is not a provider choice this file has anything to say about.
+ */
+function pickSlotFor(ref: string): string | null {
+  if (clawboxAiModelIdOf(ref)) return "clawai";
+  const slash = ref.indexOf("/");
+  if (slash <= 0) return null;
+  return ref.slice(0, slash).trim().toLowerCase() || null;
+}
+
+/** The stored map, tolerant of anything that is not one — the store is hand-editable JSON. */
+export function explicitPicksFrom(raw: unknown): ExplicitModelPicks {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const picks: ExplicitModelPicks = {};
+  for (const [provider, model] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof model === "string" && model.trim()) picks[provider] = model.trim();
+  }
+  return picks;
+}
+
 export interface ClawboxAiModelDecision {
-  /** The BARE model id a pair/re-pair/tier change must write. */
+  /** The BARE model id a pair, re-pair or tier change must write. */
   modelId: string;
   /** True when it is the owner's own choice rather than the tier default. */
   explicit: boolean;
-  /**
-   * Set when the pick was inferred from the model the box is already running
-   * and has to be written down — see the migration note on
-   * {@link decideClawboxAiModelId}. The caller records it; this function is
-   * pure so both editions can share it without either owning the store.
-   */
-  migrate: string | null;
 }
 
 /**
  * Which ClawBox AI model to write, and whether the owner chose it.
  *
- * THE MIGRATION. Boxes in the field are in exactly the state this card is
- * about and carry no marker, because none existed: a primary that is a ClawBox
- * AI model and is NOT the one the badge implies can only have got there by
- * someone choosing it — the chat picker, the Telegram `/model` keyboard, an
- * `openclaw config set`. Reading that as the explicit pick is what stops the
- * very next re-pair from being the thing that discovers the marker too late.
- * It is deliberately narrow: a primary that EQUALS the tier default is no
- * evidence of anything, and a primary belonging to another provider is not a
- * ClawBox AI choice at all.
+ * No I/O and no inference: the only thing that outranks the badge is a recorded
+ * pick for THIS provider. An unreadable store therefore lands on the badge, the
+ * same answer beta gave — a pair that writes no model at all is a box with no
+ * working chat, and bookkeeping we could not read is not worth holding a save
+ * hostage to.
  */
 export function decideClawboxAiModelId(opts: {
-  /** `EXPLICIT_MODEL_PICK_KEY` as the config store holds it. */
-  storedPick: unknown;
-  /** What the box runs today — `agents.defaults.model.primary`, or Hermes' `model.default`. */
-  currentPrimary: string | null | undefined;
+  picks: ExplicitModelPicks;
   /** The bare id the tier badge implies. */
   tierModelId: string;
 }): ClawboxAiModelDecision {
-  const picked = clawboxAiModelIdOf(opts.storedPick);
-  if (picked) return { modelId: picked, explicit: true, migrate: null };
-  // A pick that names another provider is an ANSWER — the owner's last choice
-  // simply was not about ClawBox AI — so the migration below must not run for
-  // it. Only the absence of any pick leaves the question open.
-  if (typeof opts.storedPick === "string" && opts.storedPick.trim()) {
-    return { modelId: opts.tierModelId, explicit: false, migrate: null };
-  }
-  const running = clawboxAiModelIdOf(opts.currentPrimary);
-  if (running && running !== opts.tierModelId) {
-    // Recorded as the box spells it, not as this function parsed it: the
-    // marker is the same field a picker writes, and one shape per edition is
-    // what makes it readable by a person looking at data/config.json.
-    return { modelId: running, explicit: true, migrate: String(opts.currentPrimary).trim() };
-  }
-  return { modelId: opts.tierModelId, explicit: false, migrate: null };
+  const picked = clawboxAiModelIdOf(opts.picks.clawai);
+  return picked
+    ? { modelId: picked, explicit: true }
+    : { modelId: opts.tierModelId, explicit: false };
 }
 
 /**
  * Write down that the owner chose this model.
  *
- * Called from the model pickers — the ones an owner presses — and from the
- * migration above. Never from a switch the box made for itself.
+ * Called from the surfaces an owner presses, and only when the request NAMED a
+ * model — a provider-only switch resolves that provider's own recommended
+ * default, which is not a choice.
+ *
+ * FAIL-SOFT, deliberately. This is bookkeeping: losing it costs one overwrite by
+ * the badge, while throwing costs a model change that has already landed on
+ * disk. `setMany` reads the store strictly and throws on a `data/config.json`
+ * left root-owned by a sudo script — a real state on these boxes — and every
+ * call site sits after the write it describes.
  */
 export async function recordExplicitModelPick(model: string): Promise<void> {
   const trimmed = model.trim();
-  if (!trimmed) return;
-  await setMany({ [EXPLICIT_MODEL_PICK_KEY]: trimmed });
+  const slot = trimmed ? pickSlotFor(trimmed) : null;
+  if (!slot) return;
+  try {
+    const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+    await setMany({
+      [EXPLICIT_MODEL_PICKS_KEY]: { ...explicitPicksFrom(value), [slot]: trimmed },
+    });
+  } catch (err) {
+    console.warn(
+      "[explicit-model-pick] could not record the owner's model pick:",
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
-/** The stored pick, for a caller that has not already loaded the whole store. */
-export async function readExplicitModelPick(): Promise<string | null> {
-  const raw = await getConfigValue(EXPLICIT_MODEL_PICK_KEY).catch(() => null);
-  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+/**
+ * Drop one provider's pick.
+ *
+ * For a ClawBox AI ACCOUNT switch: the choice belonged to the account that has
+ * just been replaced, and imposing it on the next one hands the new owner a
+ * model their plan may refuse. Same signal the configure route already unpairs
+ * ClawKeep on.
+ */
+export async function forgetExplicitModelPick(provider: string): Promise<void> {
+  try {
+    const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+    const picks = explicitPicksFrom(value);
+    if (!(provider in picks)) return;
+    delete picks[provider];
+    await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: picks });
+  } catch (err) {
+    console.warn(
+      "[explicit-model-pick] could not clear the model pick:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/** The stored picks, for a caller that has not already loaded the whole store. */
+export async function readExplicitModelPicks(): Promise<ExplicitModelPicks> {
+  const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+  return explicitPicksFrom(value);
 }

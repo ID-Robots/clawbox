@@ -7,6 +7,7 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
   // A successful switch records the owner's explicit model pick (TASK-713).
+  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
   setMany: vi.fn(),
 }));
 

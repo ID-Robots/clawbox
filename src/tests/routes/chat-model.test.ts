@@ -14,6 +14,7 @@ vi.mock("@/lib/config-store", () => ({
   getAll: vi.fn(),
   // The owner's explicit model pick is written here after a successful switch
   // (TASK-713): a picker click is the one place a choice is made.
+  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
   setMany: vi.fn(),
 }));
 
@@ -516,7 +517,23 @@ describe("/setup-api/chat/model", () => {
 
       expect((await post({ model: "deepseek/deepseek-v4-pro" })).status).toBe(200);
 
-      expect(setMany).toHaveBeenCalledWith({ ai_model_explicit_pick: "deepseek/deepseek-v4-pro" });
+      expect(setMany).toHaveBeenCalledWith({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+    });
+
+    it("records a re-pick of the model the box already runs", async () => {
+      // Someone deliberately settled on the tier-default model has no other way
+      // to say so, and without this the badge moves them off it the day their
+      // plan changes. The Hermes picker records the same no-op for the same
+      // reason.
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-flash" })).status).toBe(200);
+
+      expect(setMany).toHaveBeenCalledWith({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-flash" },
+      });
     });
 
     it("records NOTHING for a switch the box made for itself", async () => {
@@ -529,7 +546,7 @@ describe("/setup-api/chat/model", () => {
       expect((await post({ model: "deepseek/deepseek-v4-pro", automatic: true })).status).toBe(200);
 
       expect(setMany).not.toHaveBeenCalledWith(
-        expect.objectContaining({ ai_model_explicit_pick: expect.anything() }),
+        expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
       );
     });
   });

@@ -19,12 +19,20 @@ const optionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async (key: string) => store[key] ?? null),
+  // The tri-state reader the explicit-pick marker uses (TASK-713), over the
+  // same fixture store.
+  getKnown: vi.fn(async (key: string) => ({ value: store[key], known: true })),
   setMany: vi.fn(async (values: Record<string, unknown>) => {
     for (const [key, value] of Object.entries(values)) store[key] = value;
   }),
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
-vi.mock("@/lib/hermes-config-cache", () => ({ hermesConfigGet: vi.fn(async () => "clawai") }));
+// Key-aware: the GET now answers with the harness's OWN `model.default` while
+// ClawBox AI is the active provider (TASK-713), so a blanket "clawai" would
+// stand in for the model as well as the provider.
+vi.mock("@/lib/hermes-config-cache", () => ({
+  hermesConfigGet: vi.fn(async (key: string) => (key === "model.provider" ? "clawai" : "")),
+}));
 vi.mock("@/lib/hermes-cli", () => ({
   runHermesCli: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
 }));
@@ -60,7 +68,7 @@ vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: vi.fn(async () => "restarted") }));
 
 import { GET, POST } from "@/app/setup-api/hermes/clawai/route";
-import { EXPLICIT_MODEL_PICK_KEY } from "@/lib/explicit-model-pick";
+import { EXPLICIT_MODEL_PICKS_KEY } from "@/lib/explicit-model-pick";
 
 /** A well-formed pasted token: charset+length is all the route checks. */
 const PASTED = "claw_abcdef0123456789";
@@ -174,8 +182,10 @@ describe("GET /setup-api/hermes/clawai", () => {
   });
 
   it("names the owner's own model when there is one, whatever the badge says", async () => {
+    // ClawBox AI is not the active provider in this fixture (`model.default` is
+    // empty), so the answer is what a link WOULD write: the pick, not the badge.
     store.clawai_tier = "flash";
-    store[EXPLICIT_MODEL_PICK_KEY] = "deepseek/deepseek-v4-pro";
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
 
     const body = await (await GET()).json();
 

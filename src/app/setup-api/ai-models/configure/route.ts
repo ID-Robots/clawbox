@@ -97,9 +97,10 @@ import { setProviderEnabled } from "@/lib/provider-enablement";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { forgetProviderEnumerations } from "@/lib/provider-runnable";
 import {
-  EXPLICIT_MODEL_PICK_KEY,
+  EXPLICIT_MODEL_PICKS_KEY,
   decideClawboxAiModelId,
-  recordExplicitModelPick,
+  explicitPicksFrom,
+  forgetExplicitModelPick,
 } from "@/lib/explicit-model-pick";
 import {
   isClaudeSubscriptionOnly,
@@ -405,23 +406,6 @@ async function readModelsMode(): Promise<string | null> {
   try {
     const mode = (await readOpenClawConfig())?.models?.mode;
     return typeof mode === "string" ? mode : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * `agents.defaults.model.primary` as openclaw.json carries it, or null.
- *
- * Null on the Hermes SKU (there is no OpenClaw config) and on an unreadable
- * one. Its only caller migrates a pre-marker explicit pick, and "we could not
- * read it" must leave that question open rather than answer it wrongly.
- */
-async function readOpenClawPrimaryModel(): Promise<string | null> {
-  if (openclawIsAbsent()) return null;
-  try {
-    const primary = (await readOpenClawConfig())?.agents?.defaults?.model?.primary;
-    return typeof primary === "string" && primary.trim() ? primary.trim() : null;
   } catch {
     return null;
   }
@@ -2131,6 +2115,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // that filled a default in for them. Written to the store after the save
     // succeeds, beside the other facts about what was configured.
     let explicitPickToRecord: string | null = null;
+    // True when the ClawBox AI branch kept the owner's own model instead of the
+    // one the badge implies. Reported in the answer so the plan card can say the
+    // plan moved and the model deliberately did not, rather than returning 200
+    // over a screen where nothing appears to have happened.
+    let explicitPickKept = false;
 
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
@@ -2191,15 +2180,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // request cannot say which this is. What settles it is whether the owner
       // has ever picked a ClawBox AI model, which is what the marker records.
       //
-      // The primary is read for the MIGRATION only: boxes in the field carry
-      // the state this card is about and no marker, and the model they are
-      // running is the evidence of the choice.
+      // A pick belongs to the ACCOUNT that made it. On a token change — the same
+      // signal that unpairs ClawKeep at step 8 — it is dropped before it is
+      // read, so the previous owner's Max choice is not imposed on a Pro plan
+      // the new one is paying for.
+      const clawaiAccountChanged = Boolean(
+        previousClawaiToken && clawboxAiToken && previousClawaiToken !== clawboxAiToken,
+      );
+      if (clawaiAccountChanged) await forgetExplicitModelPick("clawai");
       const clawaiDecision = decideClawboxAiModelId({
-        storedPick: configStore[EXPLICIT_MODEL_PICK_KEY],
-        currentPrimary: await readOpenClawPrimaryModel(),
+        picks: clawaiAccountChanged ? {} : explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]),
         tierModelId: CLAWBOX_AI_MODEL_ID_BY_TIER[resolvedClawboxTier],
       });
-      if (clawaiDecision.migrate) await recordExplicitModelPick(clawaiDecision.migrate);
+      explicitPickKept = clawaiDecision.explicit;
       if (clawaiDecision.explicit) {
         console.log(
           `[configure] ClawBox AI: keeping the owner's own model ${clawaiDecision.modelId}`
@@ -2899,7 +2892,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // The owner named a model in this save (TASK-713). In the same batch
         // as the other facts about it, so a save that landed and a pick that
         // was remembered cannot come apart.
-        ...(explicitPickToRecord ? { [EXPLICIT_MODEL_PICK_KEY]: explicitPickToRecord } : {}),
+        ...(explicitPickToRecord
+          ? {
+            [EXPLICIT_MODEL_PICKS_KEY]: {
+              ...explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]),
+              [normalizeProviderId(ocProvider) ?? ocProvider]: explicitPickToRecord,
+            },
+          }
+          : {}),
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();
@@ -3291,7 +3291,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, gatewayWarning]
       .filter(Boolean)
       .join(" ");
-    return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
+    return NextResponse.json({
+      success: true,
+      ...(warning ? { warning } : {}),
+      // The plan may have moved while the model deliberately did not (TASK-713).
+      // Reported so the plan card can say so, rather than answering 200 over a
+      // screen where nothing appears to have happened.
+      ...(explicitPickKept ? { explicitPickKept: true, model: config.defaultModel } : {}),
+    });
   } catch (err) {
     // The one refusal that is not a failure: the save was REFUSED before
     // anything was written, and the owner can act on it. Its own status and
