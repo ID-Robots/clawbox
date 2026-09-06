@@ -30,19 +30,25 @@ Object.defineProperty(window, "matchMedia", {
   })),
 });
 
-// Mock ResizeObserver
-global.ResizeObserver = vi.fn().mockImplementation(() => ({
-  observe: vi.fn(),
-  unobserve: vi.fn(),
-  disconnect: vi.fn(),
-}));
-
-// Mock IntersectionObserver
-global.IntersectionObserver = vi.fn().mockImplementation(() => ({
-  observe: vi.fn(),
-  unobserve: vi.fn(),
-  disconnect: vi.fn(),
-}));
+// ResizeObserver and IntersectionObserver: PLAIN classes, not `vi.fn()` with an
+// implementation. The suite runs with `mockReset: true`, which strips the
+// implementation off every mock before each test — so a mocked constructor
+// answered `undefined` and any effect that reached one after the reset threw
+// "obs.observe is not a function". A component whose passive effects flush a
+// beat late (a store list settling as the next test starts) hit exactly that,
+// and only in a full run, where the timing differs. A class has nothing to
+// reset. A suite that needs to WATCH the calls still stubs its own.
+class NoopObserver {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+  takeRecords(): [] { return []; }
+  readonly root = null;
+  readonly rootMargin = "";
+  readonly thresholds: readonly number[] = [];
+}
+global.ResizeObserver = NoopObserver as unknown as typeof ResizeObserver;
+global.IntersectionObserver = NoopObserver as unknown as typeof IntersectionObserver;
 
 // Unit tests must never write the REAL ~/.openclaw: on an OpenClaw 2 box a
 // recreated legacy auth-profiles.json poisons the migrated sqlite auth store

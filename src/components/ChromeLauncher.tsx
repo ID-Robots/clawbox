@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, ReactNode, useCallback } from "react";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
+import { DESKTOP_LAYERS } from "@/lib/window-snap";
 
 interface LauncherApp {
   id: string;
@@ -49,6 +51,13 @@ export default function ChromeLauncher({
   onUnpinApp,
 }: ChromeLauncherProps) {
   const { t } = useT();
+  // The English floor: a raw `launcher.page` is worse copy than an
+  // untranslated "Page 2", and on an aria-label it is what a screen reader
+  // would read out. One hook for the whole desktop (src/lib/i18n-floor.ts) —
+  // six components had grown a private copy of this and every one of them
+  // handed placeholder substitution to `t`, which the no-provider fallback
+  // does not do.
+  const tr = useTr();
   const { cols: gridCols, rows: gridRows } = useLauncherGrid();
   const appsPerPage = gridCols * gridRows;
   const [searchQuery, setSearchQuery] = useState("");
@@ -133,15 +142,35 @@ export default function ChromeLauncher({
     setTimeout(() => onAppClick(id), 200);
   }, [handleClose, onAppClick]);
 
+  // Paging only. Escape is deliberately NOT handled here: the window listener
+  // below already answers it from anywhere, and while focus was inside the
+  // panel BOTH fired for one key — two `handleClose()` calls, two 200ms timers
+  // and `onClose()` twice, which closes the launcher and then whatever the
+  // desktop put in its place. It also closed the whole launcher on the Escape
+  // that was meant to dismiss an open tile menu, since only the listener below
+  // knows about `ctxMenu`.
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      handleClose();
-    } else if (e.key === "ArrowLeft") {
+    if (e.key === "ArrowLeft") {
       setCurrentPage(p => Math.max(0, p - 1));
     } else if (e.key === "ArrowRight") {
       setCurrentPage(p => Math.min(totalPages - 1, p + 1));
     }
-  }, [handleClose, totalPages]);
+  }, [totalPages]);
+
+  // Escape belongs to the launcher, not to whatever has focus inside it. The
+  // handler above rides on the panel div, so as soon as focus left it — a tile's
+  // context menu, "Add to desktop", a click on the backdrop — Escape did
+  // nothing and the only way out was to find the backdrop and click it.
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (ctxMenu) { setCtxMenu(null); return; }
+      handleClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [isOpen, ctxMenu, handleClose]);
 
   // Swipe handlers
   const handleTouchStart = useCallback((e: React.TouchEvent) => {
@@ -182,12 +211,15 @@ export default function ChromeLauncher({
 
   return (
     <>
-      {/* Backdrop */}
+      {/* Backdrop. The launcher is a modal, so it sits on the overlay layer —
+          ABOVE the chat, which used to paint over nine of the twelve tiles and
+          swallow the clicks meant for them (see DESKTOP_LAYERS). */}
       <div
-        className={`fixed inset-0 z-[9998] transition-opacity duration-200 ${
+        data-testid="app-launcher-backdrop"
+        className={`fixed inset-0 transition-opacity duration-200 ${
           isClosing ? "opacity-0 pointer-events-none" : "opacity-100"
         }`}
-        style={{ background: "rgba(0, 0, 0, 0.3)" }}
+        style={{ background: "rgba(0, 0, 0, 0.3)", zIndex: DESKTOP_LAYERS.overlay }}
         onClick={handleClose}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -197,9 +229,9 @@ export default function ChromeLauncher({
 
       {/* Launcher panel */}
       <div
-        style={{ maxWidth: gridCols * 100 + 32, bottom: 56 }}
+        style={{ maxWidth: gridCols * 100 + 32, bottom: 56, zIndex: DESKTOP_LAYERS.overlay + 1 }}
         data-testid="app-launcher"
-        className={`fixed left-1/2 -translate-x-1/2 w-full z-[9999] transition-all duration-200 ${
+        className={`fixed left-1/2 -translate-x-1/2 w-full transition-all duration-200 ${
           isClosing ? "translate-y-full opacity-0 pointer-events-none" : "translate-y-0 opacity-100"
         }`}
         onKeyDown={handleKeyDown}
@@ -286,6 +318,10 @@ export default function ChromeLauncher({
                 <button
                   key={i}
                   onClick={() => setCurrentPage(i)}
+                  // A dot has no text, so without this a screen reader announces
+                  // "button" twice over and the page you are on is invisible.
+                  aria-label={tr("launcher.page", "Page {n}").replace("{n}", String(i + 1))}
+                  aria-current={i === currentPage ? "true" : undefined}
                   className={`rounded-full transition-all duration-200 ${
                     i === currentPage
                       ? "w-5 h-2 bg-white/70"
@@ -301,10 +337,11 @@ export default function ChromeLauncher({
       {/* Launcher context menu */}
       {ctxMenu && (
         <div
-          className="fixed z-[99999] min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
           style={{
             left: Math.min(ctxMenu.x, window.innerWidth - 200),
             top: Math.min(ctxMenu.y, window.innerHeight - 150),
+            zIndex: DESKTOP_LAYERS.menu,
           }}
           onClick={() => setCtxMenu(null)}
         >
@@ -338,7 +375,10 @@ export default function ChromeLauncher({
 
           {onAddToDesktop && (
             <button
-              onClick={() => { onAddToDesktop(ctxMenu.app.id); }}
+              // The icon lands on the desktop BEHIND the launcher, so the
+              // action is only finished once the launcher is out of the way.
+              // It used to stay up with its backdrop swallowing the next click.
+              onClick={() => { onAddToDesktop(ctxMenu.app.id); handleClose(); }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
               <span className="text-base">🖥️</span> {t("launcher.addToDesktop")}

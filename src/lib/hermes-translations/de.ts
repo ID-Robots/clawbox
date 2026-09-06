@@ -779,7 +779,7 @@ export const de: Record<string, string> = {
   "codingAgent.importButton": "Importieren",
   "codingAgent.importFromGitHub": "Von GitHub",
   "codingAgent.importFromFolder": "Aus einem Ordner",
-  "codingAgent.importReposLoading": "Deine Repositories werden gelesen…",
+  "codingAgent.importReposLoading": "Ihre Repositories werden gelesen…",
   "codingAgent.importNotConnected": "Verbinden Sie in den Einstellungen ein GitHub-Konto, um Ihre Repositories zu sehen.",
   "codingAgent.importFilterPlaceholder": "Nach Name filtern",
   "codingAgent.importNoRepos": "Dieses Konto hat noch keine Repositories.",

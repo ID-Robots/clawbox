@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useT } from "@/lib/i18n";
+import { taskTitle } from "@/lib/task-title";
 import {
   buildNewAppPrompt,
   buildResumeProjectPrompt,
@@ -72,13 +73,51 @@ const FIELD =
 
 const LABEL = "block text-xs font-medium text-[var(--text-secondary)]";
 
+/**
+ * A native select clips its selected option at the control's right edge with
+ * nothing to say it did — "Next.js full-stack app — pages, API routes,
+ * TypeScript (def", cut mid-word, is what the card showed inside the chat
+ * panel. A `select` does honour `text-overflow`, so the cut at least reads as
+ * one.
+ */
+const SELECT = "overflow-hidden text-ellipsis whitespace-nowrap";
+
+/**
+ * The first line of the last run's task, for the "Last run:" note.
+ *
+ * Cut with an ellipsis rather than in silence: the hard 120-character slice
+ * ended "…and quote the", which reads as a rendering fault rather than as a
+ * summary. Exported for its test.
+ */
+export function lastRunSummary(task: string, max = 120): string {
+  const line = taskTitle(task, Number.MAX_SAFE_INTEGER);
+  return line.length > max ? `${line.slice(0, max).trimEnd()}…` : line;
+}
+
+/**
+ * What the "Last run:" line says about a run.
+ *
+ * An automatic review pass has no task of its own — its `task` IS the
+ * REVIEW_PASS_TASK prompt the runner hands the model — so its first line read
+ * "Automatic review pass. Start by running the project's own verification —
+ * its tests or build — in THIS pass and quote the" here while the sidebar,
+ * the run's page and the breadcrumb all called it "Automatic review pass of
+ * run-xyz". Same rule as theirs, from the same key.
+ */
+export function lastRunLabel(
+  run: { task: string; reviewOf?: string | null },
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
+  return run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : lastRunSummary(run.task);
+}
+
 /** One row of GET /setup-api/coding-agent/projects, as the card reads it. */
 interface ProjectRow {
   folder: string;
   directory: string;
   kind: "folder" | "codeProject";
   name: string;
-  latestRun: { id: string; status: string; task: string } | null;
+  latestRun: { id: string; status: string; task: string; reviewOf?: string | null } | null;
 }
 
 function isProjectRow(value: unknown): value is ProjectRow {
@@ -262,7 +301,7 @@ export default function NewAppWizardCard({
             onChange={(e) => { setProjectDir(e.target.value); setError(null); }}
             disabled={projects === null || projects.length === 0}
             data-testid="coding-agent-new-project"
-            className={`${FIELD} mt-1.5 appearance-none bg-[var(--bg-elevated)] pr-9`}
+            className={`${FIELD} ${SELECT} mt-1.5 appearance-none bg-[var(--bg-elevated)] pr-9`}
           >
             <option value="">
               {projects === null ? t("codingAgent.newProjectsLoading") : projects.length === 0 ? t("codingAgent.newNoProjects") : "—"}
@@ -276,7 +315,7 @@ export default function NewAppWizardCard({
         </label>
         {project?.latestRun && (
           <p className="text-[11px] text-[var(--text-muted)] break-words" data-testid="coding-agent-new-last-run">
-            {t("codingAgent.newLastRun", { task: project.latestRun.task.trim().split(/\r?\n/)[0].slice(0, 120) })}
+            {t("codingAgent.newLastRun", { task: lastRunLabel(project.latestRun, t) })}
           </p>
         )}
         <label className={LABEL}>
@@ -336,7 +375,7 @@ export default function NewAppWizardCard({
           value={template}
           onChange={(e) => setTemplate(e.target.value as NewAppTemplate)}
           data-testid="coding-agent-new-template"
-          className={`${FIELD} mt-1.5 appearance-none bg-[var(--bg-elevated)] pr-9`}
+          className={`${FIELD} ${SELECT} mt-1.5 appearance-none bg-[var(--bg-elevated)] pr-9`}
         >
           {NEW_APP_TEMPLATES.map((tpl) => (
             <option key={tpl} value={tpl}>

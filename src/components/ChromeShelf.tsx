@@ -2,6 +2,7 @@
 
 import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
 import { useT } from "@/lib/i18n";
+import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
@@ -126,11 +127,21 @@ export default function ChromeShelf({
       setCtxMenu(null);
       setShelfMenu(null);
     };
+    // Escape dismisses a menu, like it does everywhere else on the desktop.
+    // Neither of these menus takes focus, so there was no key handler anywhere
+    // to hear it and a click outside was the only way out.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setCtxMenu(null);
+      setShelfMenu(null);
+    };
     window.addEventListener("click", close);
     window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("click", close);
       window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
     };
   }, [ctxMenu, shelfMenu]);
 
@@ -307,8 +318,9 @@ export default function ChromeShelf({
           reads it on OpenClaw: the crab keeps the desktop floor. */}
       <div
         data-mascot-ground
-        className="fixed bottom-0 left-0 right-0 flex items-center justify-center px-2 z-[10000]"
+        className="fixed bottom-0 left-0 right-0 flex items-center justify-center px-2"
         style={{
+          zIndex: DESKTOP_LAYERS.shelf,
           height: "calc(56px + env(safe-area-inset-bottom))",
           paddingBottom: "env(safe-area-inset-bottom)",
           background: "rgba(17, 24, 39, 0.55)",
@@ -383,27 +395,19 @@ export default function ChromeShelf({
             </div>
           </>
         ) : <>
-        {/* Launcher button — left, mobile only (desktop renders it inline) */}
-        <div className="absolute left-2 flex items-center sm:hidden">
-          <button
-            onClick={onLauncherClick}
-            className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title={t("shelf.appLauncher")}
-            aria-label={t("shelf.appLauncher")}
-            data-testid="shelf-launcher-button"
-          >
-            <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
-              <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
-            </div>
-          </button>
-        </div>
+        {/* One launcher button per shelf. A second, `sm:hidden` copy used to sit
+            at the left of this branch — dead weight, since anything narrower
+            than 768px renders the mobile bar above instead, but always in the
+            DOM: two elements answered `shelf-launcher-button`, which is a
+            strict-locator failure for a test and a duplicated "App Launcher"
+            control for assistive tech. */}
 
         {/* Centered: pinned + open apps */}
         <div className="flex items-center gap-1">
           {/* Launcher button — desktop only (inline) */}
           <button
             onClick={onLauncherClick}
-            className="w-11 h-11 hidden sm:flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+            className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
             title={t("shelf.appLauncher")}
             aria-label={t("shelf.appLauncher")}
             data-testid="shelf-launcher-button"
@@ -476,8 +480,9 @@ export default function ChromeShelf({
       {/* Shelf context menu */}
       {ctxMenu && (
         <div
-          className="fixed z-[99999] min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
           style={{
+            zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(ctxMenu.x, window.innerWidth - 200),
             top: ctxMenu.y - 8,
             transform: "translateY(-100%)",
@@ -551,8 +556,9 @@ export default function ChromeShelf({
       {/* Shelf context menu (right-click on empty shelf area) */}
       {shelfMenu && (
         <div
-          className="fixed z-[99999] min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
+          className="fixed min-w-[180px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90"
           style={{
+            zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(shelfMenu.x, window.innerWidth - 200),
             top: shelfMenu.y - 8,
             transform: "translateY(-100%)",

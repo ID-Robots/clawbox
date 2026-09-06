@@ -21,6 +21,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import TerminalApp, { type TerminalTabAction } from "./TerminalApp";
 
 export interface TerminalTabsProps {
@@ -86,6 +87,7 @@ function stepTab(state: TabState, direction: 1 | -1): TabState {
 
 export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
   const { t } = useT();
+  const tr = useTr();
   const [state, setState] = useState<TabState>(() => ({
     tabs: [{ id: 1, command: initialCommand?.trim() || undefined }],
     activeId: 1,
@@ -132,7 +134,9 @@ export default function TerminalTabs({ initialCommand }: TerminalTabsProps) {
     <div className="flex flex-col h-full bg-[var(--win-ground)]" data-testid="terminal-tabs">
       <div
         role="tablist"
-        aria-label="Terminal tabs"
+        // The strip's accessible name: every other string here is a
+        // `terminal.*` key, and this one stayed English on a German desktop.
+        aria-label={tr("terminal.tabsLabel", "Terminal tabs")}
         onKeyDown={onTabKeyDown}
         className="flex items-stretch shrink-0 overflow-x-auto border-b"
         style={{ background: "#12122a", borderColor: "rgba(255,255,255,0.06)" }}

@@ -242,8 +242,15 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
           paste button floating over the screen itself. The title repeated
           what the window's own title bar says, so it went; the strip kept
           the state and gained the rest — Settings beside Close, and Paste to
-          VNC beside the other actions — one row, on every face. */}
-      <div className="shrink-0 flex items-center gap-2 px-4 py-2 border-b border-white/10" data-testid="browser-header">
+          VNC beside the other actions — one row, on every face.
+
+          It WRAPS, though. Held to one line, those five controls measure
+          556 px and the app's frame on a phone is 390 px of `overflow-hidden`:
+          Open in VNC was cut in half, Settings was off-screen entirely, the
+          state label was squeezed to nothing and no ancestor scrolled — so the
+          settings this app keeps precisely so a phone that landed on
+          /app/browser can reach them were unreachable from one. */}
+      <div className="shrink-0 flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/10" data-testid="browser-header">
         <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: BRAND_ORANGE }} aria-hidden="true">
           <svg className="w-3.5 h-3.5" viewBox="0 0 135.47 135.47" aria-hidden="true">
               <path d="m67.733 67.733 29.33 16.933-29.33 50.8c37.408 0 67.733-30.325 67.733-67.733 0-12.341-3.3168-23.901-9.0837-33.867h-58.65z" fill="#afccf9"/>

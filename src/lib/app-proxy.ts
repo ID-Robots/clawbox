@@ -66,6 +66,67 @@ export const APP_PROXY_PREFIX = "/apps/";
 /** The sandbox every proxied response is served under — everything but allow-same-origin. */
 export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-orientation-lock";
 
+/**
+ * The content types a proxied response may be read cross-origin as — and the
+ * whole of the CORS answer's blast radius.
+ *
+ * A `Content-Security-Policy: sandbox` document has the opaque origin `null`,
+ * and a module script or a `crossorigin` stylesheet — everything a Vite build
+ * emits — is fetched WITH CORS. Answering that is what makes the window render
+ * instead of showing an empty `#root`. But `Origin: null` is not proof of
+ * anything: ANY page on the internet can put a sandboxed iframe on screen and
+ * fetch this box from it with the same header, and over plain HTTP there is no
+ * second signal to tell the two apart — Chrome sends `Sec-Fetch-*` only to
+ * secure contexts, and a document with an opaque origin has no referrer to
+ * send (measured on the box, 2026-09-06: neither header arrives).
+ *
+ * So the answer is scoped to what actually needs it. These are CODE — the
+ * bytes the app hands to everyone who opens it — and they carry no
+ * per-request data. An app's own JSON, HTML or plain-text responses get no
+ * CORS header and stay unreadable to another origin, which is where a notes
+ * app's notes live. An app that wants to call its own API from inside the
+ * sandbox needs a capability it can prove, not a hole opened for every page
+ * on the web by accident.
+ */
+const CORS_READABLE_TYPES = [
+  "text/css",
+  "text/javascript",
+  "application/javascript",
+  "application/x-javascript",
+  "application/ecmascript",
+  "text/ecmascript",
+  "application/wasm",
+  "font/",
+  "application/font-",
+  "application/vnd.ms-fontobject",
+  "image/svg+xml",
+];
+
+/**
+ * The `Access-Control-Allow-Origin` a proxied response needs, or null when it
+ * needs none.
+ *
+ * The proxy imposes the opaque origin, so the proxy answers for it — and only
+ * for it, and only for the asset types above: `null` is echoed back, any other
+ * origin gets nothing, and an app that sets its own policy keeps it. Never
+ * with `Access-Control-Allow-Credentials`: the cookie is stripped on the way
+ * in (a document here could not use one anyway), and answering an origin WITH
+ * credentials is the hole this is not.
+ */
+export function appProxyAllowOrigin(
+  requestOrigin: string | null,
+  upstreamAllowOrigin: string | null,
+  contentType: string | null,
+): string | null {
+  if (upstreamAllowOrigin) return null;
+  if (requestOrigin !== "null") return null;
+  const type = (contentType ?? "").split(";")[0].trim().toLowerCase();
+  if (!type) return null;
+  return CORS_READABLE_TYPES.some((allowed) => (allowed.endsWith("/") || allowed.endsWith("-") ? type.startsWith(allowed) : type === allowed))
+    ? "null"
+    : null;
+}
+
 /** How long a listener verdict is trusted: an "owned" one for this long, a refusal for a fraction of it, so a server just started is picked up on the next try. */
 export const LISTENER_CHECK_TTL_MS = 30_000;
 export const LISTENER_REFUSAL_TTL_MS = 3_000;

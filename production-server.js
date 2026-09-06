@@ -10,6 +10,7 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
+const { Transform } = require("stream");
 const { attachAccessLog } = require("./scripts/access-log.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
@@ -38,9 +39,11 @@ const IS_DEV = process.env.NODE_ENV === "development";
 // middleware, so without this check any LAN client could reach the unauth PTY /
 // VNC services straight through the port-80 proxy (SEC-1). The gateway route
 // (default) is intentionally NOT gated here — it enforces its own auth token.
+// `sanitizeClose` marks the one upstream that answers a code-less goodbye with
+// a status code no browser will accept — see createCloseFrameRewriter below.
 const UPGRADE_ROUTES = [
   { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true, requireAuth: true },
-  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true },
+  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, sanitizeClose: true },
 ];
 
 // A project's own server under /apps/<id>/ (src/lib/app-proxy.ts): the
@@ -124,7 +127,7 @@ function resolveUpgradeTarget(reqUrl) {
       const rewritten = r.stripPrefix
         ? (!stripped || stripped.startsWith("?") ? `/${stripped}` : stripped)
         : reqUrl;
-      return { targetPort: r.targetPort, url: rewritten, requireAuth: !!r.requireAuth };
+      return { targetPort: r.targetPort, url: rewritten, requireAuth: !!r.requireAuth, sanitizeClose: !!r.sanitizeClose };
     }
   }
   return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false };
@@ -441,9 +444,152 @@ const FORWARDED_CLIENT_HEADERS = new Set([
   "x-real-ip", "forwarded", "true-client-ip", "cdn-loop",
   "cf-connecting-ip", "cf-connecting-ipv6", "cf-ipcountry", "cf-visitor", "cf-ray", "cf-warp-tag-id",
 ]);
+
+// ─── A close frame the browser will accept ───────────────────────────────────
+//
+// noVNC says goodbye with `WebSocket.close()` and no arguments, so the browser
+// sends a close frame with an EMPTY payload — no status code, which is legal.
+// Python websockify fills the gap in: it records 1005 ("No close status code
+// specified by peer") and echoes THAT back on the wire. 1005 is one of the
+// codes RFC 6455 reserves for the API and forbids in a frame, so Chromium
+// refuses it — `WebSocket connection to 'ws://…/novnc-ws' failed: Received a
+// broken close frame containing a reserved status code` on every close of the
+// Remote Desktop and of the Browser app, which embeds the same view. Nothing
+// was broken except the goodbye, and nothing in the console said so.
+//
+// The proxy below is a byte pipe, so the repair belongs here: on the route
+// that names `sanitizeClose`, the upstream half is walked frame by frame and a
+// close frame carrying a code that must not be sent is replaced by an empty
+// one — which is precisely what "no status code" looks like on the wire, and
+// what the browser itself sent. Everything else is forwarded untouched, and
+// the moment a stream stops making sense the rest of it is passed through raw:
+// a proxy that cannot parse a frame must still deliver it.
+
+/** The close codes RFC 6455 allows in a FRAME: 1005/1006/1015 are API-only and 1004 is undefined. */
+function isSendableCloseCode(code) {
+  if (code >= 3000 && code <= 4999) return true;
+  return code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006;
+}
+
+/**
+ * One upstream→client stream's rewriter: hand it a chunk, write back what it
+ * returns. Stateful, so one per connection.
+ */
+function createCloseFrameRewriter() {
+  const EMPTY = Buffer.alloc(0);
+  const CLOSE = 0x8;
+  // "headers" — the upstream's 101 response, which is not framed at all;
+  // "frames" — parsing; "raw" — forward everything, whatever it is.
+  let phase = "headers";
+  let held = EMPTY;
+  let payloadLeft = 0;
+
+  const join = (parts) => (parts.length === 0 ? EMPTY : parts.length === 1 ? parts[0] : Buffer.concat(parts));
+
+  /** A close frame, or an empty one in its place when its code may not travel. */
+  const repairClose = (frame, header, length, masked) => {
+    if (length < 2) return frame;
+    const code = masked
+      ? ((frame[header] ^ frame[header - 4]) << 8) | (frame[header + 1] ^ frame[header - 3])
+      : frame.readUInt16BE(header);
+    // The reason string goes with the code: websockify's is about the code it
+    // invented, and there is no honest way to keep it once the code is gone.
+    return isSendableCloseCode(code) ? frame : Buffer.from([0x88, 0x00]);
+  };
+
+  return function rewrite(chunk) {
+    if (phase === "raw") return chunk;
+    // The framebuffer case — mid-payload with nothing held back. VNC pixels
+    // must reach the socket without being copied through a parser.
+    if (phase === "frames" && held.length === 0 && payloadLeft >= chunk.length) {
+      payloadLeft -= chunk.length;
+      return chunk;
+    }
+    let data = held.length ? Buffer.concat([held, chunk]) : chunk;
+    held = EMPTY;
+    const out = [];
+
+    if (phase === "headers") {
+      const end = data.indexOf("\r\n\r\n");
+      if (end < 0) {
+        // A 101 response's headers are a few hundred bytes; this much without
+        // an end of headers is not a handshake we should be reading.
+        if (data.length > 16384) { phase = "raw"; return data; }
+        held = Buffer.from(data);
+        return EMPTY;
+      }
+      out.push(data.subarray(0, end + 4));
+      // Anything but a 101 is an ordinary HTTP body (a 401, a 404) — not frames.
+      phase = /^HTTP\/1\.[01] 101/.test(data.subarray(0, 32).toString("latin1")) ? "frames" : "raw";
+      data = data.subarray(end + 4);
+      if (phase === "raw") { out.push(data); return join(out); }
+    }
+
+    for (;;) {
+      if (payloadLeft > 0) {
+        const take = payloadLeft < data.length ? payloadLeft : data.length;
+        if (take > 0) {
+          out.push(data.subarray(0, take));
+          data = data.subarray(take);
+          payloadLeft -= take;
+        }
+        if (payloadLeft > 0) break;
+      }
+      if (data.length < 2) { held = Buffer.from(data); break; }
+      const opcode = data[0] & 0x0f;
+      const masked = (data[1] & 0x80) !== 0;
+      let length = data[1] & 0x7f;
+      let header = 2 + (masked ? 4 : 0);
+      if (length === 126) {
+        header += 2;
+        if (data.length < 4) { held = Buffer.from(data); break; }
+        length = data.readUInt16BE(2);
+      } else if (length === 127) {
+        header += 8;
+        if (data.length < 10) { held = Buffer.from(data); break; }
+        const big = data.readBigUInt64BE(2);
+        // Past 2^53 the byte counting below stops being exact, and a proxy
+        // that miscounts truncates the app's data. Stop parsing instead.
+        if (big > BigInt(Number.MAX_SAFE_INTEGER)) { phase = "raw"; out.push(data); return join(out); }
+        length = Number(big);
+      }
+      if (data.length < header) { held = Buffer.from(data); break; }
+      if (opcode === CLOSE) {
+        // A control frame is never fragmented and never carries more than 125
+        // bytes; one that does is a stream this parser no longer understands.
+        if (length > 125) { phase = "raw"; out.push(data); return join(out); }
+        if (data.length < header + length) { held = Buffer.from(data); break; }
+        out.push(repairClose(data.subarray(0, header + length), header, length, masked));
+        data = data.subarray(header + length);
+        continue;
+      }
+      out.push(data.subarray(0, header));
+      data = data.subarray(header);
+      payloadLeft = length;
+    }
+    return join(out);
+  };
+}
+
+/** The rewriter as a stream, for the pipe. A throw inside it forwards the chunk rather than dropping the connection. */
+function closeFrameSanitizer() {
+  const rewrite = createCloseFrameRewriter();
+  return new Transform({
+    transform(chunk, _encoding, done) {
+      let out;
+      try {
+        out = rewrite(chunk);
+      } catch {
+        out = chunk;
+      }
+      done(null, out.length ? out : undefined);
+    },
+  });
+}
+
 function attachUpgradeProxy(server) {
   server.on("upgrade", (req, socket, head) => {
-    const { targetPort, url, requireAuth } = resolveUpgradeTarget(req.url);
+    const { targetPort, url, requireAuth, sanitizeClose } = resolveUpgradeTarget(req.url);
     if (requireAuth && !hasValidSession(req)) {
       return rejectUpgrade(socket);
     }
@@ -464,7 +610,14 @@ function attachUpgradeProxy(server) {
       raw += "\r\n";
       upstream.write(raw);
       if (head.length) upstream.write(head);
-      socket.pipe(upstream).pipe(socket);
+      socket.pipe(upstream);
+      if (sanitizeClose) {
+        const filter = closeFrameSanitizer();
+        filter.on("error", () => socket.destroy());
+        upstream.pipe(filter).pipe(socket);
+      } else {
+        upstream.pipe(socket);
+      }
     });
     upstream.on("error", () => socket.destroy());
     socket.on("error", () => upstream.destroy());

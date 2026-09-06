@@ -31,6 +31,7 @@ import {
   notifyCodingRunStarted,
   onCodingAgentChanged,
   onStandaloneAppPage,
+  standaloneAppHref,
   takePendingCodingRun,
 } from "@/lib/ui-events";
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
@@ -314,19 +315,48 @@ function ProjectIcon({ project, size }: { project: Project; size: "w-6 h-6" | "w
   );
 }
 
-/** One cell of the run page's figures grid. */
+/**
+ * One cell of the run page's figures grid.
+ *
+ * Nothing here truncates. The tiles are ~118 px wide in the rail, and a model
+ * name ("deepseek-v4-pro[1m]", 170 px), a Bulgarian label ("Променени
+ * файлове", 128 px) and a Japanese hint ("思考中 · 166821 トークン") all
+ * overflowed it — ellipsised in every locale, with the hint carrying no
+ * `title` and a phone offering no hover at all, so the figure was simply
+ * unreadable. A tile that grows a line is the cheaper answer than a figure
+ * nobody can read; the grid stretches its row to match.
+ */
 function StatTile({ label, value, hint, testId }: { label: string; value: ReactNode; hint?: string; testId?: string }) {
   return (
     <div className={`${CARD_SURFACE} px-3 py-2 min-w-0`} data-testid={testId}>
-      <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] truncate">{label}</div>
-      <div className="mt-0.5 text-sm font-semibold text-[var(--text-primary)] truncate" title={hint ?? (typeof value === "string" ? value : undefined)}>{value}</div>
-      {hint && <div className="text-[10px] text-[var(--text-muted)] truncate">{hint}</div>}
+      <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] break-words">{label}</div>
+      <div className="mt-0.5 text-sm font-semibold text-[var(--text-primary)] break-words" title={hint ?? (typeof value === "string" ? value : undefined)}>{value}</div>
+      {hint && <div className="text-[10px] text-[var(--text-muted)] break-words" title={hint}>{hint}</div>}
     </div>
   );
 }
 
-/** How many of a run's progress lines the run page's activity log shows. */
-const ACTIVITY_SHOWN = 40;
+/**
+ * How a run ENDED, not merely whether it is over.
+ *
+ * `isSettled` alone drew a run that failed exactly like one that succeeded —
+ * a tick — next to a status chip reading "Did not finish" in red.
+ */
+type RunOutcome = "working" | "completed" | "unfinished" | "waiting";
+
+function runOutcome(status: CodingRunStatus): RunOutcome {
+  if (isLive(status)) return "working";
+  if (status === "completed") return "completed";
+  return isSettled(status) ? "unfinished" : "waiting";
+}
+
+/** The Agents card's glyph for the run itself, per outcome. */
+const MAIN_AGENT_GLYPH: Record<RunOutcome, { icon: string; className: string }> = {
+  working: { icon: "sync", className: "text-amber-400 animate-pulse" },
+  completed: { icon: "check_circle", className: "text-[var(--text-muted)]" },
+  unfinished: { icon: "error", className: "text-red-400/80" },
+  waiting: { icon: "schedule", className: "text-[var(--text-muted)]" },
+};
 
 /** Every run button's shape; the action's own colour is added per row. */
 const RUN_BUTTON = "text-xs px-2.5 py-1 rounded-lg border disabled:opacity-50";
@@ -469,7 +499,16 @@ export default function CodingAgentApp() {
    * shows Open.
    */
   const openOrAddProject = async (project: Pick<Project, "folder" | "directory" | "onDesktop" | "app">) => {
-    if (project.onDesktop) { dispatchOpenApp(installedAppId(project.folder)); return; }
+    if (project.onDesktop) {
+      // On `/app/coding` there is no desktop listening for OPEN_APP_EVENT, so
+      // the dispatch was inert and the button did nothing whatsoever — no
+      // window, no navigation, no word about it. The app's own page is where
+      // it lives there (the pattern LocalAiPanel already uses for Memory
+      // Shard).
+      if (standalone) window.location.assign(standaloneAppHref(installedAppId(project.folder)));
+      else dispatchOpenApp(installedAppId(project.folder));
+      return;
+    }
     if (!project.app?.port) return;
     const failed = await addProjectToDesktop(project.directory);
     window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: failed ? { message: failed, type: "error" } : { message: t("codingAgent.addedToDesktop", { name: project.app.name }), type: "success" } }));
@@ -863,34 +902,63 @@ export default function CodingAgentApp() {
 
   /** The pull request as one chip: its phase, and while checks run, how many
    *  have answered. A link once GitHub has given us one. */
-  const prChip = (run: Run) => run.pr && run.pr.phase !== "failed" ? (
-    <a
-      href={run.pr.url ?? undefined}
-      target="_blank"
-      rel="noreferrer"
-      onClick={(e) => e.stopPropagation()}
-      data-testid={`coding-agent-pr-${run.id}`}
-      title={run.pr.detail ?? undefined}
-      className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 no-underline inline-flex items-center gap-1 ${
-        run.pr.phase === "merged"
-          ? "text-emerald-400 border-emerald-400/40"
-          : run.pr.phase === "blocked"
-            ? "text-amber-400 border-amber-400/40"
-            : "text-sky-300 border-sky-400/40"
-      } ${run.pr.url ? "hover:bg-white/5" : "pointer-events-none"}`}
-    >
-      {run.pr.phase === "waiting" && (
-        <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-sky-300 motion-safe:animate-pulse" />
-      )}
-      {run.pr.phase === "waiting"
-        ? t("codingAgent.prWaiting", { done: run.pr.checks.passed + run.pr.checks.failed, total: run.pr.checks.total })
-        : run.pr.phase === "merged"
-          ? t("codingAgent.prMerged")
-          : run.pr.phase === "blocked"
-            ? t("codingAgent.prBlocked")
-            : t("codingAgent.prOpening")}
-    </a>
-  ) : null;
+  const prChip = (run: Run) => {
+    const pr = run.pr;
+    if (!pr || pr.phase === "failed") return null;
+    const className = `text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 no-underline inline-flex items-center gap-1 ${
+      pr.phase === "merged"
+        ? "text-emerald-400 border-emerald-400/40"
+        : pr.phase === "blocked"
+          ? "text-amber-400 border-amber-400/40"
+          : "text-sky-300 border-sky-400/40"
+    }`;
+    const body = (
+      <>
+        {pr.phase === "waiting" && (
+          <span aria-hidden="true" className="inline-block w-1.5 h-1.5 rounded-full bg-sky-300 motion-safe:animate-pulse" />
+        )}
+        {pr.phase === "waiting"
+          ? t("codingAgent.prWaiting", { done: pr.checks.passed + pr.checks.failed, total: pr.checks.total })
+          : pr.phase === "merged"
+            ? t("codingAgent.prMerged")
+            : pr.phase === "blocked"
+              ? t("codingAgent.prBlocked")
+              : t("codingAgent.prOpening")}
+      </>
+    );
+    // No URL means nothing to follow, and an `<a>` without `href` is not a
+    // link at all: it took no focus, and `pointer-events-none` on top of that
+    // meant even its `title` — the only place the reason lived — could never
+    // appear. The chip is a plain span there, hoverable, with the reason
+    // itself drawn beside it on the run's page (prDetail below).
+    return pr.url ? (
+      <a
+        href={pr.url}
+        target="_blank"
+        rel="noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        data-testid={`coding-agent-pr-${run.id}`}
+        title={pr.detail ?? undefined}
+        className={`${className} hover:bg-white/5`}
+      >
+        {body}
+      </a>
+    ) : (
+      <span data-testid={`coding-agent-pr-${run.id}`} title={pr.detail ?? undefined} className={className}>
+        {body}
+      </span>
+    );
+  };
+
+  /** Why a pull request is waiting on the owner, in the record's own words —
+   *  on the run's page, where there is room for a sentence. The chip says the
+   *  owner is needed; without this nothing on the box said what for. */
+  const prDetail = (run: Run) =>
+    run.pr && run.pr.phase !== "failed" && !run.pr.url && run.pr.detail ? (
+      <p className="mt-1.5 text-[11px] text-amber-300/90 break-words" data-testid={`coding-agent-pr-detail-${run.id}`}>
+        {run.pr.detail}
+      </p>
+    ) : null;
 
   /** The row's and the page's run controls: the held run's first action and
    *  the way out of it, the terminal, the backup. */
@@ -1635,6 +1703,7 @@ export default function CodingAgentApp() {
           const run = view.run;
           const tone = RUN_TONE[run.status];
           const started = run.status !== "draft";
+          const mainOutcome = runOutcome(run.status);
           const project = projects.find((pr) => runBelongsTo(run, pr)) ?? null;
           const reviewedBy = runs.find((r) => r.reviewOf === run.id);
           const artifacts = run.artifacts ?? [];
@@ -1654,8 +1723,14 @@ export default function CodingAgentApp() {
           const reportFile = files.find((a) => a.kind === "markdown" && a.name === "report.md") ?? files.find((a) => a.kind === "markdown");
           const todos = run.todos ?? [];
           const todosDone = todos.filter((x) => x.status === "completed").length;
-          const activity = run.progress.slice(-ACTIVITY_SHOWN);
-          const activityAt = (run.progressAt?.length === run.progress.length ? run.progressAt : []).slice(-ACTIVITY_SHOWN);
+          // Every step the record carries, not a second cut of it. The runner
+          // already keeps only its last PROGRESS_KEEP (60) lines, and a
+          // further slice to 40 here dropped the first 29 minutes of a run —
+          // "Started with…" among them — while the timeline's badge went on
+          // counting what was left and said "40". The list scrolls inside its
+          // own capped height, so showing all of them costs nothing.
+          const activity = run.progress;
+          const activityAt = run.progressAt?.length === run.progress.length ? run.progressAt : [];
           const title = run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 160);
           const fullTask = !run.reviewOf && run.task.trim() !== firstLine(run.task, 160) ? run.task : null;
           return (
@@ -1666,7 +1741,12 @@ export default function CodingAgentApp() {
                   ...(project ? [{ label: project.name, onClick: () => { setOpenRunId(null); setOpenProjectDir(project.directory); }, testId: "coding-agent-crumb-project" }] : []),
                   { label: title },
                 ]}
-                onBack={() => { setOpenRunId(null); if (project) setOpenProjectDir(project.directory); }}
+                // A run with no project of its own — a team worker in a
+                // worktree — goes back to Projects, which is what its
+                // breadcrumb says. Leaving `openProjectDir` alone landed it on
+                // whichever project the owner had opened BEFORE, a page with
+                // nothing to do with the run they came from.
+                onBack={() => { setOpenRunId(null); setOpenProjectDir(project ? project.directory : null); }}
                 backLabel={project ? t("codingAgent.backTo", { name: project.name }) : t("codingAgent.back")}
                 navLabel={t("codingAgent.breadcrumbLabel")}
                 backTestId="coding-agent-run-back"
@@ -1713,6 +1793,7 @@ export default function CodingAgentApp() {
                     </button>
                   )}
                 </div>
+                {prDetail(run)}
                 <h2 className="mt-2 text-sm font-semibold text-[var(--text-primary)] break-words" data-testid="coding-agent-run-title">{title}</h2>
                 {fullTask && (
                   <details className="mt-1">
@@ -1946,8 +2027,13 @@ export default function CodingAgentApp() {
                     </span>
                   </p>
                   <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
-                    <li className="flex items-start gap-2 text-[11px]">
-                      <span className={`material-symbols-rounded shrink-0 ${isLive(run.status) ? "text-amber-400 animate-pulse" : "text-[var(--text-muted)]"}`} style={{ fontSize: 13 }} aria-hidden="true">{isLive(run.status) ? "sync" : "check_circle"}</span>
+                    {/* A tick for a run that did not finish is a lie the
+                        status chip above already contradicts: only a
+                        completed run gets one, a failed or stopped one gets
+                        the error glyph, and a paused run or a draft is still
+                        waiting rather than done. */}
+                    <li className="flex items-start gap-2 text-[11px]" data-testid="coding-agent-agent-main" data-outcome={mainOutcome}>
+                      <span className={`material-symbols-rounded shrink-0 ${MAIN_AGENT_GLYPH[mainOutcome].className}`} style={{ fontSize: 13 }} aria-hidden="true">{MAIN_AGENT_GLYPH[mainOutcome].icon}</span>
                       <span className="text-[var(--text-primary)] font-medium shrink-0">{t("codingAgent.agentMain")}</span>
                       <span className="text-[var(--text-muted)] break-words min-w-0">{run.model ?? run.modelsUsed?.[0] ?? ""}{started ? ` · ${duration(run)}` : ""}</span>
                     </li>
@@ -2161,7 +2247,11 @@ export default function CodingAgentApp() {
                 {p.onDesktop && (
                   <button
                     type="button"
-                    onClick={() => dispatchOpenApp(installedAppId(p.folder))}
+                    // Through the one helper, so this button knows about the
+                    // standalone page too — it dispatched the desktop-only
+                    // event directly and did nothing on `/app/coding`.
+                    onClick={() => void openOrAddProject(p)}
+                    data-testid="coding-agent-project-open"
                     className={`${BTN_SECONDARY} ml-auto`}
                   >
                     {t("codingAgent.open")}

@@ -77,6 +77,40 @@ describe("the path and the request", () => {
     expect(lib.isDocumentRequest(new Headers())).toBe(false);
   });
 
+  it("answers the CORS its own sandbox causes, for the opaque origin and nothing else", () => {
+    // A document under `sandbox` (no allow-same-origin) has the origin `null`,
+    // and a module script or a `crossorigin` stylesheet is CORS-fetched — so
+    // every ES-module app under /apps/ rendered an empty #root, with
+    // "from origin 'null' has been blocked" in a console nobody was reading.
+    expect(lib.appProxyAllowOrigin("null", null, "text/javascript")).toBe("null");
+    expect(lib.appProxyAllowOrigin("null", null, "text/css; charset=utf-8")).toBe("null");
+    expect(lib.appProxyAllowOrigin("null", null, "font/woff2")).toBe("null");
+    expect(lib.appProxyAllowOrigin("null", null, "application/wasm")).toBe("null");
+    // Not a licence for the whole web: only the origin the proxy itself makes.
+    expect(lib.appProxyAllowOrigin("https://evil.example", null, "text/javascript")).toBeNull();
+    expect(lib.appProxyAllowOrigin("http://box.local", null, "text/javascript")).toBeNull();
+    // No Origin at all is a request no CORS check will be run on.
+    expect(lib.appProxyAllowOrigin(null, null, "text/javascript")).toBeNull();
+    // An app that answers CORS itself keeps its own policy.
+    expect(lib.appProxyAllowOrigin("null", "*", "text/javascript")).toBeNull();
+  });
+
+  it("opens the app's CODE cross-origin and never its data", () => {
+    // `Origin: null` proves nothing: any page on the web can put a sandboxed
+    // iframe on screen and fetch this box from it with the same header, and
+    // over plain HTTP there is no second signal to tell them apart (measured
+    // on the box: Chrome sends Sec-Fetch-* only to secure contexts, and an
+    // opaque-origin document has no referrer). So the answer is scoped to the
+    // types that are CORS-fetched by construction and carry no per-request
+    // data — a notes app's notes are JSON, and JSON gets nothing.
+    for (const type of ["application/json", "text/html", "text/plain", "image/png", "application/octet-stream", "text/csv"]) {
+      expect(lib.appProxyAllowOrigin("null", null, type), type).toBeNull();
+    }
+    // A response with no type at all is not one we can vouch for either.
+    expect(lib.appProxyAllowOrigin("null", null, null)).toBeNull();
+    expect(lib.appProxyAllowOrigin("null", null, "")).toBeNull();
+  });
+
   it("names the same config key the runner does", async () => {
     const { CODING_AGENT_DIR_CONFIG_KEY } = await import("@/lib/coding-agent");
     expect(lib.PROJECT_FOLDER_CONFIG_KEY).toBe(CODING_AGENT_DIR_CONFIG_KEY);

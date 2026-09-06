@@ -83,6 +83,50 @@ describe("CodeEditor", () => {
     expect(onChange).toHaveBeenLastCalledWith("a  c");
   });
 
+  it("types Tab, Shift+Tab and the auto-indent through the browser's own undo stack", () => {
+    // `setRangeText` writes the value without an undo entry, so Ctrl+Z could
+    // not take a Tab back: the spaces stayed, the dirty dot stayed, and Close
+    // asked to discard a change the owner had already undone. `execCommand`
+    // is the only API that records one — stand in for it here and assert the
+    // editor goes through it.
+    const exec = vi.fn((command: string, _ui: boolean, text?: string) => {
+      const el = document.activeElement as HTMLTextAreaElement;
+      const { selectionStart, selectionEnd } = el;
+      const inserted = command === "insertText" ? text ?? "" : "";
+      el.value = el.value.slice(0, selectionStart) + inserted + el.value.slice(selectionEnd);
+      el.setSelectionRange(selectionStart + inserted.length, selectionStart + inserted.length);
+      return true;
+    });
+    Object.defineProperty(document, "execCommand", { value: exec, configurable: true, writable: true });
+    try {
+      const onChange = vi.fn();
+      render(<CodeEditor value={"a\nb"} onChange={onChange} language={null} testId="ed" />);
+      const input = screen.getByTestId("ed-input") as HTMLTextAreaElement;
+      input.focus();
+      const setRangeText = vi.spyOn(input, "setRangeText");
+
+      input.setSelectionRange(1, 1);
+      fireEvent.keyDown(input, { key: "Tab" });
+      expect(exec).toHaveBeenLastCalledWith("insertText", false, "  ");
+      expect(onChange).toHaveBeenLastCalledWith("a  \nb");
+
+      input.value = "a\nb";
+      input.setSelectionRange(0, 3);
+      fireEvent.keyDown(input, { key: "Tab" });
+      expect(exec).toHaveBeenLastCalledWith("insertText", false, "  a\n  b");
+
+      input.value = "  a";
+      input.setSelectionRange(3, 3);
+      fireEvent.keyDown(input, { key: "Enter" });
+      expect(exec).toHaveBeenLastCalledWith("insertText", false, "\n  ");
+
+      // Nothing went round the undo stack.
+      expect(setRangeText).not.toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(document, "execCommand");
+    }
+  });
+
   it("takes one indent back on Shift+Tab", () => {
     const onChange = vi.fn();
     render(<CodeEditor value={"    x"} onChange={onChange} language={null} testId="ed" />);

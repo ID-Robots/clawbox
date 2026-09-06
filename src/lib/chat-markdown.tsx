@@ -106,8 +106,13 @@ export function renderInline(text: string, keyPrefix: string) {
     if (seg.startsWith('`') && seg.endsWith('`')) {
       return <code key={`${keyPrefix}-${j}`} className="bg-white/[0.08] rounded px-1.5 py-px text-[0.9em]">{seg.slice(1, -1)}</code>;
     }
-    if (seg.startsWith('**') && seg.endsWith('**')) return <strong key={`${keyPrefix}-${j}`}>{seg.slice(2, -2)}</strong>;
-    if (seg.startsWith('*') && seg.endsWith('*')) return <em key={`${keyPrefix}-${j}`}>{seg.slice(1, -1)}</em>;
+    // Emphasis renders its own contents: `**Gravity `-11`**` reached the bubble
+    // with its backticks intact — the one code span on the page drawn as
+    // literal text — because the inner string was handed over raw. The
+    // recursion is bounded by construction: the split's emphasis patterns are
+    // `[^*]+`, so nothing inside one can be emphasis again.
+    if (seg.startsWith('**') && seg.endsWith('**')) return <strong key={`${keyPrefix}-${j}`}>{renderInline(seg.slice(2, -2), `${keyPrefix}-${j}`)}</strong>;
+    if (seg.startsWith('*') && seg.endsWith('*')) return <em key={`${keyPrefix}-${j}`}>{renderInline(seg.slice(1, -1), `${keyPrefix}-${j}`)}</em>;
     const linkMatch = seg.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
     if (linkMatch) {
       const href = isSafeHref(linkMatch[2]) ? linkMatch[2] : "#";
@@ -154,6 +159,20 @@ const TABLE_DIVIDER_RE = /^\s*\|[\s:|-]*-[\s:|-]*\|\s*$/;
 // Both bullet forms require the space, so `*emphasis*` is never a list item.
 const BULLET_RE = /^\s*[-*+]\s+(.*)$/;
 const ORDERED_RE = /^\s*(\d{1,9})[.)]\s+(.*)$/;
+
+/**
+ * An indented line that continues the list item above it.
+ *
+ * Deliberately narrower than CommonMark's lazy continuation, which lets an
+ * unindented line carry on too: a paragraph that simply follows a list at
+ * column 0 is far commoner in what models write than a lazy one, and
+ * swallowing it would be the worse mistake. A line that starts a block of its
+ * own — a fence, a heading, a table row — ends the list as it always did.
+ */
+function isListContinuation(line: string): boolean {
+  if (!line.trim() || !/^\s/.test(line)) return false;
+  return !FENCE_RE.test(line) && !HEADING_RE.test(line) && !TABLE_ROW_RE.test(line);
+}
 
 /**
  * Cells of one table row, without the outer pipes.
@@ -261,7 +280,13 @@ function parseBlocks(text: string): MdBlock[] {
         const ordered = bullet ? null : lines[i].match(ORDERED_RE);
         if (bullet) items.push({ marker: "•", text: bullet[1] });
         else if (ordered) items.push({ marker: `${ordered[1]}.`, text: ordered[2] });
-        else break;
+        else if (items.length && isListContinuation(lines[i])) {
+          // A hard-wrapped item: the indented rest of the sentence belongs to
+          // the bullet (CommonMark). It used to END the list, so "Only a
+          // benign" stayed in the bullet and " chunk-size warning (…)" was
+          // drawn as its own left-aligned paragraph, leading spaces and all.
+          items[items.length - 1].text += ` ${lines[i].trim()}`;
+        } else break;
         i++;
       }
       i--;

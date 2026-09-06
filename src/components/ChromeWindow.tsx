@@ -7,6 +7,10 @@ import * as kv from "@/lib/client-kv";
 import SnapPreviewOverlay from "@/components/SnapPreviewOverlay";
 import {
   DESKTOP_GAP,
+  MIN_WINDOW_HEIGHT,
+  MIN_WINDOW_WIDTH,
+  clampWindowPosition,
+  fitWindowSize,
   getSnapRect,
   getSnapZone,
   shelfHeight,
@@ -74,8 +78,17 @@ export default function ChromeWindow({
   maximizeSignal,
 }: ChromeWindowProps) {
   const { t } = useT();
-  const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
-  const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height, rightInset));
+  // Geometry that arrives from outside — a restored workspace, a size saved on
+  // a bigger screen — is fitted to THIS desktop before it is ever painted: a
+  // window restored with its title bar under the shelf or its controls past the
+  // right edge cannot be reached by hand, and minimize/restore and every reload
+  // put it back in exactly the same place.
+  const [size, setSize] = useState(() => fitWindowSize(initialSize || getSavedSize(appId, defaultWidth, defaultHeight)));
+  const [position, setPosition] = useState(() => (
+    initialPosition
+      ? clampWindowPosition({ ...initialPosition, ...size })
+      : getInitialPosition(size.width, size.height, rightInset)
+  ));
   const [maximized, setMaximized] = useState(false);
   const [snapped, setSnapped] = useState<SnapZone>(null);
   const [snapPreview, setSnapPreview] = useState<SnapZone>(null);
@@ -101,8 +114,6 @@ export default function ChromeWindow({
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
   const rightInsetRef = useRef(rightInset);
-  const MIN_WIDTH = 300;
-  const MIN_HEIGHT = 200;
 
   useLayoutEffect(() => {
     rightInsetRef.current = rightInset;
@@ -160,17 +171,21 @@ export default function ChromeWindow({
     if (snapped) {
       const restoreW = prevSizeRef.current.width;
       const restoreH = prevSizeRef.current.height;
-      const newX = clientX - restoreW / 2;
-      const newY = clientY - 18; // center on titlebar
+      // Centred on the cursor, then pulled back onto the desktop: a snapped
+      // window grabbed near the left edge would otherwise be dropped half its
+      // width off-screen if the pointer never moved.
+      const { x: newX, y: newY } = clampWindowPosition(
+        { x: clientX - restoreW / 2, y: clientY - 18, width: restoreW, height: restoreH },
+      );
       setSize({ width: restoreW, height: restoreH });
-      setPosition({ x: newX, y: Math.max(0, newY) });
+      setPosition({ x: newX, y: newY });
       setSnapped(null);
       dragRef.current = {
         isDragging: true,
         startX: clientX,
         startY: clientY,
         startPosX: newX,
-        startPosY: Math.max(0, newY),
+        startPosY: newY,
       };
     } else {
       dragRef.current = {
@@ -222,15 +237,15 @@ export default function ChromeWindow({
         let newX = r.startPosX;
         let newY = r.startPosY;
 
-        if (r.edge.includes("r")) newW = Math.max(MIN_WIDTH, r.startW + dx);
-        if (r.edge.includes("b")) newH = Math.max(MIN_HEIGHT, r.startH + dy);
+        if (r.edge.includes("r")) newW = Math.max(MIN_WINDOW_WIDTH, r.startW + dx);
+        if (r.edge.includes("b")) newH = Math.max(MIN_WINDOW_HEIGHT, r.startH + dy);
         if (r.edge.includes("l")) {
-          const dw = Math.min(dx, r.startW - MIN_WIDTH);
+          const dw = Math.min(dx, r.startW - MIN_WINDOW_WIDTH);
           newW = r.startW - dw;
           newX = r.startPosX + dw;
         }
         if (r.edge.includes("t")) {
-          const dh = Math.min(dy, r.startH - MIN_HEIGHT);
+          const dh = Math.min(dy, r.startH - MIN_WINDOW_HEIGHT);
           newH = r.startH - dh;
           newY = Math.max(0, r.startPosY + dh);
         }
@@ -252,8 +267,16 @@ export default function ChromeWindow({
       if (!dragRef.current.isDragging) return;
       const dx = clientX - dragRef.current.startX;
       const dy = clientY - dragRef.current.startY;
-      const newX = dragRef.current.startPosX + dx;
-      const newY = Math.max(0, dragRef.current.startPosY + dy);
+      // Clamped on every edge, not just the top: dragged down until the title
+      // bar sat under the shelf, a window was unreachable for good — no context
+      // menu offers Close, and minimize/restore and the next reload both put it
+      // straight back. The cursor is still free, so the snap zones below still
+      // fire at the real screen edges.
+      const { x: newX, y: newY } = clampWindowPosition({
+        x: dragRef.current.startPosX + dx,
+        y: dragRef.current.startPosY + dy,
+        ...currentSizeRef.current,
+      });
 
       // Direct DOM update — no React re-render during drag
       if (el) {
@@ -371,6 +394,48 @@ export default function ChromeWindow({
     setSnapped(null);
     setMaximized(true);
   }, [maximizeSignal, maximized, snapped, size.width, size.height, position.x, position.y]);
+
+  // The desktop can change shape under a window: the viewport resizes, or the
+  // chat is docked and then dragged wider. A SNAPPED window keeps the rect it
+  // was given at drop time, so widening the panel by 80px buried its minimize,
+  // maximize and close buttons under the chat; a free window can be left with
+  // its title bar off the smaller desktop, which is the one handle it has. A
+  // MAXIMIZED window needs nothing — its geometry is a CSS calc that already
+  // follows both.
+  useEffect(() => {
+    if (maximized) return;
+    const relayout = () => {
+      if (snapped) {
+        const rect = getSnapRect(snapped, rightInset);
+        if (!rect) return;
+        // The desktop's shape is external state this window synchronises to.
+        setPosition((p) => (p.x === rect.x && p.y === rect.y ? p : { x: rect.x, y: rect.y }));
+        setSize((s) => (s.width === rect.width && s.height === rect.height ? s : { width: rect.width, height: rect.height }));
+        return;
+      }
+      // FIT, then place. `clampWindowPosition` keeps whatever dimensions it is
+      // handed, so a window sized on a bigger display — or restored from
+      // maximized onto a viewport that shrank while it was full-screen — kept
+      // that size and the clamp could only choose which edge hung off: pushed
+      // left, its right-hand controls stayed past the right edge; pinned to the
+      // top, its bottom resize handle stayed under the shelf. Both are the
+      // handles needed to fix it by hand, which is the same trap `fitWindowSize`
+      // was written for at mount.
+      const fitted = fitWindowSize(currentSizeRef.current);
+      // The ref is advanced by hand because `setSize`'s write has not landed
+      // yet: a second resize event arriving before the re-render would read the
+      // size this one just replaced.
+      currentSizeRef.current = fitted;
+      setSize((s) => (s.width === fitted.width && s.height === fitted.height ? s : fitted));
+      setPosition((p) => {
+        const next = clampWindowPosition({ ...p, ...fitted });
+        return next.x === p.x && next.y === p.y ? p : next;
+      });
+    };
+    relayout();
+    window.addEventListener("resize", relayout);
+    return () => window.removeEventListener("resize", relayout);
+  }, [maximized, snapped, rightInset]);
 
   const handleMinimize = useCallback(() => {
     setMinimizing(true);

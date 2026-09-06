@@ -145,6 +145,58 @@ describe("app store — installed catalogue", () => {
     expect(screen.queryByText("store.noInstalledApps")).toBeNull();
   });
 
+  it("says what is actually true about apps built on the box, and asks ClawHub about them once", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      // An app the coding agent built is an id in `installed_apps` and nothing
+      // on ClawHub.
+      if (url === "/setup-api/apps/store?slug=angry-pigs") return jsonResponse({ error: "not_found" }, 404);
+      if (url.startsWith("/setup-api/apps/store")) return jsonResponse(LIST);
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const lookups = () => fetchMock.mock.calls.filter((call) => String(call[0]).includes("slug=angry-pigs")).length;
+
+    render(<AppStore installedAppIds={["angry-pigs"]} onInstall={vi.fn()} onUninstall={vi.fn()} />);
+    await screen.findByText("Weather Deck");
+
+    fireEvent.click(screen.getByRole("button", { name: "store.installed" }));
+    // Not "you haven't installed any apps yet": this box has one installed,
+    // it simply did not come from the store.
+    await waitFor(() => expect(screen.getByTestId("store-empty-state").textContent)
+      .toBe("The apps installed on this box did not come from the store — an app built here has no store listing."));
+    await waitFor(() => expect(lookups()).toBe(1));
+
+    // The tab used to re-ask on every visit, so opening it three times meant
+    // three more 404s and three more console errors.
+    fireEvent.click(screen.getByRole("button", { name: "store.all" }));
+    await screen.findByText("Weather Deck");
+    fireEvent.click(screen.getByRole("button", { name: "store.installed" }));
+    await screen.findByTestId("store-empty-state");
+    expect(lookups()).toBe(1);
+  });
+
+  // The Installed list is cut by the search box as well as by what is
+  // installed, so an empty list under a search says nothing about where the
+  // apps came from. This box has one installed app and it IS a store app.
+  it("answers a search that matched nothing with 'no apps found', not 'not from the store'", async () => {
+    render(<AppStore installedAppIds={["weather-deck"]} onInstall={vi.fn()} onUninstall={vi.fn()} />);
+    await screen.findByText("Weather Deck");
+
+    fireEvent.click(screen.getByRole("button", { name: "store.installed" }));
+    expect(await screen.findByText("Weather Deck")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("store.searchApps"), { target: { value: "zzz" } });
+
+    await waitFor(() => expect(screen.getByTestId("store-empty-state").textContent).toBe("store.noAppsFound"));
+
+    // Clear the search and the honest statement about this box comes back —
+    // there is no store row left to match once the filter is gone, because
+    // the catalogue fetch for "zzz" answered with the same one app.
+    fireEvent.change(screen.getByPlaceholderText("store.searchApps"), { target: { value: "" } });
+    await waitFor(() => expect(screen.getByText("Weather Deck")).toBeInTheDocument());
+  });
+
   it("ignores a stale first-page response after switching to Installed", async () => {
     let resolveFirstPage: ((response: Response) => void) | null = null;
     const firstPage = new Promise<Response>((resolve) => { resolveFirstPage = resolve; });

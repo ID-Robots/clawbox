@@ -67,8 +67,16 @@ export const BTN_DANGER =
  */
 export const SEGMENTED_TRACK = "flex w-full gap-1 p-1 rounded-lg bg-black/30";
 
+/**
+ * No `capitalize` here, deliberately: CSS title-cases EVERY word of a label,
+ * so the translated "From a folder" was drawn "From A Folder" and the German
+ * "Aus einem Ordner" became "Aus Einem Ordner" — a rule no language but
+ * English has, and not even English inside a sentence. Every label these
+ * segments carry is already cased in the translation file, which is the only
+ * place that knows how its own language works.
+ */
 export const SEGMENT =
-  "flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium capitalize border-none cursor-pointer"
+  "flex-1 inline-flex items-center justify-center gap-1.5 rounded-lg px-2 py-1.5 text-xs font-medium border-none cursor-pointer"
   + " transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
   + " focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--coral-ring)]"
   + " disabled:opacity-50 disabled:cursor-not-allowed";

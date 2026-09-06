@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import http from "http";
+import zlib from "zlib";
 import os from "os";
 import path from "path";
 import type { AddressInfo } from "net";
@@ -113,6 +114,89 @@ describe("the app proxy", () => {
     const json = await routes.GET(req("/apps/site/data.json"), ctx("site", ["data.json"]));
     expect(json.headers.get("content-security-policy")).toContain("sandbox allow-scripts");
     expect(json.headers.get("x-frame-options")).toBeNull();
+  });
+
+  it("does not label a body Node's fetch has already decompressed", async () => {
+    // The other half of the blank window. The proxy relays `upstream.body`,
+    // which fetch has already gunzipped, so passing the app's own
+    // `content-encoding: gzip` through told the browser to gunzip plain text:
+    // ERR_CONTENT_DECODING_FAILED on the stylesheet and the module script,
+    // and an empty #root again — this time with CORS answered.
+    meta("site");
+    const zipped = zlib.gzipSync(Buffer.from("body{color:red}"));
+    handler = (_r, res) => {
+      res.writeHead(200, {
+        "content-type": "text/css",
+        "content-encoding": "gzip",
+        "content-length": String(zipped.length),
+      });
+      res.end(zipped);
+    };
+    const res = await routes.GET(req("/apps/site/a.css"), ctx("site", ["a.css"]));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-encoding")).toBeNull();
+    expect(res.headers.get("content-length")).toBeNull();
+    expect(await res.text()).toBe("body{color:red}");
+    // And it asked for none in the first place: this hop is loopback.
+    expect(seen[0].headers["accept-encoding"]).toBe("identity");
+  });
+
+  it("leaves an encoding fetch did NOT unwrap alone", async () => {
+    // Dropping the header on a body that really is still encoded would be the
+    // same defect pointing the other way.
+    meta("site");
+    handler = (_r, res) => {
+      res.writeHead(200, { "content-type": "application/octet-stream", "content-encoding": "custom-thing" });
+      res.end("raw");
+    };
+    const res = await routes.GET(req("/apps/site/a.bin"), ctx("site", ["a.bin"]));
+    expect(res.headers.get("content-encoding")).toBe("custom-thing");
+  });
+
+  it("answers the CORS its own sandbox causes, so a module script and a crossorigin stylesheet load", async () => {
+    // The window was an empty white panel: both of a Vite build's assets died
+    // with "from origin 'null' has been blocked by CORS policy: No
+    // 'Access-Control-Allow-Origin' header is present". The sandbox is what
+    // makes the origin opaque, so the proxy has to answer for it.
+    meta("site");
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "text/javascript" }); res.end("export default 1"); };
+    const script = await routes.GET(
+      req("/apps/site/assets/index-BpDL3fMp.js", { headers: { origin: "null", "sec-fetch-dest": "script" } }),
+      ctx("site", ["assets", "index-BpDL3fMp.js"]),
+    );
+    expect(script.headers.get("access-control-allow-origin")).toBe("null");
+    expect(script.headers.get("vary")?.toLowerCase()).toContain("origin");
+    // Never credentialed: the owner's cookie is stripped on the way in, and an
+    // allowed origin WITH credentials is the hole this is not.
+    expect(script.headers.get("access-control-allow-credentials")).toBeNull();
+
+    // A request that is not from the sandbox is answered as before.
+    const same = await routes.GET(req("/apps/site/assets/index-BpDL3fMp.js"), ctx("site", ["assets", "index-BpDL3fMp.js"]));
+    expect(same.headers.get("access-control-allow-origin")).toBeNull();
+    const elsewhere = await routes.GET(
+      req("/apps/site/assets/index-BpDL3fMp.js", { headers: { origin: "https://evil.example" } }),
+      ctx("site", ["assets", "index-BpDL3fMp.js"]),
+    );
+    expect(elsewhere.headers.get("access-control-allow-origin")).toBeNull();
+
+    // An app that answers CORS itself keeps its own policy.
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "text/css", "access-control-allow-origin": "https://studio.example" }); res.end("body{}"); };
+    const styled = await routes.GET(req("/apps/site/assets/a.css", { headers: { origin: "null" } }), ctx("site", ["assets", "a.css"]));
+    expect(styled.headers.get("access-control-allow-origin")).toBe("https://studio.example");
+  });
+
+  it("gives the app's DATA no CORS answer, only its code", async () => {
+    // `Origin: null` proves nothing — any page on the web can send it from a
+    // sandboxed iframe of its own, and over plain HTTP no second header tells
+    // the two apart. So the answer reaches the types that are CORS-fetched by
+    // construction and carry no per-request data; a notes app's notes are
+    // JSON, and JSON stays unreadable to another origin.
+    meta("site");
+    for (const type of ["application/json", "text/html", "text/plain", "image/png"]) {
+      handler = (_r, res) => { res.writeHead(200, { "content-type": type }); res.end("{}"); };
+      const res = await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]));
+      expect(res.headers.get("access-control-allow-origin"), type).toBeNull();
+    }
   });
 
   it("carries a POST body through and hands a redirect back rather than following it", async () => {

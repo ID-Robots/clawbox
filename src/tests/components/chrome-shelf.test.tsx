@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ChromeShelf from "@/components/ChromeShelf";
 import { desktopTranslations } from "@/lib/desktop-translations";
 import type { Protection } from "@/lib/clawkeep-protection";
@@ -169,5 +169,28 @@ describe("ChromeShelf", () => {
 
     expect(screen.getByTestId("shelf-clawkeep-shield-button"))
       .toHaveAttribute("title", EN["shelf.clawkeepStale"]);
+  });
+
+  it("has exactly one App Launcher button", () => {
+    // The desktop branch carried a second, `sm:hidden` copy that could never be
+    // seen (anything under 768px renders the mobile bar instead) but was always
+    // in the DOM: two elements answered the test id — a strict-locator failure —
+    // and assistive tech was offered the same control twice.
+    render(<ChromeShelf {...baseProps} />);
+
+    expect(screen.getAllByTestId("shelf-launcher-button")).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: EN["shelf.appLauncher"] })).toHaveLength(1);
+  });
+
+  it("closes a shelf context menu on Escape", () => {
+    // Neither menu takes focus, so nothing on the page was listening for the
+    // key: a click somewhere harmless was the only way out.
+    render(<ChromeShelf {...baseProps} onShelfSettings={vi.fn()} />);
+
+    fireEvent.contextMenu(screen.getByTestId("shelf-app-settings"));
+    expect(screen.getByText(EN["shelf.unpinFromShelf"])).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByText(EN["shelf.unpinFromShelf"])).not.toBeInTheDocument();
   });
 });

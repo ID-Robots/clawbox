@@ -103,11 +103,27 @@ export async function PUT(req: NextRequest, { params }: Params) {
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
   if (!fs.existsSync(abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const body = await req.json().catch(() => ({}));
-  if (!body.newName) return NextResponse.json({ error: "newName required" }, { status: 400 });
+  // `.catch` covers a body that is not JSON at all; this covers one that IS —
+  // a request whose body is literally `null` parses to `null`, and reading
+  // `.newName` off it threw a TypeError, so the Files app got a 500 where the
+  // 400 below is the answer. Anything that is not a plain object carries no
+  // `newName` either, so they all take the same road.
+  const parsed: unknown = await req.json().catch(() => null);
+  const body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  const newName: unknown = body.newName;
+  if (typeof newName !== "string" || !newName) return NextResponse.json({ error: "newName required" }, { status: 400 });
+
+  // A rename is a NAME, not a move. `../escape.txt` resolves to a path that is
+  // still inside the browse root, so the containment check below waved it
+  // through: the app answered "Renamed" and the file left the folder the owner
+  // was looking at with nothing on screen to say where it went. The fence is
+  // here because the route is the fence — the app is not its only caller.
+  if (newName !== path.basename(newName) || newName === "." || newName === "..") {
+    return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
+  }
 
   const parentDir = path.dirname(abs);
-  const newAbs = path.resolve(parentDir, body.newName);
+  const newAbs = path.resolve(parentDir, newName);
   const base = path.resolve(BASE_DIR);
   if (newAbs !== base && !newAbs.startsWith(base + path.sep)) {
     return NextResponse.json({ error: "Invalid destination" }, { status: 400 });

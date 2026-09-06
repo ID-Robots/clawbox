@@ -113,6 +113,57 @@ describe("middleware", () => {
       expect(target.pathname).toBe("/login");
       expect(target.searchParams.get("next")).toBe("/portal");
     });
+
+    /**
+     * FOLLOW the chain, the way a browser does. The box shipped
+     * `/login/ → 308 /login/` and every single-hop assertion about it was
+     * satisfied: only walking the Location to a non-redirect sees a loop,
+     * and only walking it proves that the two halves of this block — a page
+     * path LOSING its slash, an app's base path GAINING one — cannot hand
+     * each other the same path forever.
+     */
+    async function follow(start: string, max = 6): Promise<string> {
+      let pathname = start;
+      for (let hop = 0; hop <= max; hop++) {
+        const response = await middleware(createRequest(pathname));
+        const location = response.headers.get("location");
+        if (response.status < 300 || response.status >= 400 || !location) return pathname;
+        const next = new URL(location, "http://localhost").pathname;
+        expect(next, `${pathname} redirected to itself`).not.toBe(pathname);
+        pathname = next;
+      }
+      throw new Error(`${start} never settled: still redirecting after ${max} hops`);
+    }
+
+    it.each([
+      ["/login/", "/login"],
+      ["/setup/", "/setup"],
+      ["/updating/", "/updating"],
+      ["/app/terminal/", "/app/terminal"],
+      ["/code-server/", "/code-server"],
+      // The app proxy's base path is canonical WITH the slash, and settles there
+      // whichever way it was typed.
+      ["/apps/angry-pigs", "/apps/angry-pigs/"],
+      ["/apps/angry-pigs/", "/apps/angry-pigs/"],
+      // Everything under it is what the app answers, as typed.
+      ["/apps/angry-pigs/assets/index-BpDL3fMp.js", "/apps/angry-pigs/assets/index-BpDL3fMp.js"],
+      ["/apps/angry-pigs/api/items", "/apps/angry-pigs/api/items"],
+    ])("%s settles on %s without looping", async (start, settled) => {
+      expect(await follow(start)).toBe(settled);
+    });
+
+    it("gives a proxied app's base path the slash it is served under", async () => {
+      // Without it the document's relative links resolve one level up and a
+      // Vite build answers its own "did you mean /apps/<id>/?" 404, which the
+      // owner saw as a bare page of upstream text.
+      const response = await middleware(createRequest("/apps/angry-pigs?debug=1"));
+
+      expect(response.status).toBe(308);
+      const target = new URL(response.headers.get("location")!, "http://localhost");
+      expect(target.pathname).toBe("/apps/angry-pigs/");
+      expect(target.searchParams.get("debug")).toBe("1");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    });
   });
 
   describe("Android captive portal", () => {

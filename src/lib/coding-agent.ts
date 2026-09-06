@@ -71,6 +71,9 @@ import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
 import { type CodingRunStatus, isCodingRunStatus, isHeld, isLive } from "@/lib/coding-agent-status";
+// The runner writes its fixed lines from this table so the surfaces that draw
+// them can recognise each one and say it in the owner's language.
+import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 import { memAvailableMb } from "@/lib/mem-available";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
@@ -380,8 +383,24 @@ export async function teamSpawnSlot(team: RunTeam, starting = 0): Promise<{ ok: 
 export const MAX_WAIT_MS = 120_000;
 /** Runs kept in data/coding-agent-runs.json, newest first. */
 const MAX_RUNS_KEPT = 30;
-/** Progress lines kept per run. */
+/**
+ * Progress lines kept per run — and how many of them are the run's FIRST.
+ *
+ * A plain tail dropped a long run's opening silently: a 60-line window over a
+ * 109-step run began at "+28m 59s", with "Started with …", the branch it took
+ * and its early edits gone and nothing on the record saying so, so every
+ * surface drew a partial history as if it were the whole one. The head is now
+ * kept as well, with ONE line between the two halves counting what fell out
+ * (RUNNER_STEP.dropped) — a step of its own in the feed, because `progress` is
+ * all the surfaces are handed.
+ *
+ * The bound is unchanged: 60 entries per run, whatever the run's length —
+ * 20 oldest + the marker + the 39 newest. The file holds up to MAX_RUNS_KEPT
+ * records and is rewritten whole on every flush, so its size is the thing
+ * being bounded, not the count of steps.
+ */
 const PROGRESS_KEEP = 60;
+const PROGRESS_HEAD_KEEP = 20;
 const MAX_PROGRESS_LINE_CHARS = 160;
 /**
  * The plan Claude Code keeps through its TodoWrite tool, as much of it as a
@@ -1380,8 +1399,18 @@ export interface CodingProject {
    * row draws its lettered placeholder for.
    */
   iconUrl: string | null;
-  /** The newest run that worked in this folder, if any has. */
-  latestRun: Pick<CodingRun, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
+  /**
+   * The newest run that worked in this folder, if any has.
+   *
+   * `reviewOf` travels with it because `task` is not always the run's TITLE:
+   * an automatic review pass carries the whole REVIEW_PASS_TASK prompt, and
+   * the New App card's "Last run:" line showed its first 120 characters
+   * ("Automatic review pass. Start by running the project's own verification
+   * — its tests or build — in THIS pass and quote the") where the sidebar,
+   * the run page and the breadcrumb all say "Automatic review pass of
+   * run-xyz". A caller cannot tell the two apart from `task` alone.
+   */
+  latestRun: Pick<CodingRun, "id" | "status" | "task" | "reviewOf" | "startedAt" | "completedAt"> | null;
   /**
    * The project's clawbox.json, when it carries one: what makes it a ClawBox
    * APP rather than a folder with history (src/lib/clawbox-manifest.ts). A
@@ -1531,7 +1560,7 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
       onDesktop,
       iconUrl: hasIcon ? `/setup-api/apps/icon/${folder}` : null,
       latestRun: run
-        ? { id: run.id, status: run.status, task: run.task, startedAt: run.startedAt, completedAt: run.completedAt }
+        ? { id: run.id, status: run.status, task: run.task, reviewOf: run.reviewOf, startedAt: run.startedAt, completedAt: run.completedAt }
         : null,
       app: manifest ? { name: manifest.name, description: manifest.description, kind: manifest.kind, port: manifest.port } : null,
     },
@@ -2964,7 +2993,7 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   if (run.status === "completed" || run.status === "paused") {
     run.leftover = groupAlive(run.pgid);
     if (run.leftover) {
-      pushProgress(run, "Something this run started is still running — a server it left listening? The run's page can end it.");
+      pushProgress(run, RUNNER_STEP.leftoverRunning);
       return;
     }
     // The group is gone, and the number that named it is now the kernel's to
@@ -2976,7 +3005,7 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   }
   run.leftover = false;
   if (killRunGroup(run.pgid)) {
-    pushProgress(run, "Ended what the run had left running");
+    pushProgress(run, RUNNER_STEP.endedLeftovers);
   }
   run.pgid = null;
 }
@@ -3000,7 +3029,7 @@ export function killRunLeftovers(id: string): CodingRun {
   if (isHeld(run.status)) {
     throw new CodingAgentError("invalid", "That run is paused, not finished. Resume it, or stop it first.");
   }
-  if (killRunGroup(run.pgid)) pushProgress(run, "The owner ended what the run had left running");
+  if (killRunGroup(run.pgid)) pushProgress(run, RUNNER_STEP.ownerEndedLeftovers);
   run.leftover = false;
   // Signalled or already gone, the group this record named is finished with.
   // Keeping the number would leave a Kill button aimed at whatever the kernel
@@ -3016,9 +3045,52 @@ function pushProgress(run: CodingRun, line: string): void {
   run.progress.push(cleaned.length > MAX_PROGRESS_LINE_CHARS ? `${cleaned.slice(0, MAX_PROGRESS_LINE_CHARS - 1)}…` : cleaned);
   // When it happened, kept in step with the line: the timeline shows it on hover.
   run.progressAt.push(Date.now());
-  if (run.progress.length > PROGRESS_KEEP) run.progress.splice(0, run.progress.length - PROGRESS_KEEP);
-  if (run.progressAt.length > run.progress.length) run.progressAt.splice(0, run.progressAt.length - run.progress.length);
+  trimProgress(run);
 }
+
+/** The marker's own shape, read back so a second trim adds to its count rather than stacking markers. */
+const DROPPED_RE = /^… (\d+) earlier steps are not kept$/;
+
+/**
+ * Hold the feed at PROGRESS_KEEP entries by dropping from the MIDDLE — the
+ * run's first steps and its newest both survive, and the gap between them is
+ * a line saying how many went.
+ *
+ * Times stay one for one with lines (the timeline draws nothing when they do
+ * not), and the marker is stamped with the last dropped line's time, so the
+ * step after the gap still reads as "and then, later, this".
+ */
+function trimProgress(run: { progress: string[]; progressAt: number[] }): void {
+  if (run.progressAt.length > run.progress.length) run.progressAt.splice(0, run.progressAt.length - run.progress.length);
+  if (run.progress.length <= PROGRESS_KEEP) return;
+  const timed = run.progressAt.length === run.progress.length;
+  const head = run.progress.slice(0, PROGRESS_HEAD_KEEP);
+  const headAt = timed ? run.progressAt.slice(0, PROGRESS_HEAD_KEEP) : [];
+  const rest = run.progress.slice(PROGRESS_HEAD_KEEP);
+  const restAt = timed ? run.progressAt.slice(PROGRESS_HEAD_KEEP) : [];
+  // A marker already sitting at the boundary is this run's earlier gap, not a
+  // step: its count is carried forward and it is written afresh below.
+  const carried = DROPPED_RE.exec(rest[0] ?? "");
+  let dropped = 0;
+  let gapAt = timed ? headAt[headAt.length - 1] : 0;
+  if (carried) {
+    dropped = Number(carried[1]);
+    rest.shift();
+    if (timed) gapAt = restAt.shift() ?? gapAt;
+  }
+  const tailKeep = PROGRESS_KEEP - PROGRESS_HEAD_KEEP - 1;
+  if (rest.length > tailKeep) {
+    const cut = rest.length - tailKeep;
+    dropped += cut;
+    rest.splice(0, cut);
+    if (timed) gapAt = restAt.splice(0, cut)[cut - 1] ?? gapAt;
+  }
+  run.progress = [...head, RUNNER_STEP.dropped(dropped), ...rest];
+  run.progressAt = timed ? [...headAt, gapAt, ...restAt] : [];
+}
+
+/** Staging a 200-step run through the harness is not a unit test; the trim is. */
+export const trimProgressForTests = trimProgress;
 
 function relativeToRun(run: CodingRun, file: unknown): string | null {
   if (typeof file !== "string" || !file) return null;
@@ -3256,7 +3328,7 @@ function noteTokens(run: CodingRun, state: LiveRun, tokens: number): boolean {
     state.endRequested = "stop";
     run.resumable = true;
     run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
-    pushProgress(run, "Token limit reached");
+    pushProgress(run, RUNNER_STEP.tokenLimit);
     console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
     endProcess(state);
     return true;
@@ -3336,16 +3408,15 @@ function closeSubagent(run: CodingRun, state: LiveRun, id: string, refused = fal
   run.activeSubagents = [...state.openSubagents.values()];
   // The record of it: what it did and how long it took, for the run's page.
   run.subagents = [...run.subagents.slice(-(SUBAGENT_HISTORY_KEPT - 1)), { ...done, endedAt: Date.now(), refused }];
-  const noun = done.type === WORKFLOW_SUBAGENT_TYPE ? "Workflow" : "Sub-agent";
-  const kind = done.type === WORKFLOW_SUBAGENT_TYPE || done.type === "sub-agent" ? "" : ` (${done.type})`;
+  const isWorkflow = done.type === WORKFLOW_SUBAGENT_TYPE;
   if (refused) {
     run.subagentsTotal = Math.max(0, run.subagentsTotal - 1);
     const left = (run.subagentsByType[done.type] ?? 1) - 1;
     if (left > 0) run.subagentsByType[done.type] = left;
     else delete run.subagentsByType[done.type];
-    pushProgress(run, `${noun} refused${kind}`);
+    pushProgress(run, RUNNER_STEP.helperSettled({ workflow: isWorkflow, type: done.type, refused: true }));
   } else {
-    pushProgress(run, `${noun} finished${kind}`);
+    pushProgress(run, RUNNER_STEP.helperSettled({ workflow: isWorkflow, type: done.type, refused: false }));
   }
   return done;
 }
@@ -3403,7 +3474,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // the progress feed. The live count is on the record for anyone watching.
     if (!state.sawThinking) {
       state.sawThinking = true;
-      pushProgress(run, "Thinking…");
+      pushProgress(run, RUNNER_STEP.thinking);
     }
     return;
   }
@@ -3416,9 +3487,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // not (run-roo5mgvd: the notification and the init landed mid-turn).
     // Same session, same process: any init after the first is a
     // continuation, not a fresh start.
-    pushProgress(run, state.sawInit
-      ? "Continuing after a background helper finished"
-      : `Started${run.model ? ` with ${run.model}` : ""}`);
+    pushProgress(run, state.sawInit ? RUNNER_STEP.continuing : RUNNER_STEP.started(run.model));
     state.sawInit = true;
     return;
   }
@@ -3519,7 +3588,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
             const what = typeof input.description === "string" ? input.description : "";
             const kind = typeof input.subagent_type === "string" ? input.subagent_type : "";
             openSubagent(run, state, block.id, kind || "sub-agent", what);
-            pushProgress(run, `Sub-agent started${kind ? ` (${kind})` : ""}${what ? `: ${what}` : ""}`);
+            pushProgress(run, RUNNER_STEP.helperStarted({ workflow: false, type: kind, what }));
             break;
           }
           case WORKFLOW_TOOL: {
@@ -3532,7 +3601,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
             const script = typeof input.script === "string" ? input.script : "";
             const what = /description\s*:\s*(['"`])((?:(?!\1).)*)\1/.exec(script)?.[2] ?? "";
             openSubagent(run, state, block.id, WORKFLOW_SUBAGENT_TYPE, what);
-            pushProgress(run, `Workflow started${what ? `: ${what}` : ""}`);
+            pushProgress(run, RUNNER_STEP.helperStarted({ workflow: true, type: WORKFLOW_SUBAGENT_TYPE, what }));
             break;
           }
           case "Read":
@@ -3727,13 +3796,13 @@ async function recordRunWork(run: CodingRun): Promise<void> {
     if (outcome.committed) {
       run.commit = outcome.sha;
       run.commitError = null;
-      pushProgress(run, `Committed as ${outcome.sha}${outcome.initialized ? " (new repository)" : ""}`);
+      pushProgress(run, RUNNER_STEP.committed(outcome.sha, outcome.initialized));
       console.error(`[coding-agent] ${run.id} committed ${outcome.sha}`);
     } else if (outcome.reason !== "no_changes") {
       // On the record, not only in the log: a team reads it before it
       // merges, since a worker whose commit failed has no branch to merge.
       run.commitError = (outcome.detail ?? outcome.reason).slice(0, MAX_ERROR_CHARS);
-      pushProgress(run, `Not committed: ${outcome.detail ?? outcome.reason}`);
+      pushProgress(run, RUNNER_STEP.notCommitted(outcome.detail ?? outcome.reason));
       console.error(`[coding-agent] ${run.id} not committed: ${outcome.reason}`);
     } else {
       run.commitError = null;
@@ -3761,7 +3830,7 @@ async function noteOwnCommit(run: CodingRun): Promise<void> {
     if (!own || own === run.commit) return;
     run.commit = own;
     run.commitError = null;
-    pushProgress(run, `Committed by the run itself as ${own}`);
+    pushProgress(run, RUNNER_STEP.committedByRun(own));
     console.error(`[coding-agent] ${run.id} committed itself as ${own}`);
     persist(true);
   } catch (err) {
@@ -3860,8 +3929,8 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
     if (!manifest?.port) return;
     const outcome = await registerServerApp({ id, directory: run.directory, manifest });
     pushProgress(run, outcome.ok
-      ? `On the desktop as "${manifest.name}", served at /apps/${id}/ from port ${manifest.port}`
-      : `Not on the desktop yet: clawbox.json names port ${manifest.port}, but ${outcome.detail.charAt(0).toLowerCase()}${outcome.detail.slice(1)}`);
+      ? RUNNER_STEP.onDesktop(manifest.name, id, manifest.port)
+      : RUNNER_STEP.notOnDesktop(manifest.port, `${outcome.detail.charAt(0).toLowerCase()}${outcome.detail.slice(1)}`));
     persist(true);
   } catch (err) {
     console.error("[coding-agent] project app:", err instanceof Error ? err.message : err);
@@ -3884,7 +3953,7 @@ async function commitProjectAssets(run: CodingRun): Promise<void> {
     });
     if (outcome.committed) {
       run.commit = outcome.sha;
-      pushProgress(run, `Added the generated favicon, committed as ${outcome.sha}`);
+      pushProgress(run, RUNNER_STEP.faviconCommitted(outcome.sha));
       persist(true);
     }
   } catch (err) {
@@ -3948,6 +4017,11 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
       settlePr(origin, "failed", "The run's branch was not recorded, so no pull request was opened.");
       return;
     }
+    // Held in a local because the `await` below drops the narrowing: `origin.pr`
+    // is a mutable property, so after any suspension TypeScript is right to
+    // read `base` as nullable again — and the progress line below must name the
+    // branch this pull request was actually opened into, not "null".
+    const prBase = origin.pr.base;
 
     // Nothing was committed anywhere in the chain: there is no diff to review
     // and nothing to merge.
@@ -3959,7 +4033,7 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     const opened = await openPullRequest({
       directory: origin.directory,
       branch: origin.pr.branch,
-      base: origin.pr.base,
+      base: prBase,
       title: firstLineOf(origin.task),
       body: prBody(origin, finished),
     });
@@ -3981,7 +4055,7 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
       startedAt: Date.now(),
       reviewOk,
     };
-    pushProgress(origin, `Opened pull request #${opened.number} into ${origin.pr.base}`);
+    pushProgress(origin, RUNNER_STEP.pullRequestOpened(opened.number, prBase));
     persist(true);
     console.error(`[coding-agent] ${origin.id} opened PR #${opened.number}`);
 
@@ -4014,7 +4088,7 @@ function prBody(origin: CodingRun, last: CodingRun): string {
 function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail: string | null): void {
   if (!run.pr) return;
   run.pr = { ...run.pr, phase, detail, endedAt: Date.now() };
-  pushProgress(run, phase === "merged" ? "Merged into the base branch" : `Not merged: ${detail ?? phase}`);
+  pushProgress(run, phase === "merged" ? RUNNER_STEP.merged : RUNNER_STEP.notMerged(detail ?? phase));
   persist(true);
 }
 
@@ -4387,7 +4461,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.sessionId = null;
       run.numTurns = 0;
       run.subagentsTotal = 0;
-      pushProgress(run, "The provider did not answer; starting over in a fresh session");
+      pushProgress(run, RUNNER_STEP.providerSilent);
       persist(true);
       console.error(`[coding-agent] ${run.id} retrying once after a transient upstream failure`);
       try {
@@ -4424,7 +4498,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   const settled = run.status;
   trackSettleWork((async () => {
     await recordRunWork(run);
-    pushProgress(run, settled === "paused" ? "Paused — resume to continue" : `Finished: ${settled}`);
+    pushProgress(run, settled === "paused" ? RUNNER_STEP.paused : RUNNER_STEP.finished(settled));
     persist(true);
     wakeWaiters(run.id);
     console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
@@ -4647,9 +4721,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     readOnly: input.readOnly === true,
     extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
   });
-  if (run.reviewOf) pushProgress(run, `Automatic review pass of ${run.reviewOf}`);
-  else if (resumeSessionId) pushProgress(run, "Resuming the previous session");
-  else if (resumeRunId) pushProgress(run, `Starting fresh: ${resumeRunId} did not fail in a way a resume can fix`);
+  if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
+  else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
+  else if (resumeRunId) pushProgress(run, RUNNER_STEP.startingFresh(resumeRunId));
 
   // The run's own branch, made BEFORE any work happens.
   //
@@ -4676,7 +4750,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // through Back up. Stamping this "failed" with git's raw fatal put a
       // red line at the top of every fresh-folder run in bench cycle 1.
       run.pr = null;
-      pushProgress(run, "Not a git repository yet: the work is committed into a new one when the run settles, and there is no pull request to open.");
+      pushProgress(run, RUNNER_STEP.noRepository);
     } else if (branched.ok) {
       run.pr = {
         phase: "opening",
@@ -4692,7 +4766,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
         // request opens, which is the only way into "waiting".
         reviewOk: true,
       };
-      pushProgress(run, `Working on ${branched.branch}, for a pull request into ${branched.base}`);
+      pushProgress(run, RUNNER_STEP.workingOnBranch(branched.branch, branched.base));
     } else {
       // Not fatal: the work is worth doing on whatever branch this is. The
       // owner is told why there will be no pull request.
@@ -4708,7 +4782,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
         endedAt: Date.now(),
         reviewOk: false,
       };
-      pushProgress(run, `No pull request: ${branched.detail}`);
+      pushProgress(run, RUNNER_STEP.noPullRequest(branched.detail));
     }
   }
 
@@ -4839,7 +4913,7 @@ function findLastFinished(list: CodingRun[]): number {
 function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): void {
   if (state.endRequested === kind || (kind === "pause" && state.endRequested !== null)) return;
   state.endRequested = kind;
-  pushProgress(run, kind === "stop" ? "Stop requested" : "Pause requested");
+  pushProgress(run, kind === "stop" ? RUNNER_STEP.stopRequested : RUNNER_STEP.pauseRequested);
   endProcess(state);
   persist();
 }
@@ -4949,6 +5023,17 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   }
   await assertCanSpawn(run.team ?? null);
   const setprivPath = await requireSetpriv();
+  // The folder must still be there. A team worker's worktree is removed when
+  // its task is decided, and a run resumed into a cwd that no longer exists
+  // makes Node report ENOENT against the EXECUTABLE — "spawn /usr/bin/setpriv
+  // ENOENT" — blaming a binary that is present, on a record that had already
+  // been flipped to running. Checked here, before that flip, the way a draft
+  // start checks it.
+  try {
+    run.directory = await realDirectory(run.directory);
+  } catch {
+    throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
+  }
   // The pause gap is not working time: shift the start forward by it, so the
   // elapsed clock and the ETA speak of effort, not of the night in between.
   if (run.completedAt !== null) run.startedAt += Math.max(0, Date.now() - run.completedAt);
@@ -4957,7 +5042,7 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   run.error = null;
   run.exitCode = null;
   run.lastActivityAt = Date.now();
-  pushProgress(run, "Resumed by the owner");
+  pushProgress(run, RUNNER_STEP.resumedByOwner);
   persist(true);
   console.error(`[coding-agent] ${run.id} resumed from pause`);
   startProjectIcon(run);
@@ -4987,7 +5072,7 @@ export async function createDraftRun(input: StartRunInput): Promise<CodingRun> {
   // Snapshot of today's settings for the card; re-read at start, because the
   // run keeps the settings it STARTS with, not the ones it was drafted under.
   const run = newRunRecord({ task, directory, projectId, source: input.source, status: "draft", settings: await readRunSettings() });
-  pushProgress(run, "Drafted — start it when ready");
+  pushProgress(run, RUNNER_STEP.drafted);
   insertRun(loadRuns(), run);
   persist(true);
   console.error(`[coding-agent] ${run.id} drafted by ${run.source} for ${run.directory}`);
@@ -5017,7 +5102,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   run.status = "running";
   run.startedAt = Date.now();
   run.lastActivityAt = Date.now();
-  pushProgress(run, "Started from a draft");
+  pushProgress(run, RUNNER_STEP.startedFromDraft);
   persist(true);
   console.error(`[coding-agent] ${run.id} started from draft by ${run.source} in ${run.directory}`);
   startProjectIcon(run);

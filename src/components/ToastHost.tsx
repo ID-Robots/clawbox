@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { notifyActionLabel, parseNotifyAction, type NotifyAction } from "@/lib/notify-action";
 import { dispatchOpenSettingsSection } from "@/lib/ui-events";
 import { NOTICE_AUTO_HIDE_MS } from "@/lib/use-auto-hide";
+import { DESKTOP_LAYERS } from "@/lib/window-snap";
 
 /**
  * The desktop's toast surface.
@@ -102,7 +103,7 @@ export default function ToastHost() {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="pointer-events-none fixed bottom-20 right-4 z-[99999] flex w-[340px] max-w-[calc(100vw-2rem)] flex-col gap-2" data-testid="toast-host">
+    <div className="pointer-events-none fixed bottom-20 right-4 flex w-[340px] max-w-[calc(100vw-2rem)] flex-col gap-2" style={{ zIndex: DESKTOP_LAYERS.menu }} data-testid="toast-host">
       {toasts.map((toast) => {
         const action = toast.action;
         const body = (

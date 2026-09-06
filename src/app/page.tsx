@@ -11,6 +11,7 @@ import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
 import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, NEW_APP_EVENT, notifyCodingRunStarted, handoffCodingRun, type OpenAppDetail } from "@/lib/ui-events";
 import { toastDetailForNotice } from "@/lib/notify-action";
 import { useAutoHide } from "@/lib/use-auto-hide";
+import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
@@ -31,7 +32,7 @@ import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
-import ChatPopup, { CHAT_PANEL_GAP } from "@/components/ChatPopup";
+import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } from "@/components/ChatPopup";
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
 import ToastHost from "@/components/ToastHost";
@@ -77,10 +78,24 @@ const OFF_DESKTOP_BY_DEFAULT = new Set(["vnc", "system_update"]);
 
 const DEFAULT_DESKTOP_APPS = BUILT_IN_APP_IDS.filter(id => !OFF_DESKTOP_BY_DEFAULT.has(id));
 
+// How old an owner-notice may be and still be acted on — `PENDING_ACTION_TTL_MS`
+// in src/lib/pending-actions.ts, which is the WRITER's pruning window. Copied
+// rather than imported: that module reaches for node:crypto and the KV file, and
+// this one is the desktop bundle. A desktop that was not open within the minute
+// has nothing to act on, and the ring is only pruned when something is pushed,
+// so the reader has to apply the same rule or a stale entry replays for ever.
+const PENDING_ACTION_MAX_AGE_MS = 60_000;
+
 // Desktop icon grid metrics. Module-level so the resize listener can derive
 // `rowsPerColumn` without reaching into the component.
 const CELL_H = 110; // px — one icon cell, label included
 const TASKBAR_RESERVE = 72; // px kept clear at the bottom for the taskbar
+// The top-right notice column, as the markup below draws it (`w-[320px]`,
+// `top-4`, `right: NOTICE_MARGIN + …`). Named because the column has to be
+// placed against the chat, and a card that dodges by a number the markup does
+// not use is a card that still lands on the chat's buttons.
+const NOTICE_COLUMN_WIDTH = 320;
+const NOTICE_MARGIN = 16;
 
 /**
  * Declared order for icons that have no saved slot yet.
@@ -262,6 +277,12 @@ interface OpenWindow {
 
 function ChromeDesktopInner() {
   const { t } = useT();
+  // English is the floor for a key the locale packs do not carry yet: a raw
+  // `window.switchApp` in an aria-label is what a screen reader would read out.
+  const tr = useCallback((key: string, english: string) => {
+    const value = t(key);
+    return value === key ? english : value;
+  }, [t]);
   const resolveAppName = (app: AppDef) => t(app.name) || app.name;
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
@@ -454,6 +475,10 @@ function ChromeDesktopInner() {
   const [wpOpacity, setWpOpacity] = useState(50);
   // ─── Unified SQLite load on mount ───
   const prefsLoaded = useRef(false);
+  // The docked chat's width as the DEVICE remembers it — see the write below.
+  // Seeded from the stored value even on a phone, which never restores the
+  // panel, so opening the desktop on a phone cannot erase the layout.
+  const dockWidthRef = useRef(0);
   useEffect(() => {
     nextZIndexRef.current = nextZIndex;
   }, [nextZIndex]);
@@ -511,7 +536,16 @@ function ChromeDesktopInner() {
         // we still restore it. The FLOATING chat popup, however, must never
         // auto-open on load: it should appear only when the user taps the crab.
         // (We intentionally ignore a persisted `ui_chat_open` here.)
-        if (data.ui_chat_panel_width && Number(data.ui_chat_panel_width) > 0) {
+        //
+        // Never on a PHONE, though: the panel's geometry is a desktop one
+        // (765px anchored to the right edge), so a phone drew it at x=-381 over
+        // the whole home screen, with its header — title, new chat, dock, and
+        // every way back — off the left edge. The viewport is read here rather
+        // than from `isMobile`, whose resize effect may not have run yet when
+        // this answer lands.
+        const phone = typeof window !== "undefined" && window.innerWidth < 768;
+        dockWidthRef.current = Number(data.ui_chat_panel_width) || 0;
+        if (!phone && data.ui_chat_panel_width && Number(data.ui_chat_panel_width) > 0) {
           setChatPanelWidth(Number(data.ui_chat_panel_width));
           setChatOpen(true);
         }
@@ -604,14 +638,44 @@ function ChromeDesktopInner() {
   const [chatPanelWidth, setChatPanelWidth] = useState(0);
   const [mascotX, setMascotX] = useState(85);
   const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
+  // What the FLOATING chat covers, reported by the popup itself — only while a
+  // notice is on screen, since that is the one surface that has to dodge it.
+  const [chatFloatingRect, setChatFloatingRect] = useState<ChatFloatingRect | null>(null);
+  const handleChatFloatingRect = useCallback((rect: ChatFloatingRect | null) => setChatFloatingRect(rect), []);
 
-  // What the docked chat actually occupies: its width PLUS the gap it floats
-  // in, so a maximized window stops at the gap instead of sliding under the
-  // panel and showing through it. Derived rather than folded into
-  // `chatPanelWidth`, because that value is persisted and handed straight back
-  // to the chat as `initialPanelWidth` — adding the gap there would widen the
-  // panel by one gap on every reload.
-  const chatPanelInset = chatPanelWidth > 0 ? chatPanelWidth + CHAT_PANEL_GAP : 0;
+  // ─── Where the floating chat stands among the windows ───
+  //
+  // It used to stand above all of them, always (a constant 10010 against a
+  // window's 100-and-up): a window opened while the chat was up had its
+  // minimize, maximize and close buttons underneath the popup, and the only way
+  // to reach them was to close the chat. So the floating chat draws from the
+  // SAME focus counter the windows do — open it or click in it and it comes to
+  // the front, focus a window and that window does. The docked panel is not
+  // part of this: windows reserve its strip instead of overlapping it, and it
+  // keeps DESKTOP_LAYERS.chat (see ChatPopup's `floatingZIndex`).
+  const [chatZIndex, setChatZIndex] = useState<number>(DESKTOP_LAYERS.window);
+  // null until the chat has taken a layer of its own: a chat that has never
+  // been raised must not be mistaken for one sitting on the counter's last
+  // value, or it would open UNDER the window that took that value.
+  const chatZIndexRef = useRef<number | null>(null);
+  const raiseChat = useCallback(() => {
+    const next = nextZIndexRef.current;
+    // Already the top surface. Without this, every pointer press inside the
+    // chat — every keystroke's click, every scroll grab — would spin the
+    // counter and re-render the whole desktop.
+    if (chatZIndexRef.current === next - 1) return;
+    // Advanced on the ref as well as in state, the way the wallpaper list is:
+    // two raises in one tick would otherwise both read the pre-commit value and
+    // the second would land on the same layer as the first.
+    chatZIndexRef.current = next;
+    nextZIndexRef.current = next + 1;
+    setChatZIndex(next);
+    setNextZIndex(next + 1);
+  }, []);
+  // Opening the chat puts it in front of whatever was focused before it.
+  useEffect(() => {
+    if (chatOpen) raiseChat();
+  }, [chatOpen, raiseChat]);
 
   // Open chat on skill-install, fix-error or handed-over-message events so
   // the user can watch the agent's response.
@@ -668,6 +732,23 @@ function ChromeDesktopInner() {
   const isMobile = gridDims.mobile;
   const GRID_ROWS = 6;
   const CELL_W = gridDims.cellW;
+
+  // What the docked chat actually occupies: its width PLUS the gap it floats
+  // in, so a maximized window stops at the gap instead of sliding under the
+  // panel and showing through it. Derived rather than folded into
+  // `chatPanelWidth`, because that value is persisted and handed straight back
+  // to the chat as `initialPanelWidth` — adding the gap there would widen the
+  // panel by one gap on every reload.
+  //
+  // Zero on a PHONE, whatever the stored width says: the panel is a desktop
+  // layout and a phone draws the chat full-screen instead (see `panelMode` in
+  // ChatPopup), so reserving a 771px strip on a 390px screen would push the
+  // notice column off the left edge and inset a mascot that is not drawn. It
+  // is only the reservation that is dropped — the width itself is kept, so
+  // widening the window back docks the chat where it was. Read from `isMobile`
+  // rather than measured here, so the whole desktop changes its mind at one
+  // width.
+  const chatPanelInset = !isMobile && chatPanelWidth > 0 ? chatPanelWidth + CHAT_PANEL_GAP : 0;
   const [iconPositions, setIconPositions] = useState<IconLayout>({});
   const [draggingIcon, setDraggingIcon] = useState<string | null>(null);
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
@@ -693,8 +774,15 @@ function ChromeDesktopInner() {
     });
   }, [openWindows, savePreferences]);
   useEffect(() => { savePreferences({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, savePreferences]);
+  // The dock width the desktop restores is the last one the chat had while it
+  // was OPEN. ChatPopup leaves panel mode whenever it closes — the X, Escape, a
+  // tap on the crab — and reports a width of 0 on the way out; persisting that
+  // zero threw the docked layout away, so the panel came back on one reload and
+  // was gone on the next. Closing a docked chat is not undocking it. A 0 while
+  // the chat is OPEN is the dock button, and that one is saved.
   useEffect(() => {
-    savePreferences({ ui_chat_panel_width: chatPanelWidth || 0, ui_chat_open: chatOpen ? 1 : 0 });
+    if (chatOpen) dockWidthRef.current = chatPanelWidth || 0;
+    savePreferences({ ui_chat_panel_width: dockWidthRef.current, ui_chat_open: chatOpen ? 1 : 0 });
   }, [chatPanelWidth, chatOpen, savePreferences]);
 
   // ─── Marquee selection ───
@@ -810,13 +898,29 @@ function ChromeDesktopInner() {
       e.preventDefault();
       setCtxMenu(null);
     };
+    // Escape closes it, the way it closes the launcher. The menu takes no
+    // focus, so nothing on the page was listening for the key and a click
+    // somewhere harmless was the only way out of it.
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setCtxMenu(null); };
     window.addEventListener("click", close);
     window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("click", close);
       window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
     };
   }, [ctxMenu]);
+
+  // The system tray — the power menu — is the desktop's other focus-less popup,
+  // and it stayed open on Escape too. (The launcher closes itself, with its
+  // animation; closing it from here would cut that short.)
+  useEffect(() => {
+    if (!trayOpen) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setTrayOpen(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [trayOpen]);
 
   const handleDesktopContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1266,6 +1370,11 @@ function ChromeDesktopInner() {
 
     if (app.type === "chat") {
       setChatOpen(true);
+      // Also when it is ALREADY open: the chat now takes its turn in the focus
+      // order like a window, so the shelf's chat button has to be able to pull
+      // it out from under one — `setChatOpen(true)` on an open chat is a no-op
+      // and would leave the button dead on a covered chat.
+      raiseChat();
       return;
     }
 
@@ -1303,7 +1412,7 @@ function ChromeDesktopInner() {
       { id: windowId, appId, zIndex: nextZIndex, minimized: false, ...(Object.keys(windowMeta).length ? { meta: windowMeta } : {}), ...maxNonce },
     ]);
     setNextZIndex((z) => z + 1);
-  }, [openWindows, nextZIndex, getAllApps]);
+  }, [openWindows, nextZIndex, getAllApps, raiseChat]);
 
   const closeWindow = useCallback((windowId: string) => {
     setOpenWindows((prev) => prev.filter((w) => w.id !== windowId));
@@ -1477,6 +1586,18 @@ function ChromeDesktopInner() {
       try {
         const res = await fetch("/setup-api/kv?key=ui:pending-actions");
         if (res.ok) {
+          // How old an entry is, judged on the one clock both sides agree on:
+          // the response's own Date header, which is the BOX's clock — the same
+          // clock that stamped the entry — so the skew this poll works around
+          // everywhere else cannot creep back in here.
+          //
+          // The ring is pruned by its WRITER, so an entry nothing has pushed
+          // over stays in it for hours, and the baseline below makes the newest
+          // entry news on every fresh desktop: a "Coding agent finished" card
+          // from two hours ago reappeared on every load and after every
+          // dismissal. Nothing older than the ring's own TTL is news.
+          const serverNow = Date.parse(res.headers.get("date") ?? "");
+          const freshFrom = Number.isFinite(serverNow) ? serverNow - PENDING_ACTION_MAX_AGE_MS : 0;
           const data = await res.json();
           const ring = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
           if (Array.isArray(ring)) {
@@ -1497,7 +1618,7 @@ function ChromeDesktopInner() {
               const action = entry as Record<string, unknown>;
               const id = typeof action.id === "string" ? action.id : "";
               const ts = typeof action.ts === "number" ? action.ts : 0;
-              if (!id || ts < lastSeenTs) continue;
+              if (!id || ts < lastSeenTs || ts < freshFrom) continue;
               present.add(id);
               if (seen.has(id)) continue;
               seen.add(id);
@@ -1835,7 +1956,18 @@ function ChromeDesktopInner() {
                 const next = customWallpapersRef.current.filter((_, i) => i !== idx);
                 applyCustomWallpapers(next);
                 try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
-                if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
+                // `custom-<n>` is an INDEX into that list (see the wallpaper
+                // background below, which reads it with parseInt), so deleting
+                // one renumbers every picture after it. Clearing only the exact
+                // match left a selection past the hole pointing at its
+                // neighbour — the desktop drew a different wallpaper than the
+                // one that was chosen, or none once the last entry went. The
+                // same rule is in src/app/app/[id]/page.tsx's handler.
+                const selected = wallpaperId.startsWith("custom-")
+                  ? Number.parseInt(wallpaperId.slice("custom-".length), 10)
+                  : NaN;
+                if (selected === idx) setWallpaperId("clawbox");
+                else if (Number.isInteger(selected) && selected > idx) setWallpaperId(`custom-${selected - 1}`);
               },
             }} />
           </div>
@@ -2043,6 +2175,24 @@ function ChromeDesktopInner() {
     setTimeout(() => { setUploadStatus(null); setUploadProgress(0); }, 3000);
   }, [uploadFileWithProgress]);
 
+  // Is a top-right card on screen at all? Asked once, because it decides two
+  // things: whether the column is drawn, and whether the chat is asked to
+  // report where it is standing (a rect per pointer move of a drag is not a
+  // price to pay while nothing is dodging it).
+  const noticesUp = Boolean(
+    (updateAvailable && !updateNoticeHidden)
+    || showClawAiOfferNotification
+    || pairingRequests.length > 0
+    || codingNotices.length > 0,
+  );
+  // Beside the chat, not on top of it. The docked half is the strip the panel
+  // reserves; the floating half is the popup's own rect, which lands in the
+  // same top-right corner the cards do and hid the chat's +, dock and close
+  // buttons for the 30 s a card takes to hide itself.
+  const noticeRightInset = chatPanelInset > 0
+    ? chatPanelInset
+    : noticeColumnInset(chatFloatingRect, typeof window !== "undefined" ? window.innerWidth : 0, NOTICE_COLUMN_WIDTH, NOTICE_MARGIN);
+
   if (!setupChecked || setupRequired) {
     return <div className="bg-[var(--bg-deep)]" style={{ height: '100dvh' }} />;
   }
@@ -2065,7 +2215,7 @@ function ChromeDesktopInner() {
       <TierUpgradeCelebration />
       {/* Drop overlay */}
       {desktopDragOver && (
-        <div className="fixed inset-0 z-[99998] flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
+        <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
           <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90">
             <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 48 }}>upload_file</span>
             <span className="text-lg font-semibold text-white">Drop files to upload</span>
@@ -2075,7 +2225,7 @@ function ChromeDesktopInner() {
       )}
       {/* Upload status toast */}
       {uploadStatus && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99998] min-w-[220px] rounded-lg bg-[var(--bg-elevated)] border border-white/10 text-sm text-white shadow-lg overflow-hidden">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 min-w-[220px] rounded-lg bg-[var(--bg-elevated)] border border-white/10 text-sm text-white shadow-lg overflow-hidden" style={{ zIndex: DESKTOP_LAYERS.notice }}>
           <div className="px-4 py-2">{uploadStatus}</div>
           {uploadProgress < 100 && (
             <div className="h-1 bg-white/5">
@@ -2088,8 +2238,16 @@ function ChromeDesktopInner() {
           the pairing flow dispatch. Without it ui_notify, `clawbox notify`
           and every server-side owner notice were fired and never shown. */}
       <ToastHost />
-      {((updateAvailable && !updateNoticeHidden) || showClawAiOfferNotification || pairingRequests.length > 0 || codingNotices.length > 0) && (
-        <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
+      {noticesUp && (
+        <div
+          className="pointer-events-none fixed top-4 flex w-[320px] flex-col gap-3"
+          // Beside the chat — docked or floating — never on top of it. Both are
+          // anchored to the top-right corner, and a notice at the top of the
+          // stacking order covered the chat's tab row and its +, dock and close
+          // buttons for the 30 s a card takes to hide itself. See
+          // `noticeRightInset`.
+          style={{ zIndex: DESKTOP_LAYERS.notice, right: NOTICE_MARGIN + noticeRightInset }}
+        >
           {/* New version available notification */}
           {updateAvailable && !updateNoticeHidden && (() => {
             const cb = updateAvailable.clawbox;
@@ -2388,7 +2546,7 @@ function ChromeDesktopInner() {
                 >
                   <InstalledAppIcon appId={app.id} iconUrl={app.iconUrl} name={app.name} size="w-7 h-7" />
                 </div>
-                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
+                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 break-words hyphens-auto max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {app.name}
                 </span>
               </button>
@@ -2446,7 +2604,7 @@ function ChromeDesktopInner() {
                 >
                   <AppIcon id={app.id} size="w-7 h-7" />
                 </div>
-                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
+                <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 break-words hyphens-auto max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {resolveAppName(app)}
                 </span>
               </button>
@@ -2516,7 +2674,21 @@ function ChromeDesktopInner() {
       {!isMobile && (
         <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={(x?: number) => { if (x !== undefined) setMascotX(x); setChatOpen(prev => !prev); }} />
       )}
-      <ChatPopup isOpen={chatOpen} onClose={() => setChatOpen(false)} onOpenSettingsSection={openSettingsSection} onPanelModeChange={handleChatPanelModeChange} initialPanelWidth={chatPanelWidth} mascotX={mascotHidden ? 85 : mascotX} trayMode={mascotHidden} mobile={isMobile} />
+      <ChatPopup
+        isOpen={chatOpen}
+        onClose={() => setChatOpen(false)}
+        onOpenSettingsSection={openSettingsSection}
+        onPanelModeChange={handleChatPanelModeChange}
+        initialPanelWidth={chatPanelWidth}
+        floatingZIndex={chatZIndex}
+        onFocus={raiseChat}
+        // Only while a card is up: the popup reports its rect on every pointer
+        // move of a drag, and nothing is dodging it the rest of the time.
+        onFloatingRectChange={noticesUp ? handleChatFloatingRect : undefined}
+        mascotX={mascotHidden ? 85 : mascotX}
+        trayMode={mascotHidden}
+        mobile={isMobile}
+      />
 
       {/* Windows — mobile: fullscreen, desktop: ChromeWindow */}
       {isMobile ? (
@@ -2538,12 +2710,21 @@ function ChromeDesktopInner() {
               <div className="flex items-center gap-3 px-3 py-2 bg-[#161b22] border-b border-white/[0.06] shrink-0">
                 <button
                   onClick={() => { vibrate(10); closeWindow(top.id); }}
+                  // Icon-only, and it is the phone's ONLY way out of an app:
+                  // unnamed, a screen reader announced nothing but "button".
+                  title={t("window.close")}
+                  aria-label={t("window.close")}
                   className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
                 >
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M15 18l-6-6 6-6" /></svg>
                 </button>
                 <div className="w-6 h-6 rounded flex items-center justify-center shrink-0" style={{ backgroundColor: app.color }}>
-                  {app.type === "installed" && app.storeApp
+                  {/* `storeApp` — not `type === "installed"`. An installed WEB
+                      APP has type "webapp", so it fell through to AppIcon,
+                      which knows no `installed-*` id and drew nothing: the
+                      launcher, the shelf and this header showed bare coloured
+                      discs, two of which were the same orange. */}
+                  {app.storeApp
                     ? <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} size="w-3 h-3" />
                     : <AppIcon id={app.id} size="w-3 h-3" />}
                 </div>
@@ -2552,7 +2733,10 @@ function ChromeDesktopInner() {
                   <button
                     onClick={() => minimizeWindow(top.id)}
                     className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 text-white/60 cursor-pointer"
-                    title="Switch app"
+                    // Was an English `title` on a shelf that speaks ten
+                    // languages, and no accessible name at all.
+                    title={tr("window.switchApp", "Switch app")}
+                    aria-label={tr("window.switchApp", "Switch app")}
                   >
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3H5a2 2 0 00-2 2v3m18 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3" /></svg>
                   </button>
@@ -2572,7 +2756,7 @@ function ChromeDesktopInner() {
           if (!app) return null;
 
           const renderWindowIcon = () => {
-            if (app.type === "installed" && app.storeApp) {
+            if (app.storeApp) {
               return (
                 <div
                   className="w-5 h-5 rounded flex items-center justify-center"
@@ -2621,7 +2805,7 @@ function ChromeDesktopInner() {
       {/* App Launcher */}
       <ChromeLauncher
         apps={allAppsForLauncher.map((app) => {
-          if (app.type === "installed" && app.storeApp) {
+          if (app.storeApp) {
             return {
               id: app.id,
               name: resolveAppName(app),
@@ -2673,7 +2857,7 @@ function ChromeDesktopInner() {
               ? appWindows.reduce((a, b) => (a.zIndex > b.zIndex ? a : b))
               : null;
             const renderIcon = () => {
-              if (app.type === "installed" && app.storeApp) {
+              if (app.storeApp) {
                 return (
                   <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: app.color }}>
                     <InstalledAppIcon appId={app.storeApp.id} iconUrl={app.storeApp.iconUrl} name={app.storeApp.name} />
@@ -2737,8 +2921,9 @@ function ChromeDesktopInner() {
       {ctxMenu && (
         <div
           data-testid="desktop-context-menu"
-          className="fixed z-[99999] min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90 overflow-y-auto"
+          className="fixed min-w-[200px] py-1 bg-[#2d2d2d] rounded-lg shadow-2xl border border-white/10 backdrop-blur-xl text-sm text-white/90 overflow-y-auto"
           style={{
+            zIndex: DESKTOP_LAYERS.menu,
             left: Math.min(ctxMenu.x, window.innerWidth - 220),
             top: Math.min(ctxMenu.y, window.innerHeight - 400),
             maxHeight: "calc(100vh - 80px)",
@@ -2917,7 +3102,7 @@ function ChromeDesktopInner() {
         const meta = installedMeta[uninstallConfirm];
         const appName = meta?.name || uninstallConfirm;
         return (
-          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={dismissUninstall}>
+          <div className="fixed inset-0 flex items-center justify-center bg-black/60 backdrop-blur-sm" style={{ zIndex: DESKTOP_LAYERS.modal }} onClick={dismissUninstall}>
             {/* The role sits on the panel, not the scrim — see useModalDialog. */}
             <div
               ref={uninstallPanelRef}

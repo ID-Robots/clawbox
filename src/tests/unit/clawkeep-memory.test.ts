@@ -62,6 +62,7 @@ const IDLE_RUN = {
   finishedAtMs: 0,
   durationMs: 0,
   error: "",
+  errorCode: "" as const,
 };
 
 describe("reading the real memory status", () => {
@@ -107,6 +108,36 @@ describe("reading the real memory status", () => {
     const status = await parseMemoryStatus(rows, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
     expect(status.indexIdentity).toBe("mismatched");
     expect(status.error).toContain("full reindex");
+  });
+
+  it("calls an index built by another model degraded, and names the fact in a code", async () => {
+    // Observed on the box: identity "mismatched" with the embedder answering
+    // perfectly came back as health "unknown" — a bare "Unknown" chip beside
+    // an amber banner that told the owner exactly what was wrong. The state is
+    // known; only the wording was missing. The code is what lets a German
+    // desktop say it in German instead of printing the English below.
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    for (const [identity, code] of [
+      ["mismatched", "index_identity_mismatched"],
+      ["missing", "index_identity_missing"],
+    ] as const) {
+      const rows = JSON.parse(JSON.stringify(REAL_STATUS)) as unknown;
+      (rows as Array<{ status: { custom: { indexIdentity: { status: string } } } }>)[0]
+        .status.custom.indexIdentity.status = identity;
+      const status = await parseMemoryStatus(rows, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+      expect(status.indexIdentity).toBe(identity);
+      expect(status.health).toBe("degraded");
+      expect(status.errorCode).toBe(code);
+      expect(status.error).toContain("full reindex");
+    }
+  });
+
+  it("leaves a healthy index healthy, with no code beside an empty message", async () => {
+    const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const status = await parseMemoryStatus(REAL_STATUS, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    expect(status.health).toBe("healthy");
+    expect(status.error).toBe("");
+    expect(status.errorCode).toBe("");
   });
 
   it("keeps the fingerprint stable for a configuration and changes it with the model", async () => {
@@ -256,6 +287,7 @@ describe("what the first Index now click actually runs", () => {
     const { resolveIndexMode, getMemoryStatus } = await import("@/lib/clawkeep-memory");
     const status = await getMemoryStatus();
     expect(status.available).toBe(false);
+    expect(status.errorCode).toBe("status_unavailable");
     expect(status.chunks).toBe(0);
     expect(await resolveIndexMode("incremental")).toBe("incremental");
   });
@@ -389,7 +421,7 @@ describe("how a run ends", () => {
     delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
   });
 
-  async function settledRun(): Promise<{ status: string; error: string; childPid: number }> {
+  async function settledRun(): Promise<{ status: string; error: string; errorCode: string; childPid: number }> {
     for (let i = 0; i < 300; i++) {
       const now = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8").catch(() => "{}"));
       if (now.status && now.status !== "running") return now;
@@ -417,9 +449,45 @@ describe("how a run ends", () => {
       expect(performance.now() - started).toBeLessThan(1_000);
       expect(run.status).toBe("failed");
       expect(run.error).toContain("still being set up");
+      expect(run.errorCode).toBe("migration_busy");
       expect(run.error).not.toContain("interrupted");
     } finally {
       holder.kill("SIGKILL");
+    }
+  });
+
+  it("keeps the CLI's own reason for the failure, where the box can be read", async () => {
+    // The run is spawned with the CLI's stderr thrown away, so a pass that
+    // died in 1.3 s left the owner with the catch-all "check that the
+    // embedding model is available" — about an embedder that was answering
+    // 200s — and nothing anywhere on the box said why. The sentence the owner
+    // gets is still the fixed one (raw CLI output never crosses the API
+    // boundary), but the reason now reaches the device log.
+    const script = path.join(tmpDir, "fake-index");
+    await fs.writeFile(script, [
+      "#!/bin/sh",
+      "echo 'loading index...' >&2",
+      "echo 'vector dimension mismatch: index 768, model 1024' >&2",
+      "exit 1",
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    vi.resetModules();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      const run = await settledRun();
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain("Check that the embedding model is available");
+      expect(run.errorCode).toBe("index_failed");
+      const logged = warn.mock.calls.map((call) => call.join(" ")).join("\n");
+      expect(logged).toContain("vector dimension mismatch: index 768, model 1024");
+      // The LAST word it said, not the whole transcript.
+      expect(logged).not.toContain("loading index...");
+    } finally {
+      warn.mockRestore();
     }
   });
 
@@ -448,6 +516,7 @@ describe("how a run ends", () => {
     const run = await settledRun();
     expect(run.status).toBe("failed");
     expect(run.error).toContain("interrupted");
+    expect(run.errorCode).toBe("interrupted");
     expect(run.error).not.toContain("embedding model");
   });
 });

@@ -1,4 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { translations } from "@/lib/translations";
+import type { Locale } from "@/lib/i18n";
 import {
   CLAWBOX_AI_MAX_TIER_REASONING_CONFIG,
   isClawboxAiMaxTierModel,
@@ -243,6 +247,56 @@ describe("chat-reasoning", () => {
       expect(isThinkingLevel("")).toBe(false);
       expect(isThinkingLevel(null)).toBe(false);
       expect(isThinkingLevel(3)).toBe(false);
+    });
+  });
+  /**
+   * THINKING_LEVEL_LABELS is the GATEWAY's vocabulary — the English words the
+   * wire uses — and the chat pill is a control on a desktop that may be in any
+   * of ten languages. The pill therefore words each level through the
+   * catalogue and keeps this table only as the floor for a level the catalogue
+   * does not know. Both halves are pinned here: a level added to this module
+   * with no catalogue entry would silently put an English word in a German
+   * menu, which is exactly how the picker read before.
+   */
+  describe("the levels the picker offers are worded in the owner's language", () => {
+    const LOCALES = Object.keys(translations) as Locale[];
+    const NON_EN = LOCALES.filter((l) => l !== "en");
+    const chat = fs.readFileSync(
+      path.join(process.cwd(), "src/components/ChatPopup.tsx"),
+      "utf-8",
+    );
+
+    it("covers all ten languages", () => {
+      expect(LOCALES.length).toBe(10);
+    });
+
+    it("has a catalogue key for every level on the wire", () => {
+      for (const level of Object.keys(THINKING_LEVEL_LABELS)) {
+        for (const locale of LOCALES) {
+          const value = translations[locale][`chat.effort.${level}`];
+          expect(value, `${locale} has no word for "${level}"`).toBeTruthy();
+        }
+      }
+    });
+
+    it("says them in each language, not in English", () => {
+      // The uniform ladder — what every cloud provider's picker actually shows.
+      for (const level of FALLBACK_REASONING_CONFIG.levels) {
+        for (const locale of NON_EN) {
+          const key = `chat.effort.${level}`;
+          expect(
+            translations[locale][key],
+            `${locale} still shows the English "${translations.en[key]}"`,
+          ).not.toBe(translations.en[key]);
+        }
+      }
+    });
+
+    it("is read through the catalogue by the pill, with the wire word as the floor", () => {
+      expect(chat).toMatch(/tr\(`chat\.effort\.\$\{level\}`, THINKING_LEVEL_LABELS\[level\] \?\? level\)/);
+      expect(chat).toMatch(
+        /triggerLabel=\{tr\(`chat\.effort\.\$\{effectiveThinkingLevel\}`/,
+      );
     });
   });
 });

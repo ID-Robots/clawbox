@@ -19,6 +19,7 @@ import React, {
 } from "react";
 import dynamic from "next/dynamic";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import "@xterm/xterm/css/xterm.css";
 
 /** What a keyboard shortcut in the terminal asks the tab strip around it to do. */
@@ -164,6 +165,12 @@ const MENU_H = 160;
 
 function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalAppProps) {
   const { t } = useT();
+  const tr = useTr();
+  // Read through a ref for the same reason `initialCommand` is: `connect` must
+  // not change identity — and with it the live socket's handlers — because the
+  // translation catalogue finished loading.
+  const trRef = useRef(tr);
+  useEffect(() => { trRef.current = tr; }, [tr]);
   const containerRef = useRef<HTMLDivElement>(null);
   // The right-click menu: where it is and whether Copy has anything to copy.
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
@@ -331,7 +338,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     const term = termRef.current!;
     const fitAddon = fitAddonRef.current!;
 
-    term.writeln("\x1b[2m\x1b[36mConnecting to terminal server…\x1b[0m");
+    term.writeln(`\x1b[2m\x1b[36m${trRef.current("terminal.connectingToServer", "Connecting to terminal server…")}\x1b[0m`);
 
     // Clean up previous connection
     inputDisposableRef.current?.dispose();
@@ -417,7 +424,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
       if (statusRef.current !== "error") {
         updateStatus("disconnected");
         if (ev.code !== 1000) {
-          term.writeln(`\r\n\x1b[33m[Disconnected — will retry in 3s…]\x1b[0m`);
+          term.writeln(`\r\n\x1b[33m[${trRef.current("terminal.retrying", "Disconnected — will retry in 3s…")}]\x1b[0m`);
           reconnectTimerRef.current = setTimeout(() => {
             if (mountedRef.current) connect();
           }, 3000);
@@ -560,6 +567,16 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
 
   // Fallback keyboard handler — copy/paste is handled at the xterm level
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    // The right-click menu is rendered INSIDE the div this handler sits on, so
+    // every key pressed in the menu bubbles here — and the test below ("the
+    // textarea is not focused") is true precisely because focus is on a menu
+    // item. The menu was therefore losing the keyboard to xterm on its first
+    // keystroke and the key's bytes went to the shell: Escape as \x1b (which
+    // aborts a running claude-ds turn — the very thing the xterm-level guard
+    // above exists to prevent), ArrowDown as \x1b[B (a stray `[B` on the
+    // prompt), Tab as a literal tab. While the menu is open the keyboard is
+    // the menu's.
+    if (menuOpenRef.current) return;
     // If xterm's textarea doesn't have focus, forward key to PTY directly
     const xtermTextarea = containerRef.current?.querySelector("textarea.xterm-helper-textarea");
     if (xtermTextarea && document.activeElement !== xtermTextarea) {
@@ -594,10 +611,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   }[status];
 
   const statusLabel = {
-    connecting: "Connecting…",
-    connected: "Connected",
-    disconnected: "Disconnected",
-    error: "Error",
+    connecting: tr("terminal.connecting", "Connecting…"),
+    connected: tr("terminal.connected", "Connected"),
+    disconnected: tr("terminal.disconnected", "Disconnected"),
+    error: tr("terminal.error", "Error"),
   }[status];
 
   const handleReconnect = useCallback(() => {
@@ -641,7 +658,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
               border: "1px solid rgba(34,197,94,0.3)",
             }}
           >
-            Reconnect
+            {tr("terminal.reconnect", "Reconnect")}
           </button>
         </div>
       )}
@@ -697,24 +714,30 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
 
 const MENU_ITEM = "w-full px-3 py-1.5 text-left hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent flex items-center gap-2 bg-transparent border-none cursor-pointer disabled:cursor-default text-inherit";
 
+/** next/dynamic renders this inside the page's provider, so it can be translated. */
+function TerminalLoading() {
+  const tr = useTr();
+  return (
+    <div
+      className="h-full flex flex-col items-center justify-center gap-3"
+      style={{ background: "var(--win-ground)" }}
+    >
+      <div
+        className="w-8 h-8 rounded-full border-2 border-t-transparent motion-safe:animate-spin"
+        style={{ borderColor: "var(--coral-bright)", borderTopColor: "transparent" }}
+      />
+      <span className="text-sm font-mono" style={{ color: "#4b5563" }}>
+        {tr("terminal.loading", "Loading terminal…")}
+      </span>
+    </div>
+  );
+}
+
 const TerminalApp = dynamic(
   () => Promise.resolve(TerminalInner),
   {
     ssr: false,
-    loading: () => (
-      <div
-        className="h-full flex flex-col items-center justify-center gap-3"
-        style={{ background: "var(--win-ground)" }}
-      >
-        <div
-          className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin"
-          style={{ borderColor: "var(--coral-bright)", borderTopColor: "transparent" }}
-        />
-        <span className="text-sm font-mono" style={{ color: "#4b5563" }}>
-          Loading terminal…
-        </span>
-      </div>
-    ),
+    loading: TerminalLoading,
   }
 );
 

@@ -187,6 +187,20 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
           sit in, so the two settings pages read as one family. */}
       <div className={`${CARD} grid gap-4 grid-cols-1 @md:grid-cols-2`} data-testid="memory-shard-owner-tools">
         <div className="flex flex-wrap items-center gap-2" data-testid="memory-shard-reset-card">
+          {/* The name of the thing, beside its own help mark, the way every
+              other row on this page and on the Coding Agent's is built. The
+              mark's accessible name is "Start over" — which nothing on screen
+              said, because the only visible words were the button's "Reset". */}
+          <div className="basis-full flex items-center gap-1.5">
+            <span className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("clawkeep.memory.reset.title")}
+            </span>
+            <HelpTip
+              text={t("clawkeep.memory.reset.hint")}
+              label={t("clawkeep.memory.reset.title")}
+              testId="memory-shard-reset-help"
+            />
+          </div>
           <button
             type="button"
             onClick={() => void reset()}
@@ -196,11 +210,6 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
           >
             {confirmReset ? t("clawkeep.memory.reset.confirm") : t("clawkeep.memory.reset.button")}
           </button>
-          <HelpTip
-            text={t("clawkeep.memory.reset.hint")}
-            label={t("clawkeep.memory.reset.title")}
-            testId="memory-shard-reset-help"
-          />
           {/* Full-basis so the message lands under the button rather than
               beside it as a third column in this wrapping row. */}
           {resetError && <p className="basis-full mt-2 text-[11px] text-red-400" role="alert">{resetError}</p>}

@@ -68,7 +68,11 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
   const [folderPath, setFolderPath] = useState("");
   /** The repository (or "folder") an import is running for; null when none is. */
   const [importing, setImporting] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // The error carries the tab it belongs to. An import is a request that can
+  // outlive the half that started it: a folder refusal that landed after the
+  // owner had switched to GitHub was drawn over the repository list, where
+  // "Give the folder as an absolute path" names nothing on screen.
+  const [error, setError] = useState<{ tab: "github" | "folder"; message: string } | null>(null);
   // The current translation, for a fetch memoised once: a language switched
   // while the panel is up must word the next failure in the new one.
   const tRef = useRef(t);
@@ -100,14 +104,19 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
     void fetchRepos().then(setRepos);
   };
 
-  const shown = useMemo(() => {
+  /** Every repository the filter admits — what the drawn rows are cut FROM. */
+  const matches = useMemo(() => {
     if (repos.kind !== "ready") return [];
     const q = filter.trim().toLowerCase();
-    const rows = q ? repos.repos.filter((r) => r.fullName.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q)) : repos.repos;
-    return rows.slice(0, MAX_ROWS);
+    return q ? repos.repos.filter((r) => r.fullName.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q)) : repos.repos;
   }, [repos, filter]);
 
+  const shown = useMemo(() => matches.slice(0, MAX_ROWS), [matches]);
+
   const runImport = async (body: Record<string, string>, key: string) => {
+    // Whose import this is, read now rather than when the answer comes back —
+    // by then `tab` may be the other half.
+    const from = tab;
     setImporting(key);
     setError(null);
     try {
@@ -118,7 +127,7 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
       });
       const data = await res.json().catch(() => ({})) as Partial<ImportResult> & { error?: string };
       if (!res.ok || typeof data.directory !== "string") {
-        setError(data.error || t("codingAgent.importFailed"));
+        setError({ tab: from, message: data.error || t("codingAgent.importFailed") });
         return;
       }
       onImported({
@@ -129,7 +138,7 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
         skipped: Array.isArray(data.skipped) ? data.skipped : [],
       });
     } catch {
-      setError(t("codingAgent.importFailed"));
+      setError({ tab: from, message: t("codingAgent.importFailed") });
     } finally {
       setImporting(null);
     }
@@ -153,17 +162,20 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
         </button>
       </div>
 
+      {/* A refusal belongs to the half that earned it: "Give the folder as an
+          absolute path" stayed on screen over the repository list when the
+          owner switched tabs, where it names nothing they can see. */}
       <div className={`${SEGMENTED_TRACK} mt-3`} role="tablist">
-        <button type="button" role="tab" id="coding-agent-import-tab-github" aria-controls="coding-agent-import-panel-github" aria-selected={tab === "github"} onClick={() => setTab("github")} className={tab === "github" ? SEGMENT_ON : SEGMENT_OFF} data-testid="coding-agent-import-tab-github">
+        <button type="button" role="tab" id="coding-agent-import-tab-github" aria-controls="coding-agent-import-panel-github" aria-selected={tab === "github"} onClick={() => { setTab("github"); setError(null); }} className={tab === "github" ? SEGMENT_ON : SEGMENT_OFF} data-testid="coding-agent-import-tab-github">
           {t("codingAgent.importFromGitHub")}
         </button>
-        <button type="button" role="tab" id="coding-agent-import-tab-folder" aria-controls="coding-agent-import-panel-folder" aria-selected={tab === "folder"} onClick={() => setTab("folder")} className={tab === "folder" ? SEGMENT_ON : SEGMENT_OFF} data-testid="coding-agent-import-tab-folder">
+        <button type="button" role="tab" id="coding-agent-import-tab-folder" aria-controls="coding-agent-import-panel-folder" aria-selected={tab === "folder"} onClick={() => { setTab("folder"); setError(null); }} className={tab === "folder" ? SEGMENT_ON : SEGMENT_OFF} data-testid="coding-agent-import-tab-folder">
           {t("codingAgent.importFromFolder")}
         </button>
       </div>
 
-      {error && (
-        <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="coding-agent-import-error">{error}</p>
+      {error && error.tab === tab && (
+        <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="coding-agent-import-error">{error.message}</p>
       )}
 
       {tab === "github" && (
@@ -216,8 +228,16 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
                             </span>
                           )}
                         </div>
-                        <p className="text-[11px] text-[var(--text-muted)] truncate">
-                          {[repo.description, pushedLabel(repo.pushedAt)].filter(Boolean).join(" · ")}
+                        {/* Two facts, two boxes: joined into one `truncate`
+                            line the description ate the date whole — a repo
+                            with a long summary never said when it was last
+                            pushed, which is the one thing that orders this
+                            list. The date keeps its width, the description
+                            gives up what is left. */}
+                        <p className="text-[11px] text-[var(--text-muted)] flex items-baseline gap-1 min-w-0">
+                          {repo.description && <span className="truncate">{repo.description}</span>}
+                          {repo.description && pushedLabel(repo.pushedAt) && <span className="shrink-0" aria-hidden="true">·</span>}
+                          {pushedLabel(repo.pushedAt) && <span className="shrink-0" data-testid="coding-agent-import-repo-pushed">{pushedLabel(repo.pushedAt)}</span>}
                         </p>
                       </div>
                       <button
@@ -233,8 +253,14 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
                   ))}
                 </ul>
               )}
-              {repos.truncated && (
-                <p className="mt-1 text-[10px] text-[var(--text-muted)]">{t("codingAgent.importTruncated", { n: repos.repos.length })}</p>
+              {/* The listing is cut in TWO places — the route's own ceiling and
+                  MAX_ROWS here — and the note used to be tied to the route's
+                  alone, so an account with 231 repositories drew exactly 60
+                  rows in silence and everything older was invisible unless the
+                  owner already knew a name to type. The count is what is
+                  actually on screen, whichever cut made it so. */}
+              {shown.length > 0 && (repos.truncated || matches.length > shown.length) && (
+                <p className="mt-1 text-[10px] text-[var(--text-muted)]" data-testid="coding-agent-import-truncated">{t("codingAgent.importTruncated", { n: shown.length })}</p>
               )}
             </>
           )}

@@ -19,7 +19,16 @@ import { describeProgressLine, type ProgressDescription, type ProgressLabelKey }
 import { useT } from "@/lib/i18n";
 import { CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 
-/** The chat's word for each kind of step — one key per ProgressLabelKey. */
+/**
+ * The owner's word for each kind of step — one key per ProgressLabelKey.
+ *
+ * The tool chips (the first nine) share the chat card's `codingAgent.chat*`
+ * strings so the two surfaces cannot disagree about what "Screenshot" is
+ * called. The rest are the runner's OWN sentences (RUNNER_STEP in
+ * coding-agent-progress.ts), which used to reach this list as the English the
+ * runner wrote: a German run page read "Started with deepseek-v4-pro[1m]" and
+ * "Automatic review pass of run-xyz" between properly translated chips.
+ */
 const STEP_KEY: Record<ProgressLabelKey, string> = {
   screenshot: "codingAgent.chatScreenshot",
   lookingAtPage: "codingAgent.chatLookingAtPage",
@@ -30,6 +39,61 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   edit: "codingAgent.chatEdit",
   read: "codingAgent.chatRead",
   plan: "codingAgent.chatPlan",
+  started: "codingAgent.stepStarted",
+  startedWith: "codingAgent.stepStartedWith",
+  continuing: "codingAgent.stepContinuing",
+  thinking: "codingAgent.stepThinking",
+  tokenLimit: "codingAgent.stepTokenLimit",
+  subagentStarted: "codingAgent.stepSubagentStarted",
+  subagentFinished: "codingAgent.stepSubagentFinished",
+  subagentRefused: "codingAgent.stepSubagentRefused",
+  workflowStarted: "codingAgent.stepWorkflowStarted",
+  workflowFinished: "codingAgent.stepWorkflowFinished",
+  workflowRefused: "codingAgent.stepWorkflowRefused",
+  // The run page, the sidebar and the breadcrumb already name a review pass
+  // with this key; a second string for the same sentence would drift.
+  reviewPass: "codingAgent.reviewPassTitle",
+  resuming: "codingAgent.stepResuming",
+  startingFresh: "codingAgent.stepStartingFresh",
+  noRepository: "codingAgent.stepNoRepository",
+  workingOnBranch: "codingAgent.stepWorkingOnBranch",
+  noPullRequest: "codingAgent.stepNoPullRequest",
+  committed: "codingAgent.stepCommitted",
+  committedNewRepository: "codingAgent.stepCommittedNewRepository",
+  committedByRun: "codingAgent.stepCommittedByRun",
+  notCommitted: "codingAgent.stepNotCommitted",
+  faviconCommitted: "codingAgent.stepFaviconCommitted",
+  pullRequestOpened: "codingAgent.stepPullRequestOpened",
+  merged: "codingAgent.stepMerged",
+  notMerged: "codingAgent.stepNotMerged",
+  onDesktop: "codingAgent.stepOnDesktop",
+  notOnDesktop: "codingAgent.stepNotOnDesktop",
+  providerSilent: "codingAgent.stepProviderSilent",
+  paused: "codingAgent.stepPaused",
+  finished: "codingAgent.stepFinished",
+  stopRequested: "codingAgent.stepStopRequested",
+  pauseRequested: "codingAgent.stepPauseRequested",
+  resumedByOwner: "codingAgent.stepResumedByOwner",
+  drafted: "codingAgent.stepDrafted",
+  startedFromDraft: "codingAgent.stepStartedFromDraft",
+  leftoverRunning: "codingAgent.stepLeftoverRunning",
+  endedLeftovers: "codingAgent.stepEndedLeftovers",
+  ownerEndedLeftovers: "codingAgent.stepOwnerEndedLeftovers",
+  droppedSteps: "codingAgent.stepDropped",
+};
+
+/**
+ * "Finished: completed" — the status word is the runner's, and the run's own
+ * chip already says it in the owner's language. Same six statuses as
+ * RUN_STATUSES; anything else is shown as the runner wrote it.
+ */
+const STATUS_KEY: Record<string, string> = {
+  running: "codingAgent.statusRunning",
+  completed: "codingAgent.statusCompleted",
+  failed: "codingAgent.statusFailed",
+  stopped: "codingAgent.statusStopped",
+  paused: "codingAgent.statusPaused",
+  draft: "codingAgent.statusDraft",
 };
 
 /** The chat card's chip tones, as the app's classes. */
@@ -99,7 +163,28 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
     const since = startedAt !== undefined ? sinceStart(times[i], startedAt) : null;
     return [clock, since].filter(Boolean).join(" · ") || null;
   };
-  const label = (step: ProgressDescription) => (step.labelKey ? t(STEP_KEY[step.labelKey]) : step.label);
+  /**
+   * A translated string with an English floor.
+   *
+   * `t` answers the KEY itself for a string the pack has not got, and these
+   * keys reach a box whose locale file may predate them (an older pack, or a
+   * translations chunk that failed to load while the box was offline). A raw
+   * "codingAgent.stepCommitted" on the timeline would be worse than the
+   * English the runner wrote, so a missing key falls back to `step.label` —
+   * the same sentence, already filled in.
+   */
+  const word = (key: string, english: string, params?: Record<string, string | number>) => {
+    const said = t(key, params);
+    return said === key ? english : said;
+  };
+  const label = (step: ProgressDescription) => {
+    if (!step.labelKey) return step.label;
+    const params = step.params && step.params.status !== undefined
+      // The status word is a run status, and the app already has all six.
+      ? { ...step.params, status: word(STATUS_KEY[String(step.params.status)] ?? "", String(step.params.status)) }
+      : step.params;
+    return word(STEP_KEY[step.labelKey], step.label, params);
+  };
   const detail = (step: ProgressDescription) =>
     step.counts ? `${step.counts.done}/${step.counts.total} ${t("codingAgent.chatDone")}` : step.detail;
   return (
@@ -157,7 +242,11 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
                   className={`inline-flex ${full ? "items-start" : "items-center"} gap-1 max-w-full rounded-md px-1.5 py-px text-[11px] leading-4 ${TONE[step.kind]} ${current ? "ring-1 ring-amber-400/40" : ""}`}
                 >
                   <span className="material-symbols-rounded shrink-0" style={{ fontSize: 13 }} aria-hidden="true">{step.icon}</span>
-                  <span className={full ? "whitespace-normal break-words" : "truncate"}>{full && step.kind === "text" ? line : label(step)}</span>
+                  {/* Opened or happening now, a plain message is drawn whole —
+                      but a KEYED line is the runner's own sentence, and its
+                      raw English is exactly what this card exists to stop
+                      showing. The whole line is in the detail panel below. */}
+                  <span className={full ? "whitespace-normal break-words" : "truncate"}>{full && step.kind === "text" && !step.labelKey ? line : label(step)}</span>
                   {detail(step) && <span className={`opacity-75 ${full ? "whitespace-normal break-all" : "truncate"}`}>{detail(step)}</span>}
                 </span>
                 {timed && startedAt !== undefined && (

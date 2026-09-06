@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { cancelDeviceLogin, pollDeviceLogin, startDeviceLogin } from "@/lib/coding-github";
+import { noteGitHubAccountChanged } from "@/lib/project-import";
 
 export const dynamic = "force-dynamic";
 
@@ -54,7 +55,12 @@ export async function POST(request: Request) {
     }
     if (action === "poll") {
       const out = await pollDeviceLogin();
-      if (out.status === "connected") console.error(`[coding-agent] GitHub connected as ${out.login ?? "(unknown)"}`);
+      if (out.status === "connected") {
+        // A listing that is out right now was started for whoever WAS signed
+        // in; from this instant `gh` answers as somebody else.
+        noteGitHubAccountChanged();
+        console.error(`[coding-agent] GitHub connected as ${out.login ?? "(unknown)"}`);
+      }
       return NextResponse.json(out);
     }
     if (action === "cancel") {

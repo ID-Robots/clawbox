@@ -261,6 +261,70 @@ describe("renderText block parsing", () => {
       expect(container.textContent).not.toContain("•");
       expect(container.querySelector("em")?.textContent).toBe("emphatic");
     });
+
+    // A run's report.md wraps its lines. The indented rest of a bullet used to
+    // END the list and be drawn as its own left-aligned paragraph, leading
+    // spaces and all — seen on run-dc7ighed's summary.
+    it("keeps a hard-wrapped item's continuation inside the bullet", () => {
+      const { container } = draw(
+        "- `bun run build` — **succeeds**. Only a benign\n  chunk-size warning (`>500 kB`, one vendor bundle).\n- The dev server answers on\n  http://127.0.0.1:4310/ and serves the rebuilt bundle.",
+      );
+      const items = [...container.querySelectorAll("div.flex.gap-1\\.5")];
+      expect(items).toHaveLength(2);
+      expect(items[0].textContent).toContain("Only a benign chunk-size warning (>500 kB, one vendor bundle).");
+      expect(items[1].textContent).toContain("The dev server answers on http://127.0.0.1:4310/ and serves the rebuilt bundle.");
+      // Nothing left over as a stray paragraph, and no leading spaces kept.
+      expect(container.textContent).not.toContain("  chunk-size");
+    });
+
+    it("keeps a numbered item's continuation too", () => {
+      const { getByTestId } = draw("1. Gravity was wrong\n   in the launch tuning.\n2. The score never reset.");
+      const text = getByTestId("bubble").textContent ?? "";
+      expect(text).toContain("Gravity was wrong in the launch tuning.");
+      expect(text).toContain("2.");
+    });
+
+    // Lazy continuation is deliberately NOT accepted: a paragraph that simply
+    // follows the list at column 0 is far commoner in what models write.
+    it("ends the list at an unindented line", () => {
+      const { container } = draw("- pull\n- build\nThat is the whole procedure.");
+      expect([...container.querySelectorAll("div.flex.gap-1\\.5")]).toHaveLength(2);
+      expect(container.textContent).toContain("That is the whole procedure.");
+      expect(container.textContent).not.toContain("build That is");
+    });
+
+    it("still ends the list at an indented fence", () => {
+      const { container } = draw("- run it\n  ```\n  bun run build\n  ```\n- then read the log");
+      expect(container.querySelector("pre")?.textContent).toContain("bun run build");
+      expect(container.textContent).toContain("then read the log");
+    });
+  });
+
+  describe("emphasis", () => {
+    // "**Gravity `-11`**" reached the bubble as the literal text
+    // "Gravity `-11`" — the only code span on the page not rendered — because
+    // the bold branch dropped its contents in raw.
+    it("renders a code span inside bold", () => {
+      const { container } = draw("- **Gravity `-11`** and launch tuning (`POWER=9`, `BACK_FACTOR=1`).");
+      const strong = container.querySelector("strong");
+      expect(strong?.textContent).toBe("Gravity -11");
+      expect(strong?.querySelector("code")?.textContent).toBe("-11");
+      expect(container.textContent).not.toContain("`");
+      expect([...container.querySelectorAll("code")].map((c) => c.textContent)).toEqual(["-11", "POWER=9", "BACK_FACTOR=1"]);
+    });
+
+    it("renders a code span inside italics", () => {
+      const { container } = draw("*run `bun test` first*");
+      const em = container.querySelector("em");
+      expect(em?.querySelector("code")?.textContent).toBe("bun test");
+      expect(em?.textContent).toBe("run bun test first");
+    });
+
+    it("links a URL inside bold", () => {
+      const { container } = draw("**See https://clawbox.com/docs**");
+      const link = container.querySelector("strong a");
+      expect(link?.getAttribute("href")).toBe("https://clawbox.com/docs");
+    });
   });
 
   describe("fenced code", () => {

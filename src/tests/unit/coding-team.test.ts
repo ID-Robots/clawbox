@@ -10,6 +10,12 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
+// The paused-worker case waits out the orchestrator's real held-run poll
+// (HELD_POLL_MS), which is seconds rather than milliseconds; vitest's 5 s
+// default leaves nothing for a loaded runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 let root: string;
 vi.mock("@/lib/config-store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/config-store")>();
@@ -78,8 +84,13 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
   return run;
 }
 
-/** How each run ends, keyed by the order it was started. */
-let outcomes: Array<Partial<{ status: string; summary: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; commitError: string | null }>>;
+/**
+ * How each run ends, keyed by the order it was started. `resumesAs` scripts
+ * the owner coming back to a PAUSED run: the next look at it settles it that
+ * way. Deliberately not called `then` — an object with a `then` field is a
+ * thenable, and the fake runner returns these records from an async function.
+ */
+let outcomes: Array<Partial<{ status: string; summary: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; commitError: string | null; resumesAs: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -118,6 +129,13 @@ beforeEach(async () => {
         ? (reviews.shift() ?? { summary: JSON.stringify({ verdict: "accepted", notes: "" }) })
         : (outcomes[Number(run.outcomeAt)] ?? { status: "completed", summary: "done" });
       Object.assign(run, { status: outcome.status ?? "completed", completedAt: Date.now() }, outcome);
+    } else if (run.status === "paused" && run.resumesAs) {
+      // The owner came back. Only reached if the orchestrator LOOKED again —
+      // a settle that took the pause as an outcome never would — so this is
+      // what makes the paused case observable.
+      const next = run.resumesAs as Record<string, unknown>;
+      run.resumesAs = undefined;
+      Object.assign(run, { status: "completed", completedAt: Date.now() }, next);
     }
     return run;
   });
@@ -234,6 +252,31 @@ describe("a worker in the project itself whose commit failed", () => {
     expect(done.alerts).toBe(1);
     expect(done.log.some((e) => e.type === "alert" && /Commit failed for t1 \(run-\w+\): fatal: index.lock exists/.test(e.message))).toBe(true);
     expect(plumbing.mergeWorkerBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe("a worker the owner PAUSED", () => {
+  it("is waited for, not settled: the resumed run's own result is the task's, and its worktree survives the pause", async () => {
+    // Measured on the box (team-zf2uwq1n, 2026-09-06): the orchestrator took
+    // "no process" for "finished", so a pause posted `The run ended paused.`
+    // as t1's result, failed the task and the team, and removed the worktree
+    // — while the run itself stayed resumable and its page still offered
+    // Resume, into a folder that was gone.
+    outcomes = [
+      { summary: PLAN },
+      { status: "paused", resumesAs: { summary: "index done", filesTouched: ["index.html"] } },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const t1 = done.tasks.find((t) => t.task_id === "t1")!;
+    expect(t1).toMatchObject({ status: "complete", result: "index done", attempts: 1 });
+    expect(JSON.stringify(done.log)).not.toContain("The run ended paused");
+    // The worktree was still there to merge when the task was finally decided.
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1]).filter((b: string) => /-t1-1$/.test(b))).toHaveLength(1);
+    // …and t2, which depends on t1, ran.
+    expect(done.tasks.find((t) => t.task_id === "t2")).toMatchObject({ status: "complete" });
   });
 });
 

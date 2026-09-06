@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useId, useRef, useMemo } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
 import { clawhubSkillUrl } from "@/lib/clawhub-url";
 import { categoryLabelFromKey } from "@/lib/hermes-skill-facets";
@@ -167,6 +168,7 @@ interface AppStoreProps {
 
 export default function AppStore({ installedAppIds, onInstall, onUninstall }: AppStoreProps) {
   const { t } = useT();
+  const tr = useTr();
   const [search, setSearch] = useState("");
   const [installProgress, setInstallProgress] = useState<Record<string, InstallProgress>>({});
   const [category, setCategory] = useState<string>("All");
@@ -193,6 +195,12 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   // reshuffle — the whole list re-sorts only on an explicit sort pick.
   const [pendingCategories, setPendingCategories] = useState<string[]>([]);
   const seenSlugsRef = useRef<Set<string>>(new Set());
+  // Installed ids the catalogue answered 404 for. Most of what is installed on
+  // a box is not a store skill at all — an app the coding agent built is an id
+  // in `installed_apps` and nothing on ClawHub — and every visit to Installed
+  // asked about each of them again, so the tab fired the same three failing
+  // requests (and three console errors) every time it was opened.
+  const unknownSlugsRef = useRef<Set<string>>(new Set());
   // The active sort, readable from the fetch effect and loadMore without
   // making either re-run on a sort change (same pattern as loadMoreRef below).
   const sortByRef = useRef(sortBy);
@@ -265,7 +273,9 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   useEffect(() => {
     if (category !== "Installed") return;
 
-    const missingIds = installedAppIds.filter((id) => !seenSlugsRef.current.has(id));
+    const missingIds = installedAppIds.filter(
+      (id) => !seenSlugsRef.current.has(id) && !unknownSlugsRef.current.has(id),
+    );
     if (missingIds.length === 0) {
       setLoading(false);
       return;
@@ -277,6 +287,9 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     void Promise.all(missingIds.map(async (id): Promise<StoreApp | null> => {
       try {
         const res = await fetch(`${STORE_API}?slug=${encodeURIComponent(id)}`, { signal: controller.signal });
+        // 404 is the ordinary answer for a locally built app, and it is a
+        // FACT about this id: asking again on the next visit cannot change it.
+        if (res.status === 404) { unknownSlugsRef.current.add(id); return null; }
         if (!res.ok) return null;
         const app = await res.json() as Partial<ApiApp>;
         if (
@@ -875,7 +888,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 @container">
         {loading && apps.length === 0 ? (
           <div className="flex items-center justify-center py-12">
-            <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+            <div className="w-6 h-6 border-2 border-white/20 rounded-full motion-safe:animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
           </div>
         ) : (
           <div className="grid grid-cols-1 @sm:grid-cols-2 @3xl:grid-cols-3 @5xl:grid-cols-4 gap-3">
@@ -952,9 +965,31 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           </div>
         )}
 
+        {/* "You haven't installed any apps yet" is only true when nothing is
+            installed. A box whose desktop is full of apps the coding agent
+            built has plenty installed and none of it on ClawHub, and telling
+            that owner they have installed nothing is simply wrong. */}
         {!loading && displayApps.length === 0 && (category === "Installed" || !loadError) && (
           <div className="text-center py-12 text-white/40">
-            <p className="text-sm">{category === "Installed" ? t("store.noInstalledApps") : t("store.noAppsFound")}</p>
+            <p className="text-sm" data-testid="store-empty-state">
+              {category !== "Installed"
+                ? t("store.noAppsFound")
+                : installedAppIds.length === 0
+                  ? t("store.noInstalledApps")
+                  : search
+                    // The Installed view is cut by the search box as well, so
+                    // an empty list here is just as likely to mean "nothing
+                    // you typed matched" — including a box whose installed
+                    // apps ALL have store listings. Answering that with "these
+                    // apps did not come from the store" states something the
+                    // list does not show and that may be flatly untrue, so a
+                    // search gets the answer every other tab gives it.
+                    ? t("store.noAppsFound")
+                    : tr(
+                      "store.installedNotFromStore",
+                      "The apps installed on this box did not come from the store — an app built here has no store listing.",
+                    )}
+            </p>
           </div>
         )}
 
@@ -963,7 +998,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         {category === "All" && !search && pendingCategories.length > 0 && (
           <div ref={sentinelRef} className="flex items-center justify-center py-6">
             {loadingMore && (
-              <div className="w-5 h-5 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+              <div className="w-5 h-5 border-2 border-white/20 rounded-full motion-safe:animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
             )}
           </div>
         )}

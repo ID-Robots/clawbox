@@ -74,10 +74,15 @@ export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpen
           const status = statusOf(m.id);
           const at = status !== null && isLive(status);
           const done = status !== null && isSettled(status);
+          // Settled is not the same as succeeded: a worker that FAILED wore
+          // the same emerald check_circle as one that finished, beside a
+          // status chip reading "Did not finish" in red. Only `completed`
+          // earns the tick.
+          const ok = done && status === "completed";
           const me = m.id === runId;
           return (
-            <li key={m.id} className="flex items-center gap-2 text-[11px]" data-testid="coding-agent-team-member" data-role={m.role} data-live={at || undefined} data-me={me || undefined}>
-              <span className={`material-symbols-rounded shrink-0 ${at ? "text-amber-400 animate-pulse" : done ? "text-emerald-400/80" : "text-[var(--text-muted)]"}`} style={{ fontSize: 13 }} aria-hidden="true">{at ? "sync" : done ? "check_circle" : "schedule"}</span>
+            <li key={m.id} className="flex items-center gap-2 text-[11px]" data-testid="coding-agent-team-member" data-role={m.role} data-live={at || undefined} data-me={me || undefined} data-outcome={at ? "working" : done ? (ok ? "completed" : "unfinished") : "waiting"}>
+              <span className={`material-symbols-rounded shrink-0 ${at ? "text-amber-400 animate-pulse" : ok ? "text-emerald-400/80" : done ? "text-red-400/80" : "text-[var(--text-muted)]"}`} style={{ fontSize: 13 }} aria-hidden="true">{at ? "sync" : ok ? "check_circle" : done ? "error" : "schedule"}</span>
               <span className={`font-medium shrink-0 ${at ? "text-amber-200" : "text-[var(--text-primary)]"}`}>{roleLabel(m)}</span>
               {me ? (
                 <span className="font-mono text-[var(--text-muted)]">{m.id}</span>

@@ -59,6 +59,30 @@ describe("CodingRunTeamMembers", () => {
     expect(onOpenRun).toHaveBeenCalledWith("run-plan");
   });
 
+  // A worker whose run FAILED wore the same emerald check_circle as one that
+  // finished — beside a status chip already reading "Did not finish" in red.
+  it("marks a member that did not finish apart from one that did", async () => {
+    stub();
+    const runs = [
+      { id: "run-plan", status: "completed" as const },
+      { id: "run-w1", status: "failed" as const },
+      { id: "run-w2", status: "stopped" as const },
+      { id: "run-rev", status: "running" as const },
+    ];
+    render(<CodingRunTeamMembers teamId="team-1" runId="run-plan" runs={runs} live onOpenRun={() => {}} />);
+    const list = await screen.findByTestId("coding-agent-run-team-members");
+    const rows = within(list).getAllByTestId("coding-agent-team-member");
+    expect(rows.map((r) => r.getAttribute("data-outcome"))).toEqual(["completed", "unfinished", "unfinished", "working"]);
+    const glyph = (row: HTMLElement) => row.querySelector(".material-symbols-rounded") as HTMLElement;
+    expect(glyph(rows[0]).textContent).toBe("check_circle");
+    expect(glyph(rows[0]).className).toContain("text-emerald-400/80");
+    // The two that did not finish: no tick, and nothing green about them.
+    for (const row of [rows[1], rows[2]]) {
+      expect(glyph(row).textContent).toBe("error");
+      expect(glyph(row).className).not.toContain("emerald");
+    }
+  });
+
   it("drops an older reply that lands after a newer one", async () => {
     const answers: Array<(runs: unknown[]) => void> = [];
     vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => {

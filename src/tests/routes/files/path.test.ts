@@ -181,6 +181,67 @@ describe("PUT /setup-api/files/[...path]", () => {
     expect(body.error).toBe("Already exists");
   });
 
+  it("refuses a rename that is a PATH — a file may not leave its folder under a rename", async () => {
+    // `../escape.txt` resolves to a path still inside the browse root, so the
+    // containment check waved it through: the app said "Renamed" and the file
+    // moved to the parent folder with nothing on screen to say where it went.
+    fs.mkdirSync(path.join(TEST_ROOT, "scratch"));
+    fs.writeFileSync(path.join(TEST_ROOT, "scratch", "a.txt"), "content");
+
+    for (const newName of ["../escape.txt", "sub/escape.txt", "./a.txt", "..", "."]) {
+      const res = await filesPathPut(
+        createRequest("/setup-api/files/scratch/a.txt", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ newName }),
+        }),
+        createParams(["scratch", "a.txt"]),
+      );
+      expect([newName, res.status]).toEqual([newName, 400]);
+      expect((await res.json()).error).toBe("Invalid destination");
+    }
+
+    expect(fs.existsSync(path.join(TEST_ROOT, "scratch", "a.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(TEST_ROOT, "escape.txt"))).toBe(false);
+  });
+
+  it("returns 400 when newName is not a string", async () => {
+    fs.writeFileSync(path.join(TEST_ROOT, "file.txt"), "content");
+
+    const res = await filesPathPut(
+      createRequest("/setup-api/files/file.txt", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newName: { toString: "no" } }),
+      }),
+      createParams(["file.txt"]),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("newName required");
+  });
+
+  it("answers 400, not a crash, for a body that is JSON but not an object", async () => {
+    // `await req.json()` resolves for a body of literally `null` — the
+    // `.catch` never fires — and reading `.newName` off it threw a TypeError
+    // before the validation below could answer. The Files app saw a 500 for
+    // what is an ordinary bad request. A bare string and an array are the same
+    // shape of mistake and take the same road.
+    fs.writeFileSync(path.join(TEST_ROOT, "file.txt"), "content");
+
+    for (const raw of ["null", '"new.txt"', "[]", "7"]) {
+      const req = createRequest("/setup-api/files/file.txt", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: raw,
+      });
+      const res = await filesPathPut(req, createParams(["file.txt"]));
+      expect(res.status, `a body of ${raw}`).toBe(400);
+      expect((await res.json()).error).toBe("newName required");
+      // …and the file is untouched.
+      expect(fs.existsSync(path.join(TEST_ROOT, "file.txt"))).toBe(true);
+    }
+  });
+
   it("rejects path traversal in newName", async () => {
     fs.writeFileSync(path.join(TEST_ROOT, "file.txt"), "content");
 

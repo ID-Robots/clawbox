@@ -220,6 +220,32 @@ describe("the Memory Shard app", () => {
     expect(await screen.findByText(/Nothing to index yet/)).toBeTruthy();
   });
 
+  it("emphasises Full reindex when the index was built by another model", async () => {
+    // The banner says "Run a full reindex" while "Index now" was the filled
+    // primary and "Full reindex" the grey secondary: the advice and the
+    // emphasised control pointed at two different buttons, and an incremental
+    // pass leaves every chunk that another model embedded exactly where it is.
+    memory = {
+      ...LOCAL_MEMORY,
+      health: "degraded",
+      indexIdentity: "mismatched",
+      error: "The index does not match the configured embedding model. Run a full reindex.",
+      errorCode: "index_identity_mismatched",
+    };
+    mount();
+    const full = await screen.findByTestId("memory-shard-full-reindex");
+    // `btn-gradient` is what BTN_PRIMARY is — the filled button on this desktop.
+    expect(full.className).toContain("btn-gradient");
+    expect(screen.getByTestId("memory-shard-index-now").className).not.toContain("btn-gradient");
+  });
+
+  it("leaves Index now as the emphasised action on an index that matches", async () => {
+    mount();
+    const incremental = await screen.findByTestId("memory-shard-index-now");
+    expect(incremental.className).toContain("btn-gradient");
+    expect(screen.getByTestId("memory-shard-full-reindex").className).not.toContain("btn-gradient");
+  });
+
   it("asks before a full reindex, and only sends it once confirmed", async () => {
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "Full reindex" }));
@@ -432,6 +458,19 @@ describe("the Memory Shard app", () => {
     // And the window leaves the settings page on its own — the setup it
     // described no longer exists.
     expect(await screen.findByTestId("memory-shard-wizard")).toBeTruthy();
+  });
+
+  it("shows on screen the name its reset help mark is announced with", async () => {
+    // The mark's accessible name is "Start over" (what CLAUDE.md and the tip
+    // itself call this), while the only visible words in the card were the
+    // button's "Reset" — a reader was told the name of something nothing on
+    // screen said.
+    mount();
+    fireEvent.click(await screen.findByTestId("memory-shard-open-settings"));
+    const help = await screen.findByTestId("memory-shard-reset-help");
+    const announced = help.getAttribute("aria-label") ?? "";
+    expect(announced).toBe("Start over");
+    expect(screen.getByTestId("memory-shard-reset-card").textContent).toContain(announced);
   });
 
   it("surfaces a mismatched index as something to fix, not as a healthy box", async () => {

@@ -1,7 +1,24 @@
 import { getAll } from "@/lib/config-store";
 import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
+import { createSerialLock } from "@/lib/serial-lock";
 import { ensureWebappIcon } from "@/lib/webapp-icon";
+
+/**
+ * One registration at a time in this process.
+ *
+ * The read below and the write under it are a read-modify-write over the WHOLE
+ * preference snapshot, and `setPreferences` carries every entry it was handed
+ * back to disk. Two registrations that interleave — a build finishing while a
+ * project's "Add to desktop" lands, both arriving in the same microtask drain
+ * — each read the same base and the second write drops the first: measured,
+ * two concurrent calls for `aaa` and `bbb` left `installed_meta` holding only
+ * `bbb`. The store's own write is atomic (temp file + rename), which protects
+ * the FILE, not the update. Wrapped here rather than in the routes because
+ * this is the single door every writer of `installed_apps`/`installed_meta`
+ * comes through.
+ */
+const withRegistration = createSerialLock();
 
 interface InstalledMeta {
   name: string;
@@ -37,6 +54,7 @@ export async function registerWebappInPreferences(
     description?: string;
   } = {},
 ): Promise<void> {
+  await withRegistration(async () => {
   // One read of the config, not three — config-store.get() re-reads and
   // re-parses the whole file on each call, and reading the three keys together
   // also narrows the read-modify-write window.
@@ -65,6 +83,7 @@ export async function registerWebappInPreferences(
     },
     // A freshly (re)created app shouldn't stay hidden.
     "pref:hidden_installed": hiddenInstalled.filter((id) => id !== appId),
+  });
   });
 
   // Every app that reaches the desktop gets a picture, not just the ones built
