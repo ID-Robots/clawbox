@@ -223,57 +223,27 @@ function skipTrivia(text: string, from: number): number {
 /**
  * Where the object the factory RETURNS begins, or -1.
  *
- * Only two shapes count, and picking them apart matters: the direct
- * arrow-expression body `() => ({ … })`, and a block body's own top-level
- * `return { … }`. Taking the first `({` after the arrow instead would read a
- * LOCAL object — `() => { const d = ({ get, set }); return { set }; }` reports
- * both exports and misses that the mock omits one, which is the gate passing
- * over exactly the hole it exists for.
+ * ONE shape is read: the direct arrow-expression body, `() => ({ … })`, which
+ * is what every mock factory in this repo is written as. Everything else — a
+ * block body, an identifier, a helper passed by name — answers -1, and the
+ * caller REPORTS such a factory rather than skipping it.
+ *
+ * A block-bodied branch was written first and then deleted, and the reason is
+ * worth keeping: reading `return { … }` out of a `{ … }` body is not a lookup,
+ * it is control flow. A local object before the return, a `return` inside an
+ * `if` block, an UNBRACED `if (p) return { … };`, an identifier called
+ * `myreturn` — each one is a way for the scan to answer from a path that is not
+ * the factory's only path, and each was a separate defect in review. A gate
+ * that needs a control-flow analysis to be right has bugs of its own, and every
+ * one of them fails in the direction that clears a factory nobody checked.
+ * Refusing to read the shape is the honest answer, and it costs nothing while
+ * no factory uses it.
  */
 function returnedObjectStart(factory: string, from: number): number {
   const head = skipTrivia(factory, from);
-  if (factory[head] === "(") {
-    const inner = skipTrivia(factory, head + 1);
-    return factory[inner] === "{" ? inner : -1;
-  }
-  if (factory[head] !== "{") return -1;
-
-  // A block body: find `return` at the body's own depth, not inside a nested
-  // function or object.
-  let depth = 0;
-  for (let i = head; i < factory.length; i += 1) {
-    const ch = factory[i];
-    if (ch === "/" && (factory[i + 1] === "/" || factory[i + 1] === "*")) {
-      i = skipTrivia(factory, i) - 1;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") {
-      const quote = ch;
-      i += 1;
-      while (i < factory.length && factory[i] !== quote) {
-        if (factory[i] === "\\") i += 1;
-        i += 1;
-      }
-      continue;
-    }
-    if (ch === "{" || ch === "[" || ch === "(") { depth += 1; continue; }
-    if (ch === "}" || ch === "]" || ch === ")") { depth -= 1; if (depth === 0) return -1; continue; }
-    if (ch !== "r" || !/^return\b/.test(factory.slice(i))) continue;
-    // A CONDITIONAL return makes the factory unreadable, not merely different.
-    // `() => { if (partial) return { set }; return { get, set }; }` has a path
-    // that omits an export, and answering from the unconditional one would
-    // clear it — the gate passing over the hole it exists for, for the third
-    // time in this review. Reported instead, so a human reads the factory.
-    if (depth !== 1) return -1;
-    const after = skipTrivia(factory, i + "return".length);
-    if (factory[after] === "{") return after;
-    if (factory[after] === "(") {
-      const inner = skipTrivia(factory, after + 1);
-      return factory[inner] === "{" ? inner : -1;
-    }
-    return -1;
-  }
-  return -1;
+  if (factory[head] !== "(") return -1;
+  const inner = skipTrivia(factory, head + 1);
+  return factory[inner] === "{" ? inner : -1;
 }
 
 /**
@@ -454,23 +424,21 @@ describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller
     expect([...exportsOf("() => ({ getAll: vi.fn(), getKnown: vi.fn(), setMany: vi.fn() })")!].sort())
       .toEqual(["getAll", "getKnown", "setMany"]);
 
-    // A block body, and a factory shape this cannot read at all.
-    expect([...exportsOf("() => { return { get: vi.fn(), set: vi.fn() }; }")!].sort()).toEqual(["get", "set"]);
+    // Anything that is not the direct arrow-expression body is UNREADABLE, and
+    // unreadable is reported rather than skipped. Every one of these was a way
+    // for an earlier, cleverer version to answer from a path that is not the
+    // factory's only path.
     expect(factoryExports('vi.mock("x", someHelper)')).toBeNull();
-
-    // A LOCAL object before the return is not what the factory exports. Reading
-    // the first `({` after the arrow would answer `get, set` here and miss that
-    // the mock omits `get` — the gate passing over the hole it exists for.
-    expect([...exportsOf("() => { const d = ({ get: vi.fn(), set: vi.fn() }); return { set: d.set }; }")!])
-      .toEqual(["set"]);
-    // …and a parenthesised return object is still read.
-    expect([...exportsOf("() => { return ({ get: vi.fn(), set: vi.fn() }); }")!].sort()).toEqual(["get", "set"]);
-
-    // A BRANCH-DEPENDENT factory is unreadable, not "whatever the last return
-    // says": one path here omits `get`, and answering from the unconditional
-    // return would clear it.
+    expect(exportsOf("() => { return { get: vi.fn(), set: vi.fn() }; }")).toBeNull();
+    // …a local object before the return,
+    expect(exportsOf("() => { const d = ({ get: vi.fn(), set: vi.fn() }); return { set: d.set }; }")).toBeNull();
+    // …a braced conditional return, and an UNBRACED one,
     expect(exportsOf("() => { if (p) { return { set: vi.fn() }; } return { get: vi.fn(), set: vi.fn() }; }"))
       .toBeNull();
+    expect(exportsOf("() => { if (p) return { get: vi.fn(), set: vi.fn() }; return { set: vi.fn() }; }"))
+      .toBeNull();
+    // …and an identifier that merely ENDS in the keyword.
+    expect(exportsOf("() => { const myreturn = 1; return { get: vi.fn(), set: vi.fn() }; }")).toBeNull();
 
     // And the omission the gate exists for.
     expect([...exportsOf("() => ({ getAll: vi.fn(), setMany: vi.fn() })")!].sort()).toEqual(["getAll", "setMany"]);
