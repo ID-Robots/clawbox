@@ -23,6 +23,7 @@ import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
+  CLAWBOX_AI_MODEL_ID_BY_TIER,
   CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
@@ -59,7 +60,7 @@ export const CLAWBOX_AI_PROXY_URL = (
 /** BARE model id (no `deepseek/` vendor prefix) — the proxy returns
  *  "HTTP 400: Model not allowed" for a prefixed slug. */
 export function clawaiModelForTier(tier: ClawboxAiTier): string {
-  return tier === "pro" ? CLAWBOX_AI_PRO_MODEL_ID : CLAWBOX_AI_FLASH_MODEL_ID;
+  return CLAWBOX_AI_MODEL_ID_BY_TIER[tier];
 }
 
 export class ClawaiApplyError extends Error {}

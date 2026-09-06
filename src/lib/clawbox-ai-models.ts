@@ -36,6 +36,20 @@ export const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
 };
 
 /**
+ * The same table, BARE — no `deepseek/` prefix.
+ *
+ * Both spellings are load-bearing on their own side: openclaw.json's
+ * `agents.defaults.model.primary` takes the qualified ref, while Hermes'
+ * `model.default` and the ClawBox AI proxy take the bare id (a prefixed slug
+ * comes back "HTTP 400: Model not allowed"). One table so the two editions
+ * cannot answer the tier question differently.
+ */
+export const CLAWBOX_AI_MODEL_ID_BY_TIER: Record<ClawboxAiTier, string> = {
+  flash: CLAWBOX_AI_FLASH_MODEL_ID,
+  pro: CLAWBOX_AI_PRO_MODEL_ID,
+};
+
+/**
  * The BARE ids the ClawBox AI proxy serves as CHAT models, in the order a
  * picker should show them.
  *

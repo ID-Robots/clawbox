@@ -589,6 +589,100 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(mockUnpairLocal).not.toHaveBeenCalled();
   });
 
+  /**
+   * TASK-713 — the tier badge fills in a DEFAULT, and a default never
+   * overwrites a choice.
+   *
+   * A re-pair (and the wizard finalise, which reaches this route through
+   * `clawai/poll`) arrives carrying `clawaiTier`, so the badge cannot be told
+   * apart from an owner pressing a plan card. What settles it is the other
+   * side: whether the owner has ever picked a ClawBox AI model themselves. On
+   * a Max account whose box is stamped `deviceTier: "flash"` — a state the
+   * portal keeps on purpose — an entitled Max primary was replaced by Flash on
+   * every re-pair, and the chat's own guard could not undo it because it only
+   * ever moves down.
+   */
+  describe("a re-pair never overwrites an explicit model pick", () => {
+    async function pairClawai(tier: string) {
+      return configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token",
+        authMode: "subscription",
+        clawaiTier: tier,
+      }));
+    }
+
+    function primaryWrites(): string[] {
+      return configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))
+        .filter((command) => command.startsWith("config set agents.defaults.model.primary "));
+    }
+
+    it("keeps the owner's Max model when the device badge says Flash", async () => {
+      mockGetAll.mockResolvedValue({
+        clawai_tier: "flash",
+        ai_model_explicit_pick: "deepseek/deepseek-v4-pro",
+      });
+
+      expect((await pairClawai("flash")).status).toBe(200);
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+    });
+
+    it("writes the tier default when the owner has never picked a model", async () => {
+      mockGetAll.mockResolvedValue({ clawai_tier: "flash" });
+
+      expect((await pairClawai("flash")).status).toBe(200);
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-flash"]);
+    });
+
+    it("keeps the pick on a DOWNGRADE, and lets the plan error be the one that speaks", async () => {
+      // The owner's Max pick with a box now on the Flash plan. Writing Flash
+      // here would be this route deciding an entitlement question it cannot
+      // see; the turn fails with the proxy's own "Model not allowed" instead,
+      // and the picker shows what the plan does allow.
+      mockGetAll.mockResolvedValue({
+        clawai_tier: "pro",
+        ai_model_explicit_pick: "deepseek/deepseek-v4-pro",
+      });
+
+      expect((await pairClawai("flash")).status).toBe(200);
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+    });
+
+    it("treats a primary that already differs from the tier default as an explicit pick", async () => {
+      // The migration. Boxes in the field carry the state this card is about
+      // and no marker, because none existed; the primary they are running IS
+      // the evidence of the choice, and a re-pair must not be the thing that
+      // discovers it too late.
+      mockGetAll.mockResolvedValue({ clawai_tier: "flash" });
+      mockReadOpenClawConfig.mockResolvedValue({
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      } as never);
+
+      expect((await pairClawai("flash")).status).toBe(200);
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ ai_model_explicit_pick: "deepseek/deepseek-v4-pro" }),
+      );
+    });
+
+    it("ignores a pick that belongs to another provider", async () => {
+      // Connecting ClawBox AI IS a provider choice. An Anthropic pick says
+      // nothing about which ClawBox AI model to run.
+      mockGetAll.mockResolvedValue({
+        clawai_tier: "pro",
+        ai_model_explicit_pick: "anthropic/claude-opus-5",
+      });
+
+      expect((await pairClawai("pro")).status).toBe(200);
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+    });
+  });
+
   it("configures ollama without apiKey", async () => {
     const res = await configurePost(jsonRequest({
       provider: "ollama",

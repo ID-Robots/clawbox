@@ -51,6 +51,7 @@ import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
   CLAWBOX_AI_MODEL_BY_TIER,
+  CLAWBOX_AI_MODEL_ID_BY_TIER,
   CLAWBOX_AI_DEFAULT_TIER,
   CLAWBOX_AI_PROXY_URLS,
   CLAWBOX_AI_IMAGE_PROVIDER,
@@ -95,6 +96,11 @@ import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } f
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { forgetProviderEnumerations } from "@/lib/provider-runnable";
+import {
+  EXPLICIT_MODEL_PICK_KEY,
+  decideClawboxAiModelId,
+  recordExplicitModelPick,
+} from "@/lib/explicit-model-pick";
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
@@ -2157,7 +2163,29 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       const modelName = localModelSlot || normalizedModel || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
-      config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
+      // The badge fills in a DEFAULT, and a default never overwrites a choice
+      // (TASK-713). A re-pair arrives here carrying `clawaiTier` exactly like a
+      // plan-card press does — `clawai/poll` sends the session's tier — so the
+      // request cannot say which this is. What settles it is whether the owner
+      // has ever picked a ClawBox AI model, which is what the marker records.
+      //
+      // The primary is read for the MIGRATION only: boxes in the field carry
+      // the state this card is about and no marker, and the model they are
+      // running is the evidence of the choice.
+      const clawaiDecision = decideClawboxAiModelId({
+        storedPick: configStore[EXPLICIT_MODEL_PICK_KEY],
+        currentPrimary: (await readOpenClawConfig().catch(() => null))
+          ?.agents?.defaults?.model?.primary,
+        tierModelId: CLAWBOX_AI_MODEL_ID_BY_TIER[resolvedClawboxTier],
+      });
+      if (clawaiDecision.migrate) await recordExplicitModelPick(clawaiDecision.migrate);
+      if (clawaiDecision.explicit) {
+        console.log(
+          `[configure] ClawBox AI: keeping the owner's own model ${clawaiDecision.modelId}`
+          + ` over the ${resolvedClawboxTier} badge default`,
+        );
+      }
+      config.defaultModel = `${CLAWBOX_AI_PROVIDER}/${clawaiDecision.modelId}`;
     } else if (isChatgptSubscription && !normalizedModel) {
       // ChatGPT sign-in with no explicit pick. The hardcoded default is
       // gpt-5.5, so a Pro account used to land a generation behind and had
