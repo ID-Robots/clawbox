@@ -2219,11 +2219,20 @@ export function clearFinishedRuns(): number {
   // whose pull request is still being watched is not finished either: it has
   // SETTLED, but deleting it would take its evidence folder and leave a
   // watcher polling a record that no longer exists.
-  const keep = list.filter((r) => isHeld(r.status) || isPrPending(r.pr));
+  //
+  // EXCEPT a paused run or a draft whose folder is GONE. resumeRun and
+  // startDraftRun both refuse it ("start a new run instead"), so it can
+  // neither go on nor finish, and kept here it was immortal: past the rail's
+  // newest dozen it was listed nowhere (no folder, so no project row), and
+  // no sweep touched it — the review pass paused in a folder the owner had
+  // since deleted, 2026-09-06. A LIVE run is kept whatever its folder says:
+  // the record is the only handle on the process.
+  const heldOn = (r: CodingRun) => isHeld(r.status) && (isLive(r.status) || folderPresent(r.directory));
+  const keep = list.filter((r) => heldOn(r) || isPrPending(r.pr));
   const removed = list.length - keep.length;
   if (removed === 0) return 0;
   for (const r of list) {
-    if (!isHeld(r.status) && !isPrPending(r.pr)) removeArtifacts(r.id);
+    if (!heldOn(r) && !isPrPending(r.pr)) removeArtifacts(r.id);
   }
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
@@ -4892,6 +4901,15 @@ function insertRun(list: CodingRun[], run: CodingRun): void {
     if (idx < 0) break;
     removeArtifacts(list[idx].id);
     list.splice(idx, 1);
+  }
+}
+
+/** Whether a held run's folder is still there to resume or start into. */
+function folderPresent(directory: string): boolean {
+  try {
+    return fs.statSync(directory).isDirectory();
+  } catch {
+    return false;
   }
 }
 

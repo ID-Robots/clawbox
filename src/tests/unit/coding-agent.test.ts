@@ -965,6 +965,34 @@ describe("a run", () => {
       expect(lib.getRun(done.id)).toBeNull();
     });
 
+    it("clear-history drops a held run whose folder is gone, and keeps one whose folder is there", async () => {
+      // A paused run or a draft in a folder the owner has since deleted can
+      // neither be resumed nor started (both refuse with "start a new run
+      // instead"), and kept it was immortal — invisible past the rail's
+      // newest dozen and untouched by every sweep (2026-09-06).
+      readyDevice();
+      makeProject("site");
+      const goneDir = makeProject("gone");
+      const kept = await lib.createDraftRun({ task: "keep me", projectId: "site", source: "owner" });
+      const orphan = await lib.createDraftRun({ task: "my folder goes", projectId: "gone", source: "owner" });
+      const flag = path.join(base, "gone-flag");
+      installFakeWrapper([`echo '${INIT}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+      const started = await lib.startRun({ task: "t", projectId: "gone", source: "agent" });
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 5000 });
+      lib.pauseRun(started.id);
+      await finished(started.id);
+      expect(lib.getRun(started.id)?.status).toBe("paused");
+
+      // Both still held while the folder is there: nothing to clear.
+      expect(lib.clearFinishedRuns()).toBe(0);
+
+      fs.rmSync(goneDir, { recursive: true, force: true });
+      expect(lib.clearFinishedRuns()).toBe(2);
+      expect(lib.getRun(orphan.id)).toBeNull();
+      expect(lib.getRun(started.id)).toBeNull();
+      expect(lib.getRun(kept.id)?.status).toBe("draft");
+    });
+
     it("deletes only drafts — finished runs are history", async () => {
       readyDevice();
       makeProject("site");

@@ -50,7 +50,8 @@ export default function CodingAgentSetupWizard({
 }: {
   status: AgentStatus;
   /** The app re-reads its own status; the wizard does not own that state. */
-  onDone: () => void;
+  /** Setup is finished; `runId` names the harness run when one was started. */
+  onDone: (runId?: string | null) => void;
 }) {
   const { t } = useT();
   const [step, setStep] = useState<Step>("intro");
@@ -328,7 +329,7 @@ export default function CodingAgentSetupWizard({
    * the test and skipping it — because the test is an offer, not a gate: a
    * box whose harness is not ready yet is still a configured box.
    */
-  const finish = async () => {
+  const finish = async (runId: string | null = null) => {
     setBusy("finish");
     setError(null);
     try {
@@ -342,7 +343,7 @@ export default function CodingAgentSetupWizard({
         throw new Error(out?.error || t("codingAgent.wizardFinishFailed"));
       }
       notifyCodingAgentChanged();
-      onDone();
+      onDone(runId);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.wizardFinishFailed"));
     } finally {
@@ -352,8 +353,10 @@ export default function CodingAgentSetupWizard({
 
   /**
    * The offered smoke test: scaffold the scratch project, start the canned run,
-   * then finish setup so the owner lands on the home page with the run already
-   * in flight — which is where its progress is shown.
+   * then finish setup with the run's id, so the owner lands on the RUN's page
+   * with it already in flight. Home used to be the landing — from before the
+   * runs moved off it: the owner who had just pressed "Try it once" was shown
+   * the project list, with the run they were promised a dot in the rail.
    */
   const runHarnessTest = async () => {
     setBusy("harness");
@@ -364,7 +367,7 @@ export default function CodingAgentSetupWizard({
       const started = await startHarnessTest(folder.trim() || null, t);
       if (!started.ok) throw new Error(started.error);
       notifyCodingRunStarted();
-      await finish();
+      await finish(started.runId);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.harnessTestFailed"));
       setBusy(null);
