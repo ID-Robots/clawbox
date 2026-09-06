@@ -59,7 +59,8 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `~/.openclaw` (AI config, credentials, chats) | ✅ kept | ❌ wiped |
 | `~/.hermes` (Hermes config, chats, agent install) | ✅ kept | ❌ wiped, except `hermes-agent` (the agent install) and the whole of `bin/` (which holds `tirith`, the pre-exec shell scanner) — neither can be re-downloaded in AP mode. `bin/` is kept entire rather than filtered down to `tirith`, so anything else upstream puts there survives too |
 | `~/.clawkeep` (backup pairing) | ✅ kept | ❌ wiped |
-| `~/.codex` (Codex CLI auth) | ✅ kept | ❌ wiped |
+| `~/.codex` (Codex CLI auth and state) | ✅ kept | ❌ wiped |
+| `~/.local/share/codex` (the Codex CLI binary itself) | ✅ kept, replaced when the pinned version moves | ✅ kept (a 117 MB download the box cannot make in AP mode) |
 | `~/Documents`, `~/Downloads`, `~/Desktop` | ✅ kept | ❌ contents wiped, directories kept |
 | User crontab | ✅ kept | ❌ cleared |
 | Portal device identity (`data/cloudflared/device-id`) | ✅ kept | ⚠️ the file is deleted, but the id is re-derived identically from `/etc/machine-id` — the box reappears in the portal as the same device |
