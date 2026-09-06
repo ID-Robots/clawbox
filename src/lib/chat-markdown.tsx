@@ -413,3 +413,24 @@ export function plainTextForLabel(text: string, max = 100): string {
   // label; a single very long token still gets truncated rather than dropped.
   return `${(lastSpace > max * 0.5 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
 }
+
+/**
+ * Accessible name for a spoken reply's player.
+ *
+ * The message body is already on screen and already read by the message
+ * itself, so this is a short identifying fragment, not a second copy — but it
+ * has to be there: a transcript can hold several players, and "audio" three
+ * times over tells a screen-reader user nothing about which is which.
+ *
+ * Hand it the text as the BUBBLE shows it, never the stored text: directives
+ * are lifted at render on both chat surfaces, so the raw string still carries
+ * the `EMAIL:` ids and the absolute `MEDIA:` paths a player must not announce.
+ *
+ * Shared rather than defined beside each player: the mascot chat and the
+ * full-screen chat both draw one, and every previous label rule had to be
+ * fixed twice.
+ */
+export function audioLabel(text: string | undefined, prefix: string): string {
+  const spoken = text ? plainTextForLabel(text, 100) : "";
+  return spoken ? `${prefix}: ${spoken}` : prefix;
+}

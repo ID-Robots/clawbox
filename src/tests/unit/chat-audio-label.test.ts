@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { plainTextForLabel } from "@/lib/chat-markdown";
+import { audioLabel, plainTextForLabel } from "@/lib/chat-markdown";
 
 /**
  * An accessible name is SPOKEN, so it cannot carry markdown source.
@@ -91,5 +91,43 @@ describe("plainTextForLabel", () => {
     // The caller falls back to the bare "Audio reply" label on empty output,
     // so this must not produce a stray separator.
     expect(plainTextForLabel("   \n\n  ")).toBe("");
+  });
+});
+
+describe("audioLabel", () => {
+  /**
+   * Shared by both chat surfaces since TASK-698 — the mascot chat and the
+   * full-screen one each draw a player, and every previous rule about this
+   * label had to be fixed twice.
+   */
+  it("names the clip by what the bubble shows", () => {
+    expect(audioLabel("The lantern is green.", "Audio reply"))
+      .toBe("Audio reply: The lantern is green.");
+  });
+
+  it("falls back to the bare prefix when there is nothing to say", () => {
+    expect(audioLabel("", "Audio reply")).toBe("Audio reply");
+    expect(audioLabel(undefined, "Audio reply")).toBe("Audio reply");
+    expect(audioLabel("   \n ", "Audio reply")).toBe("Audio reply");
+  });
+
+  it("never announces a directive, because both surfaces lift them before rendering", () => {
+    // The property the move exists to guarantee: a label is read out verbatim,
+    // and the STORED text keeps its `EMAIL:` ids while a caption can carry a
+    // `MEDIA:` path. Callers hand this the body text the bubble draws — the
+    // one both directives have already been taken out of.
+    const bodyText = "Here is the summary.";
+    const label = audioLabel(bodyText, "Audio reply");
+    expect(label).not.toContain("EMAIL:");
+    expect(label).not.toContain("MEDIA:");
+    expect(label).not.toContain("/home/clawbox/.openclaw/media");
+  });
+
+  it("keeps the label short enough to be useful out loud", () => {
+    const long = "word ".repeat(60);
+    const label = audioLabel(long, "Audio reply");
+    // The prefix plus a budgeted 100 characters and the ellipsis.
+    expect(label.length).toBeLessThan("Audio reply: ".length + 105);
+    expect(label.endsWith("\u2026")).toBe(true);
   });
 });
