@@ -2389,6 +2389,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // because a refusal that has already persisted a credential is not a
     // refusal, it is a half-applied save. Nothing between here and there
     // writes anything (the OAuth handoff file is consumed only on success).
+    // Set when `doctor --fix` was BLOCKED rather than failed: the sign-in is
+    // written and its move into the credential store happens at the next
+    // gateway start. A `{success:true}` with nothing said would leave the owner
+    // wondering why the provider needs a restart before it answers. Declared
+    // here because the block that sets it runs well before the other warnings
+    // are collected.
+    let credentialMigrationWarning: string | undefined;
     const settledSlash = config.defaultModel.indexOf("/");
     const settledProvider = settledSlash > 0 ? config.defaultModel.slice(0, settledSlash) : null;
     const settledModelId = config.defaultModel.slice(settledSlash + 1);
@@ -2564,7 +2571,21 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // step restarts it.
       gateway.state = "stopped-for-doctor";
       try {
-        await runOpenclawDoctorFix();
+        // A doctor BLOCKED by a legacy exec-approvals file did not fail this
+        // migration — it never started one (TASK-741). Rolling the sign-in back
+        // over that answer archived a credential this route had just written
+        // correctly, and told the owner to run the very command that is blocked.
+        // The gateway's own ExecStartPre clears the blocker on the next start
+        // and re-runs this migration (scripts/gateway-pre-start.sh, TASK-737),
+        // so the credential stands and the owner is told it is deferred.
+        if (await runOpenclawDoctorFix() === "blocked-by-legacy-exec-approvals") {
+          console.warn(
+            "[configure] doctor --fix is blocked by a legacy exec-approvals file, so the credential store"
+            + " migration is deferred to the gateway's next start; the sign-in was written and is kept",
+          );
+          credentialMigrationWarning = "Saved. Moving the sign-in into OpenClaw's credential store is waiting on"
+            + " a legacy approvals file; the gateway clears it and finishes the move on its next start.";
+        }
       } catch (doctorErr) {
         const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
         const migratedStore = siblings.some((name) => name.startsWith("auth-profiles.json.migrated-"));
@@ -3321,7 +3342,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, gatewayWarning]
+    const warning = [chatgptOrderWarning, credentialMigrationWarning, unvalidatedPrimaryWarning, gatewayWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({

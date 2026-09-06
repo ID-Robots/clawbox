@@ -3774,6 +3774,10 @@ step_openclaw_install() {
     # (measured against 2026.8.1, 2026-09-06). The gateway's own ExecStartPre
     # clears that and re-runs the migration, so this stays non-fatal — but the
     # install log has to name it rather than imply doctor merely stumbled.
+    # `local` like every other assignment in this function (PIN_FILE, PINNED,
+    # TARGET, CORE_NEEDS_INSTALL): without it the whole doctor transcript leaks
+    # into a global for the rest of the installer run.
+    local _oc_doctor_out
     if ! _oc_doctor_out="$(as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)"; then
       printf '%s\n' "$_oc_doctor_out"
       if printf '%s\n' "$_oc_doctor_out" | grep -q 'Legacy exec approvals exist at'; then

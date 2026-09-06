@@ -439,3 +439,81 @@ d("gateway pre-start: the auth-profile repair meets the same blocker", () => {
     expect(r.stderr).toContain("auth-profile migration failed");
   });
 });
+
+/**
+ * TASK-741 — the three follow-ups from #746's review that live in this block.
+ *
+ * All three are LATENT on the pinned core rather than live, and each is the
+ * kind of latency this repo has been bitten by: a verdict that reads an exit
+ * code and then second-guesses it, a bound whose comment promises a grace the
+ * code does not have, and a destination two writes can share.
+ */
+d("gateway pre-start: the config-repair block's own edges", () => {
+  it("takes exit 0 as the core's acceptance, whatever it printed", () => {
+    // ALIGNED WITH `getOpenclawConfigRefusal` (src/lib/updater.ts), which has
+    // treated exit 0 as acceptance without parsing since TASK-737. Requiring
+    // stdout to parse as JSON on top of the exit code answered `unknown` for a
+    // core that exits 0 with a banner, an empty line or a progress frame — and
+    // `unknown` skips the stamp, so EVERY gateway start of a healthy box would
+    // pay for a `config validate` and print a WARN, for ever.
+    writeFileSync(
+      path.join(binDir, "openclaw"),
+      "#!/usr/bin/env bash\n"
+      + "printf '%s\\n' \"$*\" >> \"$OC_CALLS\"\n"
+      + "if [ \"$1\" = \"config\" ]; then echo 'OpenClaw 2026.8.1 — All your chats, one OpenClaw.'; exit 0; fi\n"
+      + "exit 0\n",
+    );
+    chmodSync(path.join(binDir, "openclaw"), 0o755);
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain("could not ask the installed core");
+    // Accepted means stamped, which is what stops the next boot re-asking.
+    expect(readFileSync(stampPath, "utf-8").trim()).toBe(currentFingerprint());
+    // …and no doctor: there is nothing to repair.
+    expect(calls().some((c) => c.startsWith("doctor"))).toBe(false);
+  });
+
+  it("gives the validator bound a SIGKILL grace, like every other CLI bound here", () => {
+    // The BUDGET comment above the block claims `65 + 180 + 65` on the strength
+    // of a 5 s `-k` grace the two validate bounds did not have. Plain `timeout`
+    // sends SIGTERM only: a validator that ignored it would hold this blocking
+    // ExecStartPre for the unit's entire start budget. The doctor bound stays
+    // SIGTERM-only on purpose — a SIGKILL mid-import is what leaves the
+    // `.doctor-importing` claim file this same block has to clear.
+    const src = block();
+    expect(src).toContain('timeout -k 5 60 "$OPENCLAW_BIN" config validate --json');
+    expect(src).toContain('timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive');
+    expect(src).not.toContain('timeout -k 5 180 "$OPENCLAW_BIN" doctor');
+  });
+
+  it("never overwrites an earlier moved-aside approvals file", () => {
+    // The stamp is second-resolution and `mv` was unguarded, so two boots
+    // inside one second would silently overwrite the first copy. `date` is
+    // stubbed to one fixed answer here so the collision is the case under
+    // test rather than a race the clock usually wins.
+    writeFileSync(
+      path.join(binDir, "date"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' 20260906-181500\n",
+    );
+    chmodSync(path.join(binDir, "date"), 0o755);
+    const approvals = { version: 1, socket: {}, defaults: {}, agents: {} };
+
+    writeFileSync(path.join(stateDir, "exec-approvals.json"), JSON.stringify(approvals));
+    expect(run().status).toBe(0);
+
+    // A second boot in the same second, over a config the core refuses again.
+    rmSync(path.join(stateDir, "migrated"), { force: true });
+    writeFileSync(configPath, JSON.stringify({ agents: { defaults: { memorySearch: {}, x: 1 } } }, null, 2));
+    writeFileSync(path.join(stateDir, "exec-approvals.json"), JSON.stringify(approvals));
+    expect(run().status).toBe(0);
+
+    // BOTH copies are still there. Neither holds a decision of the owner's, so
+    // nothing of his could have been lost — but a move-aside that overwrites is
+    // a write reported as a move, and this file is the only record that the
+    // repair ever fired.
+    expect(approvalsFiles().filter((n) => n.includes(".legacy-"))).toHaveLength(2);
+    expect(existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(false);
+  });
+});

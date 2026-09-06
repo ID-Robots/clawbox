@@ -229,8 +229,11 @@ export CLAWBOX_OPENCLAW_V2
 # already add up to well over half of it — the version probe, two plugin
 # installs, the codex install and enable, the deepseek installs and the
 # auth-profile doctor below. The worst case added here is 65 + 180 + 65 = 310 s
-# (the two validate bounds carry a 5 s `-k` grace each), and only on a box
-# whose config the core actually refuses; an accepted config costs one probe.
+# — the two validate bounds carry a 5 s `-k` grace each, like every other CLI
+# bound in this file, because plain `timeout` sends SIGTERM only and a validator
+# that ignored it would hold this ExecStartPre for the unit's whole start
+# budget — and only on a box whose config the core actually refuses; an
+# accepted config costs one probe.
 # The doctor bound is SIGTERM-only, deliberately: a SIGKILL mid-import is how
 # a half-finished `exec-approvals.json.doctor-importing` claim gets left
 # behind, which blocks every later doctor exactly as the original file does.
@@ -282,13 +285,25 @@ PY
 # Echoes `accepted`, `refused<TAB><issues>` or `unknown<TAB><why>`.
 clawbox_core_config_verdict() {
   local out rc=0
-  out="$(timeout 60 "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
-  # 0 = valid, 1 = the core's verdict. Anything else (124 the bound fired,
-  # 126/127 nothing to run, a crash) is NOT an answer about the config, and
-  # reporting one as a refusal would spend 180 s of doctor on every single
-  # start of a box whose config is perfectly fine.
+  out="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
+  # EXIT 0 IS THE ANSWER, on its own (TASK-741). The core exiting 0 IS "the
+  # gateway will load this", and `getOpenclawConfigRefusal` (src/lib/updater.ts)
+  # has always read it that way — it returns "accepted" without parsing
+  # anything. Requiring stdout to parse as JSON on top of it made a core that
+  # exits 0 with empty, banner-prefixed or non-JSON output answer `unknown`,
+  # which skips the stamp and puts every single gateway start of a healthy box
+  # through a `config validate` and a WARN, for ever. Latent rather than live —
+  # measured on 2026.8.1, a valid config gives 75 bytes of pure JSON — and the
+  # shell parser below is stricter than the TypeScript one, which slices
+  # between the first `{` and the last `}`.
+  #
+  # 1 = the core's verdict, and the only exit whose payload is worth reading.
+  # Anything else (124 the bound fired, 126/127 nothing to run, a crash) is NOT
+  # an answer about the config, and reporting one as a refusal would spend
+  # 180 s of doctor on every single start of a box whose config is fine.
   case "$rc" in
-    0|1) ;;
+    0) printf 'accepted\n'; return 0 ;;
+    1) ;;
     *) printf 'unknown\tthe validator did not answer (exit %s)\n' "$rc"; return 0 ;;
   esac
   CLAWBOX_VERDICT_JSON="$out" python3 <<'PY'
@@ -301,9 +316,8 @@ except Exception:
 if not isinstance(doc, dict) or "valid" not in doc:
     print("unknown\tthe validator's answer carried no verdict")
     sys.exit(0)
-if doc.get("valid") is True:
-    print("accepted")
-    sys.exit(0)
+# Only reached on exit 1, which is the core's refusal — `valid: true` here
+# would be the CLI contradicting its own exit code, and the exit code wins.
 parts = []
 for issue in doc.get("issues") or []:
     if not isinstance(issue, dict):
@@ -360,8 +374,15 @@ then
     clawbox_exec_approvals_hold_a_decision "$_ea_file" || _ea_verdict=$?
     case "$_ea_verdict" in
       0)
-        _ea_moved="$_ea_file.legacy-$(date +%Y%m%d-%H%M%S)"
-        if mv "$_ea_file" "$_ea_moved" 2>/dev/null; then
+        # `-$$` and `mv -n`, because the stamp is only second-resolution: two
+        # moves inside one second would otherwise silently overwrite the first
+        # copy. The pid makes the name unique per boot, `-n` refuses to clobber
+        # even so, and the test is whether the file is GONE rather than what mv
+        # exited with — an `mv -n` that declined is a success code over a move
+        # that did not happen, which is the false-success shape this file is
+        # full of guards against.
+        _ea_moved="$_ea_file.legacy-$(date +%Y%m%d-%H%M%S)-$$"
+        if mv -n "$_ea_file" "$_ea_moved" 2>/dev/null && [ ! -e "$_ea_file" ]; then
           echo "  Moved a legacy exec approvals file aside ($_ea_moved): it holds no approval of yours, and its presence stops openclaw doctor before it migrates anything"
         else
           echo "  WARN: could not move $_ea_file aside; openclaw doctor will refuse to migrate this config while it is there" >&2

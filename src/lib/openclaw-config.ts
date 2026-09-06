@@ -2617,9 +2617,39 @@ export function gatewayIsAbsent(): boolean {
  * install.sh: gateway stopped first (doctor migrates the store the gateway
  * holds open), safe migrations only, and the caller's restart starts it
  * again. On OpenClaw 1 there is nothing to migrate and doctor answers fast.
+ *
+ * ONE FAILURE IS NOT A FAILED MIGRATION, and it is reported rather than thrown
+ * (TASK-741). With a legacy `exec-approvals.json` in the state directory the
+ * core's security gate throws on the file's mere PRESENCE, so `doctor --fix`
+ * exits 1 having migrated NOTHING and its last line asks the operator to run
+ * the command that has just run — measured against 2026.8.1 on 2026-09-06, the
+ * sentence arrives on STDERR:
+ *
+ *     Legacy exec approvals exist at <state>/exec-approvals.json. Run
+ *     `openclaw doctor --fix` … before using exec approvals.
+ *
+ * Presenting that to the caller as a credential-migration failure is what made
+ * `configure/route.ts` roll back a subscription sign-in it had in fact written.
+ * The blocker is cleared by the gateway's own ExecStartPre on the next start
+ * (`scripts/gateway-pre-start.sh`, TASK-737), which then re-runs this exact
+ * migration — so the credential is not lost, it is deferred, and the caller can
+ * say so instead of undoing it.
+ *
+ * Returned rather than thrown as a typed error on purpose: 59 suites replace
+ * this module with a hand-written factory, and a new class to narrow on with
+ * `instanceof` is `undefined` in every one of them that omits it (see
+ * `openclaw-config-mock-completeness.test.ts`). A value a caller compares is
+ * inert under those mocks — an omitted `runOpenclawDoctorFix` answers
+ * `undefined`, which is not this outcome, which is the behaviour they have now.
+ * EVERY OTHER failure still throws, untouched.
  */
-export async function runOpenclawDoctorFix(): Promise<void> {
-  if (gatewayIsAbsent()) return;
+export type OpenclawDoctorFixOutcome = "completed" | "blocked-by-legacy-exec-approvals";
+
+/** The core's own words for the blocker, matched rather than re-derived. */
+const LEGACY_EXEC_APPROVALS_RE = /Legacy exec approvals exist at/i;
+
+export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
+  if (gatewayIsAbsent()) return "completed";
   try {
     await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
       timeout: 30000,
@@ -2627,7 +2657,18 @@ export async function runOpenclawDoctorFix(): Promise<void> {
   } catch {
     /* older sudoers or already stopped — doctor itself reports real trouble */
   }
-  await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], { timeoutMs: 180_000 });
+  try {
+    await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], { timeoutMs: 180_000 });
+  } catch (err) {
+    // `spawnOpenclaw` rejects with `stderr.trim()` when there is any, which is
+    // where the core prints this. A timeout or a spawn error carries neither
+    // the sentence nor a verdict and is rethrown.
+    if (err instanceof Error && LEGACY_EXEC_APPROVALS_RE.test(err.message)) {
+      return "blocked-by-legacy-exec-approvals";
+    }
+    throw err;
+  }
+  return "completed";
 }
 
 /**

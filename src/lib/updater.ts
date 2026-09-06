@@ -1203,6 +1203,35 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
 }
 
 /**
+ * Where this device's OpenClaw tree is, in one place.
+ *
+ * The two-line derivation below appeared three times — in `openclawChildEnv`,
+ * in `runCurrentGatewayPreStart` and in `readOpenclawConfigForRepair` — and
+ * three copies of a rule is two chances for them to disagree about which
+ * config a repair is reasoning over.
+ *
+ * PURE, and it returns the paths only. It deliberately does NOT build an
+ * environment: the three callers set genuinely different ones and one shared
+ * env would be wrong for all of them. `runCurrentGatewayPreStart` spawns a bash
+ * script that reads ClawBox's own names and must pin those; `openclawChildEnv`
+ * feeds the core CLI, which reads only `OPENCLAW_CONFIG_PATH` /
+ * `OPENCLAW_STATE_DIR`; `readOpenclawConfigForRepair` spawns nothing at all and
+ * only wants a path to read.
+ *
+ * `OPENCLAW_HOME` is read here as a FALLBACK and must never be exported to a
+ * child: ClawBox uses that name for the `.openclaw` directory itself, while the
+ * OpenClaw CLI reads it as the ACCOUNT home and builds its tree at
+ * `$OPENCLAW_HOME/.openclaw`. Each caller that spawns something deletes it.
+ */
+function openclawTreePaths(): { home: string; openclawHome: string } {
+  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(home, ".openclaw");
+  return { home, openclawHome };
+}
+
+/**
  * The environment that pins an `openclaw` child to THIS device's real config.
  *
  * Same rule as `runCurrentGatewayPreStart`: the CLI reads `OPENCLAW_HOME` as
@@ -1214,10 +1243,7 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
  * is dead.
  */
 function openclawChildEnv(): NodeJS.ProcessEnv {
-  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
-    || process.env.OPENCLAW_HOME
-    || path.join(home, ".openclaw");
+  const { home, openclawHome } = openclawTreePaths();
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HOME: home,
@@ -1534,10 +1560,7 @@ function pluginPayloadsRepairedByPreStart(preStartOutput: string): Set<string> {
 /** Run the newly checked-out pre-start repair while the gateway is stopped. */
 async function runCurrentGatewayPreStart(): Promise<string> {
   if (!existsSync(CURRENT_GATEWAY_PRE_START)) return "";
-  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
-    || process.env.OPENCLAW_HOME
-    || path.join(home, ".openclaw");
+  const { home, openclawHome } = openclawTreePaths();
   // Never `OPENCLAW_HOME` in a child's environment. ClawBox reads that name as
   // the .openclaw directory; the OpenClaw CLI reads it as the ACCOUNT home and
   // puts its tree at `$OPENCLAW_HOME/.openclaw`. Exported here it made every
@@ -2397,11 +2420,12 @@ async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
  * malformed config must not be what stops a box from coming back.
  */
 async function readOpenclawConfigForRepair(): Promise<Record<string, unknown> | null> {
-  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
-    || process.env.OPENCLAW_HOME
-    || path.join(home, ".openclaw");
-  const configPath = process.env.OPENCLAW_CONFIG || path.join(openclawHome, "openclaw.json");
+  // `OPENCLAW_CONFIG` first, and only here: this caller READS a file and the
+  // other two spawn children that resolve their own path from
+  // `OPENCLAW_CONFIG_PATH`. Sharing one config-path rule would change which
+  // file two of the three address.
+  const configPath = process.env.OPENCLAW_CONFIG
+    || path.join(openclawTreePaths().openclawHome, "openclaw.json");
   try {
     return JSON.parse(await readFile(configPath, "utf-8")) as Record<string, unknown>;
   } catch {
