@@ -204,6 +204,59 @@ describe("/app/settings — Appearance", () => {
     expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
   });
 
+  it("shows the fallback for a selection this browser's uploads cannot answer, and leaves the box's own alone", async () => {
+    // `wp_id` is box-wide, the pictures are this browser's `localStorage`: a
+    // phone that never uploaded anything cannot answer the laptop's
+    // `custom-2`. What the card shows is the fallback; what the box holds is
+    // untouched, because opening a page is not a choice.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ ...SAVED, wp_id: "custom-2" }) };
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+
+    render(<StandaloneAppPage />);
+    // `wp_fit` proves the box's answer LANDED — "clawbox" is also this page's
+    // initial state, so asserting it alone would pass before the fetch.
+    await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(posts.some((body) => "wp_id" in body)).toBe(false);
+  });
+
+  it("does not move the selection when the shortened list cannot be stored", async () => {
+    // Site data blocked, or a locked-down profile. The list is what the next
+    // load paints and `wp_id` is a position into it — moving the id over a
+    // list that never shrank leaves a DIFFERENT picture on screen after a
+    // reload, with nothing said. So the delete does not happen at all.
+    localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]));
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-custom").textContent).toBe("2"));
+
+    fireEvent.click(screen.getByTestId("pick-custom-1"));
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("custom-1");
+
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    try {
+      fireEvent.click(screen.getByTestId("delete-custom-0"));
+    } finally {
+      setItem.mockRestore();
+    }
+
+    expect(screen.getByTestId("ui-custom").textContent).toBe("2");
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("custom-1");
+    expect(JSON.parse(localStorage.getItem("clawbox-custom-wallpapers") || "[]")).toHaveLength(2);
+  });
+
   it("offers the wallpapers this browser already uploaded, and asks the file input for a new one", async () => {
     localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA"]));
     render(<StandaloneAppPage />);

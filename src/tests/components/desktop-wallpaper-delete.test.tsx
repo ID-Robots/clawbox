@@ -176,18 +176,47 @@ describe("deleting a custom wallpaper", () => {
     expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(false);
   });
 
-  it("heals a selection this browser's list can no longer answer", async () => {
-    // What a delete on the OWNER'S LAPTOP leaves on the box's own screen, and
-    // what every box that hit this bug before the fix is still holding: the
-    // box-wide `wp_id` names a slot past the end of this browser's list.
-    window.localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify([WP[0]]));
+  it("never writes this browser's missing pictures back over the box's selection", async () => {
+    // The box's own screen, or the owner's phone: `wp_id` is box-wide (SQLite)
+    // and the pictures are per-browser `localStorage`, so a browser that never
+    // uploaded anything cannot answer ANY `custom-<n>` — including the one the
+    // owner's laptop chose and still resolves perfectly.
+    //
+    // Opening the desktop is not a statement about that selection. The
+    // fallback below is what THIS browser paints; the box keeps what it holds.
+    window.localStorage.removeItem("clawbox-custom-wallpapers");
     savedWallpaperId = "custom-2";
-    render(<ChromeDesktop />);
-    await waitFor(() => expect(screen.getByTestId("desktop-root")).toBeTruthy());
+    await mountDesktop("clawbox-wallpaper");
 
-    // Repaired rather than left dangling — and the repair is persisted, so it
-    // is not re-done on every load and Settings stops claiming "Custom 3".
-    await waitFor(() => expect(lastSavedWallpaperId()).toBe("clawbox"));
-    expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(true);
+    // Well past the 500 ms preference debounce.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(lastSavedWallpaperId()).not.toBe("clawbox");
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
+  });
+
+  it("paints the HERMES art for a selection this browser cannot answer", async () => {
+    // Same browser, Hermes box. The local fallback follows the edition, and it
+    // is still only a local fallback — nothing about it reaches the box.
+    activeHarness = "hermes";
+    window.localStorage.removeItem("clawbox-custom-wallpapers");
+    savedWallpaperId = "custom-2";
+    await mountDesktop("hermes-wallpaper");
+
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(wallpaperUrls().some((u) => u.includes("clawbox-wallpaper"))).toBe(false);
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
+  });
+
+  it("does not offer a phantom slot for a picture this browser does not have", async () => {
+    // Settings used to claim "Custom 3" over a grid of none, with no tile
+    // highlighted. The panel is handed what is ON SCREEN, so the fallback tile
+    // is the selected one and the row names it.
+    window.localStorage.removeItem("clawbox-custom-wallpapers");
+    savedWallpaperId = "custom-2";
+    await mountDesktop("clawbox-wallpaper");
+
+    await openAppearanceSettings();
+    const tile = await screen.findByRole("button", { name: /^ClawBox$/i });
+    expect(tile.getAttribute("aria-pressed")).toBe("true");
   });
 });
