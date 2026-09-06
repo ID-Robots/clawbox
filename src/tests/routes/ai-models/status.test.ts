@@ -301,6 +301,43 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.tierSource).toBe("picker");
     });
 
+    it("says the credential was REJECTED, not merely that the portal was quiet", async () => {
+      // TASK-419. The tier must not move — a Max owner whose token was
+      // revoked still pays for Max, and demoting him here is the bug that
+      // reasoning was written to prevent. What the response owes the customer
+      // is the OTHER half: the portal ANSWERED, and what it said was no.
+      // Beta reported exactly the same payload for "portal said no" and
+      // "portal never answered", so Settings painted a healthy paid badge
+      // over a credential the box had just been told was dead.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response("invalid_token", { status: 403 }));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiTokenRejected).toBe(true);
+      // Unchanged, on purpose.
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.tierSource).toBe("picker");
+    });
+
+    it("does not call an unreachable portal a rejection", async () => {
+      // The false-failure half. A 500, a timeout or a dead uplink says nothing
+      // about the credential, and telling a customer on a train to re-link a
+      // perfectly good device is the same lie in the other direction.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response("upstream is down", { status: 503 }));
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.clawaiTokenRejected).toBe(false);
+      expect(body.clawaiTier).toBe("pro");
+      expect(body.tierSource).toBe("picker");
+    });
+
     it("surfaces the portal's entitlement list beside the badge", async () => {
       // The badge is the device-pair stamp; the list is what the account may
       // actually run. A Max account paired while it was on the Pro plan reads

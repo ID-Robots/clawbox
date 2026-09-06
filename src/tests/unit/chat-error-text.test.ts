@@ -151,3 +151,36 @@ describe("sanitizeErrorMessage — handles added for TASK-440", () => {
     expect(sanitizeErrorMessage("The model is busy, try again")).toBe("The model is busy, try again");
   });
 });
+
+describe("describeChatFailure — a refused ClawBox AI credential", () => {
+  // TASK-419. The whole customer-visible failure in one line: the box showed a
+  // healthy paid badge and then answered a message with
+  //   "Error: HTTP 403: Invalid token"
+  //   "Error: Agent failed before reply: HTTP 403: Invalid token. Logs: openclaw logs --follow"
+  // Nothing there is wrong, and nothing there is usable. The remedy is a
+  // screen this customer already has open.
+  it("names the reconnect screen instead of relaying the status line", () => {
+    for (const raw of [
+      "HTTP 403: Invalid token",
+      "Agent failed before reply: HTTP 403: Invalid token",
+      "HTTP 401: missing_token",
+      "401 Unauthorized",
+    ]) {
+      const text = describeChatFailure(raw);
+      expect(text).toMatch(/Settings/);
+      expect(text).not.toContain("403");
+      expect(text).not.toContain("401");
+      expect(text).not.toMatch(/openclaw/i);
+    }
+  });
+
+  it("leaves an unrelated failure alone", () => {
+    // Narrow on purpose: "limit" and "token" are ordinary words in this
+    // codebase's error strings, and a greedy match would swallow a message
+    // whose remedy is different.
+    expect(describeChatFailure("Request exceeds the size limit")).toBe(
+      "Error: Request exceeds the size limit",
+    );
+    expect(describeChatFailure("context window exceeded: 403000 tokens")).not.toMatch(/Settings/);
+  });
+});
