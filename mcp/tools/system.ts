@@ -743,7 +743,20 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       const body = await apiPost<{ ok?: boolean; exitCode?: number }>(
         "/setup-api/clawkeep/backup",
         { ...(label ? { label } : {}) },
-        { timeoutMs: 180_000, rules: BACKUP_RULES },
+        {
+          timeoutMs: 180_000,
+          rules: BACKUP_RULES,
+          // A 12 GB backup runs for well over an hour (TASK-675), so this
+          // abort is the NORMAL outcome for the box this tool matters most
+          // on — and the generic "Retry once" would start a second full
+          // archive-and-upload beside the first. `clawkeepd` has no
+          // single-instance guard of any kind, so nothing downstream would
+          // stop it. Says what the tool's own description says.
+          onTimeout: {
+            message: "The backup is taking longer than this call waits. It is still running.",
+            next: "Do not start another one. Call backup_status to see how it is getting on, and tell the user.",
+          },
+        },
       );
       if (body.ok !== true) {
         throw new ToolError(

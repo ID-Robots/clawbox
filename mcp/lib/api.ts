@@ -65,6 +65,16 @@ export interface ApiOptions {
   timeoutMs?: number;
   /** Per-route failure → instruction mappings. */
   rules?: ErrorRule[];
+  /**
+   * What to tell the model when the call ABORTS on `timeoutMs`.
+   *
+   * `rules` cannot cover this: `matchRule` is only ever consulted against an
+   * HTTP response, and a client-side abort never produces one. The generic
+   * answer is "Retry once", which is right for a read and actively harmful for
+   * a call that started something long — the work is still going, and a retry
+   * starts a second one.
+   */
+  onTimeout?: { message: string; next: string };
 }
 
 function buildUrl(path: string, query?: ApiOptions["query"]): string {
@@ -80,7 +90,7 @@ function buildUrl(path: string, query?: ApiOptions["query"]): string {
 
 /** Call /setup-api/*. Throws a ToolError the register() wrapper can render. */
 export async function api<T = unknown>(path: string, options: ApiOptions = {}): Promise<T> {
-  const { method = "GET", body, query, timeoutMs = DEFAULT_TIMEOUT_MS, rules } = options;
+  const { method = "GET", body, query, timeoutMs = DEFAULT_TIMEOUT_MS, rules, onTimeout } = options;
   const headers: Record<string, string> = { accept: "application/json" };
   const auth = authHeader();
   if (auth) headers.authorization = auth;
@@ -102,8 +112,8 @@ export async function api<T = unknown>(path: string, options: ApiOptions = {}): 
     if (err instanceof Error && /abort|timeout/i.test(err.message)) {
       throw new ToolError(
         "TIMEOUT",
-        "The ClawBox service did not answer in time.",
-        "Retry once. If it times out again, call clawbox_health and tell the user.",
+        onTimeout?.message ?? "The ClawBox service did not answer in time.",
+        onTimeout?.next ?? "Retry once. If it times out again, call clawbox_health and tell the user.",
       );
     }
     throw new ToolError(
