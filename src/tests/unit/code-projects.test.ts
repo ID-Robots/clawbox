@@ -550,3 +550,85 @@ describe("code-projects", () => {
     });
   });
 });
+
+/**
+ * TASK-742 — the code-project store's containment check, split the way the
+ * Files API's was, and the equivalence that had to hold while it changed.
+ *
+ * `safePath()` here spelled two rules as one condition
+ * (`!resolved.startsWith(dir + path.sep) && resolved !== dir`), which leaves
+ * the code below reachable through the second term without the prefix test
+ * having decided anything — so every `code_file_*` sink downstream consumed a
+ * path the check did not govern (`js/path-injection` #529 at
+ * `fs.rm(absPath, { recursive: true })`, and its siblings on the same helper).
+ *
+ * The Files API's copy gets a route-driven probe of a few thousand paths; this
+ * one is not exported, so the probe drives the public door instead — `readFile`
+ * refuses with `Path traversal denied` or reaches the filesystem — and compares
+ * that verdict with beta's predicate spelled out below. The accepted set must
+ * not move by one string: a project file that stops resolving is a customer's
+ * work the agent can no longer read.
+ */
+describe("the containment check accepts exactly what it accepted before", () => {
+  const PROJECT = "probe";
+  const DIR = path.join("/tmp/test-data", "code-projects", PROJECT);
+
+  /** Beta's predicate, verbatim apart from the root it resolves against. */
+  function betaRefuses(filePath: string): boolean {
+    const resolved = path.resolve(DIR, filePath);
+    return !resolved.startsWith(DIR + path.sep) && resolved !== DIR;
+  }
+
+  /** What the shipped helper decides, read through the door every tool uses. */
+  async function headRefuses(filePath: string): Promise<boolean> {
+    try {
+      await readFile(PROJECT, filePath);
+      return false;
+    } catch (err) {
+      // Only the containment verdict counts here — ENOENT and "is a directory"
+      // mean the path was ACCEPTED and the filesystem then had its own say.
+      return err instanceof ValidationError && /Path traversal denied/.test((err as Error).message);
+    }
+  }
+
+  it("agrees with beta on every shape a path can take", async () => {
+    mockReadFile.mockResolvedValue("content");
+    const NL = String.fromCharCode(10);
+    const BS = String.fromCharCode(92);
+    const pieces = ["..", ".", "a", "bb", "", "/", "//", BS, " ", NL, ".hidden", "..hidden", "~"];
+    const probes = new Set<string>([
+      "..", "../", "../..", "../../etc/passwd", "./..", "a/../..", "a/b/../../..",
+      ".", "./", "/", "//", "/etc/passwd", "a//b", "a/./b", "a/b/",
+      DIR, `${DIR}/`, `${DIR}/index.html`, `${DIR}x`, `${DIR}x/inside`,
+      "..hidden", "..hidden/child", "...", ".hidden", "project.json",
+      `a${NL}`, "a ", " a", " ", "a b", "Документы/файл.txt", "a".repeat(400),
+    ]);
+    let seed = 0x5eed743;
+    const next = () => {
+      seed ^= seed << 13; seed >>>= 0;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5; seed >>>= 0;
+      return seed;
+    };
+    for (let i = 0; i < 600; i += 1) {
+      let probe = "";
+      for (let p = 0, parts = 1 + (next() % 4); p < parts; p += 1) {
+        probe += pieces[next() % pieces.length];
+        if (next() % 2 === 0) probe += "/";
+      }
+      probes.add(probe);
+    }
+
+    const divergences: Array<{ probe: string; beta: boolean; head: boolean }> = [];
+    for (const probe of probes) {
+      const head = await headRefuses(probe);
+      const beta = betaRefuses(probe);
+      if (head !== beta) divergences.push({ probe, beta, head });
+    }
+    expect(divergences).toEqual([]);
+    // Not vacuous: the corpus has to contain both verdicts, or an
+    // always-refusing head would pass against an always-refusing reference.
+    expect([...probes].some((p) => betaRefuses(p))).toBe(true);
+    expect([...probes].some((p) => !betaRefuses(p))).toBe(true);
+  });
+});

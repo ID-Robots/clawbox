@@ -1,5 +1,6 @@
 import { getModelOptions } from "@/lib/hermes-model-options";
 import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
+import { logSafe } from "@/lib/log-safe";
 
 /**
  * Ask the agent to re-advertise WHICH PROVIDERS it may switch this device to,
@@ -140,7 +141,11 @@ function describeMove(before: readonly string[], after: readonly string[]): stri
   const parts: string[] = [];
   if (gained.length > 0) parts.push(`gained ${gained.join(", ")}`);
   if (lost.length > 0) parts.push(`lost ${lost.join(", ")}`);
-  return `the providers this box can be switched to ${parts.join(" and ")}`;
+  // Bounded HERE, not at one of the three lines that write it. The list's
+  // length is the catalogue's, not this module's, and `reportMcpReloadRefused`
+  // bounding its own arm left the two success lines — the ones a healthy box
+  // actually writes — carrying the whole of it.
+  return logSafe(`the providers this box can be switched to ${parts.join(" and ")}`);
 }
 
 /**
