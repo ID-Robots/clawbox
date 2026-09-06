@@ -57,6 +57,12 @@ vi.mock("fs/promises", () => ({
     mkdir: vi.fn(),
     rm: vi.fn(),
     unlink: vi.fn(),
+    // Present, and RESOLVING by default, so a ClawBox AI save exercises the
+    // ordinary box — the one whose deepseek provider plugin is already
+    // installed. Omit it and every such case throws at `fs.access`, falls into
+    // the missing-plugin branch and spends the save installing a plugin, which
+    // is not the path these cases are about.
+    access: vi.fn(),
   },
 }));
 
@@ -254,6 +260,7 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.rm.mockResolvedValue(undefined);
     mockFs.unlink.mockResolvedValue(undefined);
+    mockFs.access.mockResolvedValue(undefined);
     mockReadConfig.mockResolvedValue({});
     mockReadConfigStrict.mockResolvedValue({});
     vi.mocked(inferConfiguredLocalModel).mockReturnValue(null);
