@@ -109,12 +109,40 @@ export const dynamic = "force-dynamic";
 
 const BASE_DIR = filesBrowseRoot();
 
+/**
+ * The absolute path one request may name, or null.
+ *
+ * SAME RULE, ONE TERM AT A TIME. The two cases used to share a condition —
+ * `resolved !== base && !resolved.startsWith(base + path.sep)` — and that is
+ * what kept `js/path-injection` open on every fs call downstream of this
+ * helper (alerts #523-#528, and the dismissed #247/#248 before them). A
+ * containment check only vouches for the path when reaching the code after it
+ * REQUIRED the check to pass: with the two terms `&&`-ed, the fall-through is
+ * reachable through `resolved === base` without the prefix test having decided
+ * anything, so the check governs nothing an analyser — or a reader — can rely
+ * on. Split, each line is the only way past itself.
+ *
+ * The base case answers with the ROOT'S OWN string. It is the same value
+ * `resolved` holds there (they are equal, which is why that branch is taken),
+ * but it is the constant this module built rather than the request's spelling
+ * of it, so nothing of the request survives into the `""` answer.
+ *
+ * The accepted set is unchanged, deliberately and exactly: an absolute path
+ * that already lies under the root is still accepted (the Coding Agent's "Open
+ * in Files" sends one), a name beginning `..` — `~/..hidden` — is still a
+ * legitimate entry rather than a traversal, and everything that resolved
+ * outside the root is still refused. `isInside()` would have been the shorter
+ * spelling and is NOT equivalent: its `rel.startsWith("..")` refuses
+ * `~/..hidden`, and the Files app has always listed it.
+ */
 function safePath(rel: string): string | null {
   const base = path.resolve(BASE_DIR);
   const resolved = path.resolve(base, rel);
-  // Require either an exact base match or a path inside base (with separator),
-  // otherwise sibling dirs like "/home/clawboxmalicious" would slip through.
-  if (resolved !== base && !resolved.startsWith(base + path.sep)) return null;
+  // The browse root itself.
+  if (resolved === base) return isProtectedFilePath(base) ? null : base;
+  // Anything else must be INSIDE it (with the separator, otherwise sibling
+  // dirs like "/home/clawboxmalicious" would slip through).
+  if (!resolved.startsWith(base + path.sep)) return null;
   // The browse root is $HOME, so secret stores (.ssh, .openclaw, the data/
   // tokens) sit inside the sandbox — deny them at the single resolve chokepoint
   // that every read/write/rename/download path funnels through.

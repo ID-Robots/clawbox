@@ -1,5 +1,6 @@
 import { getActiveHarness } from "@/lib/harness";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
+import { logSafe } from "@/lib/log-safe";
 
 /**
  * Ask Hermes to rebuild its MCP tool list, for every caller that needs to.
@@ -99,13 +100,21 @@ export async function reloadMcpServers(): Promise<boolean> {
  *              became available"
  */
 export async function reportMcpReloadRefused(tag: string, what: string): Promise<void> {
+  // BOUND THE RECORD, whoever the caller is. Six families share these two
+  // lines and one of them (`provider-mcp-refresh`) builds `what` by joining a
+  // provider list whose length nothing here decides, so one value stays one
+  // line and one caller does not decide how much gets written. It is not a
+  // barrier CodeQL recognises and is not offered as one — the values that
+  // reach the journal are rebuilt at their own source (see
+  // `harness-mcp-refresh.ts`); this is the record's own rule.
+  const line = `[${logSafe(tag, 60)}] ${logSafe(what)}`;
   const harness = await getActiveHarness().catch(() => null);
   if (harness !== null && harness !== "hermes") {
     console.log(
-      `[${tag}] ${what}; this edition has no dashboard to ask — the tool list re-probes `
+      `${line}; this edition has no dashboard to ask — the tool list re-probes `
         + "when the MCP server is next spawned",
     );
     return;
   }
-  console.error(`[${tag}] ${what}, but the agent would not reload its MCP servers`);
+  console.error(`${line}, but the agent would not reload its MCP servers`);
 }

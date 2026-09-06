@@ -1,6 +1,23 @@
 import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
 /**
+ * One harness name, in a word this module spells itself.
+ *
+ * Both arguments are typed `string` and both reach here from a request body,
+ * so the default arm is not decoration: a caller that hands this a value the
+ * device does not run must not have it echoed into the journal. It is
+ * unreachable through `/setup-api/harness/select`, which admits the two names
+ * and nothing else.
+ */
+function harnessName(value: string): string {
+  switch (value) {
+    case "openclaw": return "openclaw";
+    case "hermes": return "hermes";
+    default: return "an unrecognised harness";
+  }
+}
+
+/**
  * Ask the agent to rebuild its tool list when the ACTIVE HARNESS moved under it.
  *
  * WHY THIS EXISTS — the fifth of five, and the biggest of them. The ClawBox MCP
@@ -70,7 +87,16 @@ export async function refreshHarnessToolsIfSwitched(
   // another request may have moved in between.
   if (before === after) return false;
 
-  const moved = `the active harness moved from ${before} to ${after}`;
+  // The LINE is spelled from this module's own literals; the COMPARISON above
+  // keeps the raw values. Both halves matter: `before` and `after` reach here
+  // from the body of `POST /setup-api/harness/select`, so the journal line
+  // built from them is `js/log-injection` (#516-#518, in all three places it
+  // is written) — and `isHarness()` narrowing the body's field is exactly the
+  // `.test()`-shaped guard that leaves the caller's string in play, the same
+  // thing #464 says about `ACTIONS.find`. Rebuilding before the comparison
+  // would be the worse bug: two unknown-but-different values would collapse
+  // onto one word and a real move would report as a re-select.
+  const moved = `the active harness moved from ${harnessName(before)} to ${harnessName(after)}`;
   // `.catch` even though `reloadMcpServers` documents that it never throws: the
   // promise it makes is to the OWNER'S SWITCH, which is already persisted, and
   // it must not depend on a neighbouring module keeping its own.

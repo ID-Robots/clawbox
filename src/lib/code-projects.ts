@@ -116,10 +116,23 @@ function assertProjectName(name: unknown): string {
  * one root in this module that still joined the caller's string was the one
  * every `code_file_*` write and delete resolves against.
  */
+/**
+ * The absolute path inside one project a caller may name.
+ *
+ * ONE TERM AT A TIME, for the reason `src/app/setup-api/files/route.ts` states
+ * over its own copy of this shape: `!resolved.startsWith(dir + path.sep) &&
+ * resolved !== dir` leaves the code below reachable through the second term
+ * without the prefix test having decided anything, so the containment check
+ * governs nothing that follows — which is why every fs call downstream of this
+ * helper stayed on the `js/path-injection` list (alert #529 and its siblings).
+ * The project root answers with `projectDir`'s own string, which is the value
+ * `resolved` holds in that branch; the accepted set does not move.
+ */
 function safePath(projectId: string, filePath: string): string {
   const dir = projectDir(projectId);
   const resolved = path.resolve(dir, filePath);
-  if (!resolved.startsWith(dir + path.sep) && resolved !== dir) {
+  if (resolved === dir) return dir;
+  if (!resolved.startsWith(dir + path.sep)) {
     throw new ValidationError("Path traversal denied");
   }
   return resolved;

@@ -45,6 +45,7 @@ import { wireLocalVoice } from "@/lib/voice-local-wiring";
 import { getVoiceAutoReply, setVoiceAutoReply, ttsAutoModeFor } from "@/lib/voice-reply";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
+import { logSafe } from "@/lib/log-safe";
 
 /**
  * GET  /setup-api/tts            → who speaks for this box
@@ -73,6 +74,13 @@ const NO_STORE = { "Cache-Control": "no-store" };
  * (TASK-723). It does not recognise `logSafe` as a barrier (the note in
  * ai-models/configure/route.ts says so); a value that came out of a literal
  * array is not the request's string at all.
+ *
+ * THAT HALF WORKED, and it is worth recording because the alert that stayed
+ * open on beta (#464) was read as evidence that it had not. Measured against
+ * the query itself (TASK-742): the reported flow ends at the `err` argument of
+ * the same `console.warn`, never at `action`, so this selection is a barrier
+ * that query accepts and the failure line's other half was the one carrying
+ * the body. See the comment at that line.
  */
 const ACTIONS = ["select", "voice", "language", "autoReply"] as const;
 
@@ -505,7 +513,26 @@ export async function POST(req: Request) {
     if (action === "autoReply") return await handleAutoReply(enabled);
     return await handleSelect(choice as VoiceChoice);
   } catch (err) {
-    console.warn(`[setup-api/tts] ${action} failed:`, err);
+    // THE ERROR, NOT THE ACTION, is what CodeQL reported here (#464), and the
+    // note above `ACTIONS` was answering the wrong half: `action` never
+    // appeared in the flow — the array selection is a barrier that query does
+    // accept. The path it does report is
+    // `req.json()` -> `body.voice` -> `handleVoice` ->
+    // `runOpenclawConfigSet([…, voice])` -> the CLI's own failure ->
+    // `openclaw-config.ts`'s wrapper -> this `err`, so the value written to
+    // the journal is the openclaw CLI's stderr with the request's own string
+    // inside it, at whatever length and with whatever newlines it carries.
+    //
+    // `logSafe` bounds the record (one value, one line, capped) and
+    // `JSON.stringify` is what the query recognises as a barrier —
+    // `ai-models/configure/route.ts` reaches for the same pair at its own two
+    // flagged lines. The STACK goes with this, deliberately: what is worth
+    // reading here is which action failed and what the harness said, and the
+    // frames are of this route's own `await`s.
+    console.warn(
+      `[setup-api/tts] ${action} failed:`,
+      JSON.stringify(logSafe(err instanceof Error ? err.message : String(err))),
+    );
     // A harness that refused the write is a 409 the panel can explain, not a
     // 500: the box is reachable and said no. Anything else really is a fault.
     if (err instanceof HermesTtsWriteError) {
