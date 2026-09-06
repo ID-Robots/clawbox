@@ -28,6 +28,7 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { forgetProviderVerified } from "@/lib/provider-verified";
+import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 
 // Applying ClawBox AI to a HERMES device, in one place.
 //
@@ -130,6 +131,11 @@ export async function applyClawaiToHermes(
   // token on disk beside a mark asserting the old one worked. A mark lost to a
   // failed apply is always safe. See src/lib/provider-verified.ts.
   await forgetProviderVerified(CLAWAI_PROVIDER);
+  // And the other mark ABOUT this credential, for the same reason and at the
+  // same moment: a refusal the proxy gave the OLD token says nothing about the
+  // new one, and leaving it would make the picture button and the microphone
+  // stay away from a device that was just re-linked to fix exactly that.
+  forgetClawaiCredentialRefusal();
 
   // Read BEFORE anything is written, because the refresh at the bottom needs to
   // know whether this call is what turned drawing on. `hermesConfigGet` is keyed

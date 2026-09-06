@@ -80,6 +80,7 @@ import {
   openaiAuthOrder,
 } from "@/lib/chatgpt-subscription";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
+import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 import {
   isValidModelId,
   GOOGLE_MODELS,
@@ -2042,7 +2043,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         console.warn("[configure] ClawBox AI portal tier probe failed:", err);
       }
     }
-    const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
+    // The credential is about to be rewritten, so any memory that the PROXY
+  // refused the previous one is now about a token this box no longer holds.
+  // Dropped here — before the writes, like `forgetProviderVerified` on the
+  // Hermes side — so "re-link the device", which is what every refusal tells
+  // the customer to do, takes effect on the very next call rather than after a
+  // timer. See src/lib/harness/credentials.ts.
+  if (isClawAI) forgetClawaiCredentialRefusal();
+  const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
       ? (portalConfirmedTier
           ?? requestedClawboxAiTier
           ?? normalizeClawboxAiTier(configStore[CLAWBOX_AI_TIER_CONFIG_KEY])

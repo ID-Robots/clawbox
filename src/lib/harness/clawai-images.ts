@@ -217,9 +217,8 @@ export async function clawaiImageRouteReachable(fetchImpl: FetchLike = fetch): P
   // Ahead of the probe cache, not behind it: a 403 that lands a second after a
   // successful probe would otherwise keep the button for the ten minutes that
   // answer is good for, which is the whole window a customer spends pressing
-  // it.
-  const token = await resolveClawaiToken();
-  if (token && clawaiCredentialRefused(token) !== null) return false;
+  // it. It costs nothing — no request, and no credential read.
+  if (clawaiCredentialRefused() !== null) return false;
   const now = Date.now();
   if (probeCache && now < probeCache.expiresAt) return probeCache.promise;
   // Seeded with the SHORT ttl so concurrent callers during the probe share one
@@ -314,7 +313,7 @@ export async function generateClawaiImageBytes(
     );
   }
 
-  const refused = clawaiCredentialRefused(token);
+  const refused = clawaiCredentialRefused();
   if (refused !== null) {
     // Refused WITHOUT asking again. The customer is still told, in the same
     // words and with the same status as the request that established this, so
@@ -381,7 +380,7 @@ export async function generateClawaiImageBytes(
     // can come from an edge rule, a rate-limit page, an interception proxy or
     // a plan gate, and remembering one of those would hide the button and tell
     // a customer with a perfectly good credential to re-pair the device.
-    if (await proxyRefusedTheCredential(res)) noteClawaiCredentialRefused(token, res.status);
+    if (await proxyRefusedTheCredential(res)) noteClawaiCredentialRefused(res.status);
     // The STATUS decides what is SAID, never the body. An upstream error body is allowed to
     // quote the request that caused it, and this request carried a bearer
     // token — the same reason the transcription route relays a status and

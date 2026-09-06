@@ -198,34 +198,33 @@ describe("a credential the ClawBox AI proxy has refused", () => {
     return mod;
   }
 
-  it("remembers by credential, so a re-link is believed at once", async () => {
+  it("remembers the status, so the next caller says the same thing", async () => {
     const { clawaiCredentialRefused, noteClawaiCredentialRefused } = await memo();
-    noteClawaiCredentialRefused(OPENCLAW_TOKEN, 403);
-    expect(clawaiCredentialRefused(OPENCLAW_TOKEN)).toBe(403);
-    // A different credential is a different question, and it has not been
-    // asked. This is what makes "re-link the device" an instruction that works
-    // rather than one the box then ignores for a quarter of an hour.
-    expect(clawaiCredentialRefused(HERMES_TOKEN)).toBeNull();
+    expect(clawaiCredentialRefused()).toBeNull();
+    noteClawaiCredentialRefused(403);
+    expect(clawaiCredentialRefused()).toBe(403);
   });
 
-  it("holds more than one, so two stores in alternation cannot disable it", async () => {
-    // `resolveClawaiToken` falls through to the Hermes store whenever
-    // `openclaw.json` cannot be read — a permission error, or a file caught
-    // half-written by a concurrent `openclaw config set` — so a box whose two
-    // stores hold different strings flips per read. A single slot would be
-    // overwritten on every flip and the box would be back to asking forever.
-    const { clawaiCredentialRefused, noteClawaiCredentialRefused } = await memo();
-    noteClawaiCredentialRefused(OPENCLAW_TOKEN, 403);
-    noteClawaiCredentialRefused(HERMES_TOKEN, 401);
-    expect(clawaiCredentialRefused(OPENCLAW_TOKEN)).toBe(403);
-    expect(clawaiCredentialRefused(HERMES_TOKEN)).toBe(401);
+  it("is dropped the moment the credential is rewritten", async () => {
+    // What makes "re-link the device" — the instruction every refusal prints —
+    // an instruction that works. It is a call, not a derived key: nothing about
+    // the token is kept, so nothing has to be compared against it.
+    const { clawaiCredentialRefused, noteClawaiCredentialRefused, forgetClawaiCredentialRefusal } = await memo();
+    noteClawaiCredentialRefused(401);
+    expect(clawaiCredentialRefused()).toBe(401);
+    forgetClawaiCredentialRefusal();
+    expect(clawaiCredentialRefused()).toBeNull();
   });
 
-  it("never keeps the credential itself", async () => {
-    // The value is only ever compared, and a bare secret in module state is one
-    // stack trace away from a log line.
+  it("keeps nothing derived from the credential", async () => {
+    // An earlier draft stored a SHA-256 of the token as a comparison key, and
+    // CodeQL was right to read a credential reaching a bare digest as a
+    // password hashed without a KDF. The answer is not a stronger hash on a
+    // polled route: it is deriving nothing from the secret at all.
     const mod = await memo();
-    mod.noteClawaiCredentialRefused(OPENCLAW_TOKEN, 403);
-    expect(JSON.stringify(mod)).not.toContain(OPENCLAW_TOKEN);
+    mod.noteClawaiCredentialRefused(403);
+    const state = JSON.stringify(mod);
+    expect(state).not.toContain(OPENCLAW_TOKEN);
+    expect(state).not.toContain(HERMES_TOKEN);
   });
 });

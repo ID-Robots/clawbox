@@ -390,16 +390,18 @@ describe("generateClawaiImage", () => {
   });
 
   it("asks again the moment the device is re-linked", async () => {
-    // The other half, and the reason this is a memory of ONE credential rather
-    // than a flag on the box: re-linking is the fix the error tells the
-    // customer to apply, so it has to work without a restart and without
-    // waiting out any timer.
+    // The other half, and the reason the memo has a way to be cleared at all:
+    // re-linking is the fix the error message tells the customer to apply, so
+    // it has to work without a restart and without waiting out any timer. The
+    // writers call `forgetClawaiCredentialRefusal` — the same shape, and the
+    // same call sites, as `forgetProviderVerified`.
     const refuse = vi.fn(async () => jsonResponse({ error: { code: "invalid_token" } }, 403));
     await expect(generateClawaiImage("x", { fetchImpl: refuse })).rejects.toMatchObject({ status: 503 });
     await expect(generateClawaiImage("x", { fetchImpl: refuse })).rejects.toMatchObject({ status: 503 });
     expect(refuse).toHaveBeenCalledTimes(1);
 
     linkDevice("claw_freshtoken000000000000000000");
+    (await import("@/lib/harness/credentials")).forgetClawaiCredentialRefusal();
     const accept = vi.fn(async () => jsonResponse(imageResponse()));
     const result = await generateClawaiImage("x", { fetchImpl: accept });
     expect(accept).toHaveBeenCalledTimes(1);
@@ -421,6 +423,7 @@ describe("generateClawaiImage", () => {
 
     // And it comes back with a working credential, without a restart.
     linkDevice("claw_freshtoken000000000000000000");
+    (await import("@/lib/harness/credentials")).forgetClawaiCredentialRefusal();
     await expect(clawaiImageRouteReachable(probe)).resolves.toBe(true);
   });
 
