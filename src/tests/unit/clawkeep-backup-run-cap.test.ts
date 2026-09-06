@@ -46,11 +46,14 @@ async function declaredDaemonTimeoutMs(): Promise<number> {
 }
 
 describe("the cap a ClawKeep backup run is given", () => {
-  it("is not stricter than the one ClawKeep's own service unit declares", async () => {
-    // The bridge spawns the very binary this unit was written for. Being
-    // stricter than it means the box kills runs the daemon considers normal —
-    // and it is the box, not the daemon, the owner hears from.
-    expect(BACKUP_RUN_CAP_MS).toBeGreaterThanOrEqual(await declaredDaemonTimeoutMs());
+  it("is the one ClawKeep's own service unit declares, to the millisecond", async () => {
+    // Equality rather than "no stricter", because these two describe the SAME
+    // thing — the bound on one whole ClawKeep run — and the argument this
+    // branch makes throughout is that one fact may not be two numbers. It is
+    // also the only form that catches the drift in both directions: a
+    // `TimeoutStartSec` LOWERED to 3h passes a `>=` here while the daemon
+    // kills a four-hour backup the bridge was still waiting on.
+    expect(BACKUP_RUN_CAP_MS).toBe(await declaredDaemonTimeoutMs());
   });
 
   it("outlasts the 12 GB backup this task exists to make work", () => {
@@ -70,6 +73,11 @@ describe("the cap a ClawKeep backup run is given", () => {
     expect(declared, "limits.py must declare SUBPROCESS_TIMEOUT_S").not.toBeNull();
     const seconds = declared![1].split("*").reduce((a, b) => a * Number(b.trim()), 1);
 
+    // "No tighter", not equality, and the difference from the run cap above is
+    // deliberate: these bound a STEP inside the run, and the rule is that no
+    // step may be given less than the run itself. A step allowed more is
+    // harmless — the run cap ends it first — so pinning equality here would
+    // fail a legitimate change for no defect.
     expect(seconds * 1000).toBeGreaterThanOrEqual(BACKUP_RUN_CAP_MS);
     expect(seconds * 1000).toBeGreaterThanOrEqual(RESTORE_RUN_CAP_MS);
 

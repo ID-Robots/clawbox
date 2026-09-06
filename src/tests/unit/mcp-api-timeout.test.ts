@@ -88,9 +88,13 @@ describe("backup_now's own advice", () => {
       .then((fs) => fs.readFile("mcp/tools/system.ts", "utf8"));
     const at = src.indexOf("onTimeout: {");
     expect(at, "backup_now must pass onTimeout").toBeGreaterThan(-1);
-    const block = src.slice(at, at + 400);
-    expect(block).toMatch(/backup_list/);
-    expect(block).not.toMatch(/backup_status/);
-    expect(block).toMatch(/[Dd]o not start another one/);
+    // The `next:` line of that block and nothing else — a byte window wide
+    // enough to hold the comment also swallows the `ENDPOINT_DOWN` handler
+    // below, which names `backup_status` for its own good reasons.
+    const next = /\bnext: "([^"]+)"/.exec(src.slice(at));
+    expect(next, "onTimeout must carry a next").not.toBeNull();
+    expect(next![1]).toMatch(/backup_list/);
+    expect(next![1]).not.toMatch(/backup_status/);
+    expect(next![1]).toMatch(/[Dd]o not start another one/);
   });
 });
