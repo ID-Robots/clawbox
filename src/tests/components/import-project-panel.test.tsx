@@ -3,7 +3,7 @@
  * (with the ClawBox apps marked), and a folder on the box.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import ImportProjectPanel from "@/components/ImportProjectPanel";
 
@@ -122,6 +122,37 @@ describe("ImportProjectPanel", () => {
     expect((await screen.findByTestId("coding-agent-import-error")).textContent).toContain("absolute path");
     fireEvent.click(screen.getByTestId("coding-agent-import-tab-github"));
     expect(screen.queryByTestId("coding-agent-import-error")).toBeNull();
+  });
+
+  // An import outlives the half that started it. The folder refusal used to
+  // land wherever the owner happened to be standing, so "Give the folder as an
+  // absolute path" was drawn over the repository list, naming nothing there.
+  it("keeps a folder refusal that lands after the switch out of the GitHub tab", async () => {
+    let refuse: (() => void) | null = null;
+    const late = new Promise<Response>((resolve) => {
+      refuse = () => resolve(json({ error: "Give the folder as an absolute path.", kind: "bad_path" }, 400));
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/github-repos")) return json({ login: "yalexx", repos: REPOS, truncated: false });
+      if (url.startsWith("/setup-api/coding-agent/projects/import")) return late;
+      return json({ error: "unexpected" }, 500);
+    }));
+
+    render(<ImportProjectPanel onImported={() => {}} onClose={() => {}} initialTab="folder" />);
+    fireEvent.change(screen.getByTestId("coding-agent-import-path"), { target: { value: "relative/path" } });
+    fireEvent.submit(screen.getByTestId("coding-agent-import-folder"));
+
+    // Away to the other half while the request is still out.
+    fireEvent.click(screen.getByTestId("coding-agent-import-tab-github"));
+    await screen.findAllByTestId("coding-agent-import-repo");
+
+    // Let the refusal land — the panel is one state write away from drawing it.
+    refuse!();
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(screen.queryByTestId("coding-agent-import-error")).toBeNull();
+    expect(screen.getAllByTestId("coding-agent-import-repo")).toHaveLength(2);
   });
 
   it("says in words when no account is connected, with the way to Settings", async () => {

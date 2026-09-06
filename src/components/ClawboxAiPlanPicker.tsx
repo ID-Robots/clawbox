@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
-import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import {
   CLAWAI_TIER_INFO,
   CLAWAI_TIER_ORDER,
@@ -28,16 +28,15 @@ export default function ClawboxAiPlanPicker({
   onTierChange,
   disabled,
 }: ClawboxAiPlanPickerProps) {
-  const { t } = useT();
   // Every word on this card used to be an English literal, so a German or
   // Japanese box read its plan, its price period and its six feature bullets
   // in English. English is the floor rather than the value: `t()` answers with
   // the raw key when a locale pack has not reached it, and "ai.planNameMax" on
-  // the price line would be worse than the sentence it replaced.
-  const tr = useCallback((key: string, english: string) => {
-    const value = t(key);
-    return value === key ? english : value;
-  }, [t]);
+  // the price line would be worse than the sentence it replaced. The shared
+  // hook, not a copy of it — i18n-floor.ts also fills the `{tier}` slot below,
+  // and a private copy that only looked keys up is why that was chained onto
+  // a `.replace()` here.
+  const tr = useTr();
   const info = CLAWAI_TIER_INFO[tier];
   // Presentational only — no state the connect flow reads is gated on it.
   // A plan is always selected (the picker has no empty value and nothing
@@ -99,10 +98,8 @@ export default function ClawboxAiPlanPicker({
             // the word around it is what a screen reader has to say in the
             // owner's language.
             const ariaLabel = showPickerTrial
-              ? tr("ai.planTierOptionTrial", `${optionInfo.pillLabel} tier, Trial`)
-                  .replace("{tier}", optionInfo.pillLabel)
-              : tr("ai.planTierOption", `${optionInfo.pillLabel} tier`)
-                  .replace("{tier}", optionInfo.pillLabel);
+              ? tr("ai.planTierOptionTrial", `${optionInfo.pillLabel} tier, Trial`, { tier: optionInfo.pillLabel })
+              : tr("ai.planTierOption", `${optionInfo.pillLabel} tier`, { tier: optionInfo.pillLabel });
             return (
               <button
                 type="button"

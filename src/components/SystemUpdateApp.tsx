@@ -108,7 +108,7 @@ function StepIcon({ status }: { status: StepStatus }) {
   if (status === "running") {
     return (
       <span className="flex items-center justify-center w-6 h-6 shrink-0">
-        <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
+        <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent motion-safe:animate-spin" />
       </span>
     );
   }
@@ -321,10 +321,29 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     stopPolling();
     // The settled run lives in the web server's memory, not in this component,
     // so clearing local state alone would hide the panel until the next mount
-    // re-adopted the same dead run. Fire-and-forget: a refused dismissal (an
-    // update started meanwhile) must not turn the button into an error.
-    void fetch("/setup-api/update/dismiss", { method: "POST" }).catch(() => {});
-  }, [stopPolling]);
+    // re-adopted the same dead run.
+    //
+    // A 409 is not an error to show — it means another surface (Settings, the
+    // wizard, the MCP tools) started an update between the click and the POST,
+    // and the state this button was clearing now belongs to that run. `fetch`
+    // resolves for a 409, so ignoring the answer left the screen showing "1
+    // update available — Update everything" over an update that was already
+    // running, and a second Update from here is exactly what the run route
+    // refuses. Read the status back and rejoin the live run instead.
+    void (async () => {
+      try {
+        const res = await fetch("/setup-api/update/dismiss", { method: "POST" });
+        if (res.status !== 409) return;
+        const status = await fetch("/setup-api/update/status", { cache: "no-store" });
+        if (!status.ok) return;
+        const data = (await status.json()) as UpdateState;
+        if (data.phase !== "running") return;
+        setUpdateStarted(true);
+        setUpdateState(data);
+        startPolling();
+      } catch { /* offline: the next mount adopts whatever is running */ }
+    })();
+  }, [stopPolling, startPolling]);
 
   const saveBranch = useCallback(async (next: string | null) => {
     setBranchSaving(true);
@@ -1025,7 +1044,7 @@ function UpdateProgressCard({
 
       {!state && (
         <div className="mt-4 flex items-center gap-2 text-sm text-[var(--text-muted)]">
-          <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
+          <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent motion-safe:animate-spin" />
           {tr("update.connecting", "Connecting…")}
         </div>
       )}

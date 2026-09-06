@@ -89,6 +89,39 @@ describe("FilesApp — the toolbar in a window", () => {
     expect(buttons[2].parentElement).toHaveClass("shrink-0");
   });
 
+  it("renders wide first on a phone-sized client, and narrows only once it has measured itself", async () => {
+    // The server has no `window`, so it always renders the wide layout. Seeding
+    // `narrow` from `window.innerWidth` made a phone-sized client's first
+    // render disagree with the markup it was hydrating — `data-narrow` set and
+    // the columns already dropped — which is a hydration mismatch. The width
+    // that matters is the WINDOW's anyway, which only the observer knows.
+    const wasWide = window.innerWidth;
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true });
+    try {
+      const observers: ResizeObserverCallback[] = [];
+      class LateRO {
+        constructor(cb: ResizeObserverCallback) { observers.push(cb); }
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      }
+      vi.stubGlobal("ResizeObserver", LateRO);
+
+      render(<FilesApp />);
+      const root = await screen.findByTestId("files-app");
+      expect(root).not.toHaveAttribute("data-narrow");
+
+      act(() => {
+        observers[0]([{ contentRect: { width: 390 } } as ResizeObserverEntry], {} as ResizeObserver);
+      });
+      await waitFor(() => expect(root).toHaveAttribute("data-narrow", "true"));
+    } finally {
+      // The other tests in this file read `innerWidth` for the sidebar's own
+      // initial state; leaving a phone width behind closes it under them.
+      Object.defineProperty(window, "innerWidth", { value: wasWide, configurable: true });
+    }
+  });
+
   it("folds the ancestors behind one “…” in a narrow window, keeping the current folder whole", async () => {
     stubWindowWidth(390);
     render(<FilesApp initialPath="Projects/angry-pigs" />);

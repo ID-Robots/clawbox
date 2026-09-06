@@ -40,6 +40,7 @@ vi.mock("@/lib/code-projects", () => ({
 }));
 
 import fs from "fs/promises";
+import { deployWebapp } from "@/lib/code-projects";
 const mockReadFile = vi.mocked(fs.readFile);
 const mockMkdir = vi.mocked(fs.mkdir);
 const mockWriteFile = vi.mocked(fs.writeFile);
@@ -154,6 +155,40 @@ describe("/setup-api/webapps", () => {
       const body = await res.json();
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
+    });
+
+    it("never has two desktop registrations inside the route at once", async () => {
+      // A create ends in `registerWebappInPreferences`, which reads
+      // pref:installed_apps and pref:installed_meta out of config.json, adds
+      // one entry and writes the whole map back — with awaits between the read
+      // and the write. Two of those overlapping both start from the same
+      // snapshot and the second write drops the first's entry, so one of the
+      // two apps ends up with its files on disk and no icon anywhere.
+      // Measured directly against the real registry: two registrations begun
+      // in one tick leave only the second app registered.
+      //
+      // The route cannot let that happen from here any more. `deployWebapp` is
+      // held open on purpose, because overlap is the only thing this can watch
+      // for — with the real one the two creates do their own file writes first
+      // and drift apart, so the loss needs something to line them up.
+      let inFlight = 0;
+      let peak = 0;
+      vi.mocked(deployWebapp).mockImplementation(async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        inFlight -= 1;
+      });
+
+      const create = (appId: string, name: string) => POST(new NextRequest(new URL("http://localhost/setup-api/webapps"), {
+        method: "POST",
+        body: JSON.stringify({ appId, html: "<html></html>", name }),
+      }));
+      const answers = await Promise.all([create("notes", "Notes"), create("timer", "Timer")]);
+
+      expect(answers.map((r) => r.status)).toEqual([200, 200]);
+      expect(vi.mocked(deployWebapp)).toHaveBeenCalledTimes(2);
+      expect(peak).toBe(1);
     });
 
     it("returns 404 when updating a webapp that does not exist", async () => {

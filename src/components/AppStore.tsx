@@ -888,7 +888,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 @container">
         {loading && apps.length === 0 ? (
           <div className="flex items-center justify-center py-12">
-            <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+            <div className="w-6 h-6 border-2 border-white/20 rounded-full motion-safe:animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
           </div>
         ) : (
           <div className="grid grid-cols-1 @sm:grid-cols-2 @3xl:grid-cols-3 @5xl:grid-cols-4 gap-3">
@@ -976,10 +976,19 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
                 ? t("store.noAppsFound")
                 : installedAppIds.length === 0
                   ? t("store.noInstalledApps")
-                  : tr(
-                    "store.installedNotFromStore",
-                    "The apps installed on this box did not come from the store — an app built here has no store listing.",
-                  )}
+                  : search
+                    // The Installed view is cut by the search box as well, so
+                    // an empty list here is just as likely to mean "nothing
+                    // you typed matched" — including a box whose installed
+                    // apps ALL have store listings. Answering that with "these
+                    // apps did not come from the store" states something the
+                    // list does not show and that may be flatly untrue, so a
+                    // search gets the answer every other tab gives it.
+                    ? t("store.noAppsFound")
+                    : tr(
+                      "store.installedNotFromStore",
+                      "The apps installed on this box did not come from the store — an app built here has no store listing.",
+                    )}
             </p>
           </div>
         )}
@@ -989,7 +998,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         {category === "All" && !search && pendingCategories.length > 0 && (
           <div ref={sentinelRef} className="flex items-center justify-center py-6">
             {loadingMore && (
-              <div className="w-5 h-5 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
+              <div className="w-5 h-5 border-2 border-white/20 rounded-full motion-safe:animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
             )}
           </div>
         )}

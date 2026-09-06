@@ -189,7 +189,14 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
   // ─── The window's width ────────────────────────────────────────────────────
 
   const rootRef = useRef<HTMLDivElement>(null);
-  const [narrow, setNarrow] = useState<boolean>(() => typeof window !== "undefined" && window.innerWidth < NARROW_WIDTH);
+  // Always false to begin with, never `window.innerWidth < NARROW_WIDTH`: the
+  // server has no window and renders the wide layout, so a phone-sized client
+  // that seeded `true` handed React a first render that disagreed with the
+  // markup it was hydrating — `data-narrow` set, columns dropped — which is a
+  // hydration mismatch. The observer below measures the real element (this is
+  // the WINDOW's width, not the screen's, so innerWidth was never the right
+  // number anyway) and corrects it in the first commit after mount.
+  const [narrow, setNarrow] = useState<boolean>(false);
   useEffect(() => {
     const el = rootRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -726,7 +733,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
                 <span className="hidden sm:inline">{t("files.searchEverywhere")}</span>
               </button>
             )}
-            {searching && <Icon name="progress_activity" size={16} className="animate-spin text-[var(--text-muted)] shrink-0" />}
+            {searching && <Icon name="progress_activity" size={16} className="motion-safe:animate-spin text-[var(--text-muted)] shrink-0" />}
             <button
               onClick={closeSearch}
               className="p-1 rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer shrink-0"
@@ -774,7 +781,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
 
           {loading ? (
             <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-              <Icon name="progress_activity" size={24} className="animate-spin mr-2" />
+              <Icon name="progress_activity" size={24} className="motion-safe:animate-spin mr-2" />
               {t("files.loading")}
             </div>
           ) : error ? (
@@ -1322,7 +1329,7 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors disabled:opacity-40 disabled:cursor-default bg-[var(--coral-bright)]/15 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/25 cursor-pointer"
             title={t("files.save")}
           >
-            <Icon name={saving ? "progress_activity" : "save"} size={16} className={saving ? "animate-spin" : ""} />
+            <Icon name={saving ? "progress_activity" : "save"} size={16} className={saving ? "motion-safe:animate-spin" : ""} />
             <span className="hidden sm:inline">{t("files.save")}</span>
           </button>
         )}
@@ -1346,7 +1353,7 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
       <div className="flex-1 min-h-0 overflow-auto relative">
         {loading ? (
           <div className="flex items-center justify-center h-full text-[var(--text-muted)]">
-            <Icon name="progress_activity" size={24} className="animate-spin mr-2" />{t("files.loading")}
+            <Icon name="progress_activity" size={24} className="motion-safe:animate-spin mr-2" />{t("files.loading")}
           </div>
         ) : error ? (
           <ViewerMessage icon="error" text={error} url={url} name={entry.name} color="#f87171" />

@@ -87,6 +87,60 @@ describe("Settings → Appearance language picker", () => {
     expect(trigger).toHaveFocus();
   });
 
+  // A `role="listbox"` promises arrow-key navigation. This one had none: the
+  // rows were plain buttons in the tab order, so the only way through ten
+  // languages was Tab, and nothing ever moved focus off the trigger.
+  it("walks the rows with the arrow keys, one tab stop for the whole list", () => {
+    openPicker();
+    const options = screen.getAllByRole("option");
+    // Opens standing on the language in use, which is the row the arrows
+    // start from.
+    expect(options[0]).toHaveFocus();
+    expect(options[0]).toHaveAttribute("tabindex", "0");
+    expect(options[1]).toHaveAttribute("tabindex", "-1");
+
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "ArrowDown" });
+    expect(screen.getAllByRole("option")[1]).toHaveFocus();
+
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "End" });
+    const last = screen.getAllByRole("option").length - 1;
+    expect(screen.getAllByRole("option")[last]).toHaveFocus();
+
+    // Past the end it wraps rather than sticking, the way HeaderDropdown does.
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "ArrowDown" });
+    expect(screen.getAllByRole("option")[0]).toHaveFocus();
+
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "ArrowUp" });
+    expect(screen.getAllByRole("option")[last]).toHaveFocus();
+
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Home" });
+    expect(screen.getAllByRole("option")[0]).toHaveFocus();
+  });
+
+  it("picks the row the arrows are on with Enter, and closes back onto the trigger", () => {
+    const trigger = openPicker();
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "ArrowDown" });
+    const second = screen.getAllByRole("option")[1];
+    const chosen = second.textContent;
+    fireEvent.keyDown(screen.getByRole("listbox"), { key: "Enter" });
+
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(trigger).toHaveFocus();
+    // `setLocale` is mocked out in this suite, so the pick is asserted by the
+    // list closing on the row the keyboard was standing on — not on the one
+    // the mouse never touched.
+    expect(chosen).toBeTruthy();
+  });
+
+  it("opens on ArrowDown from the trigger, standing on the language in use", () => {
+    render(<SettingsApp ui={defaultUi} />);
+    fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
+    const trigger = screen.getByRole("button", { name: /English/ });
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    expect(screen.getByRole("option", { selected: true })).toHaveFocus();
+  });
+
   it("still closes on a click outside", () => {
     openPicker();
     fireEvent.mouseDown(document.body);

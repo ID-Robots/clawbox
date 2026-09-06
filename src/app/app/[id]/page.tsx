@@ -124,6 +124,10 @@ function useAppearance(enabled: boolean) {
   const [customWallpapers, setCustomWallpapers] = useState<string[]>(readCustomWallpapers);
   const uploadRef = useRef<HTMLInputElement>(null);
   const loaded = useRef(false);
+  // The read has answered. A STATE flag rather than the ref alone, because the
+  // ref has to be armed one commit later than the values it guards — see the
+  // arming effect at the foot of this hook.
+  const [hydrated, setHydrated] = useState(false);
   // The upload's FileReader callback runs after the render that added the
   // previous picture, so the next list is computed from a mirror rather than
   // from the state this closure captured — the desktop's rule, and the reason
@@ -153,7 +157,7 @@ function useAppearance(enabled: boolean) {
       })
       // Either way the card is now showing this device, so it may be written
       // to: a box whose preferences endpoint blinked must still be settable.
-      .finally(() => { loaded.current = true; });
+      .finally(() => { if (alive) setHydrated(true); });
     return () => { alive = false; };
   }, [enabled]);
 
@@ -162,6 +166,17 @@ function useAppearance(enabled: boolean) {
     save({ wp_id: wallpaperId, wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity });
   }, [wallpaperId, wpFit, wpBgColor, wpOpacity, save]);
   useEffect(() => { save({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, save]);
+  // Declared AFTER both save effects, deliberately. `loaded.current = true`
+  // used to be set in the fetch's own `.finally`, which runs before React has
+  // committed the state the `.then` above it queued — so the commit that lands
+  // the box's values found the writer already armed and posted them straight
+  // back. A response that omits a key leaves that key's state at this page's
+  // default, and the echo then wrote the default over what the box holds
+  // (an older server, or a partial answer, silently reset the fit and the
+  // opacity the moment /app/settings opened). Effects run in declaration
+  // order, so the two above see `loaded.current === false` for that one
+  // commit; arming here leaves every later change — the owner's — saved.
+  useEffect(() => { if (hydrated) loaded.current = true; }, [hydrated]);
 
   const onUploadFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -197,7 +212,17 @@ function useAppearance(enabled: boolean) {
       onCustomWallpaperDelete: (idx: number) => {
         const next = customRef.current.filter((_, i) => i !== idx);
         applyCustomWallpapers(next);
-        if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
+        // `custom-<n>` is an INDEX into that list, so deleting one renumbers
+        // every picture after it. Clearing only the exact match left a
+        // selection past the hole pointing at its neighbour — the wallpaper
+        // silently became a different picture, or none once the last entry
+        // went. The same rule is in src/app/page.tsx's own handler; keep the
+        // two in step, as with the list above it.
+        const selected = wallpaperId.startsWith("custom-")
+          ? Number.parseInt(wallpaperId.slice("custom-".length), 10)
+          : NaN;
+        if (selected === idx) setWallpaperId("clawbox");
+        else if (Number.isInteger(selected) && selected > idx) setWallpaperId(`custom-${selected - 1}`);
       },
     },
   };

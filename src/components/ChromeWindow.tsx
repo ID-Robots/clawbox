@@ -413,8 +413,22 @@ export default function ChromeWindow({
         setSize((s) => (s.width === rect.width && s.height === rect.height ? s : { width: rect.width, height: rect.height }));
         return;
       }
+      // FIT, then place. `clampWindowPosition` keeps whatever dimensions it is
+      // handed, so a window sized on a bigger display — or restored from
+      // maximized onto a viewport that shrank while it was full-screen — kept
+      // that size and the clamp could only choose which edge hung off: pushed
+      // left, its right-hand controls stayed past the right edge; pinned to the
+      // top, its bottom resize handle stayed under the shelf. Both are the
+      // handles needed to fix it by hand, which is the same trap `fitWindowSize`
+      // was written for at mount.
+      const fitted = fitWindowSize(currentSizeRef.current);
+      // The ref is advanced by hand because `setSize`'s write has not landed
+      // yet: a second resize event arriving before the re-render would read the
+      // size this one just replaced.
+      currentSizeRef.current = fitted;
+      setSize((s) => (s.width === fitted.width && s.height === fitted.height ? s : fitted));
       setPosition((p) => {
-        const next = clampWindowPosition({ ...p, ...currentSizeRef.current });
+        const next = clampWindowPosition({ ...p, ...fitted });
         return next.x === p.x && next.y === p.y ? p : next;
       });
     };

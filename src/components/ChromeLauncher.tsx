@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, ReactNode, useCallback } from "react";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 
 interface LauncherApp {
@@ -50,13 +51,13 @@ export default function ChromeLauncher({
   onUnpinApp,
 }: ChromeLauncherProps) {
   const { t } = useT();
-  // The server's English is the floor until the locale packs carry a key —
-  // a raw `launcher.page` is worse copy than an untranslated "Page 2", and for
-  // an aria-label it is what a screen reader would read out.
-  const tr = useCallback((key: string, english: string) => {
-    const value = t(key);
-    return value === key ? english : value;
-  }, [t]);
+  // The English floor: a raw `launcher.page` is worse copy than an
+  // untranslated "Page 2", and on an aria-label it is what a screen reader
+  // would read out. One hook for the whole desktop (src/lib/i18n-floor.ts) —
+  // six components had grown a private copy of this and every one of them
+  // handed placeholder substitution to `t`, which the no-provider fallback
+  // does not do.
+  const tr = useTr();
   const { cols: gridCols, rows: gridRows } = useLauncherGrid();
   const appsPerPage = gridCols * gridRows;
   const [searchQuery, setSearchQuery] = useState("");
@@ -141,15 +142,20 @@ export default function ChromeLauncher({
     setTimeout(() => onAppClick(id), 200);
   }, [handleClose, onAppClick]);
 
+  // Paging only. Escape is deliberately NOT handled here: the window listener
+  // below already answers it from anywhere, and while focus was inside the
+  // panel BOTH fired for one key — two `handleClose()` calls, two 200ms timers
+  // and `onClose()` twice, which closes the launcher and then whatever the
+  // desktop put in its place. It also closed the whole launcher on the Escape
+  // that was meant to dismiss an open tile menu, since only the listener below
+  // knows about `ctxMenu`.
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Escape") {
-      handleClose();
-    } else if (e.key === "ArrowLeft") {
+    if (e.key === "ArrowLeft") {
       setCurrentPage(p => Math.max(0, p - 1));
     } else if (e.key === "ArrowRight") {
       setCurrentPage(p => Math.min(totalPages - 1, p + 1));
     }
-  }, [handleClose, totalPages]);
+  }, [totalPages]);
 
   // Escape belongs to the launcher, not to whatever has focus inside it. The
   // handler above rides on the panel div, so as soon as focus left it — a tile's

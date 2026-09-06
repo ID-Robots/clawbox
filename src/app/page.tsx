@@ -1956,7 +1956,18 @@ function ChromeDesktopInner() {
                 const next = customWallpapersRef.current.filter((_, i) => i !== idx);
                 applyCustomWallpapers(next);
                 try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
-                if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
+                // `custom-<n>` is an INDEX into that list (see the wallpaper
+                // background below, which reads it with parseInt), so deleting
+                // one renumbers every picture after it. Clearing only the exact
+                // match left a selection past the hole pointing at its
+                // neighbour — the desktop drew a different wallpaper than the
+                // one that was chosen, or none once the last entry went. The
+                // same rule is in src/app/app/[id]/page.tsx's handler.
+                const selected = wallpaperId.startsWith("custom-")
+                  ? Number.parseInt(wallpaperId.slice("custom-".length), 10)
+                  : NaN;
+                if (selected === idx) setWallpaperId("clawbox");
+                else if (Number.isInteger(selected) && selected > idx) setWallpaperId(`custom-${selected - 1}`);
               },
             }} />
           </div>

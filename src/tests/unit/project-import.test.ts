@@ -24,6 +24,12 @@ vi.mock("@/lib/coding-github", async () => {
 /** What each gh invocation answers, matched on its argv joined by spaces. */
 const ghAnswers = vi.hoisted(() => new Map<string, { code: number; stdout?: string; stderr?: string }>());
 const ghCalls = vi.hoisted(() => [] as string[][]);
+/**
+ * While this holds a promise, a `gh api user/repos` waits on it before
+ * answering — the only way to have a listing still in flight when the test
+ * changes the account under it.
+ */
+const ghHold = vi.hoisted(() => ({ current: null as Promise<void> | null }));
 vi.mock("@/lib/child-run", async () => {
   const actual = await vi.importActual<typeof import("@/lib/child-run")>("@/lib/child-run");
   return {
@@ -33,6 +39,9 @@ vi.mock("@/lib/child-run", async () => {
       ghCalls.push(args);
       const key = [...ghAnswers.keys()].find((k) => args.join(" ").startsWith(k));
       const a = key ? ghAnswers.get(key)! : { code: 1, stderr: "no answer scripted" };
+      // Held AFTER the answer is picked, so a listing caught mid-flight still
+      // returns the rows that were scripted when it started.
+      if (ghHold.current && args.join(" ").startsWith("api user/repos")) await ghHold.current;
       // A scripted clone makes the folder the way a real one would.
       if (args[0] === "repo" && args[1] === "clone" && a.code === 0) {
         fs.mkdirSync(path.join(args[3], ".git"), { recursive: true });
@@ -64,6 +73,7 @@ beforeEach(async () => {
   process.env.CLAWBOX_ROOT = path.join(home, "clawbox");
   ghAnswers.clear();
   ghCalls.length = 0;
+  ghHold.current = null;
   githubStatus.mockResolvedValue({ installed: true, connected: true, login: "yalexx", loginCommand: "gh auth login" });
   vi.resetModules();
   lib = await import("@/lib/project-import");
@@ -279,6 +289,55 @@ describe("listGitHubRepos", () => {
     // …and another account is another listing, never this one's rows.
     githubStatus.mockResolvedValueOnce({ installed: true, connected: true, login: "someone-else", loginCommand: "x" });
     expect(await lib.listGitHubRepos()).toMatchObject({ ok: true, login: "someone-else" });
+    expect(ghCalls.length).toBeGreaterThan(asked);
+  });
+
+  it("never hands one account's repositories to another", async () => {
+    // A refresh is 4.5-5.3 s of `gh` boots. Sign out of one account and into
+    // another inside that window and the panel's next call joined the listing
+    // already in flight — there was ONE slot for every account — so the new
+    // owner was shown the previous one's private repositories under their own
+    // name.
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("alice/secret-plans", { private: true })]) });
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+
+    let release!: () => void;
+    ghHold.current = new Promise<void>((resolve) => { release = resolve; });
+    const forAlice = lib.listGitHubRepos();
+    // Wait until that listing is actually out on the wire and stuck there.
+    while (ghCalls.length === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+    // The owner signs into another account while it is still out.
+    ghHold.current = null;
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("bob/todo")]) });
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "bob", loginCommand: "x" });
+    const forBob = lib.listGitHubRepos();
+
+    // Bob's listing is its own: it must come back while alice's is still held.
+    // Joining alice's promise is exactly what handed over the wrong rows, and
+    // asserted only on the OUTCOME it would show up as a 30 s deadlock here.
+    let bobSettled = false;
+    void forBob.then(() => { bobSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bobSettled).toBe(true);
+
+    const bob = await forBob;
+    release();
+    const alice = await forAlice;
+
+    expect(bob).toMatchObject({ ok: true, login: "bob" });
+    expect(JSON.stringify(bob)).not.toContain("secret-plans");
+    // And the listing that finished under the wrong account is thrown away
+    // rather than filed under the name it was started for: every `gh` boot in
+    // it answered as whoever was signed in at the time.
+    expect(alice).toMatchObject({ ok: false, reason: "failed" });
+
+    // Nothing of it was cached, either — signing back in re-fetches.
+    githubStatus.mockResolvedValue({ installed: true, connected: true, login: "alice", loginCommand: "x" });
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("alice/secret-plans", { private: true })]) });
+    const asked = ghCalls.length;
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: true, login: "alice" });
     expect(ghCalls.length).toBeGreaterThan(asked);
   });
 

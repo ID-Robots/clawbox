@@ -39,6 +39,7 @@ interface StubUi {
   onWpOpacityChange: (opacity: number) => void;
   onMascotToggle: (hidden: boolean) => void;
   onWallpaperUpload: () => void;
+  onCustomWallpaperDelete: (idx: number) => void;
 }
 
 vi.mock("@/components/SettingsApp", () => ({
@@ -57,6 +58,9 @@ vi.mock("@/components/SettingsApp", () => ({
         <button data-testid="pick-opacity" onClick={() => ui.onWpOpacityChange(80)}>opacity</button>
         <button data-testid="show-mascot" onClick={() => ui.onMascotToggle(false)}>mascot</button>
         <button data-testid="ask-upload" onClick={() => ui.onWallpaperUpload()}>upload</button>
+        <button data-testid="pick-custom-1" onClick={() => ui.onWallpaperChange("custom-1")}>pick 2nd upload</button>
+        <button data-testid="pick-custom-0" onClick={() => ui.onWallpaperChange("custom-0")}>pick 1st upload</button>
+        <button data-testid="delete-custom-0" onClick={() => ui.onCustomWallpaperDelete(0)}>delete 1st upload</button>
       </div>
     );
   },
@@ -138,6 +142,66 @@ describe("/app/settings — Appearance", () => {
       () => expect(posts.some((body) => Object.keys(body).join() === "ui_mascot_hidden" && body.ui_mascot_hidden === 0)).toBe(true),
       SAVED_SOON,
     );
+  });
+
+  it("writes nothing when the box's answer leaves a key out", async () => {
+    // The box named a wallpaper and nothing else — an older server, or a read
+    // that only half answered. Every other key is still at this page's
+    // DEFAULT, and the writer used to be armed inside the fetch's `.finally`,
+    // which runs before React commits what the `.then` above it queued: the
+    // hydration commit then posted `wp_fit: "fill"` and `wp_opacity: 50` over
+    // whatever the box actually holds, the moment /app/settings opened.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ wp_id: "hermes" }) };
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-wallpaper").textContent).toBe("hermes"));
+    // Well past the 500 ms debounce: anything the hydration commit queued has
+    // had its chance to land.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(posts).toEqual([]);
+
+    // …and the card is still live: the owner's own change saves as before.
+    fireEvent.click(screen.getByTestId("pick-center"));
+    await waitFor(() => expect(posts.at(-1)).toMatchObject({ wp_fit: "center" }), SAVED_SOON);
+  });
+
+  it("renumbers the wallpaper it is showing when an earlier upload is deleted", async () => {
+    // `custom-<n>` is an INDEX into the uploaded list, so deleting the first
+    // picture makes the second one `custom-0`. The handler only cleared an
+    // exact match, so a selection past the hole was left pointing at its old
+    // number — one entry along, or off the end of the list, where the desktop
+    // draws no wallpaper at all.
+    localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]));
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-custom").textContent).toBe("2"));
+
+    fireEvent.click(screen.getByTestId("pick-custom-1"));
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("custom-1");
+
+    fireEvent.click(screen.getByTestId("delete-custom-0"));
+    expect(screen.getByTestId("ui-custom").textContent).toBe("1");
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("custom-0");
+  });
+
+  it("falls back to a built-in wallpaper when the deleted upload is the one on screen", async () => {
+    localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]));
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-custom").textContent).toBe("2"));
+
+    fireEvent.click(screen.getByTestId("pick-custom-0"));
+    fireEvent.click(screen.getByTestId("delete-custom-0"));
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
   });
 
   it("offers the wallpapers this browser already uploaded, and asks the file input for a new one", async () => {

@@ -67,6 +67,52 @@ describe("a window restored from a saved workspace", () => {
   });
 });
 
+describe("a window on a viewport that shrank", () => {
+  /** Resize the browser under a window that is already on screen. */
+  function shrinkTo(width: number, height: number) {
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: height, configurable: true });
+    act(() => { window.dispatchEvent(new Event("resize")); });
+  }
+
+  it("is shrunk to the smaller desktop, not just pushed against its edges", () => {
+    // `clampWindowPosition` keeps the dimensions it is handed, so a window
+    // sized on a 1440x900 display and carried onto a 900x600 one could only be
+    // moved: pushed left it still hung 300px off the right, and its bottom
+    // resize handle — the way out — stayed under the shelf.
+    win({ initialPosition: { x: 200, y: 100 }, initialSize: { width: 1200, height: 700 } });
+    const el = screen.getByTestId("chrome-window-files");
+    expect(el.style.width).toBe("1200px");
+
+    shrinkTo(900, 600);
+
+    expect(Number.parseInt(el.style.width, 10)).toBeLessThanOrEqual(900);
+    expect(Number.parseInt(el.style.height, 10)).toBeLessThanOrEqual(600 - SHELF);
+    // Its right-hand controls are back on the screen, and the size it now has
+    // is one the desktop can hold — which is what makes dragging it up a fix
+    // rather than a way to trade one hidden edge for another. (The vertical
+    // clamp is deliberately the TITLE BAR's, not the whole window's: see
+    // clampWindowPosition.)
+    expect(Number.parseInt(el.style.left, 10) + Number.parseInt(el.style.width, 10)).toBeLessThanOrEqual(900);
+  });
+
+  it("comes back from maximized at a size the smaller desktop can hold", () => {
+    // Maximized geometry is a CSS calc that follows the viewport, so nothing
+    // was wrong until Restore put back the pre-maximize numbers — measured on
+    // the bigger screen — and only the position was clamped.
+    win({ initialPosition: { x: 40, y: 40 }, initialSize: { width: 1300, height: 800 } });
+    const el = screen.getByTestId("chrome-window-files");
+    fireEvent.click(screen.getByLabelText("window.maximize"));
+
+    shrinkTo(800, 560);
+    fireEvent.click(screen.getByLabelText("window.restore"));
+
+    expect(Number.parseInt(el.style.width, 10)).toBeLessThanOrEqual(800);
+    expect(Number.parseInt(el.style.height, 10)).toBeLessThanOrEqual(560 - SHELF);
+    expect(Number.parseInt(el.style.left, 10) + Number.parseInt(el.style.width, 10)).toBeLessThanOrEqual(800);
+  });
+});
+
 describe("dragging a window", () => {
   it("stops with the title bar above the shelf", () => {
     win({ initialPosition: { x: 100, y: 100 }, initialSize: { width: 800, height: 640 } });

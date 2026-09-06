@@ -432,8 +432,72 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     notifyProvidersChanged();
   }, []);
   const [langOpen, setLangOpen] = useState(false);
+  // Which row the keyboard is standing on while the list is open, -1 while it
+  // is closed. The list is a `role="listbox"` of `role="option"` rows, which
+  // promises arrow-key navigation; it had none, so a keyboard user could open
+  // the picker and then only Tab through all ten rows or Escape back out. Same
+  // roving-tabindex shape as HeaderDropdown — one focusable row at a time,
+  // arrows move DOM focus, so there is no aria-activedescendant to keep in
+  // step with it.
+  const [langActive, setLangActive] = useState(-1);
   const langRef = useRef<HTMLDivElement>(null);
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
+  /** The one place the list is torn down. `refocus` is for the paths where the
+   * owner is still driving the control — Escape, Tab, a pick — rather than
+   * clicking away from it, where focus belongs wherever they clicked. */
+  const closeLangList = useCallback((refocus = false) => {
+    setLangOpen(false);
+    setLangActive(-1);
+    if (refocus) document.getElementById("settings-language-button")?.focus();
+  }, []);
+  const openLangList = useCallback((seek: "active" | "last") => {
+    const current = LANGUAGES.findIndex(l => l.code === locale);
+    setLangActive(seek === "last" ? LANGUAGES.length - 1 : current >= 0 ? current : 0);
+    setLangOpen(true);
+  }, [locale]);
+  const pickLang = useCallback((code: string) => {
+    setLocale(code as Locale);
+    closeLangList(true);
+  }, [setLocale, closeLangList]);
+  const langListKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const last = LANGUAGES.length - 1;
+    switch (e.key) {
+      case "ArrowDown": e.preventDefault(); setLangActive(i => (i >= last ? 0 : i + 1)); return;
+      case "ArrowUp": e.preventDefault(); setLangActive(i => (i <= 0 ? last : i - 1)); return;
+      case "Home": e.preventDefault(); setLangActive(0); return;
+      case "End": e.preventDefault(); setLangActive(last); return;
+      case "Enter":
+      case " ": {
+        // The rows are <button>s, so the browser synthesises a click for both
+        // keys — but only on the row that HAS focus, and preventing the default
+        // here is what stops Space from scrolling the settings pane under an
+        // open list.
+        e.preventDefault();
+        const lang = LANGUAGES[langActive];
+        if (lang) pickLang(lang.code);
+        return;
+      }
+      case "Tab":
+        // Let focus leave, but not out of a list left standing over the page:
+        // the focused row is about to be unmounted, and the browser resolves
+        // the next tab stop from wherever focus is — from <body> that means
+        // restarting at the top of Settings.
+        closeLangList(true);
+        return;
+      default:
+    }
+  }, [langActive, pickLang, closeLangList]);
+  // Focus follows the active row. The rows carry the tabindex, so this is what
+  // actually MOVES the focus an arrow key asked for.
+  useEffect(() => {
+    if (!langOpen || langActive < 0) return;
+    const row = langRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]')[langActive];
+    if (!row) return;
+    row.focus();
+    // Guarded: jsdom ships an Element without it, and a missing convenience
+    // must not take the picker down.
+    row.scrollIntoView?.({ block: "nearest" });
+  }, [langOpen, langActive]);
   const [initialSection] = useState(peekPendingSection);
   const [section, setSection] = useState<Section>(initialSection ?? DEFAULT_SECTION);
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
@@ -473,7 +537,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           className="max-w-xl flex items-center justify-center py-12 text-[var(--text-muted)]"
         >
           <span
-            className="material-symbols-rounded animate-spin"
+            className="material-symbols-rounded motion-safe:animate-spin"
             style={{ fontSize: 24 }}
             aria-hidden="true"
           >
@@ -586,14 +650,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   useEffect(() => {
     if (!langOpen) return;
     const handler = (e: MouseEvent) => {
-      if (langRef.current && !langRef.current.contains(e.target as Node)) setLangOpen(false);
+      if (langRef.current && !langRef.current.contains(e.target as Node)) closeLangList();
     };
     const keyHandler = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       e.preventDefault();
       e.stopPropagation();
-      setLangOpen(false);
-      document.getElementById("settings-language-button")?.focus();
+      closeLangList(true);
     };
     document.addEventListener("mousedown", handler);
     document.addEventListener("keydown", keyHandler, true);
@@ -601,7 +664,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       document.removeEventListener("mousedown", handler);
       document.removeEventListener("keydown", keyHandler, true);
     };
-  }, [langOpen]);
+  }, [langOpen, closeLangList]);
 
   /* ── System stats ──
    * Poll only when System section is visible (live CPU/mem/temp/etc.),
@@ -2914,7 +2977,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             ) : (
               <div className="relative w-32 h-32 flex items-center justify-center">
-                <div className="absolute inset-0 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: "#f97316" }} />
+                <div className="absolute inset-0 rounded-full border-[3px] border-white/10 motion-safe:animate-spin" style={{ borderTopColor: "#f97316" }} />
                 <div className="absolute inset-3 rounded-full border border-[#f97316]/15" style={{ animation: "factory-reset-pulse 2.5s ease-in-out infinite" }} />
                 <Image
                   src="/clawbox-crab.png"
@@ -2942,7 +3005,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </span>
                   ) : step.status === "running" ? (
                     <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                      <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent animate-spin" aria-hidden="true" />
+                      <span className="w-4 h-4 rounded-full border-2 border-[#f97316] border-t-transparent motion-safe:animate-spin" aria-hidden="true" />
                     </span>
                   ) : (
                     <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white/[0.04] shrink-0">
@@ -3079,7 +3142,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <button
                   type="button"
                   id="settings-language-button"
-                  onClick={() => setLangOpen(v => !v)}
+                  onClick={() => (langOpen ? closeLangList() : openLangList("active"))}
+                  // Enter and Space are not handled: the trigger is a <button>,
+                  // so the browser already synthesises a click for both. The
+                  // arrows are what a listbox trigger owes a keyboard — down
+                  // opens on the current language, up on the last row.
+                  onKeyDown={(e) => {
+                    if (e.key === "ArrowDown") { e.preventDefault(); openLangList("active"); }
+                    else if (e.key === "ArrowUp") { e.preventDefault(); openLangList("last"); }
+                  }}
                   // Both ids: the heading says WHAT this control is, the
                   // button's own text says which language is on it, and naming
                   // it after the heading alone would take that answer away.
@@ -3103,15 +3174,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div
                     role="listbox"
                     aria-labelledby="settings-language-label"
+                    onKeyDown={langListKeyDown}
                     className="absolute z-50 mt-1 w-full bg-[var(--bg-elevated)] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto"
                   >
-                    {LANGUAGES.map(lang => (
+                    {LANGUAGES.map((lang, index) => (
                       <button
                         key={lang.code}
                         type="button"
                         role="option"
                         aria-selected={lang.code === locale}
-                        onClick={() => { setLocale(lang.code as Locale); setLangOpen(false); }}
+                        // One tab stop for the whole list: Tab reaches the row
+                        // the arrows are on, and leaves the list rather than
+                        // walking all ten languages.
+                        tabIndex={index === langActive ? 0 : -1}
+                        onClick={() => pickLang(lang.code)}
                         className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm transition-colors cursor-pointer border-none ${
                           lang.code === locale
                             ? "bg-orange-500/15 text-[var(--coral-bright)]"
@@ -3614,7 +3690,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   className="w-full py-2.5 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-[var(--text-primary)] rounded-xl text-sm font-medium cursor-pointer transition-all flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   {wifiScanning ? (
-                    <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("settings.scanning")}</>
+                    <><span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("settings.scanning")}</>
                   ) : (
                     <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>wifi_find</span> {t("settings.availableNetworks")}</>
                   )}
@@ -3631,7 +3707,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         disabled={wifiScanning}
                         className="flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer p-0.5 disabled:opacity-50 transition-colors"
                       >
-                        <span className={`material-symbols-rounded ${wifiScanning ? "animate-spin" : ""}`} style={{ fontSize: 14 }}>refresh</span>
+                        <span className={`material-symbols-rounded ${wifiScanning ? "motion-safe:animate-spin" : ""}`} style={{ fontSize: 14 }}>refresh</span>
                         {wifiScanning ? t("settings.scanning") : t("wifi.refresh")}
                       </button>
                     </div>
@@ -3708,7 +3784,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       className="flex-1 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
                     >
                       {wifiConnecting ? (
-                        <><span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("connecting")}</>
+                        <><span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span> {t("connecting")}</>
                       ) : (
                         <><span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span> {t("settings.connect")}</>
                       )}
@@ -3986,7 +4062,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       {tgStreamingPending && (
-                        <span className="material-symbols-rounded animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">progress_activity</span>
+                        <span className="material-symbols-rounded motion-safe:animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">progress_activity</span>
                       )}
                       <button
                         type="button"
@@ -4069,7 +4145,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     onClick={() => approvePairingCode(tgPairingCode)}
                     className="px-4 py-2.5 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors shrink-0 inline-flex items-center gap-1.5"
                   >
-                    {tgApproving && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                    {tgApproving && <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
                     {t("settings.pairingApprove")}
                   </button>
                 </div>
@@ -4085,7 +4161,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       onClick={loadPending}
                       className="inline-flex items-center gap-1.5 text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer disabled:opacity-50 p-0"
                     >
-                      <span className={`material-symbols-rounded ${tgPendingLoading ? "animate-spin" : ""}`} style={{ fontSize: 16 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
+                      <span className={`material-symbols-rounded ${tgPendingLoading ? "motion-safe:animate-spin" : ""}`} style={{ fontSize: 16 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
                       {tgPendingLoading ? t("settings.pairingChecking") : t("settings.pairingCheck")}
                     </button>
                   ) : (
@@ -4098,7 +4174,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                           onClick={loadPending}
                           className="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50 p-0"
                         >
-                          <span className={`material-symbols-rounded ${tgPendingLoading ? "animate-spin" : ""}`} style={{ fontSize: 14 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
+                          <span className={`material-symbols-rounded ${tgPendingLoading ? "motion-safe:animate-spin" : ""}`} style={{ fontSize: 14 }} aria-hidden="true">{tgPendingLoading ? "progress_activity" : "refresh"}</span>
                           {t("settings.pairingCheck")}
                         </button>
                       </div>
@@ -4251,7 +4327,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   >
                     {tgSaving ? (
                       <>
-                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
                         {t("connecting")}
                       </>
                     ) : (
@@ -4324,7 +4400,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       disabled={emailTesting}
                       className="px-4 py-2.5 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
                     >
-                      {emailTesting && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                      {emailTesting && <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
                       {emailTesting ? t("settings.emailSendingTest") : t("settings.emailSendTest")}
                     </button>
                     <button
@@ -4408,7 +4484,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                           disabled={emailPendingBusy !== null}
                           className="px-4 py-2 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
                         >
-                          {emailPendingBusy === draft.id && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                          {emailPendingBusy === draft.id && <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
                           {t("settings.emailApprove")}
                         </button>
                         <button
@@ -4559,7 +4635,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       disabled={chatApprovalBusy || chatApprovalToken.trim().length === 0}
                       className="px-4 py-2 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
                     >
-                      {chatApprovalBusy && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                      {chatApprovalBusy && <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
                       {t("settings.emailChatApprovalConnect")}
                     </button>
                   </div>
@@ -4768,7 +4844,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   >
                     {emailSaving ? (
                       <>
-                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
                         {t("connecting")}
                       </>
                     ) : (
@@ -4998,7 +5074,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             Both are "wait a moment", and neither is a failure. */}
                         {(waPair?.phase === "preparing" || waPair?.phase === "starting") && (
                           <div className="flex items-center gap-3 mt-3 rounded-xl px-4 py-3 bg-white/[0.03] border border-white/[0.06]" aria-live="polite">
-                            <span className="material-symbols-rounded animate-spin shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
+                            <span className="material-symbols-rounded motion-safe:animate-spin shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
                               progress_activity
                             </span>
                             <div className="min-w-0">
@@ -5069,7 +5145,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
                         {waPair?.phase === "scanned" && (
                           <div className="flex items-center gap-3 mt-3 rounded-xl px-4 py-3 bg-green-500/[0.06] border border-green-500/15" aria-live="polite">
-                            <span className="material-symbols-rounded animate-spin shrink-0 text-green-400" style={{ fontSize: 20 }} aria-hidden="true">
+                            <span className="material-symbols-rounded motion-safe:animate-spin shrink-0 text-green-400" style={{ fontSize: 20 }} aria-hidden="true">
                               progress_activity
                             </span>
                             <div className="min-w-0">
@@ -5548,7 +5624,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   >
                     {dcSaving ? (
                       <>
-                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
                         {t("settings.discordChecking")}
                       </>
                     ) : (
@@ -5725,7 +5801,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </>
             ) : (
               <div className="flex items-center justify-center py-12 text-[var(--text-muted)] opacity-60">
-                <div className="w-6 h-6 border-2 border-white/20 rounded-full animate-spin mr-3" style={{ borderTopColor: "#fe6e00" }} />
+                <div className="w-6 h-6 border-2 border-white/20 rounded-full motion-safe:animate-spin mr-3" style={{ borderTopColor: "#fe6e00" }} />
                 <span className="text-sm">{t("settings.loadingStats")}</span>
               </div>
             )}
@@ -6377,7 +6453,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
             <div className="relative w-20 h-20" aria-hidden="true">
               <div className="absolute inset-0 rounded-full border-2 border-[#fe6e00]/20 animate-pulse" />
-              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#fe6e00] animate-spin" />
+              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#fe6e00] motion-safe:animate-spin" />
             </div>
             <div className="space-y-2">
               <h2 id="hostname-reboot-title" className="text-xl font-semibold text-white">Restarting device…</h2>

@@ -84,3 +84,51 @@ describe("SystemUpdateApp — force-full-update recovery affordance", () => {
     expect(runBody).toBeNull();
   });
 });
+
+// Dismiss clears the settled run the web server is holding. It can be refused:
+// another surface (Settings, the wizard, the MCP tools) may have started an
+// update between the click and the POST, and the state being cleared then
+// belongs to that live run. `fetch` resolves for a 409, so ignoring the answer
+// left this screen offering "Update everything" over an update in progress.
+describe("SystemUpdateApp — a dismissal refused by a live update", () => {
+  it("rejoins the running update instead of showing the update controls", async () => {
+    let statusCalls = 0;
+    let dismissCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/setup-api/update/versions")) {
+          return jsonResponse({
+            clawbox: { current: "3.1.11", target: "3.1.11", updateAvailable: false },
+            openclaw: { current: "2026.7.1", target: "2026.7.1", updateAvailable: false },
+          });
+        }
+        if (url.includes("/setup-api/system/update-branch")) return jsonResponse({ branch: null });
+        if (url.includes("/setup-api/update/dismiss")) {
+          dismissCalls += 1;
+          return jsonResponse({ dismissed: false, error: "An update is in progress" }, false, 409);
+        }
+        if (url.includes("/setup-api/update/status")) {
+          statusCalls += 1;
+          // The run this page adopted had already failed; by the time Dismiss
+          // is pressed, somebody else has started a new one.
+          return statusCalls === 1
+            ? jsonResponse({ phase: "failed", steps: [{ id: "restart", label: "Restart", status: "failed" }] })
+            : jsonResponse({ phase: "running", steps: [{ id: "build", label: "Build", status: "running" }] });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    const { getByRole, queryByRole, findByText } = render(<SystemUpdateApp />);
+    await findByText("Update stopped");
+
+    fireEvent.click(getByRole("button", { name: "Dismiss" }));
+
+    await findByText("In progress");
+    expect(dismissCalls).toBe(1);
+    // Nothing that could start a second update is on screen while one runs.
+    expect(queryByRole("button", { name: /Advanced options/ })).toBeNull();
+  });
+});

@@ -209,12 +209,29 @@ export const REPOS_STALE_AFTER_MS = 5 * 60_000;
  * that is no longer connected.
  */
 let reposCache: { login: string; repos: GitHubRepo[]; truncated: boolean; at: number } | null = null;
-let reposRefresh: Promise<GitHubReposOutcome> | null = null;
+/**
+ * The listing being fetched right now, KEYED BY THE ACCOUNT it is for.
+ *
+ * One slot for every account meant a caller that had just resolved a different
+ * login joined whichever refresh happened to be running and was handed the
+ * other account's rows: sign out of A and into B while A's five-second listing
+ * is still going, and B's Import panel showed A's private repositories. Keyed,
+ * B starts its own; each entry is dropped as its own fetch settles.
+ */
+const reposRefresh = new Map<string, Promise<GitHubReposOutcome>>();
+/**
+ * The account the last resolved probe saw. `gh` answers as whoever is signed
+ * in AT THE MOMENT of each call, not as the login the refresh was started for,
+ * so a switch mid-listing produces rows that belong to neither cleanly — this
+ * is what `fetchGitHubRepos` checks before it files or returns them.
+ */
+let activeLogin: string | null = null;
 
 /** For the tests: forget the cached listing. */
 export function _resetGitHubReposCacheForTests(): void {
   reposCache = null;
-  reposRefresh = null;
+  reposRefresh.clear();
+  activeLogin = null;
 }
 
 /** The repositories the connected account can see, newest push first. */
@@ -222,9 +239,15 @@ export async function listGitHubRepos(): Promise<GitHubReposOutcome> {
   const status = await githubStatus();
   if (status.reason === "unreachable") return { ok: false, reason: "gh_unreachable", detail: "Could not reach GitHub from this ClawBox. Check the network connection and try again." };
   if (!status.installed) return { ok: false, reason: "no_gh", detail: "The GitHub CLI (gh) is not installed on this ClawBox." };
-  if (!status.connected || !status.login) return { ok: false, reason: "not_connected", detail: "Connect a GitHub account in the Coding Agent's settings first." };
+  if (!status.connected || !status.login) {
+    // Signing out IS an account change: an in-flight listing for the account
+    // that has just gone must not be filed or served.
+    activeLogin = null;
+    return { ok: false, reason: "not_connected", detail: "Connect a GitHub account in the Coding Agent's settings first." };
+  }
 
   const login = status.login;
+  activeLogin = login;
   const cached = reposCache?.login === login ? reposCache : null;
   if (cached) {
     // Nobody is waiting on the refresh, so its failure must not surface as an
@@ -235,12 +258,21 @@ export async function listGitHubRepos(): Promise<GitHubReposOutcome> {
   return startRepoRefresh(login);
 }
 
-/** One listing at a time: a second caller arriving on a cold cache joins the first rather than starting another eight `gh` boots. */
+/**
+ * One listing PER ACCOUNT at a time: a second caller arriving on a cold cache
+ * joins the first rather than starting another eight `gh` boots — but only
+ * when it is asking about the same account (see `reposRefresh`).
+ */
 function startRepoRefresh(login: string): Promise<GitHubReposOutcome> {
-  if (!reposRefresh) {
-    reposRefresh = fetchGitHubRepos(login).finally(() => { reposRefresh = null; });
-  }
-  return reposRefresh;
+  const running = reposRefresh.get(login);
+  if (running) return running;
+  const started: Promise<GitHubReposOutcome> = fetchGitHubRepos(login).finally(() => {
+    // Only our own entry: a later refresh for this account has already
+    // replaced it if this one was somehow still registered.
+    if (reposRefresh.get(login) === started) reposRefresh.delete(login);
+  });
+  reposRefresh.set(login, started);
+  return started;
 }
 
 async function fetchGitHubRepos(login: string): Promise<GitHubReposOutcome> {
@@ -264,6 +296,14 @@ async function fetchGitHubRepos(login: string): Promise<GitHubReposOutcome> {
   }
   const apps = await findClawboxRepos(rows.map((r) => r.owner));
   const repos: GitHubRepo[] = rows.map((r) => ({ ...r, clawboxApp: apps.searched.has(r.owner) ? apps.found.has(r.fullName) : null }));
+  // The account may have changed under this listing — five seconds of `gh`
+  // boots is long enough for the owner to sign out and back in, and every one
+  // of those boots answered as whoever was signed in at the time. So the rows
+  // are neither cached under `login` nor handed back: a listing that may be
+  // half one account's and half another's belongs to nobody.
+  if (activeLogin !== login) {
+    return { ok: false, reason: "failed", detail: "The GitHub account changed while this ClawBox was listing its repositories. Try again." };
+  }
   reposCache = { login, repos, truncated, at: Date.now() };
   return { ok: true, login, repos, truncated };
 }

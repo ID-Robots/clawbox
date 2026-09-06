@@ -68,7 +68,11 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
   const [folderPath, setFolderPath] = useState("");
   /** The repository (or "folder") an import is running for; null when none is. */
   const [importing, setImporting] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // The error carries the tab it belongs to. An import is a request that can
+  // outlive the half that started it: a folder refusal that landed after the
+  // owner had switched to GitHub was drawn over the repository list, where
+  // "Give the folder as an absolute path" names nothing on screen.
+  const [error, setError] = useState<{ tab: "github" | "folder"; message: string } | null>(null);
   // The current translation, for a fetch memoised once: a language switched
   // while the panel is up must word the next failure in the new one.
   const tRef = useRef(t);
@@ -110,6 +114,9 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
   const shown = useMemo(() => matches.slice(0, MAX_ROWS), [matches]);
 
   const runImport = async (body: Record<string, string>, key: string) => {
+    // Whose import this is, read now rather than when the answer comes back —
+    // by then `tab` may be the other half.
+    const from = tab;
     setImporting(key);
     setError(null);
     try {
@@ -120,7 +127,7 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
       });
       const data = await res.json().catch(() => ({})) as Partial<ImportResult> & { error?: string };
       if (!res.ok || typeof data.directory !== "string") {
-        setError(data.error || t("codingAgent.importFailed"));
+        setError({ tab: from, message: data.error || t("codingAgent.importFailed") });
         return;
       }
       onImported({
@@ -131,7 +138,7 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
         skipped: Array.isArray(data.skipped) ? data.skipped : [],
       });
     } catch {
-      setError(t("codingAgent.importFailed"));
+      setError({ tab: from, message: t("codingAgent.importFailed") });
     } finally {
       setImporting(null);
     }
@@ -167,8 +174,8 @@ export default function ImportProjectPanel({ onImported, onClose, onOpenSettings
         </button>
       </div>
 
-      {error && (
-        <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="coding-agent-import-error">{error}</p>
+      {error && error.tab === tab && (
+        <p className="mt-2 text-[11px] text-red-400" role="alert" data-testid="coding-agent-import-error">{error.message}</p>
       )}
 
       {tab === "github" && (

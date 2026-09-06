@@ -38,6 +38,12 @@ describe("the desktop Content-Security-Policy", () => {
     expect(connect).toContain("'self'");
     expect(connect.split(/\s+/)).not.toContain("*");
     expect(connect).not.toMatch(/https:(\s|$)/);
+    // Bound to whole TOKENS. `not.toMatch(/https:(\s|$)/)` only rejects the
+    // bare scheme, so `https://*` and `https://*:*` — every origin on the
+    // internet — would have passed it. The lookahead is what keeps
+    // `https://*.local`, which is a host pattern and the LAN entry this
+    // directive exists for.
+    expect(connect).not.toMatch(/(?:^|\s)https:\/\/\*(?::\*)?(?=\s|$)/);
   });
 
   it("still refuses to run anything it did not serve", async () => {

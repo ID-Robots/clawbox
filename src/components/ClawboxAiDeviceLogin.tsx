@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { PORTAL_LOGIN_URL } from "@/lib/max-subscription";
 import { ButtonSpinner } from "./ButtonSpinner";
 import DeviceCodeCard from "./DeviceCodeCard";
@@ -42,11 +43,10 @@ export default function ClawboxAiDeviceLogin({
   // English is the floor for a key the locale packs do not carry yet: `t`
   // answers with the raw key when it is missing, and this card is the one every
   // owner meets on the Providers page — a raw `ai.clawaiGetCode` on the button
-  // would be worse than the English it replaces.
-  const tr = (key: string, english: string) => {
-    const value = t(key);
-    return value === key ? english : value;
-  };
+  // would be worse than the English it replaces. The shared hook, not a copy of
+  // it: a private one drifts from the placeholder handling in i18n-floor.ts,
+  // which is the reason that module exists.
+  const tr = useTr();
   // The manual path is collapsed by default: the device-code flow is the one
   // we want people on, and showing a token field next to it invites pasting
   // the wrong string. It matters for the cases the code flow can't serve —

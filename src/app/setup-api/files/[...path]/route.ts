@@ -103,7 +103,13 @@ export async function PUT(req: NextRequest, { params }: Params) {
   if (!abs) return NextResponse.json({ error: "Invalid path" }, { status: 400 });
   if (!fs.existsSync(abs)) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const body = await req.json().catch(() => ({}));
+  // `.catch` covers a body that is not JSON at all; this covers one that IS —
+  // a request whose body is literally `null` parses to `null`, and reading
+  // `.newName` off it threw a TypeError, so the Files app got a 500 where the
+  // 400 below is the answer. Anything that is not a plain object carries no
+  // `newName` either, so they all take the same road.
+  const parsed: unknown = await req.json().catch(() => null);
+  const body = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   const newName: unknown = body.newName;
   if (typeof newName !== "string" || !newName) return NextResponse.json({ error: "newName required" }, { status: 400 });
 

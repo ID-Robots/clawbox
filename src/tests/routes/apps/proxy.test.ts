@@ -185,6 +185,20 @@ describe("the app proxy", () => {
     expect(styled.headers.get("access-control-allow-origin")).toBe("https://studio.example");
   });
 
+  it("gives the app's DATA no CORS answer, only its code", async () => {
+    // `Origin: null` proves nothing — any page on the web can send it from a
+    // sandboxed iframe of its own, and over plain HTTP no second header tells
+    // the two apart. So the answer reaches the types that are CORS-fetched by
+    // construction and carry no per-request data; a notes app's notes are
+    // JSON, and JSON stays unreadable to another origin.
+    meta("site");
+    for (const type of ["application/json", "text/html", "text/plain", "image/png"]) {
+      handler = (_r, res) => { res.writeHead(200, { "content-type": type }); res.end("{}"); };
+      const res = await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]));
+      expect(res.headers.get("access-control-allow-origin"), type).toBeNull();
+    }
+  });
+
   it("carries a POST body through and hands a redirect back rather than following it", async () => {
     meta("site");
     handler = (r, res, body) => {

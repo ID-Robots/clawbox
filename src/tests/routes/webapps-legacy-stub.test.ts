@@ -81,8 +81,12 @@ async function listenFrom(cwd: string): Promise<{ port: number; kill: () => void
     let seen = "";
     child.stdout?.on("data", (d: Buffer) => {
       seen += d.toString();
-      const line = seen.trim();
-      if (line) resolve(Number(line));
+      // Wait for the newline the child's console.log writes. A pipe promises
+      // no chunk boundaries, so resolving on the first non-empty chunk read a
+      // split "4230\n" as "42" and the case then probed a port nothing was
+      // listening on — a flake that only ever showed up on a loaded runner.
+      const end = seen.indexOf("\n");
+      if (end !== -1) resolve(Number(seen.slice(0, end).trim()));
     });
     child.on("exit", () => reject(new Error("the project's server exited before it listened")));
   });

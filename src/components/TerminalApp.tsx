@@ -723,7 +723,7 @@ function TerminalLoading() {
       style={{ background: "var(--win-ground)" }}
     >
       <div
-        className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin"
+        className="w-8 h-8 rounded-full border-2 border-t-transparent motion-safe:animate-spin"
         style={{ borderColor: "var(--coral-bright)", borderTopColor: "transparent" }}
       />
       <span className="text-sm font-mono" style={{ color: "#4b5563" }}>

@@ -107,4 +107,33 @@ describe("registerWebappInPreferences", () => {
     await expect(registerWebappInPreferences("timer", "Timer")).resolves.toBeUndefined();
     expect(mockSetMany).toHaveBeenCalled();
   });
+  it("does not let two registrations read the same base and drop one", async () => {
+    // The read below and the write under it are a read-modify-write over the
+    // WHOLE preference snapshot, and the store's own atomic write protects the
+    // FILE, not the update. Two that interleave — a build finishing while a
+    // project's "Add to desktop" lands — each read the same base and the
+    // second write drops the first: measured before the lock, `aaa` and `bbb`
+    // registered together left installed_meta holding only `bbb`.
+    //
+    // Pinned as the ORDER rather than the surviving keys, because a mock store
+    // that merges hides the loss the real preference write does not.
+    const order: string[] = [];
+    mockGetAll.mockImplementation(async () => {
+      order.push("read");
+      // A real read is not instantaneous; this is the window the second
+      // registration used to slip into.
+      await new Promise((r) => setTimeout(r, 5));
+      return {};
+    });
+    mockSetMany.mockImplementation(async () => { order.push("write"); });
+
+    await Promise.all([
+      registerWebappInPreferences("aaa", "A"),
+      registerWebappInPreferences("bbb", "B"),
+    ]);
+
+    // read,write,read,write — never read,read,write,write.
+    expect(order).toEqual(["read", "write", "read", "write"]);
+  });
+
 });

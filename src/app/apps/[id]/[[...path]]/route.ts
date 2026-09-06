@@ -100,8 +100,10 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
     // would blank the window.
     if (key === "x-frame-options") return;
     // Both describe bytes that no longer exist once fetch has unwrapped them.
+    // An encoding it did NOT unwrap keeps both: those bytes are still the
+    // upstream's, the length is still true, and dropping it would take the
+    // total off a download's progress bar for nothing.
     if (bodyWasDecoded && (key === "content-encoding" || key === "content-length")) return;
-    if (key === "content-length" && upstreamEncoding) return;
     out.append(key, value);
   });
   // The containment (see app-proxy.ts): an opaque origin for EVERY response
@@ -112,7 +114,7 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
   // `null`, so its module scripts and `crossorigin` stylesheets are CORS
   // fetches the app's server was never asked to answer (see
   // appProxyAllowOrigin). Vary on Origin, since the answer now depends on it.
-  const allowOrigin = appProxyAllowOrigin(request.headers.get("origin"), out.get("access-control-allow-origin"));
+  const allowOrigin = appProxyAllowOrigin(request.headers.get("origin"), out.get("access-control-allow-origin"), out.get("content-type"));
   if (allowOrigin) {
     out.set("access-control-allow-origin", allowOrigin);
     const vary = out.get("vary");

@@ -220,6 +220,28 @@ describe("PUT /setup-api/files/[...path]", () => {
     expect((await res.json()).error).toBe("newName required");
   });
 
+  it("answers 400, not a crash, for a body that is JSON but not an object", async () => {
+    // `await req.json()` resolves for a body of literally `null` — the
+    // `.catch` never fires — and reading `.newName` off it threw a TypeError
+    // before the validation below could answer. The Files app saw a 500 for
+    // what is an ordinary bad request. A bare string and an array are the same
+    // shape of mistake and take the same road.
+    fs.writeFileSync(path.join(TEST_ROOT, "file.txt"), "content");
+
+    for (const raw of ["null", '"new.txt"', "[]", "7"]) {
+      const req = createRequest("/setup-api/files/file.txt", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: raw,
+      });
+      const res = await filesPathPut(req, createParams(["file.txt"]));
+      expect(res.status, `a body of ${raw}`).toBe(400);
+      expect((await res.json()).error).toBe("newName required");
+      // …and the file is untouched.
+      expect(fs.existsSync(path.join(TEST_ROOT, "file.txt"))).toBe(true);
+    }
+  });
+
   it("rejects path traversal in newName", async () => {
     fs.writeFileSync(path.join(TEST_ROOT, "file.txt"), "content");
 

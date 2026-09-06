@@ -15,6 +15,28 @@ import {
 } from "@/lib/code-projects";
 import { listenerOwnedBy, listenerRefusal, projectFolderFor, registerServerApp, serverAppStubHtml } from "@/lib/app-proxy";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
+import { createSerialLock } from "@/lib/serial-lock";
+
+/**
+ * One desktop registration at a time.
+ *
+ * Putting an app on the desktop reads `pref:installed_apps` and
+ * `pref:installed_meta` out of config.json, adds one entry and writes the whole
+ * map back (`registerWebappInPreferences`, reached from both
+ * `registerServerApp` and `deployWebapp`). There are awaits between that read
+ * and the write, so two registrations in flight together each start from the
+ * same snapshot and the second one's write drops the first one's entry: a
+ * legacy stub migrated while another app was being created took that app off
+ * the desktop — its files still on disk, no icon anywhere.
+ *
+ * This lock covers the two registrations started HERE, which is where the
+ * migration below made a second one reachable from a plain GET. The
+ * read-modify-write itself lives in src/lib/webapp-registry.ts, so a
+ * registration begun on another route (apps/install, a coding run's settle)
+ * can still race one of ours — closing that off needs the same lock one level
+ * down, in the registry.
+ */
+const withDesktopRegistration = createSerialLock();
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -80,7 +102,7 @@ async function answerForLegacyStub(appId: string, html: string): Promise<NextRes
   const directory = await projectFolderFor(appId);
   const manifest = directory ? await readClawboxManifest(directory) : null;
   if (directory && manifest?.port) {
-    const outcome = await registerServerApp({ id: appId, directory, manifest });
+    const outcome = await withDesktopRegistration(() => registerServerApp({ id: appId, directory, manifest }));
     // A refusal is not the end of it: the manifest may name a port the owner
     // has not started while the stub's own port is serving happily.
     if (outcome.ok) return htmlPage(serverAppStubHtml(manifest.name, appId));
@@ -187,7 +209,7 @@ export async function POST(request: NextRequest) {
       if (typeof name !== "string" || name.trim() === "") {
         return NextResponse.json({ error: "Name is required" }, { status: 400 });
       }
-      await deployWebapp(appId, html, { name, color, icon });
+      await withDesktopRegistration(() => deployWebapp(appId, html, { name, color, icon }));
     } else {
       // Update: only rewrite the HTML. Re-stamping meta.json here would clobber
       // the saved display name (an update carries no `name`), and re-registering
