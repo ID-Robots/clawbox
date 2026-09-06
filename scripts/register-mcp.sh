@@ -582,6 +582,16 @@ else:
     # are the tree, `~/clawbox-backup` is not. A root at the very end of the
     # command line gets its own glob, because there is no character there to put
     # in a class — that is the `rm -rf ~/clawbox` spelling.
+    #
+    # The class carries TAB, NEWLINE and CR as literal characters. Both halves
+    # of that survive: fnmatch.translate copies a class through and a regex
+    # class holds a literal control character, and PyYAML writes the glob as a
+    # double-quoted scalar with \t \n \r escapes that safe_load reads back
+    # identically. Changing this class changes every rendered glob, and the
+    # merge below is add-only by design (an owner's own rule must survive), so
+    # a box updated across such a change keeps the superseded globs alongside
+    # the new ones — harmless, since a deny only ever adds refusals, and the
+    # alternative is a script that deletes rules it did not write.
     term_class = "[" + terminators + "]"
     # The LEFT boundary of a token, so `rm ` is not found inside `confirm ` or
     # `xterm `. fnmatch's negated class, and the reason `tokenBoundary` is

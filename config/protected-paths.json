@@ -57,9 +57,21 @@
   "_pathTerminators": [
     "What may follow a root for it to be that directory rather than a longer name.",
     "A root at the very end of the command line counts too - that is the",
-    "'rm -rf ~/clawbox' spelling, which no trailing-separator rule would catch."
+    "'rm -rf ~/clawbox' spelling, which no trailing-separator rule would catch.",
+    "TAB, NEWLINE and CR are in here with the space, and they are the ones that",
+    "matter most: a newline is not an exotic spelling, it is how a typed command",
+    "is DELIVERED. process({action:'write', data:'rm -rf ~/clawbox\\n'}) types",
+    "exactly that into a live pty and a script body separates its commands the",
+    "same way, so with only a space here the whole checkout - the most",
+    "destructive spelling there is - was allowed on both editions.",
+    "Both readers splice this string in verbatim: the plugin as a JavaScript Set",
+    "and register-mcp.sh as an fnmatch class '[' + this + ']'. Python's fnmatch",
+    "carries literal control characters inside a class and PyYAML round-trips",
+    "them as \\t \\n \\r escapes, so no character here needs escaping on either",
+    "side - but a character that is special to fnmatch WOULD, so weigh that",
+    "before adding one."
   ],
-  "pathTerminators": "/ ;&|'\")",
+  "pathTerminators": "/ \t\n\r;&|'\")",
 
   "_verbFirstTokens": [
     "Destroy-then-path spellings. Each carries its own trailing space so 'rm '",

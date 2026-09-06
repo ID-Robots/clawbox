@@ -10,6 +10,7 @@
 
 import { readFileSync } from "node:fs";
 import os from "node:os";
+import { posix as posixPath } from "node:path";
 
 /**
  * The floor this module falls back to when the table cannot be read.
@@ -20,11 +21,18 @@ import os from "node:os";
  * MCP server's startup. A throw here would take every device tool off the box,
  * the read-only ones included, over a truncated JSON file. Losing the
  * carve-outs and the exotic verbs is the safe direction to lose things in.
+ *
+ * EDITED IN LOCKSTEP with config/protected-paths.json. The two string fields
+ * are pinned by EQUALITY in src/tests/unit/protected-paths.test.ts ("the
+ * compiled-in floor"), and the list fields by subset — so a table change that
+ * forgets this object is a failing build rather than a floor that quietly
+ * protects something else on exactly the boxes where the table is already
+ * unreadable.
  */
 const FLOOR = {
   pathRoots: ["/clawbox", "/llamacpp/models", "/embed/models"],
   writableSubpaths: [],
-  pathTerminators: "/ ;&|'\")",
+  pathTerminators: "/ \t\n\r;&|'\")",
   tokenBoundary: "!a-z0-9_-",
   verbFirstTokens: ["rm ", "mv "],
   pathFirstTokens: ["rm ", "mv "],
@@ -58,6 +66,34 @@ function loadTable() {
   }
   table = FLOOR;
   return table;
+}
+
+/**
+ * The two derived forms of the table, built once instead of once per character
+ * tested: `rootAt` and `indexOfToken` are called inside `indexOf` loops over the
+ * whole command line, and both used to rebuild a Set or compile a RegExp on
+ * every call.
+ *
+ * Cached against the table OBJECT rather than at import, so the lazy load above
+ * is preserved and a table read after a failed first attempt cannot be answered
+ * from a stale compile.
+ */
+let compiled;
+function compiledTable() {
+  const t = loadTable();
+  if (!compiled || compiled.table !== t) {
+    compiled = {
+      table: t,
+      terminators: new Set([...t.pathTerminators]),
+      // `tokenBoundary` is written in fnmatch's syntax, because the Hermes side
+      // splices it straight into a glob; `!` is fnmatch's negation and `^` is
+      // JavaScript's, so the one character is translated here rather than the
+      // class being written out twice. No `g` flag, so `.test()` is stateless
+      // and this instance is safe to share.
+      boundary: new RegExp(`[${t.tokenBoundary.replace(/^!/, "^")}]`),
+    };
+  }
+  return compiled;
 }
 
 /** Exported so the parity test can prove the floor is a subset of the table. */
@@ -135,7 +171,7 @@ function trimTrailingSlashes(text) {
 function rootAt(text, at, root) {
   if (!text.startsWith(root, at)) return false;
   const next = text[at + root.length];
-  return next === undefined || new Set([...loadTable().pathTerminators]).has(next);
+  return next === undefined || compiledTable().terminators.has(next);
 }
 
 /**
@@ -168,11 +204,7 @@ function findRoot(text, from = 0) {
  * definition of it.
  */
 function indexOfToken(text, token, from = 0) {
-  // `tokenBoundary` is written in fnmatch's syntax, because the Hermes side
-  // splices it straight into a glob; `!` is fnmatch's negation and `^` is
-  // JavaScript's, so the one character is translated here rather than the class
-  // being written out twice.
-  const boundary = new RegExp(`[${loadTable().tokenBoundary.replace(/^!/, "^")}]`);
+  const { boundary } = compiledTable();
   let at = text.indexOf(token, from);
   while (at >= 0) {
     if (at === 0 || boundary.test(text[at - 1])) return at;
@@ -258,10 +290,25 @@ export function commandDenyReason(command, home = os.homedir()) {
  * agent absolute paths under `data/code-projects` with "edit them with your own
  * file tools", there being no `code_file_write` tool. Denying those would have
  * taken multi-file web apps off the OpenClaw edition.
+ *
+ * CANONICALISED FIRST, and that is not cosmetic: the carve-out below is a
+ * substring test and it RETURNS, so a path that merely PASSES THROUGH a
+ * writable subtree used to exempt itself from the whole rule before the root
+ * check ever ran —
+ * `~/clawbox/data/code-projects/../llamacpp/models/gemma.gguf` names a file in
+ * the model store while containing `code-projects` as a substring.
+ * `posix.normalize` before `foldHome`, in that order: normalising second would
+ * pop `~` off `~/../clawbox` and lose the root. POSIX rather than the
+ * platform's own, because the appliance is Linux and a Windows-shaped
+ * normalise would read `\` — a legal character in a Linux filename — as a
+ * separator. ClawBox's own MCP tools never had this hole: `resolveUserPath`
+ * (`mcp/lib/guard.ts`) already hands this function a normalised path.
  */
 export function pathDenyReason(candidate, home = os.homedir()) {
   if (typeof candidate !== "string" || !candidate) return null;
-  const text = trimTrailingSlashes(foldHome(candidate, home).toLowerCase());
+  const text = trimTrailingSlashes(
+    foldHome(posixPath.normalize(candidate), home).toLowerCase(),
+  );
   for (const allowed of loadTable().writableSubpaths) {
     const at = text.indexOf(allowed.toLowerCase());
     if (at < 0) continue;

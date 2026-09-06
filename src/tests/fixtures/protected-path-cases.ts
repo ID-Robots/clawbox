@@ -117,6 +117,44 @@ export const PROTECTED_PATH_COMMAND_CASES: ProtectedPathCommandCase[] = [
     why: "the root-owned edition lock is part of the ClawBox tree",
   },
 
+  // ── Whitespace after the root ────────────────────────────────────────────
+  // A newline is not an exotic spelling: it is how a typed command is
+  // DELIVERED. `process({action:"write", data:"rm -rf ~/clawbox\n"})` types
+  // exactly this into a live pty, and a script body separates its commands the
+  // same way. With only a space in pathTerminators the root stopped ending a
+  // path segment the moment anything but a space followed it, and the whole
+  // tree — the most destructive spelling there is — was allowed.
+  {
+    command: "rm -rf ~/clawbox\n",
+    denied: true,
+    why: "the whole checkout followed by the newline that runs the line",
+  },
+  {
+    command: "cd /tmp\nrm -rf ~/clawbox\necho done",
+    denied: true,
+    why: "the same root mid-script, where no trailing-whitespace strip can reach it",
+  },
+  {
+    command: "rm -rf ~/clawbox\tfoo",
+    denied: true,
+    why: "a tab separates arguments exactly as a space does",
+  },
+  {
+    command: "rm -rf ~/clawbox\r",
+    denied: true,
+    why: "a carriage return is what a CRLF script leaves after the root",
+  },
+  {
+    command: "rm -rf ~/check-acbuild/data/llamacpp/models\n",
+    denied: true,
+    why: "the incident's own model folder, in the second checkout, with the newline that runs it",
+  },
+  {
+    command: "rm -rf ~/clawbox-backup\n",
+    denied: false,
+    why: "…and the look-alike sibling stays allowed: adding whitespace to the terminators must widen the rule only where a root really ends a segment",
+  },
+
   // ── What must keep working ───────────────────────────────────────────────
   {
     command: "ls -la ~/clawbox/data/llamacpp/models",
@@ -329,5 +367,44 @@ export const PROTECTED_PATH_TOOL_CASES: ProtectedPathToolCase[] = [
     params: { path: "/home/clawbox/clawbox/data/llamacpp/models/x.gguf", content: "x" },
     denied: true,
     why: "and never the model store, whichever list you read it from",
+  },
+
+  // ── `..` through a carve-out ─────────────────────────────────────────────
+  // The carve-out is a substring test, and it RETURNS — so a path that merely
+  // passes through a writable subtree used to exempt itself from the whole
+  // rule before the root check ever ran. Canonicalising the candidate first is
+  // what keeps the exception to the subtree it names.
+  {
+    toolName: "write",
+    params: {
+      path: "/home/clawbox/clawbox/data/code-projects/../llamacpp/models/gemma.gguf",
+      content: "x",
+    },
+    denied: true,
+    why: "THE TRAVERSAL: one `..` walks out of the code-projects carve-out and straight back into the model store",
+  },
+  {
+    toolName: "write",
+    params: {
+      path: "/home/clawbox/clawbox/data/code-projects/../../data/llamacpp/models/x.gguf",
+      content: "x",
+    },
+    denied: true,
+    why: "the same, two levels up and back down",
+  },
+  {
+    toolName: "write",
+    params: { path: "/home/clawbox/clawbox/data/webapps/../config.json", content: "{}" },
+    denied: true,
+    why: "and out of the webapps carve-out onto the tree's own config.json",
+  },
+  {
+    toolName: "write",
+    params: {
+      path: "/home/clawbox/clawbox/data/llamacpp/models/../../code-projects/app/index.html",
+      content: "<html>",
+    },
+    denied: false,
+    why: "…and canonicalising cuts both ways: a path that normalises INTO a carve-out is written, not refused",
   },
 ];
