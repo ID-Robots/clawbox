@@ -384,6 +384,20 @@ function convert(node, budget) {
   parent.replaceChild(frag, node);
 }
 
+/** What this reply has already been given: the cards standing under it now. */
+function budgetFor(parent) {
+  var budget = { seen: {}, taken: 0 };
+  if (!parent || typeof parent.querySelectorAll !== "function") return budget;
+  var drawn = parent.querySelectorAll("a." + CARD_CLASS + "[data-clawbox-email-uid]");
+  for (var i = 0; i < drawn.length; i++) {
+    var uid = drawn[i].getAttribute("data-clawbox-email-uid");
+    if (!uid || budget.seen["u" + uid]) continue;
+    budget.seen["u" + uid] = true;
+    budget.taken += 1;
+  }
+  return budget;
+}
+
 function flush() {
   if (!pending) return;
   var now = Date.now();
@@ -397,6 +411,15 @@ function flush() {
   // build will say, and it is the scope the chat window's own dedupe and cap
   // have. Nodes in different parents get their own budget, so a second reply
   // cannot be capped by the first.
+  //
+  // AND IT IS READ BACK OFF THE DOM, not carried in a variable. One reply's
+  // text nodes do not have to settle in the same sweep — a directive that
+  // arrived a second after its neighbour lands in the next one — so a
+  // per-sweep budget would give it a fresh count and a fresh "already seen"
+  // set, and the same message would get a second card. The cards already on
+  // screen under that parent ARE the count, which also means a card the page
+  // removed takes its place in the budget with it, instead of capping a
+  // conversation for good the way a stored one would.
   var budgets = typeof Map === "function" ? new Map() : null;
   for (var i = 0; i < due.length; i++) {
     var node = due[i][0];
@@ -406,7 +429,7 @@ function flush() {
     var parent = node.parentNode;
     var budget = budgets ? budgets.get(parent) : null;
     if (!budget) {
-      budget = { seen: {}, taken: 0 };
+      budget = budgetFor(parent);
       if (budgets) budgets.set(parent, budget);
     }
     convert(node, budget);

@@ -20,13 +20,25 @@
 // page would. The label's ten locales are pinned in the unit suite, where
 // asserting them does not need a second install.
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { controlUiEmailDirectiveScriptBody } from "@/lib/control-ui-email-directives";
 
-/** The production settle is half a second; these tests use the same clock, shorter. */
-const SETTLE_MS = 20;
-const SWEEP_MS = 5;
+/**
+ * The production settle is half a second; these tests use the same clock,
+ * shorter, and ADVANCED BY HAND.
+ *
+ * The streaming case mutates the node every `SWEEP_MS` and asserts that nothing
+ * has been converted yet, so the margin between the two is what the test is
+ * actually made of — and on a real clock a scheduler stall longer than
+ * `SETTLE_MS` between the mutation and the assertion would let the sweep
+ * convert `EMAIL:44` and fail for the machine's reason rather than the code's.
+ * Fake timers take the machine out of it: `Date.now()`, which is what the
+ * script measures quiet with, moves exactly as far as each `advanceTimersBy`
+ * says and no further.
+ */
+const SETTLE_MS = 150;
+const SWEEP_MS = 10;
 
 /**
  * Evaluate the shipped program with its two dependencies passed in by name.
@@ -60,14 +72,21 @@ function uids(): string[] {
  * still arriving, so every assertion here has to wait for quiet — a
  * `queueMicrotask` would see the DOM exactly as it was.
  */
-function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, SETTLE_MS + SWEEP_MS * 4));
+async function settle(): Promise<void> {
+  await vi.advanceTimersByTimeAsync(SETTLE_MS + SWEEP_MS * 4);
 }
 
 describe("the Control UI chat and an EMAIL: directive", () => {
   beforeEach(() => {
+    // The clock the settle is measured against, driven by hand: the sweep and
+    // the assertions must not race a loaded runner's scheduler.
+    vi.useFakeTimers();
     document.body.innerHTML = "";
     document.getElementById("clawbox-email-card-style")?.remove();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("turns a directive already on the page into a card and leaves the prose", async () => {
@@ -116,7 +135,7 @@ describe("the Control UI chat and an EMAIL: directive", () => {
 
     for (const text of ["Here it is.\nEMAIL:4", "Here it is.\nEMAIL:44", "Here it is.\nEMAIL:447"]) {
       node.data = text;
-      await new Promise((resolve) => setTimeout(resolve, SWEEP_MS));
+      await vi.advanceTimersByTimeAsync(SWEEP_MS);
       expect(cards()).toHaveLength(0);
     }
     node.data = "Here it is.\nEMAIL:4471";
@@ -152,6 +171,23 @@ describe("the Control UI chat and an EMAIL: directive", () => {
     await settle();
 
     expect(uids()).toEqual(["7", "8"]);
+  });
+
+  it("counts one reply once even when its lines settle in different sweeps", async () => {
+    // One reply's text nodes do not have to hold still together: a directive
+    // that arrives a second after its neighbour settles in a later sweep. A
+    // budget carried only for the length of one sweep would give it a fresh
+    // count and a fresh "already seen" set, and the same message would get a
+    // second card.
+    document.body.innerHTML = "<p>Two of them.<br>EMAIL:7</p>";
+    installScript();
+    await settle();
+    expect(uids()).toEqual(["7"]);
+
+    document.querySelector("p")?.appendChild(document.createTextNode("EMAIL:7"));
+    await settle();
+
+    expect(uids()).toEqual(["7"]);
   });
 
   it("does not weld two words together when the directive follows inline markup", async () => {
