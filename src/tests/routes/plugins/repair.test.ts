@@ -179,11 +179,18 @@ describe("plugins/repair — the Retry", () => {
     expect(await r.json()).toMatchObject({ ok: true, restarted: true });
   });
 
-  it("says the restart did not happen rather than folding it into the verdict", async () => {
+  it("keeps the badge when the gateway did not come back", async () => {
+    // The restart is what LOADS the repaired plugin. Until it happens the
+    // plugin is installed, consented and enabled — and still not running — so
+    // taking the badge away would tell the owner it is working. The repair
+    // itself did happen, which is why this is not an error: `ok: true` with
+    // `restarted: false` and the marker left in place, and the boot script
+    // clears it itself on the next successful start.
     stubExec(async () => ({ stdout: LOADED }));
     restartGateway.mockRejectedValue(new Error("gateway did not come back"));
     const r = await post({ pluginId: "codex" });
-    expect(await r.json()).toMatchObject({ ok: true, restarted: false });
+    expect(await r.json()).toMatchObject({ ok: true, restarted: false, markerCleared: false });
+    expect(clearPluginRepair).not.toHaveBeenCalled();
   });
 
   it("is inert on Hermes", async () => {

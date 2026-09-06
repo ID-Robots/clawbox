@@ -249,12 +249,6 @@ export async function POST(req: Request) {
     );
   }
 
-  // NOT a failure of the repair, which has already been proved: turning it into
-  // one would be the false failure this card exists to remove. But not a plain
-  // success either — the badge the owner just cleared is still on his screen,
-  // and the answer says so instead of leaving him to wonder.
-  const markerCleared = await clearPluginRepair(entry.id).then(() => true).catch(() => false);
-
   // AND RESTART, like every other route that installs a plugin. `plugins
   // install` prints "Restart the gateway to load plugins" for a reason: without
   // this the owner presses Retry, the badge vanishes and the provider is still
@@ -268,5 +262,21 @@ export async function POST(req: Request) {
   } catch {
     restarted = false;
   }
+
+  // THE BADGE GOES ONLY WHEN THE REPAIR IS COMPLETE END TO END — installed,
+  // verified, switched back on AND loaded by a gateway that came back. A
+  // restart that did not happen leaves a plugin that is correct on disk and
+  // still not running, and "Needs repair" is the true thing to leave on screen
+  // for that: the plugin loads at the next start, and the boot script's own
+  // consent loop clears the row there.
+  //
+  // Still not an error. The repair itself did happen, and answering `ok: false`
+  // would send the owner back through a 180 s reinstall for a restart problem
+  // — the false failure this card exists to remove. The two facts are reported
+  // separately instead, and the panel keeps the notice while `markerCleared` is
+  // false rather than removing it and putting it straight back.
+  const markerCleared = restarted
+    ? await clearPluginRepair(entry.id).then(() => true).catch(() => false)
+    : false;
   return NextResponse.json({ ok: true, pluginId: entry.id, restarted, markerCleared });
 }

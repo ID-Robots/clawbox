@@ -57,10 +57,15 @@ export default function PluginRepairNotice({
       // happen — including the one the device could not verify — and the notice
       // has to stay up for it, or the owner is left believing a fix that is not
       // there.
-      const body = (await r.json().catch(() => null)) as { ok?: boolean } | null;
+      const body = (await r.json().catch(() => null)) as { ok?: boolean; markerCleared?: boolean } | null;
       if (r.ok && body?.ok === true) {
         setPhase("idle");
-        onRepaired?.();
+        // ONLY when the device also removed the record. The repair happened —
+        // this is not a failure — but the row is what this notice is drawn
+        // from, so telling the panel to re-read while the row is still there
+        // would take the notice away and put it straight back. It stays, with
+        // its Retry, until the box says the record is gone.
+        if (body.markerCleared !== false) onRepaired?.();
         return;
       }
       setPhase("failed");
