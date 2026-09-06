@@ -291,10 +291,15 @@ function nextStep(prompt: string | undefined, replyApproval: string | undefined)
         return "It was too long to review in a Telegram message, so nothing was sent there.";
       case "no_owner_chat":
         return "Nobody is paired with this ClawBox on Telegram, so nothing was sent there.";
+      case "failed":
+        return "The Telegram request could not be delivered.";
       default:
         return "";
     }
   })();
+  // "sent" is the only value that means BUTTONS ARE LIVE. `asked_elsewhere` is
+  // a question this bot did not post — the reply path's — and reporting it as a
+  // button would send the owner looking for one nobody put there.
   const button =
     prompt === "sent" ? "This ClawBox has also posted the draft to the owner's Telegram with an Approve button." : "";
   const asked = [button, telegram].filter(Boolean).join(" ");

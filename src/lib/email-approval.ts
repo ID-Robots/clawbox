@@ -52,7 +52,7 @@ import { getOutcome, outcomeKindFor, recordOutcome, resolveSent } from "@/lib/em
 import {
   advanceOffset,
   claimPrompt,
-  countPrompts,
+  countKeyboardPrompts,
   createPrompt,
   listPrompts,
   readOffset,
@@ -132,6 +132,14 @@ export type CallbackOutcome =
 
 export type PromptOutcome =
   | { kind: "sent"; chats: number }
+  /**
+   * A question about this draft is already outstanding and it is NOT this
+   * bot's. The reply path creates prompts too (email-approval-reply.ts), and
+   * those carry no `messages` — so the old `{ kind: "sent", chats: 0 }` told
+   * the agent an Approve button had been posted when none had, and sent the
+   * owner looking for it.
+   */
+  | { kind: "asked_elsewhere" }
   | { kind: "off" }
   | { kind: "unconfigured" }
   | { kind: "no_owner_chat" }
@@ -181,8 +189,13 @@ export async function chatApprovalEnabled(): Promise<boolean> {
  * — the same number identifies the owner to every bot — so the ids the main bot
  * has approved are exactly the ids that may approve mail here.
  */
-export async function ownerChatIds(): Promise<string[]> {
-  const harness = await getActiveHarness();
+export async function ownerChatIds(harnessOverride?: "openclaw" | "hermes"): Promise<string[]> {
+  // THE HARNESS THE QUESTION CAME FROM, not necessarily the active one. On the
+  // dual SKU both inbound hooks are installed, so a reply can arrive on either
+  // bot — and the list that decides whether its sender is the owner belongs to
+  // the harness whose bot he typed to. Asking the ACTIVE one there would refuse
+  // a paired owner, or accept one paired only on the other side.
+  const harness = harnessOverride ?? (await getActiveHarness());
   const raw =
     harness === "hermes"
       ? (await readHermesApprovedUsers()).map((u) => u.id)
@@ -249,8 +262,15 @@ export async function sendApprovalPrompt(draft: PendingEmail): Promise<PromptOut
 
     const created = createPrompt({ draftId: draft.id, fingerprint: draftFingerprint(draft) });
     if (!created) return { kind: "failed", error: "Too many approval requests are already waiting." };
-    // Already asked. Asking again would leave two live buttons for one email.
-    if (!created.created) return { kind: "sent", chats: created.prompt.messages.length };
+    // Already asked. Asking again would leave two live buttons for one email —
+    // but only a prompt with MESSAGES has buttons at all, and the reply path
+    // makes prompts that have none. Reporting `sent` over one of those is the
+    // same false success this file's `nextStep` copy exists to avoid.
+    if (!created.created) {
+      return created.prompt.messages.length > 0
+        ? { kind: "sent", chats: created.prompt.messages.length }
+        : { kind: "asked_elsewhere" };
+    }
     const prompt = created.prompt;
 
     let delivered = 0;
@@ -543,6 +563,29 @@ export async function settlePrompt(prompt: ApprovalPrompt, approve: boolean): Pr
   }
 }
 
+/**
+ * Take the buttons off a prompt already IN HAND.
+ *
+ * `retireChatPrompt` looks a draft up in the store, which is right for a draft
+ * decided somewhere else and useless for one whose prompt has just been claimed
+ * — `claimPrompt` removes the record, so there is nothing left to find. The
+ * reply path holds the claimed prompt, so it clears that prompt's own
+ * keyboards. Best effort and never throws: this is tidying, and a failure here
+ * must not fail an approval that has already happened.
+ */
+export async function retireClaimedPrompt(prompt: ApprovalPrompt): Promise<void> {
+  try {
+    if (prompt.messages.length === 0) return;
+    const token = await approvalBotToken();
+    if (!token) return;
+    for (const message of prompt.messages) {
+      await clearApprovalKeyboard(token, message.chatId, message.messageId).catch(() => undefined);
+    }
+  } catch {
+    // best-effort
+  }
+}
+
 /** Retire the buttons and post the verdict under the question. Best effort. */
 async function settle(token: string | null, prompt: ApprovalPrompt, verdict: string): Promise<void> {
   if (!token) return;
@@ -637,7 +680,7 @@ async function pollLoop(): Promise<void> {
       // exit" and "running is false", and a startApprovalPoller() landing in
       // that window declines to start — leaving a question outstanding with
       // nothing listening for its answer.
-      if (!token || !(await chatApprovalEnabled()) || countPrompts() === 0) {
+      if (!token || !(await chatApprovalEnabled()) || countKeyboardPrompts() === 0) {
         running = false;
         return;
       }

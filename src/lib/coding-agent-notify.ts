@@ -35,7 +35,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
-import { sendTelegramBotMessage } from "@/lib/telegram-owner-send";
+import { isTelegramBotToken, sendTelegramBotMessage } from "@/lib/telegram-owner-send";
 import type { CodingRun } from "@/lib/coding-agent";
 
 const MAX_TOAST_CHARS = 280;
@@ -162,6 +162,13 @@ async function notifyTelegram(message: string): Promise<void> {
     } else {
       console.error("[coding-agent] this device's Telegram bot could not be read; notice not sent");
     }
+    return;
+  }
+  // Said ONCE, before the fan-out, and not five times as "not delivered": a
+  // token that is not a token is a different problem from a Telegram that would
+  // not answer, and the second reading sends support to the wrong place.
+  if (!isTelegramBotToken(token)) {
+    console.error("[coding-agent] telegram bot token is not a valid token; notice not sent");
     return;
   }
   const ids = (await readTelegramAllowFrom())

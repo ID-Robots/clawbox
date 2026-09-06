@@ -62,7 +62,9 @@ function post(body: unknown): Promise<Response> {
     new Request("http://127.0.0.1/setup-api/email/chat-reply", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${MCP_TOKEN}` },
-      body: JSON.stringify(body),
+      // The two facts every real caller carries: which surface the message
+      // arrived on, and which harness's hook is relaying it.
+      body: JSON.stringify({ channel: "telegram", harness: "openclaw", ...(body as object) }),
     }),
   );
 }
@@ -235,13 +237,45 @@ describe("an approval turn from the owner's own conversation", () => {
       new Request("http://127.0.0.1/setup-api/email/chat-reply", {
         method: "POST",
         headers: { "content-type": "application/json", cookie },
-        body: JSON.stringify({ senderId: OWNER, text: `send ${code}` }),
+        body: JSON.stringify({ senderId: OWNER, text: `send ${code}`, channel: "telegram", harness: "openclaw" }),
       }),
     );
     expect(res.status).toBe(403);
     expect(((await res.json()) as { handled: boolean }).handled).toBe(false);
     expect(vi.mocked(smtp.sendMail)).not.toHaveBeenCalled();
     expect(pending.getPending(id)).not.toBeNull();
+  });
+
+  it("weighs a Telegram sender against the Telegram list, and refuses any other surface", async () => {
+    // Both hooks fire for every channel the box has, and the allowlist is
+    // Telegram's — so a numeric id from another adapter must not be measured
+    // against it.
+    const { id, code } = await offered();
+    for (const channel of ["whatsapp", "discord", "webchat", ""]) {
+      const res = await POST(
+        new Request("http://127.0.0.1/setup-api/email/chat-reply", {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${MCP_TOKEN}` },
+          body: JSON.stringify({ senderId: OWNER, text: `send ${code}`, channel, harness: "openclaw" }),
+        }),
+      );
+      expect(((await res.json()) as { handled: boolean }).handled).toBe(false);
+    }
+    expect(vi.mocked(smtp.sendMail)).not.toHaveBeenCalled();
+    expect(pending.getPending(id)).not.toBeNull();
+  });
+
+  it("refuses a relay that will not say which harness it is", async () => {
+    const { code } = await offered();
+    const res = await POST(
+      new Request("http://127.0.0.1/setup-api/email/chat-reply", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${MCP_TOKEN}` },
+        body: JSON.stringify({ senderId: OWNER, text: `send ${code}`, channel: "telegram" }),
+      }),
+    );
+    expect(((await res.json()) as { handled: boolean }).handled).toBe(false);
+    expect(vi.mocked(smtp.sendMail)).not.toHaveBeenCalled();
   });
 
   it("refuses a body it cannot read rather than guessing", async () => {

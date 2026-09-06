@@ -64,6 +64,7 @@ import {
   MAX_PROMPT_CHARS,
   ownerChatIds,
   retireChatPrompt,
+  retireClaimedPrompt,
   settlePrompt,
   type CallbackOutcome,
 } from "@/lib/email-approval";
@@ -211,9 +212,7 @@ export async function offerReplyApproval(draft: PendingEmail): Promise<ReplyOffe
     // re-announced and this returns none.
     if (!created.created) return { kind: "already_asked" };
 
-    const prompt = created.prompt;
     const code = created.code;
-
     const text = buildNoticeText(draft, code);
     if (text.length > MAX_PROMPT_CHARS) {
       // Deliberately not truncated, and the same rule the button path applies:
@@ -274,6 +273,13 @@ export async function offerReplyApproval(draft: PendingEmail): Promise<ReplyOffe
 export async function applyReplyApproval(input: {
   senderId: string;
   text: string;
+  /**
+   * The harness whose bot the message arrived on. On the dual SKU both inbound
+   * hooks are installed, so the allowlist that decides whether this sender is
+   * the owner — and the bot the verdict goes back on — belong to THAT harness,
+   * not to whichever one happens to be active.
+   */
+  harness?: "openclaw" | "hermes";
   /** Post the verdict over Telegram instead of returning it to be rendered. */
   deliverVerdict?: boolean;
 }): Promise<ReplyApprovalResult> {
@@ -281,7 +287,7 @@ export async function applyReplyApproval(input: {
   if (!parsed) return { handled: false, outcome: "not_command" };
 
   const senderId = String(input.senderId ?? "").trim();
-  const owners = await ownerChatIds();
+  const owners = await ownerChatIds(input.harness);
   if (!senderId || !owners.includes(senderId)) {
     // Logged without the code: this is the one line that survives a refused
     // reply, and it should say that a stranger typed, not which draft.
@@ -289,19 +295,32 @@ export async function applyReplyApproval(input: {
     return { handled: false, outcome: "not_owner" };
   }
 
+  // AN UNKNOWN CODE IS ANSWERED WITH SILENCE, deliberately, and it is the one
+  // place this path is less helpful than the button. A tap on an expired
+  // handle gets `staleTapAnswer` — "that message has already been sent" — but
+  // there the presser had a button ClawBox posted, so the box knows the tap was
+  // real. Here the same words would tell anyone typing whether a code was ever
+  // valid, and a code the owner approved in Settings a minute ago is
+  // indistinguishable from a guess. So it goes on to the agent, which can say
+  // what became of the draft in its own words.
   const found = findPromptByCode(parsed.code);
   if (!found) return { handled: false, outcome: "unknown_code" };
   const prompt = claimPrompt(found.handle);
   if (!prompt) return { handled: false, outcome: "unknown_code" };
 
-  // An approval that has been claimed here must not leave the same draft
-  // answerable by a button somewhere else.
+  // An approval claimed here must not leave the same draft answerable by a
+  // button somewhere else. `retireChatPrompt` looks the draft up in the store,
+  // which `claimPrompt` has just emptied of THIS prompt, so the keyboards are
+  // cleared from the record in hand — the call afterwards still covers a second
+  // prompt for the same draft, which the store's one-per-draft rule makes
+  // impossible today and which costs nothing to keep true.
+  await retireClaimedPrompt(prompt);
   await retireChatPrompt(prompt.draftId);
 
   const settled = await settlePrompt(prompt, parsed.verb === "approve");
   // To the person who answered, and only them: they are the one waiting to hear
   // whether it went. A caller that renders replies itself (OpenClaw's claim
   // carries text) asks for neither.
-  if (input.deliverVerdict) await sendOwnerTelegramText(senderId, settled.note);
+  if (input.deliverVerdict) await sendOwnerTelegramText(senderId, settled.note, input.harness);
   return { handled: true, reply: settled.note, outcome: settled.outcome };
 }

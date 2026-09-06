@@ -605,6 +605,22 @@ describe("what the agent is told about the Telegram question", () => {
     expect(text).not.toContain("short code");
   });
 
+  it("says the question could not be delivered when neither surface reached anyone", async () => {
+    const text = await nextStepText("failed", "failed");
+    expect(text).toContain("could not be delivered");
+    expect(text).not.toContain("Approve button");
+    expect(text).not.toContain("short code");
+  });
+
+  it("claims no button for a question the approvals bot did not post", async () => {
+    // `asked_elsewhere`: a prompt exists for this draft, made by the reply
+    // path, and it carries no keyboard. Reporting it as a button is the same
+    // false success as reporting a code that was never sent.
+    const text = await nextStepText("already_asked", "asked_elsewhere");
+    expect(text).not.toContain("Approve button");
+    expect(text).not.toContain("short code");
+  });
+
   it("says nothing about a code on a box with nobody paired", async () => {
     const text = await nextStepText("no_owner_chat", "off");
     expect(text).toContain("Nobody is paired");

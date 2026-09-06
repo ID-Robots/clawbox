@@ -330,9 +330,23 @@ export function claimPrompt(handle: string, now = Date.now()): ApprovalPrompt | 
   return found;
 }
 
-/** Look without consuming — for the poller's "is anything outstanding" check. */
+/** Look without consuming. Every prompt, whichever surface asked. */
 export function countPrompts(now = Date.now()): number {
   return readStore(now).prompts.length;
+}
+
+/**
+ * How many questions have a BUTTON somewhere — the poller's condition.
+ *
+ * Not `countPrompts`: the store is shared with the reply path, whose prompts
+ * carry no `messages` because there is no keyboard to go back and edit. Counting
+ * those kept the approvals bot long-polling Telegram for up to a day over a
+ * question no tap can ever answer, against this file's own promise that "a box
+ * with the feature switched on and nothing queued makes no requests to Telegram
+ * at all".
+ */
+export function countKeyboardPrompts(now = Date.now()): number {
+  return readStore(now).prompts.filter((p) => p.messages.length > 0).length;
 }
 
 export function listPrompts(now = Date.now()): ApprovalPrompt[] {

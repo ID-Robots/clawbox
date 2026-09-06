@@ -75,8 +75,16 @@ export function looksLikeApproval(text) {
   return APPROVAL_SHAPE.test(text.replace(/^[\ufeff\s]+|[\ufeff\s]+$/g, ""));
 }
 
-/** Long enough for one loopback POST plus an SMTP conversation behind it. */
-const TIMEOUT_MS = 60_000;
+/**
+ * Long enough for one loopback POST plus the SMTP conversation behind it, and
+ * THE SAME NUMBER the Hermes twin uses — two ceilings over identical
+ * server-side work is two different answers to one question.
+ *
+ * The floor is the mail client's own worst case: src/lib/smtp-client.ts allows
+ * a 15 s connect and 20 s per command, so a sluggish server can take well over
+ * a minute before ClawBox has an answer to give.
+ */
+const TIMEOUT_MS = 120_000;
 
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
@@ -143,34 +151,88 @@ function contentOf(event) {
  * as "this handler had no opinion", which is exactly what every path but a
  * settled approval means.
  */
+/**
+ * One POST to ClawBox.
+ *
+ * Answers `{ status, claim }` rather than just the claim, because the caller
+ * has to tell an authorization failure — worth one retry with a re-read token —
+ * from every other unhappy answer, which is not.
+ */
+async function ask(token, body) {
+  const res = await fetch(`${API_BASE}/setup-api/email/chat-reply`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
+  if (!res.ok) return { status: res.status, claim: undefined };
+  const answer = await res.json();
+  if (!answer || answer.handled !== true) return { status: res.status, claim: undefined };
+  const claim =
+    typeof answer.reply === "string" && answer.reply
+      ? { handled: true, text: answer.reply }
+      : { handled: true };
+  return { status: res.status, claim };
+}
+
+/**
+ * WHERE THE MESSAGE CAME FROM, asked of both signals the core fills in.
+ *
+ * The allowlist ClawBox checks the sender against is a TELEGRAM one, so the
+ * channel travels with the request and the device refuses anything else. A
+ * delivery this hook cannot place at all is not offered — an unknown surface is
+ * not an argument for treating its ids as Telegram's.
+ */
+function channelOf(event, ctx) {
+  for (const candidate of [ctx?.channelId, event?.channel]) {
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim().toLowerCase();
+  }
+  return "";
+}
+
 export async function onBeforeDispatch(event, ctx) {
   const text = contentOf(event);
   if (!looksLikeApproval(text)) return undefined;
   const senderId = senderOf(event, ctx);
   if (!senderId) return undefined;
+  const channel = channelOf(event, ctx);
+  if (!channel) return undefined;
   const token = apiToken();
   if (!token) return undefined;
 
+  // `deliverVerdict` ON, and not because this hook cannot answer for itself —
+  // it can, through the claim's `text`, in the thread the owner typed in. It is
+  // because of the TIMEOUT case below: when ClawBox takes longer than the
+  // ceiling the mail may already be going out, and the only honest thing this
+  // hook can then do is claim the message and say nothing. That is safe only if
+  // ClawBox is the one telling the owner what happened, so it always does, and
+  // the fast path simply says it twice — once here, once from the box.
+  const body = { senderId, text, channel, harness: "openclaw", deliverVerdict: true };
+
   try {
-    const res = await fetch(`${API_BASE}/setup-api/email/chat-reply`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-      // `deliverVerdict` off: this hook can answer in the conversation itself
-      // through `text`, which lands in the thread the owner typed in. The
-      // Hermes twin cannot — its claim carries no reply — so it asks ClawBox to
-      // post the verdict instead. The divergence is the harnesses', not a
-      // decision taken twice; see
-      // scripts/hermes-plugins/clawbox_email_directives/approvals.py.
-      body: JSON.stringify({ senderId, text, deliverVerdict: false }),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    if (!res.ok) return undefined;
-    const answer = await res.json();
-    if (!answer || answer.handled !== true) return undefined;
-    return typeof answer.reply === "string" && answer.reply
-      ? { handled: true, text: answer.reply }
-      : { handled: true };
-  } catch {
+    let answer = await ask(token, body);
+    if (answer.status === 401 || answer.status === 403) {
+      // The token this process cached may be older than the file on disk. Read
+      // it once more before giving up: a stale cache is a real state and a
+      // silent one — every approval would answer 403 for as long as this
+      // process happened to stay up.
+      cachedToken = null;
+      const fresh = apiToken();
+      if (fresh && fresh !== token) answer = await ask(fresh, body);
+    }
+    return answer.claim;
+  } catch (err) {
+    // A TIMEOUT IS NOT A REFUSAL, and it is the one failure that must not fail
+    // open. ClawBox answers only once the whole send has finished, so a timeout
+    // means the mail may already be on the wire — and letting the message
+    // through would hand the model a "send <code>" it can only answer by
+    // queueing the same mail again. Claim it silently; ClawBox posts the
+    // verdict itself when it is done.
+    //
+    // Everything else — connection refused, DNS, a body that is not JSON —
+    // means nothing happened, so the message goes on to the agent exactly as it
+    // would have without this plugin.
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") return { handled: true };
     return undefined;
   }
 }

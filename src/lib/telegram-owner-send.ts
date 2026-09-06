@@ -57,6 +57,19 @@ export const TELEGRAM_CHAT_ID_RE = /^-?\d{1,20}$/;
 const BOT_TOKEN_RE = /^(\d{1,20}):([A-Za-z0-9_-]{1,200})$/;
 
 /**
+ * Is this the shape Telegram issues?
+ *
+ * Exported so a caller that reads the token store ITSELF can say so once,
+ * before it fans out. `sendTelegramBotMessage` applies the same check and
+ * answers `false` — which is right for it and wrong as a diagnostic: a
+ * malformed stored token reported five times as "the notice was not delivered"
+ * sends support looking at Telegram or at the pairing instead of at the token.
+ */
+export function isTelegramBotToken(token: string): boolean {
+  return BOT_TOKEN_RE.test(token.trim());
+}
+
+/**
  * One `sendMessage` on a token the CALLER has already resolved.
  *
  * Separate from `sendOwnerTelegramText` because coding-agent-notify.ts reads the
@@ -97,12 +110,23 @@ export async function sendTelegramBotMessage(token: string, chatId: string, text
  * differently on any of them; the reasons are in the service log, written by
  * the readers this delegates to.
  */
-export async function sendOwnerTelegramText(chatId: string, text: string): Promise<boolean> {
+export async function sendOwnerTelegramText(
+  chatId: string,
+  text: string,
+  /**
+   * Which harness's bot to speak on. Defaults to the active one; the reply
+   * path passes the harness the owner's message actually arrived on, because on
+   * a dual box the verdict has to land in the conversation he typed in.
+   */
+  harnessOverride?: "openclaw" | "hermes",
+): Promise<boolean> {
   if (!TELEGRAM_CHAT_ID_RE.test(chatId)) return false;
   const body = text.slice(0, MAX_TELEGRAM_CHARS);
   if (!body) return false;
 
-  if ((await getActiveHarness()) === "hermes") return notifyHermesTelegramUser(chatId, body);
+  if ((harnessOverride ?? (await getActiveHarness())) === "hermes") {
+    return notifyHermesTelegramUser(chatId, body);
+  }
 
   const { token } = await readActiveTelegramBot("openclaw");
   if (typeof token !== "string" || !token.trim()) return false;

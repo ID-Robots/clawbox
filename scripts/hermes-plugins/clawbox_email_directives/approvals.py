@@ -98,8 +98,16 @@ def looks_like_approval(text) -> bool:
 
 
 #: Long enough for one loopback POST plus the SMTP conversation behind it, and
-#: short enough that a wedged mail server cannot hold the gateway all day.
-TIMEOUT_S = 30
+#: THE SAME NUMBER the OpenClaw twin uses — two ceilings over identical
+#: server-side work is two different answers to one question.
+#:
+#: The floor is the mail client's own worst case: ``src/lib/smtp-client.ts``
+#: allows a 15 s connect and 20 s per command, so a sluggish server can take
+#: well over a minute before ClawBox has an answer to give. This hook is
+#: SYNCHRONOUS, so that is a real hold on the dispatch path — which is exactly
+#: why the shape test above runs first and why only a verb-and-a-code ever
+#: reaches the network.
+TIMEOUT_S = 120
 
 CLAWBOX_ROOT = os.environ.get("CLAWBOX_ROOT") or "/home/clawbox/clawbox"
 API_BASE = os.environ.get("CLAWBOX_API_BASE") or "http://127.0.0.1:80"
@@ -153,31 +161,88 @@ def _sender_of(event) -> str:
     return ""
 
 
-def _ask_clawbox(sender_id: str, text: str) -> bool:
-    """True only when ClawBox says it has DEALT with this message."""
-    token = _api_token()
-    if not token:
-        return False
-    body = json.dumps({"senderId": sender_id, "text": text, "deliverVerdict": True}).encode("utf-8")
+def _post(token: str, body: dict) -> tuple[int, bool]:
+    """One POST. Answers ``(status, handled)`` so the caller can tell a stale
+    token — worth one retry — from every other unhappy answer, which is not."""
     request = urllib.request.Request(
         f"{API_BASE}/setup-api/email/chat-reply",
-        data=body,
+        data=json.dumps(body).encode("utf-8"),
         headers={"content-type": "application/json", "authorization": f"Bearer {token}"},
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT_S) as response:  # noqa: S310 - loopback, fixed scheme
             if response.status != 200:
-                return False
+                return response.status, False
             answer = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
-        # FAIL OPEN. ClawBox restarting mid-rebuild, a timeout, a body that is
-        # not JSON: the message carries on to the agent exactly as it would have
-        # without this plugin. An approval that does not go through is an owner
-        # repeating himself; a message swallowed by a failed hook is a box that
-        # has stopped listening.
+    except urllib.error.HTTPError as err:
+        return err.code, False
+    return 200, isinstance(answer, dict) and answer.get("handled") is True
+
+
+def _channel_of(event) -> str:
+    """Which surface this arrived on.
+
+    The allowlist ClawBox checks the sender against is a TELEGRAM one, so the
+    channel travels with the request and the device refuses anything else. A
+    message this plugin cannot place is not offered — an unknown surface is not
+    an argument for treating its ids as Telegram's.
+    """
+    platform = getattr(getattr(event, "source", None), "platform", None)
+    value = getattr(platform, "value", platform)
+    return value.strip().lower() if isinstance(value, str) and value.strip() else ""
+
+
+def _ask_clawbox(sender_id: str, text: str, channel: str) -> bool | None:
+    """``True`` claimed, ``False`` not ours, ``None`` we do not know.
+
+    ``None`` is the timeout, and it is the one answer that must NOT be read as
+    "carry on": ClawBox replies only once the whole send has finished, so a
+    timeout means the mail may already be on the wire. Letting the message
+    through would hand the model a "send <code>" it can only answer by queueing
+    the same mail again.
+    """
+    global _cached_token
+    token = _api_token()
+    if not token:
         return False
-    return isinstance(answer, dict) and answer.get("handled") is True
+    body = {
+        "senderId": sender_id,
+        "text": text,
+        "channel": channel,
+        "harness": "hermes",
+        # ON because a ``skip`` carries no text: without this the owner would
+        # type his code and hear nothing back at all. It is also what makes the
+        # timeout above safe to claim — ClawBox tells him what happened.
+        "deliverVerdict": True,
+    }
+    try:
+        status, handled = _post(token, body)
+        if status in (401, 403):
+            # The token this process cached may be older than the file on disk.
+            # The Hermes gateway outlives `register-mcp.sh`, which mints
+            # `data/.mcp-token` at web-server boot, so a stale cache is a real
+            # state and a silent one — every approval would answer 403 for as
+            # long as the gateway happened to stay up.
+            _cached_token = None
+            fresh = _api_token()
+            if fresh and fresh != token:
+                _, handled = _post(fresh, body)
+        return handled
+    except TimeoutError:
+        return None
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as err:
+        # A socket timeout arrives as one of these on some builds, so it is
+        # separated by inspection rather than by class alone.
+        if isinstance(getattr(err, "reason", None), TimeoutError):
+            return None
+        # FAIL OPEN for everything else — ClawBox restarting mid-rebuild, a
+        # refused connection, a body that is not JSON: nothing happened, so the
+        # message carries on to the agent exactly as it would have without this
+        # plugin. An approval that does not go through is an owner repeating
+        # himself; a message swallowed by a failed hook is a box that has
+        # stopped listening.
+        return False
 
 
 def pre_gateway_dispatch(event=None, **kwargs):
@@ -194,8 +259,15 @@ def pre_gateway_dispatch(event=None, **kwargs):
         sender_id = _sender_of(event)
         if not sender_id:
             return None
-        if not _ask_clawbox(sender_id, text):
+        channel = _channel_of(event)
+        if not channel:
             return None
+        answered = _ask_clawbox(sender_id, text, channel)
+        if answered is False:
+            return None
+        # True (claimed) and None (we timed out and the mail may be going) both
+        # end the message here; only the second is silent, and ClawBox posts the
+        # verdict for it.
         return {"action": "skip", "reason": "clawbox_email_approval"}
     except Exception:
         # Belt AND braces: Hermes already catches this at the call site, and

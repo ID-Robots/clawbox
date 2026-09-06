@@ -276,27 +276,31 @@ describe("before_dispatch — the owner's approval reply", () => {
     const calls = stubClawbox({ handled: true, reply: "Sent." });
     // The hook runs on EVERY inbound message on every channel, so a message
     // that is not exactly a verb and a code must cost no I/O whatsoever.
-    expect(await onBeforeDispatch({ content: "can you email Ivan?" }, { senderId: "6001" })).toBeUndefined();
+    expect(
+      await onBeforeDispatch({ content: "can you email Ivan?" }, { senderId: "6001", channelId: "telegram" }),
+    ).toBeUndefined();
     expect(calls).toHaveLength(0);
   });
 
-  it("hands ClawBox the sender and the text, and asks it NOT to post the verdict", async () => {
+  it("hands ClawBox the sender, the surface and the harness", async () => {
     process.env.CLAWBOX_MCP_TOKEN = TOKEN;
     process.env.CLAWBOX_API_BASE = "http://127.0.0.1:80";
     const calls = stubClawbox({ handled: true, reply: "Sent to 1 recipient(s)." });
 
-    const result = await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" });
+    const result = await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" });
 
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("http://127.0.0.1:80/setup-api/email/chat-reply");
     expect(calls[0].init.headers).toMatchObject({ authorization: `Bearer ${TOKEN}` });
-    // deliverVerdict FALSE on this edition, and that is the whole difference
-    // from the Hermes twin: the claim below carries the text itself, so a
-    // second Telegram message would say the same thing twice.
+    // The surface and the harness travel with it: the allowlist ClawBox weighs
+    // the sender against is Telegram's, and on a dual box it is THIS harness's.
+    // `deliverVerdict` is on so a timeout can be claimed safely — see the hook.
     expect(JSON.parse(String(calls[0].init.body))).toEqual({
       senderId: "6001",
       text: "send AB2CD",
-      deliverVerdict: false,
+      channel: "telegram",
+      harness: "openclaw",
+      deliverVerdict: true,
     });
     expect(result).toEqual({ handled: true, text: "Sent to 1 recipient(s)." });
   });
@@ -304,7 +308,9 @@ describe("before_dispatch — the owner's approval reply", () => {
   it("claims without text when ClawBox sent none", async () => {
     process.env.CLAWBOX_MCP_TOKEN = TOKEN;
     stubClawbox({ handled: true });
-    expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" })).toEqual({ handled: true });
+    expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" })).toEqual({
+      handled: true,
+    });
   });
 
   it("leaves the message to the agent on every not-ours answer", async () => {
@@ -315,7 +321,9 @@ describe("before_dispatch — the owner's approval reply", () => {
       [{}, 200],
     ] as [unknown, number][]) {
       stubClawbox(body, status);
-      expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" })).toBeUndefined();
+      expect(
+        await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+      ).toBeUndefined();
     }
   });
 
@@ -324,13 +332,37 @@ describe("before_dispatch — the owner's approval reply", () => {
     // failure mode a hook can turn into "the box has stopped listening".
     process.env.CLAWBOX_MCP_TOKEN = TOKEN;
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
+    expect(
+      await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+    ).toBeUndefined();
+  });
+
+  it("CLAIMS on a timeout, because the mail may already have gone", () => {
+    // ClawBox answers only once the whole send has finished. Failing open here
+    // would hand the model a "send <code>" it can only answer by queueing the
+    // same mail a second time; ClawBox posts the verdict itself.
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      const err = new Error("timed out");
+      err.name = "TimeoutError";
+      throw err;
+    }));
+    return expect(
+      onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001", channelId: "telegram" }),
+    ).resolves.toEqual({ handled: true });
+  });
+
+  it("does not offer a message it cannot place on a surface", async () => {
+    process.env.CLAWBOX_MCP_TOKEN = TOKEN;
+    const calls = stubClawbox({ handled: true });
     expect(await onBeforeDispatch({ content: "send AB2CD" }, { senderId: "6001" })).toBeUndefined();
+    expect(calls).toHaveLength(0);
   });
 
   it("does not invent a sender, and does not ask without one", async () => {
     process.env.CLAWBOX_MCP_TOKEN = TOKEN;
     const calls = stubClawbox({ handled: true, reply: "Sent." });
-    expect(await onBeforeDispatch({ content: "send AB2CD" }, {})).toBeUndefined();
+    expect(await onBeforeDispatch({ content: "send AB2CD" }, { channelId: "telegram" })).toBeUndefined();
     expect(calls).toHaveLength(0);
   });
 });

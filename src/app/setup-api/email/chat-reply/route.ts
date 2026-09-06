@@ -91,8 +91,25 @@ const ATTEMPT_KEY = "harness";
 interface ChatReplyBody {
   senderId?: unknown;
   text?: unknown;
+  channel?: unknown;
+  harness?: unknown;
   deliverVerdict?: unknown;
 }
+
+/**
+ * The only surface whose sender ids this route may weigh.
+ *
+ * `ownerChatIds()` answers a TELEGRAM allowlist on both editions, and both
+ * inbound hooks fire for every channel the box has — so without this a numeric
+ * WhatsApp or Discord id would be checked against the Telegram list. Nothing is
+ * exploitable there without a live code, but "the same list, and the same rule,
+ * that decides who may press the button" is only true for Telegram, and a route
+ * whose comment is only sometimes true is the one that gets extended wrongly.
+ */
+const APPROVAL_CHANNEL = "telegram";
+
+/** The harnesses whose hooks may speak here. */
+const HARNESSES = new Set(["openclaw", "hermes"]);
 
 export async function POST(request: Request) {
   if (!verifyMcpBearer(request.headers.get("authorization"))) {
@@ -116,6 +133,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ handled: false, error: "senderId and text are required" }, { status: 400 });
   }
 
+  const channel = typeof body.channel === "string" ? body.channel.trim().toLowerCase() : "";
+  if (channel !== APPROVAL_CHANNEL) return NextResponse.json({ handled: false });
+
+  const harness = typeof body.harness === "string" ? body.harness.trim().toLowerCase() : "";
+  if (!HARNESSES.has(harness)) return NextResponse.json({ handled: false });
+
   // Not an approval attempt at all, so nothing is spent and nothing is looked
   // up. `applyReplyApproval` asks the same question again — the cost is one
   // anchored regex, and the alternative is a budget that answers for messages
@@ -131,6 +154,7 @@ export async function POST(request: Request) {
     const result = await applyReplyApproval({
       senderId,
       text,
+      harness: harness as "openclaw" | "hermes",
       deliverVerdict: body.deliverVerdict === true,
     });
     // The outcome is for this device's log, never for the caller: the plugin

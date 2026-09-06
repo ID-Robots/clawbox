@@ -246,6 +246,37 @@ describe("who may say send", () => {
     expect((await reply.applyReplyApproval({ senderId: OWNER, text: `send ${code}` })).handled).toBe(true);
   });
 
+  it("answers for the harness the reply arrived on, not the active one", async () => {
+    // The dual SKU installs both inbound hooks, so a reply can come in on
+    // either bot. Weighing it against the ACTIVE harness's list would refuse an
+    // owner paired only on the other side, and would post his verdict into a
+    // different conversation from the one he typed in.
+    const harness = await import("@/lib/harness");
+    const hermes = await import("@/lib/hermes-telegram");
+    vi.mocked(harness.getActiveHarness).mockResolvedValue("openclaw");
+    vi.mocked(hermes.readHermesApprovedUsers).mockResolvedValue([{ id: "7002", name: "owner" }]);
+
+    const offer = await reply.offerReplyApproval(queueDraft());
+    if (offer.kind !== "offered") throw new Error(`not offered: ${offer.kind}`);
+    vi.mocked(ownerSend.sendOwnerTelegramText).mockClear();
+
+    // The OpenClaw owner is not the Hermes bot's owner.
+    expect(
+      (await reply.applyReplyApproval({ senderId: OWNER, text: `send ${offer.code}`, harness: "hermes" })).handled,
+    ).toBe(false);
+    const settled = await reply.applyReplyApproval({
+      senderId: "7002",
+      text: `send ${offer.code}`,
+      harness: "hermes",
+      deliverVerdict: true,
+    });
+    expect(settled.handled).toBe(true);
+    // ...and the verdict goes back on the Hermes bot.
+    expect(vi.mocked(ownerSend.sendOwnerTelegramText).mock.calls).toEqual([
+      ["7002", settled.reply, "hermes"],
+    ]);
+  });
+
   it("reads the allowlist the active harness owns", async () => {
     const harness = await import("@/lib/harness");
     const hermes = await import("@/lib/hermes-telegram");
@@ -291,7 +322,9 @@ describe("the verdict", () => {
     expect(result.handled).toBe(true);
     // Exactly one message, to the person who typed — not a fan-out to the
     // household about a decision one of them made.
-    expect(vi.mocked(ownerSend.sendOwnerTelegramText).mock.calls).toEqual([[OWNER, result.reply]]);
+    expect(vi.mocked(ownerSend.sendOwnerTelegramText).mock.calls).toEqual([
+      [OWNER, result.reply, undefined],
+    ]);
   });
 
   it("is returned rather than posted when the caller renders replies", async () => {

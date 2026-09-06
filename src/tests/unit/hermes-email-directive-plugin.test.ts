@@ -218,13 +218,15 @@ d("pre_gateway_dispatch — the owner's approval reply", () => {
    * the request the box would really make and the dict the gateway would
    * really read — not a restatement of either.
    */
-  function drive(text: string, senderId: string | null, answer: unknown, fail = false): {
-    result: unknown;
-    calls: { url: string; body: unknown; auth: string }[];
-  } {
+  function drive(
+    text: string,
+    senderId: string | null,
+    answer: unknown,
+    opts: { fail?: "refused" | "timeout"; platform?: string | null } = {},
+  ): { result: unknown; calls: { url: string; body: unknown; auth: string }[] } {
     return py(
       [
-        "import json, io, urllib.request",
+        "import json, urllib.request, urllib.error",
         "import clawbox_email_directives.approvals as approvals",
         "approvals.CLAWBOX_ROOT = '/nonexistent'",
         "approvals._cached_token = 't' * 32",
@@ -232,11 +234,11 @@ d("pre_gateway_dispatch — the owner's approval reply", () => {
         "calls = []",
         "def fake_urlopen(req, timeout=None):",
         "    calls.append({'url': req.full_url, 'body': json.loads(req.data.decode()), 'auth': req.get_header('Authorization') or ''})",
-        // OSError, not urllib.error.URLError: the plugin's own `except` names
-        // both, and an exception the fake raised by mistake (an AttributeError
-        // from a module it never imported) would be swallowed by the broad
-        // catch one level up and make this assertion vacuous.
-        "    if stdin['fail']: raise OSError('refused')",
+        // OSError and TimeoutError, never an exception the fake raised by
+        // mistake: an AttributeError would be swallowed by the broad catch one
+        // level up and make these assertions vacuous.
+        "    if stdin['fail'] == 'refused': raise OSError('refused')",
+        "    if stdin['fail'] == 'timeout': raise TimeoutError('timed out')",
         "    class R:",
         "        status = 200",
         "        def read(self): return json.dumps(stdin['answer']).encode()",
@@ -244,11 +246,12 @@ d("pre_gateway_dispatch — the owner's approval reply", () => {
         "        def __exit__(self, *a): return False",
         "    return R()",
         "urllib.request.urlopen = fake_urlopen",
-        "class E: pass",
-        "e = E(); e.text = stdin['text']; e.user_id = stdin['senderId']; e.source = None",
-        "print(json.dumps({'result': approvals.pre_gateway_dispatch(event=e), 'calls': calls}))",
+        "class P: value = stdin['platform']",
+        "class S: user_id = stdin['senderId']; platform = P() if stdin['platform'] else None",
+        "class E: text = stdin['text']; user_id = stdin['senderId']; source = S()",
+        "print(json.dumps({'result': approvals.pre_gateway_dispatch(event=E()), 'calls': calls}))",
       ].join("\n"),
-      { text, senderId, answer, fail },
+      { text, senderId, answer, fail: opts.fail ?? "", platform: opts.platform === undefined ? "telegram" : opts.platform },
     );
   }
 
@@ -260,7 +263,7 @@ d("pre_gateway_dispatch — the owner's approval reply", () => {
     expect(calls).toHaveLength(0);
   });
 
-  it("hands ClawBox the sender and the text, and asks it TO post the verdict", () => {
+  it("hands ClawBox the sender, the surface and the harness", () => {
     const { result, calls } = drive("send AB2CD", "6001", { handled: true, reply: "Sent." });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("http://127.0.0.1:80/setup-api/email/chat-reply");
@@ -268,7 +271,17 @@ d("pre_gateway_dispatch — the owner's approval reply", () => {
     // deliverVerdict TRUE on this edition, and that is the whole difference
     // from the OpenClaw twin: a `skip` carries no text, so without this the
     // owner would type his code and hear nothing back at all.
-    expect(calls[0].body).toEqual({ senderId: "6001", text: "send AB2CD", deliverVerdict: true });
+    // The surface and the harness travel with it: the allowlist ClawBox weighs
+    // the sender against is Telegram's, and on a dual box it is THIS harness's.
+    // `deliverVerdict` is on because a `skip` carries no text — without it the
+    // owner would type his code and hear nothing at all.
+    expect(calls[0].body).toEqual({
+      senderId: "6001",
+      text: "send AB2CD",
+      channel: "telegram",
+      harness: "hermes",
+      deliverVerdict: true,
+    });
     // `skip` and not `allow`: `allow` BREAKS the call site's loop over the
     // other plugins' results.
     expect(result).toEqual({ action: "skip", reason: "clawbox_email_approval" });
@@ -281,11 +294,26 @@ d("pre_gateway_dispatch — the owner's approval reply", () => {
 
   it("fails OPEN when ClawBox cannot be reached at all", () => {
     // A box mid-rebuild must not swallow the owner's message.
-    const { result, calls } = drive("send AB2CD", "6001", { handled: true }, true);
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true }, { fail: "refused" });
     expect(result).toBeNull();
     // ...and it really did try, so this is the fail-open path and not the
     // shape test quietly refusing the message earlier.
     expect(calls).toHaveLength(1);
+  });
+
+  it("CLAIMS on a timeout, because the mail may already have gone", () => {
+    // ClawBox answers only once the whole send has finished. Failing open here
+    // would hand the model a "send <code>" it can only answer by queueing the
+    // same mail a second time; ClawBox posts the verdict itself.
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true }, { fail: "timeout" });
+    expect(result).toEqual({ action: "skip", reason: "clawbox_email_approval" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not offer a message it cannot place on a surface", () => {
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true }, { platform: null });
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
   });
 
   it("does not invent a sender, and does not ask without one", () => {
