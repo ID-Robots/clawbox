@@ -240,6 +240,16 @@ export CLAWBOX_OPENCLAW_V2
 # not an upper bound on the doctor arm — `TimeoutStartSec=600` is its real
 # ceiling, and that is the trade taken on purpose.
 CLAWBOX_CONFIG_VALIDATED_STAMP="$CLAWBOX_ROOT/data/openclaw-config-validated"
+# What the core still refuses AFTER its own migrations, remembered against the
+# same fingerprint the stamp uses — see `clawbox_core_residual_issues`.
+CLAWBOX_POST_MIGRATION_ISSUES="$CLAWBOX_ROOT/data/openclaw-post-migration-issues"
+# The two names the core's gate refuses on, in ONE place because three things
+# read them: the clearing loop below, the blocker test, and the sentence that
+# names the file to the owner. doctor renames the file to the
+# `.doctor-importing` claim for the duration of an import, so a killed import
+# leaves one behind that refuses every later doctor exactly as the original does.
+CLAWBOX_EXEC_APPROVALS_FILE="$OPENCLAW_STATE_DIR/exec-approvals.json"
+CLAWBOX_EXEC_APPROVALS_CLAIM="$CLAWBOX_EXEC_APPROVALS_FILE.doctor-importing"
 
 # Does this approvals file hold a decision of the OWNER's?
 # 0 = provably none, 1 = yes, 2 = cannot tell. Only 0 may lead to a move.
@@ -283,11 +293,32 @@ sys.exit(0)
 PY
 }
 
+# Which approvals file is still blocking `openclaw doctor`, if any.
+#
+# Read from the FILESYSTEM rather than remembered from the clearing loop above:
+# every file that loop could clear is gone by the time this is asked, so what is
+# left is exactly what stops doctor — whether it holds a real approval or could
+# not be read at all. Echoes the first blocking path; exit 1 when there is none.
+clawbox_exec_approvals_blocker() {
+  local f
+  for f in "$CLAWBOX_EXEC_APPROVALS_FILE" "$CLAWBOX_EXEC_APPROVALS_CLAIM"; do
+    if [ -e "$f" ]; then
+      printf '%s' "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # What the core says about this config, in the core's own words.
 # Echoes `accepted`, `refused<TAB><issues>` or `unknown<TAB><why>`.
+#
+# `$1` asks about ANOTHER file — the migration preview below has the core judge
+# a copy without openclaw.json being touched. With no argument the box's own
+# config is the subject, which is every other caller.
 clawbox_core_config_verdict() {
   local out rc=0
-  out="$(timeout -k 5 60 "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
+  out="$(OPENCLAW_CONFIG_PATH="${1:-$OPENCLAW_CONFIG}" timeout -k 5 60 "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
   # EXIT 0 IS ACCEPTANCE unless the core's own payload contradicts it
   # (TASK-741). Requiring stdout to parse as JSON on TOP of a zero exit made a
   # core that exits 0 with empty, banner-prefixed or non-JSON output answer
@@ -361,6 +392,132 @@ clawbox_stamp_read() {
   head -n1 "$CLAWBOX_CONFIG_VALIDATED_STAMP" 2>/dev/null || true
 }
 
+# WHAT THE CORE STILL REFUSES AFTER IT HAS DONE EVERYTHING IT KNOWS (TASK-754).
+#
+# THE 25-HOUR OUTAGE WAS A DIAGNOSIS PROBLEM, not a missing repair. Measured on
+# 2026.8.1, in throwaway homes, with a legacy `exec-approvals.json` holding a
+# real approval present throughout:
+#
+#   * a 2026.7 config whose migrated form VALIDATES — `openclaw gateway run`
+#     migrates it ITSELF and reaches `ready`. The core's own automatic startup
+#     config repair (`planStartupConfigRepair` / `commitStartupConfigRepair`)
+#     does it, and the approvals file does not stop it, because it is not doctor.
+#   * a 2026.7 config whose migrated form does NOT validate — exit 78, config
+#     untouched, with or without the approvals file.
+#
+# So there is nothing for this script to carry across: where that would help,
+# the core has already done it; where it would not, running the same table
+# produces the same refusal. What NOBODY on the box does is say which key is
+# actually in the way. The gateway names the PRE-migration keys —
+# `agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"`,
+# `messages: Unrecognized key: "tts"` — every one of which the core would have
+# handled, while the one that really blocks it (`tts.voiceId`, which arrives at
+# the top level verbatim because `voiceId` is renamed only inside provider
+# scopes) is never mentioned. The incident's manual repair had to work that out
+# by hand, and the box was dark for 25 hours.
+#
+# So this asks the core, with the core's own migrations, and reports the
+# REMAINDER. It reads openclaw.json and writes nothing but a preview under a
+# temporary name that is always removed.
+#
+# HARNESS FIRST. `applyLegacyDoctorMigrations` is read out of the INSTALLED
+# bundle and RUN — the same function `planStartupConfigRepair` and
+# `migrateLegacyConfig` call — found by its own declaration text and picked out
+# of the chunk by function name, because a bundle renames the export binding
+# (`applyLegacyDoctorMigrations as A`) and not the declaration. No rename table
+# lives in this file: a copy of the moves here would be a second, staler one.
+# A bundle that cannot be read reports nothing.
+#
+# WHAT IT IS NOT. Not doctor: `doctor --fix` runs these migrations and THEN
+# strips the keys the v2 schema does not recognise (`stripUnknownConfigKeys`,
+# with the active auth profile protected) — measured, it reported removing
+# `tts.voiceId` on the incident's own shape. Naming a key of the owner's and
+# deleting it are different decisions, and this only names it.
+#
+# COST. Only on a box the core refuses AND doctor could not repair — a box with
+# no gateway at all — and once per config: the answer is remembered against the
+# same fingerprint the acceptance stamp uses, so a `Restart=always` unit does
+# not pay 25 + 35 + 65 = 125 s a boot for ever, while the sentence is still
+# printed on every boot. Any rewrite of the file or a core bump asks again.
+#
+# `$include`: stood down, the way the core's own startup repair stands down —
+# the file on disk is not the whole config, so a preview built from it alone
+# would name keys an included file may already answer for.
+clawbox_core_residual_issues() {
+  local node_bin core_dist core_chunk preview verdict remembered
+
+  remembered="$(head -n1 "$CLAWBOX_POST_MIGRATION_ISSUES" 2>/dev/null || true)"
+  case "$remembered" in
+    "$(clawbox_config_fingerprint)$(printf '\t')"*) printf '%s' "${remembered#*$'\t'}"; return 0 ;;
+  esac
+
+  if grep -qF '"$include"' "$OPENCLAW_CONFIG" 2>/dev/null; then
+    return 1
+  fi
+  node_bin="$(command -v node 2>/dev/null || true)"
+  # Same derivation as the package.json read at the top of this file: the bin is
+  # npm's symlink into `../lib/node_modules/openclaw`.
+  core_dist="$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/dist"
+  # `grep -rl` rather than a chunk name: every one of them is content-hashed and
+  # changes with each core build. Bounded, and a SIGPIPE from `head` closing the
+  # pipe is not a failure to report.
+  core_chunk=""
+  if [ -n "$node_bin" ] && [ -d "$core_dist" ]; then
+    core_chunk="$(timeout -k 5 20 grep -rlF --include='*.js' 'function applyLegacyDoctorMigrations(' "$core_dist" 2>/dev/null | head -n1 || true)"
+  fi
+  [ -n "$core_chunk" ] || return 1
+
+  preview="$OPENCLAW_CONFIG.clawbox-preview.$$"
+  rm -f "$preview"
+  # `cp -p` first, so the preview carries the config's own mode: it holds the
+  # same secrets for as long as it exists.
+  cp -p "$OPENCLAW_CONFIG" "$preview" 2>/dev/null || { rm -f "$preview"; return 1; }
+  if ! CLAWBOX_PREVIEW_CHUNK="$core_chunk" \
+    CLAWBOX_PREVIEW_IN="$OPENCLAW_CONFIG" \
+    CLAWBOX_PREVIEW_OUT="$preview" \
+    timeout -k 5 30 env -u OPENCLAW_HOME -u OPENCLAW_CONFIG_PATH -u OPENCLAW_STATE_DIR \
+    "$node_bin" --input-type=module -e '
+    import { readFileSync, writeFileSync } from "node:fs";
+    import { pathToFileURL } from "node:url";
+    try {
+      const mod = await import(pathToFileURL(process.env.CLAWBOX_PREVIEW_CHUNK).href);
+      const apply = Object.values(mod).find(
+        (value) => typeof value === "function" && value.name === "applyLegacyDoctorMigrations",
+      );
+      if (!apply) throw new Error("the chunk exports no applyLegacyDoctorMigrations");
+      const raw = JSON.parse(readFileSync(process.env.CLAWBOX_PREVIEW_IN, "utf8"));
+      const result = apply(raw, { authoredRaw: raw, resolvedRaw: raw });
+      if (!result || !result.next) throw new Error("the core migrations changed nothing");
+      writeFileSync(process.env.CLAWBOX_PREVIEW_OUT, JSON.stringify(result.next, null, 2) + "\n");
+      // Exited explicitly rather than by letting the loop drain: this imports a
+      // real bundle chunk and everything it pulls in, and the day one of those
+      // registers a timer at module scope the bound above would fire over an
+      // answer that was already written.
+      process.exit(0);
+    } catch {
+      process.exit(1);
+    }
+  ' >/dev/null 2>&1; then
+    rm -f "$preview"
+    return 1
+  fi
+
+  verdict="$(clawbox_core_config_verdict "$preview")"
+  rm -f "$preview"
+  case "$verdict" in
+    refused*"$(printf '\t')"*) ;;
+    # `accepted` means the core would load the migrated file — its own startup
+    # repair will do exactly that, so there is no remainder and claiming one
+    # would be a refusal nobody made. `unknown` is a validator that could not
+    # run, which says nothing about the config either.
+    *) return 1 ;;
+  esac
+  verdict="${verdict#*$'\t'}"
+  mkdir -p "$(dirname "$CLAWBOX_POST_MIGRATION_ISSUES")" 2>/dev/null || true
+  printf '%s\t%s\n' "$(clawbox_config_fingerprint)" "$verdict" > "$CLAWBOX_POST_MIGRATION_ISSUES" 2>/dev/null || true
+  printf '%s' "$verdict"
+}
+
 clawbox_stamp_write() {
   mkdir -p "$(dirname "$CLAWBOX_CONFIG_VALIDATED_STAMP")" 2>/dev/null || true
   if ! printf '%s\n' "$(clawbox_config_fingerprint)" > "$CLAWBOX_CONFIG_VALIDATED_STAMP" 2>/dev/null; then
@@ -381,13 +538,8 @@ clawbox_stamp_write() {
 # configure route's) exited 1 having migrated nothing. Two `[ -e ]` tests is
 # what a box with no blocker pays for this.
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -x "$OPENCLAW_BIN" ]; then
-  # Both names block the core's gate: doctor renames the file to the
-  # `.doctor-importing` claim for the duration of an import, so a killed
-  # import leaves one behind that refuses every later doctor just as the
-  # original does.
-  for _ea_file in \
-    "$OPENCLAW_STATE_DIR/exec-approvals.json" \
-    "$OPENCLAW_STATE_DIR/exec-approvals.json.doctor-importing"
+  # Both names block the core's gate — see where they are defined above.
+  for _ea_file in "$CLAWBOX_EXEC_APPROVALS_FILE" "$CLAWBOX_EXEC_APPROVALS_CLAIM"
   do
     [ -e "$_ea_file" ] || continue
     # Captured, not read from `$?` after a bare call: under `set -e` a bare
@@ -466,6 +618,23 @@ then
         # keys are named HERE, in the boot log, instead of only in a gateway
         # journal nobody reads until an owner calls.
         echo "  ERROR: the core still refuses this config — the gateway will exit 78 until this is fixed: ${_cfg_detail:-$_cfg_state}" >&2
+        # AND WHICH OF THOSE KEYS IS ACTUALLY IN THE WAY (TASK-754). Every key
+        # the line above names is one the core's own migrations would handle;
+        # the key that blocks the gateway usually is not among them, because it
+        # only exists AFTER those migrations have run. This is the short list,
+        # and deriving it by hand is what cost the incident its 25 hours.
+        _cfg_residual="$(clawbox_core_residual_issues || true)"
+        if [ -n "$_cfg_residual" ]; then
+          echo "  ERROR: after the core's own migrations these remain, and they are what to fix: $_cfg_residual" >&2
+        fi
+        # The one manual step, where there is one. `openclaw doctor --fix` is
+        # what would strip the keys above, and it refuses to start while this
+        # file is here; nothing in ClawBox moves a file that holds approvals of
+        # the owner's.
+        _ea_blocker="$(clawbox_exec_approvals_blocker || true)"
+        if [ -n "$_ea_blocker" ]; then
+          echo "  ERROR: openclaw doctor --fix is the command that would repair this, and it refuses to start while $_ea_blocker exists. Review that file, move it aside by hand, and restart the gateway." >&2
+        fi
       fi
       ;;
     *)
