@@ -5771,23 +5771,91 @@ gateway_port_listening() {
   ss -ltn 2>/dev/null | grep -qE "[:.]${gw_port}[[:space:]]"
 }
 
+# Is the gateway RUNNING, or at least still trying to be?
+#
+# Under `Restart=always` a crash loop spends most of its time in `activating`,
+# so this deliberately does not separate "starting for the first time" from
+# "restarting again". What it DOES separate is a unit that is not trying at all
+# — stopped, masked, or past its start limit — which is the case the recovery
+# below exists for and the one that must not be made to wait.
+gateway_unit_running_or_starting() {
+  case "$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null || echo unknown)" in
+    activating|active|reloading) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The same question as gateway_port_listening, asked with a budget.
+#
+# `gateway_port_listening` asks ONCE. That is the right question for
+# step_validate_services' Hermes probe, which asserts that nothing is listening;
+# it is the wrong question for "is this gateway broken", because the listener
+# arrives long after systemd says the unit started. Measured on the OpenClaw box
+# 2026-09-06: `Started ClawBox OpenClaw Gateway` at 07:53:43 and
+# `[gateway] http server listening (18 plugins; 7.2s)` at 07:53:57, with the
+# ExecStartPre ahead of it taking 31 s, 86 s and 120 s across the same boot's
+# three restarts. The recovery fired in the same second as `Started`; the
+# `openclaw doctor --fix` it then ran FAILED — "the Gateway or another SQLite
+# maintenance command owns this state directory", which is the gateway proving
+# it was alive — and the box paid a full extra cold start on every update.
+# Probe-once, and a false failure on top of it.
+#
+# Returns as soon as the port answers, and as soon as the unit stops trying, so
+# a healthy box costs a second or two and a genuinely dead one costs nothing.
+wait_for_gateway_port() {
+  local budget="${CLAWBOX_GATEWAY_READY_BUDGET_S:-180}" waited=0
+  # A budget that is not a plain number is not a budget; fall back rather than
+  # letting arithmetic below fail the update over an operator's typo.
+  case "$budget" in ''|*[!0-9]*) budget=180 ;; esac
+  while :; do
+    if gateway_port_listening; then
+      return 0
+    fi
+    if ! gateway_unit_running_or_starting; then
+      return 1
+    fi
+    if [ "$waited" -ge "$budget" ]; then
+      return 1
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+}
+
 step_gateway_legacy_state_recovery() {
   # No gateway on the Hermes SKU — "not listening on 18789" is the CORRECT
   # state there, and running `openclaw doctor` + restarting a masked unit would
   # just churn (and, before the mask, resurrect it).
   is_hermes_edition && { echo "  [hermes edition] skipping gateway recovery"; return 0; }
   local gw_port="${GATEWAY_PORT:-18789}"
-  if gateway_port_listening; then
+  # WITH the budget, not a single `ss`: see wait_for_gateway_port. A gateway
+  # still in its ExecStartPre is not a gateway in legacy state.
+  if wait_for_gateway_port; then
     echo "  Gateway is listening on ${gw_port}, skipping legacy state recovery"
     return 0
   fi
 
   echo "  Gateway is not listening on ${gw_port}; running OpenClaw doctor recovery"
-  as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive || true
+  local doctor_out=""
+  doctor_out=$(as_clawbox "$OPENCLAW_BIN" doctor --fix --yes --non-interactive 2>&1) || true
+  printf '%s\n' "$doctor_out"
+  # `doctor` refusing BECAUSE the gateway holds its own state directory is
+  # positive evidence that the gateway is alive — it is the loser of a lock the
+  # gateway owns. Restarting on the strength of that is restarting over a
+  # working gateway, which is what cost a cold start per update. Wait for the
+  # listener instead and report honestly if it never comes.
+  if printf '%s\n' "$doctor_out" | grep -qiE 'owns this state directory|another (Gateway|SQLite maintenance command)'; then
+    echo "  openclaw doctor could not take the state directory because the gateway holds it — the gateway is alive, not in legacy state"
+    if wait_for_gateway_port; then
+      echo "  Gateway is listening on ${gw_port}"
+      return 0
+    fi
+    echo "  Warning: the gateway holds its state directory but is not listening on ${gw_port}; not restarting over a live gateway" >&2
+    return 0
+  fi
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
   systemctl restart clawbox-gateway.service || true
-  sleep 8
-  if gateway_port_listening; then
+  if wait_for_gateway_port; then
     echo "  Gateway recovered after doctor --fix"
     return 0
   fi
@@ -5830,9 +5898,11 @@ step_gateway_legacy_state_recovery() {
   # quarantined are never re-read, and the port check below reports a failure
   # over a recovery that was never attempted.
   systemctl restart clawbox-gateway.service || true
-  sleep 12
 
-  if gateway_port_listening; then
+  # Budgeted, for the same reason as the probe at the top: a `sleep 12` and one
+  # `ss` reported a healthy box as still offline whenever the pre-start took
+  # longer than twelve seconds, which on this hardware is the normal case.
+  if wait_for_gateway_port; then
     echo "  Gateway recovered after legacy state quarantine"
     return 0
   fi
