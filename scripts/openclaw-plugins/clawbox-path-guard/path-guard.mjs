@@ -22,12 +22,12 @@ import { posix as posixPath } from "node:path";
  * the read-only ones included, over a truncated JSON file. Losing the
  * carve-outs and the exotic verbs is the safe direction to lose things in.
  *
- * EDITED IN LOCKSTEP with config/protected-paths.json. The two string fields
- * are pinned by EQUALITY in src/tests/unit/protected-paths.test.ts ("the
- * compiled-in floor"), and the list fields by subset — so a table change that
- * forgets this object is a failing build rather than a floor that quietly
- * protects something else on exactly the boxes where the table is already
- * unreadable.
+ * EDITED IN LOCKSTEP with config/protected-paths.json. In
+ * src/tests/unit/protected-paths.test.ts ("the compiled-in floor") the two
+ * string fields are pinned by EQUALITY, the four token lists by subset, and
+ * `writableSubpaths` by being empty — so a table change that forgets this
+ * object is a failing build rather than a floor that quietly protects something
+ * else on exactly the boxes where the table is already unreadable.
  */
 const FLOOR = {
   pathRoots: ["/clawbox", "/llamacpp/models", "/embed/models"],
@@ -74,9 +74,11 @@ function loadTable() {
  * whole command line, and both used to rebuild a Set or compile a RegExp on
  * every call.
  *
- * Cached against the table OBJECT rather than at import, so the lazy load above
- * is preserved and a table read after a failed first attempt cannot be answered
- * from a stale compile.
+ * Cached against the table OBJECT rather than built at import, so the lazy load
+ * above is preserved: nothing is compiled until the first question is asked.
+ * The identity check is belt-and-braces — `loadTable()` memoises the floor too,
+ * so it can only miss on the first call — but it is what makes the cache
+ * obviously correct rather than correct by reading `loadTable`.
  */
 let compiled;
 function compiledTable() {
@@ -165,6 +167,29 @@ function trimTrailingSlashes(text) {
   let end = text.length;
   while (end > 0 && text[end - 1] === "/") end -= 1;
   return end === text.length ? text : text.slice(0, end);
+}
+
+/**
+ * Put a RELATIVE path back on a root, so canonicalising cannot lose one.
+ *
+ * Every entry in `pathRoots` starts with `/`, and `posix.normalize` drops a
+ * leading `./` — so `./clawbox/data/config.json` becomes
+ * `clawbox/data/config.json`, which no longer CONTAINS `/clawbox`. Without this
+ * step, canonicalising would have opened the hole it was added to close.
+ *
+ * A relative path is resolved by the host against a working directory this rule
+ * is not told, so the safe reading of a leading `clawbox` segment is that it IS
+ * the tree — and on the appliance it is: the gateway unit runs with
+ * `WorkingDirectory=/home/clawbox` (`config/clawbox-gateway.service`), which is
+ * exactly where `./clawbox` is the checkout. `~` is already an anchor and is
+ * left alone.
+ *
+ * This cannot over-refuse a look-alike, because a root must still END a path
+ * segment afterwards: `clawbox-backup/x` becomes `/clawbox-backup/x` and stays
+ * allowed.
+ */
+function anchorRelative(text) {
+  return text.startsWith("/") || text.startsWith("~") ? text : `/${text}`;
 }
 
 /** True when `text` at `at` starts a protected root that ends a path segment. */
@@ -297,17 +322,25 @@ export function commandDenyReason(command, home = os.homedir()) {
  * check ever ran —
  * `~/clawbox/data/code-projects/../llamacpp/models/gemma.gguf` names a file in
  * the model store while containing `code-projects` as a substring.
- * `posix.normalize` before `foldHome`, in that order: normalising second would
- * pop `~` off `~/../clawbox` and lose the root. POSIX rather than the
- * platform's own, because the appliance is Linux and a Windows-shaped
- * normalise would read `\` — a legal character in a Linux filename — as a
- * separator. ClawBox's own MCP tools never had this hole: `resolveUserPath`
- * (`mcp/lib/guard.ts`) already hands this function a normalised path.
+ *
+ * THE ORDER IS normalise, fold, anchor, and each step is load-bearing.
+ * Normalising BEFORE the fold, because a `..` can uncover a home prefix that
+ * was not there to fold before it collapsed: `/home/clawbox2/../clawbox/tmp` IS
+ * `~/tmp`, and folding first leaves it un-folded as `/home/clawbox/tmp`, where
+ * the `/clawbox` root matches and the guard refuses the agent's own home — the
+ * very failure `foldHome` exists to prevent. Anchoring after both, because
+ * normalising drops a leading `./` and every root starts with `/`.
+ *
+ * POSIX rather than the platform's own, because the appliance is Linux and a
+ * Windows-shaped normalise would read `\` — a legal character in a Linux
+ * filename — as a separator. ClawBox's own MCP tools never had the traversal
+ * hole: `resolveUserPath` (`mcp/lib/guard.ts`) already hands this function an
+ * absolute, normalised path.
  */
 export function pathDenyReason(candidate, home = os.homedir()) {
   if (typeof candidate !== "string" || !candidate) return null;
-  const text = trimTrailingSlashes(
-    foldHome(posixPath.normalize(candidate), home).toLowerCase(),
+  const text = anchorRelative(
+    trimTrailingSlashes(foldHome(posixPath.normalize(candidate), home).toLowerCase()),
   );
   for (const allowed of loadTable().writableSubpaths) {
     const at = text.indexOf(allowed.toLowerCase());

@@ -271,6 +271,29 @@ describe("mcp path guard — protected paths may be read, not written", () => {
     expect(commandDeniedByPathGuard(`rm -rf ${TREE}/data/llamacpp/models`)).toBeTruthy();
     expect(commandDeniedByPathGuard(`cat ${TREE}/README.md`)).toBeNull();
   });
+
+  // A RELATIVE redirection names no path at all, so the command text holds no
+  // root for a matcher to anchor on — but `bash` is handed the working
+  // directory as an argument, and `echo x > config.json` issued from inside the
+  // tree truncates a protected file just the same. This is the one assertion
+  // that pins `destructiveToken`'s redirection arm; without it the arm could be
+  // dropped and every other case here would stay green.
+  it.each([
+    "echo broken > config.json",
+    "echo more >> config.json",
+    "ls && echo y > package.json",
+    "printf x 2> build.log",
+  ])("refuses %s issued from inside the tree", (command) => {
+    expect(commandDeniedByPathGuard(command, TREE)).toBeTruthy();
+    // …and the identical command from an ordinary directory is not this
+    // rule's business: the cwd is what makes it destructive here.
+    expect(commandDeniedByPathGuard(command, "/var/tmp")).toBeNull();
+  });
+
+  it("does not read a redirection into a command that has none", () => {
+    expect(commandDeniedByPathGuard("cat config.json", TREE)).toBeNull();
+    expect(commandDeniedByPathGuard("grep -rn 'x' .", TREE)).toBeNull();
+  });
 });
 
 // ── The two ways a write reaches a protected path without naming one ────────

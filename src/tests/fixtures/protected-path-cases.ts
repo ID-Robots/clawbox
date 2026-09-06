@@ -160,6 +160,16 @@ export const PROTECTED_PATH_COMMAND_CASES: ProtectedPathCommandCase[] = [
     denied: false,
     why: "…and the look-alike sibling stays allowed: adding whitespace to the terminators must widen the rule only where a root really ends a segment",
   },
+  {
+    command: "cd ~/clawbox\nnpm test\nrm -rf /tmp/build\n",
+    denied: true,
+    why: "THE COST, stated: a newline now separates commands the way `;` and `&&` already did, so a multi-line script that visits the tree and deletes something ELSEWHERE is refused, exactly as the one-line spelling always was. The refusal names the rule, so the agent can re-issue the halves separately",
+  },
+  {
+    command: "cd ~/clawbox\nnpm test\nls data\n",
+    denied: false,
+    why: "…and the same script without a destroying token still runs: the newline widened what ends a path segment, not what destroys a file",
+  },
 
   // ── What must keep working ───────────────────────────────────────────────
   {
@@ -412,5 +422,43 @@ export const PROTECTED_PATH_TOOL_CASES: ProtectedPathToolCase[] = [
     },
     denied: false,
     why: "…and canonicalising cuts both ways: a path that normalises INTO a carve-out is written, not refused",
+  },
+
+  // ── The RELATIVE spelling ────────────────────────────────────────────────
+  // Every protected root starts with `/`, and canonicalising drops a leading
+  // `./` — so these are the cases that keep the traversal fix from opening the
+  // hole it closes. They are not hypothetical: OpenClaw hands the hook
+  // `workdir` exactly as the model typed it and only resolves it afterwards,
+  // against the gateway unit's `WorkingDirectory=/home/clawbox`, which is
+  // precisely where `./clawbox` is the checkout.
+  {
+    toolName: "exec",
+    params: { command: "rm -rf *", workdir: "./clawbox" },
+    denied: true,
+    why: "a relative working directory naming the tree, with a command that names no path at all",
+  },
+  {
+    toolName: "write",
+    params: { path: "./clawbox/data/config.json", content: "{}" },
+    denied: true,
+    why: "a relative file-tool target inside the tree",
+  },
+  {
+    toolName: "write",
+    params: { path: "a/b/../../clawbox/data/llamacpp/models/x.gguf", content: "x" },
+    denied: true,
+    why: "…and one whose dot segments cancel down to the root at position 0",
+  },
+  {
+    toolName: "write",
+    params: { path: "./clawbox/data/code-projects/app/index.html", content: "<html>" },
+    denied: false,
+    why: "the carve-out is held to the same spelling — anchoring must not cost the web apps",
+  },
+  {
+    toolName: "write",
+    params: { path: "./clawbox-backup/x", content: "x" },
+    denied: false,
+    why: "and the look-alike sibling stays allowed: anchoring restores the root, it does not loosen what counts as one",
   },
 ];
