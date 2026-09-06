@@ -127,7 +127,10 @@ describe("POST /setup-api/providers/default — OpenClaw", () => {
 
     const res = await call({ provider: "anthropic" });
 
-    expect(await delegateBody(chatModelPOST)).toEqual({ model: "anthropic/claude-sonnet-4-6" });
+    expect(await delegateBody(chatModelPOST)).toEqual({
+      model: "anthropic/claude-sonnet-4-6",
+      automatic: true,
+    });
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toMatchObject({ ok: true, model: "anthropic/claude-sonnet-4-6" });
     expect(hermesModelsPOST).not.toHaveBeenCalled();
@@ -153,7 +156,34 @@ describe("POST /setup-api/providers/default — OpenClaw", () => {
     const res = await call({ provider: "google" });
 
     expect(res.status).toBe(200);
-    expect(await delegateBody(chatModelPOST)).toEqual({ model: "google/gemini-2.5-pro" });
+    expect(await delegateBody(chatModelPOST)).toEqual({
+      model: "google/gemini-2.5-pro",
+      automatic: true,
+    });
+  });
+
+  it("tells chat/model the model was RESOLVED, not named by the owner", async () => {
+    // TASK-713. The owner named a PROVIDER here; the model is the row's
+    // representative id, picked out of the picker's own state. Handing it on
+    // unmarked made `chat/model` record it as the owner's explicit model pick,
+    // and a later ClawBox AI plan upgrade then found a "pick" nobody made and
+    // left the box on the old tier's model — an upgrade that works on beta,
+    // silently defeated.
+    //
+    // This asserts the seam. The other half — that `chat/model` records nothing
+    // for such a call — is pinned by "records NOTHING for a switch the box made
+    // for itself" in chat-model.test.ts, and the two together are the chain.
+    chatModelGET.mockResolvedValue(json({
+      options: [{ id: "a", provider: "clawai", model: "deepseek/deepseek-v4-flash", available: true }],
+    }));
+    chatModelPOST.mockResolvedValue(json({ ok: true }));
+
+    await call({ provider: "clawai" });
+
+    expect(await delegateBody(chatModelPOST)).toEqual({
+      model: "deepseek/deepseek-v4-flash",
+      automatic: true,
+    });
   });
 
   it("refuses a provider this box holds no credential for", async () => {

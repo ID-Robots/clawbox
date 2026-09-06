@@ -133,6 +133,11 @@ export async function POST(request: Request) {
   // snapshot is taken before any write and is honest; and on a probe that threw,
   // which must not turn a link into a 500.
   let codingAgentReadyBefore: boolean | undefined;
+  // The SAME hazard, one field over: the apply drops the stored model pick when
+  // the ClawBox AI account changes, and it cannot see that change if this route
+  // has already written the new token into the store it would read (TASK-713).
+  // Captured here, ahead of that write, and handed over explicitly.
+  let previousClawaiToken: string | undefined;
   if (suppliedToken) {
     if (!isPlausibleClawaiToken(suppliedToken)) {
       return NextResponse.json({ error: "That doesn't look like a ClawBox AI token." }, { status: 400 });
@@ -140,6 +145,7 @@ export async function POST(request: Request) {
     codingAgentReadyBefore = await getCodingAgentStatus()
       .then((status) => status.ready)
       .catch(() => undefined);
+    previousClawaiToken = await readToken();
     await setMany({ clawai_token: suppliedToken });
     // A refusal the proxy gave the token being replaced is about that token,
     // not this one. Dropped here as well as in `applyClawaiToHermes`, because a
@@ -158,7 +164,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await applyClawaiToHermes(token, tier, { codingAgentReadyBefore });
+    const result = await applyClawaiToHermes(token, tier, {
+      codingAgentReadyBefore,
+      previousClawaiToken,
+    });
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     // Only OUR own error text is safe to echo — a raw spawn error can carry the

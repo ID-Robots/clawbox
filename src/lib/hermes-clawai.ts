@@ -111,6 +111,21 @@ export interface ApplyClawaiOptions {
    * first, so they leave it unset and the snapshot below is honest.
    */
   codingAgentReadyBefore?: boolean;
+  /**
+   * The `clawai_token` this box held before the caller touched anything — for
+   * the same caller, for the same reason (TASK-713).
+   *
+   * A pick belongs to the ACCOUNT that made it, so this function drops the
+   * stored ClawBox AI pick when the token changes. It cannot learn that from
+   * the store if the caller has already written the new token there: the read
+   * would answer with the token it is being asked about, `accountChanged` would
+   * be false on every real link, and account A's Max choice would be applied to
+   * account B's Pro plan. `/setup-api/hermes/clawai` persists a PASTED token
+   * before it applies it and is the one caller that needs this; the configure
+   * route and the device-code finaliser write nothing first, so they leave it
+   * unset and the read below is honest.
+   */
+  previousClawaiToken?: string;
 }
 
 /**
@@ -136,7 +151,7 @@ export async function applyClawaiToHermes(
   token: string,
   tier: ClawboxAiTier,
   options: ApplyClawaiOptions = {},
-): Promise<{ provider: string; model: string; tier: ClawboxAiTier }> {
+): Promise<{ provider: string; model: string; tier: ClawboxAiTier; explicitPickKept: boolean }> {
   const trimmed = token.trim();
   // A token that starts with "-" would be read by hermes as a flag. runHermesCli
   // never uses a shell, but argv position is still meaningful.
@@ -157,7 +172,7 @@ export async function applyClawaiToHermes(
   // beside account B's token, waiting for the next link to apply it.
   // Read before the first write, like every other before/after fact this
   // function samples.
-  const previousToken = await getStoredClawaiToken();
+  const previousToken = options.previousClawaiToken?.trim() ?? await getStoredClawaiToken();
   const accountChanged = Boolean(previousToken && previousToken !== trimmed);
   const storedPicks = await readExplicitModelPicks();
   let picksToStore: Record<string, string> | null = null;
@@ -469,7 +484,10 @@ export async function applyClawaiToHermes(
     );
   }
 
-  return { provider: CLAWAI_PROVIDER, model, tier };
+  // `explicitPickKept` says the badge was overruled by the owner's own choice
+  // (TASK-713), so the caller can report it rather than answering 200 over a
+  // screen where the plan moved and the model deliberately did not.
+  return { provider: CLAWAI_PROVIDER, model, tier, explicitPickKept: clawaiDecision.explicit };
 }
 
 let clawaiModelsReconciled = false;

@@ -928,10 +928,19 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    // "The BOX made this switch, not the owner." Set by the chat's entitlement
-    // guard, which drops a Max model the portal refuses down to Flash so chat
-    // keeps working. It changes nothing about the write — only whether the
-    // result is remembered as the owner's own pick (TASK-713).
+    // "The BOX resolved this model, the owner did not name it." Two callers set
+    // it, both in-process: the chat's entitlement guard, which drops a Max model
+    // the portal refuses down to Flash so chat keeps working, and
+    // `/setup-api/providers/default`, where the owner named a PROVIDER and this
+    // route's own state supplied the model. It changes nothing about the write —
+    // only whether the result is remembered as the owner's own pick (TASK-713).
+    //
+    // Caller-supplied because on the wire a resolved model and a chosen one are
+    // the same field, and this route cannot tell them apart; the Hermes twin can
+    // (`if (namedModel)`) only because there a provider-only switch arrives with
+    // no model at all. It is not a permission: the caller is the authenticated
+    // owner, it cannot change WHAT is written, and the worst it can do is lose
+    // its own bookkeeping — one later badge overwrite, undone by re-picking.
     const automaticSwitch = body.automatic === true;
 
     // One read of openclaw.json for the request: the state below and every
@@ -1232,11 +1241,16 @@ export async function POST(request: Request) {
     if (targetOffSurface) return targetOffSurface;
 
     if (state.activeModel === targetModel) {
-      // The owner just chose the model the box already runs, and that IS a
-      // choice: without recording it, someone deliberately settled on the
-      // tier-default model has no way to say so, and the badge moves them off
-      // it the day their plan changes (TASK-713). The Hermes picker records the
-      // same no-op for the same reason.
+      // Naming the model the box already runs is still a choice, and the write
+      // being a no-op does not make it less of one (TASK-713) — so it is
+      // recorded here as the Hermes picker records it.
+      //
+      // NOT reachable from the chat header, and the claim is not made: ChatPopup
+      // short-circuits a pick of the active model before the POST
+      // (`switchChatModel`, ChatPopup.tsx), so an owner deliberately settling on
+      // the model they are already on has no surface that says so. This branch
+      // exists for a caller that does arrive — an API client, a future picker
+      // that stops short-circuiting — and is honest for it.
       if (!automaticSwitch) await recordExplicitModelPick(targetModel);
       // Already the primary — but a ChatGPT pick can arrive as `codex/<id>`
       // and remap onto a primary that IS `openai/<id>` already, on a box whose

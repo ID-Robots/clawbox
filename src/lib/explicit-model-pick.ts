@@ -35,13 +35,26 @@
 // ClawBox AI the default" and the MCP `ai_set_provider` tool both resolve the
 // provider's own recommended model, which is another default.
 //
-// HARNESS-FIRST. There is nothing native to borrow. OpenClaw records
-// `modelOverrideSource: "user"` per SESSION and deletes the override when it
-// equals the agent default, so it can never answer this about the primary;
-// Hermes' `model.default` carries no provenance; the portal publishes a per-device
-// `deviceTier` (a default) and `allowedModels` (the entitlement, which
-// `portalDeniesClawboxAiModel` already honours) but no per-device model. The
-// marker is ClawBox's own, in ClawBox's own store, beside `clawai_tier`.
+// HARNESS-FIRST. There is nothing native to borrow, but the reason is narrower
+// than "the core does not touch the primary". OpenClaw's sticky model selection
+// (`modelSelectionScope`, default `"effective"`, which ClawBox never sets) DOES
+// propagate an owner's session pick into `agents.defaults.model.primary` when
+// `modelOverrideSource === "user"` — it simply records no provenance where it
+// lands, and the session-scoped source it came from is deleted once the override
+// equals the agent default. So the primary itself can never be asked "did the
+// owner choose this?". Hermes' `model.default` carries no provenance either; the
+// portal publishes a per-device `deviceTier` (a default) and `allowedModels`
+// (the entitlement, which `portalDeniesClawboxAiModel` already honours) but no
+// per-device model. The marker is ClawBox's own, in ClawBox's own store, beside
+// `clawai_tier`.
+//
+// WHAT THAT LEAVES UNCOVERED, stated rather than left silent: a pick made
+// through OPENCLAW'S OWN surfaces — its Control UI picker, the core's Telegram
+// `/model` keyboard, `openclaw models set` — reaches the primary without passing
+// any ClawBox route, so nothing records it here and a later re-pair still writes
+// the badge default over it. That is beta's behaviour, unchanged by this file;
+// closing it needs either a provenance field the core does not have or a read of
+// the core's session store at pair time, and it is out of scope for this card.
 
 import { getKnown, setMany } from "@/lib/config-store";
 import { CLAWBOX_AI_CHAT_MODEL_IDS, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";

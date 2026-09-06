@@ -2301,9 +2301,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           return NextResponse.json({ success: true });
         }
         if (isClawAI) {
-          await applyClawaiToHermes(clawboxAiToken, resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER);
+          const applied = await applyClawaiToHermes(
+            clawboxAiToken,
+            resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
+          );
           await forgetLocalWasDefault();
-          return NextResponse.json({ success: true });
+          // Reported from the apply's OWN decision rather than the one taken
+          // above for the OpenClaw shape: on this SKU that helper is what reads
+          // the store and writes the model, so its answer is the one that
+          // happened. Same field as the OpenClaw branch, so the plan card does
+          // not have to know which edition it is on.
+          return NextResponse.json({
+            success: true,
+            ...(applied.explicitPickKept
+              ? { explicitPickKept: true, model: applied.model }
+              : {}),
+          });
         }
         if (authMode !== "subscription" && normalizedApiKey) {
           // Cloud API-key providers Hermes supports (anthropic, google→gemini,

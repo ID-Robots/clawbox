@@ -35,8 +35,9 @@ const hermesConfig: Record<string, string> = {};
 vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGet: vi.fn(async (key: string) => hermesConfig[key] ?? ""),
 }));
+const cliMock = vi.hoisted(() => vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })));
 vi.mock("@/lib/hermes-cli", () => ({
-  runHermesCli: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+  runHermesCli: cliMock,
 }));
 // The box already draws, so the image family cannot be what asks for a reload
 // below — anything this test counts belongs to the coding-agent family.
@@ -74,6 +75,15 @@ import { EXPLICIT_MODEL_PICKS_KEY } from "@/lib/explicit-model-pick";
 
 /** A well-formed pasted token: charset+length is all the route checks. */
 const PASTED = "claw_abcdef0123456789";
+
+/** What `hermes config set model.default` was given, if it was called. */
+function modelDefaultWrite(): string | undefined {
+  for (const call of cliMock.mock.calls as unknown as Array<[string[]]>) {
+    const args = call[0];
+    if (Array.isArray(args) && args[1] === "set" && args[2] === "model.default") return args[3];
+  }
+  return undefined;
+}
 
 function post(body: unknown): Request {
   return new Request("http://localhost/setup-api/hermes/clawai", {
@@ -113,6 +123,7 @@ function unchangedCatalogue() {
 
 beforeEach(() => {
   for (const key of Object.keys(store)) delete store[key];
+  cliMock.mockClear();
   rpcMock.mockReset();
   statusMock.mockReset();
   optionsMock.mockReset();
@@ -140,6 +151,38 @@ describe("POST /setup-api/hermes/clawai", () => {
     const response = await POST(post({ tier: "pro" }));
     expect(response.status).toBe(200);
     expect(reloadCount()).toBe(0);
+  });
+
+  it("drops the previous account's model pick when a DIFFERENT token is pasted", async () => {
+    // TASK-713, through the route rather than the helper. This route persists a
+    // pasted token BEFORE it applies it, so a `previousToken` read inside the
+    // apply would answer with the token it is being asked about: the account
+    // change would be invisible, and account A's Max choice would be handed to
+    // account B's Pro plan on a box they had only just paired. The previous
+    // token is captured here, ahead of that write, and passed in — the same
+    // shape, and for the same reason, as `codingAgentReadyBefore` beside it.
+    store.clawai_token = "claw_ACCOUNT_A0000000";
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+
+    expect(response.status).toBe(200);
+    expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({});
+    // ...and the badge, not the replaced account's pick, decided the model.
+    const modelWrite = modelDefaultWrite();
+    expect(modelWrite).toBe("deepseek-v4-flash");
+  });
+
+  it("keeps the pick when the SAME account re-applies its tier", async () => {
+    store.clawai_token = PASTED;
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+
+    expect(response.status).toBe(200);
+    expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({ clawai: "deepseek/deepseek-v4-pro" });
+    const modelWrite = modelDefaultWrite();
+    expect(modelWrite).toBe("deepseek-v4-pro");
   });
 
   it("still asks only ONCE when the link moves the providers too", async () => {
