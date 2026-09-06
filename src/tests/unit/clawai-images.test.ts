@@ -381,6 +381,17 @@ describe("generateClawaiImage", () => {
     }
     expect(edge).toHaveBeenCalledTimes(3);
 
+    // Nor does an oversized body: an edge appliance can answer a 401/403 with a
+    // full HTML page, and buffering it to look for a code we are not going to
+    // find would spend the device's memory on the answer "no".
+    const huge = vi.fn(async () => new Response(
+      JSON.stringify({ error: { code: "invalid_token" }, padding: "x".repeat(16 * 1024) }),
+      { status: 403, headers: { "content-type": "application/json" } },
+    ));
+    await expect(generateClawaiImage("x", { fetchImpl: huge })).rejects.toMatchObject({ status: 503 });
+    await expect(generateClawaiImage("x", { fetchImpl: huge })).rejects.toMatchObject({ status: 503 });
+    expect(huge).toHaveBeenCalledTimes(2);
+
     // A 403 the proxy DID attribute to the credential still stops the loop,
     // and a plan gate that answers some other code still does not.
     const gated = vi.fn(async () => jsonResponse({ error: { code: "model_not_allowed" } }, 403));

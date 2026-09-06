@@ -5,6 +5,7 @@ import {
   CLAWBOX_AI_PROXY_URL,
   clawaiCredentialRefused,
   noteClawaiCredentialRefused,
+  proxyRefusedClawaiCredential,
   resolveClawaiToken,
 } from "@/lib/harness/credentials";
 import { localSttInstalled, transcribeLocally } from "@/lib/stt-local";
@@ -271,26 +272,6 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
 type Audio = { file: Blob; name: string };
 type Transcript = { text: string };
 
-/**
- * Did the proxy identify THIS DEVICE'S CREDENTIAL as the reason it refused?
- *
- * Same rule and same reason as the image path's copy: `error.code` decides
- * whether the refusal is worth remembering, and nothing read here is ever
- * shown to the customer, so the never-relay-the-body rule below is intact.
- * Fails closed — an unreadable or unrecognised refusal is not remembered.
- */
-async function proxyRefusedTheCredential(res: Response): Promise<boolean> {
-  if (res.status !== 401 && res.status !== 403) return false;
-  let payload: unknown;
-  try {
-    payload = await res.clone().json();
-  } catch {
-    return false;
-  }
-  const error = (payload as { error?: unknown } | null)?.error;
-  const code = (error as { code?: unknown } | null)?.code;
-  return code === "invalid_token" || code === "missing_token";
-}
 
 /** The cloud engine: the recording goes to the ClawBox AI proxy. */
 async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transcript | Failure> {
@@ -350,7 +331,7 @@ async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transc
     // `missing_token` / `invalid_token`; a bare 401/403 can be an edge rule or
     // a plan gate, and remembering one of those would mute the microphone on a
     // box whose credential is fine. Only the proxy's own verdict is recorded.
-    if (await proxyRefusedTheCredential(res)) noteClawaiCredentialRefused(res.status);
+    if (await proxyRefusedClawaiCredential(res)) noteClawaiCredentialRefused(res.status);
     const status = res.status === 401 || res.status === 403
       ? 503
       : res.status >= 400 && res.status < 500 ? 400 : 502;

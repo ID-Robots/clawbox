@@ -155,3 +155,69 @@ export function forgetClawaiCredentialRefusal(): void {
 export function resetClawaiCredentialRefusals(): void {
   refusal = null;
 }
+
+/**
+ * The most a refusal body may be read before it is parsed.
+ *
+ * Enough for the service's own error envelope and nothing like enough for an
+ * interception page. `res.json()` and `res.text()` both buffer whatever the far
+ * side sends before anything can object to its size, and a 401/403 is exactly
+ * the response an edge appliance answers with a full HTML page — on a device
+ * where memory is the scarce thing.
+ */
+const MAX_REFUSAL_BODY_BYTES = 8 * 1024;
+
+/**
+ * Did the ClawBox AI proxy identify THIS DEVICE'S CREDENTIAL as the reason it
+ * refused?
+ *
+ * The proxy answers `401 {code:"missing_token"}` / `403 {code:"invalid_token"}`
+ * for a credential and other codes for everything else, and those two are the
+ * only answers that mean "asking again with this token is pointless". A bare
+ * 401/403 on the wire can come from an edge rule, a rate-limit page, an
+ * interception proxy or a plan gate.
+ *
+ * Reading `error.code` is not a breach of the never-relay-the-body rule the
+ * callers follow: that rule is about what reaches the CUSTOMER, and nothing
+ * read here is ever shown. Bounded, and it FAILS CLOSED — an unreadable,
+ * oversized, bodiless or unrecognised refusal is treated as not-the-credential,
+ * which costs a retry rather than a feature.
+ *
+ * One copy, shared by every ClawBox caller of the proxy, so the accepted
+ * contract cannot drift between the picture path and the voice path.
+ */
+export async function proxyRefusedClawaiCredential(res: Response): Promise<boolean> {
+  if (res.status !== 401 && res.status !== 403) return false;
+  const body = res.body;
+  if (!body) return false;
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) {
+        total += value.byteLength;
+        // Past the cap this is not the envelope we are looking for, and
+        // draining the rest of it buys nothing.
+        if (total > MAX_REFUSAL_BODY_BYTES) {
+          await reader.cancel().catch(() => {});
+          return false;
+        }
+        chunks.push(Buffer.from(value));
+      }
+      if (done) break;
+    }
+  } catch {
+    return false;
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    return false;
+  }
+  const error = (payload as { error?: unknown } | null)?.error;
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "invalid_token" || code === "missing_token";
+}

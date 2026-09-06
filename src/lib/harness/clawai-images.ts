@@ -7,6 +7,7 @@ import {
   CLAWBOX_AI_PROXY_URL,
   clawaiCredentialRefused,
   noteClawaiCredentialRefused,
+  proxyRefusedClawaiCredential,
   resetClawaiCredentialRefusals,
   resolveClawaiToken,
 } from "./credentials";
@@ -380,7 +381,7 @@ export async function generateClawaiImageBytes(
     // can come from an edge rule, a rate-limit page, an interception proxy or
     // a plan gate, and remembering one of those would hide the button and tell
     // a customer with a perfectly good credential to re-pair the device.
-    if (await proxyRefusedTheCredential(res)) noteClawaiCredentialRefused(res.status);
+    if (await proxyRefusedClawaiCredential(res)) noteClawaiCredentialRefused(res.status);
     // The STATUS decides what is SAID, never the body. An upstream error body is allowed to
     // quote the request that caused it, and this request carried a bearer
     // token — the same reason the transcription route relays a status and
@@ -419,30 +420,6 @@ export async function generateClawaiImageBytes(
   return { bytes, extension };
 }
 
-/**
- * Did the proxy identify THIS DEVICE'S CREDENTIAL as the reason it refused?
- *
- * The proxy answers `401 {code:"missing_token"}` / `403 {code:"invalid_token"}`
- * for a credential and other codes for everything else, and those two are the
- * only answers that mean "asking again with this token is pointless".
- *
- * Reading `error.code` is not a breach of the never-relay-the-body rule below:
- * that rule is about what reaches the CUSTOMER, and nothing read here is ever
- * shown. Fails closed — an unreadable, bodiless or unrecognised refusal is
- * treated as not-the-credential, which costs a retry rather than a feature.
- */
-async function proxyRefusedTheCredential(res: Response): Promise<boolean> {
-  if (res.status !== 401 && res.status !== 403) return false;
-  let payload: unknown;
-  try {
-    payload = await res.clone().json();
-  } catch {
-    return false;
-  }
-  const error = (payload as { error?: unknown } | null)?.error;
-  const code = (error as { code?: unknown } | null)?.code;
-  return code === "invalid_token" || code === "missing_token";
-}
 
 /**
  * What a failing status is allowed to say.
