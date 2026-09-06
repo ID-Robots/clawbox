@@ -292,7 +292,7 @@ export async function GET() {
       {
         connected: false, provider: null, providerLabel: null, mode: null, model: null,
         clawaiTier: null, clawaiAccountTier: null, clawaiAllowedModels: null,
-        clawaiConfigured: false, tierSource: "picker",
+        clawaiConfigured: false, clawaiTokenRejected: false, tierSource: "picker",
       },
       {
         headers: {

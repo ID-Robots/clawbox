@@ -51,6 +51,9 @@ const PORTAL_TIER_CACHE_MAX_ENTRIES = 64;
 // quickly enough that recovery (token re-pair, portal recovers)
 // shows up on the next poll, not minutes later.
 const PORTAL_UNREACHABLE_TTL_MS = 30_000;
+// Enough for the service's own error envelope and nothing like enough for an
+// interception page. Only ever parsed, never shown.
+const MAX_ERROR_BODY_CHARS = 4_096;
 
 export interface DeviceInfoResponse {
   tier?: string;
@@ -271,11 +274,15 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
       // fires the downgrade-celebration popup). Mark unreachable
       // instead so callers preserve localTier.
       //
-      // It is NOT ambiguous as a CREDENTIAL: whatever the plan is, the portal
-      // has just refused this token, and a box that says nothing about that
-      // reports itself healthy while every turn 403s. So the verdict carries
-      // the distinction and each caller reads the half it is entitled to.
-      return markUnreachable(res.status === 401 || res.status === 403);
+      // It is NOT ambiguous as a CREDENTIAL — but only when the PORTAL is the
+      // one refusing. A corporate proxy, a hotel captive portal, a CDN
+      // anti-bot page or an ISP interception can all answer 403 to this GET,
+      // and calling one of those a rejection would tell an owner with a
+      // perfectly valid token to re-link the device: the same false claim this
+      // change exists to end, pointing the other way. So the body has to look
+      // like the service's own auth error (`{error:{code:"invalid_token"|
+      // "missing_token"}}`, the shape it documents) before the verdict says so.
+      return markUnreachable(await portalRefusedTheToken(res));
     } catch {
       // A timeout, a dead uplink, a DNS failure: the portal said nothing at
       // all, so it said nothing about the credential either. Reporting this as
@@ -291,6 +298,61 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
   } finally {
     inFlightPortalLookups.delete(token);
   }
+}
+
+/**
+ * Has the portal refused this box's ClawBox AI token? Answered WITHOUT asking
+ * it, and without reading the credential.
+ *
+ * For the readers that must not add traffic: `provider-status.ts` is polled and
+ * states in as many words that it probes nothing. This answers only from the
+ * negative cache `fetchPortalTier` has already filled — so on a cold process it
+ * is `false`, meaning "nobody has asked", and the row stays exactly where beta
+ * left it. `/setup-api/ai-models/status` fills that cache every 30 s for as
+ * long as any client is open, which is whenever this strip is on screen.
+ *
+ * Scanned rather than keyed, so the caller needs no token: a device holds one
+ * ClawBox AI credential at a time, entries live 30 s, and a re-link mints a new
+ * key — so a live `rejected` entry is this box's, or is seconds from expiring.
+ */
+export function clawaiTokenRejectedByPortal(): boolean {
+  const now = Date.now();
+  for (const entry of portalUnreachableCache.values()) {
+    if (entry.rejected && entry.until > now) return true;
+  }
+  return false;
+}
+
+/**
+ * Did the PORTAL refuse this token, or did something on the way refuse the
+ * request?
+ *
+ * Only `{ error: { code: "invalid_token" | "missing_token" } }` — the shape the
+ * service documents (see `harness/clawai-images.ts`) — counts. Fails closed:
+ * an HTML interstitial, an empty body, a truncated read or an unrecognised code
+ * all answer false, which leaves the verdict at plain "unreachable" and the
+ * badge exactly where beta left it.
+ *
+ * Bounded, because an interception page can be arbitrarily large and this sits
+ * on the render path of the chat header.
+ */
+async function portalRefusedTheToken(res: Response): Promise<boolean> {
+  if (res.status !== 401 && res.status !== 403) return false;
+  let text: string;
+  try {
+    text = (await res.text()).slice(0, MAX_ERROR_BODY_CHARS);
+  } catch {
+    return false;
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const error = (payload as { error?: unknown } | null)?.error;
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "invalid_token" || code === "missing_token";
 }
 
 /**

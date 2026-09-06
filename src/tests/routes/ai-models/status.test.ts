@@ -311,7 +311,10 @@ describe("/setup-api/ai-models/status", () => {
       // over a credential the box had just been told was dead.
       mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
       mockGetConfigValue.mockResolvedValue("pro");
-      fetchSpy.mockResolvedValue(new Response("invalid_token", { status: 403 }));
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ error: { code: "invalid_token", type: "auth_error" } }),
+        { status: 403, headers: { "content-type": "application/json" } },
+      ));
 
       const res = await GET();
       const body = await res.json();
@@ -336,6 +339,39 @@ describe("/setup-api/ai-models/status", () => {
       expect(body.clawaiTokenRejected).toBe(false);
       expect(body.clawaiTier).toBe("pro");
       expect(body.tierSource).toBe("picker");
+    });
+
+    it("does not accuse a credential the portal never refused", async () => {
+      // The healthy direction, and the one that would make this field a
+      // liability if it were wrong: a 200 says the token works, and nothing
+      // downstream may be told otherwise.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("flash");
+      fetchSpy.mockResolvedValue(new Response(
+        JSON.stringify({ tier: "max", deviceTier: "pro" }),
+        { status: 200 },
+      ));
+
+      const body = await (await GET()).json();
+      expect(body.clawaiTokenRejected).toBe(false);
+      expect(body.tierSource).toBe("portal");
+    });
+
+    it("does not call an interception page a rejection", async () => {
+      // A corporate proxy, a hotel captive portal or a CDN anti-bot page can
+      // answer 403 to this GET. Only the portal's OWN auth error counts —
+      // otherwise the box tells an owner with a perfectly valid token to
+      // re-link the device, which is this bug pointing the other way.
+      mockReadConfig.mockResolvedValue(clawaiConfigBase as never);
+      mockGetConfigValue.mockResolvedValue("pro");
+      fetchSpy.mockResolvedValue(new Response(
+        "<html><body>Attention Required! | Cloudflare</body></html>",
+        { status: 403, headers: { "content-type": "text/html" } },
+      ));
+
+      const body = await (await GET()).json();
+      expect(body.clawaiTokenRejected).toBe(false);
+      expect(body.clawaiTier).toBe("pro");
     });
 
     it("surfaces the portal's entitlement list beside the badge", async () => {

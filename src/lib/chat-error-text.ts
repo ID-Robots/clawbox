@@ -70,14 +70,19 @@ function isRateLimit(raw: string): boolean {
  * the customer has no reason to open. The remedy is a screen they already have.
  *
  * Matched on the wire wording, like the two predicates above, and deliberately
- * NARROW: a bare "token" is an ordinary word in this codebase's errors
- * ("context window exceeded: 403000 tokens" must not match), so the number has
- * to stand alone as a status and the auth words have to be auth words.
+ * NARROW in two directions. A bare "token" is an ordinary word in this
+ * codebase's errors ("context window exceeded: 403000 tokens" must not match),
+ * so the number has to stand alone as a status. And the auth wording has to sit
+ * NEXT TO that status, because a bare "forbidden" anywhere in the line matches
+ * things that have nothing to do with the provider's credential — a web tool
+ * fetching a page that answers "403 Forbidden", or a Cloudflare interstitial,
+ * both of which reach this function through the Hermes adapter. Those used to
+ * fall to the generic "send it again"; turning them into "your sign-in is dead,
+ * reconnect the provider" would be a confident lie.
  */
 function isCredentialRejected(raw: string): boolean {
-  return /\b(?:401|403)\b(?!\s*\d)/.test(raw)
-    && /\b(?:invalid[ _-]?token|missing[ _-]?token|unauthor(?:ized|ised)|forbidden|invalid[ _-]?api[ _-]?key|auth(?:entication|orization)?[ _-]?(?:error|failed))\b/i.test(raw)
-    || /\b(?:401|403)\s+(?:unauthor(?:ized|ised)|forbidden)\b/i.test(raw);
+  return /\b(?:401|403)\b(?!\s*[\d,])[^.\n]{0,24}?\b(?:invalid[ _-]?token|missing[ _-]?token|invalid[ _-]?api[ _-]?key|auth(?:entication|orization)?[ _-]?(?:error|failed)|unauthor(?:ized|ised))\b/i
+    .test(raw);
 }
 
 /** Something went wrong and we will not say what, because we cannot say it safely. */
@@ -97,7 +102,7 @@ const RATE_LIMIT = "That message did not go through — the AI provider is rate-
  * No status number: "403" tells the customer nothing they can act on, and the
  * one thing they can act on is two taps away.
  */
-const CREDENTIAL_REJECTED = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect the provider in Settings, under AI Models, and send it again.";
+const CREDENTIAL_REJECTED = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect it in Settings, under Providers, and send it again.";
 
 /** The conversation changed under the turn; retry may work, New chat always does. */
 const TAKEOVER = "That message did not go through. That can happen when this chat is open in another tab or on Telegram — or when the session gets stuck. Send it again, and if it keeps failing, start a New chat — that clears it.";

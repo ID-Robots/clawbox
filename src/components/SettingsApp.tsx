@@ -6239,7 +6239,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         // on the type because an older /status response does not carry it, and
         // absent must mean "nobody said", never "rejected". `needsReauth` is
         // the catalogue's existing "Needs sign-in", already in all ten locales.
-        if (aiProvider.clawaiTokenRejected) return { subtitle: t("settings.providers.needsReauth") };
+        // Scoped to the ACTIVE provider, the way the route scopes `clawaiTier`
+        // one field above and for the same reason: `clawaiTokenRejected` is an
+        // ACCOUNT fact (it also breaks images, cloud voice and ClawKeep), while
+        // this line names the provider driving the chat. A box that moved its
+        // chat to Anthropic months ago must keep reading "Anthropic Claude"
+        // here, not "Needs sign-in" over a provider that answers every turn.
+        if (aiProvider.provider === "clawai" && aiProvider.clawaiTokenRejected) {
+          return { subtitle: t("settings.providers.needsReauth") };
+        }
         return { subtitle: aiProvider.providerLabel || (aiProvider.model ? aiProvider.model.split("/").pop() ?? null : null) };
       }
       case "localAi": {

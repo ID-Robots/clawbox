@@ -168,9 +168,23 @@ describe("describeChatFailure — a refused ClawBox AI credential", () => {
     ]) {
       const text = describeChatFailure(raw);
       expect(text).toMatch(/Settings/);
+      expect(text).toMatch(/Providers/);
       expect(text).not.toContain("403");
       expect(text).not.toContain("401");
       expect(text).not.toMatch(/openclaw/i);
+    }
+  });
+
+  it("leaves a 403 that is not about the credential alone", () => {
+    // Both reach this function through the Hermes adapter, and both used to
+    // fall to the calm generic line. Turning them into "your sign-in is dead"
+    // would send a customer to re-link a paid account over a web page.
+    for (const raw of [
+      "tool browser_open failed: 403 Forbidden (https://news.example.com)",
+      "web_fetch: the site returned 403 Forbidden",
+      "HTTP 403 — Just a moment…",
+    ]) {
+      expect(describeChatFailure(raw)).not.toMatch(/Settings/);
     }
   });
 
