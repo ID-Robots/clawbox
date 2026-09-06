@@ -1201,28 +1201,27 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
  * the gateway holds its state directory is the gateway proving it is alive
  * (install.sh:step_gateway_legacy_state_recovery, measured 2026-09-06), so the
  * restart + positive port probe that follows remains the verdict, not the exit
- * code. What changed is that the exit code is no longer DISCARDED: a doctor
+ * code — which is why neither caller branches on this, and it returns nothing.
+ * What changed is that the exit code is no longer DISCARDED: a doctor
  * that could not finish is the single most useful fact about an update that
  * then finds no gateway, and swallowing it silently is what left a customer
  * box dark for 25 hours with "Applying system fixups — completed" on screen
  * (TASK-737).
  */
-async function runOpenclawDoctorFix(): Promise<boolean> {
+async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
-  if (openclawIsAbsent()) return true;
+  if (openclawIsAbsent()) return;
   try {
     await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
       timeout: 90_000,
       maxBuffer: 2 * 1024 * 1024,
     });
-    return true;
   } catch (err) {
     warnUpdate(
       "openclaw-doctor-fix-failed",
       "`openclaw doctor --fix` did not complete. Config and session migrations it "
       + `performs may still be pending: ${firstLineOf(err)}`,
     );
-    return false;
   }
 }
 
