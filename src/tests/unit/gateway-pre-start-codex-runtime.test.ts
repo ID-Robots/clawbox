@@ -12,7 +12,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { repairHelpers } from "@/tests/helpers/gateway-pre-start";
+import { inspectAllJson, repairHelpers } from "@/tests/helpers/gateway-pre-start";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -191,7 +191,9 @@ interface PluginFlowOptions {
    * `plugins inspect --all --json` stdout; omitted = the CLI cannot answer.
    *
    * The consent answer is the `diagnostics` array. `status`/`activated` are the
-   * config's own `enabled` bit under another name and cannot carry it.
+   * config's own `enabled` bit under another name and cannot carry it. Built
+   * with `inspectAllJson`, because an answer that never NAMES codex — or names
+   * it without an install record — is the core saying nothing about it.
    */
   inspectJson?: string;
 }
@@ -578,11 +580,13 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
   const CONSENTED = { v2: true, needsCodex: false, enabledByConfig: true,
     installedVersion: "2026.8.1", peerHealthy: true } as const;
 
-  it.each([124, 137])("keeps Codex on when a killed verb had recorded the consent (exit %i)", (code) => {
+  it.each([124, 137])("keeps Codex on when the core positively reports the consent (exit %i)", (code) => {
+    // Named, adjudicated (it carries its install record), and no consent
+    // diagnostic: the one shape that means the consent is recorded.
     const { argv, stdout, marker } = runPluginFlowFull({
       ...CONSENTED,
       consentExit: code,
-      inspectJson: '{"diagnostics":[]}',
+      inspectJson: inspectAllJson([{ id: "codex" }]),
     });
     expect(argv).toContain("plugins inspect --all --json");
     expect(stdout).toContain("Codex runtime plugin capabilities accepted/current");
@@ -590,13 +594,43 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
     expect(marker).toEqual({});
   });
 
+  it("does not read silence about Codex as Codex's consent", () => {
+    // `collectPluginCapabilityConsentDiagnostics` never walks a plugin its
+    // installed index does not list, which is what a core generation bump
+    // leaves behind — so an answer that does not mention codex is the core
+    // having nothing to say, not the core reporting a recorded consent.
+    const { stdout, marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: 124,
+      inspectJson: inspectAllJson([{ id: "discord" }]),
+    });
+    expect(stdout).not.toContain("Codex runtime plugin capabilities accepted/current");
+    expect(stdout).toContain("booting without Codex");
+    expect(marker.codex?.stage).toBe("consent");
+  });
+
+  it("leaves Codex exactly as it is when the core keeps no consent record for it", () => {
+    // Named and loading, but with no install record the core can never emit a
+    // consent diagnostic for it — so it can never refuse readiness for consent
+    // either. Switching it off would be a false failure and calling it
+    // accepted/current a false success; say so and change nothing.
+    const { argv, stdout, marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: 124,
+      inspectJson: inspectAllJson([{ id: "codex", installed: false }]),
+    });
+    expect(stdout).not.toContain("Codex runtime plugin capabilities accepted/current");
+    expect(stdout).not.toContain("booting without Codex");
+    expect(stdout).toContain("Codex runtime plugin capabilities are still unknown");
+    expect(argv.some((line) => line.startsWith("config set"))).toBe(false);
+    expect(marker).toEqual({});
+  });
+
   it("still boots without Codex when a killed verb had NOT recorded the consent", () => {
     const { stdout, marker } = runPluginFlowFull({
       ...CONSENTED,
       consentExit: 124,
-      inspectJson:
-        '{"diagnostics":[{"level":"warn","pluginId":"codex",'
-        + '"message":"Plugin codex requires capability consent; run openclaw plugins enable"}]}',
+      inspectJson: inspectAllJson([{ id: "codex", consentRequired: true }]),
     });
     expect(stdout).toContain("booting without Codex");
     expect(marker.codex?.stage).toBe("consent");

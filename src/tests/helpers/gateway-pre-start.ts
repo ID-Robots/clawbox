@@ -49,3 +49,49 @@ export function repairHelpers(): string {
     "# A `.openclaw` INSIDE the state directory",
   );
 }
+
+/**
+ * One `openclaw plugins inspect --all --json` answer, in the CLI's own shape.
+ *
+ * 2026.8.1 answers `--all --json` with a LIST of per-plugin inspect reports,
+ * each `{plugin, diagnostics, …}` (`buildAllPluginInspectReports`), and the
+ * `--all` branch attaches that plugin's install record as `install` —
+ * `undefined`, so ABSENT from the JSON, whenever the core cannot resolve one
+ * (`resolveInstalledPluginPackageOwnership`).
+ *
+ * That absence is the whole point of this builder. The consent diagnostic is
+ * emitted only for a plugin the core adjudicated — enabled, not bundled, WITH
+ * an install owner and record — so "no diagnostic names this id" is a statement
+ * about consent only for an entry that carries `install`, and says nothing at
+ * all about an entry without one or about an id the report never mentions.
+ */
+export function inspectAllJson(
+  plugins: ReadonlyArray<{
+    id: string;
+    /** The core resolved an install record for it. Default true. */
+    installed?: boolean;
+    /** The core's "requires capability consent" diagnostic names it. */
+    consentRequired?: boolean;
+    /** `plugin.status` as the snapshot reports it. Default "loaded". */
+    status?: "loaded" | "disabled" | "error";
+  }>,
+): string {
+  return JSON.stringify(
+    plugins.map(({ id, installed = true, consentRequired = false, status = "loaded" }) => ({
+      workspaceDir: "/var/lib/clawbox/openclaw/workspace",
+      plugin: { id, name: id, status, origin: "npm" },
+      ...(installed ? { install: { pluginId: id, packagePath: `/var/lib/openclaw/npm/${id}` } } : {}),
+      diagnostics: consentRequired
+        ? [
+            {
+              level: "warn",
+              pluginId: id,
+              // formatPluginCapabilityConsentRequired, verbatim in shape.
+              message: `Plugin "${id}" requires capability consent; disable and re-enable it to review the new surface.`,
+            },
+          ]
+        : [],
+      compatibility: [],
+    })),
+  );
+}

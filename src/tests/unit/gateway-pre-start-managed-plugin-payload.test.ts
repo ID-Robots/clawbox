@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testEnv } from "@/tests/helpers/env";
-import { repairHelpers } from "@/tests/helpers/gateway-pre-start";
+import { inspectAllJson, repairHelpers } from "@/tests/helpers/gateway-pre-start";
 import { OFFICIAL_CHANNEL_PLUGINS } from "@/lib/openclaw-channels";
 
 // Starts a real process (bash / python3): vitest's 5 s test and 10 s hook
@@ -80,9 +80,13 @@ interface RunOptions {
    *
    * The consent answer is the `diagnostics` array, not `status`/`activated` —
    * those two are the config's own `enabled` bit under another name and are
-   * true before the consent verb has run.
+   * true before the consent verb has run. Build it with `inspectAllJson`: an
+   * answer that does not NAME the id, or names it without an install record,
+   * is the core saying nothing about it rather than reporting its consent.
    */
   inspectJson?: string;
+  /** A `data/plugin-repair.json` the boot starts with. */
+  existingMarker?: Record<string, Record<string, unknown>>;
   /** Install specs (argv[3]) the fake CLI refuses. */
   installFails?: string[];
   /** The INSTALLED core's release as the script resolved it; "" = unknown. */
@@ -97,6 +101,11 @@ function run(opts: RunOptions): {
 } {
   const config = path.join(dir, "openclaw.json");
   writeFileSync(config, JSON.stringify({ plugins: { entries: opts.entries } }));
+
+  if (opts.existingMarker) {
+    mkdirSync(path.join(dir, "data"), { recursive: true });
+    writeFileSync(path.join(dir, "data", "plugin-repair.json"), JSON.stringify(opts.existingMarker));
+  }
 
   const log = path.join(dir, "argv.log");
   const bin = path.join(dir, "openclaw");
@@ -221,20 +230,80 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
   // separate a landed consent from a lost one — and neither can `status` /
   // `activated`, which are that same bit under another name. The core's consent
   // DIAGNOSTIC is the only field that carries the answer.
-  const CONSENT_DIAGNOSTIC = (id: string) =>
-    `Plugin \"${id}\" requires capability consent; disable and re-enable it or run ...`;
+  //
+  // AND IT ONLY CARRIES IT FOR AN ID THE CORE ADJUDICATED.
+  // `collectPluginCapabilityConsentDiagnostics` (2026.8.1) walks the installed
+  // index and skips every plugin that is bundled, index-disabled, or has no
+  // install owner/record — and a plugin the index does not list at all is never
+  // walked. So silence has four meanings and only one of them is consent, which
+  // is why every case below asks what the report POSITIVELY says about the id.
 
-  it.each([124, 137])("switches nothing off when a killed verb had recorded the consent (exit %i)", (code) => {
-    // No diagnostic names discord, so the core has its consent.
+  it.each([124, 137])("clears nothing off a consent the core positively reports (exit %i)", (code) => {
+    // The core names discord, carries its install record — so it DID adjudicate
+    // it — and emits no consent diagnostic for it. That is the one shape that
+    // means "the consent is recorded".
     const { argv, stdout, marker } = run({
       entries: { discord: { enabled: true } },
       enableKilled: { discord: code },
-      inspectJson: '{"diagnostics":[]}',
+      inspectJson: inspectAllJson([{ id: "discord" }]),
     });
     expect(argv).toContain("plugins inspect --all --json");
     expect(stdout).toContain("discord plugin capabilities accepted/current");
     expect(argv.some((line) => line.includes("enabled false"))).toBe(false);
     expect(marker).toEqual({});
+  });
+
+  it("does not read silence about a plugin as that plugin's consent", () => {
+    // The reproduction: a real `--all` answer that simply never mentions
+    // discord. That is what the core emits for a plugin its installed index
+    // does not list — the state a core generation bump leaves behind (TASK-602)
+    // — and reading it as "consented" left an unloadable plugin enabled, which
+    // is the readiness refusal, the burnt StartLimitBurst and the TASK-606
+    // outage.
+    const { argv, stdout, marker } = run({
+      entries: { discord: { enabled: true } },
+      enableKilled: { discord: 124 },
+      inspectJson: inspectAllJson([{ id: "whatsapp" }]),
+    });
+    expect(stdout).not.toContain("discord plugin capabilities accepted/current");
+    expect(argv).toContain('config set plugins.entries["discord"].enabled false --strict-json');
+    expect(stdout).toContain("booting without it");
+    expect(marker.discord?.stage).toBe("consent");
+  });
+
+  it("switches a plugin the core cannot load off, whatever it says about consent", () => {
+    // Named, but not in a state the core would load: never left enabled, or the
+    // gateway refuses readiness over it and the unit burns its start limit.
+    const { argv, stdout } = run({
+      entries: { discord: { enabled: true } },
+      enableKilled: { discord: 124 },
+      inspectJson: inspectAllJson([{ id: "discord", status: "error" }]),
+    });
+    expect(argv).toContain('config set plugins.entries["discord"].enabled false --strict-json');
+    expect(stdout).toContain("booting without it");
+  });
+
+  it("leaves a plugin the core keeps no consent record for exactly as it is", () => {
+    // deepseek and clawbox-email-directives on the box today: enabled, live in
+    // `~/.openclaw/extensions/`, and have no install record — so the core emits
+    // no consent diagnostic for them and CANNOT. Switching them off would be a
+    // false failure over a plugin that is loading fine and can never refuse
+    // readiness for consent; calling it "accepted/current" and clearing the
+    // badge would be the false success. Neither: say so and change nothing.
+    const { argv, stdout, marker } = run({
+      entries: { deepseek: { enabled: true } },
+      enableKilled: { deepseek: 137 },
+      inspectJson: inspectAllJson([{ id: "deepseek", installed: false }]),
+      existingMarker: {
+        deepseek: { id: "deepseek", stage: "install", disabled: false, reason: "earlier boot", atMs: 1 },
+      },
+    });
+    expect(stdout).not.toContain("deepseek plugin capabilities accepted/current");
+    expect(stdout).not.toContain("booting without it");
+    expect(stdout).toContain("deepseek plugin capabilities are still unknown");
+    expect(argv.some((line) => line.includes("enabled false"))).toBe(false);
+    // The marker it started with is still there: not cleared, and not replaced.
+    expect(marker.deepseek?.stage).toBe("install");
   });
 
   it("still switches off when a killed verb had NOT recorded the consent", () => {
@@ -243,7 +312,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     const { argv, stdout, marker } = run({
       entries: { discord: { enabled: true } },
       enableKilled: { discord: 124 },
-      inspectJson: `{"diagnostics":[{"level":"warn","pluginId":"discord","message":"${CONSENT_DIAGNOSTIC("discord")}"}]}`,
+      inspectJson: inspectAllJson([{ id: "discord", consentRequired: true }]),
     });
     expect(argv).toContain('config set plugins.entries["discord"].enabled false --strict-json');
     expect(stdout).toContain("booting without it");
@@ -265,21 +334,31 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
 
   it("reads the diagnostic PER ID, not as one verdict for the boot", () => {
     // The discriminating case: both verbs were killed and both plugins are
-    // enabled, and the core names only one of them. Without this, "the core
-    // said no" and "the core could not be asked" are indistinguishable, because
-    // both end in a switch-off.
+    // enabled and adjudicated, and the core names only one of them.
     const { argv, stdout } = run({
       entries: { discord: { enabled: true }, whatsapp: { enabled: true } },
       enableKilled: { discord: 124, whatsapp: 124 },
-      inspectJson:
-        '{"diagnostics":[{"level":"warn","pluginId":"whatsapp",'
-        + '"message":"Plugin whatsapp requires capability consent; run openclaw plugins enable"}]}',
+      inspectJson: inspectAllJson([{ id: "discord" }, { id: "whatsapp", consentRequired: true }]),
     });
     // whatsapp is named, so it is still unconsented and must go off.
     expect(argv).toContain('config set plugins.entries["whatsapp"].enabled false --strict-json');
-    // discord is NOT named, so its consent landed inside the killed verb.
+    // discord is adjudicated and NOT named, so its consent landed.
     expect(argv.some((line) => line.includes('entries["discord"].enabled false'))).toBe(false);
     expect(stdout).toContain("discord plugin capabilities accepted/current");
+  });
+
+  it("matches the core's own plugin id when the entry is keyed by an alias", () => {
+    // `ensureChannelPlugin` can enable the plugin as `openclaw-whatsapp`, and
+    // the core's reports always key on the bare `whatsapp`. Comparing the two
+    // literally would find the id in neither set and switch a consented channel
+    // off on every killed verb.
+    const { argv, stdout } = run({
+      entries: { "openclaw-whatsapp": { enabled: true } },
+      enableKilled: { "openclaw-whatsapp": 124 },
+      inspectJson: inspectAllJson([{ id: "whatsapp" }]),
+    });
+    expect(stdout).toContain("openclaw-whatsapp plugin capabilities accepted/current");
+    expect(argv.some((line) => line.includes("enabled false"))).toBe(false);
   });
 
   it("asks the core once per boot, not once per plugin", () => {
@@ -287,7 +366,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     const { argv } = run({
       entries: { discord: { enabled: true }, whatsapp: { enabled: true } },
       enableKilled: { discord: 124, whatsapp: 124 },
-      inspectJson: '{"diagnostics":[]}',
+      inspectJson: inspectAllJson([{ id: "discord" }, { id: "whatsapp" }]),
     });
     expect(argv.filter((line) => line.startsWith("plugins inspect"))).toEqual([
       "plugins inspect --all --json",
