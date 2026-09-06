@@ -198,6 +198,12 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
   // remembered entitlement is a guess, and a guess is what locked a Max owner
   // out of the model he pays for (TASK-691).
   let clawaiAllowedModels: string[] | null = null;
+  // Did the portal REFUSE this device's credential? False until it says so, so
+  // a box that has not asked yet — no token, portal never reached — never
+  // accuses a credential that may be fine. See TASK-419: the answer used to be
+  // thrown away, and the badge went on saying "Connected · Pro" while every
+  // turn came back "HTTP 403: Invalid token".
+  let clawaiTokenRejected = false;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -225,6 +231,8 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
         if (lookup.tier !== localTier) {
           await setConfigValue(CLAWBOX_AI_TIER_CONFIG_KEY, lookup.tier).catch(() => {});
         }
+      } else {
+        clawaiTokenRejected = lookup.rejected;
       }
     }
   }
@@ -254,6 +262,13 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     // hook needs this to gate ClawKeep / Remote Desktop sign-in
     // prompts independently of paid-tier checks.
     clawaiConfigured: state.hasClawaiProfile,
+    // The portal answered and refused this device's token. Deliberately NOT
+    // folded into `connected` or `clawaiConfigured`: a rejected credential is
+    // still a configured one, and the gates hanging off those two (ClawKeep,
+    // Remote Desktop, the whole "has this box been linked" question) must not
+    // flip on an auth error. This is the one field that says the credential
+    // does not work, and the surfaces that claim health read it.
+    clawaiTokenRejected,
     tierSource,
   }, {
     headers: {
@@ -277,7 +292,7 @@ export async function GET() {
       {
         connected: false, provider: null, providerLabel: null, mode: null, model: null,
         clawaiTier: null, clawaiAccountTier: null, clawaiAllowedModels: null,
-        clawaiConfigured: false, tierSource: "picker",
+        clawaiConfigured: false, clawaiTokenRejected: false, tierSource: "picker",
       },
       {
         headers: {

@@ -23,7 +23,7 @@ import { SkillDetail } from "@/components/hermes-skills/SkillDetail";
 
 vi.mock("@/lib/i18n", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/i18n")>();
-  const { skillsEn } = await import("@/lib/hermes-translations/en-skills");
+  const { skillsEn } = await import("@/lib/edition-translations/en-skills");
   return {
     ...actual,
     useT: () => ({

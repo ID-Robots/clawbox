@@ -13,11 +13,11 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 // pkce opens the provider's page and takes a pasted code; device_code shows the
 // user code and waits; external shows the CLI command instead of a button.
 
-// This panel's copy lives in the Hermes catalogue (TASK-458), so resolve keys
+// This panel's copy lives in the edition catalogue (`edition-translations/en-provider.ts`, TASK-458), so resolve keys
 // against the real English table instead of echoing them back: the assertions
 // below stay on the sentence a customer actually reads.
 vi.mock("@/lib/i18n", async () => {
-  const { providerEn } = await import("@/lib/hermes-translations/en-provider");
+  const { providerEn } = await import("@/lib/edition-translations/en-provider");
   return {
     I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
     useT: () => ({

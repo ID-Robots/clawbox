@@ -47,6 +47,14 @@ function slice(from: string, to: string): string {
  * block precisely so both migrations answer that question the same way, so
  * this test takes it from there rather than restating the rule.
  */
+/**
+ * The hosts ClawBox has ever written as its AI proxy — the live one plus the
+ * retired ones — and the URL normaliser that builds them, taken from the
+ * shipped script rather than restated here. `_clawai_host_is_ours` is the arm
+ * that decides whether a route the owner did not key is theirs, and a second
+ * copy of that list would let the two answers drift.
+ */
+const PROXY_HOSTS = hasPython3 ? slice("from urllib.parse import urlsplit", "def _is_our_image_row(_row):") : "";
 const SAME_ENDPOINT = hasPython3 ? slice("def _same_endpoint(_a, _b):", "if _clawai_openai_route_is_ours:") : "";
 const POLICY = hasPython3
   ? slice("# Migration: ClawBox AI cloud voice (text to speech).", "if isinstance(ds_models, list):")
@@ -95,6 +103,10 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
     `_clawai_openai_route_is_ours = ${routeIsOurs ? "True" : "False"}`,
     `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
     `_clawai_token = ${JSON.stringify(TOKEN)}`,
+    // The ClawBox AI provider entry the image migration read the live proxy
+    // off; the only binding the host set above needs.
+    `deepseek_provider = {"baseUrl": ${JSON.stringify(PROXY)}}`,
+    PROXY_HOSTS,
     SAME_ENDPOINT,
     ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
@@ -298,6 +310,83 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     });
   });
 
+  describe("a box we linked under a previous proxy address (TASK-726)", () => {
+    // CLAWBOX_AI_PROXY_URL is env-overridable and moves between releases, so
+    // an entry WE wrote can name an endpoint that has since been retired. The
+    // rule used to be equality with the CURRENT url, which reads our own entry
+    // as the owner's own speech server: the box was skipped and left on a dead
+    // route for the life of that address, while the chat provider and the
+    // image row were repaired in the same boot.
+    const RETIRED = "https://clawbox.com/api/ai-2025";
+
+    it("re-points our own stamped entry at the address that serves today", () => {
+      const { cfg, changed, log } = migrate({
+        messages: { tts: { providers: { openai: { baseUrl: RETIRED, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED } } } },
+      });
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
+      expect(log).not.toContain("already names its own speech route");
+    });
+
+    it("recognises one by its claw_ token even without the stamp", () => {
+      // What a box carries when it was written before the stamp existed. The
+      // portal token is ours whatever address it was pointed at.
+      const { cfg, changed } = migrate({
+        messages: { tts: { providers: { openai: { baseUrl: RETIRED, model: "gpt-4o-mini-tts", apiKey: TOKEN } } } },
+      });
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)?.baseUrl).toBe(PROXY);
+      expect(speech(cfg)).toMatchObject(MANAGED);
+    });
+
+    it("takes its own entry back on a downgrade even though the address moved", () => {
+      // The mirror image, and the worse half: a box that was Max and is not
+      // any more kept OUR dead entry for good, so every spoken reply bought a
+      // refused round trip and the panel called the cloud voice configured
+      // while it did.
+      const { cfg, changed, log } = migrate(
+        { messages: { tts: { providers: { openai: { baseUrl: RETIRED, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED } } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toBeUndefined();
+      expect(log).toContain("no longer includes it");
+    });
+
+    it("leaves a pre-stamp entry alone on a downgrade, narrower than the adopt path on purpose", () => {
+      // A `claw_` token is enough to REFRESH an entry — the worst case is our
+      // own fields rewritten to our own values — and deliberately not enough to
+      // DELETE one: an owner can point our own token at our own proxy with a
+      // model of their choosing, and the case above pins that entry as theirs.
+      // The narrow residue is a box written before the stamp existed that is
+      // ALSO downgraded; it keeps a dead entry, as it did before this change.
+      const preStamp = { baseUrl: RETIRED, model: SPEECH_MODEL, apiKey: TOKEN };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: preStamp } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(preStamp);
+    });
+
+    it("still refuses to take an UNSTAMPED entry on a moved address", () => {
+      // The destructive path keeps its positive evidence: the stamp is the
+      // authorisation, and an entry we did not write is somebody's own.
+      const own = { baseUrl: RETIRED, model: "tts-1", apiKey: "sk-owner" };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: own } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+  });
+
   it("does not touch a box whose openai slot belongs to its owner", () => {
     // Same handover the transcription migration uses: when the image migration
     // decided the slot is not ours, our token must not be written anywhere
@@ -321,6 +410,88 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       // A host-only match would stamp over a deliberate path. Same rule the
       // transcription migration applies, from the same helper.
       const own = { baseUrl: "https://clawbox.com/their-own-route", model: "tts-1" };
+      const { cfg, changed } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+
+    it("is left alone when the owner has repointed OUR OWN stamped entry at their server", () => {
+      // `messages.tts.providers.openai` is the only generic OpenAI-compatible
+      // speech slot OpenClaw has, so an owner who runs their own has to edit
+      // the entry we wrote — and `openclaw config set` edits in place, leaving
+      // our `clawboxManaged` key behind on a route that is now theirs.
+      const own = {
+        baseUrl: "https://kokoro.local/v1",
+        model: "kokoro",
+        apiKey: "sk-owner",
+        voice: "af",
+        clawboxManaged: true,
+      };
+      const { cfg, changed, log } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+      expect(log).toContain("already names its own speech route");
+    });
+
+    it("does not delete that entry on a downgrade either", () => {
+      // The one irreversible action in the file, and a stale stamp must not be
+      // enough to fire it over live owner configuration.
+      const own = { baseUrl: "https://kokoro.local/v1", model: "kokoro", apiKey: "sk-owner", clawboxManaged: true };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: own } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+
+    it("is left alone when the owner has repointed it at a KEYLESS server of their own", () => {
+      // The keyed case above is the easy one. A local speech server — Kokoro,
+      // Piper — needs NO credential, so the address is the only thing that
+      // speaks for it. `openclaw config set` edits in place, which is why our
+      // `clawboxManaged` stamp is still sitting on an entry that has been
+      // theirs since the day they pointed it at their box.
+      const own = { baseUrl: "https://kokoro.local/v1", model: "kokoro", clawboxManaged: true };
+      const { cfg, changed, log } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+      expect(log).toContain("already names its own speech route");
+    });
+
+    it("does not delete that KEYLESS entry on a downgrade either", () => {
+      // The one irreversible action in the file. A stamp on an address that
+      // was never ours is not a licence to destroy the owner's configuration —
+      // and this is the case the keyed pair above cannot see.
+      const own = { baseUrl: "https://kokoro.local/v1", model: "kokoro", clawboxManaged: true };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: own } } } },
+        { deviceTier: "free" },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+
+    it("still repairs our own stamped entry left on a RETIRED proxy address", () => {
+      // The reason the rule stopped being an equality test against the current
+      // URL: a box linked under a previous address carries an entry WE wrote,
+      // pointing at an endpoint that no longer answers. That address is still
+      // one of ours, so it is still ours to repair.
+      const own = { baseUrl: "https://openclawhardware.dev/api/ai", model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED };
+      const { cfg, changed } = migrate({ messages: { tts: { providers: { openai: own } } } });
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
+    });
+
+    it("is left alone when it carries the owner's own key on a route of ours that has moved", () => {
+      // The credential is what decides after the stamp, and `sk-` is not ours
+      // however the endpoint reads.
+      const own = { baseUrl: "https://clawbox.com/api/ai-2025", model: "tts-1", apiKey: "sk-owner" };
       const { cfg, changed } = migrate({ messages: { tts: { providers: { openai: own } } } });
 
       expect(changed).toBe(false);

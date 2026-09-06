@@ -17,6 +17,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from . import limits
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +92,12 @@ def _parse_json(stdout: str, what: str) -> dict:
     return obj
 
 
+#: Re-exported so `openclaw.<name>` keeps working for anything that reads it
+#: here; the one definition lives in `limits.py`, beside `crypto.py`'s use of
+#: the same bound. See that module for why it is this number.
+SUBPROCESS_TIMEOUT_S = limits.SUBPROCESS_TIMEOUT_S
+
+
 def create_archive(
     binary: str,
     *,
@@ -98,7 +105,7 @@ def create_archive(
     include_workspace: bool = True,
     only_config: bool = False,
     verify: bool = True,
-    timeout: float = 30 * 60,  # tarballing ~1GB on Jetson takes minutes; 30m hard cap
+    timeout: float = SUBPROCESS_TIMEOUT_S,
 ) -> Archive:
     """Run `openclaw backup create --json --output <dir>`. Returns archive metadata.
 
@@ -316,7 +323,12 @@ def plan_roots(binary: str, *, timeout: float = 5 * 60) -> tuple[PlannedRoot, ..
     )
 
 
-def verify_archive(binary: str, archive: Path, *, timeout: float = 5 * 60) -> None:
+def verify_archive(
+    binary: str,
+    archive: Path,
+    *,
+    timeout: float = SUBPROCESS_TIMEOUT_S,
+) -> None:
     """Run `openclaw backup verify --json <archive>`. Raises OpenclawError on failure.
 
     Useful as a defence-in-depth check before upload when the caller did

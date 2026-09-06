@@ -17,13 +17,37 @@
 import {
   backupExitError,
   computeNextRunMs,
-  readSchedule,
+  readScheduleSnapshot,
   runBackup,
   type ClawKeepSchedule,
 } from "@/lib/clawkeep";
 
 let armed: NodeJS.Timeout | null = null;
 let armedFor: number = 0;
+/** Re-read timer for an unreadable `schedule.json`. Never a backup slot. */
+let retry: NodeJS.Timeout | null = null;
+/** Serialises overlapping rearms so the older read cannot arm last. */
+let rearmGeneration = 0;
+/**
+ * The last schedule this process could actually READ.
+ *
+ * An unreadable file is evidence of nothing, so the honest thing to keep
+ * running on is the last thing that was evidence of something. Without it the
+ * post-fire rearm — the one that has no live timer to preserve — had nothing
+ * to fall back to and simply stopped.
+ */
+let lastGood: ClawKeepSchedule | null = null;
+
+/**
+ * How long to wait before looking at an unreadable `schedule.json` again.
+ *
+ * "Can I read the schedule?" answered once and believed for the life of the
+ * process is the probe-once class, and on this file it is total: a box that
+ * boots on a root-owned or half-written file would never back up again, on one
+ * log line. Long enough that a genuinely broken file is not a log flood,
+ * short enough that a transient EIO/EMFILE self-heals within the hour.
+ */
+const UNREADABLE_RETRY_MS = 15 * 60 * 1000;
 
 function clear() {
   if (armed) {
@@ -33,9 +57,30 @@ function clear() {
   }
 }
 
+function clearRetry() {
+  if (retry) {
+    clearTimeout(retry);
+    retry = null;
+  }
+}
+
 function fireBackup(): void {
-  // Best-effort: if a manual backup is already running the daemon will
-  // serialise via its own heartbeat lock, so we don't gate here.
+  // The slot is being consumed now, so stop claiming it is still ahead:
+  // without this, `armedFor` names a time in the past for as long as the
+  // backup runs, and `nextRunAtMs()` — the number an admin surface prints as
+  // "next run" — reports it. Same reason `clawkeep-memory-scheduler.ts`
+  // clears at the top of its own `fire()`.
+  clear();
+  // NOT gated on a run already being in flight, and the reason given here
+  // used to be false: "the daemon will serialise via its own heartbeat lock".
+  // There is no such lock — no pidfile, no flock, nothing in `daemon.py`,
+  // `runner.py` or `state.py` — so two `clawkeepd` processes will happily
+  // stage two multi-GB archives and upload both. It has been survivable
+  // because the window is small; raising the run cap to four hours for
+  // TASK-675's 12 GB archives widens it, since a manual backup started late
+  // in the evening can still be running when the nightly slot fires. Closing
+  // it properly is the daemon's own single-instance guard rather than a
+  // check here, which could only ever narrow the race.
   //
   // A scheduled run must create + upload a REAL backup — `idle: true` only
   // sends a heartbeat ping (and short-circuits within the heartbeat interval),
@@ -73,10 +118,81 @@ function fireBackup(): void {
     });
 }
 
+/**
+ * Re-read the schedule and re-arm, without letting an unreadable file be read
+ * as the owner switching auto-backup off.
+ *
+ * An unreadable `schedule.json` sanitises to `DEFAULT_SCHEDULE`, whose
+ * `enabled` is false, so this used to tear the nightly timer down and go
+ * quiet: a box that had been backing up every night simply stopped, on nothing
+ * but a transient EACCES/EIO/EMFILE or a JSON truncated by a power cut
+ * (TASK-433). `readScheduleSnapshot()` already separates "no file" — a box
+ * that has never had a schedule — from "there is a file and it says nothing we
+ * can read", which is evidence of nothing.
+ *
+ * What this does NOT do is fix the same symptom on the OWNER's side: `GET
+ * /setup-api/clawkeep/schedule` and `getStatus()` both still flatten
+ * `unreadable` to `DEFAULT_SCHEDULE`, so while the engine keeps backing the
+ * box up the card still reads "auto-backup is off" and `deriveProtection`
+ * still judges it on the 7-day unscheduled window. Carrying `unreadable`
+ * through to a card state is a change with its own copy in ten locales; this
+ * one keeps the backups running.
+ */
 async function rearm(): Promise<void> {
+  const generation = ++rearmGeneration;
+  const snapshot = await readScheduleSnapshot();
+  // A concurrent rearm — a save landing during boot, or two saves in quick
+  // succession — read after this one did, so its answer is the newer.
+  if (generation !== rearmGeneration) return;
+  if (snapshot.unreadable) {
+    onUnreadableSchedule();
+    return;
+  }
+  clearRetry();
+  lastGood = snapshot.schedule;
+  applySchedule(snapshot.schedule);
+}
+
+function onUnreadableSchedule(): void {
+  // Keep backing the box up on the last schedule that WAS readable. At boot
+  // there is none, and then there is nothing to arm — but the retry below is
+  // what stops that being permanent.
+  if (lastGood) applySchedule(lastGood);
+  console.warn(
+    "[clawkeep-scheduler] schedule.json could not be read — "
+      + (armedFor > 0
+        ? `keeping the last schedule that was (next run ${new Date(armedFor).toISOString()})`
+        // Nothing armed is two different facts and only one is an alarm: a box
+        // whose owner switched auto-backup off is behaving correctly, a box
+        // that has never managed to read the file is not.
+        : lastGood
+          ? "auto-backup was last known to be off"
+          : "nothing is armed and nothing has been read yet")
+      + `; trying again in ${Math.round(UNREADABLE_RETRY_MS / 60_000)} min`,
+  );
+  clearRetry();
+  retry = setTimeout(() => { void rearm(); }, UNREADABLE_RETRY_MS);
+  // A re-read must not be a reason for the process to stay alive.
+  retry.unref?.();
+}
+
+function applySchedule(schedule: ClawKeepSchedule): void {
   clear();
-  const schedule = await readSchedule();
   arm(schedule);
+  // The one choke point every arm path goes through, and the last place this
+  // card's own symptom can still hide: `arm()` returns silently when the
+  // schedule is enabled and `computeNextRunMs()` answers 0. The range check on
+  // `timeOfDay` closes the way that used to happen, but two inputs still
+  // reach it — the weekly loop's 9-hop clock/DST guard, and any schedule
+  // handed to `refresh()` that did not come through `sanitiseSchedule()`.
+  // Auto-backup reading as on with no timer armed must never be silent again.
+  if (schedule.enabled && armedFor === 0) {
+    console.warn(
+      "[clawkeep-scheduler] auto-backup is on but the schedule computes no next run"
+        + ` (${schedule.frequency} ${schedule.timeOfDay} weekday ${schedule.weekday})`
+        + " — nothing is armed",
+    );
+  }
 }
 
 function arm(schedule: ClawKeepSchedule): void {
@@ -99,15 +215,28 @@ function arm(schedule: ClawKeepSchedule): void {
 
 /** Boot hook — call once at process start. Idempotent. */
 export async function start(): Promise<void> {
-  clear();
-  const schedule = await readSchedule();
-  arm(schedule);
+  await rearm();
 }
 
-/** Re-read the persisted schedule and rearm. Call after the user saves new
- * schedule settings via /setup-api/clawkeep/schedule. */
-export async function refresh(): Promise<void> {
-  await rearm();
+/**
+ * Re-arm after the owner saves. Call from /setup-api/clawkeep/schedule.
+ *
+ * The route hands over the schedule `writeSchedule()` just returned, because
+ * it is authoritative and re-reading the file it has only now renamed can
+ * fail: a transient error on the save path would otherwise leave the OLD
+ * cadence armed while the PUT answered 200, so a box would keep backing up
+ * after the owner switched auto-backup off. Falls back to a read when no
+ * schedule is supplied.
+ */
+export async function refresh(schedule?: ClawKeepSchedule): Promise<void> {
+  if (!schedule) {
+    await rearm();
+    return;
+  }
+  ++rearmGeneration;
+  clearRetry();
+  lastGood = schedule;
+  applySchedule(schedule);
 }
 
 /** When the next scheduled fire is, in unix ms. 0 means disarmed. Useful

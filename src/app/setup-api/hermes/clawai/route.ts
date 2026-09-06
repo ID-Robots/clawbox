@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { get, setMany } from "@/lib/config-store";
+import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 import { hermesConfigGet } from "@/lib/hermes-config-cache";
 import { getActiveHarness } from "@/lib/harness";
 import { getCodingAgentStatus } from "@/lib/coding-agent";
@@ -121,6 +122,10 @@ export async function POST(request: Request) {
       .then((status) => status.ready)
       .catch(() => undefined);
     await setMany({ clawai_token: suppliedToken });
+    // A refusal the proxy gave the token being replaced is about that token,
+    // not this one. Dropped here as well as in `applyClawaiToHermes`, because a
+    // paste that never reaches the apply still changed the credential.
+    forgetClawaiCredentialRefusal();
   }
 
   const token = suppliedToken || (await readToken());

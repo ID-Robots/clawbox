@@ -1144,9 +1144,12 @@ function BackupProgressPanel({
           ? t("clawkeep.progress.backupHint")
           : t("clawkeep.progress.restoreHint")}
       </p>
-      {/* "Looks stuck?" recovery link. Surfaces after ~6 minutes on the
-          same heartbeat (real Jetson backups complete in 2-5 min) — gives
-          the user a way out before the 30-minute auto-stale kicks in.
+      {/* "Looks stuck?" recovery link. Surfaces after RESET_HINT_AFTER_MS on
+          the same heartbeat — a way out long before STALE_RUNNING_MS retires
+          the pulse on its own. It is only ever an OFFER: the ~6 minutes was
+          chosen when a Jetson backup took 2-5 min, and a 12 GB archive
+          (TASK-675) legitimately runs for well over an hour, so the link has
+          to sit beside a healthy long run without claiming anything about it.
           Only on backup; restore has its own swap-cant-be-interrupted
           hint above and a reset there would be actively dangerous. */}
       {isBackup && onReset && heartbeatAtMs > 0

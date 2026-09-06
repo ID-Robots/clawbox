@@ -3,7 +3,15 @@ import path from "path";
 import { randomUUID } from "crypto";
 import { CLAWBOX_AI_IMAGE_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { mediaUrl } from "@/lib/chat-media";
-import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "./credentials";
+import {
+  CLAWBOX_AI_PROXY_URL,
+  clawaiCredentialRefused,
+  clawaiCredentialGeneration,
+  noteClawaiCredentialRefused,
+  proxyRefusedClawaiCredential,
+  resetClawaiCredentialRefusals,
+  resolveClawaiToken,
+} from "./credentials";
 import { chatGeneratedImageDir, GENERATED_IMAGE_RETENTION, pruneMediaDir } from "./media-root";
 import type { FetchLike } from "./transport";
 
@@ -189,16 +197,30 @@ let probeCache: { promise: Promise<boolean>; expiresAt: number } | null = null;
  * — verified: it returns the same 200 with no token and with a wrong one — so
  * it cannot tell a live credential from a revoked one. That half of the answer
  * is `hasClawaiToken`, and the two are combined by the capability rather than
- * conflated here. A token that is present but revoked therefore still shows the
- * button, and fails at generate time with the proxy's 403 surfaced as "re-link
- * this device". That is the right way round: hiding the button on every box
- * whose token MIGHT be stale would hide it on every box.
+ * conflated here. A token that is present but MIGHT be stale therefore still
+ * shows the button: hiding it on every box whose token might be stale would
+ * hide it on every box.
+ *
+ * A token the proxy HAS NAMED as the problem is a different fact, and this does
+ * answer it. Once a generate came back 401/403 with the proxy's own
+ * `invalid_token` / `missing_token`, the button is an offer to draw that ends
+ * in an error bubble every time, so it goes away — until the device is
+ * re-linked, or fifteen minutes pass, whichever comes first. The timer is
+ * there so a box the portal healed without a re-link gets its button back on
+ * its own; the consequence, stated plainly, is that a still-dead credential
+ * shows the button again every fifteen minutes and one press re-hides it.
+ * Might-be-stale stays a button; proven-dead does not.
  *
  * Fails CLOSED. Anything other than a clean, parseable, model-listing 200 is
  * false, because a wrong `true` is an offer to draw that ends in an error
  * bubble — the same lie the microphone used to tell.
  */
 export async function clawaiImageRouteReachable(fetchImpl: FetchLike = fetch): Promise<boolean> {
+  // Ahead of the probe cache, not behind it: a 403 that lands a second after a
+  // successful probe would otherwise keep the button for the ten minutes that
+  // answer is good for, which is the whole window a customer spends pressing
+  // it. It costs nothing — no request, and no credential read.
+  if (clawaiCredentialRefused() !== null) return false;
   const now = Date.now();
   if (probeCache && now < probeCache.expiresAt) return probeCache.promise;
   // Seeded with the SHORT ttl so concurrent callers during the probe share one
@@ -216,9 +238,14 @@ export async function clawaiImageRouteReachable(fetchImpl: FetchLike = fetch): P
   return entry.promise;
 }
 
-/** Test seam: forget the cached answer so the next call asks again. */
+/**
+ * Test seam: forget every remembered answer so the next call asks again —
+ * including the shared credential refusal, which is what makes the status
+ * table below able to walk 401 and 403 without poisoning the cases after them.
+ */
 export function resetClawaiImageProbe(): void {
   probeCache = null;
+  resetClawaiCredentialRefusals();
 }
 
 async function askProxyForImageModels(fetchImpl: FetchLike): Promise<boolean> {
@@ -288,6 +315,23 @@ export async function generateClawaiImageBytes(
     );
   }
 
+  const refused = clawaiCredentialRefused();
+  if (refused !== null) {
+    // Refused WITHOUT asking again. The customer is still told, in the same
+    // words and with the same status as the request that established this, so
+    // nothing is hidden — what stops is the traffic. Beta sent one POST per
+    // trigger, per process, for as long as the box stayed up, every one of them
+    // a 403 that was knowable in advance. (The fleet-wide 15k/day on TASK-727
+    // is the sum of every image caller on the box; how much of it came through
+    // here rather than through the agent's own image tool was not separated.)
+    const [status, message] = messageForStatus(refused);
+    throw new ClawaiImageError(status, message);
+  }
+
+  // Snapshotted BEFORE the request. A re-link that lands while this is in
+  // flight makes the answer a verdict on a credential the box no longer holds.
+  const generation = clawaiCredentialGeneration();
+
   let res: Response;
   try {
     // CodeQL `js/file-access-to-http` ("file data in outbound network request")
@@ -336,7 +380,14 @@ export async function generateClawaiImageBytes(
   }
 
   if (!res.ok) {
-    // The STATUS decides, never the body. An upstream error body is allowed to
+    // A credential the proxy itself names as the problem is the one failure
+    // here that CANNOT come right on its own, so it is remembered rather than
+    // re-tried. It has to be the PROXY saying so: a bare 401/403 on the wire
+    // can come from an edge rule, a rate-limit page, an interception proxy or
+    // a plan gate, and remembering one of those would hide the button and tell
+    // a customer with a perfectly good credential to re-pair the device.
+    if (await proxyRefusedClawaiCredential(res)) noteClawaiCredentialRefused(res.status, generation);
+    // The STATUS decides what is SAID, never the body. An upstream error body is allowed to
     // quote the request that caused it, and this request carried a bearer
     // token — the same reason the transcription route relays a status and
     // nothing else.
@@ -373,6 +424,7 @@ export async function generateClawaiImageBytes(
 
   return { bytes, extension };
 }
+
 
 /**
  * What a failing status is allowed to say.

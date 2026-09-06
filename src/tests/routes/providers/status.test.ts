@@ -10,6 +10,7 @@ vi.mock("@/lib/hermes-model-options", () => ({
   getModelOptions: vi.fn(),
   probeStillOwed: vi.fn(),
 }));
+vi.mock("@/lib/clawbox-ai-portal-tier", () => ({ clawaiTokenRejectedByPortal: vi.fn() }));
 
 let GET: () => Promise<Response>;
 let getActiveHarness: Mock;
@@ -18,6 +19,7 @@ let readConfig: Mock;
 let getConfigValue: Mock;
 let getModelOptions: Mock;
 let probeStillOwed: Mock;
+let clawaiTokenRejectedByPortal: Mock;
 
 beforeEach(async () => {
   vi.resetModules();
@@ -30,8 +32,13 @@ beforeEach(async () => {
     getModelOptions: Mock;
     probeStillOwed: Mock;
   });
+  ({ clawaiTokenRejectedByPortal } = (await import("@/lib/clawbox-ai-portal-tier")) as unknown as {
+    clawaiTokenRejectedByPortal: Mock;
+  });
   getConfigValue.mockResolvedValue(null);
   hasClawaiToken.mockResolvedValue(false);
+  // Nobody has asked the portal yet: the cold answer, and beta's behaviour.
+  clawaiTokenRejectedByPortal.mockReturnValue(false);
   // The settled box: the dashboard has answered, so nothing is outstanding.
   probeStillOwed.mockResolvedValue(false);
   ({ GET } = await import("@/app/setup-api/providers/status/route"));
@@ -526,5 +533,44 @@ describe("providers/status — needs repair", () => {
     getModelOptions.mockResolvedValue(hermesPayload());
     const body = await (await GET()).json() as { providers: Row[] };
     for (const row of body.providers) expect(row).not.toHaveProperty("needsRepair");
+  });
+});
+
+describe("providers/status — a ClawBox AI token the portal refused", () => {
+  // TASK-419. The strip derives "Connected" from the credential being PRESENT,
+  // so a revoked token painted the cyan dot and the word Connected on the very
+  // screen the chat's own failure text sends the customer to. `needs-reauth`
+  // already exists for this and is already worded in all ten locales.
+  it("shows the ClawBox AI row as needing sign-in on OpenClaw", async () => {
+    getActiveHarness.mockResolvedValue("openclaw");
+    readConfig.mockResolvedValue({
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      models: { providers: { deepseek: { apiKey: "claw_x" } } },
+    });
+    hasClawaiToken.mockResolvedValue(true);
+
+    clawaiTokenRejectedByPortal.mockReturnValue(false);
+    const healthy = await (await GET()).json() as { providers: { id: string; state: string }[] };
+    expect(healthy.providers.find((r) => r.id === "clawai")?.state).toBe("connected");
+
+    clawaiTokenRejectedByPortal.mockReturnValue(true);
+    const refused = await (await GET()).json() as { providers: { id: string; state: string }[] };
+    expect(refused.providers.find((r) => r.id === "clawai")?.state).toBe("needs-reauth");
+  });
+
+  it("shows it the same way on Hermes", async () => {
+    // The shared-surface rule: the same fact, the same row, the same word on
+    // the edition whose panel is built from a different reader entirely.
+    getActiveHarness.mockResolvedValue("hermes");
+    getModelOptions.mockResolvedValue(hermesPayload());
+    hasClawaiToken.mockResolvedValue(true);
+
+    clawaiTokenRejectedByPortal.mockReturnValue(false);
+    const healthy = await (await GET()).json() as { providers: { id: string; state: string }[] };
+    expect(healthy.providers.find((r) => r.id === "clawai")?.state).toBe("connected");
+
+    clawaiTokenRejectedByPortal.mockReturnValue(true);
+    const refused = await (await GET()).json() as { providers: { id: string; state: string }[] };
+    expect(refused.providers.find((r) => r.id === "clawai")?.state).toBe("needs-reauth");
   });
 });

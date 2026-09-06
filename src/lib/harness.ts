@@ -9,7 +9,7 @@
 
 import fs from "fs";
 import path from "path";
-import { get, set } from "@/lib/config-store";
+import { get, swap } from "@/lib/config-store";
 import { envPort } from "@/lib/port-probe";
 import { verifyDualLicense } from "@/lib/edition-license";
 import { readEdition, readEditionSource, type EditionSource } from "@/lib/edition-source";
@@ -133,13 +133,29 @@ export async function getActiveHarness(): Promise<Harness> {
   }
 }
 
-export async function setActiveHarness(harness: Harness): Promise<void> {
+/**
+ * Make `harness` the active one, and answer with THE ONE IT REPLACED.
+ *
+ * The predecessor comes back from the write rather than from a read the caller
+ * made earlier, because the caller's question — did this actually change
+ * anything — can only be answered by the write itself. `/setup-api/harness/select`
+ * used to read it before an identity sync with a 60 s budget, so two switches in
+ * opposite directions both saw the same predecessor: the second persisted its
+ * harness and then concluded nothing had moved, leaving the box on one harness
+ * with the agent's whole tool list built for the other.
+ */
+export async function setActiveHarness(harness: Harness): Promise<Harness> {
   // Refuse to persist a switch on a locked device (defense-in-depth — the
   // /harness/select route also rejects, and the UI hides the switcher).
   if (isSingleHarnessEdition()) {
     throw new Error("Harness switching is disabled on this edition");
   }
-  await set(HARNESS_CONFIG_KEY, harness);
+  const previous = await swap(HARNESS_CONFIG_KEY, harness);
+  // A store that has never held one, or holds something that is not a harness,
+  // reads as the default — the same answer `getActiveHarness` gives it. Not
+  // locked: `isSingleHarnessEdition()` above is the same test `lockedHarness()`
+  // makes, so the edition cannot be overriding the stored value here.
+  return isHarness(previous) ? previous : DEFAULT_HARNESS;
 }
 
 /**

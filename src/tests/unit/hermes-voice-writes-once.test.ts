@@ -52,6 +52,9 @@ vi.mock("@/lib/local-models", async (importOriginal) => ({
 vi.mock("@/lib/harness/credentials", () => ({
   CLAWBOX_AI_PROXY_URL: "https://clawbox.test/api/ai",
   resolveClawaiToken: vi.fn(async () => null),
+  // Dropped by the link path beside `forgetProviderVerified`: a refusal the
+  // proxy gave the token being replaced says nothing about the new one.
+  forgetClawaiCredentialRefusal: vi.fn(),
 }));
 // The link path's neighbours, none of which this file is about. The vision
 // resolver is mocked because it performs network I/O against the proxy.

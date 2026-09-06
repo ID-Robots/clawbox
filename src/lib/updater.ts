@@ -17,7 +17,17 @@ import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
-import { setUpdateLock, clearUpdateLock } from "./update-lock";
+import { setUpdateLock, clearUpdateLock, isUpdateLocked } from "./update-lock";
+
+/**
+ * "An update was accepted and then lost its process" — written where the lock
+ * is released, so the verdict outlives the process that reached it.
+ *
+ * The fault this records is a web server being replaced, so a verdict kept only
+ * in memory is one the next replacement erases; the box has to remember. It is
+ * cleared when a new run starts and when the owner dismisses the result.
+ */
+const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
 import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
@@ -2723,6 +2733,10 @@ export function resetUpdateState(): void {
 export function dismissSettledUpdate(): boolean {
   if (updateOwned() || state.phase === "running") return false;
   state = createInitialState(applicableSteps());
+  // The interrupted-run record is part of the result being dismissed. Without
+  // this the next idle poll re-reads it and raises the same failure again,
+  // which would make it undismissable.
+  void set(UPDATE_INTERRUPTED_KEY, undefined);
   return true;
 }
 
@@ -2793,7 +2807,49 @@ async function resumeContinuation(): Promise<boolean> {
     // continuation flag would otherwise leave the desktop locked with nothing
     // left to unlock it — there is no update to resume, so there is no lock to
     // hold. This is the one release path that does not follow a finished run.
-    await clearUpdateLock();
+    //
+    // But releasing the lock is only half an answer, and the missing half is
+    // TASK-731. The lock is on disk and the step list is not: an update whose
+    // web server was replaced between `runUpdate`'s `setUpdateLock()` and the
+    // rebuild step (which writes the continuation flag) leaves the lock held
+    // and nothing to resume. This branch then cleared it and answered IDLE —
+    // indistinguishable from a box nobody ever asked to update, over a run the
+    // route had already accepted with `{ started: true }`. The e2e-install
+    // upgrade spec then polls a state machine that cannot move for its whole
+    // 45-minute budget.
+    //
+    // Two things are needed and neither is enough alone. The lock IS the
+    // evidence, so it is read before it is cleared — and the verdict is
+    // WRITTEN BACK, because the fault being detected is "the web server keeps
+    // being replaced": a process that reports it in memory and then dies takes
+    // the only record with it, and the next one finds a clean disk and answers
+    // idle again, for good. `update_interrupted_at` is that record; it is
+    // cleared by the next `startUpdate()` and by a Dismiss.
+    //
+    // An update that FINISHED and then failed its release is not an
+    // interruption. `clearUpdateLock` is documented to fail softly, and
+    // `launchUpdate` fires it unawaited, so a leftover flag is a real state —
+    // and `update_completed` with no continuation flag is what tells the two
+    // apart. Reporting there would tell an owner to re-run a ten-minute update
+    // that already worked.
+    const wasLocked = await isUpdateLocked();
+    const released = await clearUpdateLock();
+    const finished = Boolean(await get("update_completed"));
+    const remembered = Boolean(await get(UPDATE_INTERRUPTED_KEY));
+    if ((wasLocked && released && !finished) || remembered) {
+      const message =
+        "The update was interrupted before it could finish: the web server was replaced while it ran, "
+        + "and no step is left to resume. Nothing was rolled back — start the update again.";
+      if (!remembered) {
+        // Only on the transition, so the record keeps the time it happened.
+        await set(UPDATE_INTERRUPTED_KEY, new Date().toISOString());
+      }
+      state = createInitialState(applicableSteps());
+      state.warnings = await restoreWarnings();
+      state.phase = "failed";
+      state.error = message;
+      console.error(`[Updater] ${message}`);
+    }
     return false;
   }
 
@@ -2949,10 +3005,65 @@ async function checkInternet(): Promise<boolean> {
 }
 
 async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): Promise<void> {
+  // Lock the desktop FIRST, AWAITED, before anything that can take time.
+  //
+  // It used to sit below the internet check and the drift baseline — up to two
+  // 10 s ICMP attempts, an 8 s HTTPS HEAD and a `git` shell-out — and the
+  // update was already accepted (`{started:true}`) for that whole window. A web
+  // server replaced in it left NO trace on disk, so the run was lost and the
+  // box reported "nothing is running" (TASK-731). The lock is the only durable
+  // record that a run exists, so it goes on disk before the run can be lost.
+  //
+  // Scoped to the flow that contains the RESTART step: that is the one that
+  // runs `git reset --hard` and `git clean -fd` over the project. The
+  // OpenClaw-only flow reinstalls a package and bounces the gateway, and
+  // locking the owner's desktop for that would be over-reach. It also covers
+  // the continuation, whose flag survived the reboot but may not have on a box
+  // that was power-cycled instead.
+  const ownsTheDesktop = steps.some((s) => s.id === RESTART_STEP_ID);
+  if (ownsTheDesktop) {
+    await setUpdateLock();
+    // AND clear what the last run left behind, in the same awaited prologue.
+    //
+    // `update_completed` is the discriminator resumeContinuation uses to tell
+    // "an update was interrupted" from "one finished and only failed to release
+    // its lock". Left standing, a FORCED run started after a successful one
+    // (exactly what e2e-install's upgrade spec does, twice) would take the
+    // lock, die before the rebuild writes its continuation flag, and be read as
+    // the finished one — swallowing the very report the branch exists to make.
+    // The box is not "completed" while it is updating, and the run writes both
+    // again when it is.
+    //
+    // HERE rather than in startUpdate, and awaited: the window this whole
+    // change is about begins when the first step runs, and by then the markers
+    // are gone. A restart in the microseconds before this line finds no lock
+    // either — both are written in the same prologue — so resumeContinuation
+    // correctly says nothing.
+    //
+    // Reported and not fatal, the same rule setUpdateLock follows: refusing to
+    // update a box because a marker could not be cleared is the worse outcome
+    // by some way, and a config store that cannot be written is exactly the
+    // state an update exists to repair. What it costs, said out loud, is that a
+    // later interrupted run may be read as this one having finished.
+    try {
+      await setMany({
+        [UPDATE_INTERRUPTED_KEY]: undefined,
+        update_completed: undefined,
+        update_completed_at: undefined,
+      });
+    } catch (err) {
+      console.warn(
+        "[Updater] Could not clear the previous run's markers - an interruption of THIS run may be reported as a completed update:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   if (startFrom === 0 && !(await checkInternet())) {
     state.phase = "failed";
     state.error = "No internet connection. Check your WiFi and try again.";
     state.currentStepIndex = -1;
+    await clearUpdateLock();
     return;
   }
 
@@ -2962,24 +3073,6 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // the repo, so there is nothing for it to observe.
   if (startFrom === 0 && steps.some((s) => s.id === RESTART_STEP_ID)) {
     await captureDriftBaseline();
-  }
-
-  // Lock the desktop, AWAITED, before the first step runs.
-  //
-  // Here rather than in startUpdate/resumeContinuation, and awaited rather than
-  // fired and forgotten, so the flag is on disk before anything else happens —
-  // config-store.set is synchronous inside today, but nothing about this should
-  // depend on that staying true. It also covers the continuation, whose flag
-  // survived the reboot but may not have on a box that was power-cycled instead.
-  //
-  // Scoped to the flow that contains the RESTART step, the same test the drift
-  // baseline above uses: that is the one that runs `git reset --hard` and
-  // `git clean -fd` over the project. The OpenClaw-only flow reinstalls a
-  // package and bounces the gateway, and locking the owner's desktop for that
-  // would be over-reach.
-  const ownsTheDesktop = steps.some((s) => s.id === RESTART_STEP_ID);
-  if (ownsTheDesktop) {
-    await setUpdateLock();
   }
 
   let failed = false;

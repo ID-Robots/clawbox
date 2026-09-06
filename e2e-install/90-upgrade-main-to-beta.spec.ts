@@ -6,9 +6,23 @@
  * post-reboot continuation step.
  *
  * This test relies on the shared container set up by `global-setup.ts` —
- * run it after happy-path.spec.ts. Because the updater literally bounces
- * the Next.js server (step_rebuild_reboot → systemctl restart), the HTTP
- * endpoint goes down for some seconds; `waitForUpdate` tolerates that.
+ * run it after happy-path.spec.ts.
+ *
+ * The HTTP endpoint goes down for MINUTES, not seconds, and by design. The
+ * updater stops clawbox-setup.service for the whole rebuild
+ * (`do_rebuild`) and starts it again at the end (`step_rebuild_reboot` →
+ * `systemctl restart`, the test-mode stand-in for the reboot). Nothing brings
+ * it back in between since TASK-728 removed `clawbox-gateway.service`'s
+ * `Wants=clawbox-setup.service` — which is the point of that change, and which
+ * used to be why `/setup-api/update/status` kept answering across a rebuild at
+ * all (on the PRE-UPDATE build, which is the defect it fixes).
+ *
+ * So both `waitForUpdate` calls below pass an explicit downtime budget rather
+ * than the helper's default of 60 consecutive failures (~183 s): `bun install`
+ * plus `next build` on a qemu-x86 fallback runner is well past that, and the
+ * default would report `update status unreachable` over an update that
+ * completed. 420 × 3 s = 21 min, sized on the updater's own
+ * REBUILD_TAKEOVER_TIMEOUT_MS (20 min) and still inside the 45-minute ceiling.
  *
  * The `beta` branch must exist on origin with a commit ancestor-mergeable
  * from main (or at least a git-resettable ref). This matches how the real
@@ -25,6 +39,13 @@ import {
 import { startUpdate, waitForUpdate } from "./helpers/setup-api";
 
 const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
+
+/**
+ * How many consecutive unanswered status polls (3 s apart) are a rebuild rather
+ * than a broken box — see the header. 21 minutes, sized on the updater's own
+ * REBUILD_TAKEOVER_TIMEOUT_MS.
+ */
+const REBUILD_DOWNTIME_POLLS = 420;
 
 test.describe.configure({ mode: "serial" });
 
@@ -54,7 +75,7 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     const result = await startUpdate(true);
     expect(result.started).toBe(true);
 
-    const state = await waitForUpdate({ timeoutMs: 45 * 60_000 });
+    const state = await waitForUpdate({ timeoutMs: 45 * 60_000, maxConsecutiveFetchErrors: REBUILD_DOWNTIME_POLLS });
     expect(["completed", "failed"]).toContain(state.phase);
     if (state.phase === "failed") {
       const failedStep = state.steps.find((step) => step.status === "failed");
@@ -92,7 +113,7 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     // downtime; it also needs to see the `post_update` step run via
     // `checkContinuation`, which the server's own boot hook fires a few
     // seconds after it is back up (our status polls are only the fallback).
-    const state = await waitForUpdate({ timeoutMs: 45 * 60_000 });
+    const state = await waitForUpdate({ timeoutMs: 45 * 60_000, maxConsecutiveFetchErrors: REBUILD_DOWNTIME_POLLS });
     // `waitForUpdate` returns only a terminal phase — "completed" once
     // post_update and the checks after it ran, or "failed" — polling through
     // the restart and the resumed second half to get there.

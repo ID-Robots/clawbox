@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { describe, expect, it } from "vitest";
-import { skillsEn } from "@/lib/hermes-translations/en-skills";
+import { skillsEn } from "@/lib/edition-translations/en-skills";
 
 /**
  * The contract HERMES-04 (#586) established, made checkable.
@@ -88,7 +88,7 @@ describe("every uninstall refusal the route names has copy in the store", () => 
 
 describe("every skills copy key the store asks for exists", () => {
   it("resolves each t('skills.…') in copy.ts against en-skills", () => {
-    // The locale OVERRIDES are covered by hermes-translations.test.ts, which
+    // The locale OVERRIDES are covered by edition-translations.test.ts, which
     // asserts every skills.* key of en-skills has a translation in all nine
     // locales. What that cannot see is a key copy.ts asks for that no table
     // has: `t()` returns the key itself, so the card renders `skills.foo`.
