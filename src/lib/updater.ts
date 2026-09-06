@@ -1150,6 +1150,7 @@ const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || 
 // tunable: a pre-start still running at this point is killed by systemd
 // itself, so the wait below never outlives the thing it waits for.
 const GATEWAY_PRE_START_TIMEOUT_MS = 600_000;
+const DOCTOR_FIX_TIMEOUT_MS = 90_000;
 const ROOT_STEP_SETTLE_TIMEOUT_MS = Number(process.env.ROOT_STEP_SETTLE_TIMEOUT_MS || "7200000");
 const LEGACY_GATEWAY_BLOCKER_RE =
   /installs\.json|conflicting plugin install metadata|carl_pir|belongs to agent piper/i;
@@ -1194,18 +1195,149 @@ function waitForGateway(timeoutMs: number): Promise<boolean> {
   });
 }
 
+/**
+ * The environment that pins an `openclaw` child to THIS device's real config.
+ *
+ * Same rule as `runCurrentGatewayPreStart`: the CLI reads `OPENCLAW_HOME` as
+ * the ACCOUNT home and builds its tree at `$OPENCLAW_HOME/.openclaw`, while
+ * ClawBox uses that name for the `.openclaw` directory itself — so an
+ * inherited one makes the core answer about a second, empty config. That does
+ * not matter for a command whose answer is thrown away; it matters a great
+ * deal for one whose answer is printed to the owner as the reason his gateway
+ * is dead.
+ */
+function openclawChildEnv(): NodeJS.ProcessEnv {
+  const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
+  const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
+    || process.env.OPENCLAW_HOME
+    || path.join(home, ".openclaw");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HOME: home,
+    OPENCLAW_STATE_DIR: openclawHome,
+    OPENCLAW_CONFIG_PATH: path.join(openclawHome, "openclaw.json"),
+  };
+  delete env.OPENCLAW_HOME;
+  return env;
+}
+
+/** Everything a failed child said, whichever stream it said it on. */
+function commandOutput(err: unknown): string {
+  const detail = err as { stdout?: unknown; stderr?: unknown; message?: unknown };
+  return [detail.stdout, detail.stderr, detail.message]
+    .map((part) => (typeof part === "string" ? part : ""))
+    .join("\n");
+}
+
+/**
+ * Run the core's own repair, and RECORD whether it worked.
+ *
+ * Still non-fatal, and that is load-bearing: doctor exiting non-zero because
+ * the gateway holds its state directory is the gateway proving it is alive
+ * (install.sh:step_gateway_legacy_state_recovery, measured 2026-09-06), so the
+ * restart + positive port probe that follows remains the verdict, not the exit
+ * code — which is why neither caller branches on this, and it returns nothing.
+ * What changed is that the exit code is no longer DISCARDED: a doctor that
+ * could not finish is the single most useful fact about an update that then
+ * finds no gateway, and swallowing it silently is what left a customer box
+ * dark for 25 hours with "Applying system fixups — completed" on screen
+ * (TASK-737).
+ */
 async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
   try {
     await execFile(OPENCLAW_BIN, ["doctor", "--fix", "--yes", "--non-interactive"], {
-      timeout: 90_000,
+      timeout: DOCTOR_FIX_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
+      env: openclawChildEnv(),
     });
-  } catch {
-    // Doctor can still repair some state before exiting non-zero. Continue
-    // into a restart + positive gateway probe rather than trusting exit code.
+  } catch (err) {
+    warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` did not complete. `
+      + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err)}`);
   }
+}
+
+/**
+ * Why doctor did not finish, in words worth reading.
+ *
+ * NOT `err.message`: node sets it to `Command failed: <the whole argv>`, so a
+ * warning built from its first line would name the command back at the owner
+ * and nothing else. Doctor states its own blocker — `Legacy exec approvals
+ * exist at …` is the one this card is about — and it states it in the output,
+ * so that is what is quoted. A killed child is called killed, because a 90 s
+ * timeout and a refusal are not the same problem.
+ */
+function describeDoctorFailure(err: unknown): string {
+  if ((err as { killed?: boolean } | null)?.killed) {
+    return `it was still running after ${Math.round(DOCTOR_FIX_TIMEOUT_MS / 1000)}s and was stopped`;
+  }
+  const said = commandOutput(err)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    // Its own summary frame is drawn with box-drawing characters and says
+    // nothing; the sentence that names the blocker is plain text.
+    .filter((line) => !/^[\u2500-\u257f\u25c6\u2502]/.test(line) && !line.startsWith("Command failed:"));
+  return said.at(-1) ?? "it gave no reason";
+}
+
+/**
+ * Ask the CORE whether it will accept this device's configuration.
+ *
+ * HARNESS FIRST. `openclaw config validate --json` is the core's own answer to
+ * "would the gateway start?" — `{valid, path, issues[]}` — and until TASK-737
+ * nothing in ClawBox ever asked it: not the updater, not install.sh, not the
+ * boot script. That gap is the whole of the incident: OpenClaw 2026.8 REFUSES
+ * a 2026.7-layout config instead of migrating it on load (`Unrecognized
+ * keys`, gateway exit 78), so a box whose migration did not run has a gateway
+ * that provably cannot start — and ClawBox reported "not listening on port
+ * 18789", which is true, unactionable, and indistinguishable from a dozen
+ * other causes.
+ *
+ * `--json`, not the human output: that goes to stderr and marks each issue
+ * with a themed `×` glyph any `FORCE_COLOR` in the environment repaints, so
+ * scraping it would be reading presentation as a contract.
+ *
+ * Returns the core's own reasons when it refuses, and null when it accepts,
+ * when there is no core to ask (Hermes), or when the validator could not be
+ * run at all. Null is deliberately the "say nothing" answer: this is a
+ * DIAGNOSIS of an update that has already failed, so a validator we could not
+ * reach must never invent a cause of its own — a half-installed core whose
+ * node engine is wrong exits non-zero here too, and calling that a bad config
+ * would be a false failure over a config that is fine.
+ */
+async function getOpenclawConfigRefusal(): Promise<string | null> {
+  if (openclawIsAbsent()) return null;
+  let payload: string;
+  try {
+    await execFile(OPENCLAW_BIN, ["config", "validate", "--json"], {
+      timeout: 60_000,
+      maxBuffer: 2 * 1024 * 1024,
+      env: openclawChildEnv(),
+    });
+    return null;
+  } catch (err) {
+    // The core prints the verdict as JSON on stdout and exits 1 when it
+    // refuses. Any other non-zero exit carries no verdict at all.
+    payload = commandOutput(err);
+  }
+  let verdict: unknown;
+  try {
+    verdict = JSON.parse(payload.slice(payload.indexOf("{"), payload.lastIndexOf("}") + 1));
+  } catch {
+    return null;
+  }
+  if (typeof verdict !== "object" || verdict === null) return null;
+  const { valid, issues } = verdict as { valid?: unknown; issues?: unknown };
+  if (valid !== false) return null;
+  const reasons = (Array.isArray(issues) ? issues : [])
+    .map((issue) => {
+      const { path: at, message } = (issue ?? {}) as { path?: unknown; message?: unknown };
+      return [at, message].filter((part) => typeof part === "string" && part).join(": ");
+    })
+    .filter(Boolean);
+  return reasons.length > 0 ? reasons.join("; ") : "the core gave no reason";
 }
 
 async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
@@ -2083,12 +2215,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
-    const lastLog = getGatewayFailureDetail(beforeRecoveryLog);
-    throw new Error(
-      lastLog
-        ? `OpenClaw gateway is not listening on port ${GATEWAY_PORT}: ${lastLog}`
-        : `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
-    );
+    throw new Error(await describeDeadGateway(beforeRecoveryLog));
   }
 
   await withGatewayQuiesced(async () => {
@@ -2099,12 +2226,36 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
-  const lastLog = getGatewayFailureDetail(afterRecoveryLog);
   throw new Error(
-    lastLog
-      ? `OpenClaw gateway still offline after legacy state recovery: ${lastLog}`
-      : "OpenClaw gateway still offline after legacy state recovery",
+    await describeDeadGateway(afterRecoveryLog, "OpenClaw gateway still offline after legacy state recovery"),
   );
+}
+
+/**
+ * Say WHY the gateway is not there, in the order of what the owner can act on.
+ *
+ * A configuration the core refuses outranks anything in the journal, because
+ * it is a cause rather than a symptom and it is the one the journal states
+ * worst. On a 2026.7 → 2026.8 core upgrade whose migration did not run, the
+ * gateway's own last line is `Run "openclaw doctor --fix" to repair the
+ * config, then retry.` — advice for a command ClawBox has just run and that
+ * has just failed — and `getGatewayFailureDetail` hands exactly that line back
+ * as the cause (measured against 2026.8.1 on 2026-09-06). The keys the core
+ * actually named are three lines further up and were never reported at all.
+ *
+ * Asked only here, on a path where the update has already failed: a healthy
+ * update never pays for the extra CLI call.
+ */
+async function describeDeadGateway(
+  journal: string,
+  prefix = `OpenClaw gateway is not listening on port ${GATEWAY_PORT}`,
+): Promise<string> {
+  const refusal = await getOpenclawConfigRefusal();
+  if (refusal) {
+    return `${prefix}: OpenClaw refuses this device's configuration — ${refusal}`;
+  }
+  const lastLog = getGatewayFailureDetail(journal);
+  return lastLog ? `${prefix}: ${lastLog}` : prefix;
 }
 
 const UPDATE_STEPS: UpdateStepDef[] = [

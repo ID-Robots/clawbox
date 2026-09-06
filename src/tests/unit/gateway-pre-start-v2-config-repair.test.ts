@@ -1,0 +1,441 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import { testEnv } from "@/tests/helpers/env";
+import { sliceScript } from "@/tests/helpers/gateway-pre-start";
+
+// Starts a real process (bash / python3): vitest's 5 s test and 10 s hook
+// defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+// TASK-737. A customer box was dark for 25 hours after the 2026.7.1 → 2026.8.1
+// core upgrade: OpenClaw 2026.8 does not migrate a 2026.7 config on load, it
+// REFUSES it (`Unrecognized keys`, gateway exit 78), and the migrations it
+// names are performed only by `openclaw doctor --fix`. Nothing on the boot path
+// ran doctor for that reason.
+//
+// And the repair had a blocker of its own, measured against 2026.8.1 on
+// 2026-09-06: with an EMPTY legacy `exec-approvals.json` in the state
+// directory, `doctor --fix --yes --non-interactive` exits 1 having migrated
+// NOTHING and asks the operator to run the command that just ran. Move that one
+// empty file aside and the same command exits 0 and migrates everything. The
+// stub below models exactly that, so these cases fail if either half regresses.
+//
+// The three failure shapes pinned:
+//   false success — a boot that "started the gateway" on a config the core will
+//                   not load. The config has to be provably ACCEPTED by the
+//                   core afterwards, not merely doctored at.
+//   false failure — an approvals file with content is the owner's data; it is
+//                   never moved, and its presence is reported rather than
+//                   silently repaired.
+//   probe-once    — the stamp records the core version whose config was
+//                   accepted, and is written ONLY on success, so a failed
+//                   repair is retried on the next boot rather than remembered
+//                   as done.
+
+const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
+const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
+const d = hasPython3 && hasBash ? describe : describe.skip;
+
+/** The shipped block, run verbatim — a drift in the script fails here. */
+function block(): string {
+  return sliceScript(
+    "# ── First boot on a NEW OpenClaw core: make the config loadable again ",
+    "# Resolve configured mDNS hostname",
+  );
+}
+
+let dir: string;
+let root: string;
+let binDir: string;
+let stateDir: string;
+let configPath: string;
+let stampPath: string;
+
+/**
+ * An `openclaw` that behaves like 2026.8.1 on a 2026.7 config.
+ *
+ * `config validate` refuses until the migration has run; `doctor --fix`
+ * performs it — unless a legacy exec-approvals.json is still present, in which
+ * case it exits 1 having done nothing, which is the measured behaviour this
+ * whole block exists to get past.
+ */
+function stubOpenclaw() {
+  const p = path.join(binDir, "openclaw");
+  writeFileSync(
+    p,
+    `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$OC_CALLS"
+if [ "$1" = "config" ] && [ "$2" = "validate" ]; then
+  if [ -n "\${OC_VALIDATE_RC:-}" ] && [ "\${OC_VALIDATE_RC}" != "0" ] && [ "\${OC_VALIDATE_RC}" != "1" ]; then
+    exit "\$OC_VALIDATE_RC"
+  fi
+  if [ -f "$OC_STATE/migrated" ]; then
+    echo '{"valid":true,"path":"'"$OPENCLAW_CONFIG"'","warnings":[]}'
+    exit 0
+  fi
+  cat <<'JSON'
+{"error":{"type":"cli_error","message":"OpenClaw config is invalid"},
+ "valid":false,
+ "issues":[{"path":"agents.defaults","message":"Unrecognized keys: \\"memorySearch\\", \\"imageGenerationModel\\""},
+           {"path":"messages","message":"Unrecognized key: \\"tts\\""}]}
+JSON
+  exit 1
+fi
+if [ "$1" = "doctor" ]; then
+  # The core's gate throws on the PRESENCE of either name, contents irrelevant.
+  for f in "$OC_STATE/exec-approvals.json" "$OC_STATE/exec-approvals.json.doctor-importing"; do
+    if [ -e "\$f" ]; then
+      echo "Legacy exec approvals exist at \$f. Run \\\`openclaw doctor --fix\\\` before using exec approvals."
+      exit 1
+    fi
+  done
+  touch "$OC_STATE/migrated"
+  exit 0
+fi
+exit 0
+`,
+  );
+  chmodSync(p, 0o755);
+}
+
+function run(version = "2026.8.1", extraEnv: Record<string, string> = {}) {
+  const program = [
+    "set -euo pipefail",
+    `CLAWBOX_ROOT=${JSON.stringify(root)}`,
+    `OPENCLAW_CONFIG=${JSON.stringify(configPath)}`,
+    `OPENCLAW_STATE_DIR=${JSON.stringify(stateDir)}`,
+    `OPENCLAW_BIN=${JSON.stringify(path.join(binDir, "openclaw"))}`,
+    "CLAWBOX_OPENCLAW_V2=1",
+    `CLAWBOX_OPENCLAW_EFFECTIVE=${JSON.stringify(version)}`,
+    block(),
+  ].join("\n");
+  const r = spawnSync("bash", ["-c", program], {
+    encoding: "utf-8",
+    env: testEnv({
+      PATH: `${binDir}:/usr/bin:/bin`,
+      OPENCLAW_CONFIG: configPath,
+      OC_CALLS: path.join(dir, "calls.log"),
+      OC_STATE: stateDir,
+      ...extraEnv,
+    }),
+    timeout: 30_000,
+  });
+  return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+}
+
+/** What the block will record once the core has accepted the config on disk. */
+function currentFingerprint(version = "2026.8.1"): string {
+  const st = statSync(configPath);
+  return `${version} ${st.size} ${Math.floor(st.mtimeMs / 1000)}`;
+}
+
+function calls(): string[] {
+  const p = path.join(dir, "calls.log");
+  return existsSync(p) ? readFileSync(p, "utf-8").split("\n").filter(Boolean) : [];
+}
+
+function approvalsFiles(): string[] {
+  return spawnSync("bash", ["-c", `ls ${JSON.stringify(stateDir)}`], { encoding: "utf-8" })
+    .stdout.split("\n")
+    .filter((n) => n.startsWith("exec-approvals"));
+}
+
+beforeEach(() => {
+  dir = mkdtempSync(path.join(tmpdir(), "clawbox-v2-config-repair-"));
+  root = path.join(dir, "clawbox");
+  binDir = path.join(dir, "bin");
+  stateDir = path.join(dir, "openclaw");
+  mkdirSync(path.join(root, "data"), { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+  configPath = path.join(stateDir, "openclaw.json");
+  stampPath = path.join(root, "data", "openclaw-config-validated");
+  writeFileSync(configPath, JSON.stringify({ agents: { defaults: { memorySearch: {} } } }, null, 2));
+  stubOpenclaw();
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+d("gateway pre-start: making a bumped core's config loadable", () => {
+  it("moves an EMPTY legacy exec-approvals.json aside so the core's own migration can run", () => {
+    writeFileSync(
+      path.join(stateDir, "exec-approvals.json"),
+      JSON.stringify({ version: 1, socket: {}, defaults: {}, agents: {} }),
+    );
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    // The empty file is gone from its blocking name and kept under another.
+    expect(existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(false);
+    expect(approvalsFiles().some((n) => n.startsWith("exec-approvals.json.legacy-"))).toBe(true);
+    // …and with it out of the way the core migrated and now ACCEPTS the config.
+    expect(calls().some((c) => c.startsWith("doctor --fix"))).toBe(true);
+    expect(existsSync(path.join(stateDir, "migrated"))).toBe(true);
+    expect(readFileSync(stampPath, "utf-8").trim()).toMatch(/^2026\.8\.1 \d+ \d+$/);
+  });
+
+  it("never moves an approvals file that holds approvals, and says why", () => {
+    writeFileSync(
+      path.join(stateDir, "exec-approvals.json"),
+      JSON.stringify({ version: 1, socket: {}, defaults: { "rm -rf": "deny" }, agents: {} }),
+    );
+
+    const r = run();
+
+    expect(existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(true);
+    expect(approvalsFiles()).toEqual(["exec-approvals.json"]);
+    expect(r.stderr).toContain("holds exec approvals");
+    // …and tells the owner what to actually do, rather than promising a
+    // repair by a core whose only importer is the command that is blocked.
+    expect(r.stderr).toContain("move it aside by hand");
+    // The repair still fails — that is the honest outcome — and it is REPORTED
+    // with the keys the core named, not swallowed.
+    expect(r.stderr).toContain("the core still refuses this config");
+    expect(r.stderr).toContain('agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"');
+    // A failed repair is NOT remembered as done.
+    expect(existsSync(stampPath)).toBe(false);
+  });
+
+  it("runs the core's own migration when the core refuses the config, and re-asks the core", () => {
+    const r = run();
+
+    expect(r.status).toBe(0);
+    const seen = calls();
+    expect(seen[0]).toBe("config validate --json");
+    expect(seen.some((c) => c.startsWith("doctor --fix"))).toBe(true);
+    // Asked AGAIN afterwards: doctor exiting 0 is not evidence that the core
+    // will load the file, and taking it as such is the false success that left
+    // a box dark for a day.
+    expect(seen.filter((c) => c === "config validate --json")).toHaveLength(2);
+    expect(seen.indexOf("doctor --fix --non-interactive")).toBeGreaterThan(0);
+    expect(readFileSync(stampPath, "utf-8").trim()).toMatch(/^2026\.8\.1 \d+ \d+$/);
+    // A backup of the pre-migration file is kept next to it, named for the
+    // core and taken once — not one per boot on a box that keeps failing.
+    expect(existsSync(path.join(stateDir, "openclaw.json.pre-2026.8.1-migration"))).toBe(true);
+  });
+
+  it("keeps the FIRST pre-migration backup when the repair fails and the next boot retries", () => {
+    writeFileSync(path.join(stateDir, "openclaw.json.pre-2026.8.1-migration"), '{"first":true}');
+    writeFileSync(configPath, JSON.stringify({ agents: { defaults: { memorySearch: { second: true } } } }));
+    writeFileSync(
+      path.join(stateDir, "exec-approvals.json"),
+      JSON.stringify({ version: 1, defaults: { "rm -rf": "deny" } }),
+    );
+
+    run();
+
+    expect(readFileSync(path.join(stateDir, "openclaw.json.pre-2026.8.1-migration"), "utf-8"))
+      .toBe('{"first":true}');
+    expect(
+      spawnSync("bash", ["-c", `ls ${JSON.stringify(stateDir)}`], { encoding: "utf-8" })
+        .stdout.split("\n")
+        .filter((n) => n.includes("pre-") && n.includes("-migration")),
+    ).toHaveLength(1);
+  });
+
+  it("moves aside the shape a real box actually carries: a core-generated socket block", () => {
+    // THE case this whole block exists for, and the one a fixture with
+    // `socket: {}` silently missed. The core fills socket.path and a fresh
+    // socket.token into every exec-approvals.json it persists, with no owner
+    // involvement, and regenerates both on its next write — so a file whose
+    // only content is that block holds no decision of anyone's, and reading it
+    // as an approval would make this repair decline to fire on every real box.
+    writeFileSync(
+      path.join(stateDir, "exec-approvals.json"),
+      JSON.stringify({
+        version: 1,
+        socket: { path: "/run/user/1000/openclaw/exec-approvals.sock", token: "6f2c…" },
+        defaults: {},
+        agents: {},
+      }),
+    );
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(false);
+    expect(existsSync(path.join(stateDir, "migrated"))).toBe(true);
+    expect(readFileSync(stampPath, "utf-8").trim()).toMatch(/^2026\.8\.1 \d+ \d+$/);
+  });
+
+  it("moves aside a zero-byte approvals file — the shape a power cut leaves", () => {
+    // It parses as nothing, so it cannot be read for approvals; but the core's
+    // gate throws on its PRESENCE, so leaving it alone blocks every future
+    // doctor for good.
+    writeFileSync(path.join(stateDir, "exec-approvals.json"), "");
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(false);
+    expect(existsSync(path.join(stateDir, "migrated"))).toBe(true);
+  });
+
+  it("clears the .doctor-importing claim a killed import leaves behind", () => {
+    // doctor renames the file to this for the duration of an import, and its
+    // gate refuses on either name — so a doctor killed mid-import leaves a
+    // blocker that no amount of re-running doctor can clear by itself.
+    writeFileSync(
+      path.join(stateDir, "exec-approvals.json.doctor-importing"),
+      JSON.stringify({ version: 1, socket: {}, defaults: {}, agents: {} }),
+    );
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(existsSync(path.join(stateDir, "exec-approvals.json.doctor-importing"))).toBe(false);
+    expect(existsSync(path.join(stateDir, "migrated"))).toBe(true);
+  });
+
+  it("does not read a validator that could not run as a refusal", () => {
+    // 124 (the bound fired), 127 (nothing to run) and a crash say nothing
+    // about the config. Reading one as "the core refuses this" would put every
+    // single gateway start of a HEALTHY box through a 180 s doctor run, for
+    // good, because the stamp is never written either.
+    const r = run("2026.8.1", { OC_VALIDATE_RC: "124" });
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("could not ask the installed core");
+    expect(r.stderr).not.toContain("refuses this config");
+    expect(calls().some((c) => c.startsWith("doctor"))).toBe(false);
+    expect(existsSync(stampPath)).toBe(false);
+  });
+
+  it("says so when the stamp cannot be recorded, instead of silently re-validating forever", () => {
+    // A root-owned or read-only data dir would otherwise add a CLI round trip
+    // to every gateway start with nothing in the log to explain it.
+    rmSync(path.join(root, "data"), { recursive: true, force: true });
+    writeFileSync(path.join(root, "data"), "not a directory");
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("will be repeated on every gateway start");
+  });
+
+  it("costs a steady box nothing: the stamp already names the installed core", () => {
+    // The stamp records the core AND a fingerprint of the file it accepted.
+    mkdirSync(path.dirname(stampPath), { recursive: true });
+    writeFileSync(stampPath, `${currentFingerprint()}\n`);
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(calls()).toEqual([]);
+  });
+
+  it("treats an unreadable stamp as no stamp rather than as agreement", () => {
+    // A stamp is a RECORD, and anything that is not this core's version is
+    // not a record of this core. Reading garbage as "already validated" would
+    // leave a box that cannot boot never asking why.
+    mkdirSync(path.dirname(stampPath), { recursive: true });
+    writeFileSync(stampPath, "\u0000\u0000not-a-version\n");
+
+    run("2026.8.1");
+
+    expect(calls()[0]).toBe("config validate --json");
+    expect(readFileSync(stampPath, "utf-8").trim()).toMatch(/^2026\.8\.1 \d+ \d+$/);
+  });
+
+  it("creates the stamp directory when the data dir is not there yet", () => {
+    rmSync(path.join(root, "data"), { recursive: true, force: true });
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(readFileSync(stampPath, "utf-8").trim()).toMatch(/^2026\.8\.1 \d+ \d+$/);
+  });
+
+  it("re-asks after a core bump even though the previous core was accepted", () => {
+    mkdirSync(path.dirname(stampPath), { recursive: true });
+    writeFileSync(stampPath, `${currentFingerprint("2026.7.1")}\n`);
+
+    run("2026.8.1");
+
+    expect(calls()[0]).toBe("config validate --json");
+    expect(readFileSync(stampPath, "utf-8").trim()).toMatch(/^2026\.8\.1 \d+ \d+$/);
+  });
+});
+
+/**
+ * The sibling the same discovery makes dangerous.
+ *
+ * The auth-profile repair 2 100 lines below runs the SAME `doctor --fix`, and
+ * treated every non-zero exit as a failed migration with `exit 1` — which
+ * fails a blocking ExecStartPre. That is strictly worse than the exit-78 state
+ * this card is about: exit 78 is covered by `RestartPreventExitStatus`
+ * (config/clawbox-gateway.service:78) so the unit stops trying, while a failed
+ * pre-start burns `StartLimitBurst=20` and leaves the box with no gateway.
+ */
+d("gateway pre-start: the auth-profile repair meets the same blocker", () => {
+  function authBlock(): string {
+    return sliceScript(
+      "# OpenClaw 2 refuses to start while any legacy auth-profiles.json remains",
+      "# Patch the installed openclaw deepseek plugin JSON",
+    );
+  }
+
+  function runAuth() {
+    const program = [
+      "set -euo pipefail",
+      `OPENCLAW_CONFIG=${JSON.stringify(configPath)}`,
+      `OPENCLAW_BIN=${JSON.stringify(path.join(binDir, "openclaw"))}`,
+      "CLAWBOX_OPENCLAW_V2=1",
+      authBlock(),
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", program], {
+      encoding: "utf-8",
+      env: testEnv({
+        PATH: `${binDir}:/usr/bin:/bin`,
+        OPENCLAW_CONFIG: configPath,
+        OC_CALLS: path.join(dir, "calls.log"),
+        OC_STATE: stateDir,
+      }),
+      timeout: 30_000,
+    });
+    return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  }
+
+  beforeEach(() => {
+    // The sentinel this block is gated on.
+    mkdirSync(path.join(stateDir, "agents", "main", "agent"), { recursive: true });
+    writeFileSync(path.join(stateDir, "agents", "main", "agent", "auth-profiles.json"), "{}");
+  });
+
+  it("does not fail the boot when doctor is blocked by a legacy exec approvals file", () => {
+    writeFileSync(
+      path.join(stateDir, "exec-approvals.json"),
+      JSON.stringify({ version: 1, socket: {}, defaults: {}, agents: {} }),
+    );
+
+    const r = runAuth();
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("blocked by a legacy exec approvals file");
+    expect(r.stderr).not.toContain("auth-profile migration failed");
+  });
+
+  it("still fails the boot when doctor fails for any other reason", () => {
+    // The invariant the change must not remove: a genuinely failed auth-profile
+    // migration leaves a store OpenClaw 2 refuses to start on, and that is
+    // worth stopping for.
+    writeFileSync(
+      path.join(binDir, "openclaw"),
+      "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> \"$OC_CALLS\"\necho 'doctor exploded' >&2\nexit 1\n",
+    );
+    chmodSync(path.join(binDir, "openclaw"), 0o755);
+
+    const r = runAuth();
+
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("auth-profile migration failed");
+  });
+});

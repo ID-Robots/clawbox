@@ -3766,8 +3766,23 @@ step_openclaw_install() {
     # The sessions-to-SQLite move must not race a still-running v1 gateway
     # writing the very files being migrated; gateway_setup restarts it later.
     systemctl stop clawbox-gateway.service 2>/dev/null || true
-    as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null \
-      || echo "  WARN: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
+    # Say WHICH failure this was. `|| echo WARN` over a doctor that migrated
+    # nothing is the false-success shape this repo keeps producing, and the
+    # commonest reason it exits non-zero here is a legacy exec-approvals file
+    # whose mere presence makes it refuse every migration before starting one
+    # (measured against 2026.8.1, 2026-09-06). The gateway's own ExecStartPre
+    # clears that and re-runs the migration, so this stays non-fatal — but the
+    # install log has to name it rather than imply doctor merely stumbled.
+    if ! _oc_doctor_out="$(as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)"; then
+      printf '%s\n' "$_oc_doctor_out"
+      if printf '%s\n' "$_oc_doctor_out" | grep -q 'Legacy exec approvals exist at'; then
+        echo "  WARN: openclaw doctor --fix migrated NOTHING — a legacy exec-approvals file blocks it. The gateway's pre-start moves an empty one aside and re-runs the migration on the next start."
+      else
+        echo "  WARN: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
+      fi
+    else
+      printf '%s\n' "$_oc_doctor_out"
+    fi
     # The stop above was for doctor's benefit. A FULL install restarts the
     # gateway later (gateway_setup), but this step is also on the standalone
     # run-step allow-list, where nothing follows — leaving it down would turn
