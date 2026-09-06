@@ -160,6 +160,51 @@ describe("/setup-api/clawkeep/schedule", () => {
       expect(scheduler.refresh).toHaveBeenCalledTimes(1);
     });
 
+    // TASK-433 — "the ClawKeep cron is not backing up".
+    //
+    // `sanitiseSchedule` checked the SHAPE of `timeOfDay` (`/^\d{2}:\d{2}$/`)
+    // and not its RANGE, so "not-a-time" was correctly coerced to the default
+    // while "99:99" — which matches that regex — was persisted verbatim with
+    // `enabled: true`. `computeNextRunMs` then answers 0 for exactly those
+    // values (it *does* range-check), `arm()` returns on `next <= 0`, and the
+    // box arms nothing: the panel says auto-backup is on, the PUT answered
+    // 200, and no backup ever runs. The false-success class, in the one place
+    // where the cost of it is an unprotected box.
+    //
+    // The range-correct regex already exists one file away, in
+    // `clawkeep-memory.ts` — the memory-index schedule got it right.
+    it.each(["99:99", "24:00", "00:60", "2:5"])(
+      "does not persist an unarmable time of day (%s)",
+      async (timeOfDay) => {
+        const res = await PUT(jsonReq({ ...ARMED_DAILY, timeOfDay }));
+        const body = await res.json();
+
+        // Whatever it stores, it must be a schedule the scheduler can arm:
+        // an enabled schedule that computes no next run is auto-backup that
+        // silently never happens.
+        expect(body.schedule.enabled).toBe(true);
+        expect(clawkeep.computeNextRunMs(body.schedule, new Date())).toBeGreaterThan(0);
+        expect(body.nextRunAtMs).toBeGreaterThan(0);
+
+        // And the persisted file must say the same, so a reboot re-arms it.
+        const persisted = await (await GET()).json();
+        expect(clawkeep.computeNextRunMs(persisted.schedule, new Date())).toBeGreaterThan(0);
+      },
+    );
+
+    it("re-arms a box whose schedule.json was hand-edited to an impossible hour", async () => {
+      // A file written by an older build, a hand edit, or a half-flushed
+      // write. The read path is deliberately tolerant — it must not leave the
+      // box enabled-but-unarmable, which is worse than either extreme.
+      await fs.writeFile(
+        SCHEDULE_FILE,
+        JSON.stringify({ ...ARMED_DAILY, timeOfDay: "27:00", armedAtMs: Date.now() }),
+      );
+      const body = await (await GET()).json();
+      expect(body.schedule.enabled).toBe(true);
+      expect(body.nextRunAtMs).toBeGreaterThan(0);
+    });
+
     it("treats an empty body as a disable + defaults", async () => {
       const res = await PUT(new NextRequest(new URL("http://localhost/setup-api/clawkeep/schedule"), {
         method: "PUT",

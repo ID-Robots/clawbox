@@ -17,7 +17,7 @@
 import {
   backupExitError,
   computeNextRunMs,
-  readSchedule,
+  readScheduleSnapshot,
   runBackup,
   type ClawKeepSchedule,
 } from "@/lib/clawkeep";
@@ -73,10 +73,29 @@ function fireBackup(): void {
     });
 }
 
+/**
+ * Re-read the schedule and re-arm — unless the file could not be read.
+ *
+ * An unreadable `schedule.json` sanitises to `DEFAULT_SCHEDULE`, whose
+ * `enabled` is false, so this used to tear the nightly timer down and go
+ * quiet: a box that had been backing up every night simply stopped, the panel
+ * read "auto-backup is off", and the shield sat green on the 7-day
+ * no-schedule window (TASK-433). The read already separates "no file" — a box
+ * that has never had a schedule — from "there is a file and it says nothing we
+ * can read", which is evidence of nothing and certainly not of the owner
+ * switching auto-backup off. Keep what is armed and say so.
+ */
 async function rearm(): Promise<void> {
+  const snapshot = await readScheduleSnapshot();
+  if (snapshot.unreadable) {
+    console.warn(
+      "[clawkeep-scheduler] schedule.json could not be read — leaving auto-backup as it is"
+        + (armedFor > 0 ? ` (next run still ${new Date(armedFor).toISOString()})` : " (nothing armed)"),
+    );
+    return;
+  }
   clear();
-  const schedule = await readSchedule();
-  arm(schedule);
+  arm(snapshot.schedule);
 }
 
 function arm(schedule: ClawKeepSchedule): void {
@@ -99,9 +118,7 @@ function arm(schedule: ClawKeepSchedule): void {
 
 /** Boot hook — call once at process start. Idempotent. */
 export async function start(): Promise<void> {
-  clear();
-  const schedule = await readSchedule();
-  arm(schedule);
+  await rearm();
 }
 
 /** Re-read the persisted schedule and rearm. Call after the user saves new

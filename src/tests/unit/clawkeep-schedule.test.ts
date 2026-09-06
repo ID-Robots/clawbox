@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { computeNextRunMs, type ClawKeepSchedule } from "@/lib/clawkeep";
+import { DEFAULT_SCHEDULE as actualDefaultSchedule, computeNextRunMs, type ClawKeepSchedule } from "@/lib/clawkeep";
 
 const baseSchedule: ClawKeepSchedule = {
   enabled: true,
@@ -102,11 +102,29 @@ describe("the ClawKeep backup scheduler", () => {
     vi.doUnmock("@/lib/clawkeep");
   });
 
-  async function armWith(runBackup: ReturnType<typeof vi.fn>) {
+  /**
+   * Both reads are stubbed on purpose. The real ones resolve
+   * `CLAWKEEP_DATA_DIR` at import time, so a scheduler test that left either
+   * of them real would read — and the write path would write — the developer's
+   * own `~/.clawkeep`.
+   */
+  function mockClawkeep(
+    runBackup: ReturnType<typeof vi.fn>,
+    snapshot: { schedule: ClawKeepSchedule; armedAtMs: number; unreadable: boolean },
+  ) {
     vi.doMock("@/lib/clawkeep", async () => {
       const actual = await vi.importActual<typeof import("@/lib/clawkeep")>("@/lib/clawkeep");
-      return { ...actual, runBackup, readSchedule: vi.fn(async () => SCHEDULE) };
+      return {
+        ...actual,
+        runBackup,
+        readSchedule: vi.fn(async () => snapshot.schedule),
+        readScheduleSnapshot: vi.fn(async () => snapshot),
+      };
     });
+  }
+
+  async function armWith(runBackup: ReturnType<typeof vi.fn>) {
+    mockClawkeep(runBackup, { schedule: SCHEDULE, armedAtMs: Date.now(), unreadable: false });
     const sched = await import("@/lib/clawkeep-scheduler");
     await sched.start();
     return sched;
@@ -130,6 +148,42 @@ describe("the ClawKeep backup scheduler", () => {
       expect.stringContaining("auto-backup failed"),
       expect.stringContaining("127"),
     );
+    warn.mockRestore();
+  });
+
+  it("does not read a schedule.json it cannot open as the owner switching auto-backup off", async () => {
+    // TASK-433, the half that stops a box that WAS backing up. An unreadable
+    // `schedule.json` — root-owned after a restore, EIO on failing storage,
+    // EMFILE on a loaded Jetson, a JSON truncated by a power cut — resolves to
+    // `DEFAULT_SCHEDULE`, whose `enabled` is false. `arm()` then returns, the
+    // nightly timer is torn down, and nothing anywhere says a word: the panel
+    // reads "auto-backup is off" and the shield stays green on the 7-day
+    // no-schedule window. `readScheduleSnapshot` already separates "no file"
+    // from "cannot be read"; the scheduler was throwing that distinction away.
+    const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const snapshot = { schedule: SCHEDULE, armedAtMs: Date.now(), unreadable: false };
+    mockClawkeep(runBackup, snapshot);
+
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+    const armedBefore = sched.nextRunAtMs();
+    expect(armedBefore).toBeGreaterThan(0);
+
+    // The next read fails. A transient I/O error must not disarm the box.
+    snapshot.schedule = { ...actualDefaultSchedule };
+    snapshot.armedAtMs = 0;
+    snapshot.unreadable = true;
+    await sched.refresh();
+
+    expect(sched.nextRunAtMs()).toBe(armedBefore);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("schedule.json could not be read"),
+    );
+
+    // And the run it was armed for still happens.
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    expect(runBackup).toHaveBeenCalledTimes(1);
     warn.mockRestore();
   });
 
