@@ -18,6 +18,14 @@ import { describe, expect, it } from "vitest";
  * apps routes. What is pinned here is the shape a later change could take away
  * and leave green: the accepted set is one list rather than a chain nobody
  * updates, and the logged action is selected out of that list.
+ *
+ * TASK-742 — AND THAT HALF WORKED. Alert #464 stayed open on beta through
+ * #752 and was read as evidence that the array selection had not satisfied the
+ * query. Run against the query itself, the flow it reports on this line ends
+ * at the `err` argument and never touches `action`, so the pins above are
+ * pinning a barrier that holds; the OTHER argument was the unbounded one. The
+ * case below now pins both halves of the line, and
+ * `src/tests/routes/tts-error-log-bound.test.ts` pins what the bound does.
  */
 
 const ROUTE = path.join(process.cwd(), "src/app/setup-api/tts/route.ts");
@@ -71,12 +79,20 @@ describe("POST /setup-api/tts — the action that reaches the journal", () => {
     expect(post).not.toMatch(/action !== "select"/);
   });
 
-  it("logs the selected action, never the body's copy of it", () => {
+  it("logs the selected action and a bounded error, never the body's copy of either", () => {
     const post = bodyOf(source, "export async function POST(");
-    const logLine = post.split(String.fromCharCode(10)).filter((line) => line.includes("console.warn"));
+    const warns = post.split(String.fromCharCode(10)).filter((line) => line.includes("console.warn"));
 
-    expect(logLine).toHaveLength(1);
-    expect(logLine[0]).toContain("[setup-api/tts] ${action} failed:");
-    expect(logLine[0]).not.toContain("rawAction");
+    // Still exactly one failure line in this handler.
+    expect(warns).toHaveLength(1);
+    // The prefix names the action selected out of ACTIONS…
+    expect(post).toContain("`[setup-api/tts] ${action} failed:`");
+    expect(post).not.toContain("rawAction} failed");
+    // …and the harness's own words reach the line through the pair the query
+    // recognises: `logSafe` for the record's size and one-line rule,
+    // `JSON.stringify` for the barrier. Passing `err` itself is what left #464
+    // open, and it is the shape a later "simplification" would reach for.
+    expect(post).toContain("JSON.stringify(logSafe(");
+    expect(post).not.toMatch(/console\.warn\([^)]*failed:`,\s*err\s*[,)]/);
   });
 });

@@ -1,4 +1,5 @@
 import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
+import type { Harness } from "@/lib/harness";
 
 /**
  * Ask the agent to rebuild its tool list when the ACTIVE HARNESS moved under it.
@@ -36,6 +37,26 @@ import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reloa
  */
 
 /**
+ * One harness name, in a word this module spells itself.
+ *
+ * A `Record<Harness, …>` rather than a `switch`, so a third harness added to
+ * the union is a compile error here rather than a journal line that silently
+ * reads "an unrecognised harness" for it.
+ *
+ * The parameter stays `string` because that is what the callers have: both
+ * arguments reach this module from the body of `POST /setup-api/harness/select`.
+ * The fall-through is therefore not decoration — a caller handing this a value
+ * the device does not run must not have it echoed into the journal — even
+ * though it is unreachable through that route today, which admits the two
+ * names and nothing else.
+ */
+const HARNESS_NAMES: Record<Harness, string> = { openclaw: "openclaw", hermes: "hermes" };
+
+function harnessName(value: string): string {
+  return HARNESS_NAMES[value as Harness] ?? "an unrecognised harness";
+}
+
+/**
  * Reload the MCP servers iff this request actually changed the active harness.
  *
  * Both directions, and the reload goes to HERMES either way — it is the only
@@ -70,7 +91,16 @@ export async function refreshHarnessToolsIfSwitched(
   // another request may have moved in between.
   if (before === after) return false;
 
-  const moved = `the active harness moved from ${before} to ${after}`;
+  // The LINE is spelled from this module's own literals; the COMPARISON above
+  // keeps the raw values. Both halves matter: `before` and `after` reach here
+  // from the body of `POST /setup-api/harness/select`, so the journal line
+  // built from them is `js/log-injection` (#516-#518, in all three places it
+  // is written) — and `isHarness()` narrowing the body's field is exactly the
+  // `.test()`-shaped guard that leaves the caller's string in play, the same
+  // thing #464 says about `ACTIONS.find`. Rebuilding before the comparison
+  // would be the worse bug: two unknown-but-different values would collapse
+  // onto one word and a real move would report as a re-select.
+  const moved = `the active harness moved from ${harnessName(before)} to ${harnessName(after)}`;
   // `.catch` even though `reloadMcpServers` documents that it never throws: the
   // promise it makes is to the OWNER'S SWITCH, which is already persisted, and
   // it must not depend on a neighbouring module keeping its own.
