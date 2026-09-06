@@ -16,8 +16,22 @@
 // decision is a different one.
 
 import { spawn } from "child_process";
-import { join, resolve, isAbsolute, normalize } from "path";
+import { realpathSync } from "fs";
+import { basename, dirname, join, resolve, isAbsolute, normalize } from "path";
 import { isProtectedFilePath } from "../../src/lib/file-guard";
+// TASK-605's protected-path rule, from the module the OpenClaw hook plugin
+// carries into ~/.openclaw/extensions. It lives there because a plugin copied
+// out of the checkout has to take its rule with it; it is imported HERE
+// because ClawBox's own `bash`, `write_file`, `edit_file` and `notebook_edit`
+// reach the same files the harness's tools do, and a deny the agent can walk
+// around through this server is not a deny. Its whole import graph is node
+// builtins, so it satisfies the rule at the top of this file.
+import {
+  commandDenyReason,
+  destructiveToken,
+  isProtectedDirectory,
+  pathDenyReason,
+} from "../../scripts/openclaw-plugins/clawbox-path-guard/path-guard.mjs";
 import { ToolError } from "./errors";
 
 export const HOME = process.env.HOME || "/home/clawbox";
@@ -108,6 +122,78 @@ export function assertPathAllowed(abs: string): void {
     "That path holds device credentials or a device node and is not accessible to tools.",
     "Do not try variations of it. Tell the user the file is protected and continue with the rest of the task.",
   );
+}
+
+/**
+ * The same check for a path a tool is about to WRITE, plus TASK-605's deny.
+ *
+ * Separate from `assertPathAllowed` because the two rules answer different
+ * questions and the difference is the ruling's: the ClawBox tree and the
+ * local-model folders may be read and listed — `data/llamacpp` and `data/embed`
+ * are public subtrees of the data directory precisely so the desktop can show
+ * what was downloaded — and may not be deleted, overwritten, truncated or
+ * moved. A single allow-list would have had to choose one answer for both.
+ *
+ * The message names the rule rather than hiding it: unlike the credential
+ * denial above, there is nothing secret about where this device keeps its own
+ * code, and an agent told WHY it was refused can tell the owner instead of
+ * trying the path again by another spelling.
+ */
+export function assertWritePathAllowed(abs: string): void {
+  assertPathAllowed(abs);
+  // THE REALPATH'D PARENT AS WELL AS THE PATH AS TYPED. `resolveUserPath`
+  // normalises `..` and `~` but does not follow links, so a symlink the agent
+  // planted earlier — `~/notes/models -> ~/clawbox/data/llamacpp/models` — would
+  // reach this as a path with no protected root in it. Only the parent is
+  // resolved, never the leaf: the file being written may not exist yet, and a
+  // dangling name is not a reason to refuse. Same two-stage shape as
+  // `coding-agent-media.ts`, and a resolve that fails is not evidence of
+  // anything, so the typed path's verdict stands.
+  let resolvedParent: string | null = null;
+  try {
+    resolvedParent = realpathSync(dirname(abs));
+  } catch {
+    resolvedParent = null;
+  }
+  if (resolvedParent) {
+    const viaLink = pathDenyReason(join(resolvedParent, basename(abs)), HOME);
+    if (viaLink) throw protectedWriteError();
+  }
+  // The PATH predicate, not the tool-shaped one: `toolCallDenyReason` drops any
+  // string containing a newline, because a tool PARAMETER may be a file body —
+  // and a filename may legally contain one, so routing a resolved path through
+  // it let `…/models/a\nb.gguf` through.
+  if (pathDenyReason(abs, HOME)) throw protectedWriteError();
+}
+
+function protectedWriteError(): ToolError {
+  return new ToolError(
+    "BLOCKED_PATH",
+    "The ClawBox install tree and the local-model folders are protected on this device: they can be read, but not written, deleted or moved.",
+    "Do not retry it by another path. Tell the user what you were asked to do and that the device refused it.",
+  );
+}
+
+/**
+ * Whether a shell string names a protected path in a destroying spelling.
+ * Re-exported so `bash`'s pre-flight and the OpenClaw hook cannot disagree.
+ */
+export function commandDeniedByPathGuard(command: string, cwd?: string): string | null {
+  // The SAME home this module expands `~` against, never os.homedir(): the
+  // rule folds the resolved home into `~/` before matching, and a guard that
+  // folded a different directory than `resolveUserPath` expands would answer
+  // about a path nobody named.
+  const inCommand = commandDenyReason(command, HOME);
+  if (inCommand) return inCommand;
+  // THE WORKING DIRECTORY, which `bash` takes and used to throw away. The whole
+  // reason the OpenClaw hook reads `workdir` is that `cd <protected> && rm x`
+  // reaches a text matcher as two tokens it cannot relate — and this tool is
+  // handed the directory as an argument, so the same hole was open here in a
+  // simpler form: `bash({ cwd: "~/clawbox/data/llamacpp/models", command: "rm
+  // -f gemma.gguf" })`.
+  if (!cwd || !isProtectedDirectory(cwd, HOME)) return null;
+  const token = destructiveToken(command, HOME);
+  return token ? `\`${token}\` run from inside ${cwd}` : null;
 }
 
 /** Drop every protected path from a result list (entries, glob hits, matches). */

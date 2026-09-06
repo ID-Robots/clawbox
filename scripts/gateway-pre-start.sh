@@ -3036,6 +3036,217 @@ then
 fi
 unset CLAWBOX_MCP_TOKEN_VAL
 
+# ── Installing a ClawBox hook plugin into ~/.openclaw/extensions ────────────
+#
+# ONE INSTALLER FOR BOTH of the plugins ClawBox ships (the protected-path deny
+# of TASK-605 below, and the EMAIL:-directive strip after it). It was one
+# plugin's worth of straight-line script until the second arrived; a copy of it
+# would have been two places for the partial-write handling to drift apart, and
+# every failure this function reports was learned the hard way once already.
+#
+# Arguments: <plugin id> <destination dir> <consequence sentence> <source file>...
+# Sets CLAWBOX_HOOK_PLUGIN_READY to 1 only when the files are on disk AND the
+# config says the gateway may load them.
+#
+# The sources are absolute paths rather than names under one directory, because
+# the path guard's table lives in `config/` beside the rest of the product's
+# rendered configuration and is read by the Hermes edition too.
+install_clawbox_hook_plugin() {
+  local plugin_id="$1" dst="$2" consequence="$3"
+  shift 3
+  local sources=("$@")
+  local src
+
+  CLAWBOX_HOOK_PLUGIN_READY=0
+
+  for src in "${sources[@]}"; do
+    if [ ! -f "$src" ]; then
+      echo "  WARNING: $src is missing, so $plugin_id is not a complete plugin — $consequence" >&2
+      return 0
+    fi
+  done
+
+  # THE SOURCES ARE READ BEFORE ANYTHING ON DISK IS TOUCHED. `cp` opens its
+  # source first and leaves the destination alone when that open fails, so a
+  # source-side problem — a checkout still being written by the updater, a
+  # permission slip — must NOT be treated the same as a copy that died half-way.
+  # Answering that question here rather than after the fact is what lets the
+  # failure branch below know which state the box is in.
+  if ! cat "${sources[@]}" > /dev/null 2>&1; then
+    # The installed copy, if there is one, is untouched and still the last one
+    # that worked. Leaving it alone is strictly better than removing it.
+    echo "  WARNING: could not read the $plugin_id plugin sources — leaving whatever is already installed in place" >&2
+    return 0
+  fi
+
+  # Overwritten unconditionally: the files are OURS and versioned with the app,
+  # so an update that ships a fixed plugin has to actually deliver it. There is
+  # no customer edit here to preserve.
+  if mkdir -p "$dst" 2>/dev/null && cp -f "${sources[@]}" "$dst/" 2>/dev/null; then
+    CLAWBOX_HOOK_PLUGIN_READY=1
+  else
+    # Never fatal. Without the plugin the box behaves exactly as it did before
+    # this existed; a gateway that refuses to start would be strictly worse.
+    #
+    # BUT THE HALF-WRITTEN COPY GOES. The sources read cleanly a moment ago, so
+    # a failure here is on the WRITE side — ENOSPC, an I/O error, a target that
+    # is not a file any more — and `cp -f` truncates each target before it
+    # writes it. Whatever is in the destination now is a mixture of new files,
+    # truncated files and stale ones, and `plugins.entries.<id>.enabled` (true
+    # from an earlier boot) still tells the gateway to import it. Removing it
+    # leaves ONE state instead of that — no plugin, no hook, and a line that
+    # says so — rather than a module that may throw halfway through parsing.
+    # Where the removal cannot work either — a read-only filesystem, or a
+    # destination directory whose mode lets `cp` truncate the files already in
+    # it but does not let `rm` unlink them — the removal is REPORTED as not
+    # done. Claiming a cleanup that did not happen is the false success this
+    # step exists to avoid, and it is the difference between "nothing loads" and
+    # "the gateway imports a plugin that is missing a file".
+    if rm -rf "$dst" 2>/dev/null; then
+      echo "  WARNING: could not install the $plugin_id plugin into $dst — anything partial there has been removed rather than left for the gateway to import, so $consequence until the next boot repairs it" >&2
+    else
+      echo "  WARNING: could not install the $plugin_id plugin into $dst AND could not remove what is there — the gateway may import a partial copy. $consequence; the next boot repairs it only if that path becomes writable" >&2
+    fi
+    return 0
+  fi
+
+  # Enabled only once the files are on disk, so the config can never name a
+  # plugin that is not there. `plugins.entries.<id>.enabled` is the core's own
+  # load-permission key; the manifest's `activation.onStartup` is what makes a
+  # HOOK-ONLY plugin load at all (a plugin with no tool, provider or channel has
+  # no other reason to be constructed) — the two together are the documented
+  # startup intent.
+  #
+  # `if !` rather than a bare call: this script is an ExecStartPre with no
+  # leading `-`, under `set -euo pipefail`, so an unwritable ~/.openclaw (a full
+  # disk, a partition remounted read-only after an unclean shutdown) would
+  # otherwise re-raise out of the write below, fail the unit, and leave the box
+  # with no agent at all — over a hook this very block calls optional.
+  if ! CLAWBOX_HOOK_PLUGIN_ID="$plugin_id" python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, os, sys, tempfile
+
+cfg_path = sys.argv[1]
+plugin_id = os.environ["CLAWBOX_HOOK_PLUGIN_ID"]
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError, OSError):
+    # A config this script could not read is one the blocks above already
+    # reported on; writing a fresh one from here would discard it.
+    #
+    # NON-ZERO, so the caller reports it and clears READY. Exiting 0 here made
+    # the function's own contract false — "READY=1 means the files are on disk
+    # AND the config says the gateway may load them" — on the one box where it
+    # matters: a corrupt openclaw.json left the plugin installed, unenabled, and
+    # the boot log silent, so the operator saw a clean start on a device whose
+    # guard the gateway would never load.
+    sys.exit(1)
+
+plugins = cfg.get("plugins")
+if not isinstance(plugins, dict):
+    plugins = {}
+    cfg["plugins"] = plugins
+entries = plugins.get("entries")
+if not isinstance(entries, dict):
+    entries = {}
+    plugins["entries"] = entries
+entry = entries.get(plugin_id)
+if not isinstance(entry, dict):
+    entry = {}
+    entries[plugin_id] = entry
+
+if entry.get("enabled") is True:
+    print(f"  {plugin_id} already enabled, skipping write")
+    sys.exit(0)
+
+entry["enabled"] = True
+tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
+try:
+    with os.fdopen(tmp_fd, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp_path, cfg_path)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except Exception:
+        pass
+    raise
+print(f"  Enabled {plugin_id}")
+PY
+  then
+    echo "  WARNING: could not enable the $plugin_id plugin in $OPENCLAW_CONFIG — $consequence" >&2
+    CLAWBOX_HOOK_PLUGIN_READY=0
+  fi
+  return 0
+}
+
+# ── The protected-path deny hook ───────────────────────────────────────────
+#
+# TASK-605: a turn asked to "delete the largest of those files" ran rm on a
+# 3.2 GB local-model GGUF. The owner's ruling of 2026-09-04 is a hard deny on
+# the local-model folder and the ClawBox tree, with no confirmation prompt
+# anywhere — "narrower, but silent when it bites".
+#
+# HARNESS FIRST, AND WHAT OPENCLAW ACTUALLY OWNS. There is no path-scoped deny
+# to configure on 2026.8.1: `tools.exec.mode` is `deny|allowlist|ask|auto|full`
+# over ALL host exec, an approvals allowlist entry is a glob over the BINARY,
+# and tool policy is per tool, not per path. The core's own advice is
+# all-or-nothing ("To hard-block host exec, set approvals security to `deny` or
+# deny the `exec` tool via tool policy", docs/tools/exec-approvals.md), which
+# would take the shell away from the agent entirely. The seam that CAN express a
+# path is the typed `before_tool_call` hook — "Block a tool or request
+# approval", `{ block: true, blockReason }`, docs/plugins/hooks.md — so the deny
+# is a plugin, installed exactly like the EMAIL: one above. The Hermes edition
+# uses its own native `approvals.deny` globs instead (scripts/register-mcp.sh);
+# both read config/protected-paths.json and one test holds them to one answer.
+CLAWBOX_PATH_GUARD_ID="clawbox-path-guard"
+CLAWBOX_PATH_GUARD_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_PATH_GUARD_ID"
+CLAWBOX_PATH_GUARD_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_PATH_GUARD_ID"
+CLAWBOX_PATH_GUARD_TABLE="$CLAWBOX_ROOT/config/protected-paths.json"
+install_clawbox_hook_plugin "$CLAWBOX_PATH_GUARD_ID" "$CLAWBOX_PATH_GUARD_DST" \
+  "the ClawBox tree and the local-model folders are NOT protected from the agent's tool calls" \
+  "$CLAWBOX_PATH_GUARD_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_PATH_GUARD_SRC/package.json" \
+  "$CLAWBOX_PATH_GUARD_SRC/index.mjs" \
+  "$CLAWBOX_PATH_GUARD_SRC/path-guard.mjs" \
+  "$CLAWBOX_PATH_GUARD_TABLE"
+
+# PROVE THE COPY IS A WORKING GUARD, not just five files with the right names.
+#
+# Cheap on purpose — one `node` start against the INSTALLED copy, tens of
+# milliseconds, no `openclaw` CLI and no module-load of the other 40-odd
+# plugins. It answers the two questions a file list cannot: does the module
+# import (the table is the one thing it reads, and a truncated or absent
+# protected-paths.json is exactly what a half-finished cp leaves), and does the
+# rule it loaded still refuse the command that opened this task.
+#
+# This is NOT the same claim `openclaw plugins inspect --runtime` makes for the
+# EMAIL: plugin below — it does not prove the gateway imported the extension —
+# but it removes every failure this install can cause on its own, at a cost the
+# boot budget in this file's header can afford.
+CLAWBOX_PATH_GUARD_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" != "1" ]; then
+  :
+elif [ -z "$CLAWBOX_PATH_GUARD_NODE" ]; then
+  echo "  NOTE: no node on PATH, so the installed $CLAWBOX_PATH_GUARD_ID plugin was not exercised here — it is installed and enabled, and the gateway loads it with its own node" >&2
+else
+  if ! CLAWBOX_PATH_GUARD_DST="$CLAWBOX_PATH_GUARD_DST" "$CLAWBOX_PATH_GUARD_NODE" --input-type=module -e '
+    const dir = process.env.CLAWBOX_PATH_GUARD_DST;
+    const plugin = (await import(`${dir}/index.mjs`)).default;
+    const hooks = [];
+    plugin.register({ on: (name) => hooks.push(name) });
+    if (!hooks.includes("before_tool_call")) throw new Error("no before_tool_call hook");
+    const { toolCallDenyReason } = await import(`${dir}/path-guard.mjs`);
+    const denied = toolCallDenyReason(
+      { toolName: "exec", params: { command: "rm ~/clawbox/data/llamacpp/models/x.gguf" } },
+      "/home/clawbox",
+    );
+    if (!denied) throw new Error("the installed rule does not refuse a model-folder delete");
+  ' 2>&1; then
+    echo "  WARNING: the installed $CLAWBOX_PATH_GUARD_ID plugin did not load or did not refuse a model-folder delete — the ClawBox tree and the local-model folders are NOT protected from the agent's tool calls" >&2
+  fi
+fi
+
 # ── The outbound EMAIL:-directive hook plugin ───────────────────────────────
 #
 # `EMAIL:4471` is how the agent tells a ClawBox CHAT that its reply points at a
@@ -3053,7 +3264,7 @@ unset CLAWBOX_MCP_TOKEN_VAL
 # fail-open with a 15 s ceiling, so a fault in our handler is logged and
 # skipped, never a reply that does not arrive.
 #
-# THE FIRST PLUGIN CLAWBOX HAS EVER SHIPPED INTO OPENCLAW. The four non-stock
+# THE FIRST PLUGIN CLAWBOX EVER SHIPPED INTO OPENCLAW. The four non-stock
 # plugins on a box today (deepseek, codex, discord, whatsapp) are all upstream
 # packages installed by npm; this one is ours, so it is copied from the
 # checkout instead — no registry, no network, and it moves with the app.
@@ -3066,115 +3277,14 @@ CLAWBOX_HOOK_PLUGIN_ID="clawbox-email-directives"
 CLAWBOX_HOOK_PLUGIN_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_HOOK_PLUGIN_ID"
 CLAWBOX_HOOK_PLUGIN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_HOOK_PLUGIN_ID"
 CLAWBOX_HOOK_PLUGIN_FILES="openclaw.plugin.json package.json index.mjs email-directives.mjs"
-CLAWBOX_HOOK_PLUGIN_READY=0
+install_clawbox_hook_plugin "$CLAWBOX_HOOK_PLUGIN_ID" "$CLAWBOX_HOOK_PLUGIN_DST" \
+  "EMAIL: directives will reach channels" \
+  "$CLAWBOX_HOOK_PLUGIN_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_HOOK_PLUGIN_SRC/package.json" \
+  "$CLAWBOX_HOOK_PLUGIN_SRC/index.mjs" \
+  "$CLAWBOX_HOOK_PLUGIN_SRC/email-directives.mjs"
 
-CLAWBOX_HOOK_PLUGIN_COMPLETE=1
-for f in $CLAWBOX_HOOK_PLUGIN_FILES; do
-  [ -f "$CLAWBOX_HOOK_PLUGIN_SRC/$f" ] || CLAWBOX_HOOK_PLUGIN_COMPLETE=0
-done
-
-if [ "$CLAWBOX_HOOK_PLUGIN_COMPLETE" != "1" ]; then
-  echo "  WARNING: $CLAWBOX_HOOK_PLUGIN_SRC is not a complete plugin — EMAIL: directives will reach channels" >&2
-# Overwritten unconditionally: the files are OURS and versioned with the app, so
-# an update that ships a fixed plugin has to actually deliver it. There is no
-# customer edit here to preserve.
-# THE SOURCES ARE READ BEFORE ANYTHING ON DISK IS TOUCHED. `cp` opens its source
-# first and leaves the destination alone when that open fails, so a source-side
-# problem — a checkout still being written by the updater, a permission slip —
-# must NOT be treated the same as a copy that died half-way. Answering that
-# question here rather than after the fact is what lets the failure branch below
-# know which state the box is in.
-elif ! (cd "$CLAWBOX_HOOK_PLUGIN_SRC" && cat $CLAWBOX_HOOK_PLUGIN_FILES) > /dev/null 2>&1; then
-  # The installed copy, if there is one, is untouched and still the last one
-  # that worked. Leaving it alone is strictly better than removing it.
-  echo "  WARNING: could not read the $CLAWBOX_HOOK_PLUGIN_ID plugin sources in $CLAWBOX_HOOK_PLUGIN_SRC — leaving whatever is already installed in place" >&2
-elif mkdir -p "$CLAWBOX_HOOK_PLUGIN_DST" 2>/dev/null \
-  && (cd "$CLAWBOX_HOOK_PLUGIN_SRC" && cp -f $CLAWBOX_HOOK_PLUGIN_FILES "$CLAWBOX_HOOK_PLUGIN_DST/") 2>/dev/null; then
-  CLAWBOX_HOOK_PLUGIN_READY=1
-else
-  # Never fatal. Without the plugin the box behaves exactly as it did before
-  # this existed; a gateway that refuses to start would be strictly worse.
-  #
-  # BUT THE HALF-WRITTEN COPY GOES. The sources read cleanly a moment ago, so a
-  # failure here is on the WRITE side — ENOSPC, an I/O error, a target that is
-  # not a file any more — and `cp -f` truncates each target before it writes it.
-  # Whatever is in the destination now is a mixture of new files, truncated
-  # files and stale ones, and `plugins.entries.<id>.enabled` (true from an
-  # earlier boot) still tells the gateway to import it. Removing it leaves ONE
-  # state instead of that — no plugin, no strip, and a line that says so —
-  # rather than a module that may throw halfway through parsing. Where the
-  # removal cannot work either — a read-only filesystem, or a destination
-  # directory whose mode lets `cp` truncate the files already in it but does not
-  # let `rm` unlink them — the removal is REPORTED as not done. Claiming a
-  # cleanup that did not happen is the false success this step exists to avoid,
-  # and it is the difference between "nothing loads" and "the gateway imports a
-  # plugin that is missing a file".
-  if rm -rf "$CLAWBOX_HOOK_PLUGIN_DST" 2>/dev/null; then
-    echo "  WARNING: could not install the $CLAWBOX_HOOK_PLUGIN_ID plugin into $CLAWBOX_HOOK_PLUGIN_DST — anything partial there has been removed rather than left for the gateway to import, so EMAIL: directives will reach channels until the next boot repairs it" >&2
-  else
-    echo "  WARNING: could not install the $CLAWBOX_HOOK_PLUGIN_ID plugin into $CLAWBOX_HOOK_PLUGIN_DST AND could not remove what is there — the gateway may import a partial copy. EMAIL: directives will reach channels; the next boot repairs it only if that path becomes writable" >&2
-  fi
-fi
-
-# Enabled only once the files are on disk, so the config can never name a
-# plugin that is not there. `plugins.entries.<id>.enabled` is the core's own
-# load-permission key; the manifest's `activation.onStartup` is what makes a
-# HOOK-ONLY plugin load at all (a plugin with no tool, provider or channel has
-# no other reason to be constructed) — the two together are the documented
-# startup intent.
 if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
-  # `if !` rather than a bare call: this script is an ExecStartPre with no
-  # leading `-`, under `set -euo pipefail`, so an unwritable ~/.openclaw (a full
-  # disk, a partition remounted read-only after an unclean shutdown) would
-  # otherwise re-raise out of the write below, fail the unit, and leave the box
-  # with no agent at all — over a strip this very block calls optional.
-  if ! CLAWBOX_HOOK_PLUGIN_ID="$CLAWBOX_HOOK_PLUGIN_ID" python3 - "$OPENCLAW_CONFIG" <<'PY'
-import json, os, sys, tempfile
-
-cfg_path = sys.argv[1]
-plugin_id = os.environ["CLAWBOX_HOOK_PLUGIN_ID"]
-try:
-    with open(cfg_path) as f:
-        cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
-    # A config this script could not read is one the blocks above already
-    # reported on; writing a fresh one from here would discard it.
-    sys.exit(0)
-
-plugins = cfg.get("plugins")
-if not isinstance(plugins, dict):
-    plugins = {}
-    cfg["plugins"] = plugins
-entries = plugins.get("entries")
-if not isinstance(entries, dict):
-    entries = {}
-    plugins["entries"] = entries
-entry = entries.get(plugin_id)
-if not isinstance(entry, dict):
-    entry = {}
-    entries[plugin_id] = entry
-
-if entry.get("enabled") is True:
-    print("  EMAIL: directive hook plugin already enabled, skipping write")
-    sys.exit(0)
-
-entry["enabled"] = True
-tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
-try:
-    with os.fdopen(tmp_fd, "w") as f:
-        json.dump(cfg, f, indent=2)
-    os.replace(tmp_path, cfg_path)
-except Exception:
-    try:
-        os.unlink(tmp_path)
-    except Exception:
-        pass
-    raise
-print("  Enabled the EMAIL: directive hook plugin")
-PY
-  then
-    echo "  WARNING: could not enable the $CLAWBOX_HOOK_PLUGIN_ID plugin in $OPENCLAW_CONFIG — EMAIL: directives will still reach channels" >&2
-  fi
 
   # PROVE IT LOADS — whenever the answer could have changed.
   #

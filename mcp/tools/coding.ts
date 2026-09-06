@@ -29,6 +29,8 @@ import {
   filterAllowedPaths,
   isAllowedPath,
   assertPathAllowed,
+  assertWritePathAllowed,
+  commandDeniedByPathGuard,
   resolveUserPath,
   spawnArgv,
 } from "../lib/guard";
@@ -146,16 +148,38 @@ async function assertNotStale(abs: string): Promise<void> {
  *   2. the whole command scanned for a credential-store NAME anywhere in it, so
  *      a path assembled indirectly is still recognised.
  */
-function commandTouchesProtectedPath(command: string): boolean {
+function commandTouchesProtectedPath(command: string, cwd?: string): string | null {
   const tokens = command.split(/[\s;|&<>()'"`]+/).filter(Boolean);
   for (const raw of tokens) {
     if (!raw.startsWith("/") && !raw.startsWith("~") && !raw.startsWith("./")) continue;
     try {
-      if (!isAllowedPath(resolveUserPath(raw))) return true;
+      if (!isAllowedPath(resolveUserPath(raw))) return CREDENTIAL_REASON;
     } catch { /* not a resolvable path */ }
   }
-  return SECRET_NAME_RE.test(command);
+  // TASK-605: the same rule the two harnesses enforce on their own shells. This
+  // tool is registered on the OpenClaw edition, where the harness's `exec` is
+  // covered by the before_tool_call hook — and this is a SECOND shell, reached
+  // by a different tool id, so without this the deny would have a door in it.
+  //
+  // The WORKING DIRECTORY goes with the command. It is the reason the hook
+  // reads `workdir` at all: `cd <protected> && rm x` reaches a text matcher as
+  // two tokens it cannot relate, and this tool is handed the directory as an
+  // argument, so the same hole was open here in a simpler form.
+  const guarded = commandDeniedByPathGuard(command, cwd);
+  if (guarded) return guarded;
+  return SECRET_NAME_RE.test(command) ? CREDENTIAL_REASON : null;
 }
+
+/**
+ * The refusal for a credential path, kept apart from the protected-path one.
+ *
+ * The two answers are different on purpose: a credential store's refusal names
+ * nothing (this tool is reachable from untrusted page content, and "blocked
+ * because it is ~/.hermes/.env" is a map of where the secrets are), while a
+ * TASK-605 refusal names the rule, because there is nothing secret about where
+ * the device keeps its own code and an agent told WHY stops trying spellings.
+ */
+const CREDENTIAL_REASON = "__credential__";
 
 function tooLargeToFetch(): ToolError {
   return new ToolError(
@@ -246,11 +270,22 @@ export function registerCodingTools(reg: Registrar): void {
           );
         }
       }
-      if (commandTouchesProtectedPath(command)) {
+      const blockedReason = commandTouchesProtectedPath(command, workDir);
+      if (blockedReason === CREDENTIAL_REASON) {
         throw new ToolError(
           "BLOCKED_PATH",
           "That command names a protected device file.",
           "Do not try variations of it. Tell the user that file holds device credentials.",
+        );
+      }
+      if (blockedReason) {
+        // The rule, not the credential sentence: `rm -rf ~/clawbox` holds no
+        // credentials, and telling the agent it does sends it to the owner with
+        // the wrong explanation.
+        throw new ToolError(
+          "BLOCKED_PATH",
+          `That command is refused on this device: ${blockedReason}. The ClawBox install tree and the local-model folders can be read, but not deleted, overwritten, truncated or moved.`,
+          "Do not retry or rephrase it. Tell the user what you were asked to do and that the device refused it.",
         );
       }
       const { blocked, warnings } = inspectCommand(command);
@@ -441,7 +476,7 @@ export function registerCodingTools(reg: Registrar): void {
     { editions: codingEditions, readOnly: false, destructive: true },
     async ({ file_path, content }: { file_path: string; content: string }) => {
       const abs = resolveUserPath(file_path);
-      assertPathAllowed(abs);
+      assertWritePathAllowed(abs);
 
       const existed = await stat(abs).then(() => true).catch(() => false);
       if (existed) await assertNotStale(abs);
@@ -494,7 +529,7 @@ export function registerCodingTools(reg: Registrar): void {
         throw new ToolError("BAD_ARGUMENT", "old_text and new_text are identical.", "Pass the text you actually want in the file as new_text.");
       }
       const abs = resolveUserPath(file_path);
-      assertPathAllowed(abs);
+      assertWritePathAllowed(abs);
       await assertNotStale(abs);
 
       const buf = await fsReadFile(abs).catch(() => null);
@@ -730,7 +765,7 @@ export function registerCodingTools(reg: Registrar): void {
       const abs = resolveUserPath(notebook_path);
       // This tool called no guard at all before: a notebook path pointing into
       // a credential directory was written without a check.
-      assertPathAllowed(abs);
+      assertWritePathAllowed(abs);
       if (!isNotebook(abs)) {
         throw new ToolError("BAD_ARGUMENT", "That is not a notebook file.", "Pass a path ending in .ipynb, or use edit_file for ordinary files.");
       }
