@@ -3147,8 +3147,38 @@ step_hermes_install() {
     # right here — before the reachability check, before any repair, printing
     # nothing — taking `install.sh --step hermes_install` (the documented
     # repair command) and every later step of a full install down with it.
-    installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-      "$shim" --version 2>/dev/null | head -1) || installed=""
+    #
+    # Runnability stays THE SHIM'S to prove, and is asked first. `--help` goes
+    # through the same shim -> `<agent_dir>/hermes` -> `hermes_cli.main` path
+    # `--version` does, so a shim whose interpreter or entry script is gone
+    # still fails it — but unlike `--version` it runs no update check
+    # (`banner.check_for_updates()` has two call sites in 0.20.5:
+    # `print_fast_version_info` and the interactive welcome banner). Asking the
+    # venv interpreter directly instead would only prove the PACKAGE IMPORTS,
+    # which is not the question this guard exists to answer: a box whose
+    # `hermes` command is dead would read as "already installed" and the
+    # documented repair would do nothing. Measured on a Hermes box: 0.82 s.
+    if runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      "$shim" --help >/dev/null 2>&1; then
+      # The agent runs; this is only the version STRING for the log line.
+      # TASK-613: remove once hermes-agent#104275 lands
+      # (HERMES_DISABLE_UPDATE_CHECK / updates.check). `hermes --version` also
+      # runs that update check — `git fetch origin main` plus an
+      # unauthenticated GitHub compare, 10 s each — and on a box being
+      # installed or repaired the six-hour cache is always cold, so this step
+      # paid for a network round trip whose only output `head -1` throws away.
+      # Upstream's own printer takes `check_updates=False`
+      # (hermes_cli/_startup_fast.py) and no CLI flag or env var reaches it, so
+      # ask the interpreter the shim just proved it execs. Fails OPEN: anything
+      # wrong here leaves `installed` empty and the `--version` probe below
+      # answers exactly as it always did.
+      installed=$(runuser -u "$CLAWBOX_USER" -- env -u PYTHONHOME HOME="$CLAWBOX_HOME" \
+        PYTHONSAFEPATH=1 PYTHONPATH="$agent_dir" "$venv_python" -c \
+        'from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)' \
+        2>/dev/null | head -1) || installed=""
+      [ -n "$installed" ] || installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+        "$shim" --version 2>/dev/null | head -1) || installed=""
+    fi
   fi
 
   # A version string cannot answer "is this the pinned build?": upstream prints
@@ -3270,8 +3300,22 @@ step_hermes_install() {
   # the owner as a crash-looping dashboard. `|| installed=""` for the same
   # errexit reason as the first probe: when the install laid down nothing, this
   # runs a shim that does not exist and exits 127.
-  installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-    "$shim" --version 2>/dev/null | head -1) || installed=""
+  #
+  # Shaped like the probe above and for the same reasons: the SHIM answers
+  # whether the agent this install just laid down actually runs, and only then
+  # is the version string read without the update check — which here has
+  # nothing cached and everything to fetch. TASK-613: remove once
+  # hermes-agent#104275 lands (HERMES_DISABLE_UPDATE_CHECK / updates.check).
+  installed=""
+  if runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+    "$shim" --help >/dev/null 2>&1; then
+    installed=$(runuser -u "$CLAWBOX_USER" -- env -u PYTHONHOME HOME="$CLAWBOX_HOME" \
+      PYTHONSAFEPATH=1 PYTHONPATH="$agent_dir" "$venv_python" -c \
+      'from hermes_cli._startup_fast import print_fast_version_info as v; v(check_updates=False)' \
+      2>/dev/null | head -1) || installed=""
+    [ -n "$installed" ] || installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      "$shim" --version 2>/dev/null | head -1) || installed=""
+  fi
   if [ -n "$installed" ]; then
     at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
       git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""

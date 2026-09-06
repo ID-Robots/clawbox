@@ -663,6 +663,28 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     expect(r.out).toMatch(/Hermes installed \(Hermes 9\.9\.9\)/);
   });
 
+  it("a broken shim over an importable package is still 'not installed'", () => {
+    // TASK-613 put a `python -c` printer in front of the version probe to keep
+    // the agent's update check off a fresh install. The thing it must NOT do is
+    // become the proof that Hermes RUNS: importing `hermes_cli` says the
+    // package is on disk, not that `~/.local/bin/hermes` works. This is that
+    // box — the entry script the 4-line shim execs is gone or renamed (an
+    // interrupted `--force-commit` checkout, a partial restore), while the venv
+    // and the package are intact — and it is the exact device the step's own
+    // "require the interpreter to exist AND the agent to actually answer"
+    // comment was written for. Pinned WITH the agent already on the pin, which
+    // is what turns the mistake into a silent one: nothing later in the step
+    // would have contradicted "already installed at the pinned commit".
+    giveShim({ answers: false });
+    giveAgent({ venv: true, head: PIN });
+
+    const r = run();
+
+    expect(r.code).toBe(0);
+    expect(r.installerRan).toBe(true);
+    expect(r.out).not.toMatch(/already installed/);
+  });
+
   it("a shim with no agent directory reinstalls without inventing a husk", () => {
     giveShim();
 
