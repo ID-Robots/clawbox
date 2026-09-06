@@ -3792,6 +3792,15 @@ fi
 # fail-open with a 15 s ceiling, so a fault in our handler is logged and
 # skipped, never a reply that does not arrive.
 #
+# THE SAME PLUGIN NOW CARRIES THE INBOUND HALF: `before_dispatch`, the core's
+# typed inbound CLAIM hook ("Handle an inbound message before the normal model
+# dispatch"), which is how the owner's "send <code>" reply to a queued email
+# reaches ClawBox without a second Telegram bot — see
+# scripts/openclaw-plugins/clawbox-email-directives/email-approvals.mjs and
+# src/lib/email-approval-reply.ts. It needs no conversation-access grant (the
+# core gates only the prompt/agent hooks), so nothing about the config written
+# below changes for it.
+#
 # THE FIRST PLUGIN CLAWBOX EVER SHIPPED INTO OPENCLAW. The four non-stock
 # plugins on a box today (deepseek, codex, discord, whatsapp) are all upstream
 # packages installed by npm; this one is ours, so it is copied from the
@@ -3804,13 +3813,14 @@ fi
 CLAWBOX_HOOK_PLUGIN_ID="clawbox-email-directives"
 CLAWBOX_HOOK_PLUGIN_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_HOOK_PLUGIN_ID"
 CLAWBOX_HOOK_PLUGIN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_HOOK_PLUGIN_ID"
-CLAWBOX_HOOK_PLUGIN_FILES="openclaw.plugin.json package.json index.mjs email-directives.mjs"
+CLAWBOX_HOOK_PLUGIN_FILES="openclaw.plugin.json package.json index.mjs email-directives.mjs email-approvals.mjs"
 install_clawbox_hook_plugin "$CLAWBOX_HOOK_PLUGIN_ID" "$CLAWBOX_HOOK_PLUGIN_DST" \
-  "EMAIL: directives will reach channels" \
+  "EMAIL: directives will reach channels and approving a queued email from Telegram will not work" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/openclaw.plugin.json" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/package.json" \
   "$CLAWBOX_HOOK_PLUGIN_SRC/index.mjs" \
-  "$CLAWBOX_HOOK_PLUGIN_SRC/email-directives.mjs"
+  "$CLAWBOX_HOOK_PLUGIN_SRC/email-directives.mjs" \
+  "$CLAWBOX_HOOK_PLUGIN_SRC/email-approvals.mjs"
 
 if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
 
@@ -4081,7 +4091,13 @@ if not isinstance(data, dict):
 plugin = data.get("plugin") if isinstance(data.get("plugin"), dict) else {}
 hooks = data.get("typedHooks") if isinstance(data.get("typedHooks"), list) else []
 names = [h.get("name") for h in hooks if isinstance(h, dict)]
-if "reply_payload_sending" in names:
+# BOTH hooks, by NAME and never by count: this plugin registers an outbound
+# strip and an inbound approval claim, and a box that loaded only one of them is
+# a box where either the EMAIL: line reaches a channel or the owner's "send
+# <code>" is answered by the agent instead of the queue. A count would call that
+# healthy the moment the numbers happened to line up.
+missing = [want for want in ("reply_payload_sending", "before_dispatch") if want not in names]
+if not missing:
     print("ok")
 else:
     # The diagnostics are what tell an operator WHICH of the failures this is:
@@ -4089,7 +4105,8 @@ else:
     # never enabled.
     diagnostics = data.get("diagnostics") if isinstance(data.get("diagnostics"), list) else []
     detail = "; ".join(str(d)[:120] for d in diagnostics[:2])
-    print("unregistered status={} hooks={} {}".format(plugin.get("status"), names or "none", detail).strip())
+    print("unregistered status={} missing={} hooks={} {}".format(
+        plugin.get("status"), ",".join(missing), names or "none", detail).strip())
 PY
         )" || CLAWBOX_HOOK_VERDICT="cli-unavailable the verdict reader could not run"
         ;;
@@ -4102,7 +4119,7 @@ PY
     esac
     case "$CLAWBOX_HOOK_VERDICT" in
       ok)
-        echo "  EMAIL: directive hook plugin loaded (reply_payload_sending registered)"
+        echo "  ClawBox email hook plugin loaded (reply_payload_sending and before_dispatch registered)"
         printf '%s\n' "$CLAWBOX_HOOK_STAMP" > "$CLAWBOX_HOOK_STAMP_FILE" 2>/dev/null || true
         rm -f "$CLAWBOX_HOOK_ATTEMPT_FILE" 2>/dev/null || true
         ;;
@@ -4134,7 +4151,7 @@ PY
           > "$CLAWBOX_HOOK_ATTEMPT_FILE" 2>/dev/null || true
         ;;
       *)
-        echo "  WARNING: the $CLAWBOX_HOOK_PLUGIN_ID plugin did not register reply_payload_sending — EMAIL: directives will still reach channels ($CLAWBOX_HOOK_VERDICT)" >&2
+        echo "  WARNING: the $CLAWBOX_HOOK_PLUGIN_ID plugin did not register both of its hooks — EMAIL: directives may still reach channels, and approving a queued email from Telegram will not work ($CLAWBOX_HOOK_VERDICT)" >&2
         printf '%s %s %s\n' "$CLAWBOX_HOOK_STAMP" "$(date +%s 2>/dev/null || echo 0)" "$CLAWBOX_HOOK_VERDICT" \
           > "$CLAWBOX_HOOK_ATTEMPT_FILE" 2>/dev/null || true
         ;;

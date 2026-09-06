@@ -359,6 +359,17 @@ describe("where a run may work", () => {
     expect(lib.denyRulesCover(rules, path.join(root, "data", "cloudflared", "cert.pem"))).toBe(true);
   });
 
+  it("denies the email stores by name, whether or not they exist yet", () => {
+    // All three are named rather than discovered: a run must not read who the
+    // owner mailed, what a queued draft says, or the code that releases one —
+    // and each of those files only appears once mail has been used, so a rule
+    // built from what is on disk would leave a fresh box uncovered.
+    const rules = lib.fileDenyRules();
+    for (const name of ["email-pending.json", "email-outcomes.json", "email-approval-prompts.json"]) {
+      expect(lib.denyRulesCover(rules, path.join(root, "data", name))).toBe(true);
+    }
+  });
+
   it("denies the checkout's own top-level entries — the brief's promise, made true", () => {
     // Everything directly under the checkout except data/, whose entries the
     // pass above already covers one by one: src/, mcp/, scripts/ and

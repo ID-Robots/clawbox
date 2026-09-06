@@ -565,3 +565,65 @@ describe("email_send after a timeout", () => {
     expect(String(payload.what_happens_next)).toMatch(/already waiting/i);
   });
 });
+
+describe("what the agent is told about the Telegram question", () => {
+  /** The tool's own JSON, as the model receives it. */
+  async function nextStepText(replyApproval: string, approvalPrompt: string): Promise<string> {
+    const { handler } = collect().get("email_send")!;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(202, {
+          success: true,
+          queued: true,
+          pendingId: "d1",
+          recipients: 1,
+          approvalPrompt,
+          replyApproval,
+        }),
+      ),
+    );
+    const result = await handler({ to: "a@example.com", subject: "s", body: "b" });
+    const raw = result.content[0].type === "text" ? result.content[0].text : "";
+    return String((JSON.parse(raw) as { what_happens_next?: string }).what_happens_next ?? "");
+  }
+
+  it("names the code when one was actually sent, and never the code itself", async () => {
+    const text = await nextStepText("offered", "off");
+    expect(text).toContain("short code");
+    expect(text).toContain("which is not shown to you");
+    // The invariant the whole feature rests on: the agent still cannot approve.
+    expect(text).toContain("You cannot approve it yourself");
+  });
+
+  it("claims no code when the question was already outstanding elsewhere", async () => {
+    // `already_asked` means the approvals bot's button is live for this draft
+    // and NOTHING was posted with a code. Telling the agent otherwise sends the
+    // owner looking for a message that was never sent.
+    const text = await nextStepText("already_asked", "sent");
+    expect(text).toContain("Approve button");
+    expect(text).not.toContain("short code");
+  });
+
+  it("says the question could not be delivered when neither surface reached anyone", async () => {
+    const text = await nextStepText("failed", "failed");
+    expect(text).toContain("could not be delivered");
+    expect(text).not.toContain("Approve button");
+    expect(text).not.toContain("short code");
+  });
+
+  it("claims no button for a question the approvals bot did not post", async () => {
+    // `asked_elsewhere`: a prompt exists for this draft, made by the reply
+    // path, and it carries no keyboard. Reporting it as a button is the same
+    // false success as reporting a code that was never sent.
+    const text = await nextStepText("already_asked", "asked_elsewhere");
+    expect(text).not.toContain("Approve button");
+    expect(text).not.toContain("short code");
+  });
+
+  it("says nothing about a code on a box with nobody paired", async () => {
+    const text = await nextStepText("no_owner_chat", "off");
+    expect(text).toContain("Nobody is paired");
+    expect(text).not.toContain("short code");
+  });
+});

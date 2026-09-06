@@ -173,9 +173,11 @@ d("Hermes transform_llm_output plugin — EMAIL: directives", () => {
     expect(answer).toEqual(["a"]);
   });
 
-  it("registers exactly one hook, under the name Hermes actually fires", () => {
+  it("registers exactly its two hooks, under the names Hermes actually fires", () => {
     // hermes_cli/plugins.py:3120 WARNS on an unknown hook name but registers it
-    // anyway, so a typo here would be a silent no-op on every box.
+    // anyway, so a typo here would be a silent no-op on every box. Both are
+    // pinned: the outbound strip this plugin was built for, and the inbound
+    // approval claim that now rides on it.
     const registered = py<Array<[string, string]>>(
       [
         "import clawbox_email_directives as p",
@@ -187,7 +189,10 @@ d("Hermes transform_llm_output plugin — EMAIL: directives", () => {
         "print(json.dumps(ctx.hooks))",
       ].join("\n"),
     );
-    expect(registered).toEqual([["transform_llm_output", "transform_llm_output"]]);
+    expect(registered).toEqual([
+      ["transform_llm_output", "transform_llm_output"],
+      ["pre_gateway_dispatch", "pre_gateway_dispatch"],
+    ]);
   });
 
   it("ships the two files Hermes needs to load a plugin at all", () => {
@@ -202,5 +207,117 @@ d("Hermes transform_llm_output plugin — EMAIL: directives", () => {
       ].join("\n"),
     );
     expect(files).toEqual({ "__init__.py": true, "plugin.yaml": true, "email_directives.py": true });
+  });
+});
+
+// ── The inbound half: what the hook actually asks ClawBox, and what it returns ─
+
+d("pre_gateway_dispatch — the owner's approval reply", () => {
+  /**
+   * Drive the SHIPPED module with `urlopen` replaced, so what is asserted is
+   * the request the box would really make and the dict the gateway would
+   * really read — not a restatement of either.
+   */
+  function drive(
+    text: string,
+    senderId: string | null,
+    answer: unknown,
+    opts: { fail?: "refused" | "timeout"; platform?: string | null } = {},
+  ): { result: unknown; calls: { url: string; body: unknown; auth: string }[] } {
+    return py(
+      [
+        "import json, urllib.request, urllib.error",
+        "import clawbox_email_directives.approvals as approvals",
+        "approvals.CLAWBOX_ROOT = '/nonexistent'",
+        "approvals._cached_token = 't' * 32",
+        "approvals.API_BASE = 'http://127.0.0.1:80'",
+        "calls = []",
+        "def fake_urlopen(req, timeout=None):",
+        "    calls.append({'url': req.full_url, 'body': json.loads(req.data.decode()), 'auth': req.get_header('Authorization') or ''})",
+        // OSError and TimeoutError, never an exception the fake raised by
+        // mistake: an AttributeError would be swallowed by the broad catch one
+        // level up and make these assertions vacuous.
+        "    if stdin['fail'] == 'refused': raise OSError('refused')",
+        "    if stdin['fail'] == 'timeout': raise TimeoutError('timed out')",
+        "    class R:",
+        "        status = 200",
+        "        def read(self): return json.dumps(stdin['answer']).encode()",
+        "        def __enter__(self): return self",
+        "        def __exit__(self, *a): return False",
+        "    return R()",
+        "urllib.request.urlopen = fake_urlopen",
+        "class P: value = stdin['platform']",
+        "class S: user_id = stdin['senderId']; platform = P() if stdin['platform'] else None",
+        "class E: text = stdin['text']; user_id = stdin['senderId']; source = S()",
+        "print(json.dumps({'result': approvals.pre_gateway_dispatch(event=E()), 'calls': calls}))",
+      ].join("\n"),
+      { text, senderId, answer, fail: opts.fail ?? "", platform: opts.platform === undefined ? "telegram" : opts.platform },
+    );
+  }
+
+  it("asks nothing at all about an ordinary message", () => {
+    // The hook is SYNCHRONOUS and fires on every inbound message, so anything
+    // that is not exactly a verb and a code must cost no I/O whatsoever.
+    const { result, calls } = drive("can you email Ivan?", "6001", { handled: true });
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("hands ClawBox the sender, the surface and the harness", () => {
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true, reply: "Sent." });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("http://127.0.0.1:80/setup-api/email/chat-reply");
+    expect(calls[0].auth).toBe(`Bearer ${"t".repeat(32)}`);
+    // deliverVerdict TRUE on this edition, and that is the whole difference
+    // from the OpenClaw twin: a `skip` carries no text, so without this the
+    // owner would type his code and hear nothing back at all.
+    // The surface and the harness travel with it: the allowlist ClawBox weighs
+    // the sender against is Telegram's, and on a dual box it is THIS harness's.
+    // Nothing asks for the verdict — ClawBox posts it on both editions, which
+    // is what lets a timeout be claimed silently.
+    expect(calls[0].body).toEqual({
+      senderId: "6001",
+      text: "send AB2CD",
+      channel: "telegram",
+      harness: "hermes",
+    });
+    // `skip` and not `allow`: `allow` BREAKS the call site's loop over the
+    // other plugins' results.
+    expect(result).toEqual({ action: "skip", reason: "clawbox_email_approval" });
+  });
+
+  it("leaves the message to the agent when ClawBox did not claim it", () => {
+    expect(drive("send AB2CD", "6001", { handled: false }).result).toBeNull();
+    expect(drive("send AB2CD", "6001", {}).result).toBeNull();
+  });
+
+  it("fails OPEN when ClawBox cannot be reached at all", () => {
+    // A box mid-rebuild must not swallow the owner's message.
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true }, { fail: "refused" });
+    expect(result).toBeNull();
+    // ...and it really did try, so this is the fail-open path and not the
+    // shape test quietly refusing the message earlier.
+    expect(calls).toHaveLength(1);
+  });
+
+  it("CLAIMS on a timeout, because the mail may already have gone", () => {
+    // ClawBox answers only once the whole send has finished. Failing open here
+    // would hand the model a "send <code>" it can only answer by queueing the
+    // same mail a second time; ClawBox posts the verdict itself.
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true }, { fail: "timeout" });
+    expect(result).toEqual({ action: "skip", reason: "clawbox_email_approval" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not offer a message it cannot place on a surface", () => {
+    const { result, calls } = drive("send AB2CD", "6001", { handled: true }, { platform: null });
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("does not invent a sender, and does not ask without one", () => {
+    const { result, calls } = drive("send AB2CD", null, { handled: true });
+    expect(result).toBeNull();
+    expect(calls).toHaveLength(0);
   });
 });

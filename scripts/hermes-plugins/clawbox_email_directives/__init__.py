@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 
+from .approvals import pre_gateway_dispatch
 from .email_directives import strip_email_directives
 
 logger = logging.getLogger(__name__)
@@ -114,3 +115,10 @@ def transform_llm_output(response_text=None, platform=None, **kwargs):
 
 def register(ctx) -> None:
     ctx.register_hook("transform_llm_output", transform_llm_output)
+    # The inbound half. See approvals.py: it claims ONLY a message that is
+    # exactly a verb and a code, so every other message reaches the agent
+    # untouched, and it fails open on anything unexpected.
+    ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch)
+
+
+__all__ = ["pre_gateway_dispatch", "register", "transform_llm_output"]

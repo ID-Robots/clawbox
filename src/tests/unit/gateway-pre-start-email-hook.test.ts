@@ -74,6 +74,14 @@ function stubOpenclaw(body: string) {
   return p;
 }
 
+/**
+ * The two hooks a healthy box registers: the outbound directive strip and the
+ * inbound approval claim. Named once so a test cannot pass by asserting only
+ * the hook it happens to care about — the pre-start check requires both, and a
+ * box with one of them is a box where half this feature is silently off.
+ */
+const BOTH_HOOKS = ["reply_payload_sending", "before_dispatch"];
+
 function loadedInspection(hookNames: string[]) {
   return `cat <<'JSON'\n${JSON.stringify({
     plugin: { id: PLUGIN_ID, status: "loaded", activated: true, hookCount: hookNames.length, hookNames: [] },
@@ -169,7 +177,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     mkdirSync(binDir, { recursive: true });
     configPath = path.join(openclawHome, "openclaw.json");
     writeFileSync(configPath, JSON.stringify({ plugins: { entries: { deepseek: { enabled: true } } } }));
-    stubOpenclaw(loadedInspection(["reply_payload_sending"]));
+    stubOpenclaw(loadedInspection(BOTH_HOOKS));
   });
 
   afterEach(() => {
@@ -179,9 +187,15 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
   it("installs the shipped plugin and enables it", () => {
     const r = run();
     expect(r.status).toBe(0);
-    expect(installed()).toEqual(["email-directives.mjs", "index.mjs", "openclaw.plugin.json", "package.json"]);
+    expect(installed()).toEqual([
+      "email-approvals.mjs",
+      "email-directives.mjs",
+      "index.mjs",
+      "openclaw.plugin.json",
+      "package.json",
+    ]);
     expect(readConfig().plugins?.entries?.[PLUGIN_ID]).toEqual({ enabled: true });
-    expect(r.stdout).toContain("reply_payload_sending registered");
+    expect(r.stdout).toContain("reply_payload_sending and before_dispatch registered");
   });
 
   it("copies the real plugin, not a placeholder", () => {
@@ -216,7 +230,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
   it("verifies the plugin LOADED the first time it is installed", () => {
     const r = run();
     expect(calls()).toContain(`plugins inspect ${PLUGIN_ID} --runtime --json`);
-    expect(r.stdout).toContain("reply_payload_sending registered");
+    expect(r.stdout).toContain("reply_payload_sending and before_dispatch registered");
   });
 
   it("does NOT pay for the runtime check on an ordinary gateway restart", () => {
@@ -269,7 +283,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // and crash for ever is the delay this file's header exists to prevent.
     stubOpenclaw(loadedInspection(["gateway_start"]));
     const first = run();
-    expect(first.stderr).toMatch(/WARNING.*did not register reply_payload_sending/);
+    expect(first.stderr).toMatch(/WARNING.*did not register both of its hooks/);
     writeFileSync(path.join(dir, "calls.log"), "");
     const second = run();
     // Silent it is not — only cheap.
@@ -285,7 +299,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     writeFileSync(path.join(dir, "calls.log"), "");
     const r = run();
     expect(calls()).toContain("plugins inspect");
-    expect(r.stderr).toMatch(/WARNING.*did not register reply_payload_sending/);
+    expect(r.stderr).toMatch(/WARNING.*did not register both of its hooks/);
   });
 
   it("asks again inside the window when the plugin's own bytes change", () => {
@@ -302,7 +316,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     stubOpenclaw(loadedInspection(["gateway_start"]));
     run();
     expect(existsSync(attemptStamp())).toBe(true);
-    stubOpenclaw(loadedInspection(["reply_payload_sending"]));
+    stubOpenclaw(loadedInspection(BOTH_HOOKS));
     ageAttempt(86_401);
     run();
     expect(existsSync(attemptStamp())).toBe(false);
@@ -334,7 +348,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     writeFileSync(path.join(dir, "calls.log"), "");
     const r = run();
     expect(calls()).toContain("plugins inspect");
-    expect(r.stdout).toContain("reply_payload_sending registered");
+    expect(r.stdout).toContain("reply_payload_sending and before_dispatch registered");
   });
 
   it("repairs a lost extensions tree without paying for the check again", () => {
@@ -347,7 +361,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     rmSync(path.join(openclawHome, "extensions"), { recursive: true, force: true });
     writeFileSync(path.join(dir, "calls.log"), "");
     const r = run();
-    expect(installed()).toHaveLength(4);
+    expect(installed()).toHaveLength(5);
     expect(calls()).not.toContain("plugins inspect");
     expect(r.stdout).toContain("unchanged since it was last verified");
   });
@@ -358,8 +372,20 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     stubOpenclaw(loadedInspection(["gateway_start"]));
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stderr).toMatch(/WARNING.*did not register reply_payload_sending/);
+    expect(r.stderr).toMatch(/WARNING.*did not register both of its hooks/);
     expect(r.stderr).toContain("gateway_start");
+  });
+
+  it("warns when only one of the two hooks registered, and names the missing one", () => {
+    // The half-loaded box is the one a count would call healthy. A plugin that
+    // registered the outbound strip and not the inbound claim leaves the owner
+    // typing "send AB2CD" at an agent that will explain it cannot help — with
+    // nothing in the log to say why.
+    stubOpenclaw(loadedInspection(["reply_payload_sending"]));
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toMatch(/WARNING.*did not register both of its hooks/);
+    expect(r.stderr).toContain("missing=before_dispatch");
   });
 
   it("carries the core's own diagnostic when the plugin did not load", () => {
@@ -381,13 +407,13 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // is working perfectly.
     stubOpenclaw(
       `cat <<'JSON'\n${JSON.stringify({
-        plugin: { id: PLUGIN_ID, status: "loaded", hookCount: 1, hookNames: [] },
-        typedHooks: [{ name: "reply_payload_sending" }],
+        plugin: { id: PLUGIN_ID, status: "loaded", hookCount: 2, hookNames: [] },
+        typedHooks: BOTH_HOOKS.map((name) => ({ name })),
         diagnostics: [],
       })}\nJSON`,
     );
     const r = run();
-    expect(r.stdout).toContain("reply_payload_sending registered");
+    expect(r.stdout).toContain("reply_payload_sending and before_dispatch registered");
   });
 
   it("survives an openclaw that is missing, and still exits 0", () => {
@@ -596,12 +622,12 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // where it was. Removing it there would turn "the box keeps stripping with
     // what it already had" into "no plugin, and a config that names one".
     run();
-    expect(installed()).toHaveLength(4);
+    expect(installed()).toHaveLength(5);
     const bare = mkdtempSync(path.join(tmpdir(), "oc-unreadable-src-"));
     try {
       const src = path.join(bare, "scripts", "openclaw-plugins", PLUGIN_ID);
       mkdirSync(src, { recursive: true });
-      for (const f of ["openclaw.plugin.json", "package.json", "index.mjs", "email-directives.mjs"]) {
+      for (const f of ["openclaw.plugin.json", "package.json", "index.mjs", "email-directives.mjs", "email-approvals.mjs"]) {
         writeFileSync(path.join(src, f), "x");
         chmodSync(path.join(src, f), 0o000);
       }
@@ -609,7 +635,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
       expect(r.status).toBe(0);
       expect(r.stderr).toMatch(/WARNING: could not read .* plugin sources/);
       expect(r.stderr).toContain("leaving whatever is already installed in place");
-      expect(installed()).toHaveLength(4);
+      expect(installed()).toHaveLength(5);
     } finally {
       rmSync(bare, { recursive: true, force: true });
     }
@@ -708,7 +734,7 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     // on a box whose only real problem is a full /tmp.
     const r = run(REPO, "2026.8.1", { TMPDIR: path.join(dir, "no-such-tmpdir") });
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain("reply_payload_sending registered");
+    expect(r.stdout).toContain("reply_payload_sending and before_dispatch registered");
     expect(r.stderr).not.toMatch(/may not be discovered/);
   });
 
