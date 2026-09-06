@@ -129,12 +129,25 @@ export async function set(key: string, value: unknown): Promise<void> {
  * land a config write between them. It says nothing about another process
  * writing the same file — the rename in `writeConfig` is what covers that.
  *
- * Replaces only. To delete a key, `set` it to `undefined`.
+ * Replaces only, and REFUSES a value JSON would drop rather than treating it as
+ * `set` does. `JSON.stringify` omits a key whose value is `undefined`, and a
+ * function or a symbol identically, so accepting one would rename a config
+ * WITHOUT the key over the one that had it — and the caller, handed the
+ * predecessor and no error, would read that as the switch having been made.
+ * The test is `JSON.stringify(value) === undefined`, which is the property that
+ * actually matters, rather than an enumeration of the values that have it. To
+ * delete a key, `set` it to `undefined`.
  *
  * Same strict read as `set`, for the same reason: a write over a store nobody
  * can read must throw rather than replace it with the one key being saved.
  */
 export async function swap(key: string, value: unknown): Promise<unknown> {
+  // Ahead of the read, so a value that cannot be stored costs no file access.
+  // `JSON.stringify` throws on a BigInt or a cycle, which `writeConfig` would
+  // have done anyway — here it happens before anything is opened.
+  if (JSON.stringify(value) === undefined) {
+    throw new TypeError(`config-store: swap(${key}) replaces, it cannot delete — use set()`);
+  }
   const config = readConfigStrict();
   const previous = config[key];
   config[key] = value;

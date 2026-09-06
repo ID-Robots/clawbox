@@ -150,6 +150,51 @@ describe("config-store", () => {
       await expect(configStore.swap("telegram_bot_token", "111:x")).rejects.toThrow();
       expect(await fs.readFile(CONFIG_PATH, "utf-8")).toBe("{ half written");
     });
+
+    it("refuses `undefined` instead of quietly REMOVING the key", async () => {
+      // `swap` replaces; it does not delete. `JSON.stringify` drops a key whose
+      // value is `undefined`, so the rename would have written a config without
+      // it — and the caller, handed the predecessor and no error, would read
+      // that as a successful switch. `setActiveHarness` losing `active_harness`
+      // that way leaves the box with no recorded harness while the route
+      // reports the change made.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "hermes", keep: "kept" }), "utf-8");
+
+      await expect(configStore.swap("active_harness", undefined)).rejects.toThrow(TypeError);
+      const content = JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"));
+      expect(content).toEqual({ active_harness: "hermes", keep: "kept" });
+    });
+
+    it("refuses every OTHER value JSON drops the same way", async () => {
+      // `undefined` is not special — a function and a symbol are omitted by
+      // `JSON.stringify` identically, with the identical outcome: the key gone
+      // from the file, the predecessor returned, no error. The guard tests the
+      // property, so this list is what the property covers rather than a second
+      // enumeration to keep in step.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "hermes" }), "utf-8");
+
+      await expect(configStore.swap("active_harness", () => "hermes")).rejects.toThrow(TypeError);
+      await expect(configStore.swap("active_harness", Symbol("hermes"))).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ active_harness: "hermes" });
+    });
+
+    it("lets neither of two overlapping swaps read a predecessor the other replaced", async () => {
+      // The property the whole fix rests on, and the one nothing else pins: the
+      // read and the write are in the SAME event-loop turn, so the second call
+      // cannot see the value the first one started from. Move this module to
+      // `fs/promises` — a natural cleanup, since it is already `async` — and an
+      // `await` appears between them, both swaps answer "openclaw", the route
+      // concludes nothing moved and skips the reload. That is TASK-715 exactly.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "openclaw" }), "utf-8");
+
+      // Deliberately NOT awaited in between.
+      const first = configStore.swap("active_harness", "hermes");
+      const second = configStore.swap("active_harness", "openclaw");
+
+      expect(await first).toBe("openclaw");
+      expect(await second).toBe("hermes");
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8")).active_harness).toBe("openclaw");
+    });
   });
 
   describe("setMany", () => {
