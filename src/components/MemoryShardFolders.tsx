@@ -49,11 +49,20 @@ export default function MemoryShardFolders({ onBusyChange }: { onBusyChange?: (b
   const [busy, setBusy] = useState<Busy | null>(null);
   const [error, setError] = useState<string | null>(null);
   const browseAbort = useRef<AbortController | null>(null);
+  // Bumped by every write that landed. A read that BEGAN before a write is
+  // answered from the list as it was then, and applied late it would put that
+  // older list over the write's own answer — the folder just added gone
+  // from the card until the next mount. So a read is applied only while no
+  // write has landed since it started.
+  const sourcesRevision = useRef(0);
 
   const loadSources = useCallback(async () => {
+    const revision = sourcesRevision.current;
     try {
       const res = await fetch("/setup-api/clawkeep/memory/sources");
-      if (res.ok) setSources(((await res.json()) as SourcesAnswer).paths ?? []);
+      if (!res.ok) return;
+      const paths = ((await res.json()) as SourcesAnswer).paths ?? [];
+      if (revision === sourcesRevision.current) setSources(paths);
     } catch {
       // An unreadable list is an empty one here; the controls still work.
     }
@@ -97,6 +106,7 @@ export default function MemoryShardFolders({ onBusyChange }: { onBusyChange?: (b
       });
       const out = (await res.json().catch(() => null)) as SourcesAnswer | null;
       if (!res.ok) throw new Error(out?.error || t(fallbackKey));
+      sourcesRevision.current += 1;
       setSources(out?.paths ?? []);
       return true;
     } catch (err) {

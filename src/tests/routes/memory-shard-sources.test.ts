@@ -37,7 +37,12 @@ const cli = vi.hoisted(() => ({
   delayMs: 0,
   failNext: false,
   unreadable: false,
-  reset() { this.extraPaths = []; this.writes = []; this.delayMs = 0; this.failNext = false; this.unreadable = false; },
+  /** The config turns unreadable the moment the next write has landed. */
+  unreadableAfterWrite: false,
+  reset() {
+    this.extraPaths = []; this.writes = []; this.delayMs = 0;
+    this.failNext = false; this.unreadable = false; this.unreadableAfterWrite = false;
+  },
 }));
 vi.mock("@/lib/openclaw-config", async () => {
   const actual = await vi.importActual<typeof import("@/lib/openclaw-config")>("@/lib/openclaw-config");
@@ -61,11 +66,20 @@ vi.mock("@/lib/openclaw-config", async () => {
         cli.writes.push(next);
         cli.extraPaths = next;
       }
+      if (cli.unreadableAfterWrite) {
+        cli.unreadableAfterWrite = false;
+        cli.unreadable = true;
+      }
     }),
   };
 });
 
 const switchToLocalEmbeddings = vi.hoisted(() => vi.fn(async () => {}));
+const invalidateMemoryStatusCache = vi.hoisted(() => vi.fn(() => {}));
+vi.mock("@/lib/clawkeep-memory", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
+  return { ...actual, invalidateMemoryStatusCache };
+});
 vi.mock("@/lib/memory-shard", async () => {
   const actual = await vi.importActual<typeof import("@/lib/memory-shard")>("@/lib/memory-shard");
   return { ...actual, switchToLocalEmbeddings };
@@ -74,6 +88,7 @@ vi.mock("@/lib/memory-shard", async () => {
 afterEach(() => {
   vi.mocked(hasOwnerSession).mockReset().mockResolvedValue(false);
   switchToLocalEmbeddings.mockClear();
+  invalidateMemoryStatusCache.mockClear();
   cli.reset();
 });
 
@@ -216,6 +231,28 @@ describe("folder writes are serialised (ms-findings F-A)", () => {
     expect(await mutateExtraPaths((current) => [...current, "/home/owner/b"])).toEqual(["/home/owner/a", "/home/owner/b"]);
   });
 
+  it("answers the written list when only the read-back after a landed write fails", async () => {
+    // The pre-write read failing means nothing was touched; the read-back
+    // failing means the CLI has already saved the list. The two must not
+    // share an answer: reported as `read_failed`, a folder that IS on disk
+    // would be shown as not added (CodeRabbit on PR #758).
+    const { mutateExtraPaths, ExtraPathsUnreadableError } = await import("@/lib/memory-shard");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    cli.extraPaths = ["/home/owner/a"];
+    cli.unreadableAfterWrite = true;
+
+    const answered = mutateExtraPaths((current) => [...current, "/home/owner/b"]);
+    await expect(answered).resolves.toEqual(["/home/owner/a", "/home/owner/b"]);
+    expect(cli.writes).toEqual([["/home/owner/a", "/home/owner/b"]]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not be read back"), expect.any(Error));
+
+    // Still unreadable for the NEXT mutation, whose pre-write read is the
+    // one that must refuse.
+    await expect(mutateExtraPaths((current) => [...current, "/home/owner/c"])).rejects.toBeInstanceOf(ExtraPathsUnreadableError);
+    expect(cli.writes).toHaveLength(1);
+    warn.mockRestore();
+  });
+
   it("does not let a mutation whose write threw block the next one", async () => {
     const { mutateExtraPaths } = await import("@/lib/memory-shard");
     cli.extraPaths = [];
@@ -294,6 +331,24 @@ describe("folder writes are serialised (ms-findings F-A)", () => {
       const ok = await DELETE(new NextRequest(url("sources"), { method: "DELETE", body: JSON.stringify({ path: "/home/owner/old" }) }));
       expect(ok.status).toBe(200);
       expect(await ok.json()).toEqual({ paths: [] });
+    });
+
+    it("answers success, with the folder in the list, when the write landed and only the read-back failed", async () => {
+      vi.mocked(hasOwnerSession).mockResolvedValue(true);
+      const { NextRequest } = await import("next/server");
+      const { POST } = await import("@/app/setup-api/clawkeep/memory/sources/route");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      cli.extraPaths = ["/home/owner/old"];
+      cli.unreadableAfterWrite = true;
+
+      const add = await POST(new NextRequest(url("sources"), { method: "POST", body: JSON.stringify({ path: docs }) }));
+      expect(add.status).toBe(200);
+      const real = fs.realpathSync(docs);
+      expect(await add.json()).toEqual({ paths: ["/home/owner/old", real] });
+      // The list changed, so the status reading it feeds is stale.
+      expect(invalidateMemoryStatusCache).toHaveBeenCalledTimes(1);
+      expect(cli.extraPaths).toEqual(["/home/owner/old", real]);
+      warn.mockRestore();
     });
 
     it("answers read_failed and writes nothing while openclaw.json cannot be read", async () => {

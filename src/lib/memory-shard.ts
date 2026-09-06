@@ -153,7 +153,8 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
  * when the two are the same (an idempotent add or a remove of a folder that
  * is not there costs no CLI spawn and no gateway restart). Answers the list
  * as read back after the write, so a caller reports what is on disk rather
- * than what it asked for.
+ * than what it asked for — or, when only that read-back fails, the list that
+ * was written, which is what is on disk then.
  */
 export async function mutateExtraPaths(
   fn: (current: string[]) => string[] | Promise<string[]>,
@@ -164,8 +165,19 @@ export async function mutateExtraPaths(
     if (sameList(current, next)) return current;
     await writeExtraPaths(next);
     // Strict here too: a lenient read-back would answer `[]` over the list
-    // just written, and a retry costs nothing when the list already matches.
-    return readExtraPathsForWrite();
+    // just written. But a read-back that FAILS is not a failed mutation —
+    // the CLI has validated and saved `next` by now — so it is not the
+    // pre-write `ExtraPathsUnreadableError` either: that one means "nothing
+    // was touched", and the route answers it as such. Reported that way, a
+    // folder that IS on disk would be shown as not added and the status
+    // cache left warm over a changed identity. The written list is the
+    // truth here, so it is answered, and the read-back failure logged.
+    try {
+      return await readExtraPathsForWrite();
+    } catch (err) {
+      console.warn("[memory-shard] extraPaths written but could not be read back; answering the written list:", err);
+      return next;
+    }
   });
   // The tail never rejects: a failed write is this caller's to report, not
   // the next caller's to inherit.

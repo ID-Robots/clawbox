@@ -76,6 +76,33 @@ async function rearmDeviceLocalSchedules(): Promise<void> {
   }
 }
 
+/**
+ * ONE transition at a time.
+ *
+ * A transition is several awaited steps over SHARED state — the env file the
+ * root step reads, the three store keys, the OS, the process zone and the
+ * schedulers — and TimezoneAdopter fires this route from every open desktop
+ * tab, so two of them overlap in practice. Unserialised, a second request
+ * could replace `timezone.env` before the first one's root step read it: the
+ * OS would land on the second zone while the first request put ITS zone into
+ * the process and re-armed the schedules in it, and the last request to
+ * finish decided which zone the applied marker named. Each step was atomic on
+ * its own; the sequence was not. Queued here, in process, each transition
+ * reads the state the previous one left, an identical zone from a second tab
+ * is answered `changed: false` off that state rather than re-run, and the
+ * last zone asked for is the one every layer ends on.
+ *
+ * The tail never rejects — a transition that threw is its caller's 500, not
+ * the next caller's — the same shape as `mutateExtraPaths`.
+ */
+let transitionQueue: Promise<void> = Promise.resolve();
+
+function runTransition<T>(run: () => Promise<T>): Promise<T> {
+  const turn = transitionQueue.then(run);
+  transitionQueue = turn.then(() => undefined, () => undefined);
+  return turn;
+}
+
 export async function GET() {
   const state = await readState();
   return NextResponse.json({
@@ -133,8 +160,16 @@ export async function POST(request: Request) {
     );
   }
 
-  const state = await readState();
   const adopting = body.adopt === true;
+  return runTransition(() => transition(tz, adopting));
+}
+
+/**
+ * Everything from reading the recorded state to the answer, run under
+ * `runTransition` so no two requests interleave their steps.
+ */
+async function transition(tz: string, adopting: boolean): Promise<NextResponse> {
+  const state = await readState();
 
   // ADOPTION is a repair, not a sync. The desktop offers the browser's zone on
   // every load so a box that shipped before this existed heals on the owner's

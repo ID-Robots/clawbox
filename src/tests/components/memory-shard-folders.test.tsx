@@ -12,7 +12,7 @@
  * these tests match on; the English behind the new keys is pinned once.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import MemoryShardFolders from "@/components/MemoryShardFolders";
 import MemoryShardSettingsPanel from "@/components/MemoryShardSettingsPanel";
 import { clawkeepTranslations } from "@/lib/clawkeep-translations";
@@ -31,6 +31,10 @@ let sources: string[];
 let writes: { method: string; path: string }[];
 /** An in-flight write waits on this before answering; null answers at once. */
 let gate: { promise: Promise<void>; release: () => void } | null;
+/** The mount read waits on this before answering, with the list AS IT WAS when the read began. */
+let readGate: { promise: Promise<void>; release: () => void } | null;
+/** How many mount reads have been answered. */
+let readsAnswered: number;
 /** The next write's refusal: a status and a body, or no body at all. */
 let refuse: { status: number; body: unknown } | null;
 
@@ -47,7 +51,12 @@ function installFetch() {
       new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 
     if (url.startsWith("/setup-api/clawkeep/memory/sources")) {
-      if (!init?.method) return json({ paths: sources });
+      if (!init?.method) {
+        const asRead = [...sources];
+        if (readGate) await readGate.promise;
+        readsAnswered += 1;
+        return json({ paths: asRead });
+      }
       const body = JSON.parse(String(init.body)) as { path: string };
       writes.push({ method: init.method, path: body.path });
       if (gate) await gate.promise;
@@ -72,6 +81,8 @@ beforeEach(() => {
   sources = [A, B];
   writes = [];
   gate = null;
+  readGate = null;
+  readsAnswered = 0;
   refuse = null;
   installFetch();
 });
@@ -138,6 +149,29 @@ describe("MemoryShardFolders", () => {
     await waitFor(() => expect(screen.queryByTestId("memory-shard-picker")).not.toBeInTheDocument());
     expect(screen.getByTestId("memory-shard-sources").textContent).toContain(PICKED);
     expect(writes).toEqual([{ method: "POST", path: PICKED }]);
+  });
+
+  it("keeps a write's answer over a mount read that lands after it", async () => {
+    // The read that starts on mount is answered from the list as it was
+    // then. Landing AFTER an add succeeded, it used to put that older list
+    // over the add's own answer — the folder just added gone from the card
+    // until the next mount (CodeRabbit on PR #758).
+    readGate = deferred();
+    render(<MemoryShardFolders />);
+    await openPicker();
+    fireEvent.click(screen.getByTestId("memory-shard-pick"));
+    await waitFor(() => expect(screen.getByTestId("memory-shard-sources").textContent).toContain(PICKED));
+    expect(writes).toEqual([{ method: "POST", path: PICKED }]);
+
+    readGate.release();
+    await waitFor(() => expect(readsAnswered).toBe(1));
+    // Let the read's answer be applied — or, before the fix, mis-applied.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+
+    const list = screen.getByTestId("memory-shard-sources").textContent;
+    expect(list).toContain(PICKED);
+    expect(list).toContain(A);
+    expect(list).toContain(B);
   });
 
   it("tells its host when a write starts and when it is answered, so a control the host owns can wait too", async () => {

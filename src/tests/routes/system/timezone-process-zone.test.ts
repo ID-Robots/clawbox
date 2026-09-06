@@ -26,8 +26,8 @@ import { saveEnv } from "@/tests/helpers/env";
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-timezone-process-tests-${process.pid}-${Date.now()}`);
 
 const { getMock, setMock } = vi.hoisted(() => ({
-  getMock: vi.fn(async () => undefined as unknown),
-  setMock: vi.fn(async () => {}),
+  getMock: vi.fn<(key: string) => Promise<unknown>>(async () => undefined),
+  setMock: vi.fn<(key: string, value: unknown) => Promise<void>>(async () => {}),
 }));
 
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
@@ -144,6 +144,65 @@ describe("POST /setup-api/system/timezone reaches the running web server", () =>
       expect.stringContaining("could not re-arm the ClawKeep backup scheduler"),
       expect.any(Error),
     );
+    expect(mockRefreshMemory).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs two overlapping requests one after the other, each root step reading its own zone", async () => {
+    // TimezoneAdopter fires this route from every open tab. Unserialised, the
+    // second request replaced data/timezone.env before the first one's root
+    // step read it: the OS landed on the second zone while the first request
+    // put ITS zone into the process and re-armed the schedules in it
+    // (CodeRabbit on PR #758). Here the root step reads the env file the way
+    // step_set_timezone does, slowly, and the store writes take a moment,
+    // which is exactly the window the interleaving needs.
+    const envPath = path.join(TEST_ROOT, "data", "timezone.env");
+    const seen: Array<{ env: string; processZone: string | undefined }> = [];
+    mockStartRootStep.mockImplementation(async () => {
+      seen.push({ env: (await fs.readFile(envPath, "utf-8")).trim(), processZone: process.env.TZ });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    setMock.mockImplementation(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+
+    const mod = await import("@/app/setup-api/system/timezone/route");
+    const [first, second] = await Promise.all([
+      mod.POST(post({ timezone: "Europe/Sofia" })),
+      mod.POST(post({ timezone: "America/New_York" })),
+    ]);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    // Each OS leg was given the zone of the request it belongs to, and the
+    // second began only once the first had reached the process.
+    expect(seen).toEqual([
+      { env: "TIMEZONE=Europe/Sofia", processZone: "UTC" },
+      { env: "TIMEZONE=America/New_York", processZone: "Europe/Sofia" },
+    ]);
+    // The last zone asked for is the one every layer ends on.
+    expect(process.env.TZ).toBe("America/New_York");
+    const appliedWrites = setMock.mock.calls.filter(([key]) => key === "timezone_applied").map(([, value]) => value);
+    expect(appliedWrites.at(-1)).toBe("America/New_York");
+    expect(mockRefreshMemory).toHaveBeenCalledTimes(2);
+  });
+
+  it("answers a second tab's identical zone off the state the first one left, without re-running it", async () => {
+    // Both tabs adopt the same browser zone. Queued, the second reads the
+    // first's applied marker and is `changed: false` — no second env write,
+    // root step or scheduler re-arm for a zone that has just landed.
+    const store = new Map<string, unknown>();
+    getMock.mockImplementation(async (key: string) => store.get(key));
+    setMock.mockImplementation(async (key: string, value: unknown) => {
+      if (value === undefined) store.delete(key); else store.set(key, value);
+    });
+
+    const mod = await import("@/app/setup-api/system/timezone/route");
+    const [first, second] = await Promise.all([
+      mod.POST(post({ timezone: "Europe/Sofia", adopt: true })),
+      mod.POST(post({ timezone: "Europe/Sofia", adopt: true })),
+    ]);
+
+    expect(await first.json()).toMatchObject({ success: true, changed: true, applied: true });
+    expect(await second.json()).toMatchObject({ success: true, changed: false, timezone: "Europe/Sofia" });
+    expect(mockStartRootStep).toHaveBeenCalledTimes(1);
     expect(mockRefreshMemory).toHaveBeenCalledTimes(1);
   });
 
