@@ -27,6 +27,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 
 import { parseApprovalReply } from "@/lib/email-approval-reply";
@@ -133,7 +134,6 @@ describe("the approval reply shape, on both harnesses and on the device", () => 
     // A plugin that learned the verbs would be a second place to decide what
     // "no" means. Asserted by reading the shipped files rather than by trusting
     // the comment that says so.
-    const fs = require("node:fs") as typeof import("node:fs");
     for (const file of [MJS_PLUGIN, path.join(PY_PLUGIN_DIR, "approvals.py")]) {
       const source = fs.readFileSync(file, "utf-8");
       // The words appear in prose in both headers; what must not appear is a

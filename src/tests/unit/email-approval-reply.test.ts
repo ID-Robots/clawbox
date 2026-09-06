@@ -261,6 +261,36 @@ describe("delete", () => {
   });
 });
 
+// ── Telling the person what happened ─────────────────────────────────────────
+
+describe("the verdict", () => {
+  it("goes to whoever answered, when the caller cannot render it itself", async () => {
+    const { code } = await offered();
+    vi.mocked(ownerSend.sendOwnerTelegramText).mockClear();
+
+    const result = await reply.applyReplyApproval({
+      senderId: OWNER,
+      text: `send ${code}`,
+      deliverVerdict: true,
+    });
+
+    expect(result.handled).toBe(true);
+    // Exactly one message, to the person who typed — not a fan-out to the
+    // household about a decision one of them made.
+    expect(vi.mocked(ownerSend.sendOwnerTelegramText).mock.calls).toEqual([[OWNER, result.reply]]);
+  });
+
+  it("is returned rather than posted when the caller renders replies", async () => {
+    const { code } = await offered();
+    vi.mocked(ownerSend.sendOwnerTelegramText).mockClear();
+
+    const result = await reply.applyReplyApproval({ senderId: OWNER, text: `send ${code}` });
+
+    expect(result.reply).toContain("Sent to 1 recipient");
+    expect(vi.mocked(ownerSend.sendOwnerTelegramText)).not.toHaveBeenCalled();
+  });
+});
+
 // ── What every surface then says ─────────────────────────────────────────────
 
 describe("the record every surface reads", () => {

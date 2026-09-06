@@ -48,7 +48,6 @@
 // `handled: false` and the message goes on to the agent, which can say which
 // draft it means. Sizing and alphabet are in email-approval-prompts.ts.
 
-import { getEmailCredentials } from "@/lib/email-config";
 import { draftFingerprint, type PendingEmail } from "@/lib/email-pending";
 import {
   buildPromptText,
@@ -62,7 +61,6 @@ import {
   claimPrompt,
   createPrompt,
   findPromptByCode,
-  recordPromptMessage,
   removePromptsForDraft,
 } from "@/lib/email-approval-prompts";
 import { sendOwnerTelegramText } from "@/lib/telegram-owner-send";
@@ -182,15 +180,15 @@ export async function offerReplyApproval(draft: PendingEmail): Promise<ReplyOffe
       return { kind: "no_owner_chat" };
     }
 
+    // NOTHING IS RECORDED ABOUT WHERE IT WENT, deliberately. `prompt.messages`
+    // exists so the button path can go back and EDIT the keyboard it posted;
+    // this is a plain message with no keyboard, so there is nothing to edit and
+    // a placeholder message id would only give `clearApprovalKeyboard` a
+    // stranger's message to try. The verdict goes to whoever answers, which is
+    // both simpler and more exact than replaying the fan-out.
     let delivered = 0;
     for (const chatId of chats) {
-      if (await sendOwnerTelegramText(chatId, text)) {
-        // There is no message id to record — this is a plain send, not the
-        // inline keyboard the button path edits later — but the CHAT is worth
-        // keeping: it is where the verdict goes.
-        recordPromptMessage(prompt.handle, { chatId, messageId: 1 });
-        delivered += 1;
-      }
+      if (await sendOwnerTelegramText(chatId, text)) delivered += 1;
     }
 
     if (delivered === 0) {
@@ -252,22 +250,9 @@ export async function applyReplyApproval(input: {
   await retireChatPrompt(prompt.draftId);
 
   const settled = await settlePrompt(prompt, parsed.verb === "approve");
-  if (input.deliverVerdict) {
-    for (const message of prompt.messages) {
-      await sendOwnerTelegramText(message.chatId, settled.note).catch(() => undefined);
-    }
-  }
+  // To the person who answered, and only them: they are the one waiting to hear
+  // whether it went. A caller that renders replies itself (OpenClaw's claim
+  // carries text) asks for neither.
+  if (input.deliverVerdict) await sendOwnerTelegramText(senderId, settled.note);
   return { handled: true, reply: settled.note, outcome: settled.outcome };
-}
-
-/**
- * Is there anywhere for a reply-approval question to GO on this device?
- *
- * Asked by /email/send so the agent is told the truth about whether the owner
- * was asked at all, and by nothing else — it is not a gate, and a false here
- * only means the draft waits in Settings → Email as it always did.
- */
-export async function replyApprovalPossible(): Promise<boolean> {
-  if (!(await getEmailCredentials())) return false;
-  return (await ownerChatIds()).length > 0;
 }
