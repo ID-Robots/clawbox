@@ -197,10 +197,3 @@ export async function readProviderRunnable(): Promise<Map<string, ProviderRunnab
   }
   return verdicts;
 }
-
-/**
- * The verdict for one provider — `unknown` unless the box has a count for it.
- */
-export async function providerRunnable(provider: string): Promise<ProviderRunnable> {
-  return (await readProviderRunnable()).get(provider) ?? "unknown";
-}

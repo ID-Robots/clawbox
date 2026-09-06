@@ -53,23 +53,23 @@ describe("the recorded model count", () => {
   });
 
   it("says nothing at all about a provider with no record", async () => {
-    const { providerRunnable } = await load();
+    const { readProviderRunnable } = await load();
 
-    expect(await providerRunnable("google")).toBe("unknown");
+    expect((await readProviderRunnable()).get("google")).toBeUndefined();
   });
 
   it("expires a count older than the catalogue's refresh interval", async () => {
     writeRecord({ google: { models: 0, atMs: Date.now() - 7 * 60 * 60_000 } });
-    const { providerRunnable } = await load();
+    const { readProviderRunnable } = await load();
 
-    expect(await providerRunnable("google")).toBe("unknown");
+    expect((await readProviderRunnable()).get("google")).toBeUndefined();
   });
 
   it("treats an unusable timestamp as expired, not as fresh", async () => {
     writeRecord({ google: { models: 0, atMs: Number.NaN } });
-    const { providerRunnable } = await load();
+    const { readProviderRunnable } = await load();
 
-    expect(await providerRunnable("google")).toBe("unknown");
+    expect((await readProviderRunnable()).get("google")).toBeUndefined();
   });
 
   it("reads a corrupt record as nothing known, rather than throwing", async () => {
@@ -121,9 +121,9 @@ describe("the recorded model count", () => {
     // answer to "where is the store" is the same as to a missing file.
     dataDir = "";
     vi.resetModules();
-    const { recordProviderEnumeration, providerRunnable } = await load();
+    const { recordProviderEnumeration, readProviderRunnable } = await load();
 
     await expect(recordProviderEnumeration("google", 0)).resolves.toBeUndefined();
-    expect(await providerRunnable("google")).toBe("unknown");
+    expect([...(await readProviderRunnable())]).toEqual([]);
   });
 });
