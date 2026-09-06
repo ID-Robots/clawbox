@@ -647,6 +647,83 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
     const tts = cfg.tts as { providers?: Record<string, SpeechEntry> } | undefined;
     expect(tts?.providers?.openai).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
   });
+
+  /**
+   * TASK-743 — the DOWNGRADE half only ever looked in the v2 home, and the box
+   * it was written for is exactly the one whose entry is not there.
+   *
+   * A box that was Max under a 2026.7 core wrote its stamped entry into
+   * `messages.tts.providers.openai`. Upgrade the core and drop the plan to Pro
+   * before the loader migration has moved that block — which is the ordinary
+   * order, and is guaranteed on a box whose `doctor --fix` aborts before its
+   * state migrations, the same thing that strands the legacy image key one
+   * migration earlier in this file — and this arm read `cfg["tts"]`, found
+   * nothing, and left our own dead entry in place: every spoken reply buying a
+   * 403 round trip while the Voice panel calls the cloud voice configured.
+   *
+   * Deleting from the legacy home is safe where WRITING to it is not: a
+   * removal cannot create the dual-home shape the arming half stands down
+   * over, and it leaves the core's own migration less to move rather than more.
+   */
+  describe("taking the cloud voice back from wherever the entry actually is", () => {
+    const OURS = { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED };
+
+    it("takes back a stamped entry stranded in the legacy home", () => {
+      const seeded = { messages: { tts: { providers: { openai: { ...OURS } } } } };
+
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+
+      expect(changed).toBe(true);
+      const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
+      expect(messages.tts.providers.openai).toBeUndefined();
+      // The rest of the legacy block is untouched — this arm removes one entry,
+      // it does not migrate or tidy the home it found it in.
+      expect(messages.tts.providers).toEqual({});
+    });
+
+    it("takes back an entry in EITHER home when a box carries both", () => {
+      const seeded = {
+        tts: { providers: { openai: { ...OURS } } },
+        messages: { tts: { providers: { openai: { ...OURS } } } },
+      };
+
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+
+      expect(changed).toBe(true);
+      expect((cfg.tts as { providers: Record<string, SpeechEntry> }).providers.openai).toBeUndefined();
+      const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
+      expect(messages.tts.providers.openai).toBeUndefined();
+    });
+
+    it("leaves an owner's own entry in the legacy home alone", () => {
+      // The extra home widens WHERE this arm looks, never WHAT it may delete:
+      // the stamp is still the only thing that opens the door, and this is the
+      // one place in the file that destroys configuration.
+      const theirs = { baseUrl: "https://their.own/voice", model: "x" };
+      const seeded = { messages: { tts: { providers: { openai: { ...theirs } } } } };
+
+      const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+
+      expect(changed).toBe(false);
+      const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
+      expect(messages.tts.providers.openai).toEqual(theirs);
+    });
+
+    it("still reads only the legacy home on a v1 core", () => {
+      // `cfg["tts"]` is not a home a 2026.7 core has, and reading it there
+      // would be this arm inventing one.
+      const seeded = {
+        tts: { providers: { openai: { ...OURS } } },
+        messages: { tts: { providers: { openai: { ...OURS } } } },
+      };
+
+      const { cfg } = migrate(seeded, { deviceTier: PRO_DEVICE_TIER });
+
+      expect((cfg.tts as { providers: Record<string, SpeechEntry> }).providers.openai).toEqual(OURS);
+      const messages = cfg.messages as { tts: { providers: Record<string, SpeechEntry> } };
+      expect(messages.tts.providers.openai).toBeUndefined();
+    });
+  });
 });
 
 /**

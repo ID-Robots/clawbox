@@ -52,7 +52,7 @@ vi.mock("@/lib/hermes-config-cache", () => ({
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(), HERMES_BIN: "/usr/bin/hermes" }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({ readConfig: vi.fn() }));
-vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
+vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn(async () => {}) }));
 
 /** Every `systemctl` argv the module forked, so the claim can name the unit. */
 function systemctlCalls(): string[][] {

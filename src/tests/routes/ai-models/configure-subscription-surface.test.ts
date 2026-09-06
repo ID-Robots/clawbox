@@ -50,6 +50,13 @@ vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
   setMany: vi.fn(),
+  // `get`/`set` are how `@/lib/clawai-credential-refusal` reads and clears the
+  // persisted ClawBox AI credential refusal. Both of its calls sit inside a
+  // catch that answers a DEFAULT, so omitting them here would not fail this
+  // file — it would quietly make every case take the "no refusal on record"
+  // branch. Guarded by openclaw-config-mock-completeness.test.ts.
+  get: vi.fn(async () => undefined),
+  set: vi.fn(async () => {}),
 }));
 
 vi.mock("@/lib/clawkeep", () => ({ unpairLocal: vi.fn() }));
@@ -459,7 +466,22 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     }));
 
     expect(res.status).toBe(200);
-    expect(mockSurfaceRead).not.toHaveBeenCalled();
+    // Still every read this route makes, with ONE file named — not a filter
+    // over the interesting ones, which would stop catching a regression that
+    // made this save read some other cache.
+    //
+    // The assertion was a bare `not.toHaveBeenCalled()` and held only because
+    // this file's `@/lib/config-store` factory omitted `get`. The mechanism,
+    // measured rather than guessed (TASK-743): `configureModel` calls
+    // `setProviderEnabled(ocProvider, true)` inside a try/catch that logs and
+    // carries on, and that reaches `readProviderStatus` ->
+    // `readProviderRunnable` -> `_enumerations.json`. With `get` missing the
+    // very first hop threw, the catch swallowed it, and the whole re-enable
+    // step — not just the read — silently did not happen in any case in this
+    // file. On a box it always does.
+    expect(mockSurfaceRead.mock.calls.map(([file]) => String(file))).toEqual([
+      "/home/clawbox/clawbox/data/catalog-cache/_enumerations.json",
+    ]);
   });
 });
 

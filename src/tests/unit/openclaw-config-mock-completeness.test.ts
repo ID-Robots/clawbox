@@ -170,3 +170,90 @@ describe(`every ${MOCKED_MODULE} mock that can reach an ${NARROWED_EXPORT} narro
     ).toBeGreaterThan(20);
   });
 });
+
+/**
+ * The same hole, one module over: `@/lib/config-store`.
+ *
+ * `@/lib/clawai-credential-refusal` reads and writes the persisted ClawBox AI
+ * credential refusal through that store, and BOTH of its calls sit inside a
+ * `try` whose `catch` answers a default — deliberately, because "the store
+ * could not be read" is not "the credential was refused". That makes a missing
+ * export worse here than in the module above: `get` being `undefined` does not
+ * crash a test, it makes `clawaiCredentialRefusalOnRecord()` answer `false`
+ * for every case in the file, so the image-ops gate is never exercised and
+ * nothing says so. A green suite over an untested gate.
+ *
+ * #755 fixed exactly that by hand in three files. #756 opened it again in a
+ * fourth on the same day, and fixed it by hand too. That is the point at which
+ * a rule earns a gate.
+ *
+ * THE SCOPE IS THE HAZARD, not the import graph. Nearly every route in this
+ * repo reaches this reader transitively — the whole-graph rule the sibling
+ * above uses reports fifty files here, which is a list nobody acts on. What
+ * makes a file able to hit the wrong answer is that its own subject calls the
+ * reader, so the scope is one hop: a test that imports a module which imports
+ * `@/lib/clawai-credential-refusal` itself.
+ */
+const STORE_MODULE = "@/lib/config-store";
+const SILENT_STORE_READER = "@/lib/clawai-credential-refusal";
+/** What that reader takes off the store, and therefore what a factory must name. */
+const STORE_EXPORTS = ["get", "set"] as const;
+
+describe(`every ${STORE_MODULE} mock in front of a ${SILENT_STORE_READER} caller carries its store functions`, () => {
+  const readerFile = resolveAlias(SILENT_STORE_READER);
+
+  // The modules that call the reader directly. Their own suites, and the
+  // suites of anything that imports them, are what can silently take the
+  // default answer.
+  const callers = new Set(
+    files.filter((f) => f !== readerFile && aliasImports(read.get(f)!).includes(SILENT_STORE_READER)),
+  );
+  const exposed = new Set<string>(callers);
+  for (const caller of callers) {
+    for (const importer of importers.get(caller) ?? []) exposed.add(importer);
+  }
+
+  const offenders: string[] = [];
+  for (const file of exposed) {
+    if (!/\.test\.tsx?$/.test(file)) continue;
+    const factory = mockCall(read.get(file)!, STORE_MODULE);
+    if (!factory) continue;
+    if (factory.includes("importActual") || factory.includes("importOriginal")) continue;
+    const missing = STORE_EXPORTS.filter((name) => !new RegExp(`\\b${name}\\s*[:,)]`).test(factory));
+    if (missing.length > 0) offenders.push(`${path.relative(SRC, file)} (${missing.join(", ")})`);
+  }
+
+  it("has no factory missing them", () => {
+    expect(
+      offenders.sort(),
+      `These suites mock ${STORE_MODULE} with a factory that omits ${STORE_EXPORTS.join("/")}, and they exercise a module that reads the persisted ClawBox AI credential refusal through it. ` +
+        `Those reads are wrapped in a catch that answers a DEFAULT, so the omission does not fail the suite — it silently makes every case take the "no refusal on record" branch. ` +
+        `Add \`get\`/\`set\` to the factory (see src/tests/routes/ai-models/configure-images.test.ts), or make it a partial mock over importActual.`,
+    ).toEqual([]);
+  });
+
+  it("is actually watching something", () => {
+    // Without this, a rename of the reader would empty every set above and the
+    // gate would pass by finding nothing — the one failure a gate must not
+    // have. Both ends are pinned: the reader resolves, and it has callers whose
+    // suites mock the store.
+    expect(readerFile).not.toBeNull();
+    expect(callers.size).toBeGreaterThan(1);
+    expect(
+      [...exposed].filter((f) => /\.test\.tsx?$/.test(f) && mockCall(read.get(f)!, STORE_MODULE) !== null).length,
+    ).toBeGreaterThan(3);
+  });
+
+  it("reports a factory that omits them, in either quote form", () => {
+    // The predicate itself, over the two shapes: the sibling above learned the
+    // hard way that a mock the scanner cannot SEE is skipped rather than
+    // reported.
+    const omits = `vi.mock('${STORE_MODULE}', () => ({ getAll: vi.fn(), setMany: vi.fn() }));`;
+    const carries = `vi.mock("${STORE_MODULE}", () => ({ get: vi.fn(), set: vi.fn() }));`;
+    const seen = mockCall(omits, STORE_MODULE);
+    expect(seen).not.toBeNull();
+    expect(STORE_EXPORTS.filter((n) => !new RegExp(`\\b${n}\\s*[:,)]`).test(seen!))).toEqual(["get", "set"]);
+    expect(STORE_EXPORTS.filter((n) => !new RegExp(`\\b${n}\\s*[:,)]`).test(mockCall(carries, STORE_MODULE)!)))
+      .toEqual([]);
+  });
+});

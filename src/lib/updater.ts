@@ -1370,8 +1370,20 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
     // same rule this function already states for a validator it could not run,
     // now applied to one it could not let finish (and the `killSignal` above
     // makes that kill harder, so the two belong together).
-    if ((err as { killed?: boolean; signal?: unknown } | null)?.killed
-      || (err as { signal?: unknown } | null)?.signal) {
+    //
+    // A MAXBUFFER OVERFLOW IS THE SAME EVENT WITH NEITHER FLAG SET. Node kills
+    // the child when its stdout passes `maxBuffer`, and the error it rejects
+    // with carries `code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"` while `killed`
+    // and `signal` are both `undefined` (measured) — so the two-flag test above
+    // let a TRUNCATED buffer through to the parser. Low, because 2 MB against
+    // this payload's tens of bytes means it takes a core gone haywire to reach,
+    // and truncated JSON usually fails to parse anyway; but "usually" is the
+    // whole of the risk — `{"valid":true,"warnings":[…` cut mid-array can still
+    // slice cleanly between the first `{` and the last `}` this reader looks
+    // for, and `coreReportedMissingPlugins` would then switch the owner's
+    // plugin entries off on half a verdict.
+    const failure = err as { killed?: boolean; signal?: unknown; code?: unknown } | null;
+    if (failure?.killed || failure?.signal || failure?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
       return { accepted, payload: null };
     }
     text = commandOutput(err);

@@ -240,9 +240,10 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     // NOT gated on `hasClawaiImageRoute`, unlike Hermes, and the asymmetry is
     // real rather than an oversight. Here the picture comes from the AGENT'S
     // image provider, which is only ours by default: `ai-models/configure`
-    // leaves `agents.defaults.imageGenerationModel` alone when it already names
-    // one, so a customer who pointed it at their own provider draws pictures
-    // that never touch the ClawBox AI proxy. Probing our route and answering
+    // leaves the image-generation slot alone when it already names a model AND
+    // whenever the legacy `agents.defaults.imageGenerationModel` key is still
+    // on the box at all (TASK-743), so a customer who pointed it at their own
+    // provider draws pictures that never touch the ClawBox AI proxy. Probing our route and answering
     // false would hide a button that works — the "wrong false" this table
     // spends most of its comments avoiding.
     canGenerateImages: facts.hasClawaiToken,

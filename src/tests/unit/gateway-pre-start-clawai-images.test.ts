@@ -772,6 +772,117 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
     );
     expect(mediaImage(cfg)).toEqual({ primary: "openai/their-pick" });
   });
+
+  /**
+   * TASK-743 — the dual-home shape, on the key this file's own header names
+   * first, and link 1 of the incident TASK-737 is about.
+   *
+   * `_has_image_model` reads the legacy key as a FALLBACK when the v2 home is
+   * absent, so a box whose `agents.defaults.imageGenerationModel` names a model
+   * was never at risk. The shapes it reads as an EMPTY slot are: `{}`,
+   * `{"primary": ""}`, `{"fallbacks": []}`, a JSON `null`, a scalar — and for
+   * every one of them this block wrote `mediaModels.image` and left the legacy
+   * key sitting beside it. Measured against 2026.8.1, both homes present is
+   * `agents.defaults: Unrecognized key: "imageGenerationModel"`, exit 1 — the
+   * gateway exit 78 that kept a customer box dark for 25 hours.
+   *
+   * The guard is #751's, on the KEY rather than its contents, for the reason
+   * that comment gives about `messages.tts`: a discriminator that asked what
+   * the key HELD would go on writing the second home beside every shape that
+   * holds nothing.
+   *
+   * "Holds nothing" here means `_has_image_model`'s rule, NOT the core's. The
+   * core coerces a bare string (`hasExplicitToolModelConfig` ->
+   * `resolveAgentModelPrimaryValue`, measured on 2026.8.1), so the scalar case
+   * below is a configured model this block reads as an empty slot — which is a
+   * separate defect, out of this card and recorded in the run queue. It is
+   * listed here because the guard covers it either way, not because the core
+   * agrees that it is empty.
+   */
+  describe("a legacy image key the core has not migrated yet", () => {
+    const EMPTY_LEGACY_SHAPES: Array<[string, unknown]> = [
+      ["an empty object", {}],
+      ["an empty primary", { primary: "" }],
+      ["a whitespace primary", { primary: "   " }],
+      ["an empty fallbacks list", { fallbacks: [] }],
+      ["a null", null],
+      ["a scalar", "openai/gpt-image-1"],
+      ["a list", []],
+    ];
+
+    for (const [name, legacy] of EMPTY_LEGACY_SHAPES) {
+      it(`stands down rather than writing the v2 home beside ${name}`, () => {
+        const { cfg, log } = migrate(
+          pairedBox({ agents: { defaults: { imageGenerationModel: legacy } } }),
+          true,
+        );
+
+        // The v2 home is NOT created…
+        expect(mediaImage(cfg)).toBeUndefined();
+        // …and the legacy key is left exactly as it was, for the core's own
+        // migration to move. This block never removes it: taking it away here
+        // would be this file deciding a migration the core owns.
+        expect(imageGenerationModel(cfg)).toEqual(legacy);
+        expect(log).toContain("Skipped the ClawBox AI image model");
+      });
+    }
+
+    it("still writes the provider and the model row, so the next boot has nothing left to do", () => {
+      // Narrower than #751's stand-down on purpose: the `models[]` row has ONE
+      // home on both cores and its repair is what keeps a box bootable, so only
+      // the slot stands down.
+      const { cfg, changed } = migrate(
+        pairedBox({ agents: { defaults: { imageGenerationModel: { primary: "" } } } }),
+        true,
+      );
+
+      expect(changed).toBe(true);
+      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
+      expect(imageEntry(cfg)).toEqual({
+        id: CLAWBOX_AI_IMAGE_MODEL_ID,
+        name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
+        baseUrl: "https://clawbox.com/api/ai",
+      });
+    });
+
+    it("claims the v2 home the moment the core's migration has moved the key", () => {
+      // Standing down is never permanent — the same promise the cloud voice's
+      // guard makes. Once `doctor --fix` has moved the key, the next boot is an
+      // ordinary one.
+      const { cfg, changed, log } = migrate(pairedBox(), true);
+
+      expect(changed).toBe(true);
+      expect(mediaImage(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+      expect(imageGenerationModel(cfg)).toBeUndefined();
+      expect(log).not.toContain("Skipped the ClawBox AI image model");
+    });
+
+    it("does not stand down on a v1 core, whose only home this key is", () => {
+      // The guard is `_clawbox_v2` AND the key. On a 2026.7 box the legacy key
+      // IS the home, and standing down there would leave the image path
+      // undeclared for good.
+      const { cfg, log } = migrate(
+        pairedBox({ agents: { defaults: { imageGenerationModel: { primary: "" } } } }),
+      );
+
+      expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
+      expect(log).not.toContain("Skipped the ClawBox AI image model");
+    });
+
+    it("reports no change when the slot is all there was to write", () => {
+      // A box that already has our row and our provider, standing down on the
+      // slot, must not report a write it did not make — `changed` is what makes
+      // the boot script rewrite openclaw.json.
+      const armed = migrate(pairedBox(), true).cfg;
+      const agents = (armed.agents ?? {}) as { defaults: Record<string, unknown> };
+      delete (agents.defaults.mediaModels as Record<string, unknown>).image;
+      agents.defaults.imageGenerationModel = { primary: "" };
+
+      const { changed } = migrate(armed, true);
+
+      expect(changed).toBe(false);
+    });
+  });
 });
 
 /**
@@ -952,6 +1063,57 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     expect(mediaImage(cfg)).toBeUndefined();
     expect(imageEntry(cfg)).toBeUndefined();
     expect(both).toBeTruthy();
+  });
+
+  /**
+   * TASK-743 — an EMPTY leftover legacy key used to veto the whole take-back.
+   *
+   * `_slot_is_theirs` asked `agents_defaults.get("imageGenerationModel") is not
+   * None`, so `{}`, `{"primary": ""}`, `{"fallbacks": []}` and `[]` — the very
+   * shapes the guard above treats as holding no decision — read as the owner's
+   * image configuration and stopped #755's arm from removing anything. A box
+   * whose credential the proxy had permanently refused therefore kept the image
+   * path declared for as long as that key survived, which is the TASK-727 shape
+   * (6,554 refused calls in twelve hours).
+   *
+   * Both arms now ask ONE question, and it is deliberately WIDER for the delete
+   * than the upsert's: a bare string counts, because the core coerces one and
+   * this is the only place in the file that destroys configuration.
+   */
+  it.each<[string, unknown]>([
+    ["an empty object", {}],
+    ["an empty primary", { primary: "" }],
+    ["an empty fallbacks list", { fallbacks: [] }],
+    ["a list", []],
+  ])("takes the image path back over a leftover legacy key holding %s", (_label, leftover) => {
+    const withLeftover = JSON.parse(JSON.stringify(armedBox(true))) as Config;
+    ((withLeftover.agents as { defaults: Record<string, unknown> }).defaults)
+      .imageGenerationModel = leftover;
+
+    const { cfg, changed } = migrate(withLeftover, true, REFUSED);
+
+    expect(changed).toBe(true);
+    expect(mediaImage(cfg)).toBeUndefined();
+    expect(imageEntry(cfg)).toBeUndefined();
+    // The leftover itself is not ours to remove — only the core migrates it.
+    expect(imageGenerationModel(cfg)).toEqual(leftover);
+  });
+
+  it("still leaves a legacy key that NAMES a model, including a bare string", () => {
+    // The other side of the same predicate. A string is a configured model to
+    // the core (`hasExplicitToolModelConfig` coerces it), so it may well name
+    // our row — and a delete cannot be undone.
+    for (const theirs of [{ primary: "replicate/flux-pro" }, "replicate/flux-pro"]) {
+      const withTheirs = JSON.parse(JSON.stringify(armedBox(true))) as Config;
+      ((withTheirs.agents as { defaults: Record<string, unknown> }).defaults)
+        .imageGenerationModel = theirs;
+
+      const { cfg, changed } = migrate(withTheirs, true, REFUSED);
+
+      expect(changed).toBe(false);
+      expect(imageEntry(cfg)).toBeDefined();
+      expect(imageGenerationModel(cfg)).toEqual(theirs);
+    }
   });
 
   it("removes the models list it created rather than leaving an empty one", () => {
