@@ -1042,6 +1042,15 @@ CLAWBOX_VOICE_PROXY="$(printf '%s' "$CLAWBOX_VOICE_PROXY" | tr -d '[:space:]')"
 while [ "${CLAWBOX_VOICE_PROXY%/}" != "$CLAWBOX_VOICE_PROXY" ]; do
   CLAWBOX_VOICE_PROXY="${CLAWBOX_VOICE_PROXY%/}"
 done
+# AFTER the normalisation, not only through `${:-}`. A variable set to
+# whitespace survives `${:-}` and normalises to the empty string, and an empty
+# "our proxy" is the worst possible value here: it makes an owner's slot that
+# carries their key and NO base_url — the canonical way Hermes' generic `openai`
+# slot is used — read as ours, so the arm would overwrite their credential and
+# the withdrawal would delete it.
+if [ -z "$CLAWBOX_VOICE_PROXY" ]; then
+  CLAWBOX_VOICE_PROXY="https://clawbox.com/api/ai"
+fi
 CLAWBOX_VOICE_MODEL="gpt-4o-mini-tts"
 CLAWBOX_VOICE_PLAN=$(
   CLAWBOX_DEVICE_STORE="$PROJECT_DIR/data/config.json" \
@@ -1075,12 +1084,16 @@ PROXY = os.environ["CLAWBOX_AI_PROXY_URL"].strip().rstrip("/")
 # It exists so an entry left on an address we have since moved off is still
 # recognisably ours — which is the ONLY thing that makes a credential-blind
 # delete safe.
+# The empty string can never be a member: an unset endpoint is not an address,
+# and admitting one would make every owner slot with a key and no URL ours.
+# Defence in depth — the shell above restores the default before we get here.
 OUR_PROXIES = {
     PROXY,
     "https://clawbox.com/api/ai",
     "https://openclawhardware.dev/api/ai",
     "https://www.openclawhardware.dev/api/ai",
 }
+OUR_PROXIES.discard("")
 # Hermes' factory default, and the one selection besides "unset" that means
 # nobody has chosen: `edge` is Microsoft's cloud voice, which the box gets for
 # having expressed no opinion.

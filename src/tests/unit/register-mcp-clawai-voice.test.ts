@@ -537,6 +537,24 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     expect(configCalls()).toEqual([]);
   });
 
+  it.each([
+    ["a whitespace-only override", " "],
+    ["an override that is only slashes", "///"],
+  ])("never treats an unset endpoint as ours, given %s", (_label, override) => {
+    // An empty "our proxy" is the worst value this binding can take: it makes
+    // an owner's slot carrying their key and NO base_url — the canonical way
+    // Hermes' generic `openai` slot is used — read as ours, so the arm would
+    // overwrite their credential and the withdrawal would delete it.
+    writeStore({ clawai_token: TOKEN, clawai_tier: "flash" });
+    writeYaml(`${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    api_key: sk-theirs\n`);
+
+    const r = run({ CLAWBOX_AI_PROXY_URL: override });
+
+    expect(at("tts.openai.api_key")).toBe("sk-theirs");
+    expect(configCalls()).toEqual([]);
+    expect(r.stdout).toContain("not ours to withdraw");
+  });
+
   it("arms a dual box, and writes nothing into ~/.openclaw", () => {
     // Edition-gated, not harness-gated, and consistent with §4b: the web server
     // is not restarted when the owner switches harness, so a block that asked
