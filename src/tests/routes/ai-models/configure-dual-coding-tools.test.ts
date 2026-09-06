@@ -328,11 +328,17 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     expect(mockReloadMcpServers).not.toHaveBeenCalled();
   });
 
-  it("does not reload on a save that writes no ClawBox AI credential", async () => {
+  it("does not reload — or even ASK — on a save that writes no ClawBox AI credential", async () => {
     const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
 
     expect(res.status).toBe(200);
     expect(mockReloadMcpServers).not.toHaveBeenCalled();
+    // The cost guard, pinned. Asserting only "no reload" would hold even if the
+    // route probed on EVERY provider save — with no `clawai_token` the verdict
+    // is false before and after either way — and each probe is a config read
+    // plus PATH scans for `claude`, the wrapper and `setpriv`, plus a readdir of
+    // the owner's project folder, on a Jetson.
+    expect(mockGetCodingAgentStatus).not.toHaveBeenCalled();
   });
 
   it("samples the verdict BEFORE the write, not after it", async () => {
@@ -377,17 +383,29 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
   /*
    * The OTHER fix this card names — swapping `openclawIsAbsent()` for
    * `(await getActiveHarness()) === "hermes"` at the Hermes early return — is
-   * NOT taken, and this case is why. That early return's local-model arm is
-   * `isLocalScope && (isLlamaCpp || isOllama)`; a PRIMARY-scope local save on a
-   * dual box does not match it, matches neither of the other two arms, and
-   * would fall through to the branch's closing 400. Today that save takes the
-   * OpenClaw path and is registered with Hermes on the way out — the block at
-   * the end of it that says in as many words "This branch runs on the `dual`
-   * SKU, where OpenClaw exists but Hermes is the harness actually answering".
-   * Pinned so the predicate swap cannot be made without this failing first.
+   * NOT taken, and this case is why.
+   *
+   * That early return's local-model arm is `isLocalScope && (isLlamaCpp ||
+   * isOllama)`, and a PRIMARY-scope local save does not match it. It does not
+   * fall through to the branch's closing 400 either, which is worse: for a
+   * local provider the `apiKey` slot carries the MODEL ID (both
+   * `/setup-api/llamacpp/install` and `useOllamaModels` post it that way), so
+   * `normalizedApiKey` is non-empty and the save would match the branch's THIRD
+   * arm — handed to `applyCloudProviderKeyToHermes` with a model id as the API
+   * key. Today it takes the OpenClaw path and is registered with Hermes on the
+   * way out, by the block whose comment says in as many words "This branch runs
+   * on the `dual` SKU, where OpenClaw exists but Hermes is the harness actually
+   * answering". `@/lib/hermes-cloud-provider` is deliberately NOT mocked here,
+   * so an attempted swap fails loudly rather than quietly.
    */
-  it("keeps configuring a primary-scope local model on dual, rather than refusing it", async () => {
-    const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+  it("keeps configuring a primary-scope local model on dual, rather than diverting it", async () => {
+    // The shape `configureLlamaCpp` actually sends: for a local provider the
+    // `apiKey` slot carries the model id.
+    const res = await configurePost(jsonRequest({
+      provider: "llamacpp",
+      apiKey: "gemma4-e2b-it-q4_0",
+      authMode: "local",
+    }));
 
     expect(res.status).toBe(200);
     expect(store.ai_model_configured).toBe(true);

@@ -31,7 +31,6 @@ import {
 } from "@/lib/openclaw-config";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
-import { getCodingAgentStatus } from "@/lib/coding-agent";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
 import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
@@ -698,6 +697,31 @@ async function storedClawboxAiToken(): Promise<string> {
       : "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * `getCodingAgentStatus().ready`, or `undefined` when the probe could not answer.
+ *
+ * IMPORTED LAZILY, the same move `hermes-clawai.ts` makes for the reason it
+ * states: `coding-agent` owns the runs store and captures `DATA_DIR`,
+ * `CODE_PROJECTS_DIR` and `RUNS_PATH` at module evaluation, and it drags
+ * `child_process`, the app proxy, the git helpers and the browser-session
+ * machinery in behind it. A static import here would put all of that in the
+ * graph of every route that statically imports THIS one — `clawai/poll` and
+ * `llamacpp/install` — and on the Hermes SKU it would be paid on a path that
+ * returns long before this code can run.
+ *
+ * `undefined` on a throw, never `false`: "we could not find out" must not read
+ * as "the coding agent is not ready", which would buy a reload on a save that
+ * changed nothing.
+ */
+async function codingAgentReady(): Promise<boolean | undefined> {
+  try {
+    const { getCodingAgentStatus } = await import("@/lib/coding-agent");
+    return (await getCodingAgentStatus()).ready;
+  } catch {
+    return undefined;
   }
 }
 
@@ -2957,9 +2981,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // — `undefined` everywhere else, so no other save pays for two status
     // reads — and `undefined` again on a probe that threw, which must not turn
     // a save into a 500 or buy a reload nobody asked for.
-    const codingAgentReadyBefore = isClawAI
-      ? await getCodingAgentStatus().then((status) => status.ready).catch(() => undefined)
-      : undefined;
+    const codingAgentReadyBefore = isClawAI ? await codingAgentReady() : undefined;
     if (isLocalScope) {
       await setMany({
         local_ai_configured: true,
@@ -3032,16 +3054,17 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     }
 
     // The credential is on disk, so ask the agent to rebuild its tool list if
-    // — and only if — this save is what made the coding agent usable, or
-    // stopped it being. The guard lives in the helper: a reload respawns every
+    // — and only if — this save is what made the coding agent usable. Only that
+    // direction is live here: `getConfiguredClawboxAiToken` falls back to the
+    // stored token and an empty one is refused with a 400 long before this, so
+    // a ClawBox AI save can never CLEAR `clawaiConnected`. The guard is the
+    // helper's either way: a reload respawns every
     // MCP child and invalidates the model's prompt cache, so a re-save of a
     // token the box already held must not buy one. Best effort by design; the
     // owner's save has already landed and an edition with no dashboard to ask
     // re-probes at the next respawn on its own.
     if (codingAgentReadyBefore !== undefined) {
-      const readyAfter = await getCodingAgentStatus()
-        .then((status) => status.ready)
-        .catch(() => undefined);
+      const readyAfter = await codingAgentReady();
       if (readyAfter !== undefined) {
         await refreshCodingAgentToolsIfReadinessChanged(codingAgentReadyBefore, readyAfter);
       }

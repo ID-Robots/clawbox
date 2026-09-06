@@ -66,14 +66,26 @@ export interface CodingAgentRefreshOptions {
  * next restart — which is exactly the behaviour of every box before this
  * existed.
  *
- * BOTH WRITE PATHS, not just the switch. `ready` is `enabled` AND the harness
+ * EVERY WRITE PATH, not just the switch. `ready` is `enabled` AND the harness
  * installed AND ClawBox AI connected, and the owner can move the third one on
- * its own: `applyClawaiToHermes` is what writes `clawai_token`, and every Hermes
- * connect entry point funnels through it. A box whose switch is already on goes
- * ready:false → ready:true the moment the AI is connected — which is exactly the
- * order the readiness text sends the owner in ("ClawBox AI is not connected.
- * Open Settings → AI Models and sign in to ClawBox AI first."). So this helper
- * hangs off the connect path too; see `hermes-clawai.ts`.
+ * its own: a box whose switch is already on goes ready:false → ready:true the
+ * moment the AI is connected — which is exactly the order the readiness text
+ * sends the owner in ("ClawBox AI is not connected. Open Settings → AI Models
+ * and sign in to ClawBox AI first."). So this helper hangs off the connect path
+ * too.
+ *
+ * THE RULE IS PER WRITER, not per funnel, and the difference has cost a
+ * defect. This docblock used to say "`applyClawaiToHermes` is what writes
+ * `clawai_token`, and every Hermes connect entry point funnels through it" —
+ * and it was false. `POST /setup-api/ai-models/configure` writes that key with
+ * its own `setMany` on every SKU where the openclaw binary exists, which on
+ * `edition=dual` with `active_harness=hermes` is a box whose agent IS Hermes;
+ * an audit that trusted the funnel claim is how that site survived #514 and
+ * #528 (TASK-577). So: **every writer of `clawai_token` snapshots
+ * `getCodingAgentStatus().ready` BEFORE its write and calls this helper after
+ * it.** Today that is `applyClawaiToHermes` (`hermes-clawai.ts`) and the
+ * configure route's two `setMany` batches; anything that becomes a third
+ * carries the same obligation.
  *
  * @param before what `getCodingAgentStatus().ready` said BEFORE the write
  * @param after  what it says after — the same field the panel is shown, so the
