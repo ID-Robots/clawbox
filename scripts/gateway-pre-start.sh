@@ -473,6 +473,10 @@ clawbox_core_residual_issues() {
       ;;
   esac
 
+  # A cheap pre-filter only — the AUTHORITATIVE test is in the node child
+  # below, which tests the DECODED key the way the core's own
+  # `containsConfigIncludeDirective` does. JSON may spell the same key
+  # `"\u0024include"`, which no grep over the raw bytes can see.
   if grep -qF '"$include"' "$OPENCLAW_CONFIG" 2>/dev/null; then
     return 1
   fi
@@ -527,6 +531,17 @@ clawbox_core_residual_issues() {
       );
       if (!apply) throw new Error("the chunk exports no applyLegacyDoctorMigrations");
       const raw = JSON.parse(readFileSync(process.env.CLAWBOX_PREVIEW_IN, "utf8"));
+      // The same test `containsConfigIncludeDirective` makes in the core, on
+      // the DECODED document: a `$include` may be written `"\u0024include"` in
+      // JSON, which the shell pre-filter cannot see, and a preview built from
+      // one file alone would name keys an included file may already answer for.
+      const hasInclude = (value) => {
+        if (Array.isArray(value)) return value.some(hasInclude);
+        if (!value || typeof value !== "object") return false;
+        if (Object.hasOwn(value, "$include")) return true;
+        return Object.values(value).some(hasInclude);
+      };
+      if (hasInclude(raw)) throw new Error("the config carries a $include directive");
       const result = apply(raw, { authoredRaw: raw, resolvedRaw: raw });
       if (!result || !result.next) throw new Error("the core migrations changed nothing");
       writeFileSync(process.env.CLAWBOX_PREVIEW_OUT, JSON.stringify(result.next, null, 2) + "\n");

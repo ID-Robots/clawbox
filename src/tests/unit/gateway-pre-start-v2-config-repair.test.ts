@@ -884,6 +884,24 @@ exit 0
     expect(previewFiles()).toEqual([]);
   });
 
+  it("stands down on a $include spelled the way JSON also allows", () => {
+    // `"\u0024include"` decodes to `$include`, so the core's own
+    // `containsConfigIncludeDirective` sees it and no grep over the raw bytes
+    // can. The authoritative test is therefore made on the decoded document.
+    writeFileSync(
+      configPath,
+      `{"\\u0024include":"./extra.json",${JSON.stringify(incidentConfig()).slice(1)}`,
+    );
+    withRealApproval();
+
+    const r = run();
+
+    // The arm WAS reached — the core refuses this config — and stood down.
+    expect(r.stderr).toContain("the core still refuses this config");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(previewFiles()).toEqual([]);
+  });
+
   it("stands down on a config that carries a $include", () => {
     // The core's own startup repair refuses an include for the same reason: the
     // file on disk is not the whole config, so a preview built from it alone
@@ -896,6 +914,7 @@ exit 0
 
     const r = run();
 
+    expect(r.stderr).toContain("the core still refuses this config");
     expect(r.stderr).not.toContain("after the core's own migrations these remain");
     expect(previewFiles()).toEqual([]);
   });

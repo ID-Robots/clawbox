@@ -45,8 +45,17 @@ export const LEGACY_EXEC_APPROVALS_NAMES = [
   "exec-approvals.json.doctor-importing",
 ] as const;
 
-/** Doctor's own sentence with the path it names captured. */
-const LEGACY_EXEC_APPROVALS_PATH_RE = /Legacy exec approvals exist at\s+(\S+?)[.,;]?(?:\s|$)/i;
+/**
+ * Doctor's own sentence with the path it names captured.
+ *
+ * Anchored on the FILE NAME rather than on "run of non-whitespace", because a
+ * state directory may contain a space (`OPENCLAW_STATE_DIR` is whatever the
+ * operator set) and `(\S+?)` would then hand the owner `/srv/ClawBox` as the
+ * file to move aside. Non-greedy up to the known suffix, so the sentence's own
+ * trailing full stop and everything after it stay out.
+ */
+const LEGACY_EXEC_APPROVALS_PATH_RE =
+  /Legacy exec approvals exist at\s+(\S.*?exec-approvals\.json(?:\.doctor-importing)?)(?=[.,;]?(?:\s|$))/i;
 
 /**
  * WHICH file is blocking, in the order of what can be trusted.

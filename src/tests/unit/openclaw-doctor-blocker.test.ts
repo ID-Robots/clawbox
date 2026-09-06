@@ -36,6 +36,24 @@ describe("which exec-approvals file is blocking openclaw doctor", () => {
     expect(legacyExecApprovalsBlocker(said, home)).toBe("/srv/openclaw-state/exec-approvals.json");
   });
 
+  it("keeps a state directory that contains a space whole", () => {
+    // `OPENCLAW_STATE_DIR` is whatever the operator set, and a path cut at the
+    // first space names a directory rather than a file — so the owner is told
+    // to move aside something that is not the blocker.
+    const said = "Legacy exec approvals exist at /srv/ClawBox State/exec-approvals.json."
+      + " Run `openclaw doctor --fix` with OPENCLAW_STATE_DIR set to /srv/ClawBox State"
+      + " before using exec approvals.";
+
+    expect(legacyExecApprovalsBlocker(said, home)).toBe("/srv/ClawBox State/exec-approvals.json");
+  });
+
+  it("names the claim file when that is the one the core tripped over", () => {
+    const said = "Legacy exec approvals exist at /x/exec-approvals.json.doctor-importing."
+      + " Run `openclaw doctor --fix` before using exec approvals.";
+
+    expect(legacyExecApprovalsBlocker(said, home)).toBe("/x/exec-approvals.json.doctor-importing");
+  });
+
   it("falls back to the claim file a killed import left behind", () => {
     // A doctor killed before it printed anything says nothing, and the claim is
     // the name the blocker carries mid-import — refused exactly as the original.
