@@ -2654,10 +2654,62 @@ for key, entry in entries.items():
 MANAGEDPY
 )"
   for MANAGED_PLUGIN in $MANAGED_ENABLED_PLUGINS; do
-    if timeout 60 "$OPENCLAW_BIN" plugins enable "$MANAGED_PLUGIN" --accept-capabilities </dev/null >/dev/null 2>&1; then
+    if MANAGED_PLUGIN_OUT="$(timeout -k 5 60 "$OPENCLAW_BIN" plugins enable "$MANAGED_PLUGIN" --accept-capabilities </dev/null 2>&1)"; then
       echo "  $MANAGED_PLUGIN plugin capabilities accepted/current"
+      continue
+    fi
+    # `enable` said no. WHY it said no decides what happens next, and the exit
+    # code alone cannot: it is also non-zero for a config lock, a registry
+    # hiccup and — the one that matters on a cold Jetson — the 60 s timeout
+    # above, none of which a 120 s npm install repairs. `Plugin not found: <id>`
+    # is the core's own wording for the package not being on disk (verified
+    # against the installed 2026.8.1 CLI), which is the state a core upgrade
+    # leaves behind: plugin payloads live in npm project directories keyed to
+    # the core GENERATION, so a bump strands everything installed under the old
+    # one (TASK-602). The codex block above asks the same question of the
+    # filesystem rather than of an exit code, for the same reason.
+    case "$MANAGED_PLUGIN_OUT" in
+      *"Plugin not found"*) ;;
+      *)
+        echo "  WARN: could not confirm $MANAGED_PLUGIN plugin capabilities; gateway readiness may remain blocked"
+        continue
+        ;;
+    esac
+    # The payload is gone, and only ClawBox's own npm packages may be replaced
+    # here: deepseek comes from ClawHub and clawbox-email-directives is copied
+    # out of the checkout — both have their own block in this script, and an
+    # `@openclaw/<id>` guess would fetch a package that is not the plugin. Same
+    # list as OFFICIAL_CHANNEL_PLUGINS in src/lib/openclaw-channels.ts, which
+    # gateway-pre-start-managed-plugin-payload.test.ts holds it to.
+    MANAGED_PLUGIN_KEY="${MANAGED_PLUGIN#@openclaw/}"
+    MANAGED_PLUGIN_KEY="${MANAGED_PLUGIN_KEY#openclaw-}"
+    MANAGED_PLUGIN_PKG=""
+    case "$MANAGED_PLUGIN_KEY" in
+      discord|whatsapp) MANAGED_PLUGIN_PKG="@openclaw/$MANAGED_PLUGIN_KEY" ;;
+    esac
+    if [ -z "$MANAGED_PLUGIN_PKG" ]; then
+      echo "  WARN: the $MANAGED_PLUGIN payload is missing and ClawBox has no npm package of its own for it; its own installer owns that repair"
+      continue
+    fi
+    # Pinned to the INSTALLED core, like the deepseek block below and unlike the
+    # codex one above: this script never installs the core, so on a box that
+    # pulled new ClawBox code before its core update landed the pin file names a
+    # release the running runtime cannot load. `CLAWBOX_OPENCLAW_EFFECTIVE` is
+    # already normalised to MAJOR.MINOR.PATCH above, so an npm republish
+    # (2026.7.1 -> 2026.7.1-2) cannot turn into a 404 here. The unpinned spec is
+    # the fallback for a core whose release could not be read at all, never a
+    # second attempt: this is a BLOCKING ExecStartPre, so ONE 120 s install per
+    # plugin is the whole budget — at most 6 minutes for the two ids above, and
+    # only on a box whose gateway would not come up at all.
+    if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+      MANAGED_PLUGIN_SPEC="$MANAGED_PLUGIN_PKG@$CLAWBOX_OPENCLAW_EFFECTIVE"
     else
-      echo "  WARN: could not confirm $MANAGED_PLUGIN plugin capabilities; gateway readiness may remain blocked"
+      MANAGED_PLUGIN_SPEC="$MANAGED_PLUGIN_PKG"
+    fi
+    if timeout -k 5 120 "$OPENCLAW_BIN" plugins install "$MANAGED_PLUGIN_SPEC" --force --accept-capabilities </dev/null >/dev/null 2>&1; then
+      echo "  $MANAGED_PLUGIN plugin payload reinstalled ($MANAGED_PLUGIN_SPEC)"
+    else
+      echo "  WARN: could not reinstall the $MANAGED_PLUGIN plugin payload ($MANAGED_PLUGIN_SPEC); gateway readiness may remain blocked"
     fi
   done
 fi
