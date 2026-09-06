@@ -198,6 +198,21 @@ export const PROTECTED_PATH_COMMAND_CASES: ProtectedPathCommandCase[] = [
     denied: true,
     why: "…and a real `rm` reached by its absolute path still is one: `/` is a boundary",
   },
+  {
+    command: "sed -i s/a/b/ ~/clawbox/data/config.json",
+    denied: true,
+    why: "an in-place edit is an overwrite, and the spelling an agent reaches for first when asked to fix a file in the tree",
+  },
+  {
+    command: "du -sh ~/embed/models && rm ~/clawbox/data/x",
+    denied: true,
+    why: "a delete after the SECOND protected root: stopping at the first root hit missed it on one edition while the Hermes globs denied it",
+  },
+  {
+    command: "sed s/a/b/ ~/clawbox/data/config.json",
+    denied: false,
+    why: "…and sed WITHOUT -i only reads",
+  },
 ];
 
 export interface ProtectedPathToolCase {

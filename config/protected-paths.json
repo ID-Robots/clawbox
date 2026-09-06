@@ -66,9 +66,14 @@
     "cannot match 'rmdir' - which is absent anyway, because it removes only EMPTY",
     "directories and cannot cost anyone a model file. 'dd' is absent because 'dd '",
     "also matches 'git add ', and 'cp' because it reads as often as it writes",
-    "('cp ~/clawbox/config/x /tmp/' copies OUT of the tree)."
+    "('cp ~/clawbox/config/x /tmp/' copies OUT of the tree). 'sed -i' has no",
+    "trailing space on purpose, so it also catches 'sed -i.bak' and \"sed -i''\";",
+    "it is in because an in-place edit is the spelling an agent reaches for first",
+    "when asked to 'fix' a file in the tree. 'install', 'ln -sf' and 'dd of=' are",
+    "the same operation and are NOT caught - see the PR body's residual, which",
+    "wants a destination-argument rule rather than more verbs."
   ],
-  "verbFirstTokens": ["rm ", "unlink ", "shred ", "truncate ", "mv ", "tee "],
+  "verbFirstTokens": ["rm ", "unlink ", "shred ", "truncate ", "mv ", "tee ", "sed -i"],
 
   "_tokenBoundary": [
     "What may come immediately BEFORE a token for it to be that command. The",

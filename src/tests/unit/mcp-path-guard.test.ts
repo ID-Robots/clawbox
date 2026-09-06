@@ -1,4 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "fs";
+import { tmpdir } from "os";
 import path from "path";
 import {
   isAllowedPath,
@@ -268,5 +270,40 @@ describe("mcp path guard — protected paths may be read, not written", () => {
   it("recognises a destroying command through the bash pre-flight", () => {
     expect(commandDeniedByPathGuard(`rm -rf ${TREE}/data/llamacpp/models`)).toBeTruthy();
     expect(commandDeniedByPathGuard(`cat ${TREE}/README.md`)).toBeNull();
+  });
+});
+
+// ── The two ways a write reaches a protected path without naming one ────────
+describe("mcp path guard — a link into the tree is still the tree", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "clawbox-link-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("refuses a write whose PARENT is a symlink into the model folder", () => {
+    // `resolveUserPath` normalises `..` and `~` and does not follow links, so a
+    // link the agent planted earlier reaches the guard as a path with no
+    // protected root in it at all.
+    const models = path.join(dir, "clawbox", "data", "llamacpp", "models");
+    mkdirSync(models, { recursive: true });
+    const link = path.join(dir, "notes");
+    symlinkSync(models, link);
+
+    expect(() => assertWritePathAllowed(path.join(link, "gemma.gguf"))).toThrow();
+    // …and the read is still allowed, which is the whole point of the split.
+    expect(() => assertPathAllowed(path.join(link, "gemma.gguf"))).not.toThrow();
+  });
+
+  it("still allows a write through a link that goes somewhere ordinary", () => {
+    const real = path.join(dir, "scratch");
+    mkdirSync(real, { recursive: true });
+    const link = path.join(dir, "via");
+    symlinkSync(real, link);
+    expect(() => assertWritePathAllowed(path.join(link, "notes.md"))).not.toThrow();
   });
 });

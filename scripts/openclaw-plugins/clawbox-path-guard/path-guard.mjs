@@ -216,13 +216,20 @@ export function commandDenyReason(command, home = os.homedir()) {
     if (hit) return `\`${token.trim()}\` targeting ${hit.root}`;
   }
 
-  const rootHit = findRoot(text);
-  if (rootHit) {
+  // EVERY root hit, not the first. `cat ~/clawbox/notes && rm ~/clawbox/x`
+  // finds `/clawbox` at the first mention and looks for a token after it, which
+  // works — but `du -sh ~/embed/models && rm ~/clawbox/x` finds whichever root
+  // comes first in the TABLE, and stopping there missed deletes the Hermes
+  // globs (which have no notion of "first") went on denying.
+  for (let from = 0; ; ) {
+    const rootHit = findRoot(text, from);
+    if (!rootHit) break;
     for (const token of t.pathFirstTokens) {
       if (indexOfToken(text, token.toLowerCase(), rootHit.end) >= 0) {
         return `\`${token.trim()}\` after ${rootHit.root}`;
       }
     }
+    from = rootHit.end;
   }
 
   // Every occurrence, not the first: `echo a > ~/clawbox-backup/x; echo b >
@@ -287,6 +294,12 @@ export function destructiveToken(text, home = os.homedir()) {
   for (const token of [...t.verbFirstTokens, ...t.pathFirstTokens]) {
     if (indexOfToken(lower, token.toLowerCase()) >= 0) return token.trim();
   }
+  // A redirection with no path at all — `echo x > big.gguf` — names its target
+  // RELATIVE to the working directory, and the caller only asks this when that
+  // directory is already known to be protected. The command rules cannot see
+  // it (there is no root in the text to anchor on), which is the whole reason
+  // this half exists.
+  if (/(^|[^0-9a-z_-])[0-9]?>/.test(lower)) return ">";
   return null;
 }
 

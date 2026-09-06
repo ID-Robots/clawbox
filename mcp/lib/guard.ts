@@ -16,7 +16,8 @@
 // decision is a different one.
 
 import { spawn } from "child_process";
-import { join, resolve, isAbsolute, normalize } from "path";
+import { realpathSync } from "fs";
+import { basename, dirname, join, resolve, isAbsolute, normalize } from "path";
 import { isProtectedFilePath } from "../../src/lib/file-guard";
 // TASK-605's protected-path rule, from the module the OpenClaw hook plugin
 // carries into ~/.openclaw/extensions. It lives there because a plugin copied
@@ -140,13 +141,33 @@ export function assertPathAllowed(abs: string): void {
  */
 export function assertWritePathAllowed(abs: string): void {
   assertPathAllowed(abs);
+  // THE REALPATH'D PARENT AS WELL AS THE PATH AS TYPED. `resolveUserPath`
+  // normalises `..` and `~` but does not follow links, so a symlink the agent
+  // planted earlier — `~/notes/models -> ~/clawbox/data/llamacpp/models` — would
+  // reach this as a path with no protected root in it. Only the parent is
+  // resolved, never the leaf: the file being written may not exist yet, and a
+  // dangling name is not a reason to refuse. Same two-stage shape as
+  // `coding-agent-media.ts`, and a resolve that fails is not evidence of
+  // anything, so the typed path's verdict stands.
+  let resolvedParent: string | null = null;
+  try {
+    resolvedParent = realpathSync(dirname(abs));
+  } catch {
+    resolvedParent = null;
+  }
+  if (resolvedParent) {
+    const viaLink = pathDenyReason(join(resolvedParent, basename(abs)), HOME);
+    if (viaLink) throw protectedWriteError();
+  }
   // The PATH predicate, not the tool-shaped one: `toolCallDenyReason` drops any
   // string containing a newline, because a tool PARAMETER may be a file body —
   // and a filename may legally contain one, so routing a resolved path through
   // it let `…/models/a\nb.gguf` through.
-  const denied = pathDenyReason(abs, HOME);
-  if (!denied) return;
-  throw new ToolError(
+  if (pathDenyReason(abs, HOME)) throw protectedWriteError();
+}
+
+function protectedWriteError(): ToolError {
+  return new ToolError(
     "BLOCKED_PATH",
     "The ClawBox install tree and the local-model folders are protected on this device: they can be read, but not written, deleted or moved.",
     "Do not retry it by another path. Tell the user what you were asked to do and that the device refused it.",
