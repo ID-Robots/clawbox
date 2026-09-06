@@ -308,7 +308,11 @@ describe("the status cache", () => {
    */
   afterEach(() => {
     delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
     vi.useRealTimers();
+    // A clock spy a failed assertion left behind would put every later test
+    // in this file 300 s ahead.
+    vi.restoreAllMocks();
   });
 
   it("never blocks the caller that peeks, and starts the probe for it", async () => {
@@ -393,6 +397,244 @@ describe("the status cache", () => {
       startedAtMs: Date.now() - 9_000, finishedAtMs: Date.now(), durationMs: 9_000, error: "", childPid: 0,
     }));
     expect((await pending).run.status).toBe("succeeded");
+  });
+
+  /**
+   * F-C of the real-browser sweep: the read that flipped the card's `running`
+   * off carried the MID-REBUILD reading (identity "mismatched", one pending
+   * file) because the probe behind it had started before the run settled and
+   * `invalidateMemoryStatusCache` ran, and finished after. At the slow cadence
+   * that followed, the amber "Run a full reindex" banner sat for 30 s over an
+   * index that had just been rebuilt.
+   *
+   * The CLI is a script that answers a DIFFERENT payload per call, so the
+   * tests can tell which probe's reading a caller was handed, and it HOLDS
+   * each answer until the test releases it, so "that probe is in flight" is
+   * read off the counter rather than guessed from a sleep. Asked to index it
+   * holds the same way, so a run's finish — the real one, in
+   * `startMemoryIndex` — lands at the moment the test chose. Every hold is
+   * bounded, so a probe a failing test forgot cannot outlive it.
+   */
+  async function withProbeAnswers(identities: string[]): Promise<{
+    mod: typeof import("@/lib/clawkeep-memory");
+    probes: () => Promise<number>;
+    /** Lets probe N answer. */
+    release: (n: number) => Promise<void>;
+    /** Lets the held index run exit 0 — the real finish follows. */
+    releaseIndex: () => Promise<void>;
+    /** Waits until probe N has been spawned (it is then held). */
+    untilProbes: (n: number) => Promise<void>;
+    /** Waits until a peek reads that identity. */
+    untilPeek: (identity: string) => Promise<void>;
+  }> {
+    for (const [i, identity] of identities.entries()) {
+      const payload = JSON.parse(JSON.stringify(REAL_STATUS)) as Array<{
+        status: { custom: { indexIdentity: { status: string } } };
+      }>;
+      payload[0].status.custom.indexIdentity.status = identity;
+      await fs.writeFile(path.join(tmpDir, `answer-${i + 1}.json`), JSON.stringify(payload));
+    }
+    const counter = path.join(tmpDir, "probe-count");
+    const script = path.join(tmpDir, "gated-openclaw");
+    // The count is taken BEFORE the hold, so a test can settle a run while a
+    // known probe is in flight; a call past the last answer repeats it.
+    await fs.writeFile(script, [
+      "#!/bin/sh",
+      'hold() { i=0; while [ ! -e "$1" ] && [ "$i" -lt 500 ]; do sleep 0.02; i=$((i+1)); done; }',
+      `if [ "$2" = index ]; then hold "${tmpDir}/go-index"; exit 0; fi`,
+      `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"`,
+      `hold "${tmpDir}/go-$n"`,
+      `[ "$n" -gt ${identities.length} ] && n=${identities.length}`,
+      `cat "${tmpDir}/answer-$n.json"`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    vi.resetModules();
+    const mod = await import("@/lib/clawkeep-memory");
+    const probes = async () => Number((await fs.readFile(counter, "utf8").catch(() => "0")).trim());
+    const until = async (what: string, ready: () => Promise<boolean>) => {
+      for (let i = 0; i < 250; i++) {
+        if (await ready()) return;
+        await settle(20);
+      }
+      throw new Error(`${what} never happened`);
+    };
+    return {
+      mod,
+      probes,
+      release: (n) => fs.writeFile(path.join(tmpDir, `go-${n}`), ""),
+      releaseIndex: () => fs.writeFile(path.join(tmpDir, "go-index"), ""),
+      untilProbes: (n) => until(`probe ${n}`, async () => (await probes()) >= n),
+      untilPeek: (identity) => until(`a peek of ${identity}`, async () => mod.peekMemoryStatus()?.indexIdentity === identity),
+    };
+  }
+
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it("probes once more when a run settled under the probe, and answers the caller with that reading", async () => {
+    const { mod, probes, release, untilProbes } = await withProbeAnswers(["mismatched", "valid"]);
+    const pending = mod.getMemoryStatus();
+    await untilProbes(1);
+    // A run finishes while the first probe is still in flight.
+    mod.invalidateMemoryStatusCache();
+    await release(1);
+    await untilProbes(2);
+    await release(2);
+    const status = await pending;
+    // The caller gets the second probe's reading, never the straddled one.
+    expect(status.indexIdentity).toBe("valid");
+    expect(await probes()).toBe(2);
+    // ...and that reading is fresh and settled: the next read is answered
+    // from it, with no third process booted behind it (a third would be held,
+    // and would show on the counter).
+    expect((await mod.getMemoryStatus()).indexIdentity).toBe("valid");
+    await settle(100);
+    expect(await probes()).toBe(2);
+  });
+
+  it("serves a probe nothing invalidated as it is, without a second process", async () => {
+    const { mod, probes, release, untilProbes } = await withProbeAnswers(["mismatched", "valid"]);
+    const pending = mod.getMemoryStatus();
+    await untilProbes(1);
+    await release(1);
+    expect((await pending).indexIdentity).toBe("mismatched");
+    await settle(100);
+    expect(await probes()).toBe(1);
+  });
+
+  it("retries once and never loops when the retry straddles as well; the read after it pays the probe that settles", async () => {
+    const { mod, probes, release, untilProbes } = await withProbeAnswers(["mismatched", "mismatched", "valid"]);
+    const pending = mod.getMemoryStatus();
+    await untilProbes(1);
+    mod.invalidateMemoryStatusCache();
+    await release(1);
+    // A second run settles under the retry.
+    await untilProbes(2);
+    mod.invalidateMemoryStatusCache();
+    await release(2);
+    // Bounded: the caller is answered after the retry, with its reading, and
+    // no third probe starts on its own.
+    const status = await pending;
+    expect(status.indexIdentity).toBe("mismatched");
+    await settle(100);
+    expect(await probes()).toBe(2);
+    // That reading predates the last change, and nothing is running: the next
+    // read waits for one more probe rather than serving it — the settled
+    // index is what it is answered with.
+    const next = mod.getMemoryStatus();
+    await untilProbes(3);
+    await release(3);
+    expect((await next).indexIdentity).toBe("valid");
+    expect(mod.peekMemoryStatus()?.indexIdentity).toBe("valid");
+    await settle(100);
+    expect(await probes()).toBe(3);
+  });
+
+  it("keeps the reading it had while the retry runs, rather than showing the mid-run one to a peek", async () => {
+    // A peek during the retry is answered with the pre-run reading — stale,
+    // but the index as it was — not with the straddled probe's. The third
+    // answer differs from the first so the last peek proves the retried
+    // reading REPLACED the pre-run one rather than merely matching it.
+    const { mod, probes, release, untilProbes } = await withProbeAnswers(["valid", "mismatched", "missing"]);
+    const warm = mod.warmMemoryStatusCache();
+    await untilProbes(1);
+    await release(1);
+    await warm;
+    const realNow = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 300_000);
+    const refreshed = mod.warmMemoryStatusCache();
+    await untilProbes(2);
+    mod.invalidateMemoryStatusCache();
+    await release(2);
+    // The straddled "mismatched" reading came back and was thrown away; the
+    // retry is in flight, and the peek still reads the index as it was.
+    await untilProbes(3);
+    expect(mod.peekMemoryStatus()?.indexIdentity).toBe("valid");
+    await release(3);
+    await refreshed;
+    expect(mod.peekMemoryStatus()?.indexIdentity).toBe("missing");
+    await settle(100);
+    expect(await probes()).toBe(3);
+  });
+
+  /**
+   * The two reads the sweep actually saw, driven through the REAL finish in
+   * `startMemoryIndex` with a held indexer: the card holds a reading, so it
+   * never waits on a probe the way the cold callers above do — what it is
+   * answered with after the pass is `getMemoryStatus`'s rule, not the
+   * retry's.
+   */
+  it("answers the read after a run with the settled reading, not one a probe took while the pass was writing the index", async () => {
+    // The pre-run reading, the one a TTL probe takes mid-pass, the post-run one.
+    const { mod, probes, release, releaseIndex, untilProbes, untilPeek } =
+      await withProbeAnswers(["valid", "mismatched", "valid"]);
+    const warm = mod.warmMemoryStatusCache();
+    await untilProbes(1);
+    await release(1);
+    await warm;
+    expect((await mod.startMemoryIndex("full", "manual")).accepted).toBe(true);
+    // The cache ages past its TTL during the pass; the card's poll is answered
+    // at once from the pre-run reading and kicks a probe behind it, as ever.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 300_000);
+    const during = await mod.getMemoryStatus();
+    expect(during.run.status).toBe("running");
+    expect(during.indexIdentity).toBe("valid");
+    // That probe comes back while the pass is still writing: stored — a
+    // reading is a reading while the run is going — but never settled.
+    await untilProbes(2);
+    await release(2);
+    await untilPeek("mismatched");
+    // The pass ends; the finish starts the post-run probe and holds nothing.
+    await releaseIndex();
+    await untilProbes(3);
+    // The read that flips the card out of "running" WAITS for that probe
+    // rather than answering from the mid-pass reading...
+    let answered = false;
+    const flip = mod.getMemoryStatus().then((s) => { answered = true; return s; });
+    await settle(200);
+    expect(answered).toBe(false);
+    await release(3);
+    const status = await flip;
+    expect(status.run.status).toBe("succeeded");
+    expect(status.indexIdentity).toBe("valid");
+    expect(await probes()).toBe(3);
+    // ...and that reading is settled: the next read is answered from it.
+    expect((await mod.getMemoryStatus()).indexIdentity).toBe("valid");
+    await settle(100);
+    expect(await probes()).toBe(3);
+  });
+
+  it("answers the read after a run with the retried reading when the run settled under a probe, even for a caller that held one", async () => {
+    // The owner pressed Full reindex OVER the amber banner: the pre-run
+    // reading says "mismatched" too, so answering it after the pass would
+    // have drawn the same banner over the rebuilt index.
+    const { mod, probes, release, releaseIndex, untilProbes } =
+      await withProbeAnswers(["mismatched", "mismatched", "valid"]);
+    const warm = mod.warmMemoryStatusCache();
+    await untilProbes(1);
+    await release(1);
+    await warm;
+    expect((await mod.startMemoryIndex("full", "manual")).accepted).toBe(true);
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 300_000);
+    expect((await mod.getMemoryStatus()).run.status).toBe("running");
+    // The TTL probe is in flight when the pass ends: the finish settles under
+    // it, it is retried, and the read after the pass waits for the retry.
+    await untilProbes(2);
+    await releaseIndex();
+    await release(2);
+    await untilProbes(3);
+    let answered = false;
+    const flip = mod.getMemoryStatus().then((s) => { answered = true; return s; });
+    await settle(200);
+    expect(answered).toBe(false);
+    await release(3);
+    const status = await flip;
+    expect(status.run.status).toBe("succeeded");
+    expect(status.indexIdentity).toBe("valid");
+    expect(await probes()).toBe(3);
+    await settle(100);
+    expect(await probes()).toBe(3);
   });
 });
 

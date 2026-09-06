@@ -10,6 +10,7 @@ import {
   TIMEZONE_APPLIED_KEY,
   TIMEZONE_SOURCE_KEY,
   TIMEZONE_STORE_KEY,
+  applyProcessTimeZone,
   applyTimeZoneToHarness,
   canonicalTimeZone,
   readOsTimeZone,
@@ -42,6 +43,37 @@ async function readState(): Promise<{
     source: source ?? null,
     applied: !!timezone && appliedZone === timezone,
   };
+}
+
+/**
+ * Re-arm both "device-local" schedules in the zone the process now runs in.
+ *
+ * Each scheduler computed its next slot with `Date#setHours` in the zone the
+ * web server STARTED in, so a timer armed before the change is still the old
+ * zone's hour; re-reading the schedule re-does that arithmetic. Logged, never
+ * an error: the zone itself has landed by the time this runs, and a schedule
+ * that could not be re-armed is the next save's or the next boot's problem,
+ * not a reason to tell the owner the timezone failed.
+ */
+async function rearmDeviceLocalSchedules(): Promise<void> {
+  // Imported LAZILY, unlike the schedule routes next door, which take
+  // `refresh` at the top: TimezoneAdopter POSTs here on every desktop load and
+  // the GET answers beside it, while the two schedulers carry the whole
+  // ClawKeep and memory stack behind them — a module tree this route needs on
+  // the one path where the OS leg has just landed and nowhere else. Each import
+  // sits inside the same guard as its refresh, so a module that cannot load is
+  // logged the way a re-arm that cannot run is.
+  const refreshes: Array<[label: string, run: () => Promise<void>]> = [
+    ["ClawKeep backup", async () => (await import("@/lib/clawkeep-scheduler")).refresh()],
+    ["memory index", async () => (await import("@/lib/clawkeep-memory-scheduler")).refresh()],
+  ];
+  for (const [label, run] of refreshes) {
+    try {
+      await run();
+    } catch (err) {
+      console.warn(`[timezone] could not re-arm the ${label} scheduler in the new zone:`, err);
+    }
+  }
 }
 
 export async function GET() {
@@ -198,6 +230,16 @@ export async function POST(request: Request) {
     osFailure = "The device clock could not be changed — the Terminal and the logs stay on the old "
       + "zone. It is not recorded as applied: an adopted zone is retried on the next dashboard load, "
       + "an explicit one has to be sent again.";
+  }
+  if (!osFailure) {
+    // The web server's OWN clock, which the OS leg does not reach: Node fixed
+    // its zone when this process started, and the two schedulers arm their
+    // "device-local" hour with `setHours` in that zone. Without this the owner's
+    // 04:30 stayed armed for 07:30 until the next restart (see
+    // applyProcessTimeZone). Only behind a landed OS leg, so the process never
+    // runs ahead of the `date` the Terminal and the logs show.
+    applyProcessTimeZone(tz);
+    await rearmDeviceLocalSchedules();
   }
 
   const harness = await applyTimeZoneToHarness(tz);

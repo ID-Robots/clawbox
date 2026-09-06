@@ -14,10 +14,56 @@
  * and embed/install are one wizard flow, so a page refused the download must
  * not be able to move the index onto a model that is not there.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { hasOwnerSession } from "@/lib/owner-session";
 
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => false) }));
+
+/**
+ * The OpenClaw config as the CLI would hold it, in memory: `readConfig` and
+ * `readConfigStrict` answer it — the strict one throwing while a test says
+ * the file is unreadable, the way the real one does for an EACCES or a file
+ * caught half-written — and `runOpenclawConfigSetBatch` writes the extraPaths
+ * key into it, slowly when a test asks for the ~5 s the real spawn costs, and
+ * failing once when a test asks for that. Nothing here reads the box's own
+ * ~/.openclaw.
+ */
+const cli = vi.hoisted(() => ({
+  extraPaths: [] as string[],
+  writes: [] as string[][],
+  delayMs: 0,
+  failNext: false,
+  unreadable: false,
+  reset() { this.extraPaths = []; this.writes = []; this.delayMs = 0; this.failNext = false; this.unreadable = false; },
+}));
+vi.mock("@/lib/openclaw-config", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/openclaw-config")>("@/lib/openclaw-config");
+  const held = () => ({ memory: { search: { extraPaths: [...cli.extraPaths] } } });
+  return {
+    ...actual,
+    readConfig: vi.fn(async () => (cli.unreadable ? {} : held())),
+    readConfigStrict: vi.fn(async () => {
+      if (cli.unreadable) throw new Error("EACCES: permission denied, open 'openclaw.json'");
+      return held();
+    }),
+    runOpenclawConfigSetBatch: vi.fn(async (batch: readonly (readonly string[])[]) => {
+      if (cli.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, cli.delayMs));
+      if (cli.failNext) {
+        cli.failNext = false;
+        throw new Error("openclaw config set timed out");
+      }
+      for (const [key, value] of batch) {
+        if (key !== "memory.search.extraPaths") continue;
+        const next = JSON.parse(value) as string[];
+        cli.writes.push(next);
+        cli.extraPaths = next;
+      }
+    }),
+  };
+});
 
 const switchToLocalEmbeddings = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("@/lib/memory-shard", async () => {
@@ -28,6 +74,7 @@ vi.mock("@/lib/memory-shard", async () => {
 afterEach(() => {
   vi.mocked(hasOwnerSession).mockReset().mockResolvedValue(false);
   switchToLocalEmbeddings.mockClear();
+  cli.reset();
 });
 
 const url = (p: string) => `http://localhost/setup-api/clawkeep/memory/${p}`;
@@ -119,5 +166,156 @@ describe("the state module stays client-safe", () => {
     // else, so these two lists must not be confused.
     expect([...state.INDEXABLE_EXTENSIONS]).toEqual([".md"]);
     expect([...state.EXTRACTABLE_EXTENSIONS]).toContain(".pdf");
+  });
+});
+
+describe("folder writes are serialised (ms-findings F-A)", () => {
+  // The queue is module state, so every test here shares it; each one drains
+  // its own turns before it ends, and the afterEach resets the CLI side.
+  it("runs an add and a remove that overlap one after the other, each on the other's result, one write each, in order", async () => {
+    const { mutateExtraPaths } = await import("@/lib/memory-shard");
+    cli.extraPaths = ["/home/owner/a"];
+    cli.delayMs = 20;
+
+    const add = mutateExtraPaths((current) => [...current, "/home/owner/b"]);
+    const remove = mutateExtraPaths((current) => current.filter((p) => p !== "/home/owner/a"));
+    const [afterAdd, afterRemove] = await Promise.all([add, remove]);
+
+    // Unserialised, both read ["/a"] before either write and the remove's
+    // write lands last — `[]`, the folder the add answered with gone.
+    expect(cli.writes).toEqual([["/home/owner/a", "/home/owner/b"], ["/home/owner/b"]]);
+    expect(afterAdd).toEqual(["/home/owner/a", "/home/owner/b"]);
+    expect(afterRemove).toEqual(["/home/owner/b"]);
+    expect(cli.extraPaths).toEqual(["/home/owner/b"]);
+  });
+
+  it("writes nothing when the mutation leaves the list as it was, and answers the list it read", async () => {
+    const { mutateExtraPaths } = await import("@/lib/memory-shard");
+    cli.extraPaths = ["/home/owner/a"];
+    // An idempotent add: the folder is already there.
+    expect(await mutateExtraPaths((current) => (current.includes("/home/owner/a") ? current : [...current, "/home/owner/a"])))
+      .toEqual(["/home/owner/a"]);
+    expect(cli.writes).toEqual([]);
+  });
+
+  it("refuses to mutate a list it could not read, rather than reading it as empty", async () => {
+    // `readExtraPaths` forgives an unreadable config as `[]` for the wizard's
+    // first paint. Inside a mutation that `[]` would be WRITTEN: an add would
+    // save a one-entry list over every folder the owner had chosen, a remove
+    // would answer "no folders" over a list still on disk.
+    const { mutateExtraPaths, ExtraPathsUnreadableError } = await import("@/lib/memory-shard");
+    cli.extraPaths = ["/home/owner/a"];
+    cli.unreadable = true;
+
+    await expect(mutateExtraPaths((current) => [...current, "/home/owner/b"])).rejects.toBeInstanceOf(ExtraPathsUnreadableError);
+    await expect(mutateExtraPaths((current) => current.filter((p) => p !== "/home/owner/a"))).rejects.toBeInstanceOf(ExtraPathsUnreadableError);
+    expect(cli.writes).toEqual([]);
+
+    // Readable again: the queue is free and the list is what it always was.
+    cli.unreadable = false;
+    expect(await mutateExtraPaths((current) => [...current, "/home/owner/b"])).toEqual(["/home/owner/a", "/home/owner/b"]);
+  });
+
+  it("does not let a mutation whose write threw block the next one", async () => {
+    const { mutateExtraPaths } = await import("@/lib/memory-shard");
+    cli.extraPaths = [];
+    cli.failNext = true;
+
+    const failed = mutateExtraPaths((current) => [...current, "/home/owner/a"]);
+    const next = mutateExtraPaths((current) => [...current, "/home/owner/b"]);
+
+    await expect(failed).rejects.toThrow("timed out");
+    // The failed turn wrote nothing, so the next one starts from the list as
+    // it was — and it runs at all, which is the point.
+    expect(await next).toEqual(["/home/owner/b"]);
+    expect(cli.writes).toEqual([["/home/owner/b"]]);
+  });
+
+  describe("through the route", () => {
+    // A scratch browse root, so the route's containment check has a real
+    // folder to accept without the test reading the owner's home.
+    let root: string;
+    let docs: string;
+    let previousRoot: string | undefined;
+    beforeAll(() => {
+      root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-memory-sources-"));
+      docs = path.join(root, "docs");
+      fs.mkdirSync(docs);
+      previousRoot = process.env.FILES_ROOT;
+      process.env.FILES_ROOT = root;
+    });
+    afterAll(() => {
+      if (previousRoot === undefined) delete process.env.FILES_ROOT;
+      else process.env.FILES_ROOT = previousRoot;
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+
+    it("ends with the state the last call asked for when POST and DELETE overlap", async () => {
+      vi.mocked(hasOwnerSession).mockResolvedValue(true);
+      const { NextRequest } = await import("next/server");
+      const { POST, DELETE } = await import("@/app/setup-api/clawkeep/memory/sources/route");
+      cli.extraPaths = ["/home/owner/old"];
+      cli.delayMs = 20;
+
+      const add = POST(new NextRequest(url("sources"), { method: "POST", body: JSON.stringify({ path: docs }) }));
+      const remove = DELETE(new NextRequest(url("sources"), { method: "DELETE", body: JSON.stringify({ path: "/home/owner/old" }) }));
+      const [addRes, removeRes] = await Promise.all([add, remove]);
+
+      expect(addRes.status).toBe(200);
+      expect(removeRes.status).toBe(200);
+      // Exactly one write each, and the list on disk is what both asked for
+      // together: the new folder in, the old one out. On the box the same two
+      // requests ended with `extraPaths: []`.
+      expect(cli.writes).toHaveLength(2);
+      const real = fs.realpathSync(docs);
+      expect(cli.extraPaths).toEqual([real]);
+      // Whichever answered last carries the settled list.
+      const last = cli.writes[1];
+      expect(last).toEqual([real]);
+    });
+
+    it("answers a stable kind when the write itself fails, rather than a bare 500", async () => {
+      vi.mocked(hasOwnerSession).mockResolvedValue(true);
+      const { NextRequest } = await import("next/server");
+      const { POST, DELETE } = await import("@/app/setup-api/clawkeep/memory/sources/route");
+      cli.extraPaths = ["/home/owner/old"];
+
+      cli.failNext = true;
+      const add = await POST(new NextRequest(url("sources"), { method: "POST", body: JSON.stringify({ path: docs }) }));
+      expect(add.status).toBe(500);
+      expect(await add.json()).toMatchObject({ kind: "write_failed", error: expect.any(String) });
+
+      cli.failNext = true;
+      const remove = await DELETE(new NextRequest(url("sources"), { method: "DELETE", body: JSON.stringify({ path: "/home/owner/old" }) }));
+      expect(remove.status).toBe(500);
+      expect(await remove.json()).toMatchObject({ kind: "write_failed" });
+      // Nothing landed, and the queue is free for the next request.
+      expect(cli.extraPaths).toEqual(["/home/owner/old"]);
+      const ok = await DELETE(new NextRequest(url("sources"), { method: "DELETE", body: JSON.stringify({ path: "/home/owner/old" }) }));
+      expect(ok.status).toBe(200);
+      expect(await ok.json()).toEqual({ paths: [] });
+    });
+
+    it("answers read_failed and writes nothing while openclaw.json cannot be read", async () => {
+      vi.mocked(hasOwnerSession).mockResolvedValue(true);
+      const { NextRequest } = await import("next/server");
+      const { GET, POST, DELETE } = await import("@/app/setup-api/clawkeep/memory/sources/route");
+      cli.extraPaths = ["/home/owner/old"];
+      cli.unreadable = true;
+
+      const add = await POST(new NextRequest(url("sources"), { method: "POST", body: JSON.stringify({ path: docs }) }));
+      expect(add.status).toBe(500);
+      expect(await add.json()).toMatchObject({ kind: "read_failed", error: expect.any(String) });
+
+      const remove = await DELETE(new NextRequest(url("sources"), { method: "DELETE", body: JSON.stringify({ path: "/home/owner/old" }) }));
+      expect(remove.status).toBe(500);
+      expect(await remove.json()).toMatchObject({ kind: "read_failed" });
+
+      // The owner's list is untouched — the whole point — and the lenient
+      // GET still answers rather than failing the page.
+      expect(cli.writes).toEqual([]);
+      expect(cli.extraPaths).toEqual(["/home/owner/old"]);
+      expect((await GET(new NextRequest(url("sources")))).status).toBe(200);
+    });
   });
 });
