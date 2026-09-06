@@ -38,6 +38,9 @@ vi.mock("@/lib/route-auth", async () => {
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
+  // The owner's explicit model picks are read and cleared through the tri-state
+  // reader, so a store that cannot be read is not mistaken for an empty one.
+  getKnown: vi.fn(),
   setMany: vi.fn(),
 }));
 
@@ -175,7 +178,7 @@ vi.mock("@/lib/local-ai-token", () => ({
   markLocalAiTokenMigrated: vi.fn(),
 }));
 
-import { getAll, setMany } from "@/lib/config-store";
+import { getAll, getKnown, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
   setPrimaryModelWithoutCatalogValidation,
@@ -278,6 +281,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.rm.mockResolvedValue(undefined);
     mockFs.unlink.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
+    vi.mocked(getKnown).mockResolvedValue({ value: undefined, known: true });
     // A provisioned box, past the wizard: that is the shape every case here
     // means, and it is the one where step 9 waits for the gateway to come back.
     readSetupGateFacts.mockReturnValue({ setupComplete: true, passwordConfigured: true });
@@ -587,6 +591,144 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(mockUnpairLocal).not.toHaveBeenCalled();
+  });
+
+  /**
+   * TASK-713 — the tier badge fills in a DEFAULT, and a default never
+   * overwrites a choice.
+   *
+   * A re-pair (and the wizard finalise, which reaches this route through
+   * `clawai/poll`) arrives carrying `clawaiTier`, so the badge cannot be told
+   * apart from an owner pressing a plan card. What settles it is the other
+   * side: whether the owner has ever picked a ClawBox AI model themselves. On
+   * a Max account whose box is stamped `deviceTier: "flash"` — a state the
+   * portal keeps on purpose — an entitled Max primary was replaced by Flash on
+   * every re-pair, and the chat's own guard could not undo it because it only
+   * ever moves down.
+   */
+  describe("a re-pair never overwrites an explicit model pick", () => {
+    async function pairClawai(tier: string) {
+      return configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token",
+        authMode: "subscription",
+        clawaiTier: tier,
+      }));
+    }
+
+    function primaryWrites(): string[] {
+      return configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))
+        .filter((command) => command.startsWith("config set agents.defaults.model.primary "));
+    }
+
+    it("keeps the owner's Max model when the device badge says Flash", async () => {
+      mockGetAll.mockResolvedValue({
+        clawai_tier: "flash",
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+
+      const body = await (await pairClawai("flash")).json();
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+      // ...and the answer SAYS so, so the plan card is not a 200 over a screen
+      // where nothing appears to have happened.
+      expect(body).toMatchObject({ explicitPickKept: true, model: "deepseek/deepseek-v4-pro" });
+    });
+
+    it("writes the tier default when the owner has never picked a model", async () => {
+      // The control for the case above: identical on beta, and it is what says
+      // the guard is about the marker rather than about ClawBox AI saves.
+      mockGetAll.mockResolvedValue({ clawai_tier: "flash" });
+
+      const body = await (await pairClawai("flash")).json();
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-flash"]);
+      expect(body.explicitPickKept).toBeUndefined();
+    });
+
+    it("keeps the pick on a DOWNGRADE, and lets the plan error be the one that speaks", async () => {
+      // The owner's Max pick with a box now on the Flash plan. Writing Flash
+      // here would be this route deciding an entitlement question it cannot
+      // see; the turn fails with the proxy's own "Model not allowed" instead,
+      // and the picker shows what the plan does allow.
+      mockGetAll.mockResolvedValue({
+        clawai_tier: "pro",
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+
+      expect((await pairClawai("flash")).status).toBe(200);
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+    });
+
+    it("is not moved by a pick the owner made for a DIFFERENT provider", async () => {
+      // Connecting ClawBox AI IS a provider choice, so an Anthropic pick says
+      // nothing about which ClawBox AI model to run — and must not erase the
+      // ClawBox AI slot either, which is why the picks are keyed per provider.
+      mockGetAll.mockResolvedValue({
+        clawai_tier: "flash",
+        ai_model_explicit_picks: {
+          anthropic: "anthropic/claude-opus-5",
+          clawai: "deepseek/deepseek-v4-pro",
+        },
+      });
+
+      expect((await pairClawai("flash")).status).toBe(200);
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+    });
+
+    it("drops the pick when the box is linked to a DIFFERENT ClawBox AI account", async () => {
+      // The choice belonged to the account that has just been replaced —
+      // the same signal this route already unpairs ClawKeep on. Imposing account
+      // A's Max model on account B's Pro plan fails every turn on a box B has
+      // only just paired.
+      mockGetAll.mockResolvedValue({
+        clawai_tier: "flash",
+        clawai_token: "claw_ACCOUNT_A",
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+      vi.mocked(getKnown).mockResolvedValue({
+        value: { clawai: "deepseek/deepseek-v4-pro" },
+        known: true,
+      });
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_ACCOUNT_B",
+        authMode: "subscription",
+        clawaiTier: "flash",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-flash"]);
+      // Cleared in the SAME write that stores the replacement token, so a failed
+      // clear cannot leave account A's pick beside account B's token.
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+        clawai_token: "claw_ACCOUNT_B",
+        ai_model_explicit_picks: {},
+      }));
+    });
+
+    it("does NOT read the model the box is running as a choice", async () => {
+      // The badge and the model move at different times: the status poll
+      // persists a new portal tier within 30 s while nothing rewrites the model
+      // until the next configure, so the first configure after ANY plan change
+      // sees a primary that differs from the tier default. Reading that as a
+      // pick minted one on every upgrade — the customer pays for Max and the box
+      // could never default to it again.
+      mockGetAll.mockResolvedValue({ clawai_tier: "pro" });
+      mockReadOpenClawConfig.mockResolvedValue({
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      } as never);
+
+      expect((await pairClawai("pro")).status).toBe(200);
+
+      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+      expect(mockSetMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
+      );
+    });
   });
 
   it("configures ollama without apiKey", async () => {

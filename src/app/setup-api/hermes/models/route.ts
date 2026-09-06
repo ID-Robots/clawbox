@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
+import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { getActiveHarness } from "@/lib/harness";
 import { requireSession } from "@/lib/route-auth";
 import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
@@ -226,6 +227,9 @@ export async function POST(request: Request) {
   // (pick Anthropic, keep saving deepseek). When the caller didn't name a
   // model we take that provider's own recommended default.
   let targetModel = model;
+  // Did the CALLER name it, or did we resolve one for them? Only the first is a
+  // choice worth remembering (TASK-713).
+  const namedModel = Boolean(model);
   if (!targetModel) {
     if (targetProvider === previousProvider) {
       targetModel = payload.current.model;
@@ -306,6 +310,17 @@ export async function POST(request: Request) {
       if (providerChanged || targetModel !== payload.current.model) {
         await setKey("model.default", targetModel);
       }
+      // The owner chose this model here, so the ClawBox AI tier badge may not
+      // fill one in over it on the next link or re-pair (TASK-713). Recorded
+      // after the write landed, and on the no-op path too: "already on the model
+      // I want" is the same choice.
+      //
+      // Only when the REQUEST named a model. A provider-only switch — which is
+      // what `/setup-api/providers/default` and the MCP `ai_set_provider` tool
+      // send, both deliberately — resolves that provider's own recommended
+      // default, and recording another default as a choice is the very
+      // confusion this marker exists to end.
+      if (namedModel) await recordExplicitModelPick(targetModel);
     } catch (err) {
       if (providerChanged && previousProvider) {
         // runHermesCli RESOLVES with a non-zero `code` on a failed command and

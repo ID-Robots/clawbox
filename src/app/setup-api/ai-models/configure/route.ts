@@ -51,6 +51,7 @@ import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
   CLAWBOX_AI_MODEL_BY_TIER,
+  CLAWBOX_AI_MODEL_ID_BY_TIER,
   CLAWBOX_AI_DEFAULT_TIER,
   CLAWBOX_AI_PROXY_URLS,
   CLAWBOX_AI_IMAGE_PROVIDER,
@@ -95,6 +96,11 @@ import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } f
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { forgetProviderEnumerations } from "@/lib/provider-runnable";
+import {
+  EXPLICIT_MODEL_PICKS_KEY,
+  decideClawboxAiModelId,
+  explicitPicksFrom,
+} from "@/lib/explicit-model-pick";
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
@@ -2104,6 +2110,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           ?? normalizeClawboxAiTier(configStore[CLAWBOX_AI_TIER_CONFIG_KEY])
           ?? CLAWBOX_AI_DEFAULT_TIER)
       : null;
+    // Set by the branch below in which the OWNER named a model, rather than one
+    // that filled a default in for them. Written to the store after the save
+    // succeeds, beside the other facts about what was configured.
+    let explicitPickToRecord: string | null = null;
+    // True when the ClawBox AI branch kept the owner's own model instead of the
+    // one the badge implies. Reported in the answer so the plan card can say the
+    // plan moved and the model deliberately did not, rather than returning 200
+    // over a screen where nothing appears to have happened.
+    let explicitPickKept = false;
+    // The picks map minus the ClawBox AI entry, when this save links a DIFFERENT
+    // ClawBox AI account. Written in the same batch as the new token below.
+    let clawaiPicksToStore: Record<string, string> | null = null;
+
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
@@ -2157,7 +2176,39 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       const modelName = localModelSlot || normalizedModel || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
-      config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
+      // The badge fills in a DEFAULT, and a default never overwrites a choice
+      // (TASK-713). A re-pair arrives here carrying `clawaiTier` exactly like a
+      // plan-card press does — `clawai/poll` sends the session's tier — so the
+      // request cannot say which this is. What settles it is whether the owner
+      // has ever picked a ClawBox AI model, which is what the marker records.
+      //
+      // A pick belongs to the ACCOUNT that made it. On a token change — the same
+      // signal that unpairs ClawKeep at step 8 — it is not read, so the previous
+      // owner's Max choice is not imposed on a Pro plan the new one is paying
+      // for; and it is CLEARED in the same `setMany` that stores the new token,
+      // so the two cannot come apart. A separate delete could fail on its own
+      // and leave account A's pick beside account B's token, waiting for the
+      // next re-pair to apply it.
+      const clawaiAccountChanged = Boolean(
+        previousClawaiToken && clawboxAiToken && previousClawaiToken !== clawboxAiToken,
+      );
+      const storedPicks = explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]);
+      if (clawaiAccountChanged && storedPicks.clawai) {
+        delete storedPicks.clawai;
+        clawaiPicksToStore = storedPicks;
+      }
+      const clawaiDecision = decideClawboxAiModelId({
+        picks: clawaiAccountChanged ? {} : storedPicks,
+        tierModelId: CLAWBOX_AI_MODEL_ID_BY_TIER[resolvedClawboxTier],
+      });
+      explicitPickKept = clawaiDecision.explicit;
+      if (clawaiDecision.explicit) {
+        console.log(
+          `[configure] ClawBox AI: keeping the owner's own model ${clawaiDecision.modelId}`
+          + ` over the ${resolvedClawboxTier} badge default`,
+        );
+      }
+      config.defaultModel = `${CLAWBOX_AI_PROVIDER}/${clawaiDecision.modelId}`;
     } else if (isChatgptSubscription && !normalizedModel) {
       // ChatGPT sign-in with no explicit pick. The hardcoded default is
       // gpt-5.5, so a Pro account used to land a generation behind and had
@@ -2210,6 +2261,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           );
         }
         config.defaultModel = `${targetProvider}/${requestedModel}`;
+        // The owner named this model. Remembered for the same reason the chat
+        // picker's pick is (TASK-713): a default may fill a gap, never
+        // overwrite a choice — and the marker holds the LAST choice, whichever
+        // provider it was about.
+        explicitPickToRecord = config.defaultModel;
       }
     }
 
@@ -2245,9 +2301,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           return NextResponse.json({ success: true });
         }
         if (isClawAI) {
-          await applyClawaiToHermes(clawboxAiToken, resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER);
+          const applied = await applyClawaiToHermes(
+            clawboxAiToken,
+            resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
+          );
           await forgetLocalWasDefault();
-          return NextResponse.json({ success: true });
+          // Reported from the apply's OWN decision rather than the one taken
+          // above for the OpenClaw shape: on this SKU that helper is what reads
+          // the store and writes the model, so its answer is the one that
+          // happened. Same field as the OpenClaw branch, so the plan card does
+          // not have to know which edition it is on.
+          return NextResponse.json({
+            success: true,
+            ...(applied.explicitPickKept
+              ? { explicitPickKept: true, model: applied.model }
+              : {}),
+          });
         }
         if (authMode !== "subscription" && normalizedApiKey) {
           // Cloud API-key providers Hermes supports (anthropic, google→gemini,
@@ -2806,6 +2875,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         local_ai_configured_at: new Date().toISOString(),
         // Consumed by shouldPromoteLocalToPrimary above.
         local_ai_was_default: undefined,
+        // UNREACHABLE today, and it must stay that way or be given the pick
+        // clear its sibling batch below carries: `isLocalScope` with neither
+        // Ollama nor llama.cpp is refused with a 400 long before this, so
+        // `isClawAI && isLocalScope` cannot happen. If that guard ever loosens,
+        // this becomes a ClawBox AI token write with no `ai_model_explicit_picks`
+        // beside it — the previous account's model choice surviving into the
+        // next account's box (TASK-713).
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });
@@ -2842,6 +2918,21 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         ai_model_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
+        // The owner named a model in this save (TASK-713), or this save linked a
+        // different ClawBox AI account and the previous owner's pick goes with
+        // it. Either way in the SAME batch as the other facts about the save, so
+        // a token that landed and a pick that was remembered — or forgotten —
+        // cannot come apart.
+        ...(explicitPickToRecord
+          ? {
+            [EXPLICIT_MODEL_PICKS_KEY]: {
+              ...(clawaiPicksToStore ?? explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY])),
+              [normalizeProviderId(ocProvider) ?? ocProvider]: explicitPickToRecord,
+            },
+          }
+          : clawaiPicksToStore
+            ? { [EXPLICIT_MODEL_PICKS_KEY]: clawaiPicksToStore }
+            : {}),
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();
@@ -3233,7 +3324,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, gatewayWarning]
       .filter(Boolean)
       .join(" ");
-    return NextResponse.json({ success: true, ...(warning ? { warning } : {}) });
+    return NextResponse.json({
+      success: true,
+      ...(warning ? { warning } : {}),
+      // The plan may have moved while the model deliberately did not (TASK-713).
+      // Reported so the plan card can say so, rather than answering 200 over a
+      // screen where nothing appears to have happened.
+      ...(explicitPickKept ? { explicitPickKept: true, model: config.defaultModel } : {}),
+    });
   } catch (err) {
     // The one refusal that is not a failure: the save was REFUSED before
     // anything was written, and the owner can act on it. Its own status and

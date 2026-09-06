@@ -38,7 +38,13 @@ vi.mock("@/lib/coding-agent-mcp-refresh", () => ({
   refreshCodingAgentToolsIfReadinessChanged: vi.fn(),
 }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
-vi.mock("@/lib/config-store", () => ({ setMany: vi.fn() }));
+// `getKnown` too: the link reads the owner's explicit model picks before
+// deciding what the tier badge may write (TASK-713). Nothing stored here, so the
+// badge decides, exactly as it did before the marker existed.
+vi.mock("@/lib/config-store", () => ({
+  setMany: vi.fn(),
+  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+}));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: envMock }));
 // The copy is mocked; `mergePluginsEnabled` is NOT, because the merge is the
 // part with a rule in it and it has its own reasons to be right.

@@ -1,4 +1,10 @@
-import { setMany } from "@/lib/config-store";
+import { getKnown, setMany } from "@/lib/config-store";
+import {
+  EXPLICIT_MODEL_PICKS_KEY,
+  decideClawboxAiModelId,
+  picksWithoutProvider,
+  readExplicitModelPicks,
+} from "@/lib/explicit-model-pick";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
@@ -20,9 +26,8 @@ import {
 } from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_CHAT_MODEL_IDS,
-  CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_IMAGE_MODEL_ID,
-  CLAWBOX_AI_PRO_MODEL_ID,
+  CLAWBOX_AI_MODEL_ID_BY_TIER,
   CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
@@ -59,7 +64,10 @@ export const CLAWBOX_AI_PROXY_URL = (
 /** BARE model id (no `deepseek/` vendor prefix) — the proxy returns
  *  "HTTP 400: Model not allowed" for a prefixed slug. */
 export function clawaiModelForTier(tier: ClawboxAiTier): string {
-  return tier === "pro" ? CLAWBOX_AI_PRO_MODEL_ID : CLAWBOX_AI_FLASH_MODEL_ID;
+  // Total, as the ternary it replaced was: every caller normalises the tier
+  // first, but this value goes straight into `config set model.default` argv and
+  // an `undefined` there would be a broken write rather than a wrong one.
+  return CLAWBOX_AI_MODEL_ID_BY_TIER[tier] ?? CLAWBOX_AI_MODEL_ID_BY_TIER.flash;
 }
 
 export class ClawaiApplyError extends Error {}
@@ -104,6 +112,21 @@ export interface ApplyClawaiOptions {
    * first, so they leave it unset and the snapshot below is honest.
    */
   codingAgentReadyBefore?: boolean;
+  /**
+   * The `clawai_token` this box held before the caller touched anything — for
+   * the same caller, for the same reason (TASK-713).
+   *
+   * A pick belongs to the ACCOUNT that made it, so this function drops the
+   * stored ClawBox AI pick when the token changes. It cannot learn that from
+   * the store if the caller has already written the new token there: the read
+   * would answer with the token it is being asked about, `accountChanged` would
+   * be false on every real link, and account A's Max choice would be applied to
+   * account B's Pro plan. `/setup-api/hermes/clawai` persists a PASTED token
+   * before it applies it and is the one caller that needs this; the configure
+   * route and the device-code finaliser write nothing first, so they leave it
+   * unset and the read below is honest.
+   */
+  previousClawaiToken?: string;
 }
 
 /**
@@ -113,18 +136,62 @@ export interface ApplyClawaiOptions {
  * @param tier  device tier — decides which bare deepseek id becomes model.default
  * @param options see `ApplyClawaiOptions`
  */
+/**
+ * The ClawBox AI token this box already holds, or "".
+ *
+ * Read to spot an ACCOUNT switch — the same thing the OpenClaw configure route
+ * compares to unpair ClawKeep. An unreadable store answers "" and nothing is
+ * dropped, which is the direction that keeps a working link working.
+ */
+async function getStoredClawaiToken(): Promise<string> {
+  const { value } = await getKnown("clawai_token");
+  return typeof value === "string" ? value.trim() : "";
+}
+
 export async function applyClawaiToHermes(
   token: string,
   tier: ClawboxAiTier,
   options: ApplyClawaiOptions = {},
-): Promise<{ provider: string; model: string; tier: ClawboxAiTier }> {
+): Promise<{ provider: string; model: string; tier: ClawboxAiTier; explicitPickKept: boolean }> {
   const trimmed = token.trim();
   // A token that starts with "-" would be read by hermes as a flag. runHermesCli
   // never uses a shell, but argv position is still meaningful.
   if (!trimmed || trimmed.startsWith("-")) {
     throw new ClawaiApplyError("Sign in to ClawBox AI first to get a device token.");
   }
-  const model = clawaiModelForTier(tier);
+  // The tier badge fills in a DEFAULT and never overwrites a choice (TASK-713).
+  // Same rule and same decision function as the OpenClaw route — a re-pair
+  // reaches both editions carrying a tier it cannot be told apart from a plan
+  // press, so what settles it is whether the owner has ever picked a ClawBox AI
+  // model here.
+  //
+  // A pick belongs to the ACCOUNT that made it, so a token change means it is
+  // not read here — the previous owner's Max choice must not be imposed on the
+  // Pro plan the new one is paying for — and it is CLEARED in the same
+  // `setMany` that stores the new token at the bottom, so the two cannot come
+  // apart. A separate delete could fail on its own and leave account A's pick
+  // beside account B's token, waiting for the next link to apply it.
+  // Read before the first write, like every other before/after fact this
+  // function samples.
+  const previousToken = options.previousClawaiToken?.trim() ?? await getStoredClawaiToken();
+  const accountChanged = Boolean(previousToken && previousToken !== trimmed);
+  const storedPicks = await readExplicitModelPicks();
+  // Null whenever there is nothing to drop — including when the CALLER has
+  // already dropped it, which `/setup-api/hermes/clawai` does in the same write
+  // that stores the token it supplies.
+  const picksToStore = accountChanged
+    ? picksWithoutProvider(storedPicks, CLAWAI_PROVIDER)
+    : null;
+  const clawaiDecision = decideClawboxAiModelId({
+    picks: accountChanged ? {} : storedPicks,
+    tierModelId: clawaiModelForTier(tier),
+  });
+  if (clawaiDecision.explicit) {
+    console.log(
+      `[Hermes ClawAI] keeping the owner's own model ${clawaiDecision.modelId} over the ${tier} badge default`,
+    );
+  }
+  const model = clawaiDecision.modelId;
   // BEFORE the first write. The token is about to change — an account switch, a
   // re-pair, a rotated device token — and the step loop below can throw after
   // `providers.clawai.api_key` has already landed, which would leave the new
@@ -346,6 +413,9 @@ export async function applyClawaiToHermes(
     ai_model_configured: true,
     ai_model_provider: CLAWAI_PROVIDER,
     ai_model_configured_at: new Date().toISOString(),
+    // The previous account's model pick, dropped in the same write as its
+    // replacement token (TASK-713).
+    ...(picksToStore ? { [EXPLICIT_MODEL_PICKS_KEY]: picksToStore } : {}),
   });
 
   // The device's provider/model just changed — don't serve the old selection.
@@ -415,7 +485,10 @@ export async function applyClawaiToHermes(
     );
   }
 
-  return { provider: CLAWAI_PROVIDER, model, tier };
+  // `explicitPickKept` says the badge was overruled by the owner's own choice
+  // (TASK-713), so the caller can report it rather than answering 200 over a
+  // screen where the plan moved and the model deliberately did not.
+  return { provider: CLAWAI_PROVIDER, model, tier, explicitPickKept: clawaiDecision.explicit };
 }
 
 let clawaiModelsReconciled = false;

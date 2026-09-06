@@ -1,6 +1,12 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import {
+  EXPLICIT_MODEL_PICKS_KEY,
+  clawboxAiModelIdOf,
+  picksWithoutProvider,
+  readExplicitModelPicks,
+} from "@/lib/explicit-model-pick";
 import { get, setMany } from "@/lib/config-store";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
 import { hermesConfigGet } from "@/lib/hermes-config-cache";
@@ -51,17 +57,35 @@ export async function GET() {
   const blocked = await requireHermes();
   if (blocked) return blocked;
 
-  const [token, tierStored] = await Promise.all([readToken(), readStoredTier()]);
+  const [token, tierStored, picks] = await Promise.all([
+    readToken(),
+    readStoredTier(),
+    readExplicitModelPicks(),
+  ]);
   const tier: ClawboxAiTier = tierStored ?? "flash";
   // Memoised against config.yaml's mtime: this GET runs on every chat open and
   // every Settings visit, and the CLI spawn behind it costs ~600 ms each time.
-  const active = (await hermesConfigGet("model.provider")) === CLAWAI_PROVIDER;
+  // The second key is free once the first has warmed that cache.
+  const [activeProvider, storedModel] = await Promise.all([
+    hermesConfigGet("model.provider"),
+    hermesConfigGet("model.default"),
+  ]);
+  const active = activeProvider === CLAWAI_PROVIDER;
   return NextResponse.json({
     hasToken: Boolean(token),
     tier,
     tierStored,
     active,
-    model: clawaiModelForTier(tier),
+    // The model this box RUNS for ClawBox AI, which is no longer the same
+    // question as which tier the badge shows: an explicit pick outlives the
+    // badge (TASK-713), and the panel renders this string as "Model: …".
+    // While ClawBox AI is the ACTIVE provider the harness's own `model.default`
+    // is the answer — no derivation can beat what the box is configured with.
+    // Otherwise it is what a link would write: the owner's pick if there is one,
+    // else the badge's default.
+    model: (active && storedModel.trim())
+      || clawboxAiModelIdOf(picks.clawai)
+      || clawaiModelForTier(tier),
   });
 }
 
@@ -114,6 +138,11 @@ export async function POST(request: Request) {
   // snapshot is taken before any write and is honest; and on a probe that threw,
   // which must not turn a link into a 500.
   let codingAgentReadyBefore: boolean | undefined;
+  // The SAME hazard, one field over: the apply drops the stored model pick when
+  // the ClawBox AI account changes, and it cannot see that change if this route
+  // has already written the new token into the store it would read (TASK-713).
+  // Captured here, ahead of that write, and handed over explicitly.
+  let previousClawaiToken: string | undefined;
   if (suppliedToken) {
     if (!isPlausibleClawaiToken(suppliedToken)) {
       return NextResponse.json({ error: "That doesn't look like a ClawBox AI token." }, { status: 400 });
@@ -121,7 +150,22 @@ export async function POST(request: Request) {
     codingAgentReadyBefore = await getCodingAgentStatus()
       .then((status) => status.ready)
       .catch(() => undefined);
-    await setMany({ clawai_token: suppliedToken });
+    previousClawaiToken = await readToken();
+    // The pick goes with the account, and it goes in THIS write. The apply
+    // below clears it too, but only in its own final `setMany`, behind a step
+    // loop that is fatal on any failing `hermes config set` — so a step that
+    // fails after this line would answer 502 having stored account B's token
+    // beside account A's pick, and this route never rolls the token back. Every
+    // later link would then read `previousToken === trimmed`, see no account
+    // change, and write A's model as B's default for good (TASK-713).
+    const replacedAccount = Boolean(previousClawaiToken && previousClawaiToken !== suppliedToken);
+    const picksWithoutClawai = replacedAccount
+      ? picksWithoutProvider(await readExplicitModelPicks(), CLAWAI_PROVIDER)
+      : null;
+    await setMany({
+      clawai_token: suppliedToken,
+      ...(picksWithoutClawai ? { [EXPLICIT_MODEL_PICKS_KEY]: picksWithoutClawai } : {}),
+    });
     // A refusal the proxy gave the token being replaced is about that token,
     // not this one. Dropped here as well as in `applyClawaiToHermes`, because a
     // paste that never reaches the apply still changed the credential.
@@ -139,7 +183,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await applyClawaiToHermes(token, tier, { codingAgentReadyBefore });
+    const result = await applyClawaiToHermes(token, tier, {
+      codingAgentReadyBefore,
+      previousClawaiToken,
+    });
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     // Only OUR own error text is safe to echo — a raw spawn error can carry the

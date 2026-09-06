@@ -33,7 +33,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const cliMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
-vi.mock("@/lib/config-store", () => ({ setMany: vi.fn(), get: vi.fn(async () => null) }));
+vi.mock("@/lib/config-store", () => ({
+  setMany: vi.fn(),
+  get: vi.fn(async () => null),
+  // Read before the first write, to spot an account switch and the owner's
+  // explicit model pick (TASK-713).
+  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+}));
 // The image half of the ClawBox AI apply writes to ~/.hermes and copies a plugin
 // into it; neither belongs in this file's blast radius, and both have their own.
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn() }));

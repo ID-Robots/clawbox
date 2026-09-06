@@ -19,14 +19,26 @@ const optionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async (key: string) => store[key] ?? null),
+  // The tri-state reader the explicit-pick marker uses (TASK-713), over the
+  // same fixture store.
+  getKnown: vi.fn(async (key: string) => ({ value: store[key], known: true })),
   setMany: vi.fn(async (values: Record<string, unknown>) => {
     for (const [key, value] of Object.entries(values)) store[key] = value;
   }),
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
-vi.mock("@/lib/hermes-config-cache", () => ({ hermesConfigGet: vi.fn(async () => "clawai") }));
+// Key-aware: the GET now answers with the harness's OWN `model.default` while
+// ClawBox AI is the active provider (TASK-713), so a blanket "clawai" would
+// stand in for the model as well as the provider.
+/** What `hermes config get <key>` answers in a given test. */
+const hermesConfig: Record<string, string> = {};
+vi.mock("@/lib/hermes-config-cache", () => ({
+  hermesConfigGet: vi.fn(async (key: string) => hermesConfig[key] ?? ""),
+}));
+const cliMock = vi.hoisted(() =>
+  vi.fn(async (_args: string[]) => ({ code: 0, stdout: "", stderr: "" })));
 vi.mock("@/lib/hermes-cli", () => ({
-  runHermesCli: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+  runHermesCli: cliMock,
 }));
 // The box already draws, so the image family cannot be what asks for a reload
 // below — anything this test counts belongs to the coding-agent family.
@@ -59,10 +71,20 @@ vi.mock("@/lib/coding-agent", () => ({
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: vi.fn(async () => "restarted") }));
 
-import { POST } from "@/app/setup-api/hermes/clawai/route";
+import { GET, POST } from "@/app/setup-api/hermes/clawai/route";
+import { EXPLICIT_MODEL_PICKS_KEY } from "@/lib/explicit-model-pick";
 
 /** A well-formed pasted token: charset+length is all the route checks. */
 const PASTED = "claw_abcdef0123456789";
+
+/** What `hermes config set model.default` was given, if it was called. */
+function modelDefaultWrite(): string | undefined {
+  for (const call of cliMock.mock.calls as unknown as Array<[string[]]>) {
+    const args = call[0];
+    if (Array.isArray(args) && args[1] === "set" && args[2] === "model.default") return args[3];
+  }
+  return undefined;
+}
 
 function post(body: unknown): Request {
   return new Request("http://localhost/setup-api/hermes/clawai", {
@@ -102,6 +124,7 @@ function unchangedCatalogue() {
 
 beforeEach(() => {
   for (const key of Object.keys(store)) delete store[key];
+  cliMock.mockClear();
   rpcMock.mockReset();
   statusMock.mockReset();
   optionsMock.mockReset();
@@ -131,6 +154,63 @@ describe("POST /setup-api/hermes/clawai", () => {
     expect(reloadCount()).toBe(0);
   });
 
+  it("drops the previous account's model pick when a DIFFERENT token is pasted", async () => {
+    // TASK-713, through the route rather than the helper. This route persists a
+    // pasted token BEFORE it applies it, so a `previousToken` read inside the
+    // apply would answer with the token it is being asked about: the account
+    // change would be invisible, and account A's Max choice would be handed to
+    // account B's Pro plan on a box they had only just paired. The previous
+    // token is captured here, ahead of that write, and passed in — the same
+    // shape, and for the same reason, as `codingAgentReadyBefore` beside it.
+    store.clawai_token = "claw_ACCOUNT_A0000000";
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+
+    expect(response.status).toBe(200);
+    expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({});
+    // ...and the badge, not the replaced account's pick, decided the model.
+    const modelWrite = modelDefaultWrite();
+    expect(modelWrite).toBe("deepseek-v4-flash");
+  });
+
+  it("clears the previous account's pick even when the apply then FAILS", async () => {
+    // This route stores the pasted token ITSELF and never rolls it back, while
+    // the apply's own clear rides its final `setMany` — behind a step loop that
+    // is fatal on any failing `hermes config set`. So a step that fails after
+    // the token write answered 502 with account B's token stored beside account
+    // A's pick, and every later link then read `previousToken === trimmed`, saw
+    // no account change, and wrote A's model as B's default for good. The two
+    // writes are one write now (TASK-713).
+    store.clawai_token = "claw_ACCOUNT_A0000000";
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+    cliMock.mockImplementation(async (args: string[]) => (
+      args[1] === "set" && args[2] === "model.default"
+        ? { code: 1, stdout: "", stderr: "config store is locked by another writer" }
+        : { code: 0, stdout: "", stderr: "" }
+    ));
+
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+
+    expect(response.status).toBe(502);
+    // The token landed, as it does on beta — and the pick it replaced did not
+    // survive it.
+    expect(store.clawai_token).toBe(PASTED);
+    expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({});
+  });
+
+  it("keeps the pick when the SAME account re-applies its tier", async () => {
+    store.clawai_token = PASTED;
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+
+    expect(response.status).toBe(200);
+    expect(store[EXPLICIT_MODEL_PICKS_KEY]).toEqual({ clawai: "deepseek/deepseek-v4-pro" });
+    const modelWrite = modelDefaultWrite();
+    expect(modelWrite).toBe("deepseek-v4-pro");
+  });
+
   it("still asks only ONCE when the link moves the providers too", async () => {
     // Connecting ClawBox AI credentials the `clawai` provider AND makes the
     // coding agent runnable. `reload.mcp` is global — it rebuilds every
@@ -149,5 +229,62 @@ describe("POST /setup-api/hermes/clawai", () => {
     const response = await POST(post({ token: PASTED, tier: "flash" }));
     expect(response.status).toBe(200);
     expect(reloadCount()).toBe(1);
+  });
+});
+
+/**
+ * TASK-713 — the panel renders this field as "Model: …", so it has to name the
+ * model the box RUNS, not the one the tier badge implies. Once an explicit pick
+ * outlives the badge, those are two different questions.
+ */
+describe("GET /setup-api/hermes/clawai", () => {
+  beforeEach(() => {
+    for (const key of Object.keys(store)) delete store[key];
+    for (const key of Object.keys(hermesConfig)) delete hermesConfig[key];
+    store.clawai_token = "claw_token_abc";
+  });
+
+  it("names the tier's model when the owner has picked none", async () => {
+    // Some other provider is active, so this is what a LINK would write.
+    hermesConfig["model.provider"] = "anthropic";
+    hermesConfig["model.default"] = "anthropic/claude-opus-5";
+    store.clawai_tier = "flash";
+
+    const body = await (await GET()).json();
+
+    expect(body.model).toBe("deepseek-v4-flash");
+    expect(body.active).toBe(false);
+    expect(body.tier).toBe("flash");
+  });
+
+  it("names the owner's own model when there is one, whatever the badge says", async () => {
+    // Again a link's answer, not the box's: ClawBox AI is not the active
+    // provider here, so the pick is what would be written.
+    hermesConfig["model.provider"] = "anthropic";
+    hermesConfig["model.default"] = "anthropic/claude-opus-5";
+    store.clawai_tier = "flash";
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+
+    const body = await (await GET()).json();
+
+    expect(body.model).toBe("deepseek-v4-pro");
+    // The badge itself is untouched — it is the PLAN, and it is still what the
+    // plan card renders.
+    expect(body.tier).toBe("flash");
+  });
+
+  it("names what the box is CONFIGURED with while ClawBox AI is the active provider", async () => {
+    // Nothing derived can beat the harness's own answer. A pick that disagrees
+    // with `model.default` — an out-of-band `hermes config set`, a link that
+    // half-landed — must not be painted as the model in use.
+    hermesConfig["model.provider"] = "clawai";
+    hermesConfig["model.default"] = "deepseek-v4-flash";
+    store.clawai_tier = "pro";
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+
+    const body = await (await GET()).json();
+
+    expect(body.model).toBe("deepseek-v4-flash");
+    expect(body.active).toBe(true);
   });
 });

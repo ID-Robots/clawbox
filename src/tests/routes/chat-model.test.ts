@@ -12,6 +12,10 @@ vi.mock("util", () => ({
 vi.mock("@/lib/config-store", () => ({
   DATA_DIR: "/home/clawbox/clawbox/data",
   getAll: vi.fn(),
+  // The owner's explicit model pick is written here after a successful switch
+  // (TASK-713): a picker click is the one place a choice is made.
+  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+  setMany: vi.fn(),
 }));
 
 const { configSetMock } = vi.hoisted(() => ({ configSetMock: vi.fn() }));
@@ -78,6 +82,7 @@ import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfig
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
+import { setMany } from "@/lib/config-store";
 import { promisify } from "util";
 
 describe("/setup-api/chat/model", () => {
@@ -474,6 +479,76 @@ describe("/setup-api/chat/model", () => {
     ]);
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
+  });
+
+  describe("remembering that the OWNER chose this model", () => {
+    /**
+     * TASK-713. The ClawBox AI tier badge is a device default, and every pair
+     * and re-pair wrote it over `agents.defaults.model.primary`. What stops it
+     * doing that to a model the owner chose is knowing that they chose one —
+     * and this is the click where that happens.
+     */
+    function boxWithClawaiAndAnthropic() {
+      vi.mocked(getAll).mockResolvedValue({});
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+          },
+        },
+        models: { providers: { deepseek: { models: [
+          { id: "deepseek-v4-flash", name: "ClawBox AI Flash" },
+          { id: "deepseek-v4-pro", name: "ClawBox AI Pro" },
+        ] } } },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      } as never);
+    }
+
+    async function post(body: Record<string, unknown>) {
+      return POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }));
+    }
+
+    it("records the pick after the write lands", async () => {
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-pro" })).status).toBe(200);
+
+      expect(setMany).toHaveBeenCalledWith({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+    });
+
+    it("records a re-pick of the model the box already runs", async () => {
+      // Someone deliberately settled on the tier-default model has no other way
+      // to say so, and without this the badge moves them off it the day their
+      // plan changes. The Hermes picker records the same no-op for the same
+      // reason.
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-flash" })).status).toBe(200);
+
+      expect(setMany).toHaveBeenCalledWith({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-flash" },
+      });
+    });
+
+    it("records NOTHING for a switch the box made for itself", async () => {
+      // The chat's entitlement guard drops a Max model the portal refuses down
+      // to Flash so chat keeps working. Remembering the box's own recovery as
+      // the owner's decision would pin the box to Flash for good — the tier
+      // badge could never move it again, which is the opposite of the fix.
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-pro", automatic: true })).status).toBe(200);
+
+      expect(setMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
+      );
+    });
   });
 
   it("rejects an invalid source", async () => {

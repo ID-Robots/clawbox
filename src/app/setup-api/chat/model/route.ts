@@ -38,6 +38,7 @@ import {
   providerRowRunnable,
 } from "@/lib/provider-status";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
+import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
@@ -920,12 +921,27 @@ export async function POST(request: Request) {
     return NextResponse.json(WRONG_STORE, { status: 409 });
   }
   try {
-    let body: { source?: ChatModelSource; model?: string; provider?: string };
+    let body: { source?: ChatModelSource; model?: string; provider?: string; automatic?: boolean };
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
+
+    // "The BOX resolved this model, the owner did not name it." Two callers set
+    // it, both in-process: the chat's entitlement guard, which drops a Max model
+    // the portal refuses down to Flash so chat keeps working, and
+    // `/setup-api/providers/default`, where the owner named a PROVIDER and this
+    // route's own state supplied the model. It changes nothing about the write —
+    // only whether the result is remembered as the owner's own pick (TASK-713).
+    //
+    // Caller-supplied because on the wire a resolved model and a chosen one are
+    // the same field, and this route cannot tell them apart; the Hermes twin can
+    // (`if (namedModel)`) only because there a provider-only switch arrives with
+    // no model at all. It is not a permission: the caller is the authenticated
+    // owner, it cannot change WHAT is written, and the worst it can do is lose
+    // its own bookkeeping — one later badge overwrite, undone by re-picking.
+    const automaticSwitch = body.automatic === true;
 
     // One read of openclaw.json for the request: the state below and every
     // credential fact the routing turns on come from the same snapshot.
@@ -1225,6 +1241,17 @@ export async function POST(request: Request) {
     if (targetOffSurface) return targetOffSurface;
 
     if (state.activeModel === targetModel) {
+      // Naming the model the box already runs is still a choice, and the write
+      // being a no-op does not make it less of one (TASK-713) — so it is
+      // recorded here as the Hermes picker records it.
+      //
+      // NOT reachable from the chat header, and the claim is not made: ChatPopup
+      // short-circuits a pick of the active model before the POST
+      // (`switchChatModel`, ChatPopup.tsx), so an owner deliberately settling on
+      // the model they are already on has no surface that says so. This branch
+      // exists for a caller that does arrive — an API client, a future picker
+      // that stops short-circuiting — and is honest for it.
+      if (!automaticSwitch) await recordExplicitModelPick(targetModel);
       // Already the primary — but a ChatGPT pick can arrive as `codex/<id>`
       // and remap onto a primary that IS `openai/<id>` already, on a box whose
       // Codex runtime entry is missing (written by an older ClawBox, or lost).
@@ -1355,6 +1382,17 @@ export async function POST(request: Request) {
     //     Each announcement therefore sits at the write it describes.
     const pluginSwitchedOn = providerPluginSwitchedOnBy([targetModel], configBeforeBatch);
     if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
+
+    // 1b-2. The owner chose this model, so nothing that fills in a DEFAULT may
+    //       overwrite it later — that is the whole of TASK-713, and this is
+    //       where the choice is made. Recorded after the write landed, so a
+    //       refused batch records nothing.
+    //
+    //       `automatic` is the one exemption: the chat's entitlement guard
+    //       drops a refused Max model to Flash by posting HERE, and recording
+    //       that as a choice would pin the box to Flash for good — the box's
+    //       own recovery, read back as the owner's decision.
+    if (!automaticSwitch) await recordExplicitModelPick(targetModel);
 
     // 1c. The other side of the arm: a pick that is NOT the subscription's, on
     //     a reference an earlier ChatGPT pick armed, has to clear it — a

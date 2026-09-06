@@ -119,7 +119,16 @@ export async function POST(request: Request) {
     new Request("http://localhost/setup-api/chat/model", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: option.model }),
+      // `automatic`, because the owner named a PROVIDER and this route resolved
+      // the model — the row's representative id, picked above out of the
+      // picker's own state. Recording that as the owner's explicit model choice
+      // would defeat the very thing the marker protects: a ClawBox AI plan
+      // upgrade would then find a "pick" nobody made and leave the box on the
+      // old tier's model (TASK-713). It is the same rule the Hermes twin
+      // applies as `if (namedModel)` in `/setup-api/hermes/models`, expressed
+      // on the side that knows the answer — this caller — because on the wire
+      // a resolved model and a chosen one are the same field.
+      body: JSON.stringify({ model: option.model, automatic: true }),
     }),
   );
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;

@@ -201,7 +201,11 @@ describe("a ClawBox AI Pro model the account is entitled to", () => {
     // the POST is already there after the same settle() they assert emptiness
     // after. (The upgrade message itself goes into the transcript, which the
     // "Switching AI provider…" overlay covers for the whole of the switch.)
-    expect(modelWrites(calls)).toEqual(['{"model":"deepseek/deepseek-v4-flash"}']);
+    // `automatic: true` is the whole difference between the BOX recovering and
+    // the OWNER choosing Flash: the server records a pick for the second and
+    // must not for the first, or this recovery would pin the box to Flash for
+    // good (TASK-713).
+    expect(modelWrites(calls)).toEqual(['{"model":"deepseek/deepseek-v4-flash","automatic":true}']);
   });
 
   it("is left running when the entitlement could not be read at all", async () => {
@@ -272,7 +276,11 @@ describe("the boot guard when the switch it asks for fails", () => {
     release();
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
 
-    expect(modelWrites(calls)).toEqual(['{"model":"deepseek/deepseek-v4-flash"}']);
+    // `automatic: true` is the whole difference between the BOX recovering and
+    // the OWNER choosing Flash: the server records a pick for the second and
+    // must not for the first, or this recovery would pin the box to Flash for
+    // good (TASK-713).
+    expect(modelWrites(calls)).toEqual(['{"model":"deepseek/deepseek-v4-flash","automatic":true}']);
     // The failure is reported once, as itself…
     expect(occurrences("Selected AI provider is not configured")).toBe(1);
     // …and nothing claims the box was moved off the model it is still on.
