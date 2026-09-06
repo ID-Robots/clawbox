@@ -2928,10 +2928,26 @@ export function startUpdate(): { started: boolean; error?: string } {
   state.phase = "running";
   state.currentStepIndex = 0;
 
-  // A new run supersedes the record of the last interrupted one. Fired rather
-  // than awaited, like the lock release it mirrors: refusing to start an update
-  // because a marker could not be cleared would be the worse outcome.
-  void set(UPDATE_INTERRUPTED_KEY, undefined);
+  // A new run supersedes what the last one left behind — the interrupted record
+  // AND the completion markers.
+  //
+  // `update_completed` is the discriminator resumeContinuation uses to tell "an
+  // update was interrupted" from "one finished and only failed to release its
+  // lock". Left standing, a FORCED run started after a successful one (which is
+  // exactly what e2e-install's upgrade spec does, twice) would take the lock,
+  // die before the rebuild writes its continuation flag, and be read as the
+  // finished one — swallowing the very report this branch exists to make. The
+  // box is not "completed" while it is updating, and runUpdate writes both
+  // again when it is.
+  //
+  // Fired rather than awaited, like the lock release it mirrors: refusing to
+  // start an update because a marker could not be cleared would be the worse
+  // outcome.
+  void setMany({
+    [UPDATE_INTERRUPTED_KEY]: undefined,
+    update_completed: undefined,
+    update_completed_at: undefined,
+  });
   launchUpdate(steps, 0, { markCompleted: true });
   return { started: true };
 }

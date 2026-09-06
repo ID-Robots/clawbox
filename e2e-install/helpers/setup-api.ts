@@ -399,9 +399,13 @@ function looksUnstarted(state: UpdateState): boolean {
 /** What the container can say about a run that vanished. Never throws. */
 async function diagnoseLostUpdate(): Promise<string> {
   const parts: string[] = [];
+  // Bounded well under dockerExec's 60 s default: this runs on a path that has
+  // already spent its 120 s budget, and three sequential defaults would turn a
+  // two-minute verdict into a five-minute one.
+  const DIAGNOSIS_TIMEOUT_MS = 15_000;
   const ask = async (label: string, cmd: string[]) => {
     try {
-      parts.push(`${label}:\n${(await dockerExec(cmd, { user: "root" })).trim()}`);
+      parts.push(`${label}:\n${(await dockerExec(cmd, { user: "root", timeoutMs: DIAGNOSIS_TIMEOUT_MS })).trim()}`);
     } catch (err) {
       parts.push(`${label}: could not be read (${err instanceof Error ? err.message : String(err)})`);
     }

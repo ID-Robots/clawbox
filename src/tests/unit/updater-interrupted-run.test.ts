@@ -47,11 +47,12 @@ vi.mock("@/lib/config-store", () => ({
 
 vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 
-import { get, set } from "@/lib/config-store";
+import { get, set, setMany } from "@/lib/config-store";
 import * as updater from "@/lib/updater";
 
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
+const mockSetMany = vi.mocked(setMany);
 
 /** The disk as this box would have it after the run was lost. */
 function diskState({
@@ -74,6 +75,8 @@ beforeEach(() => {
   mockGet.mockReset();
   mockSet.mockReset();
   mockSet.mockResolvedValue(undefined as never);
+  mockSetMany.mockReset();
+  mockSetMany.mockResolvedValue(undefined as never);
 });
 
 afterEach(() => {
@@ -147,6 +150,25 @@ describe("an update whose process was replaced is reported, not forgotten", () =
     diskState({ locked: false, interruptedAt: "2026-09-06T09:00:00.000Z" });
     await updater.checkContinuation();
     expect(updater.getUpdateState().phase).toBe("failed");
+  });
+
+  it("clears the completion markers when a new run starts, so the next verdict is not swallowed", () => {
+    // update_completed is the discriminator the branch above uses. Left
+    // standing, a FORCED run after a successful one — which is exactly what
+    // e2e-install's upgrade spec does, twice — would be read as the finished
+    // one if it died before the rebuild wrote its continuation flag.
+    updater.resetUpdateState();
+    diskState({ locked: false, completed: true });
+
+    expect(updater.startUpdate()).toEqual({ started: true });
+
+    expect(mockSetMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update_completed: undefined,
+        update_completed_at: undefined,
+        update_interrupted_at: undefined,
+      }),
+    );
   });
 
   it("says nothing about a run that FINISHED and only failed to release its lock", async () => {
