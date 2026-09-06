@@ -799,7 +799,9 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.message).toMatch(/did not finish|did not run/i);
-    expect(out.error.next).toBeTruthy();
+    // Not merely truthy: a truthy `next` is also what the catch-all's "retry
+    // once" produces, which is the advice the rules exist to replace.
+    expect(out.error.next).toMatch(/do not start another one/i);
   });
 
   it("tells the owner to re-pair when the portal revoked this device mid-backup", async () => {

@@ -148,6 +148,10 @@ function backupErrorText(
   switch (code) {
     case "quota_full":
       return t("clawkeep.error.outOfSpace");
+    case "tier_limit":
+      // A different remedy from "out of space": the account has room, the plan
+      // does not cover this backup.
+      return t("clawkeep.error.planLimit");
     case "pairing_revoked":
       return t("clawkeep.error.pairingRejected");
     case "token_unreadable":
