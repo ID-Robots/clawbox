@@ -43,6 +43,7 @@ import BackgroundJobsPanel from "./BackgroundJobsPanel";
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
 import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
+import { customWallpaperId, customWallpaperIndex } from "@/lib/custom-wallpapers";
 
 /* ── Types ── */
 
@@ -3291,7 +3292,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   );
                 })}
                 {ui.customWallpapers.map((dataUrl, i) => {
-                  const selected = ui.wallpaperId === `custom-${i}`;
+                  const selected = ui.wallpaperId === customWallpaperId(i);
                   // The last two names on this card that never followed the UI
                   // language: an uploaded wallpaper announced itself as
                   // "Custom 1" beside tiles whose names were translated.
@@ -3305,7 +3306,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         type="button"
                         aria-pressed={selected}
                         aria-label={customName}
-                        onClick={() => ui.onWallpaperChange(`custom-${i}`)}
+                        onClick={() => ui.onWallpaperChange(customWallpaperId(i))}
                         className={`relative w-full h-full rounded-xl overflow-hidden transition-all cursor-pointer border-none p-0 ${
                           selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
                         }`}
@@ -6221,9 +6222,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return { subtitle: null };
       }
       case "appearance": {
-        const sub = ui.wallpaperId.startsWith("custom-")
-          ? `Custom ${parseInt(ui.wallpaperId.split("-")[1] || "0") + 1}`
-          : ui.wallpaperId;
+        const customIdx = customWallpaperIndex(ui.wallpaperId);
+        // A slot number is only printable when the slot EXISTS. `wp_id` is
+        // box-wide while the pictures are this browser's `localStorage`, so an
+        // id can name a position the list no longer holds — and printing
+        // "Custom 3" beside a grid of two, with none of them highlighted, is
+        // the panel asserting a selection it never checked. The desktop paints
+        // the first built-in there, so that is what the row says.
+        const sub = customIdx === null
+          ? ui.wallpaperId
+          : customIdx < ui.customWallpapers.length
+            ? `Custom ${customIdx + 1}`
+            : (ui.wallpapers[0]?.name ?? ui.wallpaperId);
         return { subtitle: sub };
       }
       case "wifi":

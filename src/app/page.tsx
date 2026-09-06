@@ -46,6 +46,8 @@ import type { InstalledMeta } from "@/lib/store-categories";
 import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
 import { apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
+import { customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import { TOAST_EVENT } from "@/components/ToastHost";
 import {
   layoutIcons,
   layoutsEqual,
@@ -591,6 +593,13 @@ function ChromeDesktopInner() {
   // the mirror behind. A mirror kept in step by convention is an invisible LOST
   // write, and the purity rule cannot see one: it reports side effects INSIDE
   // an updater, never a missing ref advance outside one.
+  // What a box with no custom wallpaper selected shows — the harness's own
+  // art, the same default the mount path above picks for a first boot.
+  const harnessDefaultWallpaperId = activeHarness === "hermes" ? "hermes" : "clawbox";
+  // The repair effect below has to be able to tell "no custom wallpapers" from
+  // "not read yet": firing against the empty initial state would reset a
+  // perfectly good `custom-<n>` selection on every load.
+  const [customWallpapersLoaded, setCustomWallpapersLoaded] = useState(false);
   const customWallpapersRef = useRef<string[]>([]);
   const applyCustomWallpapers = useCallback((next: string[]) => {
     customWallpapersRef.current = next;
@@ -601,11 +610,29 @@ function ChromeDesktopInner() {
   useEffect(() => {
     try {
       const saved = localStorage.getItem(CUSTOM_WPS_KEY);
-      if (!saved) return;
-      const parsed: string[] = JSON.parse(saved);
-      applyCustomWallpapers(parsed);
+      if (saved) {
+        const parsed: string[] = JSON.parse(saved);
+        applyCustomWallpapers(parsed);
+      }
     } catch {}
+    setCustomWallpapersLoaded(true);
   }, [applyCustomWallpapers]);
+  // A selection that names a picture this browser does not have.
+  //
+  // `wp_id` is box-wide (SQLite, read by every browser that opens the desktop)
+  // while the pictures are per-browser `localStorage`, so a delete on the
+  // laptop leaves the box's own screen holding a position past the end of its
+  // own list — and so does every box that hit TASK-719 before it was fixed.
+  // The desktop already paints the default there; without this, Settings goes
+  // on claiming a slot that does not exist and the stale id is written back on
+  // every preference save. Reset to what is actually on screen and let the
+  // existing debounced write persist the repair.
+  useEffect(() => {
+    if (!customWallpapersLoaded || !prefsLoaded.current) return;
+    const index = customWallpaperIndex(wallpaperId);
+    if (index === null || index < customWallpapers.length) return;
+    setWallpaperId(harnessDefaultWallpaperId);
+  }, [customWallpapersLoaded, customWallpapers, wallpaperId, harnessDefaultWallpaperId]);
   const wallpaperInputRef = useRef<HTMLInputElement>(null);
   const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1954,20 +1981,29 @@ function ChromeDesktopInner() {
                 // Same as the upload above: outside the updater, and off the
                 // ref rather than off `prev`.
                 const next = customWallpapersRef.current.filter((_, i) => i !== idx);
+                // The stored list FIRST, because it is what the next load
+                // paints and what `wp_id` is a position into. A swallowed
+                // write (site data blocked, a locked-down profile) with the
+                // other two already moved would leave the three disagreeing
+                // and a DIFFERENT picture on screen after a reload, with
+                // nothing said. So the delete simply does not happen, and the
+                // owner is told why.
+                try {
+                  localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next));
+                } catch {
+                  window.dispatchEvent(new CustomEvent(TOAST_EVENT, {
+                    detail: { message: "Could not remove that wallpaper — this browser is not letting the page store them." },
+                  }));
+                  return;
+                }
                 applyCustomWallpapers(next);
-                try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
-                // `custom-<n>` is an INDEX into that list (see the wallpaper
-                // background below, which reads it with parseInt), so deleting
-                // one renumbers every picture after it. Clearing only the exact
-                // match left a selection past the hole pointing at its
-                // neighbour — the desktop drew a different wallpaper than the
-                // one that was chosen, or none once the last entry went. The
-                // same rule is in src/app/app/[id]/page.tsx's handler.
-                const selected = wallpaperId.startsWith("custom-")
-                  ? Number.parseInt(wallpaperId.slice("custom-".length), 10)
-                  : NaN;
-                if (selected === idx) setWallpaperId("clawbox");
-                else if (Number.isInteger(selected) && selected > idx) setWallpaperId(`custom-${selected - 1}`);
+                // `custom-<n>` is an INDEX into that list, so deleting one
+                // renumbers every picture after it. Through the SHARED rule,
+                // which is also what src/app/app/[id]/page.tsx's handler and
+                // the background below now use — and the fallback is the
+                // harness's own art, so a Hermes box does not land on the
+                // ClawBox wallpaper.
+                setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, harnessDefaultWallpaperId));
               },
             }} />
           </div>
@@ -2469,8 +2505,8 @@ function ChromeDesktopInner() {
       )}
       {/* Desktop wallpaper background */}
       {(() => {
-        const customIdx = wallpaperId.startsWith("custom-") ? parseInt(wallpaperId.split("-")[1]) : -1;
-        const customWp = customIdx >= 0 ? customWallpapers[customIdx] : undefined;
+        const customIdx = customWallpaperIndex(wallpaperId);
+        const customWp = customIdx === null ? undefined : customWallpapers[customIdx];
         return customWp ? (
           <>
             <div className="absolute inset-0 z-0 pointer-events-none" style={{ backgroundColor: wpBgColor }} />

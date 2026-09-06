@@ -6,6 +6,7 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
+import { wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import { apps } from "@/lib/desktop-apps";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
@@ -115,7 +116,10 @@ function usePreferenceSaver(loadedRef: { current: boolean }) {
  * `ui_mascot_hidden`) and the same uploaded-wallpaper list, so a change made
  * from a phone is the change the desktop would have made.
  */
-function useAppearance(enabled: boolean) {
+function useAppearance(enabled: boolean, activeHarness: string | null) {
+  // What a box with no custom wallpaper selected shows. `null` — the harness
+  // is still being resolved — keeps the neutral default rather than guessing.
+  const harnessDefaultWallpaperId = activeHarness === "hermes" ? "hermes" : "clawbox";
   const [wallpaperId, setWallpaperId] = useState("clawbox");
   const [wpFit, setWpFit] = useState<WpFit>("fill");
   const [wpBgColor, setWpBgColor] = useState("#000000");
@@ -213,16 +217,12 @@ function useAppearance(enabled: boolean) {
         const next = customRef.current.filter((_, i) => i !== idx);
         applyCustomWallpapers(next);
         // `custom-<n>` is an INDEX into that list, so deleting one renumbers
-        // every picture after it. Clearing only the exact match left a
-        // selection past the hole pointing at its neighbour — the wallpaper
-        // silently became a different picture, or none once the last entry
-        // went. The same rule is in src/app/page.tsx's own handler; keep the
-        // two in step, as with the list above it.
-        const selected = wallpaperId.startsWith("custom-")
-          ? Number.parseInt(wallpaperId.slice("custom-".length), 10)
-          : NaN;
-        if (selected === idx) setWallpaperId("clawbox");
-        else if (Number.isInteger(selected) && selected > idx) setWallpaperId(`custom-${selected - 1}`);
+        // every picture after it. Through the SHARED rule, not a fourth
+        // spelling of it: this handler and the desktop's write the same
+        // box-wide `wp_id`, and the fallback is the harness's own art — a
+        // Hermes box whose only custom wallpaper is deleted must not land on
+        // the ClawBox one (TASK-719).
+        setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, harnessDefaultWallpaperId));
       },
     },
   };
@@ -263,10 +263,10 @@ export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
   // Only /app/settings reads the appearance preferences — every other page
   // here would be paying for a request it never renders.
-  const appearance = useAppearance(id === "settings");
   // null while unresolved — a harness-only app must not paint before we know
   // which harness this device actually runs.
   const [harness, setHarness] = useState<string | null>(null);
+  const appearance = useAppearance(id === "settings", harness);
 
   useEffect(() => {
     let alive = true;
