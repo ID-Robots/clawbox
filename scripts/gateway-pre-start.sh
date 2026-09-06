@@ -543,6 +543,12 @@ clawbox_core_residual_issues() {
       };
       if (hasInclude(raw)) throw new Error("the config carries a $include directive");
       const result = apply(raw, { authoredRaw: raw, resolvedRaw: raw });
+      // `{next: null, changes: []}` is the core saying it changed NOTHING, and
+      // it says it in no other case. A preview built from the file anyway would
+      // be byte-identical to the one the core has just refused, so its verdict
+      // can only repeat the issues the caller printed one line earlier — a
+      // second, longer copy of the sentence this whole arm exists to shorten,
+      // bought with another 65 s of a blocking ExecStartPre.
       if (!result || !result.next) throw new Error("the core migrations changed nothing");
       writeFileSync(process.env.CLAWBOX_PREVIEW_OUT, JSON.stringify(result.next, null, 2) + "\n");
       // Exited explicitly rather than by letting the loop drain: this imports a
