@@ -4719,8 +4719,12 @@ install_root_libexec() {
   done
   # Everything the web server may invoke as root via a NOPASSWD grant. Same
   # rule as above: the copy that runs must not be the one clawbox can rewrite.
+  # gateway-restart-when-online.sh is launched BY ROOT from the NetworkManager
+  # dispatcher on every network event, so it belongs here for exactly the reason
+  # this block exists: the copy that runs must not be the one clawbox can
+  # rewrite. See scripts/nm-dispatcher-failover.sh.
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
-             clawbox-resource-limits.sh; do
+             clawbox-resource-limits.sh gateway-restart-when-online.sh; do
     if [ -f "$PROJECT_DIR/scripts/$src" ]; then
       install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
@@ -5215,10 +5219,55 @@ step_nm_dispatcher() {
     echo "  Skipping NM dispatcher: $SRC missing"
     return
   fi
-  mkdir -p "$DISPATCHER_DIR"
-  cp "$SRC" "$DEST"
-  chown root:root "$DEST"
-  chmod 0755 "$DEST"
+  # Every line below claims only what it has just done. step_post_update calls
+  # this step as `step_nm_dispatcher || echo "  Warning: …"`, and bash suspends
+  # `set -e` for the whole dynamic extent of a function run in a condition
+  # context — so on the in-app update path, the one every field box takes, an
+  # unchecked failure here would print "installed" over a file that never
+  # landed, and the `||` warning would never fire because the function still
+  # returned 0 from its last echo. Same rule step_systemd_services states for
+  # itself, for the same reason.
+  #
+  # install_root_file, not `cp` + `chown` + `chmod`: NetworkManager may execute
+  # this dispatcher at any instant, including mid-update, and `cp` writes the
+  # LIVE inode with O_TRUNC — which on an existing 0755 file means NM can run a
+  # truncated, still-executable dispatcher that silently does less than half its
+  # job. That is the prefix hazard install_root_file was written for (TASK-584).
+  # It stages `$DEST.new` in the same directory and renames, so NM sees either
+  # the whole old file or the whole new one. The staged name is briefly visible
+  # to NM's scan — `.new` is not one of the suffixes it skips — but the worst
+  # that costs is one extra run of a COMPLETE dispatcher, which the waiter's
+  # lock collapses anyway; a truncated one has no such floor.
+  if ! mkdir -p "$DISPATCHER_DIR" \
+     || ! install_root_file "$SRC" "$DEST" 0755; then
+    echo "  Warning: could not install the NetworkManager failover dispatcher at $DEST" >&2
+    record_provision_failure nm_dispatcher
+    return 1
+  fi
+  # The dispatcher is useless without the waiter it defers the gateway restart
+  # to, and the waiter must be the ROOT-OWNED copy — root runs it. Installed
+  # here as well as in install_root_libexec so an in-app UPDATE, which runs
+  # step_nm_dispatcher from step_post_update, gets both halves together rather
+  # than a new dispatcher pointing at nothing.
+  local WAITER_SRC="$PROJECT_DIR/scripts/gateway-restart-when-online.sh"
+  if [ -f "$WAITER_SRC" ]; then
+    # install_root_file returns 1 on both its failure paths and leaves the
+    # PREVIOUS copy in place, so an unreported failure is not "no waiter" but a
+    # STALE one — worse, and invisible until a network event logs the
+    # dispatcher's own "missing or not executable" line.
+    if install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR" \
+       && install_root_file "$WAITER_SRC" "$ROOT_LIBEXEC_DIR/gateway-restart-when-online.sh"; then
+      echo "  Deferred gateway-restart helper installed"
+    else
+      echo "  Warning: could not install the deferred gateway-restart helper — the failover will not restart the gateway" >&2
+      record_provision_failure nm_dispatcher
+      return 1
+    fi
+  else
+    # A checkout without the script is degraded, not broken: the dispatcher
+    # still fails over to WiFi. Reported, and not claimed as installed.
+    echo "  Warning: $WAITER_SRC missing — the failover will not restart the gateway"
+  fi
   echo "  NetworkManager failover dispatcher installed"
 }
 
