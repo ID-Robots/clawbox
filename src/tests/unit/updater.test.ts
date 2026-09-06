@@ -2648,6 +2648,48 @@ describe("updater", () => {
       expect(state.error).toContain("gateway crashed for an unrelated reason");
     });
 
+    it("bounds the validator with a signal that actually stops it", async () => {
+      // TASK-741, the TypeScript half of the same fix as the boot script's
+      // `timeout -k 5 60`. Node's `execFile` sends `killSignal` ONCE at the
+      // deadline and never escalates, so the default SIGTERM leaves a validator
+      // that ignores it running with nothing to stop it — and this call is on
+      // the recovery path of an update that has already failed, where the
+      // 60 s bound is the only thing between the owner and a hung step.
+      //
+      // Safe for THIS call and not for its neighbour: `config validate` writes
+      // nothing, while a SIGKILL mid-`doctor --fix` is what leaves an
+      // `exec-approvals.json.doctor-importing` claim behind and blocks every
+      // later doctor. Both halves are asserted, because the second is the one a
+      // future tidy-up would "fix" by making them consistent.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        [DOCTOR]: new Error("Command failed: openclaw doctor --fix"),
+        [VALIDATE]: { stdout: JSON.stringify({ valid: true, warnings: [] }), stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      await runContinuation();
+
+      const optionsFor = (needle: string) => mockExecFile.mock.calls
+        .filter(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`.includes(needle))
+        .map(([, , options]) => options as { timeout?: number; killSignal?: string });
+
+      const validate = optionsFor(VALIDATE);
+      expect(validate.length).toBeGreaterThan(0);
+      expect(validate.every((o) => o.killSignal === "SIGKILL")).toBe(true);
+      expect(validate.every((o) => o.timeout === 60_000)).toBe(true);
+
+      const doctor = optionsFor(DOCTOR);
+      expect(doctor.length).toBeGreaterThan(0);
+      expect(doctor.every((o) => o.killSignal === undefined)).toBe(true);
+    });
+
     it("still blames the journal when the core ACCEPTS the config", async () => {
       // The load-bearing half: doctor exiting non-zero is not by itself proof
       // of anything — it is what a doctor that lost a lock to a LIVE gateway
