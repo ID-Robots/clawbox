@@ -621,9 +621,10 @@ function transformOpenclawEntries(
     // aliases and never projects a model's lifecycle, so
     // `anthropic/claude-opus-4-8` — `status: "deprecated"` in the core's own
     // manifest — arrives here with `tags: []` (measured, 2026.8.1). The
-    // lifecycle is read from where the core actually publishes it, inside
-    // `isOfferableModelId`, so the sanitiser applies the same rule to a payload
-    // an older build cached.
+    // lifecycle is read from where the core actually publishes it, at SERVE
+    // time in `withoutRetiredModels` below — never here and never in the
+    // sanitiser, so a payload an older build cached keeps every row this box
+    // will still accept.
     if (entry.tags?.includes("deprecated")) continue;
     if (!isOfferableModelId(provider, id)) continue;
     out.push({
