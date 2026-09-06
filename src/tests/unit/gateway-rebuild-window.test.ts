@@ -153,11 +153,17 @@ describe("every rebuild-ending restart clears a latched start limit", () => {
     return INSTALL_SH.slice(start, end);
   }
 
-  it.each(["step_rebuild", "step_rebuild_reboot"])("%s resets the limit before restarting", (fn) => {
-    const body = shellFn(fn);
-    const reset = body.indexOf("systemctl reset-failed clawbox-setup.service");
-    const restart = body.indexOf("systemctl restart clawbox-setup.service");
-    expect(reset, `${fn} restarts clawbox-setup without clearing a latched start limit`).toBeGreaterThan(-1);
-    expect(restart).toBeGreaterThan(reset);
-  });
+  it.each(["step_rebuild", "step_rebuild_reboot", "restore_previous_build"])(
+    "%s resets the limit before restarting",
+    (fn) => {
+      // restore_previous_build is the THIRD rebuild-ending restart — the
+      // rollback path — and it got its `reset-failed` in 5e268479 with the
+      // others. Left out of this list, a regression there would pass.
+      const body = shellFn(fn);
+      const reset = body.indexOf("systemctl reset-failed clawbox-setup.service");
+      const restart = body.indexOf("systemctl restart clawbox-setup.service");
+      expect(reset, `${fn} restarts clawbox-setup without clearing a latched start limit`).toBeGreaterThan(-1);
+      expect(restart).toBeGreaterThan(reset);
+    },
+  );
 });
