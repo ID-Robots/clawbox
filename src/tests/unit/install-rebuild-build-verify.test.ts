@@ -133,6 +133,8 @@ interface Scenario {
   nodePty?: "succeeds" | "fails";
   /** Which shipped function to run. */
   entry?: "do_rebuild" | "step_build";
+  /** Call `do_rebuild --reboot-follows`, as step_rebuild_reboot's real arm does. */
+  rebootFollows?: boolean;
 }
 
 interface Run {
@@ -184,6 +186,7 @@ function run(scenario: Scenario = {}): Run {
     nodePty = "succeeds",
     buildLog = "writable",
     entry = "do_rebuild",
+    rebootFollows = false,
   } = scenario;
 
   // Per RUN, not per test: a case that calls this twice must not read the
@@ -361,11 +364,16 @@ function run(scenario: Scenario = {}): Run {
     "  fi",
     "}",
     "",
-    "# beta's own memory reclaim, and the start half that gives back what it",
-    "# took, which do_rebuild calls on both exits. Their behaviour has its own",
-    "# suite; here they only have to be present and harmless.",
+    "# beta's own memory reclaim, and the two verbs that account for what it",
+    "# took — do_rebuild ends in one or the other on every exit. Their",
+    "# behaviour has its own suite; here they only have to be present,",
+    "# harmless and OBSERVABLE, so the arm that hands the engines to a reboot",
+    "# can be told from the arm that starts them. Both are stubbed",
+    "# unconditionally: an unstubbed one would be a 127 inside the updater's",
+    "# own rebuild step with every suite still green.",
     "free_memory_for_build() { :; }",
-    "resume_paused_engines() { :; }",
+    'resume_paused_engines() { echo "RESUMED"; }',
+    'forget_paused_engines() { echo "FORGOT"; }',
     "",
     shellFunctions(
       "build_entry_present",
@@ -378,7 +386,7 @@ function run(scenario: Scenario = {}): Run {
     "",
     shellFunction(entry),
     "",
-    entry,
+    rebootFollows ? `${entry} --reboot-follows` : entry,
     "",
   ];
 
@@ -605,6 +613,31 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     expect(r.systemctl.some((l) => /^systemctl restart clawbox-setup/.test(l))).toBe(true);
     expect(r.stderr).toMatch(/it is DOWN/);
     expect(r.stderr).not.toMatch(/answers on :80/);
+  });
+
+  it("hands the paused engines to the reboot, and starts them itself when there is none", () => {
+    // The in-app updater's arm is `do_rebuild --reboot-follows`, and there the
+    // engines are systemd's to bring back — starting four model servers seconds
+    // before shutdown restores nothing that survives and lengthens the very
+    // shutdown the updater is waiting through. Every other caller starts them.
+    const withReboot = run({ build: "succeeds", rebootFollows: true });
+    expect(withReboot.status).toBe(0);
+    expect(withReboot.stdout + withReboot.stderr).toMatch(/FORGOT/);
+    expect(withReboot.stdout + withReboot.stderr).not.toMatch(/RESUMED/);
+
+    const withoutReboot = run({ build: "succeeds" });
+    expect(withoutReboot.status).toBe(0);
+    expect(withoutReboot.stdout + withoutReboot.stderr).toMatch(/RESUMED/);
+  });
+
+  it("starts them back on the failure arm even when a reboot was announced", () => {
+    // errexit ends step_rebuild_reboot before its `reboot` when do_rebuild
+    // fails, so that arm is the one caller whose engines nothing else will
+    // bring back.
+    const r = run({ build: "oom-killed", rebootFollows: true });
+    expect(r.status).not.toBe(0);
+    expect(r.stdout + r.stderr).toMatch(/RESUMED/);
+    expect(r.stdout + r.stderr).not.toMatch(/FORGOT/);
   });
 
   it("restarts clawbox-setup rather than starting it, so a latched unit is replaced", () => {

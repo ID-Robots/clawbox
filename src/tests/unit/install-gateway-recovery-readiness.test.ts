@@ -26,10 +26,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * more reason to restart: a false failure, and one unnecessary cold start on
  * every update.
  *
- * Driven against a stubbed `ss`, `systemctl` and `openclaw`, because the two
- * properties that matter — "waits for a listener that is on its way" and "never
- * restarts over a gateway doctor just proved alive" — cannot be read out of a
- * regex.
+ * It is NOT inert on the in-app update path, which is worth stating because the
+ * updater masks and stops the gateway for `post_update` and this step is inside
+ * `post_update`. `step_gateway_setup` runs first, inside the same step, and
+ * STARTS the gateway again — so the recovery that follows it meets a live,
+ * still-starting unit. Measured a second time on the OpenClaw box, this boot:
+ *
+ *   08:52:02  systemd: Started ClawBox OpenClaw Gateway.
+ *   08:52:02  root-step: Gateway is not listening on 18789; running OpenClaw doctor recovery
+ *   08:52:12  root-step: … the Gateway or another SQLite maintenance command owns this state directory.
+ *   08:52:28  systemd: Stopping ClawBox OpenClaw Gateway...     <- the recovery's restart
+ *
+ * with `LoadState=loaded` and no `/run/systemd/system/clawbox-gateway.service`,
+ * i.e. no runtime mask in force at that moment.
+ *
+ * Driven against a stubbed `ss`, `systemctl` and `openclaw`, because the
+ * properties that matter — "waits for a listener that is on its way", "never
+ * restarts over a gateway doctor just proved alive", "stops waiting on a unit
+ * that is looping" and "one budget for the whole step" — cannot be read out of
+ * a regex.
  */
 
 // Starts a real bash process: vitest's 5 s default is not enough on a loaded
@@ -78,6 +93,17 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
         'case " $* " in',
         // `systemctl show … -p ActiveState --value`
         '  *" ActiveState "*) printf "%s\\n" "${UNIT_STATE:-activating}" ; exit 0 ;;',
+        // `systemctl show … -p NRestarts --value` — the crash-loop signal. The
+        // count RISES per probe when RESTARTS_RISE is set, which is what a unit
+        // that is looping rather than starting looks like.
+        '  *" NRestarts "*)',
+        '    if [ -n "${RESTARTS_RISE:-}" ]; then',
+        '      n=$(cat "$RESTARTS" 2>/dev/null || echo 0); n=$((n + 1)); printf %s "$n" > "$RESTARTS"',
+        '      printf "%s\\n" "$n"',
+        "    else",
+        '      printf "7\\n"',
+        "    fi",
+        "    exit 0 ;;",
         "esac",
         "exit 0",
         "",
@@ -115,11 +141,14 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
     listenAfter = 0,
     unitState = "activating",
     doctorOwned = "",
-  }: { listenAfter?: number; unitState?: string; doctorOwned?: string } = {}) {
+    restartsRise = "",
+  }: { listenAfter?: number; unitState?: string; doctorOwned?: string; restartsRise?: string } = {}) {
     const log = path.join(tmp, "systemctl.log");
     const probes = path.join(tmp, "probes");
+    const restarts = path.join(tmp, "restarts");
     fs.writeFileSync(log, "");
     fs.writeFileSync(probes, "0");
+    fs.writeFileSync(restarts, "0");
     const script = [
       // install.sh's own options; a laxer harness would certify a script the
       // shipped one is not.
@@ -129,6 +158,9 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
       // Every helper the step reaches that is not what is under test.
       "is_hermes_edition() { return 1; }",
       'as_clawbox() { "$@"; }',
+      // The step-wide budget counter is a TOP-LEVEL assignment, cut from
+      // install.sh like the functions so a test cannot pass by declaring it.
+      `grep -E '^GATEWAY_READY_SPENT=' "$1" > "${tmp}/fns.sh"`,
       ...[
         "gateway_port_listening",
         "gateway_unit_running_or_starting",
@@ -149,6 +181,8 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
           ...process.env,
           SYSTEMCTL_LOG: log,
           PROBES: probes,
+          RESTARTS: restarts,
+          RESTARTS_RISE: restartsRise,
           LISTEN_AFTER: String(listenAfter),
           UNIT_STATE: unitState,
           DOCTOR_OWNED: doctorOwned,
@@ -209,12 +243,41 @@ describe("the gateway recovery waits for a listener instead of asking once", () 
     expect(r.out).toMatch(/RC=0/);
   });
 
+  it("stops waiting on a gateway that is restarting rather than starting", () => {
+    // `Restart=always` means a crash loop reads as `activating` for most of its
+    // life, so the state alone cannot tell it from a first start. A rising
+    // NRestarts can, and it is what keeps a genuinely broken gateway from
+    // spending the whole budget before the recovery it needs is even attempted.
+    const r = run({ listenAfter: 999, unitState: "activating", restartsRise: "1" });
+
+    expect(r.out).toMatch(/it is looping, not starting/);
+    expect(r.out).toMatch(/running OpenClaw doctor recovery/);
+  });
+
+  it("spends ONE budget across the whole step, not one per call", () => {
+    // The step asks up to four times. Four independent budgets would turn an
+    // 8-second path on a broken box into a six-minute one inside post_update's
+    // 900 s advisory budget, where an overrun is reported `completed`.
+    const RESUME = INSTALL_SH.slice(
+      INSTALL_SH.indexOf("wait_for_gateway_port() {"),
+      INSTALL_SH.indexOf(`${NL}}`, INSTALL_SH.indexOf("wait_for_gateway_port() {")),
+    );
+    expect(INSTALL_SH).toMatch(/^GATEWAY_READY_SPENT=0$/m);
+    expect(RESUME).toContain("GATEWAY_READY_SPENT");
+    expect(RESUME).toMatch(/budget > GATEWAY_READY_SPENT/);
+  });
+
   it("leaves the single-shot probe alone for the question that wants one", () => {
     // step_validate_services' Hermes probe asserts that NOTHING is listening on
     // the OpenClaw port. Waiting there would turn "nothing is listening" into a
     // three-minute pause on every validated Hermes install, and a budgeted
     // answer is not the question it asks.
-    const validate = INSTALL_SH.slice(INSTALL_SH.indexOf("step_validate_services() {"));
+    const validateStart = INSTALL_SH.indexOf("step_validate_services() {");
+    // BOUNDED at the function's own closing brace: slicing to end-of-file would
+    // assert "nowhere below here", which passes today only because the helpers
+    // happen to be defined above it.
+    const validate = INSTALL_SH.slice(validateStart, INSTALL_SH.indexOf(`${NL}}`, validateStart));
+    expect(validate.length).toBeGreaterThan(0);
     expect(validate).toContain("if gateway_port_listening; then");
     expect(validate).not.toContain("wait_for_gateway_port");
   });

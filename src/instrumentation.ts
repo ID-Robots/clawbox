@@ -249,21 +249,22 @@ export async function register() {
     // request path arms its own timer, so a search in the meantime loses
     // nothing. See armIdleStopIfRunning.
     //
-    // OLLAMA TOO, since TASK-724. It is the same system unit shape and the same
-    // ten-minute standby, and install.sh's update path now STARTS it again
-    // after the rebuild that stopped it — from a root shell, which cannot arm a
-    // timer that lives in this process. Without this line every update ended
-    // with `ollama serve` resident and no idle stop for it until something
-    // happened to go through the proxy. Both are no-ops for a unit that is not
-    // running, so a box that never had one loses nothing.
+    // Deliberately NOT extended to ollama (TASK-724). It looks like the same
+    // shape — a system unit with the same ten-minute standby, restarted by a
+    // root shell that cannot arm a timer living in this process — but the
+    // timing does not work: this fires once at boot + 15 s, while
+    // step_post_update's stop and restart of ollama happen minutes later, so
+    // the timer would either be armed for the WRONG ollama (and stop the one
+    // the update restarts, ten minutes in) or fire before that restart and
+    // leave it with no timer at all. Closing that loop needs the arm to happen
+    // at the moment of the start, which only the web server can do. Recorded
+    // rather than half-done.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { armIdleStopIfRunning } = require('./lib/local-ai-runtime')
     const rearm = setTimeout(() => {
-      for (const provider of ['embed', 'ollama'] as const) {
-        void armIdleStopIfRunning(provider).catch((err: unknown) => {
-          console.warn(`[instrumentation] Could not re-arm the ${provider} idle stop:`, err instanceof Error ? err.message : err)
-        })
-      }
+      void armIdleStopIfRunning('embed').catch((err: unknown) => {
+        console.warn('[instrumentation] Could not re-arm the embedder idle stop:', err instanceof Error ? err.message : err)
+      })
     }, 15_000)
     rearm.unref?.()
   } catch (err) {
