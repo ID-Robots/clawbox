@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * TASK-723 — the session key that becomes a transcript FILENAME.
@@ -31,12 +32,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 let root: string;
+let restoreEnv: () => void;
 let store: typeof import("@/lib/harness/transcript-store");
 
 const STORE_SOURCE = path.join(process.cwd(), "src/lib/harness/transcript-store.ts");
 
 describe("the transcript key that becomes a filename", () => {
   beforeEach(async () => {
+    // RESTORED, not deleted: vitest reuses a worker across files, so an
+    // `afterEach` that deletes a variable the worker already had takes it away
+    // from every file after this one. `saveEnv` is the repo's own undo.
+    restoreEnv = saveEnv("CLAWBOX_ROOT");
     root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-transcript-key-"));
     process.env.CLAWBOX_ROOT = root;
     vi.resetModules();
@@ -44,7 +50,7 @@ describe("the transcript key that becomes a filename", () => {
   });
 
   afterEach(() => {
-    delete process.env.CLAWBOX_ROOT;
+    restoreEnv();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
