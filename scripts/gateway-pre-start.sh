@@ -2349,62 +2349,86 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
     # inner shape unchanged (the loader migration carries clawboxManaged
     # through, so ownership stamps survive the move).
     _tts = (cfg.get("tts") if _clawbox_v2 else _messages.get("tts"))
-    if _clawbox_v2 and not isinstance(_tts, dict):
-        _legacy_tts = _messages.get("tts") if isinstance(_messages, dict) else None
-        if isinstance(_legacy_tts, dict) and _legacy_tts.get("providers"):
-            # A legacy messages.tts block the loader migration has not moved
-            # yet: writing the v2 home beside it would leave two speech
-            # configs racing the migration. Leave it; next boot reads the
-            # migrated home.
-            _tts = _legacy_tts
-    if not isinstance(_tts, dict):
-        _tts = {}
-    _tts_providers = _tts.get("providers")
-    if not isinstance(_tts_providers, dict):
-        _tts_providers = {}
-    _speech = _tts_providers.get("openai")
-    if not isinstance(_speech, dict):
-        _speech = {}
-
-    # Whose entry is this? `_clawai_route_is_ours` above holds the whole rule —
-    # a foreign credential takes the slot back whatever else says, then our own
-    # stamp or a `claw_` token claims it wherever it points, then the endpoint,
-    # then an empty slot. An entry that is not ours is the owner's own
-    # OpenAI-compatible voice — a self-hosted Kokoro, an OpenAI key of their
-    # own, a different route on our host — and every field of it is left alone.
-    # The endpoint arm keeps the one-trailing-slash rule the transcription
-    # migration uses: `.../api/ai//` is a deliberate route, not a typo to tidy.
-    _speech_base_url = _speech.get("baseUrl")
-    _speech_route_taken = not _clawai_route_is_ours(
-        _speech_base_url,
-        _speech.get("apiKey"),
-        _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True,
-        _clawai_proxy_base_url,
+    # STAND DOWN while the core's own migration still owes this box a move
+    # (TASK-739). A legacy `messages.tts` block with providers in it and no v2
+    # home yet is a migration in flight: `openclaw doctor --fix` moves the
+    # whole block, and seeding the v2 home beside it would leave two speech
+    # configs racing that move.
+    #
+    # THIS USED TO BE A REBINDING, AND THAT WAS THE BUG. It set
+    # `_tts = _legacy_tts` — the SAME dict object as `cfg["messages"]["tts"]` —
+    # and then fell through into the body below, which mutates that dict and
+    # assigns it to `cfg["tts"]`. The written config then carried the block
+    # under BOTH homes, which is `messages: Unrecognized key: "tts"`: one of
+    # the four keys OpenClaw 2026.8 refuses outright with exit 78, and one of
+    # the four that kept a customer box dark for 25 hours (TASK-737). Standing
+    # down has to mean writing nothing, so the whole body is guarded rather
+    # than the variable reassigned.
+    #
+    # The guard cannot be ANDed into the condition above: the `elif` below is
+    # the downgrade half of this migration, and a box in this state must not
+    # fall into it and start deleting from a home the block just declined to
+    # write.
+    _legacy_tts = _messages.get("tts")
+    _tts_move_in_flight = (
+        _clawbox_v2
+        and not isinstance(_tts, dict)
+        and isinstance(_legacy_tts, dict)
+        and bool(_legacy_tts.get("providers"))
     )
-    if _speech_route_taken:
+    if _tts_move_in_flight:
         print(
-            "  Skipped ClawBox AI cloud voice: messages.tts.providers.openai already names its own speech route"
+            "  Skipped ClawBox AI cloud voice: a legacy messages.tts block is still waiting for the core's own migration"
         )
     else:
-        _speech_before = dict(_speech)
-        _speech["baseUrl"] = _clawai_proxy_base_url
-        _speech["model"] = CLAWBOX_SPEECH_MODEL_ID
-        _speech["apiKey"] = _clawai_token
-        # Adopt and normalise an unmarked entry that is ours by any of the other
-        # arms — a hand repair, one written before this stamp existed, or one
-        # still naming an address we have since retired — rather than leave a
-        # box with a half-configured voice. Writing is recoverable and
-        # deleting is not, which is why only the delete below insists on it.
-        _speech[CLAWBOX_SPEECH_MANAGED_KEY] = True
-        if _speech != _speech_before:
-            _tts_providers["openai"] = _speech
-            _tts["providers"] = _tts_providers
-            if _clawbox_v2:
-                cfg["tts"] = _tts
-            else:
-                _messages["tts"] = _tts
-                cfg["messages"] = _messages
-            changed = True
+        if not isinstance(_tts, dict):
+            _tts = {}
+        _tts_providers = _tts.get("providers")
+        if not isinstance(_tts_providers, dict):
+            _tts_providers = {}
+        _speech = _tts_providers.get("openai")
+        if not isinstance(_speech, dict):
+            _speech = {}
+
+        # Whose entry is this? `_clawai_route_is_ours` above holds the whole rule —
+        # a foreign credential takes the slot back whatever else says, then our own
+        # stamp or a `claw_` token claims it wherever it points, then the endpoint,
+        # then an empty slot. An entry that is not ours is the owner's own
+        # OpenAI-compatible voice — a self-hosted Kokoro, an OpenAI key of their
+        # own, a different route on our host — and every field of it is left alone.
+        # The endpoint arm keeps the one-trailing-slash rule the transcription
+        # migration uses: `.../api/ai//` is a deliberate route, not a typo to tidy.
+        _speech_base_url = _speech.get("baseUrl")
+        _speech_route_taken = not _clawai_route_is_ours(
+            _speech_base_url,
+            _speech.get("apiKey"),
+            _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True,
+            _clawai_proxy_base_url,
+        )
+        if _speech_route_taken:
+            print(
+                "  Skipped ClawBox AI cloud voice: messages.tts.providers.openai already names its own speech route"
+            )
+        else:
+            _speech_before = dict(_speech)
+            _speech["baseUrl"] = _clawai_proxy_base_url
+            _speech["model"] = CLAWBOX_SPEECH_MODEL_ID
+            _speech["apiKey"] = _clawai_token
+            # Adopt and normalise an unmarked entry that is ours by any of the other
+            # arms — a hand repair, one written before this stamp existed, or one
+            # still naming an address we have since retired — rather than leave a
+            # box with a half-configured voice. Writing is recoverable and
+            # deleting is not, which is why only the delete below insists on it.
+            _speech[CLAWBOX_SPEECH_MANAGED_KEY] = True
+            if _speech != _speech_before:
+                _tts_providers["openai"] = _speech
+                _tts["providers"] = _tts_providers
+                if _clawbox_v2:
+                    cfg["tts"] = _tts
+                else:
+                    _messages["tts"] = _tts
+                    cfg["messages"] = _messages
+                changed = True
 
 elif _clawai_openai_route_is_ours:
     # The other direction, and it has to exist or this migration is one-way.
