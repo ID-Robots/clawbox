@@ -57,6 +57,33 @@ beforeEach(() => {
   store({});
 });
 
+describe("recording a pick", () => {
+  it("does not lose a slot to a write that started beside it", async () => {
+    // One KEY holds every provider's pick, so two model switches in flight
+    // together would each read the map, add their own slot and write their own
+    // snapshot — and the loser's provider would be gone. Two separate config
+    // keys could not lose each other that way; one map can.
+    const stored: Record<string, unknown> = {};
+    getKnownMock.mockImplementation(async (key: string) => ({ value: stored[key], known: true }));
+    setManyMock.mockImplementation(async (values: Record<string, unknown>) => {
+      for (const [key, value] of Object.entries(values)) stored[key] = value;
+    });
+    const { recordExplicitModelPick } = await import("@/lib/explicit-model-pick");
+
+    await Promise.all([
+      recordExplicitModelPick(`deepseek/${CLAWBOX_AI_PRO_MODEL_ID}`),
+      recordExplicitModelPick("anthropic/claude-opus-5"),
+      recordExplicitModelPick("openrouter/openai/gpt-5"),
+    ]);
+
+    expect(stored[EXPLICIT_MODEL_PICKS_KEY]).toEqual({
+      clawai: `deepseek/${CLAWBOX_AI_PRO_MODEL_ID}`,
+      anthropic: "anthropic/claude-opus-5",
+      openrouter: "openrouter/openai/gpt-5",
+    });
+  });
+});
+
 describe("a Hermes re-pair and the owner's own model", () => {
   it("writes the tier default when the owner has never picked one", async () => {
     await applyClawaiToHermes("claw_token_abc", "flash");
@@ -134,7 +161,13 @@ describe("a Hermes re-pair and the owner's own model", () => {
     // The slot is derived from a model reference that arrives in a request
     // body, so it is validated rather than trusted — a name like `__proto__`
     // has meaning to an object before it has meaning to us.
-    store({ [EXPLICIT_MODEL_PICKS_KEY]: { __proto__: CLAWBOX_AI_PRO_MODEL_ID } });
+    // Built through JSON, not an object literal: `{ __proto__: x }` sets the
+    // PROTOTYPE and creates no own property, so a literal here would pass
+    // whatever the parser did. This is the shape a hand-edited
+    // `data/config.json` actually produces.
+    store({
+      [EXPLICIT_MODEL_PICKS_KEY]: JSON.parse(`{"__proto__": "${CLAWBOX_AI_PRO_MODEL_ID}"}`),
+    });
 
     await applyClawaiToHermes("claw_token_abc", "flash");
 

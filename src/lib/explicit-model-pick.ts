@@ -79,6 +79,33 @@ export const EXPLICIT_MODEL_PICKS_KEY = "ai_model_explicit_picks";
 export type ExplicitModelPicks = Record<string, string>;
 
 /**
+ * Writes are serialised through this chain.
+ *
+ * One KEY holds every provider's pick, and storing it is a read-modify-write:
+ * two model switches in flight together — a picker click while a promote is
+ * still settling — would each read the map, add their own slot and write their
+ * own snapshot, and the loser's provider would be dropped. Two separate config
+ * keys could not lose each other that way; one map can, which is the cost of
+ * keying by provider inside a single value.
+ *
+ * In-process is the whole of the problem here: the Next server is the only
+ * writer of this key, and `data/config.json` has no inter-process lock to take
+ * (its `set`/`setMany` carry the same unlocked read-modify-write for every
+ * other key on beta).
+ */
+let writeChain: Promise<void> = Promise.resolve();
+
+/** Run a read-modify-write on the picks map without another one interleaving. */
+function serialise(fn: () => Promise<void>): Promise<void> {
+  const next = writeChain.then(fn, fn);
+  // Never leaves a rejected promise as the chain head: the next writer would
+  // inherit it and the whole key would stop being written for the process
+  // lifetime. Each caller handles its own failure.
+  writeChain = next.then(() => {}, () => {});
+  return next;
+}
+
+/**
  * The ClawBox AI chat model this reference names, bare, or null.
  *
  * The id allowlist is what actually decides — `CLAWBOX_AI_CHAT_MODEL_IDS` is a
@@ -187,20 +214,22 @@ export async function recordExplicitModelPick(model: string): Promise<void> {
   const trimmed = model.trim();
   const slot = trimmed ? pickSlotFor(trimmed) : null;
   if (!slot) return;
-  try {
-    const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
-    // `explicitPicksFrom` has already dropped every key that is not a provider
-    // slot, and `slot` itself came through `isProviderSlot`, so the property
-    // name written here is one of a bounded, known shape.
-    const picks = explicitPicksFrom(value);
-    picks[slot] = trimmed;
-    await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: picks });
-  } catch (err) {
-    console.warn(
-      "[explicit-model-pick] could not record the owner's model pick:",
-      err instanceof Error ? err.message : err,
-    );
-  }
+  return serialise(async () => {
+    try {
+      const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+      // `explicitPicksFrom` has already dropped every key that is not a provider
+      // slot, and `slot` itself came through `isProviderSlot`, so the property
+      // name written here is one of a bounded, known shape.
+      const picks = explicitPicksFrom(value);
+      picks[slot] = trimmed;
+      await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: picks });
+    } catch (err) {
+      console.warn(
+        "[explicit-model-pick] could not record the owner's model pick:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  });
 }
 
 /** The stored picks, for a caller that has not already loaded the whole store. */
