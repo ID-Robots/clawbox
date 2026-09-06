@@ -404,6 +404,10 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     expect(res.status).toBe(200);
     expect(store.clawai_token).toBe(CLAWAI_TOKEN);
     expect(mockReloadMcpServers).not.toHaveBeenCalled();
+    // And the post-write probe was actually REACHED. Without this the case
+    // would pass over a route that skipped the second read entirely — 200, the
+    // token stored and no reload are all true of that route too.
+    expect(mockGetCodingAgentStatus).toHaveBeenCalledTimes(2);
   });
 
   /*
