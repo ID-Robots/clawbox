@@ -2490,6 +2490,12 @@ PY
 # that has been fine for weeks — a false failure, and the shape this codebase
 # keeps producing. Every success branch below calls this.
 clawbox_plugin_repair_clear() {
+  # No file, nothing to clear — AND nothing to re-enable from, which is the one
+  # gap this pairing does not close: a box whose `clawbox_plugin_repair_mark`
+  # could not write (unwritable `data/`, the deliberately non-fatal WARN above)
+  # ends the boot with the entry off, no row and no way to know we did it. That
+  # is why the mark's failure is a WARN on stderr rather than a silent skip:
+  # the boot log is the only record left of it.
   [ -f "$CLAWBOX_PLUGIN_REPAIR_FILE" ] || return 0
   # PUT THE ENTRY BACK BEFORE THE BADGE GOES, and only for a row that says WE
   # switched it off.
@@ -2506,6 +2512,13 @@ clawbox_plugin_repair_clear() {
   #
   # `disabled: false` means ClawBox recorded a failure and changed nothing —
   # an entry the OWNER turned off is his, and stays off.
+  #
+  # WHAT THIS COSTS, because this runs inside a blocking ExecStartPre: one
+  # python read per clear, and on a row we did switch off one `openclaw config
+  # set` cold start (`timeout -k 5 60`) plus the read-back. Only on a box that
+  # is actually recovering from a failed plugin — a healthy box has no rows and
+  # pays the `[ -f ]` above — but a new call site added to this helper inherits
+  # that, so count it against the same budget the managed loop rations.
   if [ "$(CLAWBOX_REPAIR_ID="$1" python3 - "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'PY' 2>/dev/null || echo 0
 import json, os, sys
 try:

@@ -233,13 +233,21 @@ export async function POST(req: Request) {
 
   const repaired = await harnessSaysLoaded(entry.id);
   if (repaired !== true) {
-    // The re-enable is a STEP of the repair, not its verdict. The plugin still
-    // does not load, so leaving the entry enabled would hand the next boot the
-    // readiness refusal this card exists to end — the box is put back exactly
-    // as it was found, badge and all. Best-effort: a config that cannot be
-    // written is reported by the boot script's own boot-without next time, and
-    // failing this differently would only hide the real answer.
-    if (entry.disabled) {
+    // The re-enable is a STEP of the repair, not its verdict — but only a
+    // plugin that DEMONSTRABLY does not load is switched back off.
+    //
+    // `repaired === null` is "the box could not be asked", and this route's own
+    // `harnessSaysLoaded` says why the two must not be collapsed: the inspect
+    // module-loads every enabled plugin and can time out on exactly the box
+    // whose gateway has just failed to come back. Switching the entry off over
+    // that answer would take a working plugin down on a click that changed
+    // nothing — and for deepseek and the channels no boot path puts it back,
+    // because the install blocks skip a payload that is present and the managed
+    // loop only visits entries that are already enabled.
+    //
+    // Best-effort: a config that cannot be written is reported by the boot
+    // script's own boot-without next time.
+    if (entry.disabled && repaired === false) {
       await runOpenclawConfigSet([`plugins.entries["${entry.id}"].enabled`, "false", "--strict-json"])
         .catch(() => undefined);
     }

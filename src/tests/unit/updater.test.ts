@@ -671,6 +671,20 @@ describe("updater", () => {
         },
       });
       mockClawboxDisabledEntryId.mockResolvedValue("codex");
+      // openclaw.json as `plugins enable codex` leaves it. The repair proves its
+      // re-enable against the FILE rather than against an exit code, so the
+      // fixture has to model the write the verb performs — a stub that answered
+      // the exit code alone would have blessed a clear this test is about.
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (String(file).endsWith("/openclaw.json")) {
+          const enabled = mockExecFile.mock.calls.some(([, args]) =>
+            (args as string[] | undefined)?.join(" ").includes("plugins enable codex"),
+          );
+          return JSON.stringify({ plugins: { entries: { codex: { enabled } } } });
+        }
+        throw new Error("ENOENT");
+      });
       updater = await import("@/lib/updater");
       if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
       else process.env.CLAWBOX_ROOT = priorRoot;

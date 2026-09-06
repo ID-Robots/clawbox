@@ -410,6 +410,10 @@ export interface UpdateState {
 export { RESTART_STEP_ID } from "./update-constants";
 import { RESTART_STEP_ID } from "./update-constants";
 import { clawboxDisabledEntryId, clearPluginRepair, readPluginRepairs } from "./plugin-repair";
+// The id rule, from the PURE module rather than through `plugin-repair`: it is
+// string work with no `fs` behind it, and taking it from the reader would tie a
+// pure helper to that module's surface for no reason.
+import { canonicalPluginId } from "./plugin-repair-id";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -1473,12 +1477,22 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
   return await clawboxSwitchedPluginOff(wanted);
 }
 
-/** True when `data/plugin-repair.json` says ClawBox switched this plugin off. */
-async function clawboxSwitchedPluginOff(canonicalId: string): Promise<boolean> {
+/**
+ * True when `data/plugin-repair.json` says ClawBox switched this plugin off.
+ *
+ * `canonicalPluginId` on BOTH sides, which is the same rule `clawboxDisabledEntryId`
+ * and `clearPluginRepair` use. `normalizeManagedPluginId` strips only the two
+ * prefixes, so a row filed as `@openclaw/deepseek-provider` was found by one
+ * marker reader and not the other. Not reachable with ClawBox's own writers —
+ * the deepseek block marks the literal `deepseek` — but two ids for one file is
+ * how the alias bug this card already fixed got in.
+ */
+async function clawboxSwitchedPluginOff(pluginId: string): Promise<boolean> {
   try {
+    const wanted = canonicalPluginId(pluginId);
     const repairs = await readPluginRepairs();
     return Object.values(repairs).some(
-      (row) => normalizeManagedPluginId(row.id) === canonicalId && row.disabled,
+      (row) => canonicalPluginId(row.id) === wanted && row.disabled,
     );
   } catch {
     // An unreadable marker is not consent: fall back to respecting the config,
@@ -1645,6 +1659,17 @@ async function clearRepairMarkerAfterPayloadRepair(pluginId: string): Promise<vo
         `[Updater] "${switchedOff}" was reinstalled but could not be switched back on; `
         + "leaving its repair record in place:",
         err instanceof Error ? err.message : err,
+      );
+      return;
+    }
+    // PROVED AGAINST THE FILE, not against the exit code — the same read-back
+    // the boot script's own re-enable does. This whole card exists because an
+    // exit code was read as an outcome, and a `plugins enable` that returns 0
+    // without writing would otherwise clear the badge over an entry still off.
+    if (!(await pluginEntryEnabled(switchedOff))) {
+      console.warn(
+        `[Updater] "${switchedOff}" still reads as switched off after \`plugins enable\`; `
+        + "leaving its repair record in place",
       );
       return;
     }
@@ -1821,6 +1846,27 @@ async function readOpenclawConfigForRepair(): Promise<Record<string, unknown> | 
   } catch {
     return null;
   }
+}
+
+/**
+ * Does openclaw.json now say this plugin's entry is enabled?
+ *
+ * False for a config that cannot be read: an unverifiable write is not a
+ * verified one, and the caller's answer to that is to keep the repair record —
+ * a badge that is one boot stale beats a badge removed over a plugin still off.
+ */
+async function pluginEntryEnabled(pluginId: string): Promise<boolean> {
+  const cfg = await readOpenclawConfigForRepair();
+  if (!cfg) return false;
+  const plugins = cfg.plugins && typeof cfg.plugins === "object"
+    ? cfg.plugins as Record<string, unknown>
+    : {};
+  const entries = plugins.entries && typeof plugins.entries === "object"
+    ? plugins.entries as Record<string, unknown>
+    : {};
+  const entry = entries[pluginId];
+  return !!entry && typeof entry === "object"
+    && (entry as Record<string, unknown>).enabled === true;
 }
 
 /** Respect an owner-disabled unused Codex plugin even if old logs mention it. */

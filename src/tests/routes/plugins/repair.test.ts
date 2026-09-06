@@ -167,6 +167,14 @@ describe("plugins/repair — the Retry", () => {
     const r = await post({ pluginId: "codex" });
     expect(await r.json()).toMatchObject({ code: "unverified" });
     expect(clearPluginRepair).not.toHaveBeenCalled();
+    // AND THE ENTRY IS LEFT ON. "The box could not be asked" is not "the plugin
+    // does not load" — the inspect module-loads every enabled plugin and times
+    // out on exactly the box whose gateway has just failed to come back — so
+    // switching it off here would take a working plugin down on a click that
+    // changed nothing, with no boot path to put it back.
+    expect(runOpenclawConfigSet.mock.calls.map(([args]) => (args as string[]).join(" "))).toEqual([
+      'plugins.entries["codex"].enabled true --strict-json',
+    ]);
   });
 
   it("puts back the entry the boot script switched off, then restarts", async () => {
