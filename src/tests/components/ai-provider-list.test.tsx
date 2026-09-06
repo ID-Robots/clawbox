@@ -26,6 +26,7 @@ const ROWS = [
 
 let posts: { url: string; body: unknown }[] = [];
 
+/** The box's answers to every call this list makes, in one stub. */
 function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number }; unattachedRepairs?: unknown[] } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {

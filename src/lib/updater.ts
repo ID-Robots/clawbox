@@ -1310,6 +1310,7 @@ interface CoreConfigVerdict {
   payload: Record<string, unknown> | null;
 }
 
+/** Run `openclaw config validate --json` once and hand back what it said. */
 async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
   if (openclawIsAbsent()) return null;
   let accepted = true;

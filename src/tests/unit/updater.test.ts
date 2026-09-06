@@ -2782,6 +2782,7 @@ describe("updater", () => {
       });
     }
 
+    /** The second half of an update, run to its terminal phase. */
     async function runContinuation() {
       vi.resetModules();
       mockGet.mockResolvedValue(true);
@@ -2799,6 +2800,7 @@ describe("updater", () => {
       return updater.getUpdateState();
     }
 
+    /** A box whose gateway refuses readiness, and a core that says why. */
     function setupBox(warnings: { path: string; message: string }[]): void {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
