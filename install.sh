@@ -953,15 +953,12 @@ as_clawbox_login() {
 ensure_clawbox_bashrc_path() {
   # Make ~/.npm-global/bin and ~/.local/bin available in the clawbox user's
   # interactive shells (e.g. the in-UI terminal) so CLIs like openclaw, claude,
-  # codex, gemini, hf, and clawkeep resolve without a full path. Codex is a
-  # user-local binary since TASK-439; the stanza's own wording is left as it
-  # is, because it is TEXT ALREADY WRITTEN into every shipped box's ~/.bashrc
-  # and rewording it here would only make the two disagree.
+  # codex, gemini, hf, and clawkeep resolve without a full path.
   local BASHRC="$CLAWBOX_HOME/.bashrc"
   if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
     cat >> "$BASHRC" <<'PATHEOF'
 
-# npm global binaries (openclaw, codex, gemini) and user-local binaries (claude, hf, clawkeep)
+# npm global binaries (openclaw, gemini) and user-local binaries (claude, codex, hf, clawkeep)
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 PATHEOF
     chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
@@ -7331,7 +7328,9 @@ ensure_claude_code() {
   fi
 
   local installer rc=1
-  installer="$(mktemp)"
+  # `|| true` for the errexit reason above; an empty path then falls into the
+  # download-failed branch, which reports rather than ends the run.
+  installer="$(mktemp || true)"
   # --max-time bounds a STALLED vendor: this runs inside step_post_update, and
   # every recovery step after it waits behind this download. --proto-redir keeps
   # a redirect from stepping down to plain HTTP on the way to something we then
@@ -7593,11 +7592,17 @@ remove_npm_codex() {
 # What the box is left running when an install did not happen. Said out loud,
 # because "could not install Codex" and "this box now has no Codex" are
 # different facts and only one of them needs anybody's attention.
+#
+# The login shell is asked, rather than the two files being tested in some
+# order: on the commonest failure BOTH are present — every shipped box has the
+# npm copy, and a previous partial run may have left a native binary — and PATH
+# order decides which one the owner gets. Naming the other one would state the
+# opposite of what this line is for.
 codex_left_as_is() {
-  if [ -x "$CODEX_NATIVE_BIN" ]; then
-    echo "  Keeping the Codex already at $CODEX_NATIVE_BIN" >&2
-  elif npm_codex_present; then
-    echo "  Keeping the npm-installed Codex at $NPM_PREFIX/bin/codex" >&2
+  local resolved
+  resolved="$(as_clawbox_login "command -v codex" 2>/dev/null | tr -d '\r' | tail -n1 || true)"
+  if [ -n "$resolved" ]; then
+    echo "  Keeping the Codex this box resolves today: $resolved" >&2
   else
     echo "  This box has no Codex CLI" >&2
   fi
@@ -7639,9 +7644,10 @@ ensure_codex_cli() {
 
   url="https://github.com/openai/codex/releases/download/rust-v$version/install.sh"
   installer="$(mktemp)"
-  # --max-time bounds a stalled vendor: this runs inside step_post_update and
-  # every later recovery step waits behind it. --proto-redir stops a redirect
-  # stepping down to plain HTTP on the way to something we then execute.
+  # --max-time bounds THIS fetch — the ~30 KB installer script, nothing more.
+  # The vendor's own 117 MB package download is bounded separately below.
+  # --proto-redir stops a redirect stepping down to plain HTTP on the way to
+  # something we then execute.
   if ! curl -fsSL --proto '=https' --proto-redir '=https' \
       --connect-timeout 15 --max-time 300 "$url" -o "$installer" 2>/dev/null \
     || [ ! -s "$installer" ]; then
@@ -7675,13 +7681,29 @@ ensure_codex_cli() {
     return 1
   fi
 
-  # </dev/null as well as CODEX_NON_INTERACTIVE=true: an installer that found a
-  # tty here would be asking an unattended update a question nobody can answer.
-  # It DOES notice the npm copy and offer to remove it; under non-interactive
-  # that offer is declined, which is why the removal below is ours to do — and
-  # ours is the honest order, since the vendor's would take the working Codex
-  # away before knowing whether the new one runs.
-  if ! as_clawbox_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' sh '$installer'" </dev/null; then
+  # CODEX_NON_INTERACTIVE=true is load-bearing, and </dev/null is not a
+  # substitute for it: the installer's prompt opens /dev/tty directly, so only
+  # the variable stops an unattended update being asked a question nobody can
+  # answer. It DOES notice the npm copy and offer to remove it; that offer is
+  # what non-interactive declines, which is why the removal below is ours to do
+  # — and ours is the honest order, since the vendor's would take the working
+  # Codex away before knowing whether the new one runs.
+  #
+  # Two side effects of the vendor's, recorded rather than fought:
+  #   * having seen the npm copy it also appends its own marked block
+  #     (`# >>> Codex installer >>>`) to the clawbox user's ~/.bashrc, putting
+  #     ~/.local/bin first. Marker-guarded, so it cannot duplicate, and it does
+  #     not disturb ensure_clawbox_bashrc_path (whose guard greps the export
+  #     line, not the comment). It makes the native binary win sooner, which is
+  #     the direction this step is going in anyway.
+  #   * it downloads a ~117 MB package, and on its GitHub fallback path applies
+  #     no timeout of its own. `timeout` is therefore ours: without it a stalled
+  #     fetch parks step_post_update — and every recovery step queued behind it
+  #     — until systemd's TimeoutStartSec=7200 fires two hours later. -k because
+  #     a plain SIGTERM is not a ceiling; a killed install leaves the vendor's
+  #     staging directory rather than a half-linked codex, and the verification
+  #     below is what decides either way.
+  if ! as_clawbox_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' timeout -k 30 1800 sh '$installer'" </dev/null; then
     echo "  WARN: OpenAI's Codex installer ran but failed" >&2
     codex_left_as_is
     rm -f "$installer"
@@ -7737,7 +7759,7 @@ step_ai_tools_install() {
   ensure_claude_code || true
 
   # OpenAI Codex CLI (optional): the pinned native binary, never an npm global.
-  # Swallowed here for the same reason as Claude Code above — this step must not
+  # Swallowed here for the same reason as the CLI above — this step must not
   # abort over an optional tool — and reported honestly inside the function.
   ensure_codex_cli || true
 

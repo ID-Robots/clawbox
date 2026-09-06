@@ -168,10 +168,17 @@ describe("Codex is installed the way OpenAI supports", () => {
     // reset would delete the BINARY along with the credentials and leave
     // ~/.local/bin/codex dangling on a box that has just rebooted into AP mode
     // with no internet to re-download 117 MB.
-    const fn = ensure();
-    expect(INSTALL_SH).toContain('CODEX_PACKAGE_HOME="$CLAWBOX_HOME/.local/share/codex"');
-    expect(fn).toContain("CODEX_HOME=");
-    expect(fn).not.toContain('CODEX_HOME="$CLAWBOX_HOME/.codex"');
+    //
+    // Asserted on the INVOCATION and with a pattern that covers every way the
+    // wrong path could be spelled. An earlier version of this test spelled the
+    // forbidden value in double quotes, which the shell here never uses — so
+    // pointing CODEX_HOME straight back at ~/.codex passed it, on both files.
+    for (const [name, source] of [["install.sh", INSTALL_SH], ["install-x64.sh", INSTALL_X64]] as const) {
+      const fn = extractShellFunctionFrom(source, "ensure_codex_cli");
+      expect(source, name).toContain('CODEX_PACKAGE_HOME="$CLAWBOX_HOME/.local/share/codex"');
+      expect(fn, name).toMatch(/CODEX_HOME='\$CODEX_PACKAGE_HOME'/);
+      expect(fn, name).not.toMatch(/CODEX_HOME=['"]?\$\{?CLAWBOX_HOME\}?\/\.codex/);
+    }
   });
 });
 
@@ -191,12 +198,20 @@ describe("the x64 desktop installer follows the same rules", () => {
     expect(shellCode(fn)).not.toContain("sudo -u");
   });
 
-  it("takes the npm copy away only after the native binary reports the pin", () => {
-    const fn = ensure();
-    const verified = fn.lastIndexOf("codex_native_is_current");
-    const removed = fn.lastIndexOf("remove_npm_codex");
-    expect(verified).toBeGreaterThan(-1);
-    expect(verified).toBeLessThan(removed);
+  it("takes the npm copy away in exactly two places, both of them after a check", () => {
+    // install.sh's own version of this rule is proved by running the function
+    // (the download-failed and digest-mismatch cases below assert that no
+    // `npm uninstall` happened at all). Nothing runs the x64 twin, so the rule
+    // is structural here — and it counts the call sites rather than comparing
+    // the last of each, because comparing catches a MOVED removal and misses
+    // an ADDED one on the not-yet-installed path, which is the same defect.
+    const fn = shellCode(ensure());
+    const removals = [...fn.matchAll(/^\s*remove_npm_codex\b/gm)].map((m) => m.index ?? -1);
+    expect(removals).toHaveLength(2);
+    // The first is the already-installed path, before anything is downloaded.
+    expect(removals[0]).toBeLessThan(fn.indexOf('url="https://github.com'));
+    // The second is after the installed binary has reported the pinned version.
+    expect(removals[1]).toBeGreaterThan(fn.lastIndexOf("codex_native_is_current"));
   });
 });
 
@@ -273,6 +288,10 @@ function runEnsure(opts: {
   preinstalledVersion?: string;
   /** Is the npm copy there before the run? */
   npmPresent?: boolean;
+  /** A THIRD codex, ahead of both on the login shell's PATH (~/.bun/bin). */
+  bunCodex?: boolean;
+  /** Leave the npm entry as a DANGLING symlink instead of a real file. */
+  npmDangling?: boolean;
   /** Pin file contents; defaults to the repo's real pin. */
   pin?: string;
   /** Can the box compute a digest at all? */
@@ -285,6 +304,8 @@ function runEnsure(opts: {
     installerWorks = true,
     npmUninstallWorks = true,
     npmPresent = true,
+    bunCodex = false,
+    npmDangling = false,
     sha256sumWorks = true,
     plainCall = false,
   } = opts;
@@ -292,6 +313,7 @@ function runEnsure(opts: {
   const home = path.join(tmp, "home");
   const npmPrefix = path.join(home, ".npm-global");
   const nativeBin = path.join(home, ".local", "bin", "codex");
+  const bunBin = path.join(home, ".bun", "bin", "codex");
   const calls = path.join(tmp, "calls");
   const payloadFile = path.join(tmp, "payload");
   const projectDir = path.join(tmp, "project");
@@ -305,7 +327,12 @@ function runEnsure(opts: {
     path.join(projectDir, "config", "codex-target.txt"),
     opts.pin ?? `${pinned.version} ${pinned.sha256}\n`,
   );
-  if (npmPresent) fs.writeFileSync(path.join(npmPrefix, "bin", "codex"), "#!/usr/bin/env node\n", { mode: 0o755 });
+  if (npmDangling) fs.symlinkSync(path.join(npmPrefix, "lib", "gone", "codex.js"), path.join(npmPrefix, "bin", "codex"));
+  else if (npmPresent) fs.writeFileSync(path.join(npmPrefix, "bin", "codex"), "#!/usr/bin/env node\n", { mode: 0o755 });
+  if (bunCodex) {
+    fs.mkdirSync(path.dirname(bunBin), { recursive: true });
+    fs.writeFileSync(bunBin, "#!/usr/bin/env node\n", { mode: 0o755 });
+  }
   if (opts.preinstalledVersion) fs.writeFileSync(nativeBin, "native\n", { mode: 0o755 });
 
   const installedVersion = opts.installedVersion ?? opts.preinstalledVersion ?? pinned.version;
@@ -323,6 +350,7 @@ function runEnsure(opts: {
     `INSTALLED_VERSION=${JSON.stringify(installedVersion)}`,
     `INSTALLER_WORKS=${installerWorks ? 1 : 0}`,
     `NPM_UNINSTALL_WORKS=${npmUninstallWorks ? 1 : 0}`,
+    `BUN_BIN=${JSON.stringify(bunBin)}`,
     // The stub curl: writes $PAYLOAD to the -o path, or fails when it is empty.
     "curl() {",
     '  printf "curl %s\\n" "$*" >> "$CALLS"',
@@ -350,7 +378,9 @@ function runEnsure(opts: {
     '      [ -x "$CODEX_NATIVE_BIN" ] || return 127',
     '      printf "codex-cli %s\\n" "$INSTALLED_VERSION"; return 0 ;;',
     '    *"command -v codex"*)',
-    // The login shell's real PATH order: the npm copy wins while it exists.
+    // The login shell's real PATH order, spelled out in install.sh's own
+    // as_clawbox_login: ~/.bun/bin, then ~/.npm-global/bin, then ~/.local/bin.
+    '      if [ -x "$BUN_BIN" ]; then printf "%s\\n" "$BUN_BIN"; return 0; fi',
     '      if [ -x "$NPM_PREFIX/bin/codex" ]; then printf "%s\\n" "$NPM_PREFIX/bin/codex"; return 0; fi',
     '      if [ -x "$CODEX_NATIVE_BIN" ]; then printf "%s\\n" "$CODEX_NATIVE_BIN"; return 0; fi',
     "      return 1 ;;",
@@ -376,7 +406,8 @@ function runEnsure(opts: {
     output,
     calls: fs.readFileSync(calls, "utf-8").split("\n").filter(Boolean),
     nativeExists: fs.existsSync(nativeBin),
-    npmExists: fs.existsSync(path.join(npmPrefix, "bin", "codex")),
+    // lstat, not stat: a dangling symlink is something still there.
+    npmExists: fs.lstatSync(path.join(npmPrefix, "bin", "codex"), { throwIfNoEntry: false }) !== undefined,
   };
 }
 
@@ -386,7 +417,8 @@ d("a download that did not happen never deletes the working Codex", () => {
     expect(r.status).not.toBe(0);
     expect(r.npmExists).toBe(true);
     expect(r.calls.join("\n")).not.toContain("npm uninstall");
-    expect(r.output).toMatch(/Keeping the npm-installed Codex/);
+    // Names the codex the OWNER gets, which is PATH order and not a guess.
+    expect(r.output).toMatch(/Keeping the Codex this box resolves today: .*\.npm-global\/bin\/codex/);
   });
 
   it("refuses an installer whose digest is not the pinned one, and runs nothing", () => {
@@ -421,7 +453,7 @@ d("errexit must not swallow the refusal it is meant to print", () => {
     const r = runEnsure({ payload: "#!/bin/sh\ntrue\n", sha256sumWorks: false, plainCall: true });
     expect(r.status).not.toBe(0);
     expect(r.output).toMatch(/does not match its pinned sha256/);
-    expect(r.output).toMatch(/Keeping the npm-installed Codex/);
+    expect(r.output).toMatch(/Keeping the Codex this box resolves today: .*\.npm-global\/bin\/codex/);
     expect(r.calls.filter((c) => c.includes("sh '"))).toHaveLength(0);
     expect(r.npmExists).toBe(true);
   });
@@ -465,6 +497,43 @@ d("a verified native install leaves exactly one codex on PATH", () => {
     expect(r.calls.filter((c) => c.startsWith("curl "))).toHaveLength(0);
     expect(r.npmExists).toBe(false);
     expect(r.status).toBe(0);
+  });
+});
+
+d("what the owner actually types is the verdict", () => {
+  it("refuses to call it done while a third codex still wins PATH", () => {
+    // ~/.bun/bin comes BEFORE both ~/.npm-global/bin and ~/.local/bin on
+    // as_clawbox_login's PATH, and the vendor installer has a bun branch — so
+    // this box exists. Removing the npm copy is not the same fact as `codex`
+    // resolving to the pinned binary, and only the second one is the card.
+    const body = "#!/bin/sh\ntrue\n";
+    const sha = createHash("sha256").update(body).digest("hex");
+    const r = runEnsure({ payload: body, pin: `${readPin().version} ${sha}\n`, bunCodex: true });
+    expect(r.nativeExists).toBe(true);
+    expect(r.npmExists).toBe(false);
+    expect(r.status).not.toBe(0);
+    expect(r.output).toMatch(/still resolves to .*\.bun\/bin\/codex/);
+  });
+
+  it("does not read 0.153.40 as the 0.153.4 it pinned", () => {
+    // A whole-token match, so a future release whose number extends the pin is
+    // installed rather than mistaken for it.
+    const pin = readPin();
+    const r = runEnsure({ preinstalledVersion: pin.version, installedVersion: `${pin.version}0`, payload: "" });
+    // Not current => it tries to install, and there is nothing to download.
+    expect(r.calls.filter((c) => c.startsWith("curl "))).toHaveLength(1);
+    expect(r.status).not.toBe(0);
+    expect(r.npmExists).toBe(true);
+  });
+
+  it("counts a dangling npm symlink as still there", () => {
+    // What a half-finished `npm uninstall` leaves. It shadows nothing, but
+    // calling the removal a success over it hides a box that needs a look.
+    const pin = readPin();
+    const r = runEnsure({ preinstalledVersion: pin.version, payload: "", npmDangling: true, npmUninstallWorks: false });
+    expect(r.calls.join("\n")).toContain("npm uninstall");
+    expect(r.status).not.toBe(0);
+    expect(r.output).toMatch(/still there/);
   });
 });
 

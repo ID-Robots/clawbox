@@ -1084,7 +1084,7 @@ ensure_codex_cli() {
   fi
 
   url="https://github.com/openai/codex/releases/download/rust-v$version/install.sh"
-  installer="$(mktemp)"
+  installer="$(mktemp || true)"
   if ! curl -fsSL --proto '=https' --proto-redir '=https' \
       --connect-timeout 15 --max-time 300 "$url" -o "$installer" 2>/dev/null \
     || [ ! -s "$installer" ]; then
@@ -1110,7 +1110,12 @@ ensure_codex_cli() {
     return 1
   fi
 
-  if ! as_user_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' sh '$installer'" </dev/null; then
+  # CODEX_NON_INTERACTIVE=true is what declines the installer's own offer to
+  # remove the npm copy (its prompt opens /dev/tty, so </dev/null alone would
+  # not) — the removal is ours, after the verification. `timeout` bounds the
+  # ~117 MB package fetch, which the vendor leaves unbounded on its GitHub
+  # fallback path.
+  if ! as_user_login "CODEX_RELEASE='$version' CODEX_NON_INTERACTIVE=true CODEX_INSTALL_DIR='$CLAWBOX_HOME/.local/bin' CODEX_HOME='$CODEX_PACKAGE_HOME' timeout -k 30 1800 sh '$installer'" </dev/null; then
     echo "  WARN: OpenAI's Codex installer ran but failed" >&2
     rm -f "$installer"
     return 1
