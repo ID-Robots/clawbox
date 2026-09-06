@@ -156,10 +156,7 @@ describe("the ClawKeep backup scheduler", () => {
     // `schedule.json` — root-owned after a restore, EIO on failing storage,
     // EMFILE on a loaded Jetson, a JSON truncated by a power cut — resolves to
     // `DEFAULT_SCHEDULE`, whose `enabled` is false. `arm()` then returns, the
-    // nightly timer is torn down, and nothing anywhere says a word: the panel
-    // reads "auto-backup is off" and the shield stays green on the 7-day
-    // no-schedule window. `readScheduleSnapshot` already separates "no file"
-    // from "cannot be read"; the scheduler was throwing that distinction away.
+    // nightly timer is torn down, and nothing anywhere says a word.
     const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const snapshot = { schedule: SCHEDULE, armedAtMs: Date.now(), unreadable: false };
@@ -168,7 +165,7 @@ describe("the ClawKeep backup scheduler", () => {
     const sched = await import("@/lib/clawkeep-scheduler");
     await sched.start();
     const armedBefore = sched.nextRunAtMs();
-    expect(armedBefore).toBeGreaterThan(0);
+    expect(armedBefore).toBeGreaterThan(Date.now());
 
     // The next read fails. A transient I/O error must not disarm the box.
     snapshot.schedule = { ...actualDefaultSchedule };
@@ -181,10 +178,66 @@ describe("the ClawKeep backup scheduler", () => {
       expect.stringContaining("schedule.json could not be read"),
     );
 
-    // And the run it was armed for still happens.
+    // The run it was armed for happens...
     await vi.advanceTimersByTimeAsync(61 * 60_000);
     expect(runBackup).toHaveBeenCalledTimes(1);
+
+    // ...and so does the NEXT one. The post-fire rearm has no live timer to
+    // preserve, so "keep what is armed" is not an answer there: a box that
+    // ran once more and then stopped for ever would look identical to a
+    // healthy one for a whole day.
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(runBackup).toHaveBeenCalledTimes(2);
     warn.mockRestore();
+  });
+
+  it("keeps asking when the box BOOTS on a schedule it cannot read", async () => {
+    // There is no last-known-good at boot, so nothing can be armed — and
+    // answering "can I read the schedule?" once and believing it for the life
+    // of the process is the probe-once class. On this file it is total: the
+    // box would never back up again, on one log line.
+    const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const snapshot = { schedule: { ...actualDefaultSchedule }, armedAtMs: 0, unreadable: true };
+    mockClawkeep(runBackup, snapshot);
+
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+    expect(sched.nextRunAtMs()).toBe(0);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("nothing is armed"));
+
+    // The permissions are repaired (or the storage settles). Nobody touches
+    // the panel — the retry is the only thing that can notice.
+    snapshot.schedule = SCHEDULE;
+    snapshot.unreadable = false;
+    await vi.advanceTimersByTimeAsync(16 * 60_000);
+
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(runBackup).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("honours a save whose schedule the route already holds", async () => {
+    // The owner switches auto-backup OFF. The route hands `refresh` the
+    // schedule `writeSchedule()` returned, so a read that would have failed on
+    // this path cannot leave the old cadence armed under a 200 answer.
+    const runBackup = vi.fn(async () => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const snapshot = { schedule: SCHEDULE, armedAtMs: Date.now(), unreadable: false };
+    mockClawkeep(runBackup, snapshot);
+
+    const sched = await import("@/lib/clawkeep-scheduler");
+    await sched.start();
+    expect(sched.nextRunAtMs()).toBeGreaterThan(Date.now());
+
+    // The file read would now fail; the route does not need it.
+    snapshot.unreadable = true;
+    await sched.refresh({ ...SCHEDULE, enabled: false });
+
+    expect(sched.nextRunAtMs()).toBe(0);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60_000);
+    expect(runBackup).not.toHaveBeenCalled();
   });
 
   it("says nothing when the scheduled backup actually ran", async () => {

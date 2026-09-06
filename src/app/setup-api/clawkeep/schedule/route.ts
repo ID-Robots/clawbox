@@ -31,7 +31,11 @@ export async function PUT(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   try {
     const { schedule, armedAtMs } = await writeSchedule(body);
-    await refreshScheduler();
+    // The schedule the write returned, not a re-read of the file it just
+    // renamed: a transient read failure on this path would leave the OLD
+    // cadence armed under a 200, so a box would go on backing up after the
+    // owner switched auto-backup off.
+    await refreshScheduler(schedule);
     // Hand back the arm stamp the write itself produced: the card folds both
     // into its local status, so arming auto-backup cannot lapse the shield on
     // the same click for a run that has not come round yet — and a save that
