@@ -128,6 +128,11 @@ function useAppearance(enabled: boolean, activeHarness: string | null) {
   // probe is a same-origin call that answers long before a card can be opened
   // and a picture deleted on it.
   const harnessDefaultWallpaperId = activeHarness === "hermes" ? "hermes" : "clawbox";
+  // Painted vs persisted, exactly as on the desktop: this route answers
+  // `d?.active || "unknown"` on a probe that failed, and "unknown" reads as
+  // OpenClaw above. Null means the delete writes no fallback at all.
+  const persistableDefaultWallpaperId =
+    activeHarness === "hermes" || activeHarness === "openclaw" ? harnessDefaultWallpaperId : null;
   const [wallpaperId, setWallpaperId] = useState("clawbox");
   const [wpFit, setWpFit] = useState<WpFit>("fill");
   const [wpBgColor, setWpBgColor] = useState("#000000");
@@ -263,7 +268,7 @@ function useAppearance(enabled: boolean, activeHarness: string | null) {
         // captured before the store above advances the ref to the shortened
         // one — not the list the saved id was originally chosen against, which
         // may have been another browser's entirely.
-        setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, harnessDefaultWallpaperId));
+        setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, persistableDefaultWallpaperId));
       },
     },
   };

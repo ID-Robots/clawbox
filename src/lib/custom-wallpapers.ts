@@ -51,6 +51,16 @@ export function isCustomWallpaperInRange(wallpaperId: string, count: number): bo
  * the harness's own art, the same default a box that has never chosen one
  * opens on, so a Hermes box does not land on the ClawBox wallpaper.
  *
+ * `null` there means the edition is NOT KNOWN YET, and then this returns the id
+ * unchanged rather than guessing. The guess would be persisted box-wide and is
+ * wrong half the time: `activeHarness` unresolved reads as OpenClaw everywhere
+ * it is turned into a wallpaper, so a Hermes box whose probe was slow or failed
+ * would write the ClawBox art over the owner's selection, permanently, on a
+ * delete that had nothing to do with the edition. The desktop already refuses
+ * that write on the MOUNT path; this is the same refusal on the delete path.
+ * What the owner sees meanwhile is the render fallback, which costs nothing and
+ * corrects itself the moment the probe lands.
+ *
  * `before` is the list as it stood BEFORE the removal, and it is what decides
  * whether the rule applies at all: renumbering only makes sense for a selection
  * that was an index into this very list. The range check lives here rather than
@@ -71,7 +81,7 @@ export function wallpaperIdAfterDelete(
   wallpaperId: string,
   deletedIndex: number,
   before: readonly string[],
-  fallbackId: string,
+  fallbackId: string | null,
 ): string {
   const active = customWallpaperIndex(wallpaperId);
   // A built-in is selected: a custom one going away cannot change it.
@@ -83,6 +93,6 @@ export function wallpaperIdAfterDelete(
   // browser's shorter list over a choice it cannot even paint — the same write
   // the mount path already refuses to make (TASK-719).
   if (!isCustomWallpaperInRange(wallpaperId, before.length)) return wallpaperId;
-  if (active === deletedIndex) return fallbackId;
+  if (active === deletedIndex) return fallbackId ?? wallpaperId;
   return active > deletedIndex ? customWallpaperId(active - 1) : wallpaperId;
 }

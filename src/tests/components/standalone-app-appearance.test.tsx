@@ -24,7 +24,10 @@ vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a>,
 }));
 vi.mock("next/image", () => ({ default: () => null }));
-vi.mock("@/lib/client-harness", () => ({ fetchHarness: vi.fn(async () => ({ active: "openclaw" })) }));
+// Hoisted so a case can decide what the probe answers — including answering
+// without an `active`, which is what a failed probe looks like to this route.
+const harnessMock = vi.hoisted(() => vi.fn(async (): Promise<{ active?: string }> => ({ active: "openclaw" })));
+vi.mock("@/lib/client-harness", () => ({ fetchHarness: harnessMock }));
 
 interface StubUi {
   wallpaperId: string;
@@ -79,6 +82,7 @@ let posts: Record<string, unknown>[];
 beforeEach(() => {
   posts = [];
   localStorage.clear();
+  harnessMock.mockResolvedValue({ active: "openclaw" });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -291,6 +295,31 @@ describe("/app/settings — Appearance", () => {
     expect(screen.getByTestId("ui-custom").textContent).toBe("2");
     expect(screen.getByTestId("ui-wallpaper").textContent).toBe("custom-1");
     expect(JSON.parse(localStorage.getItem("clawbox-custom-wallpapers") || "[]")).toHaveLength(2);
+  });
+
+  it("writes no edition fallback when the probe never said which edition this is", async () => {
+    // This route answers `d?.active || "unknown"` on a failed probe, and
+    // "unknown" reads as OpenClaw wherever it is turned into a wallpaper. So
+    // deleting the picture in use on a Hermes box whose probe failed persisted
+    // "clawbox" box-wide — permanently, from a delete that had nothing to do
+    // with the edition. The guess is fine to PAINT and not fine to WRITE.
+    harnessMock.mockResolvedValue({});
+    localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA"]));
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-custom").textContent).toBe("1"));
+
+    fireEvent.click(screen.getByTestId("pick-custom-0"));
+    await waitFor(() => expect(posts.at(-1)).toMatchObject({ wp_id: "custom-0" }), SAVED_SOON);
+    posts.length = 0;
+
+    // The delete is not blocked — a local operation must not wait on a probe.
+    fireEvent.click(screen.getByTestId("delete-custom-0"));
+    expect(screen.getByTestId("ui-custom").textContent).toBe("0");
+    // Painted locally…
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    // …and not written. Well past the 500 ms debounce.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(posts.some((body) => body.wp_id === "clawbox")).toBe(false);
   });
 
   it("offers the wallpapers this browser already uploaded, and asks the file input for a new one", async () => {

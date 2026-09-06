@@ -596,6 +596,14 @@ function ChromeDesktopInner() {
   // What a box with no custom wallpaper selected shows — the harness's own
   // art, the same default the mount path above picks for a first boot.
   const harnessDefaultWallpaperId = activeHarness === "hermes" ? "hermes" : "clawbox";
+  // The same answer, but only once the probe has actually given one. The line
+  // above has to name a wallpaper to PAINT while `activeHarness` is still null,
+  // and guessing there is free — the paint corrects itself when the probe
+  // lands. Guessing in a value that gets PERSISTED box-wide is not free: an
+  // unresolved harness reads as OpenClaw, so it would write the ClawBox art
+  // over a Hermes box's selection for good. Null means "do not write one".
+  const persistableDefaultWallpaperId =
+    activeHarness === "hermes" || activeHarness === "openclaw" ? harnessDefaultWallpaperId : null;
   // The fallback below has to be able to tell "no custom wallpapers" from "not
   // read yet": an empty initial state puts every `custom-<n>` out of range, so
   // without this a perfectly good selection flashes the default on every load.
@@ -2027,7 +2035,7 @@ function ChromeDesktopInner() {
                 // advances the ref to the shortened one — and it is what tells
                 // the rule whether the saved id was an index into this
                 // browser's list at all.
-                setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, harnessDefaultWallpaperId));
+                setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, persistableDefaultWallpaperId));
               },
             }} />
           </div>

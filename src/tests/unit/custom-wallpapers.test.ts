@@ -59,6 +59,18 @@ describe("the selection after a custom wallpaper is deleted", () => {
     expect(wallpaperIdAfterDelete("clawbox", 0, listOf(3), "hermes")).toBe("clawbox");
   });
 
+  it("writes NO fallback while the edition is still unknown", () => {
+    // `null` is "the harness probe has not answered". The deleted picture was
+    // the selected one, so a fallback would be persisted box-wide — and an
+    // unresolved harness reads as OpenClaw everywhere it becomes a wallpaper,
+    // so the guess would put the ClawBox art on a Hermes box for good. The id
+    // is left alone; the render fallback is what the owner sees meanwhile.
+    expect(wallpaperIdAfterDelete("custom-1", 1, listOf(2), null)).toBe("custom-1");
+    // Everything that is NOT edition-specific still happens: renumbering an
+    // earlier delete needs no harness at all.
+    expect(wallpaperIdAfterDelete("custom-2", 0, listOf(3), null)).toBe("custom-1");
+  });
+
   it("does not renumber a selection this list never held", () => {
     // `wp_id` is box-wide and the pictures are per-browser, so a browser with
     // three of its own can be holding the laptop's "custom-5". Deleting one of

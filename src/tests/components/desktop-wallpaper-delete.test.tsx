@@ -291,6 +291,38 @@ describe("deleting a custom wallpaper", () => {
     expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
   });
 
+  it("writes no edition fallback when the in-use picture is deleted before the probe answers", async () => {
+    // The mount path already refuses to persist a fallback it cannot compute
+    // ("writes nothing while the harness probe has not answered"). The DELETE
+    // path is the sibling call site of the very same value, and it was writing
+    // it: `activeHarness` is null until the probe lands and null reads as
+    // OpenClaw, so deleting the wallpaper in use on a Hermes box whose probe is
+    // slow — or has failed for good, after three attempts — persisted
+    // "clawbox" box-wide. Permanent, and nothing to do with the edition.
+    activeHarness = "hermes";
+    harnessDelayMs = 3_000;
+    savedWallpaperId = "custom-2";
+
+    render(<ChromeDesktop />);
+    await waitFor(() => expect(screen.getByTestId("desktop-root")).toBeTruthy());
+    // Inside the window: preferences have landed, the probe has not.
+    await waitFor(() => expect(wallpaperUrls().some((u) => u.includes(WP[2]))).toBe(true));
+
+    await openAppearanceSettings();
+    fireEvent.click(await screen.findByRole("button", { name: /Remove custom 3/i }));
+
+    // The delete itself is not blocked — a local operation must not wait on a
+    // remote probe. Only the box-wide guess is withheld.
+    await waitFor(() => {
+      expect(JSON.parse(window.localStorage.getItem("clawbox-custom-wallpapers") || "[]"))
+        .toEqual([WP[0], WP[1]]);
+    });
+    // Well past the 500 ms debounce, still inside the probe delay.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(saved.some((body) => "wp_id" in body && body.wp_id === "clawbox")).toBe(false);
+    expect(saved.some((body) => "wp_id" in body && body.wp_id !== "custom-2")).toBe(false);
+  });
+
   it("does not offer a phantom slot for a picture this browser does not have", async () => {
     // Settings used to claim "Custom 3" over a grid of none, with no tile
     // highlighted. The panel is handed what is ON SCREEN, so the fallback tile
