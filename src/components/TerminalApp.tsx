@@ -353,7 +353,22 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
       wsRef.current = null;
     }
 
-    const ws = new WebSocket(wsUrl);
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(wsUrl);
+    } catch {
+      // The connect lock is released by `onopen` and `onclose`, and a
+      // constructor that throws reaches neither. Left raised, it made every
+      // later connect() return at the guard above — the 3 s auto-reconnect and
+      // the Reconnect button alike — so the terminal could not be revived
+      // without remounting the window (TASK-712's sibling call site).
+      connectLockRef.current = false;
+      if (!mountedRef.current) return;
+      updateStatus("error");
+      term.writeln(`\r\n\x1b[31mError: Cannot connect to ${wsUrl}\x1b[0m`);
+      term.writeln("\x1b[2mTerminal server may not be running.\x1b[0m");
+      return;
+    }
     wsRef.current = ws;
     pendingCommandRef.current = initialCommandRef.current?.trim() || null;
     updateStatus("connecting");

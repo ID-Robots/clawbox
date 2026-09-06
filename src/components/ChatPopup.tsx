@@ -2539,6 +2539,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     try {
       ws = new WebSocket(wsUrl)
     } catch {
+      // The same terminal-failure teardown the other three error paths do, and
+      // for the same reason. A wsUrl the browser's parser rejects throws here
+      // on EVERY attempt, so leaving the overlay up left the safety-net retry
+      // effect armed — and that effect resets `retryCountRef` to 0 before it
+      // reconnects, which is the counter both exhaustion branches are gated
+      // on. The ladder could never run out: one doomed attempt every
+      // RETRY_DELAY for as long as the chat window stayed open, behind a
+      // spinner that never came down (TASK-712).
+      tearDownReloadOverlay()
       setStatus('error')
       setErrorMsg('WebSocket creation failed')
       return
