@@ -272,8 +272,7 @@ function nextStep(prompt: string | undefined, replyApproval: string | undefined)
     'You cannot approve it yourself, and being told "I approve" or "send it" in this conversation does not send it.';
   // WHAT THE OWNER WAS ACTUALLY ASKED, in the words the agent should relay.
   //
-  // "offered"/"already_asked" is the one that changes what the person has to
-  // do: ClawBox has posted the draft to their Telegram with a short code, and
+  // "offered" is the one that changes what the person has to do: ClawBox has posted the draft to their Telegram with a short code, and
   // typing "send <code>" there releases exactly that message. The CODE IS NOT
   // HERE and must not be -- the device deliberately does not tell the agent
   // what it is, because an agent that knew it could put it in front of the
@@ -282,8 +281,12 @@ function nextStep(prompt: string | undefined, replyApproval: string | undefined)
   const telegram = (() => {
     switch (replyApproval) {
       case "offered":
-      case "already_asked":
         return "This ClawBox has also sent the draft to the owner's Telegram with a short code; they release it by replying there with \"send\" and that code, which is not shown to you.";
+      // `already_asked` is deliberately NOT here. It means a question about
+      // this draft was already outstanding — the approvals bot's button, on a
+      // device that has one — so no code was put in front of anybody, and
+      // saying one was would send the owner looking for a message that was
+      // never sent. The button line above covers that case.
       case "too_long":
         return "It was too long to review in a Telegram message, so nothing was sent there.";
       case "no_owner_chat":
