@@ -1,6 +1,17 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getSnapRect, getSnapZone, shelfHeight, SNAP_THRESHOLD } from "@/lib/window-snap";
+import {
+  DESKTOP_LAYERS,
+  MIN_WINDOW_HEIGHT,
+  MIN_WINDOW_WIDTH,
+  TITLE_BAR_HEIGHT,
+  clampWindowPosition,
+  fitWindowSize,
+  getSnapRect,
+  getSnapZone,
+  shelfHeight,
+  SNAP_THRESHOLD,
+} from "@/lib/window-snap";
 
 /**
  * The snap zones are shared by BOTH draggable surfaces on the desktop — the app
@@ -97,5 +108,83 @@ describe("getSnapRect", () => {
   it("keeps a snapped surface clear of the reserved strip", () => {
     const right = getSnapRect("right", 300)!;
     expect(right.x + right.width).toBe(W - 300);
+  });
+});
+
+describe("clampWindowPosition", () => {
+  const win = { width: 800, height: 600 };
+
+  it("leaves a window that is already on the desktop alone", () => {
+    expect(clampWindowPosition({ x: 100, y: 50, ...win })).toEqual({ x: 100, y: 50 });
+  });
+
+  it("keeps the title bar above the shelf", () => {
+    // The drag handler clamped y at 0 and nothing else, so a window dragged to
+    // the bottom of the viewport put its whole 36px title bar under the shelf —
+    // and with it every way to move the window back.
+    expect(clampWindowPosition({ x: 100, y: 890, ...win }).y).toBe(H - SHELF - TITLE_BAR_HEIGHT);
+  });
+
+  it("keeps the window controls, which live at the right end, on the desktop", () => {
+    expect(clampWindowPosition({ x: 1020, y: 0, ...win }).x).toBe(W - win.width);
+    expect(clampWindowPosition({ x: -44, y: 20, ...win }).x).toBe(0);
+  });
+
+  it("measures the screen, not the desktop a docked chat narrows", () => {
+    // A docked chat only narrows the desktop; the windows beside it keep their
+    // own size and place, so a window wider than the strip that is left must
+    // not be dragged to the left edge the moment the panel appears.
+    expect(clampWindowPosition({ x: 500, y: 0, width: 400, height: 300 })).toEqual({ x: 500, y: 0 });
+  });
+
+  it("leaves a window wider than the screen where it is, rather than pushing it right", () => {
+    const wide = { x: -200, y: 10, width: W + 200, height: 400 };
+    expect(clampWindowPosition(wide).x).toBe(-200);
+    expect(clampWindowPosition({ ...wide, x: 40 }).x).toBe(0);
+  });
+});
+
+describe("fitWindowSize", () => {
+  it("leaves a window that fits alone", () => {
+    expect(fitWindowSize({ width: 800, height: 600 })).toEqual({ width: 800, height: 600 });
+  });
+
+  it("shrinks a restored window that is taller than the desktop", () => {
+    // 881px of window on an 844px desktop hides its own bottom edge — and the
+    // resize handle that would fix it — under the shelf.
+    expect(fitWindowSize({ width: 1102, height: 881 })).toEqual({ width: W, height: H - SHELF });
+  });
+
+  it("never squeezes below the window minimums", () => {
+    Object.defineProperty(window, "innerWidth", { value: 120, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 120, configurable: true });
+    expect(fitWindowSize({ width: 800, height: 600 })).toEqual({
+      width: MIN_WINDOW_WIDTH,
+      height: MIN_WINDOW_HEIGHT,
+    });
+  });
+});
+
+describe("DESKTOP_LAYERS", () => {
+  it("puts the modal launcher above the chat it used to open behind", () => {
+    // 9998/9999 against the chat's 10010 left nine of twelve app tiles
+    // unclickable whenever the chat was open, and a click on one landed in the
+    // chat's composer.
+    expect(DESKTOP_LAYERS.overlay).toBeGreaterThan(DESKTOP_LAYERS.chat);
+  });
+
+  it("keeps the ladder in one order: windows under the shelf, menus over everything but a modal", () => {
+    const ladder = [
+      DESKTOP_LAYERS.window,
+      DESKTOP_LAYERS.shelf,
+      DESKTOP_LAYERS.mascot,
+      DESKTOP_LAYERS.chat,
+      DESKTOP_LAYERS.overlay,
+      DESKTOP_LAYERS.notice,
+      DESKTOP_LAYERS.menu,
+      DESKTOP_LAYERS.modal,
+    ];
+    expect(ladder).toEqual([...ladder].sort((a, b) => a - b));
+    expect(new Set(ladder).size).toBe(ladder.length);
   });
 });

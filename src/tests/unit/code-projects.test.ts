@@ -67,7 +67,9 @@ import {
   APP_ID_RE,
   MAX_PROJECT_NAME_LENGTH,
   WEBAPPS_DIR,
+  legacyRedirectPort,
   projectPath,
+  serverAppDownHtml,
   ValidationError,
   NotFoundError,
 } from "@/lib/code-projects";
@@ -463,6 +465,48 @@ describe("code-projects", () => {
         .mockResolvedValueOnce(indexHtml);
       const result = await buildProject("myapp", { name: "New Name", color: "#fff" });
       expect(result.url).toContain("myapp");
+    });
+  });
+
+  // The stubs the box wrote before /apps/<id>/ existed: one line of script
+  // sending the frame to `location.hostname:<port>`. With the server down the
+  // window was a white rectangle, so the webapps route has to recognise one —
+  // and must never mistake a real app for one, because a stub it "recognises"
+  // is a stub it does not serve.
+  describe("legacyRedirectPort", () => {
+    it("reads the port out of the stub the box used to write", () => {
+      expect(
+        legacyRedirectPort(
+          `<!doctype html><html><body><script>location.replace(location.protocol+'//'+location.hostname+':4230/');</script></body></html>`,
+        ),
+      ).toBe(4230);
+      expect(legacyRedirectPort(`<script>window.location.href='http://'+location.hostname+':4199'</script>`)).toBe(4199);
+      expect(legacyRedirectPort(`<script>location.assign("//"+location.hostname+":18080/app")</script>`)).toBe(18080);
+    });
+
+    it("says nothing about a document that is not one", () => {
+      // No redirect at all.
+      expect(legacyRedirectPort(`<p>${"x"}</p><script>document.title=location.hostname;</script>`)).toBeNull();
+      // A redirect that names no host of its own — the proxy stub itself.
+      expect(legacyRedirectPort(`<script>location.replace("/apps/game/");</script>`)).toBeNull();
+      // A port no local server may hold, and one that is not a port at all.
+      expect(legacyRedirectPort(`<script>location.replace(location.hostname+':80/')</script>`)).toBeNull();
+      expect(legacyRedirectPort(`<script>location.replace(location.hostname+':70000/')</script>`)).toBeNull();
+      // Too big to be a stub: a whole app that happens to read its hostname.
+      const app = `<script>location.replace(location.hostname+':4230/')</script>${"<div></div>".repeat(600)}`;
+      expect(app.length).toBeGreaterThan(4096);
+      expect(legacyRedirectPort(app)).toBeNull();
+    });
+  });
+
+  describe("serverAppDownHtml", () => {
+    it("says which app and why, with the name and the reason escaped", () => {
+      const html = serverAppDownHtml(`Cool <Game>`, `Nothing is listening on port 4199.`);
+      expect(html).toContain("Cool &lt;Game&gt;");
+      expect(html).toContain("Nothing is listening on port 4199.");
+      expect(html).not.toContain("<Game>");
+      // No script: it renders in a frame with an opaque origin.
+      expect(html).not.toContain("<script");
     });
   });
 

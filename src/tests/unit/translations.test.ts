@@ -105,6 +105,7 @@ describe("translations", () => {
         "app",
         "shelf",
         "launcher",
+        "mascot",
         "desktop",
         "uninstall",
         "installed",

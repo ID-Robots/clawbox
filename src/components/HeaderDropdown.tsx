@@ -94,7 +94,10 @@ export function HeaderDropdown({
   // Viewport-space (position: fixed) coordinates for the open popover.
   // The popover is portaled to <body> so it can't be clipped by the chat
   // window's `overflow: hidden` — see the flip/shift logic below.
-  const [coords, setCoords] = useState<{ left: number; top: number; maxHeight: number; width: number } | null>(null)
+  // `top` and `bottom` are exclusive: a list that opens BELOW the trigger is
+  // anchored by its top edge, one that flips ABOVE by its bottom edge — see
+  // the flip branch in `compute`.
+  const [coords, setCoords] = useState<{ left: number; top: number | null; bottom: number | null; maxHeight: number; width: number } | null>(null)
   // Index of the option that currently holds DOM focus inside the open list.
   const [activeIndex, setActiveIndex] = useState(-1)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -192,18 +195,30 @@ export function HeaderDropdown({
       // internally instead of being clipped.
       const spaceBelow = vh - t.bottom - gap - margin
       const spaceAbove = t.top - gap - margin
-      let top: number
+      let top: number | null
+      let bottom: number | null
       let maxHeight: number
       const minPreferredHeight = 160
       if (spaceBelow >= minPreferredHeight || spaceBelow >= spaceAbove) {
         top = t.bottom + gap
+        bottom = null
         maxHeight = Math.min(maxDesired, spaceBelow)
       } else {
         maxHeight = Math.min(maxDesired, spaceAbove)
-        top = Math.max(margin, t.top - gap - maxHeight)
+        // Anchored by its BOTTOM edge, not by a top computed from `maxHeight`:
+        // `maxHeight` is a cap, not the height, so a four-row list positioned
+        // at `t.top - gap - 320` floated 180px above the pill, in the middle of
+        // the transcript. From the bottom edge the list grows upward out of the
+        // trigger whatever its content height, and the cap still makes a long
+        // one scroll inside itself.
+        // The `Math.max` is the old clamp's twin, for the degenerate case it
+        // covered: a trigger scrolled below the viewport would otherwise hang
+        // its list off the bottom of the screen entirely.
+        top = null
+        bottom = Math.max(margin, vh - t.top + gap)
       }
 
-      const next = { left, top, maxHeight: Math.max(maxHeight, 0), width }
+      const next = { left, top, bottom, maxHeight: Math.max(maxHeight, 0), width }
       // Scrolling the popover itself reaches this listener (capture phase, on
       // window) and leaves the trigger rect untouched. Without this bail-out
       // every scroll event re-rendered the whole list to the same numbers.
@@ -211,6 +226,7 @@ export function HeaderDropdown({
         prev
         && prev.left === next.left
         && prev.top === next.top
+        && prev.bottom === next.bottom
         && prev.maxHeight === next.maxHeight
         && prev.width === next.width
           ? prev
@@ -236,17 +252,26 @@ export function HeaderDropdown({
       if (triggerRef.current?.contains(t)) return
       close()
     }
-    // On window, bubble phase: Escape from inside the portaled list reaches it
-    // too, so this is the ONE Escape handler — including for an empty list,
-    // where no row ever took focus.
+    // The ONE Escape handler for this list — including for an empty one, where
+    // no row ever took focus.
+    //
+    // On `document`, CAPTURE phase, and it stops there: the surfaces these
+    // pills sit in close themselves on a window-level Escape (the chat popup
+    // does), and on the bubble phase that listener — registered first, when the
+    // chat opened — ran BEFORE this one, so dismissing a menu also closed the
+    // whole conversation and un-docked the panel with it. Same phase and same
+    // reason as useModalDialog: Escape must close the innermost thing open.
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') close(true)
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      close(true)
     }
     window.addEventListener('pointerdown', handlePointer, true)
-    window.addEventListener('keydown', handleKey)
+    document.addEventListener('keydown', handleKey, true)
     return () => {
       window.removeEventListener('pointerdown', handlePointer, true)
-      window.removeEventListener('keydown', handleKey)
+      document.removeEventListener('keydown', handleKey, true)
     }
   }, [open, close])
 
@@ -258,8 +283,17 @@ export function HeaderDropdown({
   // Read out of the live popover rather than a ref array — one query per
   // keystroke costs nothing, where a per-row ref callback was re-attaching
   // every row on every render of a list that can be 340 models long.
-  useEffect(() => {
-    if (!open || activeIndex < 0) return
+  //
+  // Keyed on `positioned` as well, because the portal does not exist in the
+  // commit that opens the list: `coords` is still null there and the popover
+  // renders one commit later, once the layout effect above has measured the
+  // trigger. Without it the FIRST open of a pill left focus on the trigger —
+  // arrows did nothing and Tab walked out of the page while the list stayed on
+  // screen — and only the second open worked, because `coords` survives a
+  // close and the list then rendered in the opening commit.
+  const positioned = coords !== null
+  useLayoutEffect(() => {
+    if (!open || !positioned || activeIndex < 0) return
     const el = popoverRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]')[activeIndex]
     if (!el) return
     el.focus()
@@ -269,7 +303,7 @@ export function HeaderDropdown({
     // `options.length`, not `options`: the array is a fresh literal from the
     // caller on every parent render, and re-stealing focus (plus the reflow
     // scrollIntoView forces) because the parent re-rendered is not the job.
-  }, [open, activeIndex, options.length])
+  }, [open, positioned, activeIndex, options.length])
 
   const handleSelect = useCallback((option: HeaderDropdownOption) => {
     if (option.disabled) return
@@ -418,7 +452,7 @@ export function HeaderDropdown({
           style={{
             position: 'fixed',
             left: coords.left,
-            top: coords.top,
+            ...(coords.top !== null ? { top: coords.top } : { bottom: coords.bottom ?? 0 }),
             width: coords.width,
             maxHeight: coords.maxHeight,
             // Above the chat popup (zIndex 10010) so it is never clipped.

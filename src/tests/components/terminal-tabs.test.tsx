@@ -245,6 +245,43 @@ describe("the terminal's right-click menu", () => {
     expect(terms[0].press({ key: "Escape" })).toBe(true);
   });
 
+  it("keeps the keyboard while it is open — no key reaches the shell, and focus stays on the menu", async () => {
+    const { container } = render(<TerminalApp />);
+    await waitFor(() => expect(terms.length).toBe(1));
+    const surface = container.querySelector("[tabindex='0']") as HTMLElement;
+    // xterm's own hidden input, which the real terminal has and the mocked
+    // one does not: the wrapper's fallback forwarder only fires when it finds
+    // one and it is NOT focused — which is exactly the state a menu item's
+    // focus puts the window in.
+    const helper = document.createElement("textarea");
+    helper.className = "xterm-helper-textarea";
+    surface.appendChild(helper);
+    await act(async () => { sockets[0].open(); });
+    sent.length = 0;
+
+    fireEvent.contextMenu(surface, { clientX: 10, clientY: 10 });
+    const menu = screen.getByTestId("terminal-context-menu");
+    await waitFor(() => expect(menu.contains(document.activeElement)).toBe(true));
+
+    // The menu is a child of the div that carries the fallback forwarder, so
+    // every one of these bubbles to it. None of them is the shell's: Escape
+    // would arrive as \x1b and abort a running claude-ds turn, ArrowDown as
+    // \x1b[B (the stray `[B` seen on the prompt), Tab as a literal tab.
+    for (const key of ["ArrowDown", "ArrowUp", "Tab", "Escape", "Home", "End"]) {
+      fireEvent.keyDown(document.activeElement ?? menu, { key });
+    }
+    expect(sent.filter((frame) => frame.type === "input")).toEqual([]);
+
+    // And the arrows moved focus WITHIN the menu rather than losing it to the
+    // terminal underneath.
+    fireEvent.contextMenu(surface, { clientX: 10, clientY: 10 });
+    const reopened = await screen.findByTestId("terminal-context-menu");
+    await waitFor(() => expect(reopened.contains(document.activeElement)).toBe(true));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    expect(reopened.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).not.toBe(helper);
+  });
+
   it("pastes through the terminal when the clipboard can be read", async () => {
     const readText = vi.fn(async () => "echo hi");
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { readText, writeText: vi.fn(async () => {}) } });

@@ -289,8 +289,10 @@ const PUBLIC_EXACT = new Set([
 ]);
 
 /** `/apps/<id>/…` — see src/lib/app-proxy.ts. The prefix alone, no import: middleware runs on the edge runtime. */
+const APP_PROXY_PREFIX = "/apps/";
+
 function isAppProxyPath(pathname: string): boolean {
-  return pathname.startsWith("/apps/") && pathname.length > "/apps/".length;
+  return pathname.startsWith(APP_PROXY_PREFIX) && pathname.length > APP_PROXY_PREFIX.length;
 }
 
 /** A navigation (a document, a frame) as opposed to a fetch a document makes — the same test app-proxy.ts makes. */
@@ -379,14 +381,36 @@ async function verifySessionCookie(cookie: string, expectedGen: number): Promise
 export async function middleware(request: NextRequest) {
   const pathname = request.nextUrl.pathname.toLowerCase();
 
-  // 0. The trailing-slash redirect Next used to do itself before anything
-  // here ran (skipTrailingSlashRedirect in next.config.ts): kept, first, for
-  // PAGE paths — never a proxied app's under /apps/<id>/, whose base path
-  // carries the slash on purpose (src/lib/app-proxy.ts), and never an API
-  // path, which the gates below judge as typed (a `/setup-api/gateway/`
-  // must not dodge the exact-match list by way of a redirect).
+  // 0. Trailing slashes. Next used to canonicalise them itself before
+  // anything here ran; `skipTrailingSlashRedirect` in next.config.ts switches
+  // that off so `/apps/<id>/` — an app's base path, which a Vite dev server
+  // insists on with the slash — reaches the proxy as typed, which makes this
+  // block the ONLY canonicaliser the box has. It runs both ways, and the two
+  // rules are written so no path can be moved by both:
+  //   - a page path LOSES a trailing slash — never a proxied app's under
+  //     /apps/<id>/ (src/lib/app-proxy.ts), and never an API path, which the
+  //     gates below judge as typed (a `/setup-api/gateway/` must not dodge
+  //     the exact-match list by way of a redirect);
+  //   - an app's base path `/apps/<id>` GAINS one.
   {
     const raw = request.nextUrl.pathname;
+    // The OTHER half of the pair, and the reason /apps/<id>/ is exempt from
+    // the strip below: `/apps/<id>` is an app's BASE PATH and has to CARRY
+    // the slash. Without it the document's relative links resolve one level
+    // up (`./assets/x.js` → `/assets/x.js`, off the proxy altogether) and a
+    // Vite build answers its own "did you mean /apps/<id>/?" 404, which the
+    // owner saw as a bare page of upstream text. Only the base path is moved
+    // — anything with a segment after the id is a request the app answers as
+    // typed — so this cannot loop with the strip, which skips every
+    // /apps/<id>/… path.
+    if (isAppProxyPath(raw) && !raw.endsWith("/") && !raw.slice(APP_PROXY_PREFIX.length).includes("/")) {
+      const url = new URL(request.url);
+      url.pathname = `${url.pathname}/`;
+      return NextResponse.redirect(url, {
+        status: 308,
+        headers: { "cache-control": "no-store" },
+      });
+    }
     if (raw.length > 1 && raw.endsWith("/") && !isAppProxyPath(raw) && !raw.startsWith("/setup-api/") && !raw.startsWith("/api/") && !raw.startsWith("/_next/")) {
       // A PLAIN `URL`, never `request.nextUrl.clone()`: `NextURL` records the
       // trailing slash in a `trailingSlash` flag when it parses the URL, its

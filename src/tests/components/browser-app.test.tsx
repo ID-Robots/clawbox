@@ -320,6 +320,17 @@ describe("BrowserApp", () => {
     expect(document.querySelectorAll('[title="vnc.pasteToRemote"]')).toHaveLength(1);
   });
 
+  it("lets the header WRAP, so a phone can still reach Settings", async () => {
+    const { findByTestId } = render(<BrowserApp />);
+    const header = await findByTestId("browser-header");
+    // Held to one line these five controls measure 556 px, and the app's frame
+    // on a phone is 390 px of `overflow-hidden` with nothing scrollable in
+    // between: Open in VNC was cut in half and Settings — the reason the
+    // settings live in this app at all — was off the screen entirely.
+    expect(header.className).toContain("flex-wrap");
+    expect(header.className).not.toContain("flex-nowrap");
+  });
+
   it("opens the screen's paste dialog from the header's Paste to VNC button", async () => {
     const { findByTestId, findByRole } = render(<BrowserApp />);
     fireEvent.click(await findByTestId("browser-paste"));

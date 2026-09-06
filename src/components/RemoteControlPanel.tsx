@@ -363,7 +363,17 @@ export default function RemoteControlPanel() {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {/* Two columns only when a column is wide enough for its label.
+                `sm:grid-cols-2` split on the VIEWPORT, so inside the 576px
+                settings column each cell measured 263px — enough for
+                "Regenerate Tunnel URL" and not for "Add device for quick
+                access", which wrapped to three lines beside a one-line
+                neighbour stretched to match it. 18rem is that label plus its
+                two icons and the cell's own padding; below it the pair stacks
+                full-width and both read on one line. The `min(...,100%)` is
+                what keeps a phone narrower than 18rem from being handed a
+                column wider than itself. */}
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(min(18rem,100%),1fr))] gap-2">
               <a
                 href={`${status?.portalWeb ?? "https://clawbox.com"}/portal/devices`}
                 target="_blank"

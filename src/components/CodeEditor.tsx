@@ -31,6 +31,30 @@ function loadHighlighter(): Promise<Highlighter> {
 /** What one Tab inserts. Two spaces: what the runs write, and what `tab-size` draws a tab as. */
 export const INDENT = "  ";
 
+/**
+ * Put `text` over [start, end) the way a keystroke would, so the browser
+ * records the edit on the textarea's OWN undo stack. `setRangeText` writes the
+ * value without one, which made Tab, Shift+Tab and the auto-indent the only
+ * edits in a file that Ctrl+Z could not take back: the spaces stayed, the
+ * dirty dot stayed, and Close asked to discard a change the owner had already
+ * undone. `execCommand` is deprecated and still the only API that offers this;
+ * where it is missing or refuses (jsdom, a future removal) fall back to
+ * `setRangeText` — the old behaviour, which is better than no edit at all.
+ */
+function typeInto(el: HTMLTextAreaElement, text: string, start: number, end: number): void {
+  if (!text && start === end) return;
+  const doc = el.ownerDocument;
+  if (typeof doc?.execCommand === "function") {
+    el.setSelectionRange(start, end);
+    try {
+      // Replacing a selection with nothing is a deletion: insertText("") is a
+      // no-op in some engines.
+      if (doc.execCommand(text ? "insertText" : "delete", false, text)) return;
+    } catch { /* fall through to the write that costs the undo entry */ }
+  }
+  el.setRangeText(text, start, end, "end");
+}
+
 export interface CodeEditorProps {
   value: string;
   /** Present: the text can be typed into. Absent: a read-only view. */
@@ -100,11 +124,11 @@ export default function CodeEditor({ value, onChange, language, onSave, autoFocu
           return e.shiftKey ? line.slice(-delta) : INDENT + line;
         }).join("\n");
         if (total === 0) return;
-        el.setRangeText(next, firstLine, blockEnd, "preserve");
+        typeInto(el, next, firstLine, blockEnd);
         const start = Math.max(firstLine, selectionStart + firstDelta);
         el.setSelectionRange(start, Math.max(start, selectionEnd + total));
       } else {
-        el.setRangeText(INDENT, selectionStart, selectionEnd, "end");
+        typeInto(el, INDENT, selectionStart, selectionEnd);
       }
       onChange?.(el.value);
       return;
@@ -116,7 +140,7 @@ export default function CodeEditor({ value, onChange, language, onSave, autoFocu
       const indent = /^[ \t]*/.exec(el.value.slice(lineStart, selectionStart))?.[0] ?? "";
       if (!indent) return;
       e.preventDefault();
-      el.setRangeText(`\n${indent}`, selectionStart, selectionEnd, "end");
+      typeInto(el, `\n${indent}`, selectionStart, selectionEnd);
       onChange?.(el.value);
     }
   };

@@ -515,22 +515,61 @@ async function waitForRebuildToTakeOver(): Promise<never> {
   throw new Error(message);
 }
 
-function getLastLogLine(logText: string): string | null {
+/**
+ * systemd's own lifecycle notes, which `journalctl -u` interleaves with the
+ * step's output. Everything a unit says about itself carries the unit name and
+ * a colon ("…service: Main process exited…", "…service: Failed with result…",
+ * "…service: Consumed 8.523s CPU time."); the start/stop announcements name
+ * the unit's DESCRIPTION instead, so they are matched by their opening verb.
+ */
+const SYSTEMD_LIFECYCLE_LINE =
+  /^(?:Starting|Started|Stopping|Stopped|Reloading|Reloaded|Failed to start|Scheduled restart job|Triggering OnFailure|Deactivated successfully)\b/;
+
+/**
+ * sudo/su/PAM bookkeeping. install.sh runs most of the rebuild through
+ * `as_clawbox_login`, and every one of those logs a session-open and a
+ * session-close into the same unit's journal — so even after systemd's own
+ * lines are gone, the last line is often "session closed for user clawbox".
+ */
+const SESSION_BOOKKEEPING_LINE =
+  /^(?:pam_\w+\(|\(to \S+\) \S+ on |\S+ : (?:TTY|PWD|USER)=)/;
+
+/**
+ * The line that says WHY a root step failed.
+ *
+ * The LAST line never is: systemd's accounting epilogue always follows the
+ * exit. On 2026-09-05 the restart step recorded
+ * "clawbox-root-update@rebuild_reboot.service: Consumed 8.523s CPU time." as
+ * the failure while `Error: rebuild failed (exit 137)` — the OOM-killed build —
+ * sat four lines above it, and that is the sentence the System Update page
+ * showed the owner. install.sh says every fatal thing as `echo "Error: …" >&2`,
+ * so the newest of those wins; failing that, the last line the STEP itself
+ * wrote, once systemd's and sudo's lines are out of the way.
+ */
+function getStepFailureLine(logText: string, unit: string): string | null {
   const lines = logText
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter(Boolean);
-  return lines.length > 0 ? lines[lines.length - 1] : null;
+    .filter(Boolean)
+    .filter((line) => !line.startsWith(`${unit}:`)
+      && !SYSTEMD_LIFECYCLE_LINE.test(line)
+      && !SESSION_BOOKKEEPING_LINE.test(line));
+  if (lines.length === 0) return null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/^(?:error|fatal)\b/i.test(lines[i])) return lines[i];
+  }
+  return lines[lines.length - 1];
 }
 
 async function readRootStepFailure(stepId: string): Promise<string | null> {
+  const unit = `clawbox-root-update@${stepId}.service`;
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", `clawbox-root-update@${stepId}.service`, "-n", "40", "--no-pager", "-o", "cat"],
+      ["-u", unit, "-n", "40", "--no-pager", "-o", "cat"],
       { timeout: 10_000 },
     );
-    return getLastLogLine(stdout);
+    return getStepFailureLine(stdout, unit);
   } catch {
     return null;
   }
@@ -2507,6 +2546,27 @@ export function resetUpdateState(): void {
   state = createInitialState(applicableSteps());
   running = false;
   continuationInFlight = null;
+}
+
+/**
+ * Forget a run that has already settled, at the owner's request.
+ *
+ * The state lives in this process's memory, so a failed run sits in it until
+ * the web server restarts — and on 2026-09-05 the step that FAILED was the
+ * restart. The System Update page now adopts a failure it did not start
+ * (otherwise the owner is shown "1 update available" over a dead update), so
+ * without this its Dismiss button could only hide the panel until the window
+ * was reopened.
+ *
+ * Refuses while an update owns the box: this clears no `running` flag on
+ * purpose — `resetUpdateState` does, and doing that here would let a second
+ * run start beside the one still going. Answers whether it cleared anything so
+ * the route can say 409 rather than pretend.
+ */
+export function dismissSettledUpdate(): boolean {
+  if (updateOwned() || state.phase === "running") return false;
+  state = createInitialState(applicableSteps());
+  return true;
 }
 
 export async function isUpdateCompleted(): Promise<boolean> {

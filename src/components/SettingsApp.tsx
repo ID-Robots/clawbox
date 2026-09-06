@@ -221,6 +221,18 @@ function isChannelSection(id: string): id is ChannelSection {
   return (CHANNEL_SECTIONS as readonly string[]).includes(id);
 }
 
+/**
+ * Cut a translated sentence into the text before and after a placeholder, so
+ * the value can be rendered as its own styled node instead of flattened into
+ * the string. A translation that dropped the slot keeps its whole sentence
+ * AFTER the value — the layout the English copy already had — rather than
+ * losing either half.
+ */
+function splitAtSlot(sentence: string, slot: string): [string, string] {
+  const at = sentence.indexOf(slot);
+  return at < 0 ? ["", sentence] : [sentence.slice(0, at), sentence.slice(at + slot.length)];
+}
+
 /** The three mailbox modes, in increasing order of what the assistant may do. */
 const EMAIL_MODE_OPTIONS: { id: EmailMode; labelKey: string; hintKey: string }[] = [
   { id: "send", labelKey: "settings.emailModeSend", hintKey: "settings.emailModeSendHint" },
@@ -379,7 +391,14 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
   return (
     <div className="flex items-center justify-between">
       <span className="text-sm text-[var(--text-primary)]">{label}</span>
+      {/* The label is a sibling span, not a <label> — htmlFor only binds to
+          form controls and this is a styled <button> — so without an explicit
+          name and role a screen reader read "button" with no state at all. */}
       <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label={label}
         onClick={() => onToggle(!on)}
         className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${on ? "bg-orange-500" : "bg-white/15"}`}
       >
@@ -396,6 +415,14 @@ type SectionStatus = { subtitle: string | null };
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
+  // English is the floor for a key the locale packs do not carry yet: `t`
+  // answers with the raw key when it is missing, so a string keyed here before
+  // its translations land would put `settings.accessDeviceAt` on screen — worse
+  // than the English sentence it replaces. Same helper as the desktop shell's.
+  const tr = useCallback((key: string, english: string) => {
+    const value = t(key);
+    return value === key ? english : value;
+  }, [t]);
   const navLabel = useCallback((item: { labelKey: string }) => t(item.labelKey), [t]);
   const notifyChatModelStateChanged = useCallback(() => {
     window.dispatchEvent(new Event(CHAT_MODEL_STATE_EVENT));
@@ -442,7 +469,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         <div
           role="status"
           aria-live="polite"
-          aria-label="Loading Remote Control"
+          aria-label={t("settings.loadingRemote")}
           className="max-w-xl flex items-center justify-center py-12 text-[var(--text-muted)]"
         >
           <span
@@ -551,14 +578,29 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => window.removeEventListener("resize", check);
   }, []);
 
-  // Close language dropdown on click outside
+  // Close language dropdown on click outside — and on Escape, which left the
+  // list open with no way back to the trigger for anyone not using a mouse.
+  // Capture phase and stopped there, like HeaderDropdown's: Escape must close
+  // the innermost thing open, not the window the list is floating in. Focus
+  // goes back to the trigger, or it would be lost with the element it was on.
   useEffect(() => {
     if (!langOpen) return;
     const handler = (e: MouseEvent) => {
       if (langRef.current && !langRef.current.contains(e.target as Node)) setLangOpen(false);
     };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      setLangOpen(false);
+      document.getElementById("settings-language-button")?.focus();
+    };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler, true);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler, true);
+    };
   }, [langOpen]);
 
   /* ── System stats ──
@@ -991,11 +1033,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const saveHotspotSSID = async () => {
     const next = hotspotSSIDInput.trim();
     if (!next) {
-      setHotspotSSIDStatus({ type: "error", message: "Hotspot name is required" });
+      setHotspotSSIDStatus({ type: "error", message: t("settings.hotspotNameRequired") });
       return;
     }
     if (next.length > 32) {
-      setHotspotSSIDStatus({ type: "error", message: "Hotspot name must be 32 characters or less" });
+      setHotspotSSIDStatus({ type: "error", message: t("settings.hotspotNameTooLong") });
       return;
     }
     if (next === hotspotSSID) return;
@@ -1019,7 +1061,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // wrong answer this PR is about. The field status stays about the field:
       // the name WAS saved, whatever the radio did.
       setHotspotApWarning(await readHotspotVerdict(res));
-      setHotspotSSIDStatus({ type: "success", message: "Hotspot name updated" });
+      setHotspotSSIDStatus({ type: "success", message: t("settings.hotspotNameUpdated") });
     } catch (err) {
       setHotspotSSIDStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
     } finally {
@@ -1033,7 +1075,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       return;
     }
     if (hotspotPassword.length > 63) {
-      setHotspotPasswordStatus({ type: "error", message: "Password must be 63 characters or less" });
+      setHotspotPasswordStatus({ type: "error", message: t("settings.hotspotPasswordTooLong") });
       return;
     }
     setHotspotPasswordSaving(true);
@@ -1053,7 +1095,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // Same rule as the SSID save above: one home for the AP verdict, written
       // on every outcome so a later success clears an earlier failure.
       setHotspotApWarning(await readHotspotVerdict(res));
-      setHotspotPasswordStatus({ type: "success", message: "Hotspot password updated" });
+      setHotspotPasswordStatus({ type: "success", message: t("settings.hotspotPasswordUpdated") });
     } catch (err) {
       setHotspotPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
     } finally {
@@ -3053,11 +3095,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </span>
                 </button>
                 {langOpen && (
-                  <div className="absolute z-50 mt-1 w-full bg-[var(--bg-elevated)] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto">
+                  /* The trigger promises `aria-haspopup="listbox"`; this was a
+                     plain div of buttons, so a screen reader was told to expect
+                     a list of options and found none. Same shape as
+                     HeaderDropdown: role on the container, role + aria-selected
+                     on every row. */
+                  <div
+                    role="listbox"
+                    aria-labelledby="settings-language-label"
+                    className="absolute z-50 mt-1 w-full bg-[var(--bg-elevated)] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto"
+                  >
                     {LANGUAGES.map(lang => (
                       <button
                         key={lang.code}
                         type="button"
+                        role="option"
+                        aria-selected={lang.code === locale}
                         onClick={() => { setLocale(lang.code as Locale); setLangOpen(false); }}
                         className={`w-full flex items-center gap-2.5 px-3.5 py-2.5 text-sm transition-colors cursor-pointer border-none ${
                           lang.code === locale
@@ -3089,6 +3142,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   return (
                     <button
                       key={wp.id}
+                      type="button"
+                      aria-pressed={selected}
+                      aria-label={wp.name}
                       onClick={() => ui.onWallpaperChange(wp.id)}
                       className={`relative rounded-xl overflow-hidden aspect-video transition-all cursor-pointer border-none p-0 group ${
                         selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02] hover:ring-1 hover:ring-white/20 hover:ring-offset-1 hover:ring-offset-[#0d1117]"
@@ -3113,6 +3169,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 })}
                 {ui.customWallpapers.map((dataUrl, i) => {
                   const selected = ui.wallpaperId === `custom-${i}`;
+                  // The last two names on this card that never followed the UI
+                  // language: an uploaded wallpaper announced itself as
+                  // "Custom 1" beside tiles whose names were translated.
+                  const customName = t("settings.customWallpaper", { n: i + 1 });
                   return (
                     <div
                       key={`custom-${i}`}
@@ -3121,7 +3181,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <button
                         type="button"
                         aria-pressed={selected}
-                        aria-label={`Custom ${i + 1}`}
+                        aria-label={customName}
                         onClick={() => ui.onWallpaperChange(`custom-${i}`)}
                         className={`relative w-full h-full rounded-xl overflow-hidden transition-all cursor-pointer border-none p-0 ${
                           selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
@@ -3129,18 +3189,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       >
                         <img src={dataUrl} alt="" className="w-full h-full object-cover" />
                         {selected && (
-                          <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shadow-lg">
+                          <span aria-hidden="true" className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shadow-lg">
                             <span className="material-symbols-rounded text-white" style={{ fontSize: 14 }}>check</span>
                           </span>
                         )}
                         <span className={`absolute bottom-0 inset-x-0 text-[10px] py-1.5 text-center font-medium backdrop-blur-md ${
                           selected ? "bg-orange-500/70 text-white" : "bg-black/50 text-white/70"
-                        }`}>Custom {i + 1}</span>
+                        }`}>{customName}</span>
                       </button>
                       <button
                         type="button"
                         onClick={() => ui.onCustomWallpaperDelete(i)}
-                        aria-label={`Remove Custom ${i + 1}`}
+                        aria-label={t("settings.removeCustomWallpaper", { n: i + 1 })}
                         className="absolute top-1.5 left-1.5 w-5 h-5 bg-red-500/90 rounded-full text-white opacity-60 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none shadow-lg"
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 12 }}>close</span>
@@ -3152,7 +3212,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   onClick={() => ui.onWallpaperUpload()}
                   className="rounded-xl aspect-video border-2 border-dashed border-[var(--border-subtle)] hover:border-orange-400/40 hover:bg-orange-500/5 flex flex-col items-center justify-center gap-1.5 text-[var(--text-muted)] opacity-60 hover:text-[var(--coral-bright)]/70 transition-all cursor-pointer"
                 >
-                  <span className="material-symbols-rounded" style={{ fontSize: 24 }}>add_photo_alternate</span>
+                  {/* A Material ligature is TEXT: left unhidden it joined the
+                      accessible name, which read "add_photo_alternate Upload". */}
+                  <span aria-hidden="true" className="material-symbols-rounded" style={{ fontSize: 24 }}>add_photo_alternate</span>
                   <span className="text-[10px] font-medium">{t("settings.upload")}</span>
                 </button>
               </div>
@@ -3174,6 +3236,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     return (
                       <button
                         key={mode}
+                        type="button"
+                        aria-pressed={ui.wpFit === mode}
+                        aria-label={t(`settings.${mode}`)}
                         onClick={() => ui.onWpFitChange(mode)}
                         className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer border-none capitalize ${
                           ui.wpFit === mode ? "bg-orange-500/15 text-[var(--coral-bright)] shadow-sm" : "text-white/35 hover:text-[var(--text-secondary)] hover:bg-white/[0.04]"
@@ -3196,6 +3261,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="relative h-6 flex items-center">
                   <input
                     type="range" min={0} max={100} value={ui.wpOpacity}
+                    aria-label={t("settings.opacity")}
                     onChange={e => ui.onWpOpacityChange(parseInt(e.target.value, 10))}
                     className="w-full h-1.5 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#fe6e00] [&::-webkit-slider-thumb]:border-2 [&::-webkit-slider-thumb]:border-[#0d1117] [&::-webkit-slider-thumb]:shadow-[0_0_0_2px_rgba(254,110,0,0.3),0_2px_6px_rgba(0,0,0,0.3)] [&::-webkit-slider-thumb]:cursor-pointer"
                     style={{
@@ -3212,6 +3278,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="relative">
                     <input
                       type="color" value={ui.wpBgColor}
+                      // Same defect as the opacity slider beside it: the card's
+                      // <label> has no htmlFor, so this swatch had no name.
+                      aria-label={t("settings.bgColor")}
                       onChange={e => ui.onWpBgColorChange(e.target.value)}
                       className="w-10 h-10 rounded-xl cursor-pointer border-2 border-[var(--border-subtle)] hover:border-white/20 transition-colors"
                     />
@@ -3280,10 +3349,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>settings_ethernet</span>
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-[var(--text-primary)] font-medium truncate">Ethernet{ethernet.iface ? ` (${ethernet.iface})` : ""}</div>
+                    <div className="text-sm text-[var(--text-primary)] font-medium truncate">{t("wifi.ethernet")}{ethernet.iface ? ` (${ethernet.iface})` : ""}</div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                      <span className="text-xs text-green-400/80">Wired · {t("settings.connected")}</span>
+                      <span className="text-xs text-green-400/80">{tr("settings.wired", "Wired")} · {t("settings.connected")}</span>
                     </div>
                   </div>
                 </div>
@@ -3303,24 +3372,46 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="mt-4 rounded-xl border px-4 py-3 border-white/[0.06] bg-white/[0.03]">
                   <div className="flex items-center gap-2 mb-1.5">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>link</span>
-                    <span className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">Access this device at</span>
+                    <span className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{tr("settings.accessDeviceAt", "Access this device at")}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <a href={primaryUrl} className="flex-1 min-w-0 text-sm font-mono text-[var(--text-primary)] hover:text-[var(--coral-bright)] truncate underline-offset-2 hover:underline">{primaryLabel}</a>
                     <button
                       onClick={copyLocalUrl}
                       className="px-2.5 py-1.5 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
-                      title="Copy URL"
-                      aria-label={copiedLocalUrl ? "URL copied" : "Copy URL"}
+                      title={tr("settings.copyUrl", "Copy URL")}
+                      aria-label={copiedLocalUrl ? tr("settings.urlCopied", "URL copied") : tr("settings.copyUrl", "Copy URL")}
                     >
                       <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{copiedLocalUrl ? "check" : "content_copy"}</span>
-                      {copiedLocalUrl ? "Copied" : "Copy"}
+                      {/* The setup pack has carried "copy"/"copied" in all ten
+                          languages since the wizard shipped; this button was
+                          simply never wired to them. */}
+                      {copiedLocalUrl ? t("copied") : t("copy")}
                     </button>
                   </div>
-                  <span className="sr-only" aria-live="polite">{copiedLocalUrl ? "URL copied to clipboard" : ""}</span>
+                  <span className="sr-only" aria-live="polite">{copiedLocalUrl ? tr("settings.urlCopiedToClipboard", "URL copied to clipboard") : ""}</span>
                   {ipv4 && localUrl && (
                     <p className="text-[11px] text-[var(--text-muted)] mt-2 leading-relaxed">
-                      <span className="font-mono text-[var(--text-secondary)]">{localUrl}</span> also works on networks that support mDNS. The IP can change when the device reconnects — reserve it in your router for a permanent address.
+                      {/* Split at the slot rather than rendering the address
+                          first and the sentence after it: the URL keeps its
+                          monospace styling, and a language that does not open
+                          with the subject can move the slot. */}
+                      {(() => {
+                        const [before, after] = splitAtSlot(
+                          tr(
+                            "settings.mdnsHint",
+                            "{url} also works on networks that support mDNS. The IP can change when the device reconnects — reserve it in your router for a permanent address.",
+                          ),
+                          "{url}",
+                        );
+                        return (
+                          <>
+                            {before}
+                            <span className="font-mono text-[var(--text-secondary)]">{localUrl}</span>
+                            {after}
+                          </>
+                        );
+                      })()}
                     </p>
                   )}
                 </div>
@@ -3344,6 +3435,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                 </div>
                 <button
+                  type="button"
+                  role="switch"
+                  aria-checked={hotspotEnabled === true}
+                  aria-label={t("settings.hotspot")}
                   onClick={toggleHotspot}
                   disabled={hotspotEnabled === null || hotspotToggling}
                   className={`relative w-11 h-6 rounded-full transition-colors cursor-pointer border-none ${hotspotEnabled ? "bg-[#fe6e00]" : "bg-white/10"} ${hotspotToggling ? "opacity-50" : ""}`}
@@ -3409,7 +3504,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         type="button"
                         onClick={() => setHotspotPasswordShow(v => !v)}
                         className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer"
-                        aria-label={hotspotPasswordShow ? "Hide password" : "Show password"}
+                        aria-label={hotspotPasswordShow ? t("login.hidePassword") : t("login.showPassword")}
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{hotspotPasswordShow ? "visibility_off" : "visibility"}</span>
                       </button>
@@ -3476,11 +3571,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             <div className="text-sm text-[var(--text-primary)] font-medium truncate">{net.name}</div>
                             {isActive && <div className="text-[10px] text-green-400/80 mt-0.5">Connected</div>}
                           </div>
-                          <button onClick={() => { setSavedEditing(isEditing ? null : net.name); setSavedNewPassword(""); setSavedStatus(null); }} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title="Edit password" aria-label={`Edit password for ${net.name}`}>
-                            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{isEditing ? "close" : "edit"}</span>
+                          <button onClick={() => { setSavedEditing(isEditing ? null : net.name); setSavedNewPassword(""); setSavedStatus(null); }} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title={t("settings.editPassword")} aria-label={t("settings.editPasswordFor", { name: net.name })}>
+                            <span aria-hidden="true" className="material-symbols-rounded" style={{ fontSize: 16 }}>{isEditing ? "close" : "edit"}</span>
                           </button>
-                          <button onClick={() => forgetSavedNetwork(net.name)} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-red-500/30 text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title="Forget" aria-label={`Forget ${net.name}`}>
-                            <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span>
+                          <button onClick={() => forgetSavedNetwork(net.name)} disabled={savedBusy === net.name} className="px-2 py-1 bg-white/[0.06] hover:bg-red-500/30 text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors disabled:opacity-50" title={t("settings.forgetNetwork")} aria-label={t("settings.forgetNetworkFor", { name: net.name })}>
+                            <span aria-hidden="true" className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span>
                           </button>
                         </div>
                         {isEditing && (
@@ -3657,8 +3752,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               openClawAIOfferRequest={openClawAIOfferRequest}
               requestedProviderId={requestedAiProviderId}
               providerSelectionRequest={providerSelectionRequest}
-              title="Connect AI Provider"
-              description="Choose the primary AI service your assistant should use day to day"
+              title={tr("settings.aiConnectTitle", "Connect AI Provider")}
+              description={tr("settings.aiConnectDesc", "Choose the primary AI service your assistant should use day to day")}
               onConfigured={() => {
                 fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
                 notifyChatModelStateChanged();
@@ -4534,7 +4629,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <button
                         type="button"
                         onClick={() => setEmailShowPassword((v) => !v)}
-                        aria-label={emailShowPassword ? "Hide password" : "Show password"}
+                        aria-label={emailShowPassword ? t("login.hidePassword") : t("login.showPassword")}
                         className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-50 hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer p-0.5"
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{emailShowPassword ? "visibility_off" : "visibility"}</span>
@@ -5984,7 +6079,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
       case "wifi":
         if (connectedSSID) return { subtitle: connectedSSID };
-        if (ethernet.connected) return { subtitle: ethernet.iface ? `Ethernet (${ethernet.iface})` : "Ethernet" };
+        if (ethernet.connected) return { subtitle: ethernet.iface ? `${t("wifi.ethernet")} (${ethernet.iface})` : t("wifi.ethernet") };
         return { subtitle: t("settings.notConnected") || "Not connected" };
       case "ai": {
         if (aiProvider === null) return { subtitle: null };
@@ -6198,7 +6293,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 ${active ? "bg-[var(--coral-bright)]/25" : "bg-white/[0.06]"}`}>
                 <span className="material-symbols-rounded" style={{ fontSize: 20, color: active ? "var(--coral-bright)" : "var(--text-muted)" }}>{item.icon}</span>
               </span>
-              <span className="flex-1 min-w-0 truncate font-medium">{navLabel(item)}</span>
+              {/* Wraps rather than truncates: at the 240px rail width German's
+                  "Systemaktualisierung" was the one label that did not fit and
+                  read as "Systemaktualisier…" — a section name clipped to an
+                  ellipsis is unreadable, while a second line only costs a few
+                  pixels of rail height on the one row that needs it. */}
+              <span className="flex-1 min-w-0 break-words font-medium leading-tight">{navLabel(item)}</span>
               {status.subtitle && <span className="sr-only">{status.subtitle}</span>}
             </button>
           );

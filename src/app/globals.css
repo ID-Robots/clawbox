@@ -380,18 +380,42 @@ h6 {
  * gap between them. Each pill has its own background + border so they
  * read as separate controls, not as one segmented bar. The rounded-bar
  * variant felt heavy and pinched the labels on narrow chat panels. */
+/* The composer's bottom row: attach / microphone / new-app / picture on the
+ * left, the pills and the send button on the right.
+ *
+ * It WRAPS. At the docked default width (420px) the row is 392px inside its
+ * padding, of which four 36px buttons and their gaps take 176 — leaving 216 for
+ * three pills, which rendered as "Cla…", "Ma…", "M…", and single letters at the
+ * 340px minimum. A pill that says "M…" names nothing, and these three are how
+ * the owner sees (and changes) which model is answering. So when the buttons
+ * and a readable pill row no longer fit on one line, the pills take a line of
+ * their own — see .chat-header-pills' flex-basis, which is what decides when
+ * that happens. */
+.chat-composer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .chat-header-pills {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex: 1 1 auto;
+  /* The basis is the wrap threshold, not a floor: this is roughly what the
+   * three de-duplicated labels need un-truncated, so the row breaks before they
+   * start losing characters. `min-width: 0` keeps it a THRESHOLD — on the line
+   * it lands on, the pills may still shrink below it (and truncate) rather than
+   * push the send button off the edge on a 340px chat. */
+  flex: 1 1 280px;
   min-width: 0;
-  /* Keep the pills on a SINGLE row: as the chat panel narrows they squeeze
+  /* Keep the three pills THEMSELVES on one row (the row they are on may be a
+   * line of its own — see .chat-composer-row): as the chat narrows they squeeze
    * and their labels truncate with "..." (each trigger reserves 24px on the
-   * right so the chevron never disappears) — they never wrap to a second row
-   * or overlap. overflow:hidden clips any final overshoot cleanly; the chat
-   * window enforces a min-width (see ChatPopup) so the pills can't be
-   * squeezed past a readable size. The open menu is portaled to <body>
+   * right so the chevron never disappears) — one pill never drops below
+   * another, and they never overlap. overflow:hidden clips any final overshoot
+   * cleanly; the chat window enforces a min-width (see ChatPopup) so the pills
+   * can't be squeezed past a readable size. The open menu is portaled to <body>
    * (see HeaderDropdown), so clipping the row here can't hide the popover. */
   overflow: hidden;
 }

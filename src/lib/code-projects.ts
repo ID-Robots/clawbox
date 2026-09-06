@@ -8,6 +8,7 @@
 
 import fs from "fs/promises";
 import path from "path";
+import { isProxyablePort } from "./clawbox-manifest";
 import { DATA_DIR } from "./config-store";
 import { registerWebappInPreferences } from "./webapp-registry";
 import { ensureWebappIcon, htmlHint, safeAppId } from "./webapp-icon";
@@ -690,6 +691,56 @@ export async function writeWebappIndex(appId: string, html: string): Promise<voi
   const dir = webappPath(appId);
   await fs.mkdir(dir, { recursive: true });
   await fs.writeFile(path.join(dir, "index.html"), html, "utf-8");
+}
+
+// ── Legacy host:port stubs ───────────────────────────────────────────────────
+//
+// Before `/apps/<id>/` existed (src/lib/app-proxy.ts), an app with a server of
+// its own was put on the desktop as a one-file stub that sent the frame to
+// `location.hostname:<port>`. Those stubs are still on disk on every box that
+// shipped, and when their server is not running the window is whatever the
+// browser makes of ERR_CONNECTION_REFUSED — an empty white rectangle, with
+// nothing anywhere to say the app is simply not started. The webapps route
+// recognises such a stub before it serves it; these two are what it needs.
+
+/** The largest document still plausibly a redirect stub rather than an app. */
+export const LEGACY_STUB_MAX_BYTES = 4096;
+/** How a stub sends the frame somewhere else. */
+const LEGACY_REDIRECT_RE = /location\s*\.\s*(?:replace|assign|href)|http-equiv\s*=\s*["']?refresh/i;
+
+/**
+ * The port a legacy host:port redirect stub points at, or null when this
+ * document is not one.
+ *
+ * Deliberately narrow — a document is only a stub when it is TINY, names
+ * `location.hostname`, redirects, and carries a port a local server could
+ * actually have. A one-file app that happens to read its own hostname must
+ * never be mistaken for one, because being mistaken means it is not served.
+ */
+export function legacyRedirectPort(html: string): number | null {
+  if (html.length > LEGACY_STUB_MAX_BYTES) return null;
+  if (!/location\s*\.\s*hostname/.test(html)) return null;
+  if (!LEGACY_REDIRECT_RE.test(html)) return null;
+  for (const match of html.matchAll(/:(\d{4,5})(?!\d)/g)) {
+    const port = Number(match[1]);
+    if (isProxyablePort(port)) return port;
+  }
+  return null;
+}
+
+/**
+ * The page shown in place of a legacy stub whose server is not there.
+ *
+ * `detail` is the box's own sentence about the port — the same one
+ * `/apps/<id>/` answers a 502 with — so the two surfaces cannot say different
+ * things about the same silence. Framed with an opaque origin, so it is plain
+ * HTML with no script and no link back into the desktop.
+ */
+export function serverAppDownHtml(name: string, detail: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(name)}</title><style>` +
+    "body{background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;padding:24px;box-sizing:border-box}" +
+    "main{max-width:34rem;text-align:center}h1{font-size:1.05rem;font-weight:600;margin:0 0 .6rem}p{margin:0;font-size:.9rem;line-height:1.6;color:#b9b9c6}" +
+    `</style></head><body><main><h1>${escapeHtml(name)}</h1><p>${escapeHtml(detail)}</p></main></body></html>`;
 }
 
 /**

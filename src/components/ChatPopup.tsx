@@ -119,6 +119,14 @@ const USER_CLAMP_CHARS = 700
 // into a mascot bag that must be in the UI locale. The server deletes the
 // legacy KV key on first read.
 
+/** The floating popup's live rect, in viewport coordinates. */
+export interface ChatFloatingRect {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
 interface ChatPopupProps {
   isOpen: boolean
   onClose: () => void
@@ -127,9 +135,61 @@ interface ChatPopupProps {
   onThinkingChange?: (thinking: boolean) => void
   onPanelModeChange?: (panelWidth: number) => void
   initialPanelWidth?: number
+  /**
+   * Where the FLOATING popup stands in the desktop's stacking order.
+   *
+   * It used to be a constant 10010 — above every window, whose band starts at
+   * 100 — so a window opened while the chat was up had its minimize, maximize
+   * and close buttons underneath the popup, and the owner had to close the chat
+   * to reach them. The desktop now hands the floating chat a value out of the
+   * same focus counter the windows draw from (`raiseChat` in page.tsx), which
+   * makes it their peer: whichever surface was focused last is on top. The
+   * DOCKED panel is not part of that — windows reserve its strip rather than
+   * overlapping it — and stays at `DESKTOP_LAYERS.chat`.
+   */
+  floatingZIndex?: number
+  /** Any pointer press inside the chat, so the desktop can put it back on top. */
+  onFocus?: () => void
+  /**
+   * The floating popup's rect whenever it moves, and `null` while the chat is
+   * closed, docked or full-screen — for the surfaces that have to keep clear of
+   * it (the top-right notice column).
+   */
+  onFloatingRectChange?: (rect: ChatFloatingRect | null) => void
   mascotX?: number
   mobile?: boolean
   trayMode?: boolean
+}
+
+/**
+ * How far LEFT the desktop's top-right notice column has to move to clear the
+ * FLOATING chat, on top of its own `margin`.
+ *
+ * The docked half of this answer is a number the desktop already has — the
+ * panel's width plus the gap it floats in — and the notices use it so a card
+ * lands beside the panel instead of over its tab row and its +, dock and close
+ * buttons. The floating popup had no such answer: the cards are fixed to the
+ * top-right corner and the chat is often standing in it, so for the 30s before
+ * a card hides itself the chat's header controls were unreachable.
+ *
+ * Returns 0 when the chat is nowhere near the column, and never shifts the
+ * column off the screen: on a desktop too narrow for both, the cards move as
+ * far as they can and no further.
+ */
+export function noticeColumnInset(
+  rect: { left: number; right: number } | null,
+  viewportWidth: number,
+  columnWidth: number,
+  margin: number,
+): number {
+  if (!rect) return 0
+  const columnLeft = viewportWidth - margin - columnWidth
+  if (rect.right <= columnLeft) return 0
+  // The column's right edge lands `margin` clear of the chat's left edge; the
+  // caller adds its own margin back, so what it needs is the difference.
+  const clear = viewportWidth - rect.left
+  const maxInset = viewportWidth - columnWidth - margin * 2
+  return Math.max(0, Math.min(clear, maxInset))
 }
 
 // `system`-role messages render as colored pill banners; `variant` picks
@@ -211,7 +271,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
-import { DESKTOP_GAP, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
+import { DESKTOP_GAP, DESKTOP_LAYERS, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
   attachmentAcceptAttribute,
@@ -225,6 +285,7 @@ import {
 } from '@/lib/chat-attachments'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useT } from '@/lib/i18n'
+import { useTr } from '@/lib/i18n-floor'
 import {
   extractProviderModelId,
   isModelUsableOnSubscription,
@@ -602,6 +663,14 @@ function readStoredSize(): { w: number; h: number } {
 // narrower instead of smashing the pills.
 const MIN_CHAT_WIDTH = 340
 
+// The gutter the floating popup keeps from every screen edge — the same 8px
+// per side `readStoredSize` already reserves when it restores a remembered
+// size. Drag and resize honour it too: without it the popup could be grown or
+// dragged past the right/bottom edge, taking the header's dock and close
+// buttons and the composer's send button off-screen with it, and nothing on the
+// desktop brings a chat in that state back.
+const VIEWPORT_MARGIN = 8
+
 /**
  * Is this tool call the one that queues outgoing mail?
  *
@@ -687,10 +756,18 @@ function emailRefusalSentence(rows: unknown[]): string {
   return ''
 }
 
-function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, onFloatingRectChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
+  const tr = useTr()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
-  const panelMode = panelWidth !== null
+  // A PHONE never draws the docked panel. Its geometry is a desktop one — a
+  // column anchored to the right edge at a width chosen on a big screen — which
+  // a 390px viewport drew at x=-381: the header, the title, the new-chat and
+  // dock buttons and every other way back out were off the left edge, with the
+  // panel covering the whole home screen. The width itself is kept (the desktop
+  // hands it back as `initialPanelWidth`), so widening the window docks the
+  // chat again instead of losing the owner's layout.
+  const panelMode = panelWidth !== null && !mobile
   const [visible, setVisible] = useState(false)
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Gateway is canonical; render an empty list until chat.history arrives.
@@ -1309,8 +1386,62 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [initialPanelWidth]) // eslint-disable-line react-hooks/exhaustive-deps -- panelWidth excluded: one-way sync from parent, must not re-trigger on local resize
 
-  // Exit panel mode when closed
-  useEffect(() => { if (!isOpen && panelMode) { setPanelWidth(null); onPanelModeChange?.(0) } }, [isOpen, panelMode, onPanelModeChange])
+  // The width a CLOSED chat was docked at, or null when it was floating.
+  // Closing has to hand the desktop its strip back (a window must not be
+  // squeezed for a panel nobody can see), and the only way to say that is
+  // `onPanelModeChange(0)` — which also drops the dock. So the layout the owner
+  // chose is remembered here and put back on the next open: the X used to turn
+  // a docked panel into a 520x680 floating popup.
+  const dockedBeforeCloseRef = useRef<number | null>(null)
+
+  // Give the desktop its strip back while the chat is closed, and take the
+  // dock back when it opens again.
+  useEffect(() => {
+    if (!isOpen && panelMode) {
+      dockedBeforeCloseRef.current = panelWidth
+      setPanelWidth(null)
+      onPanelModeChange?.(0)
+      return
+    }
+    // Not on a phone: the dock is a desktop layout (see `panelMode`), and
+    // taking it back here would hand the desktop a strip to reserve for a panel
+    // this viewport does not draw. The width is held until the window is wide
+    // enough again, which re-runs this effect.
+    if (isOpen && !panelMode && !mobile && dockedBeforeCloseRef.current !== null) {
+      const restored = dockedBeforeCloseRef.current
+      dockedBeforeCloseRef.current = null
+      setPanelWidth(restored)
+      onPanelModeChange?.(restored)
+    }
+  }, [isOpen, panelMode, panelWidth, mobile, onPanelModeChange])
+
+  // What the floating popup covers, for the desktop surfaces that must keep
+  // clear of it. Reported only while the desktop is listening (it passes no
+  // callback unless a notice is actually on screen), because `pos`/`size` move
+  // on every pointer event of a drag and each report is a desktop re-render.
+  const reportedRectRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!onFloatingRectChange) return
+    if (!isOpen || panelMode || mobile) {
+      if (reportedRectRef.current !== null) {
+        reportedRectRef.current = null
+        onFloatingRectChange(null)
+      }
+      return
+    }
+    const report = () => {
+      const el = popupRef.current
+      if (!el) return
+      const r = el.getBoundingClientRect()
+      const key = `${r.left}|${r.top}|${r.right}|${r.bottom}`
+      if (key === reportedRectRef.current) return
+      reportedRectRef.current = key
+      onFloatingRectChange({ left: r.left, top: r.top, right: r.right, bottom: r.bottom })
+    }
+    report()
+    window.addEventListener('resize', report)
+    return () => window.removeEventListener('resize', report)
+  }, [isOpen, panelMode, mobile, pos, size, visible, onFloatingRectChange])
 
   const togglePanelMode = useCallback(() => {
     if (panelMode) {
@@ -1360,7 +1491,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const onMove = (ev: PointerEvent) => {
       const d = dragRef.current
       if (!d) return
-      setPos({ x: d.origX + (ev.clientX - d.startX), y: d.origY + (ev.clientY - d.startY) })
+      // Clamped to the screen the popup is being dragged on: dropped below the
+      // bottom edge its composer is unreachable, and dropped past the right one
+      // its close button is. A popup taller or wider than the viewport lands at
+      // the top-left gutter, where its header is at least on screen.
+      const x = d.origX + (ev.clientX - d.startX)
+      const y = d.origY + (ev.clientY - d.startY)
+      setPos({
+        x: Math.max(VIEWPORT_MARGIN, Math.min(x, window.innerWidth - rect.width - VIEWPORT_MARGIN)),
+        y: Math.max(VIEWPORT_MARGIN, Math.min(y, window.innerHeight - rect.height - VIEWPORT_MARGIN)),
+      })
       setSnapPreview(getSnapZone(ev.clientX, ev.clientY))
     }
     const onUp = (ev: PointerEvent) => {
@@ -1401,10 +1541,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const dx = cx - start.x
       const dy = cy - start.y
       let newW = start.w, newH = start.h, newX = start.left, newY = start.top
-      if (edge.includes('r')) newW = Math.max(MIN_CHAT_WIDTH, start.w + dx)
-      if (edge.includes('b')) newH = Math.max(MIN_CHAT_HEIGHT, start.h + dy)
-      if (edge.includes('l')) { newW = Math.max(MIN_CHAT_WIDTH, start.w - dx); newX = start.left + (start.w - newW) }
-      if (edge.includes('t')) { newH = Math.max(MIN_CHAT_HEIGHT, start.h - dy); newY = start.top + (start.h - newH) }
+      // Each edge stops at the viewport gutter as well as at the size floor:
+      // dragging the bottom-right corner past the screen used to keep growing
+      // the popup, pushing the send button and the header's controls off it.
+      // The floor wins on a screen too small for it — a chat clipped at the
+      // edge is still usable, one narrower than MIN_CHAT_WIDTH is not.
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      if (edge.includes('r')) newW = Math.max(MIN_CHAT_WIDTH, Math.min(start.w + dx, vw - start.left - VIEWPORT_MARGIN))
+      if (edge.includes('b')) newH = Math.max(MIN_CHAT_HEIGHT, Math.min(start.h + dy, vh - start.top - VIEWPORT_MARGIN))
+      // Growing leftward/upward moves the far edge, which is what has to stay
+      // inside: the right edge is fixed at `start.left + start.w`.
+      if (edge.includes('l')) { newW = Math.max(MIN_CHAT_WIDTH, Math.min(start.w - dx, start.left + start.w - VIEWPORT_MARGIN)); newX = start.left + (start.w - newW) }
+      if (edge.includes('t')) { newH = Math.max(MIN_CHAT_HEIGHT, Math.min(start.h - dy, start.top + start.h - VIEWPORT_MARGIN)); newY = start.top + (start.h - newH) }
       setSize({ w: newW, h: newH })
       setPos({ x: newX, y: newY })
       last = { w: newW, h: newH }
@@ -4685,15 +4834,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [isOpen, visible, status])
 
-  // Close on Escape. An open image preview swallows the key before it reaches
-  // here (useModalDialog stops it at the document capture phase), so dismissing
-  // the picture cannot also close the conversation behind it.
+  // Close on Escape — but only when nothing is open ON TOP of the chat, since
+  // Escape closes the innermost thing first. An open image preview swallows the
+  // key before it reaches here (useModalDialog stops it at the document capture
+  // phase) and so does an open pill menu (HeaderDropdown, same phase). The New
+  // app card cannot: it is a popover over the composer whose own handler is a
+  // plain document listener, so the key reached both and one Escape dismissed
+  // the card AND the whole conversation — un-docking a docked panel with it.
   useEffect(() => {
     if (!isOpen) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || showNewApp) return
+      onClose()
+    }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [isOpen, onClose])
+  }, [isOpen, onClose, showNewApp])
 
   // Listen for skill installs — flag for /new after reconnect
   const skillInstalledRef = useRef(false)
@@ -4884,6 +5040,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     <div
       data-testid="chat-popup"
       ref={popupRef}
+      // On the CAPTURE phase: the header, the pills and the composer all stop
+      // their own pointer events, and a click that raises no surface is a click
+      // that leaves the chat buried under the window that covered it.
+      onPointerDownCapture={onFocus}
       style={{
         position: 'fixed',
         ...posStyle,
@@ -4908,7 +5068,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     : 'calc(100vh - 182px)',
                 borderRadius: 16,
               }),
-        zIndex: 10010,
+        // The docked panel owns its strip and stays above the windows beside
+        // it; the floating popup takes the place in the focus order the desktop
+        // gives it, so the window the owner just opened is not stuck underneath
+        // it with its title-bar controls covered. See `floatingZIndex`.
+        //
+        // A PHONE is neither: the chat is full-screen there and so is the one
+        // window the desktop draws (at z 200, above the whole window band), so
+        // a chat in the focus order would be opened and never seen.
+        zIndex: panelMode || mobile ? DESKTOP_LAYERS.chat : floatingZIndex ?? DESKTOP_LAYERS.chat,
         overflow: 'hidden',
         boxShadow: mobile ? 'none' : '0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08)',
         background: '#0d1117',
@@ -5162,7 +5330,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <button
             onPointerDown={stopHeaderDrag}
             onClick={() => { onOpenFull(); onClose() }}
-            title="Open full UI"
+            title={tr('chat.openFullUi', 'Open full UI')}
             style={{
               background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
               cursor: 'pointer', padding: 4, borderRadius: 6,
@@ -5201,7 +5369,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <button
             onPointerDown={stopHeaderDrag}
             onClick={togglePanelMode}
-            title={panelMode ? "Undock panel" : "Dock to right"}
+            title={panelMode ? tr('chat.undockPanel', 'Undock panel') : tr('chat.dockToRight', 'Dock to right')}
             style={{
               background: panelMode ? 'rgba(249,115,22,0.2)' : 'none',
               border: 'none',
@@ -5956,7 +6124,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             el.style.height = Math.min(el.scrollHeight, 100) + 'px'
           }}
         />
-        <div data-testid="chat-composer-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {/* The row's layout lives in globals.css (.chat-composer-row), because
+            what the pills need against the 36px buttons beside them is a wrap
+            rule and a flex-basis — see the block there. */}
+        <div data-testid="chat-composer-row" className="chat-composer-row">
         {/* Shown only where a file staged here can actually reach the model.
             The alternative is worse than a missing button: the picture is drawn
             into the user's own bubble and then dropped, so the customer sees
@@ -5966,7 +6137,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={status !== 'connected'}
-          title="Attach file"
+          title={tr('chat.attachFile', 'Attach file')}
           style={{
             width: 36, height: 36, borderRadius: 10, border: 'none',
             background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)',
@@ -6087,17 +6258,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
-            // below — provider → model (scoped to it) → thinking effort. The
-            // row is 262px at the 400px docked default, of which ~142px is
-            // label text, so every pill label is de-duplicated against its
-            // neighbour (see src/lib/chat-header-pills.ts) to fit un-truncated.
-            // Below ~386px they still truncate with "…" rather than wrap (see
-            // .chat-header-pills in globals.css); the popovers keep full text.
-            // Falls back to a plain label until the catalogue loads.
+            // below — provider → model (scoped to it) → thinking effort. Every
+            // pill label is de-duplicated against its neighbour (see
+            // src/lib/chat-header-pills.ts) to fit un-truncated, and when the
+            // row can no longer hold them beside the composer's buttons they
+            // take a line of their own rather than being cut to "Cla…" (see
+            // .chat-composer-row in globals.css). Narrower still they truncate
+            // with "…"; the popovers keep the full text either way. Falls back
+            // to a plain label until the catalogue loads.
             hermesProviders.length > 0 ? (
               <>
                 <HeaderDropdown
-                  ariaLabel="Chat provider"
+                  ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}
                   value={hermesProvider}
                   triggerLabel={hermesProviderPill}
                   options={hermesProviders.map(p => ({ id: p.id, label: hermesProviderName(p.id) }))}
@@ -6111,7 +6283,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     its proxy serves exactly the one model of the active tier. */}
                 {showModelPill && (
                   <HeaderDropdown
-                    ariaLabel="Hermes model"
+                    ariaLabel={tr('chat.pillHermesModel', 'Hermes model')}
                     /* While the new provider's list loads there is no model to
                        name yet — an ellipsis holds the pill's place rather than
                        showing the previous provider's id, which would be wrong
@@ -6148,7 +6320,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     than borrowing the effort scale's vocabulary. */}
                 {hermesReasoningOptions.length > 0 && (
                   <HeaderDropdown
-                    ariaLabel={hermesBinaryReasoning ? 'Thinking' : 'Reasoning effort'}
+                    ariaLabel={hermesBinaryReasoning ? tr('chat.pillThinking', 'Thinking') : tr('chat.pillReasoningEffort', 'Reasoning effort')}
                     value={hermesEffectiveReasoning}
                     /* Brain glyph instead of a "Thinking: " word prefix — see
                        REASONING_PILL_ICON. The word cost 55px of a 142px row
@@ -6206,7 +6378,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               : (unselectableActive ? t('chat.noChatModel') : activeId)
             return (
               <HeaderDropdown
-                ariaLabel="Chat provider"
+                ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}
                 value={activeId}
                 triggerLabel={triggerLabel}
                 options={chatModelState.options.map((option) => ({
@@ -6285,7 +6457,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               ?? activeModelId
             return (
               <HeaderDropdown
-                ariaLabel={`${activeOption.label} model`}
+                ariaLabel={tr('chat.pillProviderModel', '{provider} model', { provider: activeOption.label })}
                 value={activeModelId}
                 triggerLabel={shortModelPillLabel(
                   activeModelLabel,
@@ -6351,17 +6523,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               the gateway ("thinkingLevel … not supported for llamacpp/gemma…"). */}
           {visibleThinkingLevels.length > 1 && (
             <HeaderDropdown
-              ariaLabel="Reasoning effort"
+              ariaLabel={tr('chat.pillReasoningEffort', 'Reasoning effort')}
               value={effectiveThinkingLevel}
+              /* THINKING_LEVEL_LABELS is the gateway's English vocabulary;
+                 the pill is a control on a desktop that may be in any of ten
+                 languages, so the level is worded here and the English is
+                 the floor for a level the catalogue does not know. */
               options={visibleThinkingLevels.map(level => ({
                 id: level,
-                label: THINKING_LEVEL_LABELS[level] ?? level,
+                label: tr(`chat.effort.${level}`, THINKING_LEVEL_LABELS[level] ?? level),
               }))}
               onChange={handleThinkingLevelChange}
               onPointerDown={stopHeaderDrag}
               /* Brain glyph instead of a "Thinking: " word prefix — see
                  REASONING_PILL_ICON. */
-              triggerLabel={THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}
+              triggerLabel={tr(`chat.effort.${effectiveThinkingLevel}`, THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel)}
               triggerIcon={REASONING_PILL_ICON}
               triggerMaxWidth={120}
               popoverWidth={180}

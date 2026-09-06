@@ -204,8 +204,10 @@ describe("SettingsApp factory reset overlay", () => {
     render(<SettingsApp ui={{ ...defaultUi, customWallpapers: ["data:image/png;base64,AA=="] }} />);
     fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
 
-    const select = await screen.findByRole("button", { name: "Custom 1" });
-    const remove = screen.getByRole("button", { name: "Remove Custom 1" });
+    // Keys, not copy: the two names are `t()`-resolved now (they used to be
+    // English template literals) and this suite stubs `t` with identity.
+    const select = await screen.findByRole("button", { name: "settings.customWallpaper" });
+    const remove = screen.getByRole("button", { name: "settings.removeCustomWallpaper" });
     expect(select).not.toContainElement(remove);
     expect(remove.className).toContain("opacity-60");
     expect(remove.className).not.toContain("opacity-0 ");

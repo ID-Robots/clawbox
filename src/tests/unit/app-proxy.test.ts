@@ -77,6 +77,21 @@ describe("the path and the request", () => {
     expect(lib.isDocumentRequest(new Headers())).toBe(false);
   });
 
+  it("answers the CORS its own sandbox causes, for the opaque origin and nothing else", () => {
+    // A document under `sandbox` (no allow-same-origin) has the origin `null`,
+    // and a module script or a `crossorigin` stylesheet is CORS-fetched — so
+    // every ES-module app under /apps/ rendered an empty #root, with
+    // "from origin 'null' has been blocked" in a console nobody was reading.
+    expect(lib.appProxyAllowOrigin("null", null)).toBe("null");
+    // Not a licence for the whole web: only the origin the proxy itself makes.
+    expect(lib.appProxyAllowOrigin("https://evil.example", null)).toBeNull();
+    expect(lib.appProxyAllowOrigin("http://box.local", null)).toBeNull();
+    // No Origin at all is a request no CORS check will be run on.
+    expect(lib.appProxyAllowOrigin(null, null)).toBeNull();
+    // An app that answers CORS itself keeps its own policy.
+    expect(lib.appProxyAllowOrigin("null", "*")).toBeNull();
+  });
+
   it("names the same config key the runner does", async () => {
     const { CODING_AGENT_DIR_CONFIG_KEY } = await import("@/lib/coding-agent");
     expect(lib.PROJECT_FOLDER_CONFIG_KEY).toBe(CODING_AGENT_DIR_CONFIG_KEY);

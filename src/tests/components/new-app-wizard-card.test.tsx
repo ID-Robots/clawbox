@@ -9,7 +9,8 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
-import NewAppWizardCard from "@/components/NewAppWizardCard";
+import NewAppWizardCard, { lastRunLabel, lastRunSummary } from "@/components/NewAppWizardCard";
+import { translations } from "@/lib/translations";
 import { buildResumeProjectPrompt, buildTeamProjectPrompt, CHAT_MESSAGE_EVENT } from "@/lib/ui-events";
 
 describe("NewAppWizardCard", () => {
@@ -165,5 +166,48 @@ describe("NewAppWizardCard — an existing project", () => {
     expect((select as HTMLSelectElement).value).toBe("/home/clawbox/Projects/shop");
     fireEvent.click(screen.getByTestId("coding-agent-new-create"));
     expect(screen.getByTestId("coding-agent-new-error")).toBeInTheDocument();
+  });
+
+  // The note used to be a hard 120-character slice: "…in THIS pass and quote
+  // the" stopped mid-sentence with nothing to say it had been cut.
+  it("ends a cut last-run summary with an ellipsis and leaves a short one whole", () => {
+    const long = "Automatic review pass. Start by running the project's own verification — its tests or build — in THIS pass and quote the output you saw.";
+    const cut = lastRunSummary(long);
+    expect(cut.endsWith("…")).toBe(true);
+    expect(cut.length).toBeLessThanOrEqual(121);
+    expect(long.startsWith(cut.slice(0, -1))).toBe(true);
+    // No trailing space left in front of the ellipsis.
+    expect(cut).not.toContain(" …");
+    expect(lastRunSummary("Add a PDF export.")).toBe("Add a PDF export.");
+    expect(lastRunSummary("Build the customer list\nwith search")).toBe("Build the customer list");
+  });
+
+  // "Last run: Automatic review pass. Start by running the project's own
+  // verification — its tests or build — in THIS pass and quote the" — the
+  // first 120 characters of REVIEW_PASS_TASK, because a review pass's `task`
+  // IS that prompt. The sidebar, the run page and the breadcrumb all name it
+  // "Automatic review pass of run-…" from one key; so does this line now.
+  it("names a review pass the way every other surface does, not by its internal prompt", () => {
+    const t = (key: string, params?: Record<string, string | number>) => {
+      let str = translations.en[key] ?? key;
+      if (params) for (const [k, v] of Object.entries(params)) str = str.replaceAll(`{${k}}`, String(v));
+      return str;
+    };
+    const reviewTask = "Automatic review pass. Start by running the project's own verification — its tests or build — in THIS pass and quote the output you saw.";
+    expect(lastRunLabel({ task: reviewTask, reviewOf: "run-gywqvpbg" }, t)).toBe("Automatic review pass of run-gywqvpbg");
+    // Every other run still reads by its own first line.
+    expect(lastRunLabel({ task: "Build the customer list\nwith search", reviewOf: null }, t)).toBe("Build the customer list");
+    expect(lastRunLabel({ task: "# Paginate the inventory API", reviewOf: null }, t)).toBe("Paginate the inventory API");
+    expect(lastRunLabel({ task: reviewTask, reviewOf: null }, t)).toContain("…");
+  });
+
+  // A native select clips its selected option at the control's edge; without
+  // `text-overflow` the label simply stopped mid-word ("…TypeScript (def").
+  it("lets a clipped select label end in an ellipsis", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(PROJECTS), { status: 200, headers: { "content-type": "application/json" } })));
+    render(<NewAppWizardCard onClose={() => {}} />);
+    expect(screen.getByTestId("coding-agent-new-template").className).toContain("text-ellipsis");
+    fireEvent.click(screen.getByTestId("coding-agent-new-mode-existing"));
+    expect((await screen.findByTestId("coding-agent-new-project")).className).toContain("text-ellipsis");
   });
 });

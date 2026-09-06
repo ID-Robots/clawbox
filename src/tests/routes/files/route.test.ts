@@ -290,6 +290,30 @@ describe("GET /setup-api/files?search=", () => {
     expect(res.status).toBe(200);
     expect(body.files).toHaveLength(300);
     expect(body.truncated).toBe(true);
+    expect(body.stoppedBy).toBe("matches");
+  });
+
+  it("walks past node_modules and .git — the folder itself still matches, nothing under it does", async () => {
+    // Searching Home spent the whole scan budget inside a dependency tree, so
+    // the answer was pages of node_modules paths and nothing from the folders
+    // the owner keeps files in.
+    fs.mkdirSync(path.join(TEST_ROOT, "proj", "node_modules", "left-pad"), { recursive: true });
+    fs.mkdirSync(path.join(TEST_ROOT, "proj", ".git", "refs"), { recursive: true });
+    fs.mkdirSync(path.join(TEST_ROOT, "proj", "src"), { recursive: true });
+    fs.writeFileSync(path.join(TEST_ROOT, "proj", "node_modules", "left-pad", "pad-store.js"), "x");
+    fs.writeFileSync(path.join(TEST_ROOT, "proj", ".git", "refs", "pad-head"), "x");
+    fs.writeFileSync(path.join(TEST_ROOT, "proj", "src", "pad.ts"), "x");
+
+    const body = await (await filesGet(createRequest("/setup-api/files?search=pad&hidden=1"))).json();
+    const paths = body.files.map((f: { path: string }) => f.path).sort();
+    expect(paths).toEqual(["proj/src/pad.ts"]);
+    expect(body.truncated).toBe(false);
+    expect(body.stoppedBy).toBeNull();
+
+    // The skipped folder is not hidden from the owner — only its contents are
+    // out of the walk.
+    const byName = await (await filesGet(createRequest("/setup-api/files?search=node_mod"))).json();
+    expect(byName.files.map((f: { path: string }) => f.path)).toEqual(["proj/node_modules"]);
   });
 });
 

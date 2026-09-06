@@ -31,6 +31,18 @@ export interface ClawaiTierInfo {
   hasTrial: boolean;
   /** Bullet copy shown in the highlight card. */
   features: string[];
+  /* ── The same three, as translation keys ──
+   *
+   * This module cannot call `t()`: it is imported by a route (see the header)
+   * and by the Hermes panel, so it stays pure data. The English above is the
+   * FLOOR the picker falls back to when a locale pack has not reached a key —
+   * `t()` answers with the raw key when it is missing, and "ai.planNameMax" on
+   * the price line would be worse than "Max plan". `featureKeys` is index-for-
+   * index with `features`; the copy test pins that.
+   */
+  planNameKey: string;
+  pricePeriodKey: string;
+  featureKeys: string[];
   /** Tailwind palette classes for the highlight card + selector pill. */
   cardClass: string;
   cardHeadlineClass: string;
@@ -41,15 +53,23 @@ export interface ClawaiTierInfo {
 export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
   free: {
     planName: "Free plan",
+    planNameKey: "ai.planNameFree",
     pillLabel: "Free",
     priceEuro: 0,
     pricePeriod: "free forever",
+    pricePeriodKey: "ai.planPeriodFree",
     hasTrial: false,
     features: [
       "Standard daily usage",
       "DeepSeek V4 Flash",
       "1 GB ClawKeep cloud backups",
       "Portal access",
+    ],
+    featureKeys: [
+      "ai.planFeatureStandardUsage",
+      "ai.planFeatureFlashModel",
+      "ai.planFeatureBackups1gb",
+      "ai.planFeaturePortal",
     ],
     cardClass: "border-white/10 bg-white/[0.03]",
     cardHeadlineClass: "text-gray-100",
@@ -58,9 +78,11 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
   },
   flash: {
     planName: "Pro plan",
+    planNameKey: "ai.planNamePro",
     pillLabel: "Pro",
     priceEuro: 9,
     pricePeriod: "/month",
+    pricePeriodKey: "ai.planPeriodMonth",
     // Pro bills from day one; flip to true if a trial returns.
     hasTrial: false,
     features: [
@@ -71,6 +93,14 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
       "Priority processing",
       "Email support",
     ],
+    featureKeys: [
+      "ai.planFeature5xUsage",
+      "ai.planFeatureFlashModel",
+      "ai.planFeatureBackups5gb",
+      "ai.planFeatureRemoteDesktop",
+      "ai.planFeaturePriority",
+      "ai.planFeatureEmailSupport",
+    ],
     cardClass: "border-orange-400/20 bg-orange-500/5",
     cardHeadlineClass: "text-orange-100",
     cardCheckClass: "text-orange-300",
@@ -78,9 +108,11 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
   },
   pro: {
     planName: "Max plan",
+    planNameKey: "ai.planNameMax",
     pillLabel: "Max",
     priceEuro: 49,
     pricePeriod: "/month",
+    pricePeriodKey: "ai.planPeriodMonth",
     hasTrial: true,
     features: [
       "Maximum usage",
@@ -89,6 +121,14 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
       "Remote Desktop access",
       "Highest priority",
       "Full Support — real humans via Call/Meeting",
+    ],
+    featureKeys: [
+      "ai.planFeatureMaxUsage",
+      "ai.planFeatureProModel",
+      "ai.planFeatureBackups50gb",
+      "ai.planFeatureRemoteDesktop",
+      "ai.planFeatureHighestPriority",
+      "ai.planFeatureFullSupport",
     ],
     cardClass:
       "border-fuchsia-400/25 bg-gradient-to-br from-fuchsia-500/10 via-pink-500/5 to-transparent",
@@ -103,6 +143,10 @@ export const CLAWAI_TIER_ORDER: readonly ClawaiTier[] = ["free", "flash", "pro"]
 /** The one marketing line for ClawBox AI. Both panels render this string. */
 export const CLAWBOX_AI_DESCRIPTION =
   "All-in cloud AI for ClawBox — backups, remote desktop, full support";
+
+/** Its translation key, for a caller that has a `t()` to hand — the constant
+ *  above stays the English floor for the ones that do not. */
+export const CLAWBOX_AI_DESCRIPTION_KEY = "ai.clawboxAiDescription";
 
 export function normalizeClawaiUiTier(value: unknown): ClawaiTier | null {
   return value === "free" || value === "flash" || value === "pro" ? value : null;

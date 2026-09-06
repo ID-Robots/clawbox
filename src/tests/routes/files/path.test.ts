@@ -181,6 +181,45 @@ describe("PUT /setup-api/files/[...path]", () => {
     expect(body.error).toBe("Already exists");
   });
 
+  it("refuses a rename that is a PATH — a file may not leave its folder under a rename", async () => {
+    // `../escape.txt` resolves to a path still inside the browse root, so the
+    // containment check waved it through: the app said "Renamed" and the file
+    // moved to the parent folder with nothing on screen to say where it went.
+    fs.mkdirSync(path.join(TEST_ROOT, "scratch"));
+    fs.writeFileSync(path.join(TEST_ROOT, "scratch", "a.txt"), "content");
+
+    for (const newName of ["../escape.txt", "sub/escape.txt", "./a.txt", "..", "."]) {
+      const res = await filesPathPut(
+        createRequest("/setup-api/files/scratch/a.txt", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ newName }),
+        }),
+        createParams(["scratch", "a.txt"]),
+      );
+      expect([newName, res.status]).toEqual([newName, 400]);
+      expect((await res.json()).error).toBe("Invalid destination");
+    }
+
+    expect(fs.existsSync(path.join(TEST_ROOT, "scratch", "a.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(TEST_ROOT, "escape.txt"))).toBe(false);
+  });
+
+  it("returns 400 when newName is not a string", async () => {
+    fs.writeFileSync(path.join(TEST_ROOT, "file.txt"), "content");
+
+    const res = await filesPathPut(
+      createRequest("/setup-api/files/file.txt", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newName: { toString: "no" } }),
+      }),
+      createParams(["file.txt"]),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("newName required");
+  });
+
   it("rejects path traversal in newName", async () => {
     fs.writeFileSync(path.join(TEST_ROOT, "file.txt"), "content");
 

@@ -865,6 +865,36 @@ describe("a run", () => {
       expect(stopped.status).toBe("stopped");
     });
 
+    it("refuses to resume a run whose folder is gone, naming the folder instead of blaming the wrapper", async () => {
+      // A team worker's worktree is removed when its task is decided, and the
+      // run left behind is still "paused, resumable". Spawning into a cwd
+      // that no longer exists makes Node report ENOENT against the EXECUTABLE
+      // — "spawn /usr/bin/setpriv ENOENT" — so the run failed 15 ms after
+      // "Resumed by the owner", blaming a binary that is present.
+      installFakeClaude();
+      const flag = path.join(base, "pause-flag-gone");
+      installFakeWrapper([`echo '${INIT}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+      const dir = makeProject("site");
+      const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 5000 });
+      lib.pauseRun(started.id);
+      expect((await finished(started.id)).status).toBe("paused");
+
+      const recorded = lib.getRun(started.id)!.directory;
+      fs.rmSync(dir, { recursive: true, force: true });
+      await expect(lib.resumeRun(started.id)).rejects.toMatchObject({
+        kind: "not_found",
+        message: expect.stringContaining(recorded),
+      });
+      // Nothing was spawned and nothing was flipped: the record is still the
+      // paused one the owner can read, not a failed run with a wrong reason.
+      const after = lib.getRun(started.id)!;
+      expect(after.status).toBe("paused");
+      expect(after.error).toBeNull();
+      expect(after.progress.filter((line) => line === "Resumed by the owner")).toHaveLength(0);
+    });
+
     it("drafts a run, starts it later, and never auto-starts it", async () => {
       readyDevice();
       makeProject("site");

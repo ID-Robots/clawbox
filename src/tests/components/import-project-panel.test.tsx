@@ -3,7 +3,7 @@
  * (with the ClawBox apps marked), and a folder on the box.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import ImportProjectPanel from "@/components/ImportProjectPanel";
 
@@ -60,6 +60,68 @@ describe("ImportProjectPanel", () => {
     await waitFor(() => expect(onImported).toHaveBeenCalledTimes(1));
     expect(posts).toEqual([{ url: "/setup-api/coding-agent/projects/import", body: { source: "github", repo: "yalexx/tinder-clone" } }]);
     expect(onImported).toHaveBeenCalledWith({ project: { directory: "/p/tinder-clone", folder: "tinder-clone", name: "Tinder Clone" }, directory: "/p/tinder-clone", folder: "tinder-clone", initialized: false, skipped: [] });
+  });
+
+  // 231 repositories, 60 rows, and the note tied to the ROUTE's truncation —
+  // which was false — so everything older than the 60th was invisible and
+  // nothing on screen said so.
+  it("says how many repositories are listed when its own ceiling cuts the list", async () => {
+    const many = Array.from({ length: 65 }, (_, i) => ({
+      ...REPOS[1], fullName: `yalexx/repo-${i}`, name: `repo-${i}`, folder: `repo-${i}`,
+    }));
+    stubFetch({ status: 200, body: { login: "yalexx", repos: many, truncated: false } }, { status: 200, body: {} });
+    render(<ImportProjectPanel onImported={() => {}} onClose={() => {}} />);
+    expect(await screen.findAllByTestId("coding-agent-import-repo")).toHaveLength(60);
+    expect(screen.getByTestId("coding-agent-import-truncated").textContent).toBe(t("codingAgent.importTruncated", { n: 60 }));
+    // Filtered down to what fits, there is nothing hidden to warn about.
+    fireEvent.change(screen.getByTestId("coding-agent-import-filter"), { target: { value: "repo-1" } });
+    expect(screen.queryByTestId("coding-agent-import-truncated")).toBeNull();
+  });
+
+  // The segmented control carried a CSS `capitalize`, which title-cases EVERY
+  // word: "From a folder" was drawn "From A Folder", and the German "Aus einem
+  // Ordner" became "Aus Einem Ordner".
+  it("leaves the tab labels cased as the translation wrote them", async () => {
+    render(<ImportProjectPanel onImported={() => {}} onClose={() => {}} />);
+    const folder = await screen.findByTestId("coding-agent-import-tab-folder");
+    expect(folder.textContent).toBe("From a folder");
+    expect(folder.className).not.toContain("capitalize");
+    expect(screen.getByTestId("coding-agent-import-tab-github").className).not.toContain("capitalize");
+  });
+
+  it("says nothing about a cut when every repository is on screen", async () => {
+    render(<ImportProjectPanel onImported={() => {}} onClose={() => {}} />);
+    await screen.findAllByTestId("coding-agent-import-repo");
+    expect(screen.queryByTestId("coding-agent-import-truncated")).toBeNull();
+  });
+
+  // The pushed date shared one `truncate` line with the description, so a repo
+  // with a long summary never showed when it was last pushed — the very fact
+  // this list is ordered by.
+  it("keeps the pushed date on the row beside a long description", async () => {
+    const long = "ClawBox — your private AI assistant on NVIDIA Jetson, with a desktop, a captive portal and a coding agent that ships";
+    stubFetch({ status: 200, body: { login: "yalexx", repos: [{ ...REPOS[0], description: long }], truncated: false } }, { status: 200, body: {} });
+    render(<ImportProjectPanel onImported={() => {}} onClose={() => {}} />);
+    const row = (await screen.findAllByTestId("coding-agent-import-repo"))[0];
+    const pushed = within(row).getByTestId("coding-agent-import-repo-pushed");
+    expect(pushed.textContent).toBe(new Date("2026-09-01T00:00:00Z").toLocaleDateString());
+    // Its own box, and one that never gives up its width to the description.
+    expect(pushed.className).toContain("shrink-0");
+    expect(pushed.className).not.toContain("truncate");
+    expect(within(row).getByText(long).className).toContain("truncate");
+  });
+
+  it("clears a folder refusal when the owner switches to the GitHub tab", async () => {
+    stubFetch(
+      { status: 200, body: { login: "yalexx", repos: REPOS, truncated: false } },
+      { status: 400, body: { error: "Give the folder as an absolute path, e.g. /home/clawbox/old-site or ~/old-site.", kind: "bad_path" } },
+    );
+    render(<ImportProjectPanel onImported={() => {}} onClose={() => {}} initialTab="folder" />);
+    fireEvent.change(screen.getByTestId("coding-agent-import-path"), { target: { value: "relative/path" } });
+    fireEvent.submit(screen.getByTestId("coding-agent-import-folder"));
+    expect((await screen.findByTestId("coding-agent-import-error")).textContent).toContain("absolute path");
+    fireEvent.click(screen.getByTestId("coding-agent-import-tab-github"));
+    expect(screen.queryByTestId("coding-agent-import-error")).toBeNull();
   });
 
   it("says in words when no account is connected, with the way to Settings", async () => {

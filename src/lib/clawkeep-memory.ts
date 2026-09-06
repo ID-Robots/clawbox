@@ -23,6 +23,37 @@ export type MemoryIndexMode = "incremental" | "full";
 export type MemoryIndexTrigger = "manual" | "schedule";
 export type MemoryRunStatus = "idle" | "running" | "succeeded" | "failed";
 
+/**
+ * Stable, language-independent names for the sentences below.
+ *
+ * Every other ClawBox route carries a `code` beside its English `error`, and
+ * this one did not: the panel could only print the server's English, so a
+ * German desktop showed "The index does not match the configured embedding
+ * model" among its own labels. The English stays — it is the floor for a
+ * surface whose locale pack has not caught up — but the code is what a screen
+ * words for itself.
+ */
+export type MemoryStatusErrorCode =
+  | "index_identity_mismatched"
+  | "index_identity_missing"
+  | "provider_degraded"
+  | "status_unavailable";
+
+export type MemoryRunErrorCode =
+  | "timed_out"
+  | "interrupted"
+  | "migration_busy"
+  | "openclaw_missing"
+  | "index_failed";
+
+const RUN_ERROR_CODES = new Set<string>([
+  "timed_out",
+  "interrupted",
+  "migration_busy",
+  "openclaw_missing",
+  "index_failed",
+]);
+
 export interface MemoryIndexSchedule {
   enabled: boolean;
   frequency: MemoryScheduleFrequency;
@@ -40,6 +71,10 @@ interface PersistedMemoryRunState {
   finishedAtMs: number;
   durationMs: number;
   error: string;
+  /** The `error` above, as a name a UI can translate. Empty on a state file
+   *  written before the codes existed, which is why no surface may key its
+   *  rendering on the code alone. */
+  errorCode: MemoryRunErrorCode | "";
   /** Internal only. Never returned by publicMemoryRunState(). */
   childPid: number;
 }
@@ -71,6 +106,9 @@ export interface ClawKeepMemoryStatus {
   dirty: boolean;
   indexBytes: number;
   error: string;
+  /** `error`'s stable name, for a surface that words it in the owner's
+   *  language. Empty exactly when `error` is. */
+  errorCode: MemoryStatusErrorCode | "";
   run: MemoryRunState;
   schedule: MemoryIndexSchedule;
   nextRunAtMs: number;
@@ -128,6 +166,7 @@ const EMPTY_RUN_STATE: PersistedMemoryRunState = {
   finishedAtMs: 0,
   durationMs: 0,
   error: "",
+  errorCode: "",
   childPid: 0,
 };
 
@@ -241,6 +280,12 @@ function sanitiseRunState(value: unknown): PersistedMemoryRunState {
     durationMs: finiteNonNegative(raw.durationMs),
     // Only our own fixed public strings are persisted, never CLI output.
     error: typeof raw.error === "string" && raw.error.length <= 240 ? raw.error : "",
+    // An unknown name is dropped rather than passed through: this field exists
+    // so a surface can look up a translation by it, and a state file written
+    // by an older build carries none at all.
+    errorCode: typeof raw.errorCode === "string" && RUN_ERROR_CODES.has(raw.errorCode)
+      ? raw.errorCode as MemoryRunErrorCode
+      : "",
     childPid: Number.isSafeInteger(raw.childPid) && Number(raw.childPid) > 0 ? Number(raw.childPid) : 0,
   };
 }
@@ -265,8 +310,8 @@ async function writeRunState(state: PersistedMemoryRunState): Promise<void> {
  * itself to the browser by default. Here it does not.
  */
 function publicMemoryRunState(state: PersistedMemoryRunState): MemoryRunState {
-  const { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error } = state;
-  return { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error };
+  const { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error, errorCode } = state;
+  return { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error, errorCode };
 }
 
 function processIsAlive(pid: number): boolean {
@@ -289,6 +334,7 @@ async function markInterrupted(state: PersistedMemoryRunState): Promise<Persiste
     finishedAtMs,
     durationMs: state.startedAtMs ? Math.max(0, finishedAtMs - state.startedAtMs) : 0,
     error: INTERRUPTED_MESSAGE,
+    errorCode: "interrupted",
     childPid: 0,
   };
   await writeRunState(failed);
@@ -518,6 +564,12 @@ export async function parseMemoryStatus(
   if (!provider || provider === "none") health = "unavailable";
   else if (!semanticAvailable || providerMode === "degraded" || cleanString(custom.providerUnavailableReason)) health = "degraded";
   else if (providerMode === "active" && indexIdentity === "valid") health = "healthy";
+  // An index built by a different model — or one with no fingerprint at all —
+  // is a KNOWN state, not an unknown one: search is degraded until it is
+  // rebuilt, and the `error` below already says exactly that. Left as
+  // "unknown", the chip contradicted the amber banner right beside it and
+  // named nothing the owner could act on.
+  else if (indexIdentity === "mismatched" || indexIdentity === "missing") health = "degraded";
 
   return {
     available: Boolean(provider || model || files || chunks),
@@ -546,6 +598,13 @@ export async function parseMemoryStatus(
         ? "The index fingerprint is missing. Run a full reindex."
         : health === "degraded"
           ? "The embedding model is not ready. Check the model, then try indexing again."
+          : "",
+    errorCode: indexIdentity === "mismatched"
+      ? "index_identity_mismatched"
+      : indexIdentity === "missing"
+        ? "index_identity_missing"
+        : health === "degraded"
+          ? "provider_degraded"
           : "",
     run,
     schedule,
@@ -578,6 +637,7 @@ function unavailableStatus(
     dirty: false,
     indexBytes: 0,
     error: "Memory status is unavailable. Try again.",
+    errorCode: "status_unavailable",
     run,
     schedule,
     nextRunAtMs: computeNextMemoryRunMs(schedule, now),
@@ -759,15 +819,41 @@ async function acquireRunLock(): Promise<boolean> {
   }
 }
 
-function fixedFailureMessage(timedOut: boolean, code: number | null, signal: NodeJS.Signals | null): string {
-  if (timedOut || code === 124) return "Indexing timed out. Try again after the device is idle.";
+function fixedFailure(
+  timedOut: boolean,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): { error: string; errorCode: MemoryRunErrorCode } {
+  if (timedOut || code === 124) {
+    return { error: "Indexing timed out. Try again after the device is idle.", errorCode: "timed_out" };
+  }
   // Killed from outside — the OOM killer, an operator, a service restart. The
   // embedding model had nothing to do with it, so do not send the owner to
   // check it; the same words the reconcile uses for a run lost to a reboot.
-  if (signal || code === null) return INTERRUPTED_MESSAGE;
-  if (code === LOCK_BUSY_EXIT) return "The embedding model is still being set up. Try again in a few minutes.";
-  if (EXEC_FAILURE_EXITS.has(code)) return "OpenClaw is not installed or could not be started.";
-  return "Indexing failed. Check that the embedding model is available, then try again.";
+  if (signal || code === null) return { error: INTERRUPTED_MESSAGE, errorCode: "interrupted" };
+  if (code === LOCK_BUSY_EXIT) {
+    return { error: "The embedding model is still being set up. Try again in a few minutes.", errorCode: "migration_busy" };
+  }
+  if (EXEC_FAILURE_EXITS.has(code)) {
+    return { error: "OpenClaw is not installed or could not be started.", errorCode: "openclaw_missing" };
+  }
+  return {
+    error: "Indexing failed. Check that the embedding model is available, then try again.",
+    errorCode: "index_failed",
+  };
+}
+
+/**
+ * The CLI's own last word, for the device log.
+ *
+ * Only the tail is kept: `openclaw memory index` prints a line per file, and
+ * nothing here needs the transcript — just whatever it said before it gave up.
+ */
+const MAX_RUN_STDERR_CHARS = 4_000;
+
+function lastMeaningfulLine(text: string): string {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length ? lines[lines.length - 1].slice(0, 300) : "";
 }
 
 /**
@@ -815,6 +901,7 @@ export async function startMemoryIndex(
     finishedAtMs: 0,
     durationMs: 0,
     error: "",
+    errorCode: "",
     childPid: 0,
   };
   try {
@@ -841,8 +928,19 @@ export async function startMemoryIndex(
   const child = spawn(
     "flock",
     ["--no-fork", "-n", "-E", String(LOCK_BUSY_EXIT), EMBED_MIGRATION_LOCK, openclawBin(), ...args],
-    { env: openclawEnv(), stdio: "ignore" },
+    { env: openclawEnv(), stdio: ["ignore", "ignore", "pipe"] },
   );
+  // The CLI's stderr, kept for the device log and NOT for the response: this
+  // module's contract is that raw CLI output, paths and provider errors stop
+  // here. With `stdio: "ignore"` it was discarded before anyone could read it
+  // either, so a run that failed in 1.3 s left the owner with the catch-all
+  // "check that the embedding model is available" — about a model that was
+  // answering perfectly — and nothing anywhere on the box said why. Draining
+  // the pipe is also what keeps a chatty run from blocking on a full one.
+  let stderrTail = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderrTail = (stderrTail + chunk.toString("utf8")).slice(-MAX_RUN_STDERR_CHARS);
+  });
   // Listen BEFORE the first await. A busy migration lock makes `flock -n`
   // exit in a couple of milliseconds, inside the state write below; with the
   // listeners attached after it, that exit went unseen, the run stayed
@@ -881,12 +979,20 @@ export async function startMemoryIndex(
     clearTimeout(timer);
     const finishedAtMs = Date.now();
     const ok = code === 0 && !timedOut;
+    const failure = ok ? null : fixedFailure(timedOut, code, signal);
+    if (failure) {
+      console.warn(
+        `[clawkeep-memory] ${mode} index run failed (${failure.errorCode}, exit ${code ?? "none"}`
+        + `${signal ? `, ${signal}` : ""}): ${lastMeaningfulLine(stderrTail) || "the CLI printed nothing"}`,
+      );
+    }
     const finalState: PersistedMemoryRunState = {
       ...state,
       status: ok ? "succeeded" : "failed",
       finishedAtMs,
       durationMs: Math.max(0, finishedAtMs - startedAtMs),
-      error: ok ? "" : fixedFailureMessage(timedOut, code, signal),
+      error: failure ? failure.error : "",
+      errorCode: failure ? failure.errorCode : "",
       childPid: 0,
     };
     await writeRunState(finalState).catch(() => { /* status route will reconcile */ });

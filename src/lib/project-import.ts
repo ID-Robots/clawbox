@@ -189,6 +189,34 @@ export async function findClawboxRepos(owners: string[]): Promise<{ found: Set<s
   return { found, searched };
 }
 
+/**
+ * How long a listing is answered from the last one. Measured on the box:
+ * 4.5-5.3 s per call, of which the connection probe is a fraction — the rest
+ * is up to three pages of `gh api user/repos` and five code searches, each a
+ * fresh `gh` boot, and the Import panel pays for all of it on every mount.
+ * Served stale-while-revalidate past the window: the cached rows go back at
+ * once and a refresh runs behind them, so only the first open after a
+ * web-server boot waits.
+ */
+export const REPOS_STALE_AFTER_MS = 5 * 60_000;
+
+/**
+ * The last successful listing, keyed by the account it belongs to. Failures
+ * are never cached — a rate-limited or half-answered listing must not be
+ * served for five minutes — and the account is re-probed on every call rather
+ * than cached with it, so signing out of GitHub still answers `not_connected`
+ * on the very next request instead of handing back the rows of an account
+ * that is no longer connected.
+ */
+let reposCache: { login: string; repos: GitHubRepo[]; truncated: boolean; at: number } | null = null;
+let reposRefresh: Promise<GitHubReposOutcome> | null = null;
+
+/** For the tests: forget the cached listing. */
+export function _resetGitHubReposCacheForTests(): void {
+  reposCache = null;
+  reposRefresh = null;
+}
+
 /** The repositories the connected account can see, newest push first. */
 export async function listGitHubRepos(): Promise<GitHubReposOutcome> {
   const status = await githubStatus();
@@ -196,6 +224,26 @@ export async function listGitHubRepos(): Promise<GitHubReposOutcome> {
   if (!status.installed) return { ok: false, reason: "no_gh", detail: "The GitHub CLI (gh) is not installed on this ClawBox." };
   if (!status.connected || !status.login) return { ok: false, reason: "not_connected", detail: "Connect a GitHub account in the Coding Agent's settings first." };
 
+  const login = status.login;
+  const cached = reposCache?.login === login ? reposCache : null;
+  if (cached) {
+    // Nobody is waiting on the refresh, so its failure must not surface as an
+    // unhandled rejection on a request that already answered.
+    if (Date.now() - cached.at >= REPOS_STALE_AFTER_MS) void startRepoRefresh(login).catch(() => undefined);
+    return { ok: true, login, repos: cached.repos, truncated: cached.truncated };
+  }
+  return startRepoRefresh(login);
+}
+
+/** One listing at a time: a second caller arriving on a cold cache joins the first rather than starting another eight `gh` boots. */
+function startRepoRefresh(login: string): Promise<GitHubReposOutcome> {
+  if (!reposRefresh) {
+    reposRefresh = fetchGitHubRepos(login).finally(() => { reposRefresh = null; });
+  }
+  return reposRefresh;
+}
+
+async function fetchGitHubRepos(login: string): Promise<GitHubReposOutcome> {
   const rows: Omit<GitHubRepo, "clawboxApp">[] = [];
   let truncated = false;
   for (let page = 1; page <= REPOS_MAX_PAGES; page++) {
@@ -216,7 +264,8 @@ export async function listGitHubRepos(): Promise<GitHubReposOutcome> {
   }
   const apps = await findClawboxRepos(rows.map((r) => r.owner));
   const repos: GitHubRepo[] = rows.map((r) => ({ ...r, clawboxApp: apps.searched.has(r.owner) ? apps.found.has(r.fullName) : null }));
-  return { ok: true, login: status.login, repos, truncated };
+  reposCache = { login, repos, truncated, at: Date.now() };
+  return { ok: true, login, repos, truncated };
 }
 
 // ── The import itself ────────────────────────────────────────────────────────

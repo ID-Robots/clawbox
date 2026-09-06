@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { useBuildIdentity } from "@/components/BuildIdentityPanel";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
@@ -46,6 +47,26 @@ interface BranchInfo {
 }
 
 const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-5";
+
+/**
+ * A translated sentence with one or more rendered elements inside it.
+ *
+ * The elements are placeholders in the string (`{beta}`, `{reboot}`) rather
+ * than markup in the catalogue: a translator gets one whole sentence and can
+ * put the `<code>` chip or the emphasis where their language wants it, which
+ * splitting the sentence into fragments around the JSX would not allow.
+ */
+function Interpolated({ text, slots }: { text: string; slots: Record<string, ReactNode> }) {
+  return (
+    <>
+      {text.split(/(\{[a-zA-Z]+\})/g).map((part, i) => {
+        const name = part.match(/^\{([a-zA-Z]+)\}$/)?.[1];
+        const slot = name ? slots[name] : undefined;
+        return <span key={i}>{slot ?? part}</span>;
+      })}
+    </>
+  );
+}
 
 function compareSemver(a: string | null | undefined, b: string | null | undefined): number {
   if (!a || !b) return 0;
@@ -111,6 +132,11 @@ function StepIcon({ status }: { status: StepStatus }) {
  */
 export default function SystemUpdateApp({ embedded = false }: { embedded?: boolean } = {}) {
   const { t } = useT();
+  const tr = useTr();
+  // Settings embeds this app while the desktop can have the standalone window
+  // open beside it, so the label's id has to be per-instance or the second
+  // toggle would borrow the first one's name.
+  const betaLabelId = useId();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
@@ -186,6 +212,15 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // If an update is already running when the user opens this app (it was
   // kicked off from Settings, the wizard, or a prior session), immediately
   // join the poll so the live progress shows.
+  //
+  // A run that already FAILED is adopted the same way. It used to be ignored,
+  // and the failure of 2026-09-05 is what that costs: the restart step is the
+  // one that failed, so nobody was watching this page when it did, and every
+  // window opened afterwards showed "1 update available — Update everything"
+  // over an update that had died an hour earlier. `completed` is deliberately
+  // NOT adopted — the status route synthesises that phase for any box whose
+  // `update_completed` flag is set and has nothing to do, so adopting it would
+  // paint "Update complete" on a device that has just been sitting there.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -198,6 +233,9 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           setUpdateStarted(true);
           setUpdateState(data);
           startPolling();
+        } else if (data.phase === "failed") {
+          setUpdateStarted(true);
+          setUpdateState(data);
         }
       } catch { /* idle */ }
     })();
@@ -265,20 +303,27 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setUpdateError(typeof data.error === "string" ? data.error : `Failed to start update (HTTP ${res.status})`);
+        setUpdateError(typeof data.error === "string"
+          ? data.error
+          : tr("update.startFailedHttp", "Failed to start update (HTTP {status})", { status: res.status }));
         return;
       }
       startPolling();
     } catch (err) {
-      setUpdateError(err instanceof Error ? err.message : "Failed to start update");
+      setUpdateError(err instanceof Error ? err.message : tr("update.startFailed", "Failed to start update"));
     }
-  }, [startPolling]);
+  }, [startPolling, tr]);
 
   const dismissResult = useCallback(() => {
     setUpdateStarted(false);
     setUpdateError(null);
     setUpdateState(null);
     stopPolling();
+    // The settled run lives in the web server's memory, not in this component,
+    // so clearing local state alone would hide the panel until the next mount
+    // re-adopted the same dead run. Fire-and-forget: a refused dismissal (an
+    // update started meanwhile) must not turn the button into an error.
+    void fetch("/setup-api/update/dismiss", { method: "POST" }).catch(() => {});
   }, [stopPolling]);
 
   const saveBranch = useCallback(async (next: string | null) => {
@@ -344,22 +389,24 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       case "loading":
         return {
           icon: "hourglass_empty", iconClass: "text-white/40",
-          headline: "Checking for updates…", subhead: "Reading device + cloud version manifests.",
+          headline: tr("update.heroChecking", "Checking for updates…"),
+          subhead: tr("update.heroCheckingSub", "Reading device + cloud version manifests."),
           tone: "neutral" as const,
         };
       case "fetch-error":
         return {
           icon: "cloud_off", iconClass: "text-amber-300",
-          headline: "Couldn't reach the update server",
+          headline: tr("update.heroUnreachable", "Couldn't reach the update server"),
           subhead: versionsError
             ?? versions?.remote?.reason
-            ?? "Check the device's internet connection and try again.",
+            ?? tr("update.heroUnreachableSub", "Check the device's internet connection and try again."),
           tone: "warn" as const,
         };
       case "up-to-date":
         return {
           icon: "verified", iconClass: "text-emerald-300",
-          headline: "You're up to date", subhead: "Every component is on the latest release.",
+          headline: tr("update.heroCurrent", "You're up to date"),
+          subhead: tr("update.heroCurrentSub", "Every component is on the latest release."),
           tone: "good" as const,
         };
       case "drift":
@@ -385,29 +432,37 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         if (versions && shipsOpenclaw(versions) && componentNeedsUpdate(versions.openclaw)) updates.push("OpenClaw");
         return {
           icon: "system_update", iconClass: "text-emerald-300",
-          headline: `${updates.length} update${updates.length === 1 ? "" : "s"} available`,
-          subhead: `New version available for ${updates.join(" and ")}.`,
+          headline: updates.length === 1
+            ? tr("update.heroAvailableOne", "1 update available")
+            : tr("update.heroAvailableMany", "{count} updates available", { count: updates.length }),
+          subhead: tr("update.heroAvailableSub", "New version available for {components}.", {
+            components: updates.join(tr("update.componentJoin", " and ")),
+          }),
           tone: "available" as const,
         };
       }
       case "updating":
         return {
           icon: "downloading", iconClass: "text-orange-300",
-          headline: "Updating your device", subhead: "Don't power off until this finishes.",
+          headline: tr("update.heroUpdating", "Updating your device"),
+          subhead: tr("update.heroUpdatingSub", "Don't power off until this finishes."),
           tone: "busy" as const,
         };
       case "completed":
         return {
           icon: "task_alt", iconClass: "text-emerald-300",
-          headline: "Update complete",
-          subhead: updateState?.steps.some((s) => s.id === RESTART_STEP_ID) ? "The device will restart in a moment." : "Everything's been updated.",
+          headline: tr("update.heroComplete", "Update complete"),
+          subhead: updateState?.steps.some((s) => s.id === RESTART_STEP_ID)
+            ? tr("update.heroCompleteRestart", "The device will restart in a moment.")
+            : tr("update.heroCompleteSub", "Everything's been updated."),
           tone: "good" as const,
         };
       case "failed":
         return {
           icon: "error", iconClass: "text-red-300",
-          headline: "Update failed",
-          subhead: updateError || updateState?.error || "One step couldn't complete. See the steps below.",
+          headline: tr("update.heroFailed", "Update failed"),
+          subhead: updateError || updateState?.error
+            || tr("update.heroFailedSub", "One step couldn't complete. See the steps below."),
           tone: "error" as const,
         };
     }
@@ -474,7 +529,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                     onClick={() => void triggerUpdate()}
                     className="px-6 py-2.5 rounded-full bg-emerald-500 hover:bg-emerald-400 text-black text-sm font-semibold shadow-lg cursor-pointer"
                   >
-                    Update everything
+                    {tr("update.updateEverything", "Update everything")}
                   </button>
                 )}
                 {status === "up-to-date" && (
@@ -484,7 +539,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                     disabled={refreshing}
                     className="px-6 py-2.5 rounded-full border border-[var(--border-subtle)] bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] disabled:opacity-50 cursor-pointer"
                   >
-                    {refreshing ? "Checking…" : "Check for updates"}
+                    {refreshing ? tr("update.checking", "Checking…") : tr("update.checkForUpdates", "Check for updates")}
                   </button>
                 )}
               </div>
@@ -497,7 +552,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 disabled={refreshing}
                 className="mt-6 px-5 py-2 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-200 text-sm font-semibold hover:bg-amber-500/25 cursor-pointer disabled:opacity-50"
               >
-                {refreshing ? "Retrying…" : "Try again"}
+                {refreshing ? tr("update.retrying", "Retrying…") : tr("update.tryAgain", "Try again")}
               </button>
             )}
           </div>
@@ -515,7 +570,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
             <div className="grid grid-cols-1 gap-3">
               <ComponentCard
                 name="ClawBox"
-                description="Device OS and built-in apps"
+                description={tr("update.clawboxCardSub", "Device OS and built-in apps")}
                 current={versions.clawbox.current}
                 target={versions.clawbox.target}
                 available={clawboxAvail}
@@ -551,7 +606,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               >
                 <span className="inline-flex items-center gap-2">
                   <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">tune</span>
-                  Advanced options
+                  {tr("update.advancedOptions", "Advanced options")}
                 </span>
                 <span
                   className={`material-symbols-rounded text-[var(--text-muted)] transition-transform ${showAdvanced ? "rotate-180" : ""}`}
@@ -567,17 +622,30 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                   {/* Beta toggle */}
                   <div className="flex items-start justify-between gap-4">
                     <div>
-                      <div className="text-sm text-gray-100 inline-flex items-center gap-2">
+                      {/* The label the toggle beside it is named by — a switch
+                          whose only accessible name was the empty string is an
+                          unnamed button to a screen reader. */}
+                      <div id={betaLabelId} className="text-sm text-gray-100 inline-flex items-center gap-2">
                         <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">science</span>
-                        Beta channel
+                        {tr("update.betaChannel", "Beta channel")}
                       </div>
                       <p className="mt-1 text-xs text-[var(--text-muted)]">
-                        Pulls updates from <code className="bg-[var(--bg-elevated)] px-1 rounded">beta</code> instead of <code className="bg-[var(--bg-elevated)] px-1 rounded">main</code>. Pre-release features land here first; expect rough edges.
+                        <Interpolated
+                          text={tr(
+                            "update.betaChannelHelp",
+                            "Pulls updates from {beta} instead of {main}. Pre-release features land here first; expect rough edges.",
+                          )}
+                          slots={{
+                            beta: <code className="bg-[var(--bg-elevated)] px-1 rounded">beta</code>,
+                            main: <code className="bg-[var(--bg-elevated)] px-1 rounded">main</code>,
+                          }}
+                        />
                       </p>
                     </div>
                     <BetaToggle
                       enabled={branch === "beta"}
                       saving={branchSaving}
+                      labelledBy={betaLabelId}
                       onEnable={() => setBetaConfirm(true)}
                       onDisable={() => void saveBranch(null)}
                     />
@@ -585,9 +653,9 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
 
                   {/* Branch override */}
                   <div className="border-t border-[var(--border-subtle)] pt-4">
-                    <div className="text-sm text-gray-100">Branch override</div>
+                    <div className="text-sm text-gray-100">{tr("update.branchOverride", "Branch override")}</div>
                     <p className="mt-1 text-xs text-[var(--text-muted)]">
-                      Pin updates to a specific git branch (e.g. for QA). Leave blank to follow the configured channel.
+                      {tr("update.branchOverrideHelp", "Pin updates to a specific git branch (e.g. for QA). Leave blank to follow the configured channel.")}
                     </p>
                     <div className="mt-2 flex items-center gap-2">
                       <input
@@ -604,7 +672,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                         disabled={branchSaving || branchInput.trim() === (branch ?? "")}
                         className="px-3 py-1.5 rounded-md bg-emerald-500/15 border border-emerald-500/40 text-emerald-200 text-xs font-semibold disabled:opacity-50 cursor-pointer"
                       >
-                        {branchSaving ? "Saving…" : "Save"}
+                        {branchSaving ? tr("update.saving", "Saving…") : tr("update.save", "Save")}
                       </button>
                     </div>
                     {branchError && (
@@ -625,17 +693,17 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                     <div className="border-t border-[var(--border-subtle)] pt-4">
                       <div className="text-sm text-gray-100 inline-flex items-center gap-2">
                         <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">restart_alt</span>
-                        Force full update
+                        {tr("update.forceFullUpdate", "Force full update")}
                       </div>
                       <p className="mt-1 text-xs text-[var(--text-muted)]">
-                        Re-runs OpenClaw and system-service setup even when the version is current. Use it if a recovery script told you to, or if the assistant or services misbehave after an update. The device reboots when it finishes.
+                        {tr("update.forceFullUpdateHelp", "Re-runs OpenClaw and system-service setup even when the version is current. Use it if a recovery script told you to, or if the assistant or services misbehave after an update. The device reboots when it finishes.")}
                       </p>
                       <button
                         type="button"
                         onClick={() => setForceConfirm(true)}
                         className="mt-2 px-3 py-1.5 rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-semibold cursor-pointer hover:bg-amber-500/25"
                       >
-                        Force full update
+                        {tr("update.forceFullUpdate", "Force full update")}
                       </button>
                     </div>
                   )}
@@ -649,16 +717,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       {betaConfirm && (
         <ConfirmModal
           titleId="beta-confirm-title"
-          title="Enable beta updates?"
+          title={tr("update.betaConfirmTitle", "Enable beta updates?")}
           icon="warning"
-          confirmLabel="Enable beta"
+          confirmLabel={tr("update.betaConfirmAction", "Enable beta")}
           onCancel={() => setBetaConfirm(false)}
           onConfirm={() => { setBetaConfirm(false); void saveBranch("beta"); }}
         >
           <p>
-            Beta builds may include unfinished features and regressions. They&apos;re great for early
-            feedback but can break local state. You can switch back any time, but downgrades aren&apos;t
-            always reversible.
+            {tr("update.betaConfirmBody", "Beta builds may include unfinished features and regressions. They're great for early feedback but can break local state. You can switch back any time, but downgrades aren't always reversible.")}
           </p>
         </ConfirmModal>
       )}
@@ -666,16 +732,20 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       {forceConfirm && (
         <ConfirmModal
           titleId="force-confirm-title"
-          title="Force a full update?"
+          title={tr("update.forceConfirmTitle", "Force a full update?")}
           icon="restart_alt"
-          confirmLabel="Yes, run full update"
+          confirmLabel={tr("update.forceConfirmAction", "Yes, run full update")}
           onCancel={() => setForceConfirm(false)}
           onConfirm={() => { setForceConfirm(false); void triggerUpdate(); }}
         >
           <p>
-            This re-runs the full update — including OpenClaw and system-service setup — even
-            though the version is already current, then <strong>reboots the device</strong>. Use it
-            to finish a recovery or fix services that misbehave after an update.
+            <Interpolated
+              text={tr(
+                "update.forceConfirmBody",
+                "This re-runs the full update — including OpenClaw and system-service setup — even though the version is already current, then {reboot}. Use it to finish a recovery or fix services that misbehave after an update.",
+              )}
+              slots={{ reboot: <strong>{tr("update.forceConfirmReboot", "reboots the device")}</strong> }}
+            />
           </p>
         </ConfirmModal>
       )}
@@ -707,6 +777,7 @@ function ConfirmModal({
   onCancel: () => void;
   children: ReactNode;
 }) {
+  const tr = useTr();
   // Cancel is first in DOM order, so the shared trap lands there on open.
   const dialogRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
 
@@ -738,7 +809,7 @@ function ConfirmModal({
             onClick={onCancel}
             className="px-4 py-2 rounded-lg text-sm font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
           >
-            Cancel
+            {tr("update.cancel", "Cancel")}
           </button>
           <button
             type="button"
@@ -777,27 +848,29 @@ function ConfirmModal({
  * same field raw, kept it — two windows the desktop can show side by side.
  */
 function AgentVersions({ versions }: { versions: VersionInfo }) {
+  const tr = useTr();
+  const pinnedNote = tr("update.pinnedByClawbox", "Pinned by ClawBox — updated with it");
   const rows: { name: string; version: string | null; note: string }[] = [];
   if (shipsOpenclaw(versions)) {
     rows.push({
       name: "OpenClaw",
       version: cleanVersion(versions.openclaw.current) || versions.openclaw.current,
-      note: "Pinned by ClawBox — updated with it",
+      note: pinnedNote,
     });
   }
   if (versions.hermes) {
     rows.push({
       name: "Hermes",
       version: versions.hermes.current,
-      note: "Pinned by ClawBox — updated with it",
+      note: pinnedNote,
     });
   }
   if (!rows.length) return null;
 
   return (
     <div className={CARD} data-testid="agent-versions">
-      <div className="text-base font-semibold text-gray-100">Agent</div>
-      <p className="text-xs text-[var(--text-muted)] mt-0.5 mb-3">The assistant harness running on this device</p>
+      <div className="text-base font-semibold text-gray-100">{tr("update.agent", "Agent")}</div>
+      <p className="text-xs text-[var(--text-muted)] mt-0.5 mb-3">{tr("update.agentSub", "The assistant harness running on this device")}</p>
       <div className="space-y-2">
         {rows.map((row) => (
           <div key={row.name} className="flex items-baseline justify-between gap-3 text-xs">
@@ -837,6 +910,7 @@ function ComponentCard({
   unknown?: boolean;
   onUpdate: () => void;
 }) {
+  const tr = useTr();
   return (
     <div className={`${CARD} flex flex-col`}>
       <div className="flex items-start justify-between gap-2">
@@ -845,16 +919,18 @@ function ComponentCard({
           <p className="text-xs text-[var(--text-muted)] mt-0.5">{description}</p>
         </div>
         <span className={`shrink-0 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${available ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-[var(--text-muted)] border-[var(--border-subtle)]"}`}>
-          {available ? "UPDATE" : unknown ? "UNKNOWN" : "CURRENT"}
+          {available
+            ? tr("update.badgeUpdate", "UPDATE")
+            : unknown ? tr("update.badgeUnknown", "UNKNOWN") : tr("update.badgeCurrent", "CURRENT")}
         </span>
       </div>
       <div className="mt-4 grid grid-cols-2 gap-2 text-xs">
         <div>
-          <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">Installed</div>
+          <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">{tr("update.installed", "Installed")}</div>
           <div className="mt-1 font-mono text-gray-100 truncate">{cleanVersion(current ?? "") || current || "—"}</div>
         </div>
         <div>
-          <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">Latest</div>
+          <div className="uppercase tracking-wider text-[10px] text-[var(--text-muted)]">{tr("update.latest", "Latest")}</div>
           <div className={`mt-1 font-mono truncate ${available ? "text-emerald-300" : "text-gray-100"}`}>
             {unknown ? "—" : cleanVersion(target ?? "") || target || "—"}
           </div>
@@ -866,7 +942,9 @@ function ComponentCard({
         disabled={!available}
         className="mt-4 px-3 py-1.5 rounded-md text-xs font-semibold border cursor-pointer disabled:cursor-default disabled:opacity-50 transition-colors bg-emerald-500/15 border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/25"
       >
-        {available ? `Update ${name}` : unknown ? "Couldn't check" : "Up to date"}
+        {available
+          ? tr("update.updateComponent", "Update {name}", { name })
+          : unknown ? tr("update.couldNotCheck", "Couldn't check") : tr("update.upToDateShort", "Up to date")}
       </button>
     </div>
   );
@@ -875,11 +953,18 @@ function ComponentCard({
 function BetaToggle({
   enabled,
   saving,
+  labelledBy,
   onEnable,
   onDisable,
 }: {
   enabled: boolean;
   saving: boolean;
+  /**
+   * The id of the "Beta channel" text beside it. The toggle has no label of
+   * its own — it is a bare styled <button> — so without this assistive tech
+   * reads "button, pressed" with no name at all.
+   */
+  labelledBy: string;
   onEnable: () => void;
   onDisable: () => void;
 }) {
@@ -888,7 +973,9 @@ function BetaToggle({
       type="button"
       onClick={() => (enabled ? onDisable() : onEnable())}
       disabled={saving}
-      aria-pressed={enabled}
+      role="switch"
+      aria-checked={enabled}
+      aria-labelledby={labelledBy}
       className={`relative inline-flex items-center w-10 h-5 rounded-full transition-colors cursor-pointer border-none shrink-0 ${enabled ? "bg-amber-500" : "bg-white/15"} ${saving ? "opacity-50" : ""}`}
     >
       <span
@@ -910,6 +997,7 @@ function UpdateProgressCard({
   status: Status;
   onDismiss: () => void;
 }) {
+  const tr = useTr();
   const failedSteps = state?.steps.filter((s) => s.status === "failed") ?? [];
   // Non-fatal problems the update found and worked around — build drift, a
   // missing update pin it wrote for the owner. Krasi's ruling is that these
@@ -920,7 +1008,9 @@ function UpdateProgressCard({
     <div className={CARD}>
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-semibold text-gray-100">
-          {status === "completed" ? "Update finished" : status === "failed" ? "Update stopped" : "In progress"}
+          {status === "completed"
+            ? tr("update.progressFinished", "Update finished")
+            : status === "failed" ? tr("update.progressStopped", "Update stopped") : tr("update.progressRunning", "In progress")}
         </h2>
         {(status === "completed" || status === "failed") && (
           <button
@@ -928,7 +1018,7 @@ function UpdateProgressCard({
             onClick={onDismiss}
             className="px-3 py-1 rounded-md text-xs font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
           >
-            Dismiss
+            {tr("update.dismiss", "Dismiss")}
           </button>
         )}
       </div>
@@ -936,7 +1026,7 @@ function UpdateProgressCard({
       {!state && (
         <div className="mt-4 flex items-center gap-2 text-sm text-[var(--text-muted)]">
           <span className="w-4 h-4 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin" />
-          Connecting…
+          {tr("update.connecting", "Connecting…")}
         </div>
       )}
 
@@ -979,7 +1069,7 @@ function UpdateProgressCard({
           {failedSteps.map((step) => (
             <li key={`${step.id}-err`} className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
               <span className="font-semibold text-red-100">{step.label}:</span>{" "}
-              {step.error || "Unknown error"}
+              {step.error || tr("update.unknownError", "Unknown error")}
             </li>
           ))}
         </ul>
@@ -987,7 +1077,7 @@ function UpdateProgressCard({
 
       {status === "completed" && state?.steps.some((s) => s.id === RESTART_STEP_ID) && (
         <p className="mt-4 text-xs text-[var(--text-muted)]">
-          The page will reload once the device is back up.
+          {tr("update.reloadOnRestart", "The page will reload once the device is back up.")}
         </p>
       )}
     </div>

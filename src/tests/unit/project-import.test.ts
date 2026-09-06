@@ -255,6 +255,43 @@ describe("listGitHubRepos", () => {
     expect(await lib.listGitHubRepos()).toMatchObject({ ok: false, reason: "gh_unreachable" });
     expect(ghCalls).toEqual([]);
   });
+
+  it("answers the next listing from the last one, and still probes the account every time", async () => {
+    // 4.5-5.3 s per call on the box — three pages of `gh api user/repos` plus
+    // five code searches, each a fresh `gh` boot — and the Import panel paid
+    // for all of it on every mount.
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("yalexx/a")]) });
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    const first = await lib.listGitHubRepos();
+    expect(first).toMatchObject({ ok: true });
+    const asked = ghCalls.length;
+    expect(asked).toBeGreaterThan(0);
+
+    expect(await lib.listGitHubRepos()).toEqual(first);
+    expect(ghCalls).toHaveLength(asked);
+
+    // The CONNECTION is not cached with the rows: signing out of GitHub is
+    // answered on the very next request, not five minutes later.
+    githubStatus.mockResolvedValueOnce({ installed: true, connected: false, login: null, loginCommand: "x" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: false, reason: "not_connected" });
+    expect(ghCalls).toHaveLength(asked);
+
+    // …and another account is another listing, never this one's rows.
+    githubStatus.mockResolvedValueOnce({ installed: true, connected: true, login: "someone-else", loginCommand: "x" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: true, login: "someone-else" });
+    expect(ghCalls.length).toBeGreaterThan(asked);
+  });
+
+  it("never serves a failed listing from the cache", async () => {
+    ghAnswers.set("api user/repos", { code: 1, stderr: "rate limited" });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: false, reason: "failed" });
+    const asked = ghCalls.length;
+
+    ghAnswers.set("api user/repos", { code: 0, stdout: page([repo("yalexx/a")]) });
+    ghAnswers.set("api -X GET search/code", { code: 0, stdout: JSON.stringify({ items: [] }) });
+    expect(await lib.listGitHubRepos()).toMatchObject({ ok: true });
+    expect(ghCalls.length).toBeGreaterThan(asked);
+  });
 });
 
 describe("importGitHubRepo", () => {

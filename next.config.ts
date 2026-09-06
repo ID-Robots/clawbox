@@ -211,7 +211,16 @@ const nextConfig: NextConfig = {
               // object URL — is refused by every browser ("Media load rejected
               // by URL safety check") while the request itself succeeded.
               "media-src 'self' blob: data:",
-              `connect-src 'self' ws: wss: ${LOCAL_LAN_SOURCES}`,
+              // `data:` in connect-src: the OpenClaw Control UI, served on
+              // these paths through the gateway proxy, FETCHES its Font
+              // Awesome icons as `data:image/svg+xml,…` rather than assigning
+              // them to an <img>. connect-src is not covered by img-src's
+              // `data:`, so every load of /chat/* and of the OpenClaw window
+              // logged a pair of "Connecting to data:… violates the Content
+              // Security Policy" errors. A data: URL is inert as a network
+              // destination — it carries its own bytes and reaches nothing —
+              // so allowing it opens no channel out of the box.
+              `connect-src 'self' data: ws: wss: ${LOCAL_LAN_SOURCES}`,
               // Frames: code-server and the sandboxed webapp iframes are
               // same-origin, but an app the coding agent builds with its own
               // server (a Next.js app on :4199, a game with pointer lock) is

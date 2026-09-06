@@ -45,7 +45,7 @@ import {
 } from "@/lib/coding-agent";
 import { addWorkerWorktree, changedFiles, ensureTeamBranch, mergeWorkerBranch, removeWorktree } from "@/lib/coding-team-worktree";
 import { parseVerdict, REVIEWER_BRIEF, reviewerTask } from "@/lib/coding-team-reviewer";
-import { isLive } from "@/lib/coding-agent-status";
+import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
   allComplete,
   createBoard,
@@ -74,6 +74,8 @@ export const MAX_ALERTS = 3;
 const WAIT_SLICE_MS = 60_000;
 /** How long the loop waits for a slot (memory, the cap) before looking again. */
 const SLOT_WAIT_MS = 15_000;
+/** How often a run that is HELD (paused by the owner) is looked at again. */
+const HELD_POLL_MS = 2_000;
 /** A planner or a worker that has not settled by then is stopped and the team failed. */
 export const RUN_BUDGET_MS = 60 * 60_000;
 /** Sibling results quoted into a worker's task are cut here each. */
@@ -509,7 +511,13 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
     for (;;) {
       const run = await waitForRun(runId, WAIT_SLICE_MS);
       if (!run) return null;
-      if (!isLive(run.status)) return run;
+      // SETTLED, not merely "no process": a PAUSED worker is held by the
+      // owner and can still be resumed. Taking it as an outcome recorded
+      // "The run ended paused." as the task's result, failed the task and
+      // the team, and removed the worktree — while the run's own page went
+      // on offering Resume into a folder that was no longer there. The
+      // budget below is what ends a pause nobody comes back to.
+      if (isSettled(run.status)) return run;
       if (team.stopRequested) {
         try { stopRun(runId); } catch { /* raced with its own settle */ }
         return getRun(runId);
@@ -519,6 +527,9 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
         try { stopRun(runId); } catch { /* raced */ }
         return getRun(runId);
       }
+      // waitForRun answers AT ONCE for a run that is not running, so a held
+      // one (paused, a draft) would spin this loop; look again in a moment.
+      if (!isLive(run.status)) await sleep(HELD_POLL_MS);
     }
   } finally {
     team.currentRunIds.delete(runId);

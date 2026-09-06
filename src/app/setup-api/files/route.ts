@@ -40,6 +40,14 @@ function safePath(rel: string): string | null {
   return resolved;
 }
 
+// Folders the search walks past. A home directory's weight is almost entirely
+// node_modules: searching from Home spent the whole 20,000-entry budget inside
+// one of them, so the answer was a page of dependency paths and NOTHING from
+// the tree the owner keeps files in — while the banner said "first 61 shown",
+// as if the rest were merely not displayed. The folder itself is still
+// reported when its own name matches; only the descent into it is skipped.
+const SEARCH_SKIPPED_DIRS = new Set(["node_modules", ".git", ".cache", ".npm", "__pycache__", ".venv"]);
+
 // Recursive name search rooted at `rootAbs`. Breadth-first so shallow matches
 // surface first; bounded by MAX_SCANNED/MAX_MATCHES so a search over a large
 // home directory can't hang the request or exhaust memory. Symlinked
@@ -59,7 +67,10 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
   const queue: string[] = [rootAbs];
   let head = 0;
   let scanned = 0;
-  let truncated = false;
+  // WHY the walk ended, not just that it did: "the match list is full" and
+  // "the tree was too big to finish" are different answers and the banner
+  // above the results words them differently.
+  let stoppedBy: "matches" | "scanned" | null = null;
 
   while (head < queue.length) {
     const dir = queue[head++];
@@ -70,7 +81,7 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
       continue; // unreadable dir (permissions) — skip it
     }
     for (const dirent of entries) {
-      if (scanned >= MAX_SCANNED) { truncated = true; break; }
+      if (scanned >= MAX_SCANNED) { stoppedBy = "scanned"; break; }
       scanned++;
       const name = dirent.name;
       if (!includeHidden && name.startsWith(".")) continue;
@@ -93,14 +104,14 @@ async function searchTree(rootAbs: string, query: string, includeHidden: boolean
           modified,
           path: path.relative(baseResolved, full).split(path.sep).join("/"),
         });
-        if (matches.length >= MAX_MATCHES) { truncated = true; break; }
+        if (matches.length >= MAX_MATCHES) { stoppedBy = "matches"; break; }
       }
-      if (isDir) queue.push(full);
+      if (isDir && !SEARCH_SKIPPED_DIRS.has(name)) queue.push(full);
     }
-    if (truncated) break;
+    if (stoppedBy) break;
   }
 
-  return { files: matches, search: query, truncated };
+  return { files: matches, search: query, truncated: stoppedBy !== null, stoppedBy };
 }
 
 function ensureBaseDir() {

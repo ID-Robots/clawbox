@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Image from "next/image";
@@ -42,6 +42,167 @@ const APP_TITLES: Record<string, string> = {
   setup: "app.setup",
 };
 
+type WpFit = "fill" | "fit" | "center";
+
+/**
+ * The wallpapers the desktop offers, and the localStorage key it keeps the
+ * uploaded ones under. Both are mirrored from src/app/page.tsx, whose copies
+ * are locals inside that page component and cannot be imported — keep the two
+ * lists in step. The storage key MUST be the same string: the desktop and this
+ * page are one origin, so a wallpaper added on either is the same list.
+ */
+const WALLPAPERS: { id: string; name: string; image?: string }[] = [
+  { id: "clawbox", name: "ClawBox", image: "/clawbox-wallpaper.jpeg" },
+  { id: "hermes", name: "Hermes", image: "/hermes-wallpaper.jpeg" },
+  { id: "deep-space", name: "Deep Space" },
+];
+const CUSTOM_WPS_KEY = "clawbox-custom-wallpapers";
+
+/** The wallpapers this browser was given by hand. Read where the state is
+ *  initialised rather than from an effect: it is a value on disk, not a
+ *  subscription, and there is no first paint to correct. */
+function readCustomWallpapers(): string[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const saved = window.localStorage.getItem(CUSTOM_WPS_KEY);
+    const parsed = saved ? JSON.parse(saved) : null;
+    return Array.isArray(parsed) ? (parsed as string[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * One debounced POST per key set, and nothing at all before the device's own
+ * values have been read — the desktop's `usePreferenceWriter` rule, for the
+ * same two reasons: the opacity slider fires on every pixel, and writing the
+ * defaults this page starts at would erase what the box actually holds. It is
+ * a second copy because the desktop's lives inside src/app/page.tsx.
+ */
+function usePreferenceSaver(loadedRef: { current: boolean }) {
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  useEffect(() => {
+    const map = timers.current;
+    return () => {
+      for (const timer of map.values()) clearTimeout(timer);
+      map.clear();
+    };
+  }, []);
+  return useCallback((body: Record<string, unknown>) => {
+    if (!loadedRef.current) return;
+    const slot = Object.keys(body).join(",");
+    const pending = timers.current.get(slot);
+    if (pending) clearTimeout(pending);
+    timers.current.set(slot, setTimeout(() => {
+      timers.current.delete(slot);
+      fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => {});
+    }, 500));
+  }, [loadedRef]);
+}
+
+/**
+ * Appearance, on the page that IS Settings for a phone.
+ *
+ * This route used to hand `SettingsApp` a table of hard-coded defaults and
+ * seven `() => {}` handlers, so /app/settings showed no wallpapers, 100%
+ * opacity and the mascot on whatever the device actually had, and every
+ * control on the card was dead. The state here is the SAME preferences the
+ * desktop reads and writes (`wp_id`, `wp_fit`, `wp_bg_color`, `wp_opacity`,
+ * `ui_mascot_hidden`) and the same uploaded-wallpaper list, so a change made
+ * from a phone is the change the desktop would have made.
+ */
+function useAppearance(enabled: boolean) {
+  const [wallpaperId, setWallpaperId] = useState("clawbox");
+  const [wpFit, setWpFit] = useState<WpFit>("fill");
+  const [wpBgColor, setWpBgColor] = useState("#000000");
+  const [wpOpacity, setWpOpacity] = useState(50);
+  const [mascotHidden, setMascotHidden] = useState(false);
+  const [customWallpapers, setCustomWallpapers] = useState<string[]>(readCustomWallpapers);
+  const uploadRef = useRef<HTMLInputElement>(null);
+  const loaded = useRef(false);
+  // The upload's FileReader callback runs after the render that added the
+  // previous picture, so the next list is computed from a mirror rather than
+  // from the state this closure captured — the desktop's rule, and the reason
+  // both writers go through `applyCustomWallpapers`.
+  const customRef = useRef<string[]>(customWallpapers);
+  const applyCustomWallpapers = useCallback((next: string[]) => {
+    customRef.current = next;
+    setCustomWallpapers(next);
+    try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true;
+    fetch("/setup-api/preferences?keys=wp_id,wp_fit,wp_bg_color,wp_opacity,ui_mascot_hidden")
+      .then((r) => r.json())
+      .then((data: Record<string, unknown>) => {
+        if (!alive) return;
+        if (data.wp_id) setWallpaperId(String(data.wp_id));
+        if (data.wp_fit) setWpFit(data.wp_fit as WpFit);
+        if (data.wp_bg_color) setWpBgColor(String(data.wp_bg_color));
+        if (data.wp_opacity !== undefined && data.wp_opacity !== null) {
+          const opacity = parseInt(String(data.wp_opacity), 10);
+          if (Number.isFinite(opacity)) setWpOpacity(opacity);
+        }
+        setMascotHidden(Boolean(data.ui_mascot_hidden));
+      })
+      // Either way the card is now showing this device, so it may be written
+      // to: a box whose preferences endpoint blinked must still be settable.
+      .finally(() => { loaded.current = true; });
+    return () => { alive = false; };
+  }, [enabled]);
+
+  const save = usePreferenceSaver(loaded);
+  useEffect(() => {
+    save({ wp_id: wallpaperId, wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity });
+  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, save]);
+  useEffect(() => { save({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, save]);
+
+  const onUploadFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const next = [...customRef.current, reader.result as string];
+      applyCustomWallpapers(next);
+      setWallpaperId(`custom-${next.length - 1}`);
+      setWpOpacity(100);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  }, [applyCustomWallpapers]);
+
+  return {
+    uploadRef,
+    onUploadFile,
+    ui: {
+      wallpaperId,
+      wpFit,
+      wpBgColor,
+      wpOpacity,
+      mascotHidden,
+      wallpapers: WALLPAPERS,
+      customWallpapers,
+      onWallpaperChange: setWallpaperId,
+      onWpFitChange: setWpFit,
+      onWpBgColorChange: setWpBgColor,
+      onWpOpacityChange: setWpOpacity,
+      onMascotToggle: setMascotHidden,
+      onWallpaperUpload: () => uploadRef.current?.click(),
+      onCustomWallpaperDelete: (idx: number) => {
+        const next = customRef.current.filter((_, i) => i !== idx);
+        applyCustomWallpapers(next);
+        if (wallpaperId === `custom-${idx}`) setWallpaperId("clawbox");
+      },
+    },
+  };
+}
+
 /**
  * The title bar renders INSIDE `I18nProvider`, because the provider is this
  * page's own child: `useT()` in `StandaloneAppPage` would see no provider above
@@ -58,8 +219,26 @@ function StandaloneTitle({ nameKey, literal }: { nameKey?: string; literal?: str
   return <span className="text-xs font-medium text-white/70">{text}</span>;
 }
 
+/**
+ * Inside the provider for the reason `StandaloneTitle` is: the page component
+ * itself sits ABOVE `I18nProvider`, where `t()` echoes the key back. The
+ * literal was the last hard-coded English on this bar — a German desktop's
+ * Files and Terminal pages said "Back to Desktop" while everything around it
+ * was translated. English is the FLOOR here, not the answer: the key is not in
+ * the desktop catalogue yet, and a raw key on screen would be worse than the
+ * English it replaces.
+ */
+function BackToDesktopLabel() {
+  const { t } = useT();
+  const hit = t("app.backToDesktop");
+  return <>{hit === "app.backToDesktop" ? "Back to Desktop" : hit}</>;
+}
+
 export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
+  // Only /app/settings reads the appearance preferences — every other page
+  // here would be paying for a request it never renders.
+  const appearance = useAppearance(id === "settings");
   // null while unresolved — a harness-only app must not paint before we know
   // which harness this device actually runs.
   const [harness, setHarness] = useState<string | null>(null);
@@ -215,22 +394,16 @@ export default function StandaloneAppPage() {
       case "settings":
         return (
           <div className="h-full overflow-y-auto">
-            <SettingsApp ui={{
-              wallpaperId: "clawbox",
-              wpFit: "fill",
-              wpBgColor: "#0a0f1a",
-              wpOpacity: 100,
-              mascotHidden: false,
-              wallpapers: [],
-              customWallpapers: [],
-              onWallpaperChange: () => {},
-              onWpFitChange: () => {},
-              onWpBgColorChange: () => {},
-              onWpOpacityChange: () => {},
-              onMascotToggle: () => {},
-              onWallpaperUpload: () => {},
-              onCustomWallpaperDelete: () => {},
-            }} />
+            <SettingsApp ui={appearance.ui} />
+            {/* The Upload tile clicks this, exactly as the desktop's does. */}
+            <input
+              ref={appearance.uploadRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              data-testid="standalone-wallpaper-upload"
+              onChange={appearance.onUploadFile}
+            />
           </div>
         );
       case "store":
@@ -274,7 +447,7 @@ export default function StandaloneAppPage() {
           <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
           <StandaloneTitle nameKey={titleKey} literal={titleLiteral} />
           <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">
-            Back to Desktop
+            <BackToDesktopLabel />
           </Link>
         </div>
         {/* App content */}

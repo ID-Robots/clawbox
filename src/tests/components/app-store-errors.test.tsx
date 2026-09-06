@@ -145,6 +145,37 @@ describe("app store — installed catalogue", () => {
     expect(screen.queryByText("store.noInstalledApps")).toBeNull();
   });
 
+  it("says what is actually true about apps built on the box, and asks ClawHub about them once", async () => {
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      // An app the coding agent built is an id in `installed_apps` and nothing
+      // on ClawHub.
+      if (url === "/setup-api/apps/store?slug=angry-pigs") return jsonResponse({ error: "not_found" }, 404);
+      if (url.startsWith("/setup-api/apps/store")) return jsonResponse(LIST);
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const lookups = () => fetchMock.mock.calls.filter((call) => String(call[0]).includes("slug=angry-pigs")).length;
+
+    render(<AppStore installedAppIds={["angry-pigs"]} onInstall={vi.fn()} onUninstall={vi.fn()} />);
+    await screen.findByText("Weather Deck");
+
+    fireEvent.click(screen.getByRole("button", { name: "store.installed" }));
+    // Not "you haven't installed any apps yet": this box has one installed,
+    // it simply did not come from the store.
+    await waitFor(() => expect(screen.getByTestId("store-empty-state").textContent)
+      .toBe("The apps installed on this box did not come from the store — an app built here has no store listing."));
+    await waitFor(() => expect(lookups()).toBe(1));
+
+    // The tab used to re-ask on every visit, so opening it three times meant
+    // three more 404s and three more console errors.
+    fireEvent.click(screen.getByRole("button", { name: "store.all" }));
+    await screen.findByText("Weather Deck");
+    fireEvent.click(screen.getByRole("button", { name: "store.installed" }));
+    await screen.findByTestId("store-empty-state");
+    expect(lookups()).toBe(1);
+  });
+
   it("ignores a stale first-page response after switching to Installed", async () => {
     let resolveFirstPage: ((response: Response) => void) | null = null;
     const firstPage = new Promise<Response>((resolve) => { resolveFirstPage = resolve; });

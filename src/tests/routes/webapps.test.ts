@@ -21,6 +21,15 @@ vi.mock("@/lib/code-projects", () => ({
   deployWebapp: vi.fn().mockResolvedValue(undefined),
   // The update path refreshes only index.html via this helper.
   writeWebappIndex: vi.fn().mockResolvedValue(undefined),
+  // The legacy host:port stub path, stubbed to "this is not a stub" so these
+  // cases stay about the plain serve/create/update route — the detector, the
+  // migration and the down page are exercised against a real temp box in
+  // webapps-legacy-stub.test.ts. Listed rather than left out because vitest
+  // THROWS on an export a mock factory does not return, which turned every
+  // index.html into a 404 the moment the route began looking at one.
+  LEGACY_STUB_MAX_BYTES: 4096,
+  legacyRedirectPort: () => null,
+  serverAppDownHtml: (name: string, detail: string) => `${name}: ${detail}`,
   // The route maps this to a 400; deployWebapp throws it for a name it refuses.
   ValidationError: class ValidationError extends Error {
     constructor(message: string) {

@@ -3,6 +3,7 @@
 import React, { useEffect, useLayoutEffect, useState, useCallback, useRef, memo } from 'react'
 import * as kv from '@/lib/client-kv'
 import { useT } from '@/lib/i18n'
+import { useTr } from '@/lib/i18n-floor'
 import { type MascotPhraseSet } from '@/lib/mascot-phrases'
 import { isPhraseCompatible } from '@/lib/mascot-language'
 import { NEUTRAL_PACK } from '@/lib/mascot-packs'
@@ -157,6 +158,7 @@ function intersectRange(a: Range, b: Range): Range {
 
 function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void; rightInset?: number } = {}) {
   const { locale, localeResolved } = useT()
+  const tr = useTr()
   // The verb at the thinking dots, picked once per thinking episode so it
   // reads as one word for one wait, not a slot machine.
   const [thinkingVerb, setThinkingVerb] = useState<string | null>(null)
@@ -510,7 +512,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     return fallbacks[Math.floor(Math.random() * fallbacks.length)]
   }, [])
 
-  // Close context menu on click/right-click elsewhere
+  // Close context menu on click/right-click elsewhere, or on Escape.
   useEffect(() => {
     if (!ctxMenu) return
     const close = (e: Event) => {
@@ -518,11 +520,24 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       e.preventDefault()
       setCtxMenu(null)
     }
+    // Escape closes the innermost thing open, and while this menu is up that
+    // is the menu — so it is taken on the document's capture phase and stopped
+    // there, the way HeaderDropdown's list and the desktop's dialogs take it.
+    // Without it the menu ignored the key entirely and only an outside click
+    // would dismiss it.
+    const closeOnEscape = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      e.stopPropagation()
+      setCtxMenu(null)
+    }
     window.addEventListener('click', close)
     window.addEventListener('contextmenu', close)
+    document.addEventListener('keydown', closeOnEscape, true)
     return () => {
       window.removeEventListener('click', close)
       window.removeEventListener('contextmenu', close)
+      document.removeEventListener('keydown', closeOnEscape, true)
     }
   }, [ctxMenu])
 
@@ -953,20 +968,27 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     writeCrabTransform()
   }, [writeCrabTransform])
 
+  /** What a tap does: open the chat, then a line of sass. Shared with the
+   *  keyboard, because the shelf hides its own chat button while the mascot is
+   *  shown — so a mascot that could only be tapped left a keyboard user with
+   *  no way through it at all. */
+  const tapMascot = useCallback(() => {
+    // Works even when sleeping.
+    if (onTap) onTap(xRef.current)
+    if (isSleepingRef.current) return
+    const sl = sassLinesRef.current; say(sl[Math.floor(Math.random() * sl.length)], 3000)
+    // Restart the action loop so mascot doesn't freeze after tap
+    if (stateTimeout.current) clearTimeout(stateTimeout.current)
+    stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
+  }, [onTap, say])
+
   const handlePointerUp = useCallback(() => {
     if (!draggingRef.current) return
     draggingRef.current = false
 
     // Tap detection — if pointer barely moved, trigger sass/chat
     if (!didDragRef.current) {
-      // Open chat on tap — works even when sleeping
-      if (onTap) onTap(xRef.current)
-      if (!isSleepingRef.current) {
-        const sl = sassLinesRef.current; say(sl[Math.floor(Math.random() * sl.length)], 3000)
-        // Restart the action loop so mascot doesn't freeze after tap
-        if (stateTimeout.current) clearTimeout(stateTimeout.current)
-        stateTimeout.current = setTimeout(() => doActionRef.current(), 3500)
-      }
+      tapMascot()
       return
     }
 
@@ -989,7 +1011,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     p.lastTime = performance.now()
     p.active = true
     physicsRAF.current = requestAnimationFrame(physicsLoop)
-  }, [physicsLoop])
+  }, [physicsLoop, tapMascot])
 
   const randRange = (min: number, max: number) => min + Math.random() * (max - min)
 
@@ -1549,6 +1571,19 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       <style>{MASCOT_KEYFRAMES}</style>
       <div ref={crabElRef}
         data-mascot={pet ? 'pet' : 'crab'}
+        // A control, not decoration: while the mascot is shown the shelf hides
+        // its own chat button, so this drawing is the way to the chat — and it
+        // was a bare <div> with no role, no tab stop and no name, unreachable
+        // by keyboard or screen reader. Enter and Space do what a tap does.
+        role="button"
+        tabIndex={0}
+        aria-label={tr('mascot.openChat', 'Open chat')}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return
+          // Space would scroll the desktop under it otherwise.
+          e.preventDefault()
+          tapMascot()
+        }}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -1697,7 +1732,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             width close to the sprite's own, and is drawn the way the art is:
             hard 2px edge, 4px corners, a solid offset shadow instead of a
             blur, and a square tail rotated to a point. */}
-        {speech && (() => {
+        {/* Not while the context menu is up: the menu is drawn upward from the
+            cursor and the bubble hangs above the head, so a right-click on a
+            speaking mascot painted the menu straight over its own words. The
+            menu is what the owner just asked for, so the bubble gives way —
+            and comes back when the menu goes, if its timer has not run out. */}
+        {speech && !ctxMenu && (() => {
           const accent = frenzy ? 'rgba(251,191,36,0.95)'
             : state === 'sass' ? 'rgba(220,38,38,0.9)'
             : state === 'facepalm' ? 'rgba(100,100,100,0.9)'
@@ -1859,14 +1899,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
               onClick={() => { mascotSleep(); setCtxMenu(null) }}
               className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3"
             >
-              <span className="text-base">💤</span> Sleep
+              <span className="text-base">💤</span> {tr('mascot.menuSleep', 'Sleep')}
             </button>
           )}
           <button
             onClick={() => { applyHidden(true); kv.set('clawbox-mascot-hidden', '1'); setCtxMenu(null); window.dispatchEvent(new Event('clawbox-hide-mascot')) }}
             className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400"
           >
-            <span className="text-base">👁️‍🗨️</span> Hide mascot
+            <span className="text-base">👁️‍🗨️</span> {tr('mascot.menuHide', 'Hide mascot')}
           </button>
         </div>
       )}

@@ -190,8 +190,31 @@ describe("GET projects", () => {
     const { projects } = await body();
     expect(projects).toHaveLength(1);
     expect(projects[0].latestRun).toEqual({
-      id: "run-newest00", status: "running", task: "task run-newest00", startedAt: 2_000, completedAt: null,
+      id: "run-newest00", status: "running", task: "task run-newest00", reviewOf: null, startedAt: 2_000, completedAt: null,
     });
+  });
+
+  // A review pass has no task of its own — its `task` IS the prompt the runner
+  // hands the model — so a caller reading `task` alone put the first 120
+  // characters of that prompt under "Last run:" on the New App card while
+  // every other surface said "Automatic review pass of run-…". The row has to
+  // carry what makes the two tellable apart.
+  it("says when the newest run was an automatic review pass", async () => {
+    const dir = makeRepo("site", { commit: "first" });
+    const real = fs.realpathSync(dir);
+    fs.writeFileSync(
+      path.join(root, "data", "coding-agent-runs.json"),
+      JSON.stringify([{
+        id: "run-review000", status: "completed", startedAt: 3_000, completedAt: 4_000, source: "agent",
+        directory: real, reviewOf: "run-gywqvpbg",
+        task: "Automatic review pass. Start by running the project's own verification — its tests or build — in THIS pass and quote the output you saw.",
+      }]),
+    );
+    vi.resetModules();
+    GET = (await import("@/app/setup-api/coding-agent/projects/route")).GET;
+
+    const { projects } = await body();
+    expect(projects[0].latestRun).toMatchObject({ id: "run-review000", reviewOf: "run-gywqvpbg" });
   });
 
   describe("code projects", () => {

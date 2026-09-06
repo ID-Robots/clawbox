@@ -1696,3 +1696,172 @@ describe("the workspace, the breadcrumb and the live view", () => {
   });
 
 });
+
+/**
+ * What the UI sweep found on the run page: steps that were dropped without a
+ * word, a Back button that landed on someone else's project, a chip claiming
+ * the owner is needed with the reason nowhere on the box, an Open that did
+ * nothing at all on the standalone page, and figures no locale could read.
+ */
+describe("CodingAgentApp — the run page's honesty", () => {
+  const started = Date.now() - 60 * 60_000;
+  const PROGRESS = Array.from({ length: 60 }, (_, i) => `Editing Scene-${i}.tsx`);
+
+  it("draws every recorded step, and counts what it draws", async () => {
+    const long = {
+      ...RUN,
+      startedAt: started,
+      progress: PROGRESS,
+      progressAt: PROGRESS.map((_, i) => started + i * 30_000),
+    };
+    stubFetch({ enabled: true, readiness: READY }, [long], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    const timeline = await screen.findByTestId("coding-agent-run-activity");
+    const steps = timeline.querySelectorAll("ol > li");
+    // 40 of the 60, starting at "+28m 59s", is what the owner used to get.
+    expect(steps).toHaveLength(60);
+    expect(steps[0].getAttribute("data-at")).toBe(String(started));
+    expect(within(timeline).getAllByTestId("coding-agent-run-activity-time")[0].textContent).toBe("+0s");
+    expect(within(timeline).getByText("60")).toBeInTheDocument();
+  });
+
+  it("goes back to Projects from a run that belongs to none, not to the project opened before it", async () => {
+    const orphan = {
+      ...RUN,
+      id: "run-orphan01",
+      projectId: null,
+      directory: "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1",
+      task: "Your task (t1 of 3): Create a new images/ folder",
+    };
+    stubFetch({ enabled: true, readiness: READY }, [RUN, orphan], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    // The owner visits a project first — the stale folder that used to win.
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    await screen.findByTestId("coding-agent-project-page");
+    act(() => { window.dispatchEvent(new CustomEvent(OPEN_CODING_RUN_EVENT, { detail: { runId: "run-orphan01" } })); });
+    const page = await screen.findByTestId("coding-agent-run-page");
+    expect(page).toHaveAttribute("data-run-id", "run-orphan01");
+    // No project crumb: this run belongs to none.
+    expect(screen.queryByTestId("coding-agent-crumb-project")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-run-back"));
+    expect(await screen.findByTestId("coding-agent-projects-section")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
+  });
+
+  it("says WHY a pull request needs the owner, instead of hiding it in a tooltip nothing can reach", async () => {
+    const detail = "Nothing was committed, so there is no pull request to open.";
+    const blocked = {
+      ...RUN,
+      pr: {
+        phase: "blocked", number: null, url: null, branch: "clawbox/run-k3x9q2ab", base: "main",
+        checks: { total: 0, passed: 0, failed: 0, pending: 0 }, detail, startedAt: started, endedAt: started + 1000,
+      },
+    };
+    stubFetch({ enabled: true, readiness: READY }, [blocked], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    await screen.findByTestId("coding-agent-run-page");
+    const chip = screen.getByTestId(`coding-agent-pr-${RUN.id}`);
+    // Not an <a> without an href, and not deaf to the pointer either.
+    expect(chip.tagName).toBe("SPAN");
+    expect(chip.className).not.toContain("pointer-events-none");
+    expect(chip.getAttribute("title")).toBe(detail);
+    expect(screen.getByTestId(`coding-agent-pr-detail-${RUN.id}`).textContent).toBe(detail);
+  });
+
+  it("keeps the chip a link once GitHub has given it one, with no detail line", async () => {
+    const opened = {
+      ...RUN,
+      pr: {
+        phase: "merged", number: 12, url: "https://github.com/yalexx/site/pull/12", branch: "clawbox/run-1", base: "main",
+        checks: { total: 0, passed: 0, failed: 0, pending: 0 }, detail: null, startedAt: started, endedAt: started + 1000,
+      },
+    };
+    stubFetch({ enabled: true, readiness: READY }, [opened], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    await screen.findByTestId("coding-agent-run-page");
+    const chip = screen.getByTestId(`coding-agent-pr-${RUN.id}`);
+    expect(chip.tagName).toBe("A");
+    expect(chip).toHaveAttribute("href", "https://github.com/yalexx/site/pull/12");
+    expect(screen.queryByTestId(`coding-agent-pr-detail-${RUN.id}`)).toBeNull();
+  });
+
+  it("navigates to the app on the standalone page, where nothing listens for the open-app event", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, pathname: "/app/coding", assign });
+    stubFetch({ enabled: true, readiness: READY }, [], { projects: [SITE_PROJECT] });
+    const opened: string[] = [];
+    const onApp = (e: Event) => opened.push((e as CustomEvent<{ appId: string }>).detail.appId);
+    window.addEventListener("clawbox:open-app", onApp);
+    try {
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+      fireEvent.click(await screen.findByTestId("coding-agent-project-open"));
+      expect(assign).toHaveBeenCalledWith("/app/installed-site");
+      expect(opened).toEqual([]);
+    } finally {
+      window.removeEventListener("clawbox:open-app", onApp);
+    }
+  });
+
+  it("still opens a desktop window when there IS a desktop", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [], { projects: [SITE_PROJECT] });
+    const opened: string[] = [];
+    const onApp = (e: Event) => opened.push((e as CustomEvent<{ appId: string }>).detail.appId);
+    window.addEventListener("clawbox:open-app", onApp);
+    try {
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+      fireEvent.click(await screen.findByTestId("coding-agent-project-open"));
+      expect(opened).toEqual(["installed-site"]);
+    } finally {
+      window.removeEventListener("clawbox:open-app", onApp);
+    }
+  });
+
+  it("lets a figure wrap rather than clipping the model name and the thinking hint", async () => {
+    const rich = { ...RUN, modelsUsed: ["deepseek-v4-pro[1m]"], tokensUsed: 120_000, thinkingTokens: 28_854 };
+    stubFetch({ enabled: true, readiness: READY }, [rich], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    const figures = await screen.findByTestId("coding-agent-run-figures");
+    // Nothing in the grid is cut with an ellipsis any more…
+    expect(figures.querySelectorAll(".truncate")).toHaveLength(0);
+    const model = within(figures).getByText("deepseek-v4-pro[1m]");
+    expect(model.className).toContain("break-words");
+    // …and the hint line, which never had one, carries the whole text on hover.
+    const hint = within(figures).getByText(t("codingAgent.thinking", { n: 28_854 }));
+    expect(hint).toHaveAttribute("title", t("codingAgent.thinking", { n: 28_854 }));
+  });
+
+  it("does not tick a run that did not finish", async () => {
+    const helper = { type: "explorer", description: "read the folder", startedAt: started, endedAt: started + 4_000, refused: false };
+    const failed = { ...RUN, status: "failed", error: "Could not start claude-ds: spawn /usr/bin/setpriv ENOENT", subagents: [helper], subagentsTotal: 1 };
+    stubFetch({ enabled: true, readiness: READY }, [failed], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    await screen.findByTestId("coding-agent-run-page");
+    const main = screen.getByTestId("coding-agent-agent-main");
+    expect(main).toHaveAttribute("data-outcome", "unfinished");
+    expect(main.querySelector(".material-symbols-rounded")?.textContent).toBe("error");
+  });
+
+  it("ticks one that did", async () => {
+    const helper = { type: "explorer", description: "read the folder", startedAt: started, endedAt: started + 4_000, refused: false };
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, subagents: [helper], subagentsTotal: 1 }], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
+    await screen.findByTestId("coding-agent-run-page");
+    const main = await screen.findByTestId("coding-agent-agent-main");
+    expect(main).toHaveAttribute("data-outcome", "completed");
+    expect(main.querySelector(".material-symbols-rounded")?.textContent).toBe("check_circle");
+  });
+});

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { APP_PROXY_CSP, resolveAppProxyTarget } from "@/lib/app-proxy";
+import { APP_PROXY_CSP, appProxyAllowOrigin, resolveAppProxyTarget } from "@/lib/app-proxy";
 
 export const dynamic = "force-dynamic";
 
@@ -86,6 +86,17 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
   // — a document whatever its declared type says, and it costs an asset
   // nothing — appended to whatever policy the app set for itself.
   out.append("content-security-policy", APP_PROXY_CSP);
+  // …and the CORS that sandbox makes necessary: the document's origin is
+  // `null`, so its module scripts and `crossorigin` stylesheets are CORS
+  // fetches the app's server was never asked to answer (see
+  // appProxyAllowOrigin). Vary on Origin, since the answer now depends on it.
+  const allowOrigin = appProxyAllowOrigin(request.headers.get("origin"), out.get("access-control-allow-origin"));
+  if (allowOrigin) {
+    out.set("access-control-allow-origin", allowOrigin);
+    const vary = out.get("vary");
+    if (!vary) out.set("vary", "Origin");
+    else if (!/(^|,)\s*origin\s*(,|$)/i.test(vary)) out.set("vary", `${vary}, Origin`);
+  }
   return new NextResponse(method === "HEAD" ? null : upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: out });
 }
 

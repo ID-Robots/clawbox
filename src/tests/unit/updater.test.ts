@@ -269,6 +269,56 @@ describe("updater", () => {
     });
   });
 
+  /**
+   * The run state is this process's memory, and on 2026-09-05 the step that
+   * FAILED was the restart — so nothing was going to clear it. System Update
+   * adopts such a failure now instead of showing "1 update available" over it,
+   * which only works if the owner's Dismiss can reach the server's copy.
+   */
+  describe("dismissSettledUpdate", () => {
+    it("forgets a settled run", async () => {
+      // Driven through the post-restart continuation, the way the advisory
+      // case above is: a full `startUpdate` never settles in a test, because
+      // rebuild_reboot waits to be killed by the restart it asks for.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
+        "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": { stdout: "Error: rebuild failed (exit 137)\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("failed");
+      });
+
+      await vi.waitFor(() => {
+        expect(updater.dismissSettledUpdate()).toBe(true);
+      });
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("idle");
+      expect(state.steps.every((step) => step.status === "pending")).toBe(true);
+    });
+
+    it("refuses while a run owns the box, so it cannot clear a live run's state", () => {
+      updater.resetUpdateState();
+      updater.startUpdate();
+
+      expect(updater.dismissSettledUpdate()).toBe(false);
+      expect(updater.getUpdateState().phase).toBe("running");
+    });
+  });
+
   describe("isUpdateCompleted", () => {
     it("returns false when update not completed", async () => {
       mockGet.mockResolvedValue(undefined);
@@ -344,6 +394,97 @@ describe("updater", () => {
       const state = updater.getUpdateState();
       const aptStep = state.steps.find((step) => step.id === "apt_update");
       expect(aptStep?.status).toBe("failed");
+      expect(aptStep?.error).toBe("E: Could not get lock /var/lib/dpkg/lock-frontend");
+    });
+
+    /**
+     * 2026-09-05, on the box: the rebuild was OOM-killed and the failed step
+     * recorded "clawbox-root-update@rebuild_reboot.service: Consumed 8.523s CPU
+     * time." as the reason — systemd's accounting epilogue, which is ALWAYS the
+     * last line after a unit exits — while `Error: rebuild failed (exit 137)`
+     * sat four lines above it. The journal below is that tail, sudo/PAM noise
+     * and all; the step here is apt_update only because it is the one this
+     * harness can drive, the reader is the same one.
+     */
+    it("names the step's own error, not systemd's epilogue, when a root step fails", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
+        "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: [
+            "Starting ClawBox Root Update Step (apt_update).",
+            "    root : PWD=/ ; USER=clawbox ; COMMAND=/usr/bin/systemctl --user stop kokoro-server.service",
+            "pam_unix(sudo:session): session opened for user clawbox(uid=1000) by (uid=0)",
+            "Running bun build...",
+            "(to clawbox) root on none",
+            "Error: rebuild failed (exit 137)",
+            "  Restored the previous build; the dashboard answers on :80 again",
+            "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
+            "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
+            "Failed to start ClawBox Root Update Step (apt_update).",
+            "clawbox-root-update@apt_update.service: Consumed 8.523s CPU time.",
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.status).toBe("failed");
+      });
+
+      const aptStep = updater.getUpdateState().steps.find((step) => step.id === "apt_update");
+      expect(aptStep?.error).toBe("Error: rebuild failed (exit 137)");
+    });
+
+    it("falls back to the step's last own line when nothing said 'Error:'", async () => {
+      // Neither systemd's summary nor the sudo session pair the rebuild leaves
+      // behind is the reason a step failed, so the fallback has to reach past
+      // both to the last thing the STEP itself wrote.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
+        "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: [
+            "E: Could not get lock /var/lib/dpkg/lock-frontend",
+            "pam_unix(sudo:session): session closed for user clawbox",
+            "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
+            "clawbox-root-update@apt_update.service: Consumed 1.204s CPU time.",
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.status).toBe("failed");
+      });
+
+      const aptStep = updater.getUpdateState().steps.find((step) => step.id === "apt_update");
       expect(aptStep?.error).toBe("E: Could not get lock /var/lib/dpkg/lock-frontend");
     });
 

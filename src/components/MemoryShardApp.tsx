@@ -79,6 +79,17 @@ function isRunState(value: unknown): value is MemoryRunState {
 /** What the server accepts as a time; anything else is still being typed. */
 const TIME_OF_DAY = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+/**
+ * The route names its failures in snake_case (`index_identity_mismatched`);
+ * a translation key may only carry alphanumeric segments (the naming rule
+ * `translations.test.ts` enforces), so the code is camel-cased before it is
+ * pasted into one. Unknown codes still produce a key that resolves to
+ * nothing, which is why every caller keeps the server's English as the floor.
+ */
+function errorKeySuffix(code: string): string {
+  return code.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+}
+
 function MemoryIndexCard({ initial, onError }: {
   /** The status the window already read on the way in, when it recognised one.
    *  The card used to throw that payload away and probe again, which cost the
@@ -88,6 +99,15 @@ function MemoryIndexCard({ initial, onError }: {
   onError: (msg: string) => void;
 }) {
   const { t } = useT();
+  // The route's sentences are English, always. Its contract — like every other
+  // ClawBox route's — is a stable `code` beside them, so a screen can word the
+  // fact in the owner's language; the server's English is the floor until the
+  // locale pack carries the key, which is what kept German desktops reading
+  // "The index does not match the configured embedding model."
+  const tr = useCallback((key: string, english: string) => {
+    const value = t(key);
+    return value === key ? english : value;
+  }, [t]);
   const [status, setStatus] = useState<ClawKeepMemoryStatus | null>(initial);
   const [busy, setBusy] = useState<MemoryIndexMode | null>(null);
   const [confirmFull, setConfirmFull] = useState(false);
@@ -238,7 +258,9 @@ function MemoryIndexCard({ initial, onError }: {
   const runLine =
     run.status === "running" ? t("clawkeep.memory.runRunning")
     : run.status === "succeeded" ? t("clawkeep.memory.runSucceeded", { when: timeAgo(run.finishedAtMs, t) })
-    : run.status === "failed" ? (run.error || t("clawkeep.memory.runFailed"))
+    : run.status === "failed" ? (run.errorCode && run.error
+        ? tr(`clawkeep.memory.runError.${errorKeySuffix(run.errorCode)}`, run.error)
+        : run.error || t("clawkeep.memory.runFailed"))
     : t("clawkeep.memory.runNever");
   // Who started it, what it did and how long it took — the record carries all
   // three, and without them a scheduled pass was indistinguishable from a
@@ -262,6 +284,12 @@ function MemoryIndexCard({ initial, onError }: {
   // `enabled` at all, and that box is indexing — greying its buttons out over a
   // field it never sent would be the app inventing a state.
   const paused = status.enabled === false;
+  // The banner above says "Run a full reindex", and only a full pass can clear
+  // a mismatched or missing identity — an incremental one re-embeds what
+  // changed and leaves the rest of the index built for another model. With
+  // "Index now" filled and "Full reindex" grey, the advice and the emphasised
+  // control pointed at two different buttons.
+  const fullReindexAdvised = status.indexIdentity === "mismatched" || status.indexIdentity === "missing";
 
   return (
     <div className={`${CARD} space-y-4`}>
@@ -296,8 +324,8 @@ function MemoryIndexCard({ initial, onError }: {
       </div>
 
       {status.error && (
-        <p className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/25 rounded-md px-2.5 py-2">
-          {status.error}
+        <p className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/25 rounded-md px-2.5 py-2" data-testid="memory-shard-status-error">
+          {status.errorCode ? tr(`clawkeep.memory.error.${errorKeySuffix(status.errorCode)}`, status.error) : status.error}
         </p>
       )}
 
@@ -336,7 +364,8 @@ function MemoryIndexCard({ initial, onError }: {
           type="button"
           disabled={busy !== null || running || paused}
           onClick={() => void startIndex("incremental")}
-          className={`${BTN_PRIMARY} flex-1`}
+          data-testid="memory-shard-index-now"
+          className={`${fullReindexAdvised ? BTN_SECONDARY : BTN_PRIMARY} flex-1`}
         >
           {busy !== null || running ? t("clawkeep.memory.indexing") : t("clawkeep.memory.indexNow")}
         </button>
@@ -344,7 +373,8 @@ function MemoryIndexCard({ initial, onError }: {
           type="button"
           disabled={busy !== null || running || paused}
           onClick={() => setConfirmFull(true)}
-          className={`${BTN_SECONDARY} flex-1`}
+          data-testid="memory-shard-full-reindex"
+          className={`${fullReindexAdvised ? BTN_PRIMARY : BTN_SECONDARY} flex-1`}
         >
           {t("clawkeep.memory.fullReindex")}
         </button>

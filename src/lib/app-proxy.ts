@@ -66,6 +66,30 @@ export const APP_PROXY_PREFIX = "/apps/";
 /** The sandbox every proxied response is served under — everything but allow-same-origin. */
 export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads allow-pointer-lock allow-orientation-lock";
 
+/**
+ * The `Access-Control-Allow-Origin` a proxied response needs, or null when it
+ * needs none.
+ *
+ * The sandbox above is what makes this necessary. A document served under
+ * `Content-Security-Policy: sandbox` (no allow-same-origin) has the opaque
+ * origin `null`, and a module script or a `crossorigin` stylesheet — which
+ * is everything a Vite build emits, and every ES-module app whatever built it
+ * — is fetched WITH CORS. The app's own server never had a reason to answer
+ * CORS, so both fetches died with "from origin 'null' has been blocked" and
+ * the window was an empty #root with nothing on screen to say why.
+ *
+ * The proxy imposes the opaque origin, so the proxy answers for it — and
+ * only for it: `null` is echoed back, any other origin gets nothing, and an
+ * app that sets its own policy keeps it. Never with
+ * `Access-Control-Allow-Credentials`: the cookie is stripped on the way in
+ * (a document here could not use one anyway), and answering an origin WITH
+ * credentials is the hole this is not.
+ */
+export function appProxyAllowOrigin(requestOrigin: string | null, upstreamAllowOrigin: string | null): string | null {
+  if (upstreamAllowOrigin) return null;
+  return requestOrigin === "null" ? "null" : null;
+}
+
 /** How long a listener verdict is trusted: an "owned" one for this long, a refusal for a fraction of it, so a server just started is picked up on the next try. */
 export const LISTENER_CHECK_TTL_MS = 30_000;
 export const LISTENER_REFUSAL_TTL_MS = 3_000;

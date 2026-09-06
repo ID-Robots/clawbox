@@ -179,6 +179,15 @@ export function standaloneSettingsHref(section: string): string {
   return `/app/settings?${STANDALONE_SETTINGS_SECTION_PARAM}=${encodeURIComponent(section)}`;
 }
 
+/**
+ * Where an app lives on its own page — what a control on `/app/<id>` has to
+ * NAVIGATE to, since `dispatchOpenApp` there reaches no desktop and does
+ * nothing at all. The one spelling of that address, beside the Settings one.
+ */
+export function standaloneAppHref(appId: string): string {
+  return `/app/${encodeURIComponent(appId)}`;
+}
+
 export interface FixErrorContext {
   source: string;
   message: string;

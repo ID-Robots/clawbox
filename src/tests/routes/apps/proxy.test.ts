@@ -115,6 +115,38 @@ describe("the app proxy", () => {
     expect(json.headers.get("x-frame-options")).toBeNull();
   });
 
+  it("answers the CORS its own sandbox causes, so a module script and a crossorigin stylesheet load", async () => {
+    // The window was an empty white panel: both of a Vite build's assets died
+    // with "from origin 'null' has been blocked by CORS policy: No
+    // 'Access-Control-Allow-Origin' header is present". The sandbox is what
+    // makes the origin opaque, so the proxy has to answer for it.
+    meta("site");
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "text/javascript" }); res.end("export default 1"); };
+    const script = await routes.GET(
+      req("/apps/site/assets/index-BpDL3fMp.js", { headers: { origin: "null", "sec-fetch-dest": "script" } }),
+      ctx("site", ["assets", "index-BpDL3fMp.js"]),
+    );
+    expect(script.headers.get("access-control-allow-origin")).toBe("null");
+    expect(script.headers.get("vary")?.toLowerCase()).toContain("origin");
+    // Never credentialed: the owner's cookie is stripped on the way in, and an
+    // allowed origin WITH credentials is the hole this is not.
+    expect(script.headers.get("access-control-allow-credentials")).toBeNull();
+
+    // A request that is not from the sandbox is answered as before.
+    const same = await routes.GET(req("/apps/site/assets/index-BpDL3fMp.js"), ctx("site", ["assets", "index-BpDL3fMp.js"]));
+    expect(same.headers.get("access-control-allow-origin")).toBeNull();
+    const elsewhere = await routes.GET(
+      req("/apps/site/assets/index-BpDL3fMp.js", { headers: { origin: "https://evil.example" } }),
+      ctx("site", ["assets", "index-BpDL3fMp.js"]),
+    );
+    expect(elsewhere.headers.get("access-control-allow-origin")).toBeNull();
+
+    // An app that answers CORS itself keeps its own policy.
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "text/css", "access-control-allow-origin": "https://studio.example" }); res.end("body{}"); };
+    const styled = await routes.GET(req("/apps/site/assets/a.css", { headers: { origin: "null" } }), ctx("site", ["assets", "a.css"]));
+    expect(styled.headers.get("access-control-allow-origin")).toBe("https://studio.example");
+  });
+
   it("carries a POST body through and hands a redirect back rather than following it", async () => {
     meta("site");
     handler = (r, res, body) => {
