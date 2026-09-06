@@ -115,86 +115,21 @@ const OPENCLAW_HOME_DIR =
   || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
 const CLAWBOX_HOME_DIR = process.env.HOME ?? "/home/clawbox";
 /**
- * The core's implicit agent, for a config that declares no roster at all.
+ * The agent whose LEGACY credential file ClawBox writes, pre-v2.
  *
- * `LEGACY_IMPLICIT_AGENT_ID` in the installed core
- * (`dist/session-key-*.js`), and what `listAgentIds` answers when
- * `agents.entries` / `agents.list` are both absent — which is every stock box.
+ * `main` is the core's implicit agent (`LEGACY_IMPLICIT_AGENT_ID`) and the
+ * directory it resolves for a config with no roster, which is every box that
+ * still has a legacy `auth-profiles.json` to write. Deliberately NOT used for
+ * the `models auth …` calls any more — see `pasteAuthApiKey`.
  */
-const IMPLICIT_AGENT_ID = "main";
-
-/**
- * The agent whose store ClawBox writes to, resolved the way the CLI would.
- *
- * ONE id is computed and passed explicitly to BOTH the credential path and
- * every `models auth …` call, because those commands do not resolve alike when
- * `--agent` is omitted: `resolveModelsTargetAgent` sends a WRITE through
- * `resolveSoleAgentId` and a READ (`auth list`) through
- * `resolveAmbientOwnerAgentId`, so a guard that read one store while the paste
- * wrote another would be no guard at all.
- *
- * What it must NOT be is a constant. `main` was pinned here, and on a box whose
- * roster declares another agent that wrote the device's ClawBox AI credential
- * into a store the gateway never reads — leaving whatever was in the real store
- * to keep serving turns, however stale. That is TASK-730: two credentials on
- * one box, the revoked one preferred, and every ClawBox surface reporting on
- * the good one.
- *
- * The rule is the core's own `tryResolveSoleAgentId`, not an invention:
- *
- *   - no roster property at all  → `main` (the implicit agent)
- *   - exactly one declared agent → that agent, whatever it is called
- *   - more than one              → the core cannot pick either, and neither do
- *                                  we: `main` is passed on, and the CLI
- *                                  answers `Unknown agent id "main"` when it is
- *                                  not one of them. That is today's behaviour
- *                                  and it is loud; guessing would not be.
- *
- * Both roster shapes are read because the core reads both
- * (`readAgentRosterProperty`: `agents.entries` as a record, `agents.list` as an
- * array).
- */
-function resolveAgentIdFrom(config: unknown): string {
-  const agents = (config as { agents?: Record<string, unknown> } | null)?.agents;
-  if (!agents || typeof agents !== "object" || Array.isArray(agents)) return IMPLICIT_AGENT_ID;
-  const ids = rosterAgentIds(agents);
-  // `undefined` is "no roster declared"; an empty roster IS declared, and there
-  // the implicit agent is not implied — pass `main` on and let the CLI object.
-  if (ids === undefined) return IMPLICIT_AGENT_ID;
-  return ids.length === 1 ? ids[0] : IMPLICIT_AGENT_ID;
-}
-
-/** The declared agent ids, or undefined when no roster property is present. */
-function rosterAgentIds(agents: Record<string, unknown>): string[] | undefined {
-  const entries = Object.hasOwn(agents, "entries") ? agents.entries : undefined;
-  if (entries !== undefined) {
-    if (!entries || typeof entries !== "object" || Array.isArray(entries)) return [];
-    return Object.keys(entries).map((id) => id.trim()).filter(Boolean);
-  }
-  const list = Object.hasOwn(agents, "list") ? agents.list : undefined;
-  if (list === undefined) return undefined;
-  if (!Array.isArray(list)) return [];
-  return list
-    .map((entry) => (entry && typeof entry === "object" ? (entry as { id?: unknown }).id : undefined))
-    .map((id) => (typeof id === "string" ? id.trim() : ""))
-    .filter(Boolean);
-}
-
-/**
- * The resolved agent for THIS request.
- *
- * Read per call rather than cached in a module constant: the roster is owned by
- * the owner and by `openclaw agents add`, and a value captured at import time
- * would keep addressing yesterday's store for the lifetime of the server.
- */
-async function clawboxAgentId(): Promise<string> {
-  return resolveAgentIdFrom(await readOpenClawConfig().catch(() => null));
-}
-
-/** Where that agent keeps the pre-v2 credential file. */
-function authProfilesPathFor(agentId: string): string {
-  return path.join(OPENCLAW_HOME_DIR, "agents", agentId, "agent", "auth-profiles.json");
-}
+const LEGACY_AGENT_ID = "main";
+const AUTH_PROFILES_PATH = path.join(
+  OPENCLAW_HOME_DIR,
+  "agents",
+  LEGACY_AGENT_ID,
+  "agent",
+  "auth-profiles.json",
+);
 const CLAWBOX_UID = process.getuid?.() ?? 1000;
 const CLAWBOX_GID = process.getgid?.() ?? 1000;
 const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://clawbox.com/api/ai";
@@ -412,9 +347,9 @@ async function applyConfigSetGroups(groups: (ConfigSetGroup | null)[]): Promise<
   }
 }
 
-async function readAuthProfiles(agentId: string): Promise<AuthProfilesFile> {
+async function readAuthProfiles(): Promise<AuthProfilesFile> {
   try {
-    const raw = await fs.readFile(authProfilesPathFor(agentId), "utf-8");
+    const raw = await fs.readFile(AUTH_PROFILES_PATH, "utf-8");
     return JSON.parse(raw) as AuthProfilesFile;
   } catch (err) {
     // Only a genuinely absent file means "no profiles yet" (first run). Any
@@ -430,15 +365,14 @@ async function readAuthProfiles(agentId: string): Promise<AuthProfilesFile> {
   }
 }
 
-async function writeAuthProfiles(agentId: string, authProfiles: AuthProfilesFile) {
-  const target = authProfilesPathFor(agentId);
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  const tmpPath = target + `.tmp.${Date.now()}.${process.pid}`;
+async function writeAuthProfiles(authProfiles: AuthProfilesFile) {
+  await fs.mkdir(path.dirname(AUTH_PROFILES_PATH), { recursive: true });
+  const tmpPath = AUTH_PROFILES_PATH + `.tmp.${Date.now()}.${process.pid}`;
   await fs.writeFile(tmpPath, JSON.stringify(authProfiles, null, 2), {
     mode: 0o600,
   });
-  await fs.rename(tmpPath, target);
-  await fs.chown(target, CLAWBOX_UID, CLAWBOX_GID);
+  await fs.rename(tmpPath, AUTH_PROFILES_PATH);
+  await fs.chown(AUTH_PROFILES_PATH, CLAWBOX_UID, CLAWBOX_GID);
 }
 
 /**
@@ -461,12 +395,26 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
   await spawnOpenclawCli(
     [
       "models", "auth", "paste-api-key",
-      // `--agent` omitted means "the configured default agent", which is not
-      // necessarily the one ClawBox operates on — and a WRITE and a READ do not
-      // even resolve it the same way. `applyOpenAiAuthOrder` and
-      // `assertNoSignInAt` pass the SAME resolved id, so the guard, the order
-      // and the paste all address one store.
-      "--agent", await clawboxAgentId(),
+      // NO `--agent`. ClawBox used to pin `main` here — and in the sign-in
+      // guard and the order write — on the argument that the CLI resolves a
+      // READ and a WRITE differently, so an unpinned pair could address two
+      // stores. Measured against the installed core (2026.8.1) with a sole
+      // `pro-agent` roster and the flag omitted, that is not what happens:
+      //
+      //   models auth list --json     -> "agentId": "pro-agent"
+      //   paste-api-key …             -> agents/pro-agent/agent/openclaw-agent.sqlite
+      //
+      // The two resolvers only diverge on a roster with SEVERAL agents, and
+      // there `main` was never the right answer either. What the pin actually
+      // did was write this device's ClawBox AI credential into an agent store
+      // the gateway does not read — leaving whatever the real store held,
+      // however stale, to keep serving turns, which is TASK-730 — or, when
+      // `main` is not in the roster at all, fail the whole save outright:
+      //
+      //   $ openclaw models auth paste-api-key --agent main …
+      //   Unknown agent id "main". Use "openclaw agents list" to see configured agents.
+      //
+      // So the target is the harness's to choose, and this asks it to.
       "--provider", provider,
       "--profile-id", profileId,
     ],
@@ -533,10 +481,21 @@ async function assertNoSignInAt(profileId: string): Promise<void> {
   if (openclawIsAbsent()) return;
   let raw: string;
   try {
-    // Same agent as the paste this guards and as the auth order beside it: the
-    // store `--agent` selects is the whole subject of the question.
+    // Unpinned, like the paste this guards and the auth order beside it: all
+    // three let the core pick the agent, so all three address one store on
+    // every box where a save can succeed (see `pasteAuthApiKey`). The response
+    // names the agent it answered for (`agentId`, `agentDir`), so a box that
+    // disagrees can still be told apart in a log.
+    //
+    // KNOWN LIMIT, measured: before an agent has a store of its own the core
+    // answers from the shared one (`authStatePath` pointed at `agents/main/`
+    // while `agentId` was `pro-agent`), so this can see an inherited profile
+    // the paste would only have shadowed. It refuses in that case, which is
+    // the safe direction — and strictly better than what it replaces, since
+    // the same box previously failed the whole save with
+    // `Unknown agent id "main"`.
     raw = await spawnOpenclawCli(
-      ["models", "auth", "list", "--agent", await clawboxAgentId(), "--json"],
+      ["models", "auth", "list", "--json"],
       { captureStdout: true, timeoutMs: 60_000 },
     );
   } catch (err) {
@@ -615,9 +574,6 @@ async function applyOpenAiAuthOrder(
   config: OpenClawConfig | null,
   clawboxWroteOrder: boolean,
 ): Promise<string | undefined> {
-  // From the SAME config the caller already read, so the order and the
-  // credential cannot end up in different agents' stores.
-  const agentId = resolveAgentIdFrom(config);
   const order = openaiAuthOrder(
     config?.auth?.profiles,
     preferred,
@@ -626,8 +582,8 @@ async function applyOpenAiAuthOrder(
   const shouldSet = order.length > 1;
   if (!shouldSet && !clawboxWroteOrder) return undefined;
   const args = shouldSet
-    ? ["models", "auth", "order", "set", "--agent", agentId, "--provider", CHATGPT_PROVIDER, ...order]
-    : ["models", "auth", "order", "clear", "--agent", agentId, "--provider", CHATGPT_PROVIDER];
+    ? ["models", "auth", "order", "set", "--provider", CHATGPT_PROVIDER, ...order]
+    : ["models", "auth", "order", "clear", "--provider", CHATGPT_PROVIDER];
   try {
     await spawnOpenclawCli(args, { timeoutMs: 60_000 });
     // The marker follows the write that succeeded, so a later save knows
@@ -2470,11 +2426,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       }
       await pasteAuthApiKey(ocProvider, config.profileKey, apiKeyValue);
     } else {
-      // Same resolution as the paste above, so the legacy file and the CLI
-      // that migrates it address one agent's store.
-      const legacyAgentId = await clawboxAgentId();
-      const legacyProfilesPath = authProfilesPathFor(legacyAgentId);
-      const authProfiles = await readAuthProfiles(legacyAgentId);
+      const authProfiles = await readAuthProfiles();
       if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
         // { type: "oauth", provider, access, id?, refresh, expires, projectId? }
@@ -2494,7 +2446,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           ...(projectId ? { projectId } : {}),
         };
       }
-      await writeAuthProfiles(legacyAgentId, authProfiles);
+      await writeAuthProfiles(authProfiles);
       // OpenClaw 2 refuses to hydrate this LEGACY file: run the doctor
       // migration IMMEDIATELY, before the config-set batch, catalog refresh
       // and session sweep execute against a poisoned shared auth store (it
@@ -2510,7 +2462,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       try {
         await runOpenclawDoctorFix();
       } catch (doctorErr) {
-        const siblings = await fs.readdir(path.dirname(legacyProfilesPath)).catch(() => [] as string[]);
+        const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
         const migratedStore = siblings.some((name) => name.startsWith("auth-profiles.json.migrated-"));
         console.error(
           "[configure] doctor --fix failed after the OAuth store write:",
@@ -2533,7 +2485,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         }
         if (mustRollBack) {
           const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-          await fs.rename(legacyProfilesPath, `${legacyProfilesPath}.failed-${stamp}`).catch(() => {});
+          await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
           return NextResponse.json(
             { error: "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal." },
             { status: 502 },
@@ -3252,13 +3204,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           error: "This box is signed in to that provider, and the sign-in is stored in the same "
             + `credential slot (${err.profileId}). Saving an API key here would delete it. `
             + "Remove the sign-in first — in the Terminal: "
-            // The same `--agent` the guard read with and the paste writes to.
-            // Without it the CLI takes the configured default agent, so on a
-            // multi-agent box the owner's command clears a different store and
-            // the refusal never goes away. Argument order is the command's own
+            // Unpinned, exactly as the guard read and the paste wrote: the
+            // core resolves the same agent for all three, and naming one here
+            // would send the owner at a store none of them touched. Argument
+            // order is the command's own
             // (`models auth logout [options] <profileId>`, read from its
             // --help on 2026.8.1).
-            + `openclaw models auth logout --agent ${await clawboxAgentId()} ${err.profileId}`
+            + `openclaw models auth logout ${err.profileId}`
             + " — then paste the key.",
           code: "sign_in_would_be_lost",
           profileId: err.profileId,

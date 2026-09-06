@@ -825,11 +825,11 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
     // The sentence has to be followable literally: it names the slot and the
     // native verb that clears it.
     expect(body.error).toContain(profileId);
-    // Followable literally, against the SAME store the guard read: without the
-    // selector the CLI takes the configured default agent, so on a
-    // multi-agent box the owner clears a different store and the refusal
-    // never goes away.
-    expect(body.error).toContain(`openclaw models auth logout --agent main ${profileId}`);
+    // Followable literally, against the SAME store the guard read: all three
+    // let the core resolve the agent, so naming one here would point the owner
+    // at a store none of them touched.
+    expect(body.error).toContain(`openclaw models auth logout ${profileId}`);
+    expect(body.error).not.toContain("--agent");
     // A refusal is not a failure: nothing may have been written on the way to it.
     expect(pasteWasSpawned()).toBe(false);
     expectNoSideEffects();
@@ -859,10 +859,12 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
     const args = vi.mocked(spawnOpenclawCli).mock.calls.map(([a]) => a as string[]);
     const read = args.find((a) => a.includes("auth") && a.includes("list"));
     const paste = args.find((a) => a.includes("paste-api-key"));
+    // Neither pins an agent: the core resolves the same one for the READ that
+    // guards and the WRITE that pastes, so the guard cannot end up inspecting
+    // a different store from the one being written.
     for (const call of [read, paste]) {
       expect(call).toBeDefined();
-      expect(call).toContain("--agent");
-      expect(call?.[(call?.indexOf("--agent") ?? -1) + 1]).toBe("main");
+      expect(call).not.toContain("--agent");
     }
   });
 
