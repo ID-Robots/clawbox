@@ -751,10 +751,19 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
           // on — and the generic "Retry once" would start a second full
           // archive-and-upload beside the first. `clawkeepd` has no
           // single-instance guard of any kind, so nothing downstream would
-          // stop it. Says what the tool's own description says.
+          // stop it. `mcp/tools/email.ts` catches the same class by hand for
+          // `email_send`; this is that idea as an option, so a route no
+          // longer has to wrap its own call to say it.
+          //
+          // It names `backup_list`, as the description above does, and NOT
+          // `backup_status`: that tool answers from `deriveProtection`, which
+          // judges the last COMPLETED backup and knows nothing of a run in
+          // flight — mid-run on a box that has never finished one it would
+          // report "never backed up, unprotected", which is a worse answer
+          // than none.
           onTimeout: {
             message: "The backup is taking longer than this call waits. It is still running.",
-            next: "Do not start another one. Call backup_status to see how it is getting on, and tell the user.",
+            next: "Do not start another one. Tell the user it is still going, and call backup_list later to confirm it landed.",
           },
         },
       );

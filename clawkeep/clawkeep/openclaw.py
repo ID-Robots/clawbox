@@ -14,6 +14,7 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from . import limits
 
 
 @dataclass(frozen=True)
@@ -64,23 +65,10 @@ def _parse_json(stdout: str, what: str) -> dict:
     return obj
 
 
-#: The bound on any one `openclaw` subprocess this daemon runs.
-#:
-#: It is the daemon's own number: `clawkeep/systemd/clawkeepd.service` declares
-#: `TimeoutStartSec=4h` for one whole run, and no single step inside that run
-#: may be given less than the run itself — a per-step cap tighter than the run
-#: cap turns "this step is slow" into "this backup failed" for precisely the
-#: step that is slow.
-#:
-#: They WERE tighter: 30 minutes for `create_archive` ("tarballing ~1GB on
-#: Jetson takes minutes") and 5 minutes for `verify_archive`, both written when
-#: a ClawBox backup was ~1 GB. TASK-675 made 10 GB+ archives the supported
-#: case: `backup create --verify` tars and gzips the whole tree off eMMC and
-#: then reads it back, and the validated 12 GiB run took ~86 minutes end to
-#: end. Those two defaults, not the bridge's kill timer, were the FIRST wall a
-#: large backup hit — and being the daemon's own, they bound the archive step
-#: on the OpenClaw edition no matter what the caller allows.
-SUBPROCESS_TIMEOUT_S = 4 * 60 * 60
+#: Re-exported so `openclaw.<name>` keeps working for anything that reads it
+#: here; the one definition lives in `limits.py`, beside `crypto.py`'s use of
+#: the same bound. See that module for why it is this number.
+SUBPROCESS_TIMEOUT_S = limits.SUBPROCESS_TIMEOUT_S
 
 
 def create_archive(

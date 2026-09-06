@@ -10,14 +10,17 @@ import { BACKUP_RUN_CAP_MS, RESTORE_RUN_CAP_MS } from "@/lib/clawkeep-protection
  *
  * The customer case is a 12 GB archive. PR #607 (multipart chunking) and the
  * portal's credential-TTL fix together made that run finish, and the board
- * records the validated 12 GiB run finishing in ~86 minutes. Four separate
+ * records the validated 12 GiB run finishing in ~86 minutes. FIVE separate
  * caps stood in its way, none of them reached by the others:
  *
  *   - `openclaw.py`'s `create_archive` default, 30 minutes — the FIRST wall on
  *     the OpenClaw edition, since `agent.create_archive()` passes no timeout;
+ *   - `crypto.py`'s `encrypt_file`, 30 minutes — `openssl enc` over the whole
+ *     archive, and it runs OUTSIDE any edition branch, so it bound Hermes too;
  *   - `runBackup()`'s kill timer, `BACKUP_RUN_CAP_MS`, 60 minutes;
- *   - on the restore side, `verify_archive`'s 5 minutes, and a
- *     `RESTORE_TIMEOUT_MS` of 30 — half the backup's.
+ *   - on the restore side, `verify_archive`'s 5 minutes, `crypto.py`'s
+ *     `decrypt_file`'s 30, and a `RESTORE_TIMEOUT_MS` of 30 — half the
+ *     backup's.
  *
  * Each turns "this step is slow" into "this backup failed" for exactly the
  * step that is slow. None of the numbers is one ClawBox has to invent:
@@ -54,26 +57,34 @@ describe("the cap a ClawKeep backup run is given", () => {
     expect(BACKUP_RUN_CAP_MS).toBeGreaterThan(MEASURED_12GIB_RUN_MS);
   });
 
-  it("is not undercut by the daemon's own per-step caps on the OpenClaw edition", async () => {
+  it("is not undercut by the daemon's own per-step caps", async () => {
     // The bridge cap is the only ceiling CLAWBOX imposes; it is not the only
-    // one that exists. `agent.create_archive()` and `agent.verify_archive()`
-    // pass no timeout, so `openclaw.py`'s defaults bind those steps first —
-    // they were 30 and 5 minutes, so on OpenClaw a 12 GB backup died half an
-    // hour in and never reached the bridge's timer at all. Read out of the
-    // Python rather than restated here.
-    const py = await repoFile("clawkeep/clawkeep/openclaw.py");
-    const declared = /^SUBPROCESS_TIMEOUT_S = ([\d\s*]+)$/m.exec(py);
-    expect(declared, "openclaw.py must declare SUBPROCESS_TIMEOUT_S").not.toBeNull();
+    // one that exists. Every step below shells out and passes no timeout from
+    // its caller, so the Python default binds it first — they were 30, 5, 30
+    // and 30 minutes, so a 12 GB backup died half an hour in and never
+    // reached the bridge's timer at all. Read out of the Python rather than
+    // restated here, and swept across BOTH modules: the miss that shipped in
+    // the first version of this branch was a module this test did not read.
+    const limits = await repoFile("clawkeep/clawkeep/limits.py");
+    const declared = /^SUBPROCESS_TIMEOUT_S = ([\d\s*]+)$/m.exec(limits);
+    expect(declared, "limits.py must declare SUBPROCESS_TIMEOUT_S").not.toBeNull();
     const seconds = declared![1].split("*").reduce((a, b) => a * Number(b.trim()), 1);
 
     expect(seconds * 1000).toBeGreaterThanOrEqual(BACKUP_RUN_CAP_MS);
     expect(seconds * 1000).toBeGreaterThanOrEqual(RESTORE_RUN_CAP_MS);
 
-    // And both step functions must take that default, not a tighter literal.
-    for (const fn of ["create_archive", "verify_archive"]) {
+    // And every step must take that default, not a tighter literal of its own.
+    const steps: [string, string][] = [
+      ["clawkeep/clawkeep/openclaw.py", "create_archive"],
+      ["clawkeep/clawkeep/openclaw.py", "verify_archive"],
+      ["clawkeep/clawkeep/crypto.py", "encrypt_file"],
+      ["clawkeep/clawkeep/crypto.py", "decrypt_file"],
+    ];
+    for (const [file, fn] of steps) {
+      const py = await repoFile(file);
       const at = py.indexOf(`def ${fn}(`);
-      expect(at, `openclaw.py must define ${fn}`).toBeGreaterThan(-1);
-      expect(py.slice(at, at + 400), `${fn} must use SUBPROCESS_TIMEOUT_S`)
+      expect(at, `${file} must define ${fn}`).toBeGreaterThan(-1);
+      expect(py.slice(at, at + 500), `${fn} must use SUBPROCESS_TIMEOUT_S`)
         .toContain("timeout: float = SUBPROCESS_TIMEOUT_S");
     }
   });

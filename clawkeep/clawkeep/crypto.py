@@ -31,6 +31,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from .limits import SUBPROCESS_TIMEOUT_S
+
 log = logging.getLogger(__name__)
 
 ENCRYPTED_SUFFIX = ".enc"
@@ -73,7 +75,7 @@ def encrypt_file(
     plaintext_path: Path,
     ciphertext_path: Path,
     password_file: Path,
-    timeout: float = 30 * 60,
+    timeout: float = SUBPROCESS_TIMEOUT_S,
 ) -> None:
     """Encrypt `plaintext_path` to `ciphertext_path` using the password in
     `password_file`. The plaintext is *not* deleted — the caller decides.
@@ -124,7 +126,7 @@ def decrypt_file(
     ciphertext_path: Path,
     plaintext_path: Path,
     password_file: Path,
-    timeout: float = 30 * 60,
+    timeout: float = SUBPROCESS_TIMEOUT_S,
 ) -> None:
     """Inverse of :func:`encrypt_file`. Raises CryptoError on any failure;
     callers should treat a stderr containing "bad decrypt" / "wrong password"

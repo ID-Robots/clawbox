@@ -73,6 +73,10 @@ export interface ApiOptions {
    * answer is "Retry once", which is right for a read and actively harmful for
    * a call that started something long — the work is still going, and a retry
    * starts a second one.
+   *
+   * `mcp/tools/email.ts` catches the same class by hand around `email_send`,
+   * under a comment making the same argument. This is that idea as an option,
+   * so the next route does not have to wrap its own call to say it.
    */
   onTimeout?: { message: string; next: string };
 }
