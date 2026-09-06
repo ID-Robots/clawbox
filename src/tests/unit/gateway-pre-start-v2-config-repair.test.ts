@@ -215,6 +215,28 @@ d("gateway pre-start: making a bumped core's config loadable", () => {
     expect(calls()).toEqual([]);
   });
 
+  it("treats an unreadable stamp as no stamp rather than as agreement", () => {
+    // A stamp is a RECORD, and anything that is not this core's version is
+    // not a record of this core. Reading garbage as "already validated" would
+    // leave a box that cannot boot never asking why.
+    mkdirSync(path.dirname(stampPath), { recursive: true });
+    writeFileSync(stampPath, "\u0000\u0000not-a-version\n");
+
+    run("2026.8.1");
+
+    expect(calls()[0]).toBe("config validate");
+    expect(readFileSync(stampPath, "utf-8").trim()).toBe("2026.8.1");
+  });
+
+  it("creates the stamp directory when the data dir is not there yet", () => {
+    rmSync(path.join(root, "data"), { recursive: true, force: true });
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    expect(readFileSync(stampPath, "utf-8").trim()).toBe("2026.8.1");
+  });
+
   it("re-asks after a core bump even though the previous core was accepted", () => {
     mkdirSync(path.dirname(stampPath), { recursive: true });
     writeFileSync(stampPath, "2026.7.1\n");
