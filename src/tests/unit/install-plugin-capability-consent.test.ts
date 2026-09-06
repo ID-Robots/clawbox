@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { OFFICIAL_CHANNEL_PLUGINS } from "@/lib/openclaw-channels";
 
 /**
  * TASK-603 — the plugin refresh inside `step_openclaw_install` records consent.
@@ -101,7 +102,14 @@ describe("install.sh plugin refresh", () => {
     expect(install).toBeGreaterThan(loopStart);
     const region = LINES.slice(loopStart, install).join("\n");
     expect(region).toContain('if [ "$spec" = "$plugin" ] && [ -n "$TARGET" ]; then');
-    expect(region).toContain('codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;');
+    // The arm is a fourth copy of a list that lives in TypeScript, so it is
+    // held to it: every channel the Settings panel can install, plus codex,
+    // whose package is `@openclaw/codex` for the same reason. A channel added
+    // there and forgotten here leaves its spec bare and npm resolves @latest.
+    const arm = /\n\s+([a-z|-]+)\) spec="@openclaw\/\$PLUGIN_KEY@\$TARGET" ;;/.exec(region);
+    expect(arm, "the pin-repair case arm was not found").not.toBeNull();
+    expect(arm?.[1].split("|").sort())
+      .toEqual(["codex", ...Object.keys(OFFICIAL_CHANNEL_PLUGINS)].sort());
   });
 
   it("has no `plugins install` or `plugins enable` that skips consent entirely", () => {
