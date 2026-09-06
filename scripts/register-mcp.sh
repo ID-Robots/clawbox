@@ -975,7 +975,9 @@ fi
 #     ClawBox AI is connected. It simply never speaks (TASK-717).
 #   - a box that WAS entitled and drops to a lower plan keeps `tts.openai.*`
 #     pointing at an endpoint the proxy now answers 403 to, and pays a refused
-#     round trip on every spoken reply (TASK-718).
+#     round trip on every spoken reply (TASK-718). The withdrawal removes that
+#     slot WHOLESALE — one `hermes config unset tts.openai` — and moves the
+#     selection off it first; see the paragraph on TASK-745 below.
 # The OpenClaw edition has had both arms since TASK-459: `gateway-pre-start.sh`
 # gates on `_clawai_speech_entitled` and has the `elif` that takes its own entry
 # back. This is that pair, for the edition that has no `gateway-pre-start.sh`.
@@ -1022,23 +1024,31 @@ fi
 # state the card is about: `install.sh` selects `clawbox-local` whatever the
 # engine answered, so an engineless box reads as a chosen local voice. A box on
 # `elevenlabs`, `piper` or anything else the owner picked is left alone.
-# The WITHDRAWAL does reset it, and that is where this edition parts company
-# with the OpenClaw arm on purpose (TASK-745). There the delete removes a NAMED
+# The WITHDRAWAL resets it, and that is where this edition parts company with
+# the OpenClaw arm on purpose (TASK-745). There the delete removes a NAMED
 # provider entry ClawBox created, so the surviving selection names nothing and
-# the panel shows the choice is gone — leaving it is honest. Here `openai` is
-# the harness's own BUILT-IN provider (`BUILTIN_TTS_PROVIDERS` in
-# `tools/tts_tool.py`), so emptying the three keys removes nothing: the
-# selection still resolves, to a provider with no `base_url`, which is
-# api.openai.com. That is a 401 instead of the 403 at our own proxy, and the
-# owner's text sent to a third party on every spoken reply. So the box is handed
-# back to the voice it had — `clawbox-local` when it has a definition for one —
-# and only ever from `openai`, never from a provider the owner chose.
+# the panel showing the choice is gone is the truth — leaving it is honest.
+# Here `openai` is the harness's own BUILT-IN provider (`BUILTIN_TTS_PROVIDERS`,
+# tools/tts_tool.py:780), so removing the slot removes nothing: the selection
+# still resolves, to a provider with no `base_url`, which is api.openai.com.
+# That is a 401 instead of the 403 at our own proxy, and the owner's text sent
+# to a third party on every spoken reply.
 #
-# `hermes config unset tts.provider` is NOT the stand-down it looks like:
-# `_get_provider` falls back to `DEFAULT_PROVIDER = "edge"`, Microsoft's cloud,
-# which is exactly what `install.sh` selects `clawbox-local` on every Hermes box
-# to avoid. A box with no local definition therefore keeps a selection that
-# fails at the harness, and the boot says so.
+# RESTORING, NOT OVERRIDING. `tts.provider: openai` on a box whose `tts.openai`
+# this block has just removed is ClawBox's own residue, not a choice the owner
+# made — the arm wrote it, and it points at a slot the arm has taken away. The
+# selection therefore moves ONLY from `openai`, and only to `clawbox-local`, and
+# only when `tts.providers.clawbox-local` is a definition the harness can
+# actually resolve. An owner's own pick, the factory `edge`, an unset key and a
+# box already on its own voice are all left exactly where they are.
+#
+# WHERE THERE IS NOWHERE SAFE TO GO, nothing is withdrawn. Unsetting the
+# selection is not a stand-down — `_get_provider` falls back to
+# `DEFAULT_PROVIDER = "edge"` (:211, :661), Microsoft's cloud — and neither is
+# naming a provider the harness cannot resolve, which lands in the same Edge
+# default (:3276-3282). Keeping the cloud voice is the only outcome that leaves
+# the box refused at OUR proxy, so that is what a box with no on-device voice
+# gets, with the reason on the boot log.
 #
 # IMAGES ARE NOT PART OF THIS, and that is measured rather than assumed: the
 # proxy publishes `modelTiers: {"gpt-image-1-mini": ["free","pro","max"]}`, so
@@ -1101,11 +1111,13 @@ def _plan_failed(_kind, _exc, _tb):
     script's own source.
 
     A RUNTIME failure is not allowed to do the same, and that is what this hook
-    is for. Such a traceback can be raised from inside a VALUE — a YAML error
-    quotes the offending line, and the line it would quote is
-    `tts.openai.api_key`. So the operator gets the exception type and the line
-    number in this block, which is what says where to look, and nothing that
-    was read off a file reaches the journal.
+    is for: a bug in the POLICY CODE below, where the values in scope are the
+    device store and this box's speech configuration. `load()` already catches
+    the parse errors and reports only the exception type, so nothing routine
+    reaches here — but an exception raised anywhere after it carries whatever
+    the raiser put in its message, and `str(exc)` is one `%s` away from a
+    credential. The operator gets the type and the line number in this block,
+    which is what says where to look; nothing read off a file is printed.
 
     `os._exit(0)` rather than a raise: the shell reads this program's whole
     stdout as the verdict, so a non-zero exit would add the `|| echo` fallback
@@ -1343,29 +1355,55 @@ if plan_tier and plan_tier != ENTITLED_TIER:
     # `base_url`, which is api.openai.com: a 401 instead of the 403 at our own
     # proxy, and the owner's text sent to a third party on every spoken reply.
     #
-    # THE OWNER'S OWN PICK IS NEVER MOVED, and "their own" is the ARM's test
-    # read backwards rather than a second rule: the arm moves `""`, `edge` and
-    # `clawbox-local` because none of them is a choice, so none of them is a
-    # choice to preserve here either. `edge` in particular is Microsoft's cloud
-    # and the outcome `install.sh` selects `clawbox-local` to avoid — calling it
-    # "a voice of its own" and leaving it there would be this block telling the
-    # journal the opposite of what it did.
-    if provider not in ("", FACTORY_PROVIDER, LOCAL_PROVIDER, CLOUD_PROVIDER):
+    # ONLY A SELECTION THAT IS OURS MOVES, and `openai` is the only one that is:
+    # it is what this block's own arm writes. Everything else — an owner's
+    # `elevenlabs`, the factory `edge`, an unset key, `clawbox-local` — is left
+    # exactly where it is, because nothing about removing OUR slot changes where
+    # any of them sends a request. The slot still goes.
+    if provider != CLOUD_PROVIDER:
         say("withdraw keep")
-    # ALREADY THERE. Nothing to write, and the difference matters to the CLI
-    # budget: this is the state the previous boot's withdrawal left behind.
-    if provider == LOCAL_PROVIDER:
-        say("withdraw keep")
-    # `hermes config unset tts.provider` is NOT a stand-down: `_get_provider`
-    # falls back to `DEFAULT_PROVIDER = "edge"` (tts_tool.py:211, :661),
-    # Microsoft's cloud. `clawbox-local` is the answer even on a box that has no
-    # definition for it — that is not a gap but the state `install.sh` itself
-    # creates, and it is a REAL stand-down: an unresolvable command provider
-    # raises `tts.providers.clawbox-local.command is not configured`
-    # (tts_tool.py:1339) at the harness, with no fall-through, so nothing leaves
-    # the box. Honestly mute beats speaking to a third party, which is the
-    # ruling `step_openclaw_tts` already keeps.
-    say("withdraw %s" % LOCAL_PROVIDER)
+    # AND ONLY TO A DEFINITION THE HARNESS CAN ACTUALLY RESOLVE.
+    #
+    # This gate is here because the obvious shortcut is wrong, and it was
+    # measured wrong rather than argued: selecting `clawbox-local` on a box that
+    # has no definition for it does NOT fail locally.
+    # `_resolve_command_provider_config` (tts_tool.py:857) answers None for a
+    # name that is unknown or not a command type, `_dispatch_to_plugin_provider`
+    # answers None too, and the dispatch then walks its `elif` chain and lands
+    # in `else: # Default: Edge TTS` — the module says so at :3276-3282,
+    # "unknown names hit the Edge TTS default at the bottom". So that shortcut
+    # hands the owner's every spoken reply to MICROSOFT while the journal claims
+    # the box speaks for itself.
+    #
+    # `_is_command_provider_config` (tts_tool.py:846) is what "resolvable"
+    # means, transcribed: a non-empty `command`, and `type` either absent or
+    # `command`.
+    providers = tts.get("providers")
+    providers = providers if isinstance(providers, dict) else {}
+    local = providers.get(LOCAL_PROVIDER)
+    local = local if isinstance(local, dict) else {}
+    local_command = local.get("command")
+    local_type = local.get("type")
+    if (
+        isinstance(local_command, str)
+        and local_command.strip()
+        and local_type in (None, "command")
+    ):
+        say("withdraw %s" % LOCAL_PROVIDER)
+    # NOWHERE SAFE TO STAND DOWN TO, so nothing is withdrawn at all.
+    #
+    # Every alternative sends the owner's words to somebody: leaving `openai`
+    # over a removed slot is api.openai.com (this card), unsetting the selection
+    # or naming an unresolvable provider is Microsoft's Edge (above). Keeping
+    # the cloud voice is the only outcome that sends them to US, where the proxy
+    # answers 403 and the plan is the reason. It costs one refused round trip
+    # per spoken reply — the cost TASK-718 set out to remove — and it is the
+    # lesser of the four on a box that cannot speak for itself.
+    #
+    # Self-healing: `install.sh` `step_openclaw_tts` re-registers
+    # `tts.providers.clawbox-local` on every install and every update, so the
+    # next update makes this box withdrawable and the next boot withdraws it.
+    say("hold this box has no on-device voice to stand down to — its cloud voice stays, refused at our own proxy, rather than falling through to Microsoft's")
 
 if not arm_tier:
     say("hold no plan has been recorded for this box yet")
@@ -1494,12 +1532,23 @@ TOKENPY
       # `unset_config_value` exits 1 when nothing was removed, and no box in the
       # field carries `tts.openai.voice`, so unsetting it key-by-key reported a
       # failed withdrawal on every real box.
+      #
+      # THE LOSS IS ONE-WAY, and worth stating: the arm writes back only
+      # `base_url`, `api_key` and `model`, so a downgrade followed by an upgrade
+      # does not restore a cloud voice the owner had picked in the Voice tab.
+      # That is the card's own instruction — a voice name for a provider this
+      # box may no longer call is residue, and it would otherwise be inherited
+      # by the next arm from the plan being withdrawn — and it is bounded by the
+      # same ownership gate as everything else here: only a slot naming an
+      # address of OURS is ever touched.
       if hermes_voice_write config unset tts.openai; then
         if [ "$CLAWBOX_VOICE_TARGET" = keep ]; then
           log "removed the ClawBox AI cloud voice: this box's plan no longer includes it, and its speech selection was already elsewhere"
         else
           log "removed the ClawBox AI cloud voice: this box's plan no longer includes it, and it speaks from the box again"
         fi
+      elif [ "$CLAWBOX_VOICE_TARGET" = keep ]; then
+        log "could not remove the ClawBox AI cloud voice definition (exit $CLAWBOX_VOICE_RC) — this box's speech selection is elsewhere, so nothing points at it and no request is made; the next start will try again"
       else
         log "moved this box off the ClawBox AI cloud voice but could not remove its definition (exit $CLAWBOX_VOICE_RC) — nothing points at it, so no request is made; the next start will try again"
       fi

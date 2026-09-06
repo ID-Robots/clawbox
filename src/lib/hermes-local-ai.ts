@@ -500,8 +500,9 @@ async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | n
 
   // PROVED, not inferred. `patchHermesConfig`'s merge path reads every key back
   // (patchText), but its CLI fallback does not: `applyViaCli`'s unset loop
-  // discards the exit code, because `hermes config unset` on a key that was
-  // never there is the no-op the loop relies on. So a config.yaml the line
+  // discards the exit code, which is what the cleanup relies on — NOT the CLI
+  // being forgiving. Measured on 0.20.5 for TASK-745: `hermes config unset` on
+  // a key that was never there prints "Config key not set" and exits 1. So a config.yaml the line
   // editor refuses (a flow mapping, a duplicate key) sends the patch to a CLI
   // that a `step_hermes_install` rebuild has left exiting 127 before argparse,
   // and this function returned as if the provider were gone.
