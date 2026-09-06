@@ -2977,8 +2977,12 @@ describe("updater", () => {
       expect(disableRan("byteplus")).toBe(false);
       expect(mockRecordPluginRepair).not.toHaveBeenCalled();
       // …and the box is still reported dead, honestly, on the journal's own
-      // words rather than on a verdict nobody gave.
+      // words rather than on a verdict nobody gave. Asserted POSITIVELY: an
+      // absence alone would go on passing if the diagnosis degraded to a bare
+      // "not listening" with the journal's reason dropped too.
       expect(state.phase).toBe("failed");
+      expect(state.error).toContain("OpenClaw gateway is not listening on port 18789");
+      expect(state.error).toContain('Plugin "xiaomi" requires capability consent');
       expect(state.error).not.toContain("refuses this device's configuration");
     });
 
