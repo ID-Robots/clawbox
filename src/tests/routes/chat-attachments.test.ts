@@ -318,6 +318,20 @@ describe("/setup-api/chat/attachments", () => {
     expect(staged()).toEqual([]);
   });
 
+  it("refuses a single part over the per-file limit with 413 and no crash", async () => {
+    // Between the per-file limit (25 MiB) and the total-request meter (26 MiB),
+    // so only busboy's `fileSize` fires. busboy emits `limit` from inside its
+    // write loop and touches the part right after; a teardown that destroyed
+    // it synchronously from the handler threw inside the parser — an error
+    // nothing caught, with the 413 already on its way. The one-tick deferral
+    // in `fail` is what this pins: the answer, no leftover, and a run vitest
+    // does not end with an unhandled error.
+    const overFile = Buffer.alloc(25 * 1024 * 1024 + 4096, 0x41);
+    const res = await POST(request(multipart("big.png", overFile)));
+    expect(res.status).toBe(413);
+    await expectStagingDrains();
+  });
+
   it("reports a broken staging directory as a server error, not a client one", async () => {
     // A read-only filesystem is our problem, and it happens before the try
     // block that used to be the only error path.

@@ -13,7 +13,9 @@ import { getEdition } from "@/lib/harness";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
 import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
 import { GATEWAY_PORT, gatewayReadyWaitMs } from "@/lib/openclaw-config";
+import { hasOwnerSession } from "@/lib/owner-session";
 import { waitForPortOpen } from "@/lib/port-probe";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -133,7 +135,33 @@ async function restartStateHolder(edition: string): Promise<RestartOutcome> {
 // Runs to completion synchronously — the request stays open through
 // download (300+ MB), verify, extract, and the directory swap. Then it
 // kicks the gateway service so it re-reads the restored state.
+//
+// There is deliberately no MCP tool for a restore (mcp/tools/system.ts says
+// so beside backup_now), yet the bearer reached this route all the same:
+// swapping the agent's whole state for a snapshot anyone paired to the
+// account could have uploaded is the one ClawKeep action the agent must never
+// be able to take on its own.
 export async function POST(request: NextRequest) {
+  // OWNER ONLY, and from OUR page. Middleware admits the MCP bearer on every
+  // /setup-api route (so the agent can reach the device's own API), and the
+  // browser attaches the owner's cookie to a POST any other site fires at the
+  // box. Restoring a snapshot is neither the agent's to do nor another
+  // page's — so the gate asks both questions and refuses on either, before
+  // the body is read.
+  if (!(await hasOwnerSession(request)) || !isSameOriginRequest(request)) {
+    return NextResponse.json(
+      {
+        error: "Restoring a snapshot needs a signed-in browser session on this ClawBox's own pages.",
+        code: "owner_only",
+        // `kind` beside `code`: every other refusal on the clawkeep routes
+        // (clawKeepErrorBody, a locked snapshot, needs_passphrase, the setup
+        // route's own owner_only) is keyed `kind`, so the one field a surface
+        // already reads carries this refusal too.
+        kind: "owner_only",
+      },
+      { status: 403, headers: { "Cache-Control": "no-store" } },
+    );
+  }
   try {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const name = body.name;

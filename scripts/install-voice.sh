@@ -202,6 +202,25 @@ deploy_voice_scripts() {
   return "$rc"
 }
 
+# A server that was RESIDENT when deploy_voice_scripts copied a new
+# kokoro-server.py or whisper-server.py keeps running the OLD code — and the
+# socket it bound with the old mode — until its own idle exit, five quiet
+# minutes after the last utterance, which on a box that is being talked to
+# never comes. `try-restart` touches only a unit that is active (an idle box,
+# whose servers start on demand, is left alone) and is best-effort throughout:
+# the user manager may not be reachable from here (a fresh install with no
+# lingering yet), and losing the install over it would be the worse outcome —
+# clawbox-tts.sh and stt-client.py bring a server up on demand either way.
+# Two commands rather than one with two units, so a Whisper that will not
+# restart cannot stop the Kokoro restart from being asked for.
+restart_voice_servers() {
+  su - "$CLAWBOX_USER" -c "
+    export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+    systemctl --user try-restart kokoro-server.service
+    systemctl --user try-restart whisper-server.service
+  " 2>/dev/null || true
+}
+
 # ── Kokoro (GPU TTS) ────────────────────────────────────────────────────────
 # Kokoro is the box's ONLY voice (TASK-382 benchmarked it on real Orin
 # hardware, TASK-383 shipped it as the default, and the CPU fallback that used
@@ -924,6 +943,11 @@ if [ "${1:-}" = "--tts-only" ]; then
 
   DEPLOY_RC=0
   deploy_voice_scripts || DEPLOY_RC=$?
+  # Only over a copy that landed whole: a resident server is better off on the
+  # code it has than restarted onto a half-copied file.
+  if [ "$DEPLOY_RC" -eq 0 ]; then
+    restart_voice_servers
+  fi
 
   KOKORO_RC=0
   install_kokoro_tts || KOKORO_RC=$?
@@ -1131,6 +1155,7 @@ fi
 echo "[7/7] Deploying voice server scripts..."
 SCRIPTS_DST="$WORKSPACE/scripts"
 deploy_voice_scripts
+restart_voice_servers
 
 # Install systemd user services for persistent model servers. The Kokoro unit
 # comes from the shared writer so this path and --tts-only cannot disagree

@@ -108,8 +108,15 @@ The full suite runs via `.github/workflows/e2e-install.yml`:
 - **On-demand** via `gh workflow run "E2E Install"` or the Actions tab.
   Inputs: `upgrade_target_branch` (default `beta`) and `grep_filter` for
   narrowing the run.
-- **Per-PR** when the PR is labeled `run-full-e2e` — default CI does not
-  pay the 30+ min cost on every push.
+- **Per-PR** on every open / synchronize / reopen, against PRs targeting any
+  branch — WITHOUT credentials. The `Write .env.test` step is skipped on a
+  `pull_request` run, so the credentialed specs (the real-provider chat
+  round-trip in `80-chat.spec.ts`, the Telegram step of the wizard spec)
+  skip there and run on the schedule and on dispatch only. A same-repo PR
+  behaves exactly like a fork PR: the job checks out and executes the PR
+  head's config, global-setup and specs on the host, and a branch anyone
+  with push rights can open a PR from must not find repository secrets
+  beside them.
 
 Runner selection:
 - Default: `ubuntu-24.04-arm` (native arm64, ~10-15 min).
@@ -126,8 +133,35 @@ unset):
 - `TELEGRAM_BOT_TOKEN` — exercises the Telegram step of the happy-path
   spec and gateway channel registration.
 
-Fork PRs don't receive secrets; those specs skip but the install/setup
-/files/terminal/webapps/power coverage still runs.
+No `pull_request` run receives secrets — fork or same-repo; those specs
+skip but the install/setup/files/terminal/webapps/power coverage still
+runs. The in-workflow gate is hygiene rather than the fence (on a
+`pull_request` event the PR head supplies the workflow file too), so the
+secrets live in a GitHub Environment, and the one `e2e-install` job names
+its Environment by event:
+
+- **`e2e-pull-request`** — what a `pull_request` run references. Holds no
+  secrets and carries no protection rule; it exists only so that a PR run
+  never references the credentialed one.
+- **`e2e-credentials`** — what the schedule and a `workflow_dispatch` run
+  reference. Holds every secret listed above, with a deployment-branch
+  policy that allows only `beta` and `main`: a run from any other ref is
+  refused by GitHub before a step starts, whatever the workflow file says.
+
+It is one job rather than a credentialed job beside a secretless one
+because the split would repeat the whole install-and-run step list, and a
+caller job that `uses:` a reusable workflow cannot set an Environment (only
+the called workflow's own jobs can, and on a pull request the PR head
+supplies that file too).
+
+Owner action (Settings → Environments), done once: create `e2e-pull-request`
+empty; create `e2e-credentials`, add the secrets to it, restrict its
+deployment branches to `beta` and `main`; then **delete the repository-level
+copies** of those secrets — while they remain, a same-repo PR that edits the
+step-level `if:` reads them regardless of the Environment. A consequence to
+know: `gh workflow run "E2E Install" --ref <feature-branch>` is refused by
+that policy; dispatch from `beta` or `main` and point
+`upgrade_target_branch` at the branch under test instead.
 
 ## Debugging a failed install
 

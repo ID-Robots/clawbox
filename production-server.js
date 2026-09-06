@@ -12,6 +12,7 @@ const path = require("path");
 const WebSocket = require("ws");
 const { Transform } = require("stream");
 const { attachAccessLog } = require("./scripts/access-log.js");
+const { attachProxyPeerGuard } = require("./scripts/proxy-peer.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -721,6 +722,16 @@ http.Server.prototype.listen = function (...args) {
   // Attached here, on the ONE server Next actually creates, before it starts
   // accepting. HTTPS requests are re-emitted onto this same server (see
   // startHttpsServer), so this single call covers :80 and :443 both.
+  //
+  // The peer guard goes on FIRST (it prepends, so it runs ahead of Next's
+  // handler and ahead of the access log): a request from anywhere but loopback
+  // has its CF-Connecting-IP / CF-Connecting-IPv6 / True-Client-IP deleted
+  // before the login route can key a lockout bucket on a value the client
+  // chose, and before the access line records it as the client's address. The
+  // only honest source of those headers on this box is cloudflared, which
+  // arrives from 127.0.0.1 — see scripts/proxy-peer.js for what trusting
+  // loopback also trusts.
+  attachProxyPeerGuard(this);
   if (attachAccessLog(this)) {
     console.log("[production-server] HTTP access log enabled");
   }

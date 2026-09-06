@@ -74,9 +74,22 @@ function makeBox(opts: {
 
   // start-ap.sh is replaced by a witness: if the watchdog calls it, a file
   // appears. That is the whole assertion — "did it bring the AP back".
+  //
+  // The witness stands where the ROOT-OWNED copy stands on a box
+  // (/usr/local/libexec/clawbox/start-ap.sh), handed in through
+  // CLAWBOX_START_AP the way the failover tests hand in CLAWBOX_ONLINE_WAITER.
+  // The tree copy under $CLAWBOX_ROOT/scripts is a SECOND witness that must
+  // never fire: the watchdog runs as root on a timer and that tree is
+  // clawbox-writable (security scan #21).
+  mkdirSync(path.join(root, "libexec"), { recursive: true });
+  writeFileSync(
+    path.join(root, "libexec", "start-ap.sh"),
+    `#!/usr/bin/env bash\ntouch "${path.join(root, "STARTED")}"\n`,
+    { mode: 0o755 }
+  );
   writeFileSync(
     path.join(root, "scripts", "start-ap.sh"),
-    `#!/usr/bin/env bash\ntouch "${path.join(root, "STARTED")}"\n`,
+    `#!/usr/bin/env bash\ntouch "${path.join(root, "TREE-STARTED")}"\n`,
     { mode: 0o755 }
   );
 
@@ -88,17 +101,27 @@ function makeBox(opts: {
   );
 }
 
-function runWatchdog(): { started: boolean; status: number | null } {
+function runWatchdog(
+  startAp: string = path.join(root, "libexec", "start-ap.sh"),
+): { started: boolean; treeStarted: boolean; status: number | null; stderr: string } {
   const res = spawnSync("bash", [WATCHDOG], {
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
       CLAWBOX_ROOT: root,
+      // ALWAYS set: the script's default is the real /usr/local/libexec copy,
+      // which exists on a box that runs this suite.
+      CLAWBOX_START_AP: startAp,
       NETWORK_INTERFACE: "wlP1p1s0",
     },
     encoding: "utf-8",
   });
-  return { started: existsSync(path.join(root, "STARTED")), status: res.status };
+  return {
+    started: existsSync(path.join(root, "STARTED")),
+    treeStarted: existsSync(path.join(root, "TREE-STARTED")),
+    status: res.status,
+    stderr: res.stderr ?? "",
+  };
 }
 
 afterEach(() => {
@@ -125,7 +148,43 @@ describe("the AP watchdog tells a drop from a decision", () => {
       setupComplete: false,
       hotspotEnv: "HOTSPOT_SSID='ClawBox-Setup'\n",
     });
-    expect(runWatchdog().started).toBe(true);
+    expect(runWatchdog()).toMatchObject({ started: true, treeStarted: false });
+  });
+
+  it("never runs the start-ap.sh under CLAWBOX_ROOT, even when it has to heal", () => {
+    // Security scan #21. clawbox-ap-watchdog.service has no User=, so this
+    // script is root every twenty seconds, and $CLAWBOX_ROOT/scripts is the
+    // clawbox-owned tree install.sh chowns after every git reset. Deriving
+    // START_AP from $ROOT was root running whatever clawbox had put there —
+    // with no grant, no manifest check and no wait beyond the timer. The only
+    // start-ap.sh the watchdog may run is the root-owned libexec copy (or the
+    // test's stand-in for it), and a tree copy planted right where the old
+    // derivation looked must stay untouched.
+    makeBox({ setupComplete: false, hotspotEnv: null });
+    const r = runWatchdog();
+    expect(r.started).toBe(true);
+    expect(r.treeStarted, "the watchdog ran the clawbox-writable tree copy").toBe(false);
+  });
+
+  it("stands down, without falling back to the tree copy, when the root-owned copy is missing", () => {
+    // A box mid-migration (new tree, root step not yet run) has no libexec
+    // copy. The wrong answer is the tree copy; the right one is to say so and
+    // exit 0, so the timer does not paint a failed unit every twenty seconds.
+    makeBox({ setupComplete: false, hotspotEnv: null });
+    const r = runWatchdog(path.join(root, "libexec", "not-installed.sh"));
+    expect(r).toMatchObject({ started: false, treeStarted: false, status: 0 });
+    expect(r.stderr).toContain("not-installed.sh");
+  });
+
+  it("executes the root-owned copy by default and never derives it from CLAWBOX_ROOT", () => {
+    // The default is pinned by reading rather than running, because running it
+    // on a box means the real /usr/local/libexec copy.
+    const src = readFileSync(WATCHDOG, "utf-8");
+    const m = /^START_AP="([^"]*)"$/m.exec(src);
+    expect(m, "START_AP assignment not found").not.toBeNull();
+    expect(m![1]).toBe("${CLAWBOX_START_AP:-/usr/local/libexec/clawbox/start-ap.sh}");
+    expect(m![1]).not.toContain("$ROOT");
+    expect(m![1]).not.toContain("CLAWBOX_ROOT");
   });
 
   it("heals when there is no hotspot.env at all", () => {

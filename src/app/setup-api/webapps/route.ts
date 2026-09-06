@@ -16,6 +16,7 @@ import {
 import { listenerOwnedBy, listenerRefusal, projectFolderFor, registerServerApp, serverAppStubHtml } from "@/lib/app-proxy";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { createSerialLock } from "@/lib/serial-lock";
+import { WEBAPP_DOCUMENT_CSP } from "@/lib/webapp-sandbox";
 
 /**
  * One desktop registration at a time.
@@ -116,8 +117,31 @@ async function answerForLegacyStub(appId: string, html: string): Promise<NextRes
 /**
  * GET /setup-api/webapps?app=<appId>           — serve index.html
  * GET /setup-api/webapps?app=<appId>&file=x.js — serve asset file
+ *
+ * Every answer — the document, an asset, the stub pages, the refusals —
+ * carries `Content-Security-Policy: sandbox …` (WEBAPP_DOCUMENT_CSP), so the
+ * agent's HTML has an opaque origin when it is opened TOP-LEVEL and not only
+ * when a page of ours frames it: `launch: "window"`, a chat link and a share
+ * link all navigate to this URL as a first-class document, where the script
+ * used to run with the owner's session cookie. Set on every response rather
+ * than on text/html alone because the directive is inert on a stylesheet and
+ * an `&file=x.svg` navigated top-level runs script just the same.
+ *
+ * FOR THE RECORD ONLY: in production this header never reaches the wire from
+ * here. next.config.ts `headers()` already sets a Content-Security-Policy for
+ * this path before the handler runs, and a handler's value for a key that is
+ * already present is dropped, not appended. The second `headers()` entry in
+ * next.config.ts, with `source: "/setup-api/webapps"`, is what actually ships
+ * the sandbox; this copy keeps the route honest on its own (and is what a
+ * route test can see), and is harmless when the config's value wins.
  */
 export async function GET(request: NextRequest) {
+  const res = await serveWebappFile(request);
+  res.headers.set("Content-Security-Policy", WEBAPP_DOCUMENT_CSP);
+  return res;
+}
+
+async function serveWebappFile(request: NextRequest): Promise<NextResponse> {
   const appId = request.nextUrl.searchParams.get("app");
   if (!appId || !APP_ID_RE.test(appId)) {
     return NextResponse.json({ error: "Invalid app ID" }, { status: 400 });

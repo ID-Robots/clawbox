@@ -43,6 +43,7 @@ import os from "os";
 import path from "path";
 import { type ChildResult, failureDetail, runChild, startedMissing, wasKilled } from "@/lib/child-run";
 import { CONFIG_ROOT } from "@/lib/config-store";
+import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { isInside, isProtectedFilePath } from "@/lib/file-guard";
 import { CLAWBOX_MANIFEST_FILE } from "@/lib/clawbox-manifest";
 import { githubStatus } from "@/lib/coding-github";
@@ -380,8 +381,12 @@ export type ImportReason =
 /** The most a project import may weigh, and the most files it may hold. */
 export const IMPORT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 export const IMPORT_MAX_FILES = 100_000;
-/** Free space the disk must keep AFTER the import: a full disk takes the box's own data with it. */
-export const IMPORT_FREE_RESERVE_BYTES = 512 * 1024 * 1024;
+/**
+ * Free space the disk must keep AFTER the import: a full disk takes the box's
+ * own data with it. The box-wide number (src/lib/disk-reserve.ts), kept under
+ * this name because it is what the import's callers and tests read.
+ */
+export const IMPORT_FREE_RESERVE_BYTES = DISK_FREE_RESERVE_BYTES;
 
 /** Bytes free on the disk `dir` sits on, or null when the disk will not say. */
 export async function freeBytes(dir: string): Promise<number | null> {

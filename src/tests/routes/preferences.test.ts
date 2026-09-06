@@ -18,6 +18,13 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+// The route asks this ONE question about who is writing installed_*: cookie or
+// not. Mocked so the tests say the answer outright rather than minting a
+// session against a secret on disk; the helper's own suite covers the cookie.
+vi.mock("@/lib/owner-session", () => ({
+  hasOwnerSession: vi.fn().mockResolvedValue(false),
+}));
+
 import * as config from "@/lib/config-store";
 
 const mockGetAll = vi.mocked(config.getAll);
@@ -137,6 +144,73 @@ describe("/setup-api/preferences", () => {
       const res = await POST(req);
       const body = await res.json();
       expect(body).toEqual({ ok: true });
+    });
+
+    // installed_apps / installed_meta decide where a desktop icon OPENS and
+    // how (`webappUrl`, `launch: "window"` → a top-level window.open). The
+    // middleware admits the MCP bearer to this route, and the bearer is a
+    // file anything running as the box's user can read, so a shape check
+    // alone let the agent plant an entry that opened its own page as a
+    // first-class document with the owner's cookie. Only a browser with the
+    // owner's session may write the prefix; the contracted writers
+    // (install/uninstall/webapp-registry) write the store directly.
+    describe("installed_* writes", () => {
+      const planted = {
+        installed_meta: {
+          evil: {
+            name: "My app",
+            color: "#f97316",
+            iconUrl: "",
+            webappUrl: "/setup-api/webapps?app=evil",
+            launch: "window",
+          },
+        },
+      };
+
+      it("refuses the whole request from a caller without an owner session", async () => {
+        const { hasOwnerSession } = await import("@/lib/owner-session");
+        vi.mocked(hasOwnerSession).mockResolvedValue(false);
+        const req = new Request("http://localhost/setup-api/preferences", {
+          method: "POST",
+          headers: { Authorization: "Bearer not-a-cookie" },
+          body: JSON.stringify({ ...planted, wp_opacity: 80 }),
+        });
+        const res = await POST(req);
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ code: "owner_only" });
+        // Whole, not partial: the innocent key in the same body does not land
+        // either, so the caller cannot read the 403 as "the rest took".
+        expect(mockSetMany).not.toHaveBeenCalled();
+      });
+
+      it("lands from the owner's own session", async () => {
+        const { hasOwnerSession } = await import("@/lib/owner-session");
+        vi.mocked(hasOwnerSession).mockResolvedValue(true);
+        const req = new Request("http://localhost/setup-api/preferences", {
+          method: "POST",
+          headers: { Cookie: "clawbox_session=owner" },
+          body: JSON.stringify(planted),
+        });
+        const res = await POST(req);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true });
+        expect(mockSetMany).toHaveBeenCalledWith({ "pref:installed_meta": planted.installed_meta });
+        expect(hasOwnerSession).toHaveBeenCalledTimes(1);
+      });
+
+      it("never asks about the session for a body that names no installed_* key", async () => {
+        // The desktop's ordinary writes (wallpaper, window state) and the
+        // agent's `preferences_set` stay exactly as they were.
+        const { hasOwnerSession } = await import("@/lib/owner-session");
+        const req = new Request("http://localhost/setup-api/preferences", {
+          method: "POST",
+          body: JSON.stringify({ wp_opacity: 80, hidden_installed: ["x"] }),
+        });
+        const res = await POST(req);
+        expect(res.status).toBe(200);
+        expect(hasOwnerSession).not.toHaveBeenCalled();
+        expect(mockSetMany).toHaveBeenCalledWith({ "pref:wp_opacity": 80, "pref:hidden_installed": ["x"] });
+      });
     });
 
     it("returns error on invalid JSON", async () => {

@@ -545,3 +545,134 @@ describe("what the PR-comment jobs render", () => {
     expect(s.icon, "a skipped run carries the failure icon").not.toBe("❌");
   });
 });
+
+/**
+ * Repository secrets on a pull_request run.
+ *
+ * e2e-install.yml checks out the PR HEAD on a `pull_request` event and then
+ * runs that head's playwright.config.ts, global-setup.ts and specs on the
+ * host. Its "Write .env.test" step used to run unconditionally, putting
+ * `secrets.CLAWBOX_AI_API_KEY` and `secrets.TELEGRAM_BOT_TOKEN` in a file
+ * beside code the PR controls — so a same-repo branch (a fork never gets the
+ * secrets on this trigger) could read the file and send it anywhere. The
+ * updater spec reads CLAWBOX_UPGRADE_TARGET_BRANCH from process.env, and
+ * both `loadEnvTest()` helpers answer `{}` when the file is absent, so the
+ * whole step is gated rather than split.
+ *
+ * This is hygiene, not the fence: the PR head supplies the workflow file too,
+ * so the secrets also have to leave repository scope (a GitHub Environment
+ * restricted to beta/main) — a settings change no test here can see.
+ */
+describe("secrets never reach a pull_request run", () => {
+  const yml = read(".github/workflows/e2e-install.yml");
+  // Comments removed first — the step's own doc comment quotes `secrets` and
+  // the pattern, and must satisfy nothing. Then the file cut into steps, the
+  // PREAMBLE kept: the workflow-level and job-level `env:` blocks sit before
+  // the first step, and a `secrets.X` moved into the job's env would be
+  // inherited by the suite step — the exact regression a step-only walk
+  // could not see.
+  const text = yml.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  const [preamble, ...steps] = text.split(/^ *- (?=name:|uses:|run:)/m);
+  const stepName = (step: string) => /^name: (.*)$/m.exec(step)?.[1] ?? step.split("\n")[0];
+  // `secrets.GITHUB_TOKEN` is the per-run token GitHub scopes itself — read-
+  // only on a fork PR, harmless on any pull_request — and not the class this
+  // guard is about. (Convention in this file is `github.token`; a step that
+  // names it through `secrets.` is exempt here rather than failed over it.)
+  const SECRET = /secrets\.(?!GITHUB_TOKEN\b)/;
+  const gated = (step: string) => /^\s+if:.*github\.event_name != 'pull_request'/m.test(step);
+  const count = (s: string) => (s.match(new RegExp(SECRET.source, "g")) ?? []).length;
+
+  it("gates every step that reads a secret on the event not being a pull_request", () => {
+    const withSecrets = steps.filter((step) => SECRET.test(step));
+    expect(withSecrets.length, "no step reads a secret — the guard has nothing to guard").toBeGreaterThan(0);
+    for (const step of withSecrets) {
+      expect(gated(step), `step "${stepName(step)}" reads a secret and can run on a pull_request`).toBe(true);
+    }
+  });
+
+  it("keeps every secret inside a gated step — none in the workflow or job env", () => {
+    expect(preamble, "a secret is read outside every step (a workflow- or job-level env), where the suite step inherits it")
+      .not.toMatch(SECRET);
+    // Every occurrence in the file is accounted for by a gated step: a secret
+    // that reached a step this splitter does not recognise would show here.
+    const inGatedSteps = steps.filter(gated).reduce((n, step) => n + count(step), 0);
+    expect(count(text), "a secret is read somewhere no gated step covers").toBe(inGatedSteps);
+  });
+
+  it("runs the PR head's playwright suite in a step that reads no secret", () => {
+    const suite = steps.filter((step) => step.includes("playwright test --config e2e-install/playwright.config.ts"));
+    expect(suite.length, "the e2e-install suite step is gone").toBe(1);
+    expect(suite[0], "the suite step, which executes PR-controlled code, reads a secret").not.toMatch(SECRET);
+  });
+
+  it("does not hand a fork's PR the secrets through pull_request_target either", () => {
+    expect(yml).not.toMatch(/^\s+pull_request_target:/m);
+  });
+});
+
+/**
+ * The fence itself: a GitHub Environment.
+ *
+ * The step-level `if:` above is hygiene — on a `pull_request` event the PR
+ * head supplies the workflow file, so a same-repo branch can simply delete
+ * the gate. What a branch cannot edit is an Environment's deployment-branch
+ * policy. The one `e2e-install` job (a credentialed twin would repeat every
+ * step, and a caller job that `uses:` a reusable workflow cannot set an
+ * Environment — only the called workflow's own jobs can) names its
+ * Environment by event: `e2e-credentials`, restricted to beta and main,
+ * for the schedule and a dispatch; a secretless one for a pull_request. The
+ * policy is a settings change no test can see; what this pins is that the
+ * workflow ASKS for it, and never asks for the credentialed one on a PR.
+ */
+describe("credentialed e2e-install runs are bound to a protected Environment", () => {
+  const yml = read(".github/workflows/e2e-install.yml");
+  const text = yml.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  // The e2e-install job alone: from its key to the next job key at the same
+  // indent. `environment:` has to be the JOB's, not a step's `with:` or a
+  // job further down.
+  const jobStart = text.indexOf("\n  e2e-install:\n");
+  const jobEnd = text.indexOf("\n  comment:\n", jobStart);
+  const job = text.slice(jobStart, jobEnd);
+  const [preamble] = job.split(/^ *- (?=name:|uses:|run:)/m);
+  const ENVIRONMENT = /^ {4}environment: \$\{\{\s*github\.event_name == 'pull_request' && '([^']+)' \|\| '([^']+)'\s*\}\}$/m;
+
+  it("declares a job-level environment chosen by the event", () => {
+    expect(jobStart, "the e2e-install job is gone").toBeGreaterThan(-1);
+    expect(jobEnd, "the comment job is gone").toBeGreaterThan(jobStart);
+    expect(preamble, "the e2e-install job declares no job-level `environment:`").toMatch(ENVIRONMENT);
+    // Only one — a second declaration would be a YAML duplicate key, and
+    // which one GitHub honours is not something to find out on a PR.
+    expect(job.match(/^ {4}environment:/gm)?.length).toBe(1);
+  });
+
+  it("names e2e-credentials for every run that is not a pull_request", () => {
+    const [, onPullRequest, otherwise] = ENVIRONMENT.exec(preamble) ?? [];
+    expect(otherwise, "the schedule and a dispatch must run in the protected Environment").toBe("e2e-credentials");
+    expect(onPullRequest, "a pull_request run must not name the credentialed Environment").not.toBe("e2e-credentials");
+    expect(onPullRequest, "the pull_request Environment has no name").toBeTruthy();
+  });
+
+  it("pins the pull_request Environment name and its README entry", () => {
+    // The name is a reservation the owner creates empty; the README is where
+    // they learn that, so the two are pinned together.
+    const [, onPullRequest] = ENVIRONMENT.exec(preamble) ?? [];
+    expect(onPullRequest).toBe("e2e-pull-request");
+    expect(read("e2e-install/README.md"), "the README does not document the two Environment names for the owner")
+      .toMatch(/`e2e-pull-request`[\s\S]*`e2e-credentials`/);
+  });
+
+  it("keeps the pull_request gate on the step that writes the secrets, as hygiene", () => {
+    const steps = job.split(/^ *- (?=name:|uses:|run:)/m).slice(1);
+    const writer = steps.find((step) => /^name: Write \.env\.test$/m.test(step));
+    expect(writer, "the Write .env.test step is gone").toBeDefined();
+    expect(writer, "the secret-writing step lost its pull_request gate").toMatch(/^\s+if:.*github\.event_name != 'pull_request'/m);
+  });
+
+  it("leaves the comment job reading the e2e-install verdict", () => {
+    // The PR comment reports the job by name; a rename of the job to carry
+    // the environment would silently detach it.
+    const comment = text.slice(jobEnd);
+    expect(comment).toMatch(/^\s+needs: e2e-install$/m);
+    expect(comment).toContain("needs.e2e-install.result");
+  });
+});

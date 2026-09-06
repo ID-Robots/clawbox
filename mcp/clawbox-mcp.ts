@@ -18,7 +18,9 @@
  *   CLAWBOX_API_BASE          device API origin (default http://127.0.0.1:80)
  *   CLAWBOX_MCP_TOKEN         bearer for /setup-api/*; falls back to
  *                             <root>/data/.mcp-token so a provisioning entry
- *                             need carry no secret
+ *                             need carry no secret. Read once at startup and
+ *                             DELETED from process.env before any child can
+ *                             inherit it (mcp/lib/api.ts primeApiToken)
  *   CLAWBOX_MCP_PROFILE       full (default) | core | browser pins the tool
  *                             set; auto makes it FOLLOW THE MODEL — a device
  *                             running the on-device provider on a small model
@@ -42,7 +44,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { API_BASE, authHeader } from "./lib/api";
+import { API_BASE, authHeader, primeApiToken } from "./lib/api";
 import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { resolveProfile } from "./lib/profile";
@@ -204,6 +206,10 @@ export async function buildServer(
 }
 
 async function main(): Promise<void> {
+  // FIRST, before the probes below spawn anything: the bearer goes into this
+  // process's cache and out of its environment, so no child — a startup probe,
+  // a `bash` command, a `spawnArgv` — inherits it. See `primeApiToken`.
+  primeApiToken();
   // ONE probe of /setup-api/harness/active, for both questions it settles.
   const appHarness = await resolveAppHarness(API_BASE, authHeader());
   const edition = resolveEdition(appHarness);

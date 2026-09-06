@@ -24,6 +24,44 @@
 export const WEBAPP_IFRAME_SANDBOX = "allow-scripts allow-forms allow-popups allow-modals allow-downloads";
 
 /**
+ * The same sandbox as a RESPONSE HEADER — `Content-Security-Policy: sandbox …`
+ * on everything GET /setup-api/webapps serves — for the document nobody
+ * framed.
+ *
+ * The attribute above boxes the webapp only while a page of ours is the one
+ * framing it. The raw URL is also a first-class document on the authenticated
+ * origin: the desktop `window.open`s it for an `installed_meta` entry with
+ * `launch: "window"`, a chat reply can link to it, a share link can be pasted
+ * into a tab. Opened top-level, the agent's script ran with the owner's
+ * session cookie and could call every session-authenticated route — including
+ * the ones that deliberately refuse the agent's own bearer. A `sandbox`
+ * directive in the response's CSP gives that document the same opaque origin
+ * the frame has, wherever it was opened, and a framed document is unchanged
+ * (the attribute and the header intersect, and both already lack
+ * allow-same-origin). What a top-level open loses is localStorage and
+ * IndexedDB (a SecurityError under an opaque origin) and the KV bridge, which
+ * never worked without a parent; nothing on the box writes `launch` or
+ * `public`, so no shipped app is affected.
+ *
+ * Derived from the attribute so the two cannot drift, plus allow-pointer-lock:
+ * a game that wants the pointer is the reason `launch: "window"` exists at all
+ * (src/app/page.tsx). Never allow-same-origin, and never
+ * allow-popups-to-escape-sandbox — a popup this document opens must not come
+ * out of the box either, because top-level there is nothing outside it.
+ *
+ * DELIVERY: next.config.ts `headers()` is what actually ships this — a
+ * Content-Security-Policy set by a route handler is dropped in production
+ * because the config already sets one for the path (a config header is
+ * written before the handler runs and a handler's copy of an existing key is
+ * not appended). The route sets it too, for the record and for its tests, but
+ * the config entry is the one on the wire.
+ *
+ * This module stays dependency-free on purpose: next.config.ts imports it, and
+ * the config is loaded before any alias or bundler exists.
+ */
+export const WEBAPP_DOCUMENT_CSP = `sandbox ${WEBAPP_IFRAME_SANDBOX} allow-pointer-lock`;
+
+/**
  * The guest half of the KV bridge: a dependency-free `<script>` defining
  * `window.clawboxKv = { get, set, delete, list }`, each returning a Promise
  * that resolves on the host's matching `clawboxKvResult` and rejects after

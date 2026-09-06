@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Busboy from "busboy";
 import { Readable } from "stream";
+import { boundedBody } from "@/lib/bounded-body";
 import {
   CLAWBOX_AI_PROXY_URL,
   clawaiCredentialRefused,
@@ -91,41 +92,6 @@ const UPSTREAM_TIMEOUT_MS = 120_000;
 type Failure = { status: number; error: string };
 
 /**
- * Meter the body and cut the stream off past `MAX_REQUEST_BYTES`.
- *
- * Counting the bytes as they pass rather than trusting Content-Length: a
- * chunked upload declares no length at all, so a header check bounds only the
- * callers that were never the problem. Erroring the transform cancels the
- * source, so someone pushing gigabytes stops being read one chunk after the
- * cap instead of at the end of their upload.
- *
- * The overflow is reported by the flag rather than by matching on what the
- * parser rethrows, because what a parser makes of a cancelled source is its
- * own business and not something to pin an HTTP status on.
- */
-function boundedBody(body: ReadableStream<Uint8Array>): {
-  stream: ReadableStream<Uint8Array>;
-  overflowed: () => boolean;
-} {
-  let total = 0;
-  let over = false;
-  const stream = body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        total += chunk.byteLength;
-        if (total > MAX_REQUEST_BYTES) {
-          over = true;
-          controller.error(new Error("request body exceeds the transcription size limit"));
-          return;
-        }
-        controller.enqueue(chunk);
-      },
-    }),
-  );
-  return { stream, overflowed: () => over };
-}
-
-/**
  * Read the one audio part out of the request.
  *
  * The byte meter protects against a huge file or chunked body. Busboy adds the
@@ -146,7 +112,13 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
   }
   if (!req.body) return { status: 400, error: "Could not read the recording." };
 
-  const bounded = boundedBody(req.body);
+  // The meter (src/lib/bounded-body.ts) counts what actually arrives and cuts
+  // the source off past the cap; a chunked upload declares no length, so the
+  // header check above bounds only the callers that were never the problem.
+  const bounded = boundedBody(req.body, {
+    limit: MAX_REQUEST_BYTES,
+    message: "request body exceeds the transcription size limit",
+  });
   try {
     return await new Promise<{ file: Blob; name: string } | Failure>((resolve) => {
       let busboy: ReturnType<typeof Busboy>;

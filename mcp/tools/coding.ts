@@ -19,7 +19,7 @@
 // live defect in the previous implementation.
 
 import { readFile as fsReadFile, writeFile as fsWriteFile, readdir, stat, mkdir } from "fs/promises";
-import { statSync } from "fs";
+import { constants as fsConstants, statSync } from "fs";
 import { basename, dirname, extname, join, relative } from "path";
 import { ToolError } from "../lib/errors";
 import {
@@ -29,8 +29,8 @@ import {
   filterAllowedPaths,
   isAllowedPath,
   assertPathAllowed,
-  assertWritePathAllowed,
   commandDeniedByPathGuard,
+  resolveGuardedPath,
   hasBinary,
   resolveUserPath,
   spawnArgv,
@@ -98,7 +98,67 @@ function simpleDiff(oldText: string, newText: string, label: string): string {
   return hunks.length > 2 ? hunks.join("\n") : "";
 }
 
+// ── The file sinks ──────────────────────────────────────────────────────────
+//
+// Every read and write below opens the CANONICAL path `resolveGuardedPath`
+// vetted, with O_NOFOLLOW. The guard judged that path's target; opening the
+// typed path instead would follow whatever link sits there NOW, and a link
+// swapped between the check and the open is the classic way past a path
+// guard. The canonical path is not a link at check time — a legitimately
+// symlinked project file has already been resolved to its target, a dangling
+// one to the name the kernel would create — so O_NOFOLLOW costs an ordinary
+// file nothing and refuses only a leaf that is a link at the moment of the
+// open: one swapped in after the check, or a cycle of links `canonicalPath`
+// could not resolve and handed back as typed. ELOOP is what Linux answers for
+// either under O_NOFOLLOW (there is no O_EXCL here, so EEXIST never arrives),
+// and it means "not the file that was vetted", never a reason to retry.
+const READ_FLAGS = fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW;
+const WRITE_FLAGS = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW;
+
+function isSwappedLink(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException | null)?.code === "ELOOP";
+}
+
+function swappedLinkError(): ToolError {
+  return new ToolError(
+    "BLOCKED_PATH",
+    "That path is a link at the moment of opening — not the file that was checked, or a chain of links that never reaches one — and was not opened.",
+    "Do not retry it. Tell the user the file could not be opened safely and continue with the rest of the task.",
+  );
+}
+
+/** Read the vetted target. Any failure but a swapped link is the caller's to word. */
+async function readGuarded(target: string): Promise<Buffer> {
+  try {
+    return await fsReadFile(target, { flag: READ_FLAGS });
+  } catch (err) {
+    throw isSwappedLink(err) ? swappedLinkError() : err;
+  }
+}
+
+/** The same read, answering null where the earlier `.catch(() => null)` did. */
+async function readGuardedOrNull(target: string): Promise<Buffer | null> {
+  try {
+    return await fsReadFile(target, { flag: READ_FLAGS });
+  } catch (err) {
+    if (isSwappedLink(err)) throw swappedLinkError();
+    return null;
+  }
+}
+
+async function writeGuarded(target: string, body: string, encoding: BufferEncoding): Promise<void> {
+  try {
+    await fsWriteFile(target, body, { encoding, flag: WRITE_FLAGS });
+  } catch (err) {
+    throw isSwappedLink(err) ? swappedLinkError() : err;
+  }
+}
+
 // Staleness: only meaningful for files this process has actually read.
+//
+// Keyed by the CANONICAL path, the one the sinks open. A read recorded under
+// the typed path and a staleness check under the canonical one would never
+// meet, and the CONFLICT protection would be silently off.
 const readState = new Map<string, number>();
 const READ_STATE_MAX = 500;
 
@@ -240,7 +300,7 @@ export function registerCodingTools(reg: Registrar): void {
       timeout: zInt(1_000, MAX_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, "How long to allow, in milliseconds."),
       run_in_background: zBool(false, "Return a job id immediately instead of waiting."),
       cwd: zOptText(300, "Folder to run in. Defaults to the ClawBox home folder."),
-      allow_dangerous: zBool(false, "Override the block on destructive commands. Only set it when the user asked for exactly this."),
+      allow_dangerous: zBool(false, "Skip the typo check that blocks destructive spellings (rm -rf, git push --force). It is not permission and not the user's consent: nothing on the device treats it as either. Only set it when the user asked for exactly this command in their own words."),
     },
     { editions: codingEditions, readOnly: false, destructive: true, maxChars: BIG_OUTPUT },
     async ({
@@ -294,7 +354,7 @@ export function registerCodingTools(reg: Registrar): void {
         throw new ToolError(
           "DANGEROUS_COMMAND",
           `This command is blocked: ${blocked.join("; ")}.`,
-          "Ask the user to confirm exactly what should be removed or changed, then set allow_dangerous only if they said so.",
+          "Ask the user to confirm exactly what should be removed or changed, then set allow_dangerous only if they said so — it skips this typo check and nothing else.",
         );
       }
       const notes = warnings.length ? `Warning: ${warnings.join("; ")}.\n\n` : "";
@@ -374,9 +434,13 @@ export function registerCodingTools(reg: Registrar): void {
     { editions: codingEditions, readOnly: true, maxChars: BIG_OUTPUT },
     async ({ file_path, offset, limit }: { file_path: string; offset: number; limit: number }) => {
       const abs = resolveUserPath(file_path);
-      assertPathAllowed(abs);
+      // `abs` is the name the agent typed and stays in every header below —
+      // the path it can read back out of the answer; `target` is what is
+      // opened. `isImage`/`isPdf`/`isNotebook` judge the typed name too: the
+      // agent asked for a .png, whatever the link is called on the other side.
+      const target = resolveGuardedPath(abs, "read");
 
-      const st = await stat(abs).catch(() => null);
+      const st = await stat(target).catch(() => null);
       if (!st) throw notFound(file_path);
       if (st.isDirectory()) {
         throw new ToolError(
@@ -399,13 +463,13 @@ export function registerCodingTools(reg: Registrar): void {
       }
 
       if (isImage(abs)) {
-        const buf = await fsReadFile(abs);
+        const buf = await readGuarded(target);
         const ext = extname(abs).toLowerCase();
         const mime = ext === ".png" ? "image/png"
           : ext === ".svg" ? "image/svg+xml"
             : ext === ".gif" ? "image/gif"
               : ext === ".webp" ? "image/webp" : "image/jpeg";
-        await recordRead(abs);
+        await recordRead(target);
         return {
           content: [
             { type: "text", text: `Image ${abs} (${buf.length} bytes)` },
@@ -415,7 +479,8 @@ export function registerCodingTools(reg: Registrar): void {
       }
 
       if (isPdf(abs)) {
-        const r = await spawnArgv("pdftotext", [abs, "-"], { timeoutMs: 20_000, maxBytes: 4 * 1024 * 1024 });
+        // pdftotext follows a link itself, so it is handed the vetted target.
+        const r = await spawnArgv("pdftotext", [target, "-"], { timeoutMs: 20_000, maxBytes: 4 * 1024 * 1024 });
         if (r.exitCode !== 0 && !r.stdout.trim()) {
           throw new ToolError(
             "NOT_SUPPORTED_HERE",
@@ -424,12 +489,12 @@ export function registerCodingTools(reg: Registrar): void {
           );
         }
         const lines = r.stdout.split("\n").slice(offset, offset + limit);
-        await recordRead(abs);
+        await recordRead(target);
         return text(`[PDF ${abs}]\n${lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n")}`);
       }
 
       if (isNotebook(abs)) {
-        const raw = await fsReadFile(abs, "utf-8");
+        const raw = (await readGuarded(target)).toString("utf-8");
         let nb: { cells?: { cell_type?: string; source?: string | string[]; outputs?: { text?: string | string[] }[] }[] };
         try {
           nb = JSON.parse(raw);
@@ -444,7 +509,7 @@ export function registerCodingTools(reg: Registrar): void {
             if (o.text) out.push(`[output] ${Array.isArray(o.text) ? o.text.join("") : o.text}`);
           }
         });
-        await recordRead(abs);
+        await recordRead(target);
         return text(`[Notebook ${abs}, ${nb.cells?.length ?? 0} cells]\n${out.join("\n")}`);
       }
 
@@ -452,7 +517,7 @@ export function registerCodingTools(reg: Registrar): void {
         return text(`${abs} is a binary file of ${st.size} bytes. Its contents cannot be shown as text.`);
       }
 
-      const buf = await fsReadFile(abs);
+      const buf = await readGuarded(target);
       const raw = buf.toString(detectEncoding(buf));
       const all = raw.split("\n");
       const selected = all.slice(offset, offset + limit);
@@ -460,7 +525,7 @@ export function registerCodingTools(reg: Registrar): void {
       const header = offset + limit < all.length
         ? `[${abs}: lines ${offset + 1}-${offset + selected.length} of ${all.length}]`
         : `[${abs}: ${all.length} lines]`;
-      await recordRead(abs);
+      await recordRead(target);
       return text(`${header}\n${numbered}`);
     },
   );
@@ -477,22 +542,24 @@ export function registerCodingTools(reg: Registrar): void {
     { editions: codingEditions, readOnly: false, destructive: true },
     async ({ file_path, content }: { file_path: string; content: string }) => {
       const abs = resolveUserPath(file_path);
-      assertWritePathAllowed(abs);
+      const target = resolveGuardedPath(abs, "write");
 
-      const existed = await stat(abs).then(() => true).catch(() => false);
-      if (existed) await assertNotStale(abs);
+      const existed = await stat(target).then(() => true).catch(() => false);
+      if (existed) await assertNotStale(target);
 
       let original: string | null = null;
-      if (existed) original = await fsReadFile(abs, "utf-8").catch(() => null);
+      if (existed) original = (await readGuardedOrNull(target))?.toString("utf-8") ?? null;
 
       let body = content;
       if (original && detectLineEnding(original) === "\r\n" && !body.includes("\r\n")) {
         body = body.replace(/\n/g, "\r\n");
       }
 
-      await mkdir(dirname(abs), { recursive: true });
-      await fsWriteFile(abs, body, "utf-8");
-      await recordRead(abs);
+      // The parent of the TARGET: for a new file under a link into an ordinary
+      // folder, the missing folders are made where the file will land.
+      await mkdir(dirname(target), { recursive: true });
+      await writeGuarded(target, body, "utf-8");
+      await recordRead(target);
 
       // The RESOLVED path, never the basename. A relative `file_path` resolves
       // against CLAWBOX_ROOT, which is not the cwd the harness spawned this
@@ -530,10 +597,10 @@ export function registerCodingTools(reg: Registrar): void {
         throw new ToolError("BAD_ARGUMENT", "old_text and new_text are identical.", "Pass the text you actually want in the file as new_text.");
       }
       const abs = resolveUserPath(file_path);
-      assertWritePathAllowed(abs);
-      await assertNotStale(abs);
+      const target = resolveGuardedPath(abs, "write");
+      await assertNotStale(target);
 
-      const buf = await fsReadFile(abs).catch(() => null);
+      const buf = await readGuardedOrNull(target);
       if (!buf) throw notFound(file_path);
       const encoding = detectEncoding(buf);
       let content = buf.toString(encoding);
@@ -568,8 +635,8 @@ export function registerCodingTools(reg: Registrar): void {
         replacements = 1;
       }
 
-      await fsWriteFile(abs, content, encoding);
-      await recordRead(abs);
+      await writeGuarded(target, content, encoding);
+      await recordRead(target);
       const diff = simpleDiff(original, content, basename(abs));
       return text(`Changed ${abs} (${replacements} replacement${replacements === 1 ? "" : "s"}).${diff ? `\n${diff}` : ""}`);
     },
@@ -672,8 +739,9 @@ export function registerCodingTools(reg: Registrar): void {
       max_results: number;
       offset: number;
     }) => {
-      const target = path ? resolveUserPath(path) : DEFAULT_CWD;
-      assertPathAllowed(target);
+      // rg and grep follow a link named on the command line, so the search
+      // root is the vetted canonical path, not the typed one.
+      const target = path ? resolveGuardedPath(resolveUserPath(path), "read") : DEFAULT_CWD;
 
       // The shared probe, not a second copy of it: this was an inlined
       // `env which rg` carrying the same missing-cwd false failure hasBinary()
@@ -772,11 +840,11 @@ export function registerCodingTools(reg: Registrar): void {
       const abs = resolveUserPath(notebook_path);
       // This tool called no guard at all before: a notebook path pointing into
       // a credential directory was written without a check.
-      assertWritePathAllowed(abs);
+      const target = resolveGuardedPath(abs, "write");
       if (!isNotebook(abs)) {
         throw new ToolError("BAD_ARGUMENT", "That is not a notebook file.", "Pass a path ending in .ipynb, or use edit_file for ordinary files.");
       }
-      const raw = await fsReadFile(abs, "utf-8").catch(() => null);
+      const raw = (await readGuardedOrNull(target))?.toString("utf-8") ?? null;
       if (raw === null) throw notFound(notebook_path);
       let nb: { cells?: Record<string, unknown>[] };
       try {
@@ -815,7 +883,7 @@ export function registerCodingTools(reg: Registrar): void {
           });
         }
       }
-      await fsWriteFile(abs, JSON.stringify(nb, null, 1), "utf-8");
+      await writeGuarded(target, JSON.stringify(nb, null, 1), "utf-8");
       return text(`${edit_mode === "delete" ? "Deleted" : edit_mode === "insert" ? "Inserted a cell after" : "Replaced"} cell ${cell_index} in ${abs} (${nb.cells.length} cells now).`);
     },
   );

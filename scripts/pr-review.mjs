@@ -10,6 +10,7 @@
 import fs from "node:fs";
 import { execFileSync } from "node:child_process";
 import { callClaude } from "./lib/ai-backend.mjs";
+import { plain } from "./lib/triage-output.mjs";
 
 // Sonnet: PR review needs real reasoning; still cents per run at PR-diff sizes.
 const MODEL = "claude-sonnet-4-6";
@@ -43,8 +44,8 @@ const DOCS_ONLY_RE = /^(docs-site\/|docs\/|\.github\/|scripts\/(issue-triage|pr-
 // config/ is deliberately narrowed to root-privilege files — the whole dir
 // would flag every routine openclaw-target.txt version bump.
 const SENSITIVE_RE = /^(install(-x64)?\.sh|scripts\/(gateway-pre-start|start-ap|force-update|root-update-step|launch-browser|recover|check-sudoers-coverage)\.sh|\.github\/workflows\/|src\/middleware\.ts|src\/lib\/(auth|chpasswd|mcp-token|local-ai-token|login-rate-limit|rate-limit|oauth-utils|oauth-config|root-steps)\.ts|src\/app\/login-api\/|src\/app\/setup-api\/system\/credentials\/|production-server\.js|config\/(.*sudoers.*|49-|clawbox-root-.*|.*\.(service|rules|pkla)))/;
-// Keep in sync with the `area` enum in scripts/issue-triage.mjs — both bots
-// must emit the same `area: X` label taxonomy.
+// Keep in sync with AREA_LABELS in scripts/lib/triage-output.mjs (the issue
+// bot's `area` enum) — both bots must emit the same `area: X` label taxonomy.
 const AREA_RULES = [
   ["install", /^(install(-x64)?\.sh|scripts\/|config\/)/],
   ["gateway", /^(src\/lib\/(openclaw-config|gateway-proxy|updater)\.ts|src\/app\/setup-api\/(gateway|ai-models|update)\/)/],
@@ -158,9 +159,9 @@ function surface(files) {
 const SCHEMA = {
   type: "object",
   properties: {
-    summary: { type: "string", description: "2-3 sentences, plain language: what this PR is about and what it changes. Informative and neutral — orientation for a reader skimming their notifications, NOT a review verdict." },
+    summary: { type: "string", maxLength: 800, description: "2-3 sentences, plain language: what this PR is about and what it changes. Informative and neutral — orientation for a reader skimming their notifications, NOT a review verdict." },
     kind: { type: "string", enum: ["feature", "fix", "docs", "refactor", "chore", "test", "config", "other"], description: "The gist of the change." },
-    touches: { type: "string", description: "One short phrase naming the part(s) of ClawBox this affects, e.g. 'the setup wizard + AI-model config' or 'the gateway update path'. Empty string if unclear." },
+    touches: { type: "string", maxLength: 160, description: "One short phrase naming the part(s) of ClawBox this affects, e.g. 'the setup wizard + AI-model config' or 'the gateway update path'. Empty string if unclear." },
     highlights: {
       type: "array",
       maxItems: 4,
@@ -168,7 +169,7 @@ const SCHEMA = {
       items: {
         type: "object",
         properties: {
-          note: { type: "string", description: "<=200 chars, informative and neutral." },
+          note: { type: "string", maxLength: 240, description: "<=200 chars, informative and neutral." },
           tone: { type: "string", enum: ["info", "heads-up"] },
         },
         required: ["note", "tone"],
@@ -179,8 +180,8 @@ const SCHEMA = {
       type: "object",
       properties: {
         likely: { type: "boolean" },
-        of: { type: "string", description: "e.g. '#241' or '' when not a duplicate" },
-        reason: { type: "string" },
+        of: { type: "string", maxLength: 40, description: "e.g. '#241' or '' when not a duplicate" },
+        reason: { type: "string", maxLength: 300 },
       },
       required: ["likely", "of", "reason"],
       additionalProperties: false,
@@ -254,6 +255,14 @@ const TONE_ICON = { info: "ℹ️", "heads-up": "🟡" };
 function composeComment(data, checks, r) {
   const { src, test } = surface(data.files);
   const n = data.pr.number;
+  // The model's free text, made inert before it is rendered in the bot's
+  // voice (no HTML, no links, no @-mentions, one line each); `kind` and
+  // `tone` are enums the validator has already checked and are rendered
+  // through the tables above.
+  const summary = plain(r.summary, 800);
+  const touches = plain(r.touches, 160);
+  const dupOf = plain(r.duplicate.of, 40);
+  const dupReason = plain(r.duplicate.reason, 300);
   const lines = [
     MARKER,
     `<!-- clawreview-kind:${r.kind} -->`,
@@ -261,17 +270,17 @@ function composeComment(data, checks, r) {
     ``,
     `*${pick(GREETINGS, n)}*`,
     ``,
-    r.summary,
+    summary,
     ``,
     `**At a glance**`,
-    `- ${KIND_LABEL[r.kind] ?? KIND_LABEL.other}${r.touches ? ` · touches ${r.touches}` : ""}`,
+    `- ${KIND_LABEL[r.kind] ?? KIND_LABEL.other}${touches ? ` · touches ${touches}` : ""}`,
     `- Base branch: \`${data.pr.base.ref}\` · **+${src} source / +${test} tests** across ${data.files.length} file${data.files.length === 1 ? "" : "s"}${data.truncated ? " · (large diff — summarized from the first 80k)" : ""}`,
     ...checks.map((c) => `- ${LEVEL_ICON[c.level]} ${c.label}`),
   ];
-  if (r.duplicate.likely && r.duplicate.of) lines.push(``, `🔎 **Heads-up:** this looks related to ${r.duplicate.of} — ${r.duplicate.reason}`);
+  if (r.duplicate.likely && dupOf) lines.push(``, `🔎 **Heads-up:** this looks related to ${dupOf} — ${dupReason}`);
   if (r.highlights.length) {
     lines.push(``, `**Good to know**`);
-    for (const h of r.highlights) lines.push(`- ${TONE_ICON[h.tone] ?? "ℹ️"} ${h.note}`);
+    for (const h of r.highlights) lines.push(`- ${TONE_ICON[h.tone] ?? "ℹ️"} ${plain(h.note, 240)}`);
   }
   lines.push(``, `<sub>${pick(SIGNOFFS, n)} Conventions: <a href="https://docs.clawbox.com/llms.txt">docs</a>.</sub>`);
   return lines.join("\n");

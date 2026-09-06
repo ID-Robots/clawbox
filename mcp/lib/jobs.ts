@@ -119,6 +119,17 @@ export function startJob(
   };
   jobs.set(id, job);
 
+  // The child inherits this process's whole environment on purpose — the
+  // box's own scripts need the NVIDIA, CUDA and XDG variables, and an
+  // allow-list would drop one of them in a way that looks unrelated. The
+  // device bearer is read and deleted from process.env at startup
+  // (mcp/lib/api.ts `primeApiToken`), so `printenv` in here finds none — but
+  // that is hygiene, not a boundary: `delete process.env.X` does not rewrite
+  // the exec-time block the kernel keeps, so /proc/<this pid>/environ still
+  // carries the value for any same-uid child while gateway-pre-start.sh
+  // registers this server with the token in `env`, and the same child can
+  // read openclaw.json or data/.mcp-token as user clawbox anyway. What bounds
+  // `bash` is stated in mcp/README.md: nothing this process can add.
   // `detached` + our own timer, not spawn's `timeout`: spawn's timeout only
   // signals the direct child, and the job was only ever marked finished from
   // `close`, which never fires while a backgrounded grandchild holds the pipe.

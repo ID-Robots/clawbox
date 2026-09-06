@@ -5,6 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# Runs as the clawbox account, not root: the ExecStart is one curl against
+# loopback and needs no privilege, while the EnvironmentFile below is a file the
+# clawbox account owns — a root process whose environment a clawbox-writable
+# file decides is the CWE-732 class the 2026-09-05 scan flagged on the AP units
+# (LD_PRELOAD in that file would have loaded into root's curl every five
+# minutes). PID 1 still reads the file before the sandbox applies.
+User=clawbox
 # The per-install internal token, in KEY=value form. PID 1 reads this as root
 # BEFORE the sandbox below applies, which is the only reason a unit with
 # ProtectHome=yes can present a credential that lives under /home. Optional

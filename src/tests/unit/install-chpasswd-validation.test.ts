@@ -44,6 +44,18 @@ function shellFunction(name: string): string {
   return INSTALL_SH.slice(start, end + 2);
 }
 
+/**
+ * systemd runs a system unit as root unless User= names somebody else; `root`,
+ * `0` and an empty value all name root (the last assignment wins), and
+ * DynamicUser=yes is a transient user. Same rule as root-steps.test.ts.
+ */
+function unitRunsAsRoot(unit: string): boolean {
+  if (/^DynamicUser=yes$/m.test(unit)) return false;
+  const users = [...unit.matchAll(/^User=(.*)$/gm)].map((m) => m[1].trim());
+  const user = users.at(-1) ?? "";
+  return user === "" || user === "root" || user === "0";
+}
+
 let tmp: string;
 let project: string;
 let inputFile: string;
@@ -264,6 +276,40 @@ d("root never evaluates a clawbox-writable data file", () => {
           .not.toMatch(/data\/|HOTSPOT_ENV|CONFIG_FILE|\$ROOT/);
       }
     }
+  });
+
+  it("no root-run unit loads an EnvironmentFile under the clawbox-writable tree", () => {
+    // The residual of this audit's data/network.env finding (security scan #8):
+    // install.sh stopped sourcing the file, but clawbox-ap.service and
+    // clawbox-ap-watchdog.service — both root, both ExecStarting a bash script
+    // — still loaded it as EnvironmentFile=. systemd checks neither ownership
+    // nor variable names, so one `BASH_ENV=/home/clawbox/x.sh` line in that
+    // file ran as root before the script's first line, on the watchdog's next
+    // 20-second tick. The units load the root-owned /etc/clawbox/network.env
+    // now, which step_network_setup writes beside the data/ copy.
+    const configDir = path.join(REPO, "config");
+    const units = fs.readdirSync(configDir).filter((f) => /\.(service|timer)$/.test(f));
+    expect(units.length).toBeGreaterThan(0);
+    // No exemptions: clawbox-heartbeat.service, which loaded its credential
+    // from data/ into root's curl (ProtectHome does not stop an LD_PRELOAD
+    // line — it only forces the .so outside /home), runs as `User=clawbox`
+    // now and is skipped below like every other user unit. "Has a User= line"
+    // is NOT that test — `User=root` has one — so the value is parsed; and the
+    // whole value is checked, since `EnvironmentFile="/home/clawbox/…"` is a
+    // quoted path that starts with a quote.
+    for (const unit of units) {
+      const text = fs.readFileSync(path.join(configDir, unit), "utf-8");
+      if (!unitRunsAsRoot(text)) continue;
+      for (const m of text.matchAll(/^EnvironmentFile=(.+)$/gm)) {
+        expect(m[1], `${unit} loads a clawbox-writable environment: ${m[0]}`).not.toContain("/home/clawbox");
+      }
+    }
+    for (const unit of ["clawbox-ap.service", "clawbox-ap-watchdog.service"]) {
+      const text = fs.readFileSync(path.join(configDir, unit), "utf-8");
+      expect(text).toMatch(/^EnvironmentFile=-\/etc\/clawbox\/network\.env$/m);
+    }
+    // ...and that file is really written, root-owned, by the network step.
+    expect(shellFunction("step_network_setup")).toContain("> /etc/clawbox/network.env");
   });
 
   it("ap-watchdog.sh reads the disable flag without executing the file", () => {

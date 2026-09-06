@@ -528,46 +528,30 @@ export async function deleteFile(projectId: string, filePath: string): Promise<v
 
 // ── Search ──
 
+// Plain-text only. A `regex` option used to compile the caller's pattern and
+// run `re.test` synchronously per line, and no length cap bounds that: the
+// cost of "(a+)+$" is exponential in the LINE, so a 30-character line held
+// the box's one event loop — the desktop, every /setup-api route, the
+// gateway proxy and the terminal's WebSocket — for minutes, and a line the
+// caller had just written with `file-write` for hours. Nothing on the device
+// sent it (no UI, no MCP tool; the CLI posts a plain pattern) and the agent
+// already has a killable `grep` under a deadline, so the branch went rather
+// than gained a worker. The route answers `regex_unsupported` for a body
+// that still asks, so an old script gets a refusal and not a quiet change of
+// meaning.
 export async function searchFiles(
   projectId: string,
   pattern: string,
-  opts?: { regex?: boolean; caseSensitive?: boolean; maxResults?: number }
+  opts?: { caseSensitive?: boolean; maxResults?: number }
 ): Promise<SearchMatch[]> {
   const dir = projectDir(projectId);
   const files = await getAllTextFiles(dir);
   const results: SearchMatch[] = [];
   const max = opts?.maxResults || 100;
 
-  let matcher: (line: string) => boolean;
-  if (opts?.regex) {
-    // Cap the pattern length to limit worst-case backtracking a caller can set
-    // up (JS has no native regex timeout; a pattern like "(a+)+$" over a long
-    // line backtracks exponentially and would block the single-threaded event
-    // loop). Combined with the per-line slice below this bounds the work.
-    if (pattern.length > 200) {
-      throw new ValidationError("Regex pattern too long (max 200 chars)");
-    }
-    // No global flag: only test() is used, and the 'g' flag makes test()
-    // stateful (persisting lastIndex), which silently skips alternating matches.
-    const flags = opts.caseSensitive ? "" : "i";
-    // Flagged by CodeQL js/regex-injection: the pattern is a search FILTER, not
-    // a guard. It decides no path, permission or sanitisation outcome — only
-    // which lines of this device's own project files come back to the caller
-    // that asked. /setup-api/code sits behind the session / MCP-bearer gate.
-    let re: RegExp;
-    try {
-      re = new RegExp(pattern, flags);
-    } catch {
-      throw new ValidationError(`Invalid regex pattern: ${pattern}`);
-    }
-    // Bound each test to a slice so a pathological pattern against a very long
-    // line (files can be up to 512 KB) can't hang the process.
-    matcher = (line) => re.test(line.length > 2000 ? line.slice(0, 2000) : line);
-  } else {
-    const needle = opts?.caseSensitive ? pattern : pattern.toLowerCase();
-    matcher = (line) =>
-      (opts?.caseSensitive ? line : line.toLowerCase()).includes(needle);
-  }
+  const needle = opts?.caseSensitive ? pattern : pattern.toLowerCase();
+  const matcher = (line: string) =>
+    (opts?.caseSensitive ? line : line.toLowerCase()).includes(needle);
 
   outer: for (const file of files) {
     const relPath = path.relative(dir, file);

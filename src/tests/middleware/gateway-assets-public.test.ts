@@ -11,6 +11,8 @@
  * The opening is deliberately narrow: static bundle extensions, GET/HEAD, and
  * only under /assets/.
  */
+import fs from "fs";
+import path from "path";
 import { describe, expect, it } from "vitest";
 import { isGatewayStaticPath, isPublicGatewayAsset } from "@/lib/gateway-static";
 
@@ -93,6 +95,22 @@ describe("isPublicGatewayAsset", () => {
     ]) {
       expect(isPublicGatewayAsset(p, "GET"), p).toBe(true);
       expect(isGatewayStaticPath(p), p).toBe(true);
+    }
+  });
+
+  // Since the middleware matcher stopped skipping `/fonts/`, this gate is the
+  // ONLY thing that lets the box's own font files load without a session —
+  // the wizard over the captive portal and the /updating page both draw with
+  // them before or without a cookie. So every file actually shipped under
+  // public/fonts/ has to pass it, or the next font added with an extension
+  // the list lacks would render as a redirect to /login.
+  it("admits every file shipped in public/fonts/", () => {
+    const dir = path.join(process.cwd(), "public", "fonts");
+    const files = fs.readdirSync(dir).filter((name) => fs.statSync(path.join(dir, name)).isFile());
+    expect(files.length).toBeGreaterThan(0);
+    for (const name of files) {
+      expect(isPublicGatewayAsset(`/fonts/${name}`, "GET"), name).toBe(true);
+      expect(isPublicGatewayAsset(`/fonts/${name}`, "HEAD"), name).toBe(true);
     }
   });
 

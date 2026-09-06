@@ -50,6 +50,25 @@ jobs:
     # Budget: native arm64 finishes in 10-15 min; qemu is 30-40 min; give
     # headroom for docker pulls on cold runners.
     timeout-minutes: 90
+    # Where the secrets live. ONE job on purpose: a scheduled/manual job of
+    # its own would repeat the fifteen steps below, and a caller job that
+    # `uses:` a reusable workflow cannot set an Environment (only the called
+    # workflow's own jobs can, and on a pull_request the PR head supplies that
+    # file too) — so the one job names its Environment by event instead. A pull_request run
+    # references `e2e-pull-request`, which holds no secrets and needs no
+    # protection (the job checks out and runs the PR head's own config and
+    # specs; see "Write .env.test" below). Every other run — the schedule, a
+    # dispatch — references `e2e-credentials`, whose deployment-branch policy
+    # (beta and main only) is what fences the secrets: a run from any other
+    # ref is refused before a step starts, whatever this file says, because
+    # on a pull_request the PR head supplies this file too. The owner
+    # configures both under Settings → Environments: create
+    # `e2e-pull-request` empty; create `e2e-credentials`, put the provider
+    # keys and TELEGRAM_BOT_TOKEN in it, restrict its deployment branches to
+    # beta and main, then DELETE the repository-level copies — with those
+    # still there, a same-repo PR that edits the step-level `if:` below reads
+    # them anyway, and that `if:` is hygiene, not the fence.
+    environment: ${{ github.event_name == 'pull_request' && 'e2e-pull-request' || 'e2e-credentials' }}
     env:
       CLAWBOX_PORT: "8080"
       # Default target for the in-app updater test. On PRs targeted at this
@@ -98,12 +117,25 @@ jobs:
           platforms: arm64
 
       # Real AI-provider credentials are injected via repo secrets. The test
-      # steps that need them skip gracefully when the env var is empty, so
+      # steps that need them skip gracefully when the file is absent, so
       # forks without secrets still get meaningful coverage. Values are
       # passed through env vars and written via printf so a secret that
       # happens to contain the EOF token or other heredoc-breaking bytes
       # can't truncate the resulting .env file.
+      #
+      # Never on a pull_request run: this job checks out the PR HEAD and then
+      # runs its playwright.config.ts, global-setup.ts and specs on the host
+      # with this file beside them, so a same-repo PR branch could read the
+      # file and send it anywhere. A same-repo PR now behaves exactly like a
+      # fork PR; the credentialed specs run on the schedule and on dispatch.
+      # (A gate in this file is only hygiene — the PR head supplies the
+      # workflow too — which is why these secrets also belong in a GitHub
+      # Environment restricted to beta/main, not at repository scope.)
+      # Nothing reads CLAWBOX_UPGRADE_TARGET_BRANCH from the file — the
+      # updater spec reads process.env, set by the job-level env above — so
+      # the whole step is skipped rather than split.
       - name: Write .env.test
+        if: ${{ github.event_name != 'pull_request' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
