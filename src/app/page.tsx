@@ -588,8 +588,9 @@ function ChromeDesktopInner() {
   // `[].filter(…)` and write an empty list over every saved wallpaper.
   //
   // The raw setter is renamed out of reach and all three writers go through
-  // `applyCustomWallpapers`, so a fourth cannot advance the state while leaving
-  // the mirror behind. A mirror kept in step by convention is an invisible LOST
+  // `applyCustomWallpapers` — the two that CHANGE the list by way of
+  // `storeCustomWallpapers`, which stores it first — so a fourth cannot advance
+  // the state while leaving the mirror behind. A mirror kept in step by convention is an invisible LOST
   // write, and the purity rule cannot see one: it reports side effects INSIDE
   // an updater, never a missing ref advance outside one.
   // What a box with no custom wallpaper selected shows — the harness's own
