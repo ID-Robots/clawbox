@@ -46,6 +46,7 @@ function shellCode(fn: string): string {
 
 const STEP = extractShellFunction("step_swapfile");
 const FSTAB_FN = extractShellFunction("ensure_swapfile_fstab");
+const IN_CONTAINER = extractShellFunction("in_container");
 
 let tmp: string;
 
@@ -58,6 +59,8 @@ function runStep(opts: {
   existingFile?: "active" | "present" | "none";
   swaponFails?: boolean;
   testMode?: boolean;
+  container?: boolean;
+  readOnlyFstab?: boolean;
   fstab?: string;
 }) {
   const bin = path.join(tmp, "bin");
@@ -80,6 +83,9 @@ function runStep(opts: {
   stub("df", `echo "Avail"; echo "${opts.availGb}G"`);
   stub("free", `echo "Swap: 11Gi 1Gi 10Gi"`);
   stub("fallocate", `echo "fallocate $*" >> "${tmp}/calls"; : > "\${!#}"; exit 0`);
+  // The container probe answers through systemd-detect-virt on a real box.
+  stub("systemd-detect-virt", `exit ${opts.container ? 0 : 1}`);
+  if (opts.readOnlyFstab) fs.chmodSync(fstab, 0o444);
 
   const script = [
     "set -uo pipefail",
@@ -90,6 +96,8 @@ function runStep(opts: {
     'SWAPFILE_PRIORITY=1',
     // The helper reads /etc/fstab too; the sandbox owns both paths.
     shellCode(FSTAB_FN).replace(/\/etc\/fstab/g, fstab),
+    // The probe is the real one; only its helper binary is stubbed.
+    shellCode(IN_CONTAINER),
     // The step's own path constants are the box's; the sandbox rewrites them.
     shellCode(STEP).replace(/\/swapfile/g, swapfile).replace(/\/etc\/fstab/g, fstab),
     "step_swapfile",
@@ -175,6 +183,26 @@ describe("step_swapfile stands down rather than harming the box", () => {
     const r = runStep({ availGb: 25 });
     expect(r.status).toBe(0);
     expect(r.calls).toMatch(/fallocate -l 4G/);
+  });
+
+  it("skips a container BEFORE writing anything, test flag or not", () => {
+    // The CI harness is only one kind of container. An 8 GB file written and
+    // then refused by swapon is 8 GB of the host's disk wasted.
+    const r = runStep({ availGb: 400, container: true });
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/Skipping swapfile: running in a container/);
+    expect(r.calls).toBe("");
+    expect(r.fileExists).toBe(false);
+    expect(r.fstab).not.toMatch(/swapfile/);
+  });
+
+  it("reports an fstab that cannot be written, so the caller warns", () => {
+    // The swap is live at that point; without the status the step would claim
+    // success and the file would quietly vanish at the next boot.
+    const r = runStep({ availGb: 400, readOnlyFstab: true });
+    expect(r.status).toBe(1);
+    expect(r.out).toMatch(/will not survive a reboot/);
+    expect(r.calls).toMatch(/swapon --priority 1/);
   });
 
   it("skips in test mode: a container cannot swapon", () => {

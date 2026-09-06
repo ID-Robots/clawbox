@@ -694,6 +694,16 @@ is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
 # mode too and pin the real-hardware rule that a Kokoro which declines is a
 # mute box, so test mode alone must not soften that rule. Only the harness
 # entrypoint sets this (e2e-install/entrypoint.sh); a real device never does.
+# Is this a container rather than the board? systemd's own probe first (it
+# knows docker, podman, lxc and systemd-nspawn apart), then the two files every
+# runtime leaves behind, so a box without systemd-detect-virt still answers.
+in_container() {
+  if command -v systemd-detect-virt >/dev/null 2>&1; then
+    systemd-detect-virt --container --quiet && return 0
+  fi
+  [ -f /.dockerenv ] || [ -f /run/.containerenv ]
+}
+
 harness_has_no_gpu() {
   [ "${CLAWBOX_TEST_NO_GPU:-0}" = "1" ]
 }
@@ -4686,14 +4696,21 @@ step_swapfile() {
   # written once.
   local file=/swapfile size_gb avail_gb
 
+  # A container cannot swapon at all, and the CI harness is only one kind of
+  # container: check the machine, not just our own test flag, BEFORE anything
+  # touches the disk — an 8 GB file written and then refused is 8 GB wasted.
   if is_test_mode; then
     echo "  Skipping swapfile: test mode (a container cannot swapon)"
+    return 0
+  fi
+  if in_container; then
+    echo "  Skipping swapfile: running in a container (swap belongs to the host)"
     return 0
   fi
 
   if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "$file"; then
     echo "  Swapfile already active: $(swapon --show=NAME,SIZE --noheadings 2>/dev/null | awk -v f="$file" '$1 == f {print $2}')"
-    ensure_swapfile_fstab "$file"
+    ensure_swapfile_fstab "$file" || return 1
     return 0
   fi
 
@@ -4701,7 +4718,7 @@ step_swapfile() {
     # Left from an earlier install or a reboot that has not mounted it yet.
     if swapon --priority "$SWAPFILE_PRIORITY" "$file" 2>/dev/null; then
       echo "  Swapfile re-enabled: $file"
-      ensure_swapfile_fstab "$file"
+      ensure_swapfile_fstab "$file" || return 1
       return 0
     fi
     echo "  Warning: $file exists but could not be enabled; leaving it alone"
@@ -4746,7 +4763,7 @@ step_swapfile() {
     echo "  Warning: swapon failed; leaving the box on zram alone"
     return 0
   fi
-  ensure_swapfile_fstab "$file"
+  ensure_swapfile_fstab "$file" || return 1
   echo "  Swap is now $(free -h | awk '/^Swap:/{print $2}') ($(swapon --show=NAME --noheadings | wc -l) devices)"
 }
 
@@ -4754,7 +4771,13 @@ step_swapfile() {
 ensure_swapfile_fstab() {
   local file="$1"
   grep -qs "^$file[[:space:]]" /etc/fstab && return 0
-  printf '%s none swap sw,pri=%s 0 0\n' "$file" "$SWAPFILE_PRIORITY" >> /etc/fstab
+  # A read-only or full /etc is the case that matters: the swap is live now and
+  # would vanish at the next boot with nothing said. The append's status is the
+  # step's, and the step's is a warning at the caller — never a failed install.
+  if ! printf '%s none swap sw,pri=%s 0 0\n' "$file" "$SWAPFILE_PRIORITY" >> /etc/fstab; then
+    echo "  Warning: could not record $file in /etc/fstab — the swap is active now but will not survive a reboot" >&2
+    return 1
+  fi
   echo "  Recorded $file in /etc/fstab"
 }
 
