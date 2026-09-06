@@ -34,7 +34,12 @@ import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 /** Telegram's own limit is 4096 characters; callers cap their own text. */
 export const MAX_TELEGRAM_CHARS = 4_000;
 
-const TELEGRAM_TIMEOUT_MS = 8_000;
+/**
+ * This file's own ceiling on one request. Exported so the test can assert that
+ * a caller's budget SHORTENS it and never lengthens it, without restating the
+ * number in a second place.
+ */
+export const TELEGRAM_TIMEOUT_MS = 8_000;
 
 /**
  * A numeric Telegram chat/user id, possibly negative for a group.
@@ -77,7 +82,17 @@ export function isTelegramBotToken(token: string): boolean {
  * not be read" in its log, which is a diagnostic this function's boolean cannot
  * carry — and only the HTTP half was duplicated between the two.
  */
-export async function sendTelegramBotMessage(token: string, chatId: string, text: string): Promise<boolean> {
+export async function sendTelegramBotMessage(
+  token: string,
+  chatId: string,
+  text: string,
+  /**
+   * A caller's remaining budget. Only ever SHORTENS, the same rule the Hermes
+   * leg follows: 8 s is right for a notice nothing waits on and can still be
+   * 8 s too many inside a request whose caller gives up at 60.
+   */
+  timeoutMs?: number,
+): Promise<boolean> {
   const matched = BOT_TOKEN_RE.exec(token.trim());
   if (!matched) return false;
   // BOTH values that came off the disk are REBUILT here, out of characters
@@ -91,6 +106,8 @@ export async function sendTelegramBotMessage(token: string, chatId: string, text
   const chat = TELEGRAM_CHAT_ID_RE.exec(chatId.trim());
   if (!chat) return false;
   const safeChatId = chat[1] === "-" ? `-${chat[2]}` : chat[2];
+  const budget =
+    typeof timeoutMs === "number" && timeoutMs > 0 ? Math.min(timeoutMs, TELEGRAM_TIMEOUT_MS) : TELEGRAM_TIMEOUT_MS;
   try {
     // Interpolated raw, not encoded: Telegram wants the literal
     // "<bot id>:<secret>", and encodeURIComponent turns the colon into %3A,
@@ -101,7 +118,7 @@ export async function sendTelegramBotMessage(token: string, chatId: string, text
       // No parse_mode: the text is plain, and a stray underscore must not turn
       // into a Markdown error that swallows the whole message.
       body: JSON.stringify({ chat_id: safeChatId, text, disable_web_page_preview: true }),
-      signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS),
+      signal: AbortSignal.timeout(budget),
     });
     return res.ok;
   } catch {
@@ -151,7 +168,7 @@ export async function sendOwnerTelegramText(
 
     const { token } = await readActiveTelegramBot("openclaw");
     if (typeof token !== "string" || !token.trim()) return false;
-    return await sendTelegramBotMessage(token, chatId, body);
+    return await sendTelegramBotMessage(token, chatId, body, opts.timeoutMs);
   } catch (err) {
     console.error("[telegram] could not resolve this device's bot:", err instanceof Error ? err.message : err);
     return false;
