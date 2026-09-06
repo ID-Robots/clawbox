@@ -51,6 +51,22 @@ vi.mock("@/lib/port-probe", async (orig) => ({
 const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
 
+// The TASK-606 marker, mocked so the clears the repair paths owe can be seen.
+// `readPluginRepairs` answers `{}`, which is what the real one answers under
+// this file's mocked `fs/promises` anyway — so nothing else moves.
+const { mockClearPluginRepair, mockReadPluginRepairs, mockClawboxDisabledEntryId } = vi.hoisted(() => ({
+  mockClearPluginRepair: vi.fn(async () => true),
+  mockReadPluginRepairs: vi.fn(async () => ({})),
+  // Null by default: no row says ClawBox switched anything off, so a payload
+  // repair clears the marker without touching the config.
+  mockClawboxDisabledEntryId: vi.fn(async (): Promise<string | null> => null),
+}));
+vi.mock("@/lib/plugin-repair", () => ({
+  clearPluginRepair: mockClearPluginRepair,
+  readPluginRepairs: mockReadPluginRepairs,
+  clawboxDisabledEntryId: mockClawboxDisabledEntryId,
+}));
+
 import { get, set, setMany } from "@/lib/config-store";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
@@ -645,6 +661,30 @@ describe("updater", () => {
         );
         return consentIndex >= 0 && restartIndex > consentIndex;
       });
+      // The state the boot script's own boot-without leaves behind: the payload
+      // could not be installed, so the entry was switched off and the row says
+      // ClawBox did it. That is what the repair below has to undo.
+      mockReadPluginRepairs.mockResolvedValue({
+        codex: {
+          id: "codex", stage: "install", reason: "offline", atMs: 1,
+          disabled: true, spec: "@openclaw/codex@2026.8.1",
+        },
+      });
+      mockClawboxDisabledEntryId.mockResolvedValue("codex");
+      // openclaw.json as `plugins enable codex` leaves it. The repair proves its
+      // re-enable against the FILE rather than against an exit code, so the
+      // fixture has to model the write the verb performs — a stub that answered
+      // the exit code alone would have blessed a clear this test is about.
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (String(file).endsWith("/openclaw.json")) {
+          const enabled = mockExecFile.mock.calls.some(([, args]) =>
+            (args as string[] | undefined)?.join(" ").includes("plugins enable codex"),
+          );
+          return JSON.stringify({ plugins: { entries: { codex: { enabled } } } });
+        }
+        throw new Error("ENOENT");
+      });
       updater = await import("@/lib/updater");
       if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
       else process.env.CLAWBOX_ROOT = priorRoot;
@@ -681,6 +721,24 @@ describe("updater", () => {
       const restartIndexes = calls
         .map((call, index) => call.includes("systemctl restart clawbox-gateway.service") ? index : -1)
         .filter((index) => index >= 0);
+
+      // The OTHER half of the same repair (TASK-606): the boot script marked
+      // codex as needing repair, this update put the payload back, and a marker
+      // only the boot script ever cleared would leave a permanent "Needs
+      // repair" badge on a plugin that is now fine.
+      expect(mockClearPluginRepair.mock.calls.flat()).toContain("codex");
+
+      // …and the entry the boot script switched off is put back BEFORE the
+      // badge goes. `plugins install` leaves an explicitly disabled entry
+      // alone, so clearing on the install alone would take the badge off a
+      // plugin that is still switched off — the false success this card is
+      // about. `plugins enable` is the harness's own verb for it, and it also
+      // re-records the consent surface.
+      const enableIndex = calls.findIndex((call) =>
+        call.includes("plugins enable codex --accept-capabilities"),
+      );
+      expect(enableIndex).toBeGreaterThanOrEqual(0);
+      expect(enableIndex).toBeGreaterThan(consentIndex);
 
       expect(maskIndexes).toHaveLength(2);
       expect(stopIndexes).toHaveLength(2);
@@ -1365,6 +1423,54 @@ describe("updater", () => {
       expect(updater.getUpdateState().steps.find((step) => step.id === "post_update")?.error)
         .toContain("unmask failed");
       errorSpy.mockRestore();
+    });
+
+    it("keeps the repair record when `plugins enable` exits 0 without writing", async () => {
+      // The read-back's own case. `plugins enable` returning 0 is not the same
+      // as the entry being on, and clearing the badge on the exit code alone is
+      // the exact false success this card is about — one screen further out
+      // than the boot script's "gateway will still start".
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "Plugin \"codex\" requires capability consent\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockReadPluginRepairs.mockResolvedValue({
+        codex: {
+          id: "codex", stage: "install", reason: "offline", atMs: 1,
+          disabled: true, spec: "@openclaw/codex@2026.8.1",
+        },
+      });
+      mockClawboxDisabledEntryId.mockResolvedValue("codex");
+      // The verb exits 0 and the config still says the entry is off.
+      mockReadFile.mockImplementation(async (file) => {
+        if (String(file).endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (String(file).endsWith("/openclaw.json")) {
+          return JSON.stringify({ plugins: { entries: { codex: { enabled: false } } } });
+        }
+        throw new Error("ENOENT");
+      });
+      mockGatewayUp.mockResolvedValue(true);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      // The badge stays: the plugin is installed and still switched off, and
+      // the row is the only thing that says so.
+      expect(mockClearPluginRepair).not.toHaveBeenCalled();
     });
 
     it("does not re-enable an explicitly disabled unused Codex plugin from a stale journal line", async () => {

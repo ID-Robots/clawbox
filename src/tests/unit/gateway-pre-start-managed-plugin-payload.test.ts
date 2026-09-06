@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testEnv } from "@/tests/helpers/env";
+import { repairHelpers } from "@/tests/helpers/gateway-pre-start";
 import { OFFICIAL_CHANNEL_PLUGINS } from "@/lib/openclaw-channels";
 
 // Starts a real process (bash / python3): vitest's 5 s test and 10 s hook
@@ -44,7 +45,9 @@ function extractBlock(): string {
   return src.slice(start, end + "\n  done\nfi\n".length);
 }
 
-const BLOCK = hasBash && hasPython3 ? extractBlock() : "";
+// A refusal this loop cannot repair now ends in `clawbox_plugin_boot_without`
+// rather than a warning, so the block no longer runs without those helpers.
+const BLOCK = hasBash && hasPython3 ? `${repairHelpers()}\n${extractBlock()}` : "";
 
 let dir: string;
 
@@ -108,6 +111,9 @@ function run(opts: RunOptions): { argv: string[]; stdout: string } {
       CLAWBOX_OPENCLAW_V2: "1",
       OPENCLAW_CONFIG: config,
       OPENCLAW_BIN: bin,
+      // This case's own root, so the repair marker the helpers write does not
+      // leak between cases through the run-wide one.
+      CLAWBOX_ROOT: dir,
       CLAWBOX_OPENCLAW_EFFECTIVE: opts.effective ?? "2026.8.1",
     }),
   });
@@ -148,11 +154,16 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       entries: { discord: { enabled: true }, whatsapp: { enabled: true } },
       enableFails: ["discord", "whatsapp"],
     });
-    expect(argv).toEqual([
+    expect(argv.filter((line) => line.startsWith("plugins"))).toEqual([
       "plugins enable discord --accept-capabilities",
       "plugins enable whatsapp --accept-capabilities",
     ]);
+    expect(argv.some((line) => line.startsWith("plugins install"))).toBe(false);
     expect(stdout).toContain("WARN: could not confirm discord plugin capabilities");
+    // …and the plugin is switched off so the gateway can start without it
+    // (TASK-606): the refusal is real, it is just not one an install repairs.
+    expect(argv).toContain('config set plugins.entries["discord"].enabled false --strict-json');
+    expect(stdout).toContain("booting without it");
   });
 
   it("repairs the payload under the alias the registry answers to", () => {

@@ -3,6 +3,7 @@
 import { useCallback, useState } from "react";
 import { useT } from "@/lib/i18n";
 import AIProviderIcon from "./AIProviderIcon";
+import PluginRepairNotice from "./PluginRepairNotice";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
 import { notifyProvidersChanged } from "@/lib/ui-events";
@@ -207,6 +208,20 @@ export default function AiProviderList() {
                       >
                         {t("settings.providers.lockedHint")}
                       </span>
+                    )}
+                    {/* "Not connected" is true here and useless on its own: the
+                        boot script could not install or consent this provider's
+                        plugin and switched it off so the gateway could start.
+                        Shown even for a provider the owner has SWITCHED OFF —
+                        that switch and this failure are different facts, and
+                        hiding the second behind the first is how the owner ends
+                        up switching a provider on and watching nothing happen. */}
+                    {row.needsRepair && (
+                      <PluginRepairNotice
+                        repair={row.needsRepair}
+                        onRepaired={refresh}
+                        className="mt-0.5"
+                      />
                     )}
                   </span>
                 </span>

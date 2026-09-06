@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import path from "node:path";
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
@@ -467,5 +469,62 @@ describe("the response carries statuses, never credentials", () => {
       expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
       expect(["connected", "disconnected", "needs-reauth", "checking", "unknown"]).toContain(row.state);
     }
+  });
+});
+
+// ── TASK-606: a provider whose plugin the boot script could not repair ──────
+//
+// "Not connected" was true and useless: the plugin behind the row would not
+// install or consent, the boot script switched it off so the gateway could
+// start, and the panel had nothing to say and nothing to press. The marker is
+// stamped in `readProviderStatus`, beside the enabled switch, so neither
+// harness reader has to know about it and the two cannot disagree.
+describe("providers/status — needs repair", () => {
+  const markerDir = path.join(process.env.CLAWBOX_ROOT as string, "data");
+  const markerPath = path.join(markerDir, "plugin-repair.json");
+
+  afterEach(() => {
+    rmSync(markerPath, { force: true });
+  });
+
+  function writeMarker(rows: unknown) {
+    mkdirSync(markerDir, { recursive: true });
+    writeFileSync(markerPath, JSON.stringify(rows), "utf-8");
+  }
+
+  it("puts the DeepSeek plugin's failure on the ClawBox AI row", async () => {
+    getActiveHarness.mockResolvedValue("openclaw");
+    readConfig.mockResolvedValue({});
+    writeMarker({
+      deepseek: {
+        id: "@openclaw/deepseek-provider",
+        stage: "install",
+        reason: "The DeepSeek provider plugin, which ClawBox AI runs on, could not be installed.",
+        atMs: 1_700_000_000_000,
+        disabled: true,
+      },
+    });
+
+    const body = await (await GET()).json() as { providers: (Row & { needsRepair?: { pluginId: string; stage: string; reason: string } })[] };
+    const clawai = body.providers.find((r) => r.id === "clawai");
+    expect(clawai?.needsRepair?.pluginId).toBe("@openclaw/deepseek-provider");
+    expect(clawai?.needsRepair?.stage).toBe("install");
+    expect(clawai?.needsRepair?.reason).toMatch(/could not be installed/);
+    // Only the row it belongs to.
+    expect(body.providers.find((r) => r.id === "anthropic")).not.toHaveProperty("needsRepair");
+  });
+
+  it("says nothing on a box with no failures", async () => {
+    getActiveHarness.mockResolvedValue("openclaw");
+    readConfig.mockResolvedValue({});
+    const body = await (await GET()).json() as { providers: Row[] };
+    for (const row of body.providers) expect(row).not.toHaveProperty("needsRepair");
+  });
+
+  it("is inert on Hermes, where nothing writes the marker", async () => {
+    getActiveHarness.mockResolvedValue("hermes");
+    getModelOptions.mockResolvedValue(hermesPayload());
+    const body = await (await GET()).json() as { providers: Row[] };
+    for (const row of body.providers) expect(row).not.toHaveProperty("needsRepair");
   });
 });

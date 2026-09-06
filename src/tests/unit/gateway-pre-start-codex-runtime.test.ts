@@ -12,6 +12,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { repairHelpers } from "@/tests/helpers/gateway-pre-start";
+
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
 // src/tests/unit/test-timeout-hygiene.test.ts.
@@ -113,8 +115,9 @@ function extractManagedConsentFlow(): string {
   return SCRIPT_SOURCE.slice(start, end);
 }
 
-const PLUGIN_FLOW = extractPluginFlow();
-const MANAGED_CONSENT_FLOW = extractManagedConsentFlow();
+const REPAIR_HELPERS = repairHelpers();
+const PLUGIN_FLOW = `${REPAIR_HELPERS}\n${extractPluginFlow()}`;
+const MANAGED_CONSENT_FLOW = `${REPAIR_HELPERS}\n${extractManagedConsentFlow()}`;
 
 let dir: string;
 
@@ -203,6 +206,10 @@ function runPluginFlow(options: PluginFlowOptions): string[] {
   execFileSync("bash", ["-c", `set -euo pipefail\n${PLUGIN_FLOW}`], {
     env: {
       ...process.env,
+      // The prepended repair helpers write `$CLAWBOX_ROOT/data/plugin-repair.json`:
+      // this case's own directory, so the marker cannot leak into another one
+      // through the run-wide root `vitest.config.ts` sets.
+      CLAWBOX_ROOT: dir,
       CLAWBOX_OPENCLAW_V2: options.v2 ? "1" : "0",
       NEEDS_CODEX_PLUGIN: options.needsCodex ? "1" : "0",
       CODEX_PLUGIN_ENABLED: options.enabledByConfig ? "1" : "0",
@@ -248,6 +255,10 @@ function runManagedConsentFlow(options: {
   execFileSync("bash", ["-c", `set -euo pipefail\n${MANAGED_CONSENT_FLOW}`], {
     env: {
       ...process.env,
+      // The prepended repair helpers write `$CLAWBOX_ROOT/data/plugin-repair.json`:
+      // this case's own directory, so the marker cannot leak into another one
+      // through the run-wide root `vitest.config.ts` sets.
+      CLAWBOX_ROOT: dir,
       CLAWBOX_OPENCLAW_V2: options.v2 === false ? "0" : "1",
       OPENCLAW_CONFIG: config,
       OPENCLAW_BIN: fakeOpenClaw,
