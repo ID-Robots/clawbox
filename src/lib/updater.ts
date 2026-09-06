@@ -57,13 +57,268 @@ const execFile = promisify(execFileCb);
 function execGit(
   projectDir: string,
   args: string[],
-  options: { timeout: number; maxBuffer?: number },
+  options: { timeout: number; maxBuffer?: number; env?: NodeJS.ProcessEnv },
 ) {
   return execFile(
     "git",
     ["-c", `safe.directory=${projectDir}`, "-C", projectDir, ...args],
     options,
   );
+}
+
+/**
+ * git's own switch for "never ask a human for a credential".
+ *
+ * Every ClawBox fetches this repository anonymously and has no credential to
+ * offer. Without this, a git run that inherits a tty — a support engineer's
+ * `install.sh` in a terminal, a root unit started from one — blocks on a
+ * username prompt nobody is there to type, and the update hangs instead of
+ * failing. With it the refusal is deterministic and immediate.
+ */
+const GIT_NO_PROMPT_ENV: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
+
+/**
+ * How this device's network reach to the update remote actually went.
+ *
+ * `reachable: false` is the fact /update/versions used to lose: the fetch was
+ * swallowed, HEAD was compared against a STALE `origin/<branch>` and the box
+ * told its owner "You're up to date" while it had not managed to ask.
+ */
+export interface RemoteReachability {
+  reachable: boolean;
+  /**
+   * GitHub answered a public repository's anonymous `git-upload-pack` with
+   * 401. git words that as "could not read Username", which names credentials
+   * a ClawBox never has — so it is classified here rather than shown raw.
+   */
+  refusedAnonymously?: boolean;
+  /** One owner-facing sentence. Absent when the remote answered. */
+  reason?: string;
+}
+
+const REMOTE_REACHABLE: RemoteReachability = { reachable: true };
+
+/**
+ * Measured on the dev network, 2026-09-02 (TASK-655): GitHub answers git's
+ * protocol-v2 POST to `/git-upload-pack` with `HTTP 401` and a body reading
+ * "Repository not found." — for a PUBLIC repository — once an address has used
+ * up its anonymous allowance. On the day it was measured the GET to
+ * `/info/refs` kept answering while the POST did not, which is why the fetch
+ * failed and `ls-remote` did not. That was the state that afternoon, NOT a
+ * property of the endpoint: the GET is refused too, which is why it is retried
+ * and why getTargetVersion has a branch for it being unreachable.
+ *
+ * git reports it as `fatal: could not read Username for 'https://github.com'`.
+ * That sentence points at credentials; the cause is an anonymous-access
+ * refusal, and no ClawBox has a credential to add. Two people lost an
+ * afternoon to that wording before it was measured.
+ *
+ * Narrow on purpose. `Authentication failed` and `terminal prompts disabled`
+ * are the same 401 seen through another git version, but they ALSO fire on a
+ * QA box pointed at a private fork — where "the repository is public and the
+ * device needs no password" would be a false diagnosis. Only the measured
+ * signature earns that sentence; see refusalReason().
+ */
+function isAnonymousFetchRefusal(text: string): boolean {
+  return /could not read Username|could not read Password|Repository not found/i.test(text);
+}
+
+/** The same 401 in a spelling that does not prove the remote is public. */
+function isCredentialRefusal(text: string): boolean {
+  return isAnonymousFetchRefusal(text)
+    || /Authentication failed|terminal prompts disabled/i.test(text);
+}
+
+/**
+ * No DNS — this box is not on the network at all.
+ *
+ * Told apart from a refusal because the answers differ: a refusal is worth
+ * asking again in a moment; "there is no network" is not, and retrying it only
+ * spends the owner's time on a question already answered.
+ */
+function isOffline(text: string): boolean {
+  return /Could not resolve host|Temporary failure in name resolution|Network is unreachable/i.test(text);
+}
+
+/**
+ * The remote answered, and what it said is that this ref does not exist.
+ *
+ * A CONFIGURATION answer, not a network one: an operator who pinned Settings →
+ * System Update → Advanced to a branch that has since been deleted has a pin
+ * problem, and reporting it as "could not reach GitHub" sends them to the
+ * router instead of to the setting.
+ */
+function isMissingRef(text: string): boolean {
+  return /couldn't find remote ref|Remote branch .* not found/i.test(text);
+}
+
+/** A refusal, a timeout or a transient fault — all worth asking again. */
+function isRetryableRemoteFailure(err: unknown, text: string): boolean {
+  if (isOffline(text) || isMissingRef(text)) return false;
+  if (isCredentialRefusal(text)) return true;
+  // A git killed by execFile's own timeout has usually printed nothing, so
+  // there is no text to classify — and a stalled connection is the case a
+  // retry helps most. `killed`/`signal` is the only evidence there is.
+  const e = err as { killed?: boolean; signal?: string } | undefined;
+  if (e?.killed || e?.signal) return true;
+  return /Connection (?:timed out|refused|reset)|early EOF|RPC failed|The requested URL returned error: 5\d\d|unable to access/i
+    .test(text);
+}
+
+function errorText(err: unknown): string {
+  const e = err as { stderr?: string; stdout?: string; message?: string } | undefined;
+  return [e?.stderr, e?.stdout, e?.message].filter(Boolean).join("\n").trim();
+}
+
+/**
+ * Attempts and backoff for a refused fetch.
+ *
+ * Measured (TASK-655, 19:27): with GitHub letting roughly one anonymous fetch
+ * in three through, and one in-app update needing three separate fetches to
+ * succeed in a row, an update had a few percent chance of completing. git has
+ * no retry of its own — neither 2.34 (the boxes) nor 2.43 (the dev PC) carries
+ * a `fetch.retry`/`http.retry` knob — so it lives here.
+ *
+ * TWO budgets, because the callers pay different prices for the wrong one. The
+ * UPDATE path is a one-shot operation the owner is watching and losing it costs
+ * a whole run, so it gets the full three attempts. The VERSION CHECK is polled
+ * by four surfaces: a long retry there is dead time on every poll, and the
+ * refusal it is answering is caused by too many anonymous requests from this
+ * address — which a blanket 3x would feed. It asks twice, briefly, and it
+ * spends those two asks on the call it reads the answer from rather than
+ * splitting them: hence the third budget below, which is what the advisory tag
+ * fetch gets so the check's total stays where it was.
+ */
+const REMOTE_FETCH_ATTEMPTS = 3;
+const REMOTE_CHECK_ATTEMPTS = 2;
+/**
+ * The advisory tag fetch asks ONCE, and the retry it used to hold is spent on
+ * the `ls-remote` the tag answer is actually read from. That keeps the number
+ * of anonymous requests a version check can make exactly where it was — which
+ * matters, because the refusal being retried is caused by too many of them.
+ */
+const REMOTE_ADVISORY_ATTEMPTS = 1;
+/**
+ * An override that is not a non-negative number of milliseconds is replaced
+ * with the default, and said out loud.
+ *
+ * `Number("garbage")` is NaN, `Number(" ")` is 0, and a negative value stays
+ * negative; `setTimeout` treats all three as 0, so the retries would still run
+ * but back-to-back — removing the one thing the policy depends on, and sending
+ * the anonymous requests in the burst that causes the refusal being retried.
+ *
+ * The upper bound is here for the opposite reason, and it is why this clamps a
+ * RANGE where the shell knobs deliberately do not: `setTimeout` above
+ * 2^31 - 1 ms does not wait longer, it fires on the next tick with a
+ * `TimeoutOverflowWarning`. A huge value would therefore be INVERTED into no
+ * delay at all rather than honoured, and `reachOrigin` multiplies by the
+ * attempt number on top. Ten minutes is far past any sane version-check
+ * backoff and leaves the product three orders of magnitude clear of the limit.
+ */
+const MAX_RETRY_DELAY_MS = 600_000;
+
+function retryDelayMsFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const trimmed = raw.trim();
+  const parsed = trimmed === "" ? Number.NaN : Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_RETRY_DELAY_MS) {
+    console.warn(`[Updater] ${name}="${raw}" is not a number of milliseconds `
+      + `between 0 and ${MAX_RETRY_DELAY_MS}, using ${fallback}`);
+    return fallback;
+  }
+  return parsed;
+}
+
+const REMOTE_RETRY_DELAY_MS = retryDelayMsFromEnv("UPDATER_REMOTE_RETRY_DELAY_MS", 4000);
+const REMOTE_CHECK_RETRY_DELAY_MS = retryDelayMsFromEnv("UPDATER_REMOTE_CHECK_RETRY_DELAY_MS", 1200);
+
+const ANONYMOUS_REFUSAL_REASON =
+  "GitHub refused this ClawBox's anonymous request for the update repository. "
+  + "The repository is public and the device needs no password — GitHub answers 401 to anonymous git "
+  + "requests from an address that has made too many. Try again in a few minutes.";
+
+/** One owner-facing sentence for a failed reach. */
+function refusalReason(err: unknown, text: string): string {
+  if (isAnonymousFetchRefusal(text)) return ANONYMOUS_REFUSAL_REASON;
+  if (isCredentialRefusal(text)) {
+    return "The update repository refused this device's request for credentials it does not have. "
+      + "If this box is pointed at a private fork, it needs a remote it can read anonymously.";
+  }
+  if (isOffline(text)) {
+    return "This ClawBox could not look up github.com — check the network connection and try again.";
+  }
+  if (isMissingRef(text)) {
+    return "The update branch this ClawBox is pinned to no longer exists on GitHub. "
+      + "Choose a different branch in System Update → Advanced options.";
+  }
+  const e = err as { killed?: boolean; signal?: string } | undefined;
+  if (e?.killed || e?.signal) {
+    return "The update repository did not answer in time — the connection may be slow or blocked. Try again.";
+  }
+  // Last resort. errorText() on a spawn failure is Node's own
+  // `Command failed: git -c safe.directory=…`: an argv is not an explanation,
+  // so only its last line goes out, and only when there is nothing better.
+  return `Could not reach the update repository: ${text.split("\n").pop() || "unknown error"}`;
+}
+
+/**
+ * Run a git network command, retrying a refused or transient attempt.
+ *
+ * Returns how it went rather than throwing: every caller here wants to carry
+ * on and SAY the remote could not be reached, which is the whole point — the
+ * old `.catch(() => {})` is what turned a refusal into "up to date".
+ */
+async function reachOrigin(
+  projectDir: string,
+  args: string[],
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+): Promise<RemoteReachability> {
+  return (await readFromOrigin(projectDir, args, options)).remote;
+}
+
+/**
+ * The same policy, for a call whose OUTPUT is the answer.
+ *
+ * `RemoteReachability` travels into the /update/versions payload, so git's
+ * stdout is returned beside it rather than added to it.
+ */
+async function readFromOrigin(
+  projectDir: string,
+  args: string[],
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+): Promise<{ remote: RemoteReachability; stdout: string }> {
+  const attempts = options.attempts ?? REMOTE_FETCH_ATTEMPTS;
+  const retryDelayMs = options.retryDelayMs ?? REMOTE_RETRY_DELAY_MS;
+  let lastText = "";
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const { stdout } = await execGit(projectDir, args, {
+        timeout: options.timeout,
+        maxBuffer: options.maxBuffer,
+        env: { ...process.env, ...GIT_NO_PROMPT_ENV },
+      });
+      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? "") };
+    } catch (err) {
+      lastErr = err;
+      lastText = errorText(err);
+      if (attempt === attempts || !isRetryableRemoteFailure(err, lastText)) break;
+      console.warn(
+        `[Updater] git ${args[0]} attempt ${attempt}/${attempts} failed, retrying: `
+        + lastText.split("\n").pop(),
+      );
+      await delay(retryDelayMs * attempt);
+    }
+  }
+  return {
+    remote: {
+      reachable: false,
+      refusedAnonymously: isAnonymousFetchRefusal(lastText),
+      reason: refusalReason(lastErr, lastText),
+    },
+    stdout: "",
+  };
 }
 
 const VALID_HOST = /^[A-Za-z0-9.\-:]+$/;
@@ -776,7 +1031,27 @@ async function updateClawBoxAndReboot(): Promise<void> {
   //      are preserved so we don't nuke user state or force a multi-
   //      minute rebuild.
   const gitOptions = { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 };
-  await execGit(PROJECT_DIR, ["fetch", "origin"], gitOptions);
+  // NO fetch here. This used to be the THIRD anonymous fetch of one update —
+  // after the Node updater's own and step 0's (`bootstrap_updater` →
+  // install.sh `sync_repo_to_update_target`) — and the heaviest, because it
+  // asked for ALL refs. Step 0 is `failFast` and has already fetched origin AND
+  // hard-reset this tree to `upstream`, so this one could only ever re-fetch
+  // refs the run already has, while giving GitHub a third chance to refuse the
+  // whole update: an attempt on 2026-09-02 got through the first two, ran
+  // steps 1-8 for three and a half minutes, and died here (TASK-655).
+  //
+  // What replaces it is the question the reset actually depends on — is the ref
+  // on this device? — asked of the refs already on disk. Dropping the fetch
+  // without asking that would be a false success: `reset --hard` to a ref that
+  // was never fetched fails with git's own argv, and nothing would say why.
+  try {
+    await execGit(PROJECT_DIR, ["rev-parse", "--verify", `${upstream}^{commit}`], gitOptions);
+  } catch {
+    throw new Error(
+      `This ClawBox has no local copy of ${upstream}. Step 1 of this update was supposed to fetch it — `
+      + "run the update again, and if it keeps failing, GitHub may be refusing this address's anonymous requests.",
+    );
+  }
   await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
   try {
     await execGit(PROJECT_DIR, ["checkout", local], gitOptions);
@@ -1407,7 +1682,12 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "bootstrap_updater",
     label: "Refreshing updater scripts",
-    timeoutMs: 120_000,
+    // 180 s, raised from 120: this step's fetch now retries (install.sh
+    // `git_with_retry`, up to 3 attempts with 3 s + 6 s of backoff). A retry
+    // that gets the fetch through on attempt 3 only to be killed by the budget
+    // it needed would turn an intermittent refusal into a hard failure, which
+    // is the retry paying for itself and then being billed for it. TASK-655.
+    timeoutMs: 180_000,
     requiresRoot: true,
     failFast: true,
   },
@@ -1673,7 +1953,23 @@ interface VersionInfo {
    * before.
    */
   edition: EditionName;
+  /**
+   * Whether this check could actually reach the update remote.
+   *
+   * Without it "no update available" is unfalsifiable: a device GitHub is
+   * refusing produces exactly the same payload as a device that is genuinely
+   * current, and the one screen whose job is "should I update?" answers
+   * "You're up to date" (TASK-655, fleet-wide, measured 2026-09-02).
+   */
+  remote: RemoteReachability;
 }
+
+/**
+ * How the last real tag lookup went. Kept beside `cachedTargetVersion` and
+ * invalidated with it, so a cached version and the reachability that produced
+ * it can never disagree.
+ */
+let lastTagRemote: RemoteReachability = REMOTE_REACHABLE;
 
 let cachedVersionInfo: VersionInfo | null = null;
 let versionInfoCacheTime = 0;
@@ -1686,6 +1982,7 @@ export function invalidateVersionCache(): void {
   // memoized result of the last lookup.
   cachedTargetVersion = null;
   targetVersionCacheTime = 0;
+  lastTagRemote = REMOTE_REACHABLE;
 }
 
 /**
@@ -1757,31 +2054,46 @@ async function readHermesVersion(): Promise<string | null> {
   }
 }
 
-async function getPinnedBranchTarget(projectDir: string): Promise<{
-  branch: string;
-  currentSha: string;
-  targetSha: string;
-} | null> {
+interface PinnedBranchCheck {
+  target: { branch: string; currentSha: string; targetSha: string } | null;
+  remote: RemoteReachability;
+}
+
+/**
+ * Compare the device against its pinned branch on origin.
+ *
+ * The fetch outcome is RETURNED, not swallowed. It used to be
+ * `.catch(() => {})`, after which HEAD was compared against whatever
+ * `origin/<branch>` the last successful fetch had left: on a box GitHub was
+ * refusing, that is HEAD itself, so the answer was "no update" and the About
+ * screen said "You're up to date" about a check that never happened
+ * (TASK-655).
+ */
+async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCheck> {
   let branch: string;
   try {
     branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
   } catch {
-    return null;
+    return { target: null, remote: REMOTE_REACHABLE };
   }
-  if (!branch || !isSafeBranch(branch)) return null;
+  if (!branch || !isSafeBranch(branch)) return { target: null, remote: REMOTE_REACHABLE };
 
+  const remote = await reachOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
+    timeout: 20_000,
+    attempts: REMOTE_CHECK_ATTEMPTS,
+    retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS,
+  });
   try {
-    await execGit(projectDir, ["fetch", "--quiet", "origin", branch], { timeout: 20_000 }).catch(() => {});
     const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
       execGit(projectDir, ["rev-parse", "HEAD"], { timeout: 10_000 }),
       execGit(projectDir, ["rev-parse", `origin/${branch}`], { timeout: 10_000 }),
     ]);
     const currentSha = currentOut.trim();
     const targetSha = targetOut.trim();
-    if (!currentSha || !targetSha || currentSha === targetSha) return null;
-    return { branch, currentSha, targetSha };
+    if (!currentSha || !targetSha || currentSha === targetSha) return { target: null, remote };
+    return { target: { branch, currentSha, targetSha }, remote };
   } catch {
-    return null;
+    return { target: null, remote };
   }
 }
 
@@ -1821,7 +2133,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // hermes binary, so this must never spawn there.
     hasHermes ? readHermesVersion() : Promise.resolve(null),
   ]);
-  const pinnedBranchTarget = await getPinnedBranchTarget(PROJECT_DIR);
+  const { target: pinnedBranchTarget, remote: pinnedRemote } = await getPinnedBranchTarget(PROJECT_DIR);
+  // Two independent reads of the same remote — the tag list (getTargetVersion's
+  // `ls-remote`, a GET to /info/refs) and the pinned branch's fetch (a POST to
+  // /git-upload-pack). BOTH can be refused; the POST far more often, which is
+  // what the card measured. Either failing means this check did not see the
+  // remote, so the worse of the two is what the device reports.
+  const remote = !pinnedRemote.reachable ? pinnedRemote : lastTagRemote;
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -1858,6 +2176,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       ? { hermes: { current: hermesCurrent, target: null, updateAvailable: false } }
       : {}),
     edition,
+    remote,
   };
   versionInfoCacheTime = Date.now();
   return cachedVersionInfo;
@@ -1866,16 +2185,38 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 export async function getTargetVersion(): Promise<string | null> {
   if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
   try {
-    await execGit(
+    // The tag fetch is ADVISORY: `ls-remote` below asks origin directly, so the
+    // answer is not read from the local tag refs this call updates. Its refusal
+    // is logged, never promoted — reporting the remote unreachable because an
+    // advisory call was refused while the authoritative one answered is the
+    // false-failure half of the same bug.
+    const tagFetch = await reachOrigin(
       PROJECT_DIR,
       ["fetch", "--quiet", "--tags", "origin"],
-      { timeout: 20_000 },
-    ).catch(() => {});
-    const { stdout } = await execGit(
+      // The delay is explicit even at one attempt: dropping it would fall back
+      // to the UPDATE path's 4 s budget, so raising REMOTE_ADVISORY_ATTEMPTS
+      // later would silently put a 4 s sleep on every polled version check.
+      { timeout: 20_000, attempts: REMOTE_ADVISORY_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
+    );
+    if (!tagFetch.reachable) console.warn(`[Updater] advisory tag fetch did not land: ${tagFetch.reason}`);
+    // The AUTHORITATIVE call, and so the one that is retried. It used to get a
+    // single attempt: one refused ls-remote then made every surface say the
+    // update server could not be reached, and TARGET_VERSION_CACHE_TTL held
+    // that answer for 60 s over a refusal that clears in seconds.
+    const lsRemote = await readFromOrigin(
       PROJECT_DIR,
       ["ls-remote", "--tags", "--refs", "origin"],
-      { timeout: 10_000 },
+      { timeout: 10_000, attempts: REMOTE_CHECK_ATTEMPTS, retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS },
     );
+    if (!lsRemote.remote.reachable) {
+      lastTagRemote = lsRemote.remote;
+      cachedTargetVersion = null;
+      targetVersionCacheTime = Date.now();
+      return null;
+    }
+    const stdout = lsRemote.stdout;
+    // origin answered, on the call the tag answer depends on.
+    lastTagRemote = REMOTE_REACHABLE;
     const tags = stdout
       .trim()
       .split("\n")
@@ -1897,7 +2238,13 @@ export async function getTargetVersion(): Promise<string | null> {
     cachedTargetVersion = semverTags[semverTags.length - 1];
     targetVersionCacheTime = Date.now();
     return cachedTargetVersion;
-  } catch {
+  } catch (err) {
+    const text = errorText(err);
+    lastTagRemote = {
+      reachable: false,
+      refusedAnonymously: isAnonymousFetchRefusal(text),
+      reason: refusalReason(err, text),
+    };
     cachedTargetVersion = null;
     targetVersionCacheTime = Date.now();
     return null;

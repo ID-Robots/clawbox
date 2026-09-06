@@ -55,7 +55,12 @@ export async function GET() {
       // "completed" must not describe. `drift` travels with every response so
       // the surfaces that render it can say WHY the update is being offered.
       const completed = await isUpdateCompleted();
-      if (completed && !drift && !needsUpdate(versions.clawbox) && !needsUpdate(versions.openclaw)) {
+      // `remote.reachable === false` outranks the flag for the same reason drift
+      // does: "nothing to do" derived from a check that never reached GitHub is
+      // not a fact, and this is the payload the setup wizard reads before it
+      // decides whether to auto-advance past the update step (TASK-655).
+      const remoteAnswered = versions.remote?.reachable !== false;
+      if (completed && remoteAnswered && !drift && !needsUpdate(versions.clawbox) && !needsUpdate(versions.openclaw)) {
         return NextResponse.json({
           ...state,
           phase: "completed",

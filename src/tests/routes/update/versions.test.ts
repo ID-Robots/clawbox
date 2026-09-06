@@ -23,7 +23,7 @@ describe("GET /setup-api/update/versions", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "v2.2.2", target: "v2.2.3" },
       openclaw: { current: "2026.4.5", target: "2026.4.6" },
-      edition: "openclaw",
+      edition: "openclaw", remote: { reachable: true },
     });
 
     const mod = await import("@/app/setup-api/update/versions/route");
@@ -37,7 +37,7 @@ describe("GET /setup-api/update/versions", () => {
     await expect(response.json()).resolves.toEqual({
       clawbox: { current: "v2.2.2", target: "v2.2.3" },
       openclaw: { current: "2026.4.5", target: "2026.4.6" },
-      edition: "openclaw",
+      edition: "openclaw", remote: { reachable: true },
     });
     expect(mockInvalidateVersionCache).not.toHaveBeenCalled();
   });
@@ -49,7 +49,7 @@ describe("GET /setup-api/update/versions", () => {
       clawbox: { current: "v3.1.0", target: null },
       openclaw: { current: null, target: null },
       hermes: { current: "v0.20.5", target: null, updateAvailable: false },
-      edition: "hermes",
+      edition: "hermes", remote: { reachable: true },
     });
 
     const response = await getVersions(makeRequest());
@@ -57,7 +57,7 @@ describe("GET /setup-api/update/versions", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       hermes: { current: "v0.20.5", target: null, updateAvailable: false },
-      edition: "hermes",
+      edition: "hermes", remote: { reachable: true },
     });
   });
 

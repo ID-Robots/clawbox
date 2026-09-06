@@ -369,7 +369,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "update_check",
-    "Check whether a newer ClawBox software version is available, and report the installed version. This only reports — it never installs anything. If an update is waiting, tell the user to install it from Settings -> System Update.",
+    "Check whether a newer ClawBox software version is available, and report the installed version. This only reports — it never installs anything. If an update is waiting, tell the user to install it from Settings -> System Update. If `remote.reachable` is false the device could not reach GitHub for this check, so say the check failed and quote `remote.reason` — do NOT report the device as up to date.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, profile: "core" },
     // Shaped, not raw: the route always carries an `openclaw` component and

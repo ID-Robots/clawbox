@@ -12,6 +12,13 @@
 #                          $PROJECT_DIR/.update-branch, so the device keeps
 #                          updating on the branch it was built with.
 #   NETWORK_INTERFACE    — WiFi interface override (default: auto-detect)
+#   CLAWBOX_GIT_RETRIES  — attempts per git network call (default: 3). GitHub
+#                          refuses anonymous fetches from an address that has
+#                          made too many, ~2 in 3 when measured (TASK-655).
+#                          A value that is not a whole number is replaced with
+#                          the default and a line is printed saying so.
+#   CLAWBOX_GIT_RETRY_DELAY — seconds before the first retry, doubling (default: 3).
+#                          Same rule for a value that is not a whole number.
 set -euo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
@@ -20,6 +27,89 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "Error: Run this script with sudo" >&2
   exit 1
 fi
+
+# Retry a git call that talks to a remote.
+#
+# Measured on the dev network 2026-09-02 (TASK-655): GitHub answers git's
+# protocol-v2 POST to /git-upload-pack with `HTTP 401` and a body reading
+# "Repository not found." — for a PUBLIC repository — once an address has used
+# up its anonymous allowance. git reports it as
+# `fatal: could not read Username for 'https://github.com'`, which names
+# credentials no ClawBox has, and roughly one attempt in three got through.
+# One in-app update needs three separate fetches to succeed in a row, so a
+# single refusal ended the update at step 0 with a message about a password.
+#
+# git owns no retry of its own — neither 2.34 (the boxes) nor 2.43 has a
+# `fetch.retry`/`http.retry` knob — so it lives here. GIT_TERMINAL_PROMPT=0
+# IS git's own switch and is used rather than reimplemented: without it the
+# same call blocks on a username prompt whenever a tty is attached.
+#
+# Output is captured and re-emitted at the end of each attempt rather than
+# streamed, so the classification below has the text to read. That costs live
+# progress on a long clone; install.sh's output is read from the journal after
+# the fact, so the trade is the honest message.
+# Is this failure worth asking again? Retrying "destination path already
+# exists" three times helps nobody and costs the step's budget.
+git_retryable_failure() {
+  case "$1" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*) return 0 ;;
+    *"Authentication failed"*|*"terminal prompts disabled"*) return 0 ;;
+    *"Could not resolve host"*|*"Connection timed out"*|*"Connection reset"*) return 0 ;;
+    *"early EOF"*|*"RPC failed"*|*"unable to access"*) return 0 ;;
+  esac
+  return 1
+}
+
+git_with_retry() {
+  local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-3}"
+  local out rc=0 verb
+  # Both knobs are operator input and both are used as NUMBERS. A non-numeric
+  # `max` makes `[ "$attempt" -ge "$max" ]` fail on every iteration — "integer
+  # expression expected" — so the break is never reached and the loop does not
+  # end on its own; the regression test has to kill it on a wall clock. A
+  # non-numeric `delay` makes `$((delay * 2))` an unbound-variable error under
+  # `set -u` and takes install.sh down mid-update.
+  #
+  # Replaced with the default rather than trusted, and SAID so: a knob that is
+  # silently ignored is the same class of quiet wrong answer this whole change
+  # is about. Only the shape is checked — `0` is a legitimate "do not retry"
+  # and survives, and a numeric-but-large value is the operator's own call.
+  case "$max" in
+    ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRIES is not a number, using 3" >&2; max=3 ;;
+  esac
+  case "$delay" in
+    ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
+  esac
+  # The subcommand, not "$1": every caller here leads with -c/-C, so naming the
+  # first argument produced "git -C attempt 1/3 failed" in the journal.
+  verb="$(printf '%s\n' "$@" | grep -m1 -E '^(fetch|clone|pull|push|ls-remote)$' || true)"
+  while :; do
+    # Output is CAPTURED so the classification below has the text to read, then
+    # re-emitted on stderr — where git puts it — so a caller that captures this
+    # function's stdout cannot mistake git's progress for a result.
+    if out="$(GIT_TERMINAL_PROMPT=0 git "$@" 2>&1)"; then
+      [ -z "$out" ] || printf '%s\n' "$out" >&2
+      return 0
+    else
+      rc=$?
+    fi
+    [ "$attempt" -ge "$max" ] && break
+    git_retryable_failure "$out" || break
+    echo "  git ${verb:-remote} attempt $attempt/$max failed, retrying in ${delay}s..." >&2
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
+  printf '%s\n' "$out" >&2
+  case "$out" in
+    *"could not read Username"*|*"could not read Password"*|*"Repository not found"*)
+      echo "Error: GitHub refused this ClawBox's anonymous request for the update repository after $attempt attempt(s)." >&2
+      echo "       The repository is public and this device needs no password — GitHub answers 401 to anonymous git" >&2
+      echo "       requests from an address that has made too many. Wait a few minutes and run the update again." >&2
+      ;;
+  esac
+  return "$rc"
+}
 
 # ── Bootstrap: pull latest install.sh and re-exec before parsing constants ───
 # Fixes the race where a stale install.sh (e.g. rsync'd from an out-of-date
@@ -92,7 +182,17 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
     echo "[bootstrap] WARN: cannot tell which branch this checkout belongs to; running the on-disk copy."
   else
     echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
-    git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
+    # Fetch #1 of the three an update needs, and the one that decides which
+    # install.sh the rest of the run uses — so it retries like the others.
+    # Still tolerated: the reset below uses whatever refs are on disk. But no
+    # longer SILENT, and no longer 2>/dev/null — the WARN quotes what git said
+    # rather than guessing, because "refreshing install.sh" printed above is
+    # otherwise a claim the run did not keep (TASK-655).
+    if ! _fetchout="$(git_with_retry -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>&1)"; then
+      echo "[bootstrap] WARN: could not refresh from origin; running the refs already on disk."
+      printf '%s\n' "$_fetchout" | tail -n 3
+    fi
+    unset _fetchout
     if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
       chown -R clawbox:clawbox "$_b" 2>/dev/null || true
       # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
@@ -2348,7 +2448,7 @@ sync_repo_to_update_target() {
     exit 1
   fi
 
-  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
+  git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
   # Discard local working-tree changes before switching branches. The later
   # `reset --hard` would blow them away anyway; doing it up-front avoids
   # `git checkout` aborting with "local changes would be overwritten" when
@@ -2390,7 +2490,7 @@ step_git_pull() {
   local fresh_clone=0
   if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo "  Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
-    git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
+    git_with_retry clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
     fresh_clone=1
   fi

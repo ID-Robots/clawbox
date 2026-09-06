@@ -78,7 +78,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.0.0", target: "1.1.0" },
       openclaw: { current: "0.5.0", target: "0.5.1" },
-      edition: "openclaw",
+      edition: "openclaw", remote: { reachable: true },
     });
     mockCollectBuildIdentity.mockResolvedValue(buildIdentity(NO_DRIFT));
 
@@ -105,7 +105,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.1.0", target: null, updateAvailable: false },
       openclaw: { current: "0.5.1", target: null, updateAvailable: false },
-      edition: "openclaw",
+      edition: "openclaw", remote: { reachable: true },
     });
 
     const res = await updateStatusGet();
@@ -122,7 +122,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.0.0", target: "1.1.0", updateAvailable: true },
       openclaw: { current: "0.5.1", target: null, updateAvailable: false },
-      edition: "openclaw",
+      edition: "openclaw", remote: { reachable: true },
     });
 
     const res = await updateStatusGet();
@@ -219,7 +219,7 @@ describe("GET /setup-api/update/status", () => {
       mockGetVersionInfo.mockResolvedValue({
         clawbox: { current: "3.9.0", target: null, updateAvailable: false },
         openclaw: { current: "2026.7.1-2", target: null, updateAvailable: false },
-        edition: "hermes",
+        edition: "hermes", remote: { reachable: true },
       });
     });
 
