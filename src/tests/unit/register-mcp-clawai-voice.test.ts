@@ -67,6 +67,12 @@ let hermesLog: string;
  * A `hermes` that behaves like the real one for the two verbs this block uses:
  * it records the argv and applies the write to config.yaml. A stub that only
  * exited 0 would let every case pass over a script that wrote nothing.
+ *
+ * The python heredoc'"'"'s exit status IS the stub'"'"'s status — no trailing `exit 0`.
+ * A write that raised (an unparseable config, a scalar where an intermediate
+ * mapping was expected) leaves the file unwritten, and a stub that reported
+ * success over it would let the script treat a write that never landed as
+ * applied, which is the one thing these cases exist to catch.
  */
 function writeHermesStub(exitCode = 0) {
   const stub = path.join(home, "fake-hermes");
@@ -94,7 +100,6 @@ else:
 with open(os.environ["CLAWBOX_TEST_CFG"], "w") as fh:
     yaml.safe_dump(cfg, fh, sort_keys=False)
 EOPY
-exit 0
 `);
   fs.chmodSync(stub, 0o755);
 }
@@ -349,6 +354,11 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     function armedBox() {
       writeStore({ clawai_token: TOKEN, clawai_tier: ENTITLED_TIER });
       run();
+      // The withdrawal cases below assert ABSENCE. Without this, a fixture that
+      // silently stopped arming would leave every one of them passing over a
+      // box that never had a cloud voice to take away.
+      expect(at("tts.openai.api_key")).toBe(TOKEN);
+      expect(at("tts.openai.base_url")).toBe(PROXY);
       fs.writeFileSync(hermesLog, "");
     }
 
@@ -515,6 +525,12 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     // credential-blind delete safe, and the one the route already shares.
     const { CLAWBOX_AI_PROXY_URLS } = await import("@/lib/clawbox-ai-models");
     for (const url of CLAWBOX_AI_PROXY_URLS) expect(block).toContain(`"${url}"`);
+    // And the LIVE endpoint the arm writes, against the binding the rest of the
+    // app resolves it through — the retired-host set alone would not notice the
+    // current one moving.
+    const { CLAWBOX_AI_PROXY_URL } = await import("@/lib/hermes-clawai");
+    expect(CLAWBOX_AI_PROXY_URL).toBe(PROXY);
+    expect(block).toContain(`CLAWBOX_VOICE_PROXY="\${CLAWBOX_AI_PROXY_URL:-${PROXY}}"`);
     // And the tier constant is the DEVICE tier, not the plan name — the two are
     // off by one on purpose (CLAWBOX_AI_MODEL_BY_TIER).
     expect(tts.CLAWBOX_AI_SPEECH_TIER).toBe(ENTITLED_TIER);
