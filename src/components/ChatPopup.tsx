@@ -2112,7 +2112,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           }
         },
         reject: (err: Error) => {
-
+          // The fifth terminal-failure path, and it used to be the one that
+          // forgot both halves. A gateway that REFUSES the connect frame
+          // (protocol skew, a rejected device identity, a denied scope) keeps
+          // the socket open, so without the close below `connect()` returns at
+          // its `readyState === OPEN` guard and even the manual Try again is a
+          // no-op; and without the teardown the reconnect overlay hides the
+          // error panel, which is the TASK-712 spinner-that-never-comes-down
+          // from a far likelier trigger than an unparsable URL.
+          tearDownReloadOverlay()
+          if (wsRef.current === ws) wsRef.current = null
+          try { ws.close() } catch { /* already closing */ }
           setStatus('error')
           setErrorMsg(err.message || 'Auth failed')
         },
@@ -2538,7 +2548,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Create WebSocket AFTER all handlers are defined to avoid race conditions
     try {
       ws = new WebSocket(wsUrl)
-    } catch {
+    } catch (err) {
       // The same terminal-failure teardown the other three error paths do, and
       // for the same reason. A wsUrl the browser's parser rejects throws here
       // on EVERY attempt, so leaving the overlay up left the safety-net retry
@@ -2549,7 +2559,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // spinner that never came down (TASK-712).
       tearDownReloadOverlay()
       setStatus('error')
-      setErrorMsg('WebSocket creation failed')
+      // With the reason. The realistic triggers are browser-side refusals —
+      // mixed content (a `ws://` url offered to an HTTPS page behind a proxy
+      // that hid the scheme) and a CSP `connect-src` block — and the bare
+      // message sent the owner looking at the gateway instead. Safe to show:
+      // the token travels in the connect frame, not in `wsUrl`.
+      const reason = err instanceof Error ? err.message : String(err)
+      setErrorMsg(reason ? `WebSocket creation failed: ${reason}` : 'WebSocket creation failed')
       return
     }
     wsRef.current = ws
@@ -4912,9 +4928,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [])
   // Tear the reconnect overlay down and reset the reload flags. Called from
-  // every terminal-failure path (both retry-exhaustion branches) so the error
-  // panel — gated on `!reloadingSkill` — can render and the safety-net retry
-  // effect (which fires on `error && reloadingSkill`) stops looping.
+  // every terminal-failure path — the two retry-exhaustion branches, the 1008
+  // auth close, the refused connect frame and the socket constructor that
+  // threw — so the error panel, gated on `!reloadingSkill`, can render and the
+  // safety-net retry effect (which fires on `error && reloadingSkill`) stops
+  // looping.
   const tearDownReloadOverlay = useCallback(() => {
     if (reloadTimerRef.current) {
       clearInterval(reloadTimerRef.current)
@@ -4922,6 +4940,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     skillInstalledRef.current = false
     reloadReasonRef.current = 'skill'
+    // The pending switch goes with the overlay it was waiting behind. Its only
+    // consumer is the `hello` resolve branch gated on `skillInstalledRef`,
+    // which the line above clears — so a kept value can never be used for the
+    // switch that stored it, and would instead fire on the NEXT provider
+    // change, resetting the owner's transcript for a switch that ended
+    // minutes ago.
+    pendingModelSwitchResetRef.current = null
     setReloadingSkill(false)
     setReloadProgress(0)
   }, [])

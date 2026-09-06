@@ -4,17 +4,25 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 
 /**
- * The reconnect ladder has to be able to run out (TASK-712).
+ * The reconnect ladder has to be able to END (TASK-712).
  *
  * `new WebSocket(wsUrl)` throws synchronously on a malformed URL — a bad
  * `wsUrl` out of `/setup-api/gateway/ws-config` is enough. That catch set
  * `status: 'error'` without tearing the reconnect overlay down, unlike the
- * three other terminal-failure paths, so `reloadingSkill` stayed true, the
+ * other terminal-failure paths, so `reloadingSkill` stayed true, the
  * safety-net retry effect stayed armed, and every 3 s it RESET the retry
  * counter to zero and connected again. The two branches that can end the
  * ladder are both gated on that counter, so it could never be reached: one
  * doomed attempt every three seconds for as long as the chat window is open,
  * behind an overlay that never comes down.
+ *
+ * The first throw is terminal now rather than the start of a budgeted ladder,
+ * and that is deliberate: every trigger that exists today is deterministic —
+ * `/setup-api/gateway/ws-config` always answers `<scheme>://<host>`, so what is
+ * left is mixed content, a CSP `connect-src` block, or a url the browser's own
+ * parser refuses, and a retry fixes none of them. If `wsUrl` ever becomes
+ * proxy-derived or configurable the throw becomes transient, and this path
+ * would then want the retry budget the other three have.
  */
 
 const RETRY_DELAY = 3000;

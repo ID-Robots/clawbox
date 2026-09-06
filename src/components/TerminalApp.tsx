@@ -219,6 +219,22 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     setStatus(s);
   }, []);
 
+  // `connect()` raises the lock on entry and only `onopen`/`onclose` lower it
+  // again, so ANY throw before the socket handlers are installed strands it:
+  // a ChunkLoadError from the three dynamic imports below when an in-app update
+  // replaced the build under an already-open tab, an xterm constructor that
+  // fails, the WebSocket constructor itself. With the lock raised every later
+  // attempt — the 3 s reconnect and the Reconnect button alike — returns at the
+  // guard, silently, as an unhandled rejection, and the window sits on
+  // "Connecting to terminal server…" until it is closed and reopened.
+  const releaseAfterFailedConnect = useCallback((err: unknown) => {
+    connectLockRef.current = false;
+    if (!mountedRef.current) return;
+    updateStatus("error");
+    const reason = err instanceof Error ? err.message : String(err);
+    termRef.current?.writeln(`\r\n\x1b[31mError: could not start the terminal — ${reason}\x1b[0m`);
+  }, [updateStatus]);
+
   const connect = useCallback(async () => {
     if (!mountedRef.current || !containerRef.current) return;
     if (connectLockRef.current) return;
@@ -356,17 +372,22 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     let ws: WebSocket;
     try {
       ws = new WebSocket(wsUrl);
-    } catch {
-      // The connect lock is released by `onopen` and `onclose`, and a
-      // constructor that throws reaches neither. Left raised, it made every
-      // later connect() return at the guard above — the 3 s auto-reconnect and
-      // the Reconnect button alike — so the terminal could not be revived
-      // without remounting the window (TASK-712's sibling call site).
+    } catch (err) {
+      // The lock is released by `onopen` and `onclose`, and a constructor that
+      // throws reaches neither. Left raised it made the Reconnect button a
+      // no-op (the 3 s auto-reconnect is scheduled inside `onclose`, which this
+      // path never reaches, so the button is the whole of the recovery) and the
+      // window could not be revived without being closed and reopened —
+      // TASK-712's sibling call site.
+      //
+      // The reason, not a guess: what throws here is the BROWSER refusing the
+      // url — mixed content, or a CSP `connect-src` block — and the old text
+      // sent the owner after a PTY server that is running fine.
       connectLockRef.current = false;
       if (!mountedRef.current) return;
       updateStatus("error");
-      term.writeln(`\r\n\x1b[31mError: Cannot connect to ${wsUrl}\x1b[0m`);
-      term.writeln("\x1b[2mTerminal server may not be running.\x1b[0m");
+      const reason = err instanceof Error ? err.message : String(err);
+      term.writeln(`\r\n\x1b[31mError: the browser refused ${wsUrl} — ${reason}\x1b[0m`);
       return;
     }
     wsRef.current = ws;
@@ -441,16 +462,16 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         if (ev.code !== 1000) {
           term.writeln(`\r\n\x1b[33m[${trRef.current("terminal.retrying", "Disconnected — will retry in 3s…")}]\x1b[0m`);
           reconnectTimerRef.current = setTimeout(() => {
-            if (mountedRef.current) connect();
+            if (mountedRef.current) connect().catch(releaseAfterFailedConnect);
           }, 3000);
         }
       }
     };
-  }, [wsUrl, updateStatus]);
+  }, [wsUrl, updateStatus, releaseAfterFailedConnect]);
 
   useEffect(() => {
     mountedRef.current = true;
-    connect();
+    connect().catch(releaseAfterFailedConnect);
 
     return () => {
       mountedRef.current = false;
@@ -638,8 +659,8 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
       wsRef.current.onclose = null;
       wsRef.current.close(1000);
     }
-    connect();
-  }, [connect]);
+    connect().catch(releaseAfterFailedConnect);
+  }, [connect, releaseAfterFailedConnect]);
 
   return (
     <div

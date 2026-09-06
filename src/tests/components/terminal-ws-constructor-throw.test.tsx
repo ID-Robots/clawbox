@@ -14,20 +14,9 @@ import TerminalApp from "@/components/TerminalApp";
  * until the owner closed and reopened it.
  */
 
-let throwOnNextConstruct = false;
-const sockets: FakeWs[] = [];
-
-class FakeWs {
-  static readonly OPEN = 1;
-  readyState = 0;
-  onopen: (() => void) | null = null;
-  onmessage: ((event: MessageEvent) => void) | null = null;
-  onclose: ((event: { code: number }) => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor(public url: string) { sockets.push(this); }
-  send() {}
-  close() { this.readyState = 3; }
-}
+/** Every attempt, because `wsUrl` is derived once from `window.location` and
+ *  cannot change: a url the browser refuses is refused again on the retry. */
+let constructions = 0;
 
 const writes: string[] = [];
 function makeTerm() {
@@ -51,17 +40,13 @@ vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
 describe("a terminal socket constructor that throws", () => {
   beforeEach(() => {
-    sockets.length = 0;
+    constructions = 0;
     writes.length = 0;
-    throwOnNextConstruct = true;
-    const WebSocketStub = function (url: string) {
-      if (throwOnNextConstruct) {
-        throwOnNextConstruct = false;
-        throw new SyntaxError("The URL's scheme must be either 'ws' or 'wss'.");
-      }
-      return new FakeWs(url);
+    const WebSocketStub = function () {
+      constructions += 1;
+      throw new SyntaxError("The URL's scheme must be either 'ws' or 'wss'.");
     } as unknown as typeof WebSocket;
-    (WebSocketStub as unknown as { OPEN: number }).OPEN = FakeWs.OPEN;
+    (WebSocketStub as unknown as { OPEN: number }).OPEN = 1;
     vi.stubGlobal("WebSocket", WebSocketStub);
     vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
   });
@@ -70,16 +55,20 @@ describe("a terminal socket constructor that throws", () => {
     vi.unstubAllGlobals();
   });
 
-  it("says so and leaves Reconnect working", async () => {
+  it("says why, and lets Reconnect try again", async () => {
     render(<TerminalApp />);
 
-    // The failure is reported rather than swallowed behind "Connecting…".
+    // The failure is reported rather than swallowed behind "Connecting…", and
+    // it names what actually refused: the browser, not the PTY server.
     await screen.findByText("Error");
-    expect(writes.some((line) => line.includes("Cannot connect to"))).toBe(true);
-    expect(sockets).toHaveLength(0);
+    await waitFor(() => expect(constructions).toBe(1));
+    expect(writes.some((line) => line.includes("the browser refused"))).toBe(true);
+    expect(writes.some((line) => line.includes("scheme must be either"))).toBe(true);
 
-    // And the button in the status bar can still open one.
+    // The lock came back down, so the button in the status bar reaches the
+    // constructor a second time. It throws again — the url cannot change — but
+    // the attempt is the proof, and on beta there was none.
     fireEvent.click(screen.getByText("Reconnect"));
-    await waitFor(() => expect(sockets).toHaveLength(1));
+    await waitFor(() => expect(constructions).toBe(2));
   });
 });
