@@ -347,8 +347,17 @@ export function commandDenyReason(command, home = os.homedir()) {
  */
 export function pathDenyReason(candidate, home = os.homedir()) {
   if (typeof candidate !== "string" || !candidate) return null;
+  // TRIMMED FIRST, because the host does. `exec`'s own
+  // `normalizeExplicitWorkdirInput` runs the value through `normalizeOptionalString`
+  // (`value.trim()`) before it stats and realpaths it, so `workdir: "./clawbox "`
+  // IS the checkout to everything downstream — while an untrimmed candidate
+  // anchors to `/clawbox ` and reads as prose, because a trailing space is
+  // neither removed nor a `/`. The guard and the host would be judging two
+  // different directories, and the guard the one that does not exist.
+  // `resolveUserPath` (`mcp/lib/guard.ts`) already trims for the same reason;
+  // this arm was the outlier.
   const folded = trimTrailingSlashes(
-    foldHome(posixPath.normalize(candidate), home).toLowerCase(),
+    foldHome(posixPath.normalize(candidate.trim()), home).toLowerCase(),
   );
   // ANCHOR a relative candidate, because every entry in `pathRoots` starts with
   // `/` and `posix.normalize` drops a leading `./` — so without this,

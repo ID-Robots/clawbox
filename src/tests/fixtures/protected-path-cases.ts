@@ -461,6 +461,24 @@ export const PROTECTED_PATH_TOOL_CASES: ProtectedPathToolCase[] = [
     denied: false,
     why: "and the look-alike sibling stays allowed: anchoring restores the root, it does not loosen what counts as one",
   },
+  {
+    toolName: "exec",
+    params: { command: "rm -rf *", workdir: "./clawbox " },
+    denied: true,
+    why: "THE TRAILING BYTE: exec's own normalizeExplicitWorkdirInput trims the value before it stats and realpaths it, so this IS the checkout to the host — a guard that read the untrimmed string would judge a directory that does not exist and wave the delete through",
+  },
+  {
+    toolName: "exec",
+    params: { command: "rm -rf *", workdir: "./llamacpp/models\t" },
+    denied: true,
+    why: "the same against the model store, with the tab that the whitespace terminators otherwise cover",
+  },
+  {
+    toolName: "exec",
+    params: { command: "rm -rf *", workdir: "clawbox-backup " },
+    denied: false,
+    why: "…and trimming does not widen what counts as a root: the look-alike sibling is still not the tree",
+  },
 
   // ── The anchor must not read PROSE as a path ─────────────────────────────
   // The host derives no paths for `write` and `edit`, so every single-line
