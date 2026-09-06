@@ -24,10 +24,16 @@
 // admits. That is a real difference and it is contained by the four things
 // below.
 //
-//   1. THE GATE IS THE SENDER, NOT THE CALLER. `senderId` is checked against
-//      the harness's OWN owner allowlist — the same list, and the same rule,
-//      that decides who may press the button in email-approval.ts. A caller
-//      cannot approve on its own behalf; it can only relay a person's message.
+//   1. THE GATE IS THE SENDER AND THE CODE, NOT THE CALLER. `senderId` is
+//      checked against the harness's own Telegram allowlist — the same list,
+//      and the same rule, that decides who may press the button in
+//      email-approval.ts — and the code names one draft and its content
+//      fingerprint. Only the code's HASH is on disk, so a caller that could
+//      read the store still could not spend one. Be exact about the limit: an
+//      agent with a SHELL is contained by none of this, because it can read the
+//      mail credentials out of data/config.json and skip the route entirely.
+//      That was true before this route existed; what must not change is that
+//      the agent's TOOL surface has no approve verb.
 //   1a. AND THE BEARER IS REQUIRED EXPLICITLY, not merely accepted. middleware
 //      admits a caller on the bearer OR a session cookie; every real caller
 //      here is a harness process holding the bearer and none of them has a
@@ -57,7 +63,7 @@
 // message.
 
 import { NextResponse } from "next/server";
-import { applyReplyApproval } from "@/lib/email-approval-reply";
+import { applyReplyApproval, parseApprovalReply } from "@/lib/email-approval-reply";
 import { verifyMcpBearer } from "@/lib/mcp-token";
 import { checkRateLimit, resetRateLimit } from "@/lib/rate-limit";
 
@@ -70,6 +76,11 @@ export const dynamic = "force-dynamic";
  * bound is what keeps "short" from meaning "worth trying". Ten in ten minutes
  * is far above what a person typing does and far below what guessing needs.
  * Counted per process and per bucket, like every other budget in this subtree.
+ *
+ * SPENT ONLY ON A MESSAGE THAT IS ACTUALLY AN APPROVAL ATTEMPT, which is why
+ * the parse below runs first. Charging every message that merely reaches this
+ * route would make ordinary conversation exhaust it — and the refusal lands on
+ * the NEXT real approval, silently, because the hooks read a 429 as "carry on".
  */
 const ATTEMPT_BUDGET = { windowMs: 10 * 60 * 1000, max: 10 } as const;
 
@@ -104,6 +115,12 @@ export async function POST(request: Request) {
   if (!senderId || !text) {
     return NextResponse.json({ handled: false, error: "senderId and text are required" }, { status: 400 });
   }
+
+  // Not an approval attempt at all, so nothing is spent and nothing is looked
+  // up. `applyReplyApproval` asks the same question again — the cost is one
+  // anchored regex, and the alternative is a budget that answers for messages
+  // it was never meant to bound.
+  if (!parseApprovalReply(text)) return NextResponse.json({ handled: false });
 
   if (!checkRateLimit("email-chat-reply", ATTEMPT_KEY, ATTEMPT_BUDGET)) {
     console.error("[email/chat-reply] refused: attempt budget exhausted");

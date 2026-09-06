@@ -35,22 +35,44 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * The shape a reply must have, EXACTLY: a word, a code, nothing else.
+ * The words ClawBox acts on, and the shape a reply must have to be one.
  *
- * Applied here as well as on the ClawBox side so that an ordinary message costs
- * a regex and no HTTP at all — this hook runs on every inbound message on every
- * channel. The two copies have to agree, and
- * `src/tests/unit/email-approval-reply-parity.test.ts` is what keeps them
- * agreeing: the authority is `parseApprovalReply` in
- * src/lib/email-approval-reply.ts. It carries no `\s` and no `$`-before-newline
+ * THE VERBS ARE IN THE SHAPE, and this list has to stay identical to the one in
+ * `src/lib/email-approval-reply.ts`. Leaving them out looked tidier — "which
+ * words mean approve is the device's decision" — and it was wrong: a bare
+ * `[A-Za-z]{1,10}` matches "hello", so "hello there" and "good night" were
+ * posted to /email/chat-reply on their way past, and ten of them inside ten
+ * minutes spent the route's attempt budget on nothing.
+ *
+ * This plugin still decides NOTHING. Approve-versus-delete is settled once, on
+ * the device; the list here only decides whether to ask. Ordered longest-first
+ * so `no` wins over `n`, and case-insensitive because a phone keyboard
+ * capitalises the first word of a message.
+ *
+ * `src/tests/unit/email-approval-reply-parity.test.ts` is what keeps the three
+ * copies agreeing. The pattern carries no `\s` and no `$`-before-newline
  * subtlety — the text is trimmed first and the separator is literal spaces and
  * tabs — because those are the two places the three languages disagree.
  */
-export const APPROVAL_SHAPE = /^[A-Za-z]{1,10}[ \t]+[A-Za-z0-9]{4,8}$/;
+export const APPROVAL_WORDS = [
+  "approve", "okay", "send", "yes", "ok", "y",
+  "discard", "cancel", "delete", "reject", "deny", "no", "n",
+];
 
-/** The trim the shape assumes. Its own function so the three copies match. */
+export const APPROVAL_SHAPE = new RegExp(`^(?:${APPROVAL_WORDS.join("|")})[ \\t]+[A-Za-z0-9]{5}$`, "i");
+
+/**
+ * The trim the shape assumes — and the one character the two languages
+ * disagree about.
+ *
+ * `String.prototype.trim` treats U+FEFF as whitespace and Python's
+ * `str.strip()` does not, so a stray byte order mark on the end of a pasted
+ * code made the same message an approval here and ordinary conversation on
+ * Hermes. Both copies now take it off explicitly.
+ */
 export function looksLikeApproval(text) {
-  return typeof text === "string" && APPROVAL_SHAPE.test(text.trim());
+  if (typeof text !== "string") return false;
+  return APPROVAL_SHAPE.test(text.replace(/^[\ufeff\s]+|[\ufeff\s]+$/g, ""));
 }
 
 /** Long enough for one loopback POST plus an SMTP conversation behind it. */

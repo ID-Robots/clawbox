@@ -142,6 +142,20 @@ describe("the question", () => {
     expect(vi.mocked(ownerSend.sendOwnerTelegramText)).toHaveBeenCalledTimes(1);
   });
 
+  it("writes the code nowhere: the store keeps a hash and nothing else", async () => {
+    // A caller that can READ this file can also make the request that spends a
+    // code, so the file must not hold one. This is the whole reason the code is
+    // hashed rather than stored — see the header of email-approval-prompts.ts.
+    const { code } = await offered();
+    const raw = fs.readFileSync(path.join(root, "data", "email-approval-prompts.json"), "utf-8");
+    expect(raw).not.toContain(code);
+    expect(JSON.parse(raw).prompts[0].code).toBeUndefined();
+    expect(JSON.parse(raw).prompts[0].codeHash).toMatch(/^[0-9a-f]{64}$/);
+    // ...and it still works, which is the half a "no plaintext" assertion alone
+    // would let a broken lookup pass.
+    expect((await reply.applyReplyApproval({ senderId: OWNER, text: `send ${code}` })).handled).toBe(true);
+  });
+
   it("stands down rather than showing part of a draft nobody can read in one message", async () => {
     const long = pending.queuePending({
       to: ["someone@example.com"],

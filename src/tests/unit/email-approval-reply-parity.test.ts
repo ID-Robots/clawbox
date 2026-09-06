@@ -20,17 +20,21 @@
 // gateway's own dispatch path. Drift the other way is worse for the owner: an
 // approval that never leaves the plugin.
 //
-// The plugin copies are deliberately allowed to be SHAPE-only. They do not know
-// the verbs, and they must not: which words mean approve and which mean delete
-// is a decision the device makes, and a plugin that split them would be a
-// second place to get "no" wrong.
+// THE VERBS ARE PART OF THE SHAPE, in all three. They were left out of the two
+// plugin copies at first — "which words mean approve is the device's decision"
+// — and that made this file blind to the bug it exists to catch: a bare
+// `[A-Za-z]{1,10}` matches "hello", so "hello there" and "good night" were
+// posted to /email/chat-reply on their way past and counted against its attempt
+// budget, and the table had no such case in it, so every assertion passed. The
+// plugins still DECIDE nothing — approve-versus-delete is settled once, on the
+// device — they only decide whether to ask.
 
 import { describe, it, expect, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
-import { parseApprovalReply } from "@/lib/email-approval-reply";
+import { APPROVE_WORDS, REJECT_WORDS, parseApprovalReply } from "@/lib/email-approval-reply";
 
 // Starts a real python3: vitest's 5 s test and 10 s hook defaults are not
 // enough on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
@@ -58,6 +62,19 @@ const CASES: { text: string; approval: boolean }[] = [
   { text: "delete AB2CD", approval: true },
   { text: "deny AB2CD", approval: true },
   { text: "no AB2CD", approval: true },
+  // Both one-letter verbs, which the alternation has to reach past the longer
+  // words that start with the same letter.
+  { text: "y AB2CD", approval: true },
+  { text: "n AB2CD", approval: true },
+  // ORDINARY TWO-WORD CONVERSATION. These are the cases whose absence made this
+  // file green while every one of them was being posted to the device.
+  { text: "hello there", approval: false },
+  { text: "thanks again", approval: false },
+  { text: "good night", approval: false },
+  { text: "call later", approval: false },
+  { text: "see Peter", approval: false },
+  { text: "ok done", approval: false },
+  { text: "sending AB2CD", approval: false },
   // A verb and a code and NOTHING else. Everything below is conversation.
   { text: "send", approval: false },
   { text: "send it", approval: false },
@@ -67,10 +84,9 @@ const CASES: { text: string; approval: boolean }[] = [
   { text: "", approval: false },
   { text: "   ", approval: false },
   { text: "can you send Ivan the invoice tomorrow?", approval: false },
-  // Length bounds, both ends, on both halves.
-  { text: "send ABC", approval: false },
-  { text: "send ABCDEFGHI", approval: false },
-  { text: "supercalifra AB2CD", approval: false },
+  // The code is five characters, exactly — the length the store mints.
+  { text: "send AB2C", approval: false },
+  { text: "send AB2CDE", approval: false },
   // A newline is not whitespace a single-line command may hide behind: a
   // multi-line message is a message, and \s in one language is not \s in
   // another, which is exactly the drift this file exists to catch.
@@ -80,9 +96,14 @@ const CASES: { text: string; approval: boolean }[] = [
   { text: "\nsend AB2CD", approval: true },
   { text: "send AB2CD\n", approval: true },
   { text: "hi\nsend AB2CD", approval: false },
+  // U+FEFF: whitespace to JavaScript's trim(), not to Python's strip(). Left
+  // unhandled this one character made the same pasted code an approval on one
+  // edition and conversation on the other.
+  { text: "send AB2CD\ufeff", approval: true },
+  { text: "\ufeffsend AB2CD", approval: true },
   // Non-ASCII digits: `\d` means different things in Python and JavaScript.
-  { text: "send ٢٣٤٥٦", approval: false },
-  { text: "изпрати AB2CD", approval: false },
+  { text: "send \u0662\u0663\u0664\u0665\u0666", approval: false },
+  { text: "\u0438\u0437\u043f\u0440\u0430\u0442\u0438 AB2CD", approval: false },
 ];
 
 /** The mjs plugin's own predicate, exercised through the module it ships. */
@@ -130,15 +151,20 @@ describe("the approval reply shape, on both harnesses and on the device", () => 
     }
   });
 
-  it("the verbs live only on the device, never in a plugin", () => {
-    // A plugin that learned the verbs would be a second place to decide what
-    // "no" means. Asserted by reading the shipped files rather than by trusting
-    // the comment that says so.
-    for (const file of [MJS_PLUGIN, path.join(PY_PLUGIN_DIR, "approvals.py")]) {
-      const source = fs.readFileSync(file, "utf-8");
-      // The words appear in prose in both headers; what must not appear is a
-      // set or list of them being tested against.
-      expect(source).not.toMatch(/\bAPPROVE_WORDS\b|\bREJECT_WORDS\b/);
-    }
+  it("both plugins carry the SAME word list the device does", () => {
+    // The lists are three literals in three languages; nothing can share them.
+    // So they are compared here, by value, rather than trusted to a comment —
+    // a verb added on the device and not in a plugin is an approval the owner
+    // types that never leaves his phone.
+    const expected = [...APPROVE_WORDS, ...REJECT_WORDS].map((w) => w.toLowerCase()).sort();
+
+    const fromMjs = /APPROVAL_WORDS = \[([\s\S]*?)\]/.exec(fs.readFileSync(MJS_PLUGIN, "utf-8"));
+    expect(fromMjs).not.toBeNull();
+    expect([...fromMjs![1].matchAll(/"([a-z]+)"/g)].map((m) => m[1]).sort()).toEqual(expected);
+
+    const py = fs.readFileSync(path.join(PY_PLUGIN_DIR, "approvals.py"), "utf-8");
+    const fromPy = /APPROVAL_WORDS = \(([\s\S]*?)\)/.exec(py);
+    expect(fromPy).not.toBeNull();
+    expect([...fromPy![1].matchAll(/"([a-z]+)"/g)].map((m) => m[1]).sort()).toEqual(expected);
   });
 });

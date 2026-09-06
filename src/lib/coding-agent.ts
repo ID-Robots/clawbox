@@ -2572,11 +2572,11 @@ const FILE_TOOLS = ["Read", "Edit", "Write"] as const;
 // either, and a file that only exists once mail has been approved is exactly
 // the kind that gets added to the store and forgotten here.
 //
-// email-approval-prompts.json joined them when it stopped holding only ids: it
-// now carries the short CODE the owner types to release a draft
-// (email-approval-prompts.ts). The code is a name and not a password — identity
-// is what authorises an approval — but a live one has no business in a
-// delegated run's Read either.
+// email-approval-prompts.json joined them for a weaker reason and is kept for
+// it: it holds no message text and only the HASH of the code the owner types
+// (email-approval-prompts.ts), so reading it yields nothing usable — but it is
+// the approval machinery's own record, it sits in the same directory as the two
+// above, and a run that has no business in either has none in it.
 const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json"];
 
 /**

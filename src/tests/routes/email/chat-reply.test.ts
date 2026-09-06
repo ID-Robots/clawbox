@@ -177,6 +177,19 @@ describe("an approval turn from the owner's own conversation", () => {
     expect(vi.mocked(smtp.sendMail)).not.toHaveBeenCalled();
   });
 
+  it("does not spend the attempt budget on a message that is not an approval", async () => {
+    // The refusal a spent budget produces lands on the NEXT real approval and
+    // is silent, so anything that is not an attempt must not be charged for.
+    const { code } = await offered();
+    for (let i = 0; i < 30; i++) {
+      const res = await post({ senderId: OWNER, text: "hello there" });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { handled: boolean }).handled).toBe(false);
+    }
+    const res = await post({ senderId: OWNER, text: `send ${code}` });
+    expect(((await res.json()) as { handled: boolean }).handled).toBe(true);
+  });
+
   it("never writes sent over a send that failed", async () => {
     const { id, code } = await offered();
     const { SmtpError } = await import("@/lib/smtp-client");

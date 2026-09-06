@@ -47,14 +47,43 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
-#: The shape a reply must have, EXACTLY: a word, a code, nothing else.
+#: The words ClawBox acts on, and the shape a reply must have to be one.
 #:
-#: The authority is ``parseApprovalReply`` in ``src/lib/email-approval-reply.ts``
-#: and ``src/tests/unit/email-approval-reply-parity.test.ts`` is what keeps the
-#: three copies agreeing. Loose enough to accept "send the invoice AB2CD" would
-#: fire on things a person said in passing; that message is a sentence about
-#: mail, not an instruction to release one.
-APPROVAL_SHAPE = re.compile(r"[A-Za-z]{1,10}[ \t]+[A-Za-z0-9]{4,8}")
+#: THE VERBS ARE IN THE SHAPE, and this list has to stay identical to the one in
+#: ``src/lib/email-approval-reply.ts``. Leaving them out looked tidier — "which
+#: words mean approve is the device's decision" — and it was wrong: a bare
+#: ``[A-Za-z]{1,10}`` matches "hello", so "hello there" and "good night" were
+#: posted to /email/chat-reply on their way past, and ten of them inside ten
+#: minutes spent the route's attempt budget on nothing.
+#:
+#: This plugin still decides NOTHING. Approve-versus-delete is settled once, on
+#: the device; the list here only decides whether to ask. Ordered longest-first
+#: so ``no`` wins over ``n``, and case-insensitive because a phone keyboard
+#: capitalises the first word of a message.
+#:
+#: No ``\s`` and no ``$``: those are two of the three places these languages
+#: disagree (``\s`` matches a newline everywhere, and Python's ``$`` also
+#: matches before a trailing one). The third is U+FEFF — see
+#: ``trim_for_approval``.
+APPROVAL_WORDS = (
+    "approve", "okay", "send", "yes", "ok", "y",
+    "discard", "cancel", "delete", "reject", "deny", "no", "n",
+)
+
+APPROVAL_SHAPE = re.compile(
+    r"(?:{})[ \t]+[A-Za-z0-9]{{5}}".format("|".join(APPROVAL_WORDS)),
+    re.IGNORECASE,
+)
+
+#: U+FEFF is whitespace to JavaScript's ``trim`` and not to Python's ``strip``
+#: (``"\ufeff".isspace()`` is false), so a stray byte order mark on the end of a
+#: pasted code made the same message an approval on OpenClaw and ordinary
+#: conversation here. Both copies now take it off explicitly.
+_TRIM_CHARS = "\ufeff"
+
+
+def trim_for_approval(text: str) -> str:
+    return text.strip().strip(_TRIM_CHARS).strip()
 
 
 def looks_like_approval(text) -> bool:
@@ -65,7 +94,8 @@ def looks_like_approval(text) -> bool:
     difference would give the two editions different answers for the same
     message.
     """
-    return isinstance(text, str) and APPROVAL_SHAPE.fullmatch(text.strip()) is not None
+    return isinstance(text, str) and APPROVAL_SHAPE.fullmatch(trim_for_approval(text)) is not None
+
 
 #: Long enough for one loopback POST plus the SMTP conversation behind it, and
 #: short enough that a wedged mail server cannot hold the gateway all day.

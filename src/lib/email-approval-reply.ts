@@ -42,11 +42,21 @@
 // message it took off the wire. A claimed approval message never reaches the
 // model on either edition, so the agent does not even see the code go past.
 //
-// THE CODE IS A NAME, NOT A PASSWORD. Its job is the owner's own instruction
-// (queue-2026-09-03, B15): bind the reply to the card id, never "the latest" by
-// guess. A bare "send" therefore decides nothing at all — this file answers
-// `handled: false` and the message goes on to the agent, which can say which
-// draft it means. Sizing and alphabet are in email-approval-prompts.ts.
+// WHAT THE CODE IS FOR, AND WHAT IT IS NOT. Its job is the owner's own
+// instruction (queue-2026-09-03, B15): bind the reply to the card id, never
+// "the latest" by guess. A bare "send" therefore decides nothing at all — this
+// file answers `handled: false` and the message goes on to the agent, which can
+// say which draft it means.
+//
+// It is ALSO the reason this path is not simply open to anything holding the
+// device bearer, and that is why only its hash is written down
+// (email-approval-prompts.ts). Be exact about the limit of that: on a
+// single-user appliance an agent with a SHELL is not contained by anything
+// here — it can read data/config.json and put mail on the wire with the owner's
+// own SMTP credentials, without touching this route at all. That is a fact
+// about the appliance, not about this file, and it was true before this
+// existed. What this file must not do is hand the agent's TOOL surface an
+// approve verb, and it does not.
 
 import { draftFingerprint, type PendingEmail } from "@/lib/email-pending";
 import {
@@ -78,7 +88,7 @@ const MAX_NOTICE_CHATS = 5;
 /** What `offerReplyApproval` can say. */
 export type ReplyOfferOutcome =
   | { kind: "offered"; code: string; chats: number }
-  | { kind: "already_asked"; code: string | null }
+  | { kind: "already_asked" }
   | { kind: "no_owner_chat" }
   | { kind: "too_long" }
   | { kind: "failed"; error: string };
@@ -98,8 +108,47 @@ export interface ReplyApprovalResult {
   outcome?: CallbackOutcome | "not_command" | "not_owner" | "unknown_code";
 }
 
-const APPROVE_WORDS = new Set(["send", "approve", "ok", "okay", "yes", "y"]);
-const REJECT_WORDS = new Set(["delete", "deny", "no", "n", "cancel", "reject", "discard"]);
+/**
+ * The words that mean "send it" and the words that mean "throw it away".
+ *
+ * Listed longest-first, because they are also spelled into the two plugin
+ * copies as one ordered alternation and `no|n` must not let `n` win over `no`.
+ */
+export const APPROVE_WORDS = ["approve", "okay", "send", "yes", "ok", "y"] as const;
+export const REJECT_WORDS = ["discard", "cancel", "delete", "reject", "deny", "no", "n"] as const;
+
+const APPROVE_SET = new Set<string>(APPROVE_WORDS);
+const REJECT_SET = new Set<string>(REJECT_WORDS);
+
+/**
+ * The one whitespace character JavaScript and Python disagree about.
+ *
+ * `String.prototype.trim` treats U+FEFF as whitespace; Python's `str.strip()`
+ * does not, because `"\ufeff".isspace()` is false. Left alone, a stray byte
+ * order mark on the end of a pasted code made the same message an approval on
+ * OpenClaw and ordinary conversation on Hermes. Both plugin copies strip it the
+ * same way, and the parity test carries the case.
+ */
+export function trimForApproval(text: string): string {
+  return text.replace(/^[\ufeff\s]+|[\ufeff\s]+$/g, "");
+}
+
+/**
+ * A reply that is EXACTLY one of the words above and a five-character code.
+ *
+ * THE VERBS ARE IN THE SHAPE, and both plugins carry the same list. Leaving
+ * them out looked tidier — "which words mean approve is the device's decision"
+ * — and it was wrong: `[A-Za-z]{1,10}` matches "hello", so "hello there",
+ * "thanks again" and "good night" were all posted to /email/chat-reply and
+ * counted against its attempt budget. Ten ordinary two-word messages inside ten
+ * minutes and the next real approval was refused. The plugins still do not
+ * DECIDE anything — approve-versus-delete is settled here, once — they only
+ * decide whether to ask, and asking about "good night" is what the shape is for.
+ */
+const APPROVAL_SHAPE = new RegExp(
+  `^(${[...APPROVE_WORDS, ...REJECT_WORDS].join("|")})[ \\t]+([A-Za-z0-9]{5})$`,
+  "i",
+);
 
 /**
  * A reply that is EXACTLY a verb and a code, or nothing.
@@ -118,15 +167,16 @@ export function parseApprovalReply(text: string): { verb: "approve" | "reject"; 
   // every one of the three languages this rule is written in, and Python's `$`
   // also matches BEFORE a trailing newline where JavaScript's does not — so a
   // pattern spelled with `\s` and `$` accepts a different set on each edition.
-  // Trimming takes the stray whitespace off in a way all three agree on, and a
+  // Trimming takes the stray whitespace off in a way all three agree on (see
+  // `trimForApproval` for the one character they disagree about), and a
   // separator of literal spaces and tabs leaves nothing else to disagree about.
   // email-approval-reply-parity.test.ts is what keeps them honest.
-  const match = /^([A-Za-z]{1,10})[ \t]+([A-Za-z0-9]{4,8})$/.exec(text.trim());
+  const match = APPROVAL_SHAPE.exec(trimForApproval(text));
   if (!match) return null;
   const word = match[1].toLowerCase();
   const code = match[2].toUpperCase();
-  if (APPROVE_WORDS.has(word)) return { verb: "approve", code };
-  if (REJECT_WORDS.has(word)) return { verb: "reject", code };
+  if (APPROVE_SET.has(word)) return { verb: "approve", code };
+  if (REJECT_SET.has(word)) return { verb: "reject", code };
   return null;
 }
 
@@ -156,14 +206,13 @@ export async function offerReplyApproval(draft: PendingEmail): Promise<ReplyOffe
     // live answers, and the second would only ever say "no longer waiting".
     const created = createPrompt({ draftId: draft.id, fingerprint: draftFingerprint(draft) });
     if (!created) return { kind: "failed", error: "Too many approval requests are already waiting." };
-    if (!created.created) return { kind: "already_asked", code: created.prompt.code ?? null };
+    // The code exists exactly once, here, on the way into the message: the
+    // store keeps only its hash, so a question that was already asked cannot be
+    // re-announced and this returns none.
+    if (!created.created) return { kind: "already_asked" };
 
     const prompt = created.prompt;
-    const code = prompt.code;
-    if (!code) {
-      removePromptsForDraft(draft.id);
-      return { kind: "failed", error: "Could not name this draft." };
-    }
+    const code = created.code;
 
     const text = buildNoticeText(draft, code);
     if (text.length > MAX_PROMPT_CHARS) {
