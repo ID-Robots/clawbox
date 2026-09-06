@@ -532,18 +532,17 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
     const verdicts = summary.harness === "openclaw"
       ? await readProviderRunnable().catch(() => new Map<string, ProviderRunnable>())
       : new Map<string, ProviderRunnable>();
-    const unrunnable = summary.providers
+    const candidates = summary.providers
       .filter((row) => {
-        // A row the owner has NOT connected is never hidden, whatever the
-        // count says — that row IS the fix. Connecting a cloud provider writes
-        // its configured model rows and `models.mode: "merge"`
-        // (`writeOpenAICompatProvider` in the configure route), which is
-        // exactly what turns a zero-row provider back into a routable one, so
-        // hiding it would leave the box with no way out of the state that hid
-        // it. What this hides is the other case: a provider the box IS set up
-        // for and still cannot run a single model from.
-        if (row.state !== "connected" && row.state !== "needs-reauth") return false;
-        // The provider the box is POINTED AT is never hidden. It is the reason
+        // The connection state is NOT consulted, and that is a change of mind
+        // with a reason. It was, so that hiding a row could never take away the
+        // way out of the state that hid it — but the way out is the "Connect AI
+        // Provider" list, and that list no longer hides anything (see
+        // `AIModelsStep`). The strip answers "what is this box set up with and
+        // can it run"; a provider it can run nothing from does not belong in
+        // that answer whether or not a credential is sitting there.
+        //
+        // The provider the box is POINTED AT is never named. It is the reason
         // chat is broken, and a row nobody can see is a row nobody can change.
         if (row.isDefault) return false;
         // Nor is one whose plugin the boot script had to switch off: that row
@@ -552,7 +551,44 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
         return providerRowRunnable(row.id, verdicts) === "none";
       })
       .map((row) => row.id);
-    const hidden = new Set(unrunnable);
+    // ...and if that would leave the strip showing the default row alone, it is
+    // none of them.
+    //
+    // The counts come from `openclaw models list`, and one failure can answer
+    // `count: 0` for several providers at once — a models.json the core cannot
+    // load, a config caught half-written, a gateway restart mid-refresh. Each of
+    // those is a clean zero per provider and none of them is a fact about what
+    // the box can run. Rather than guess which, the strip declines to act when
+    // the answer is "everything": a whole panel reduced to the default row is
+    // never the honest reading, and the owner's connected key would be nowhere
+    // on the screen for the six hours a record lives.
+    //
+    // MEASURED AGAINST THE ROWS THE STRIP RENDERS, not against every row in this
+    // summary, and that is the whole of whether the rule works. Counting all of
+    // them made it unsatisfiable on every box: three of the five panel rows can
+    // never be candidates — `openai` stands for the `codex` catalogue too and
+    // that one is never enumerated, `clawai` is served from a two-row literal,
+    // and `openrouter`'s REST fetcher never records an authoritative empty — so
+    // "every non-default row is a candidate" could not happen while the harm it
+    // guards against (default + one connected provider, that one hidden) could.
+    //
+    // The filter mirrors `AiProviderList`'s, deliberately and with the coupling
+    // named: that component decides what the strip shows, and this decides what
+    // may be taken away from it. A change to one is a change to both. It cannot
+    // be shared as code — this module reads the config off disk and the
+    // component is a client one.
+    //
+    // The chat picker carries the same refusal in its own words
+    // (`chat/model/route.ts`, "if every cloud option would go, none does"). This
+    // is that rule on the surface that had none.
+    const stripHideable = summary.providers
+      .filter((row) => (row.state === "connected" || row.state === "needs-reauth")
+        && row.section !== "localAi"
+        && !row.isDefault)
+      .map((row) => row.id);
+    const wouldEmptyTheStrip = stripHideable.length > 0
+      && stripHideable.every((id) => candidates.includes(id));
+    const unrunnable = wouldEmptyTheStrip ? [] : candidates;
     // The rows no provider or channel row will draw. Split here rather than in
     // the panel so the two surfaces cannot disagree about which is which: the
     // badge below and this list are fed from one read and one rule.
@@ -566,9 +602,15 @@ export async function readProviderStatus(): Promise<ProviderStatusSummary> {
       }));
     return {
       ...summary,
+      // ADVISORY, and the rows stay. Dropping them server-side made a hidden
+      // provider render in the Connect list with no connection label at all —
+      // `statusById` had nothing for it — and took its enable/disable switch
+      // with it. The strip does its own hiding (`AiProviderList`), which is
+      // where it already filters by state, and every other consumer keeps a
+      // complete answer.
       unrunnable,
       ...(unattachedRepairs.length > 0 ? { unattachedRepairs } : {}),
-      providers: summary.providers.filter((row) => !hidden.has(row.id)).map((row) => {
+      providers: summary.providers.map((row) => {
         const repair = repairFor(repairs, row.id);
         return {
           ...row,

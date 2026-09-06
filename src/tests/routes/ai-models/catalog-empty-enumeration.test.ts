@@ -96,7 +96,13 @@ beforeEach(() => {
 
 describe("catalog — a clean empty enumeration is an answer, not a failure", () => {
   it("records zero when the CLI answers with no rows at all", async () => {
-    mockList({ count: 0, models: [] });
+    // With an unrelated warning on stderr, deliberately. Every `openclaw models
+    // list` on the shipped boxes prints `[agents/model-registry] model catalog
+    // load issue: … gpt-image-1-mini: no "api" specified` — on every provider's
+    // enumeration, exit code 0 — so requiring an empty stderr made this whole
+    // rule dead code there. What says the answer is untrustworthy is the CLI
+    // refusing, not the CLI grumbling.
+    mockList({ count: 0, models: [] }, "[agents/model-registry] model catalog load issue: …");
     await get("google", "&refresh=1");
 
     expect(await recordedCount("google")).toBe(0);
@@ -115,6 +121,19 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
     expect(await recordedCount("google")).toBe(2);
   });
 
+  it("records NOTHING when `models` is not a list at all", async () => {
+    // The parser coerces a non-array `models` to `[]`, so a body like
+    // `{count: 0, models: {}}` looks exactly like a clean zero once it is past
+    // that line — and would hide the provider for the record's whole lifetime.
+    // A shape we do not recognise is not an answer.
+    mockList({ count: 0, models: {} });
+    await get("anthropic", "&refresh=1");
+    await settle();
+
+    const recorded = fs.existsSync(RECORD) ? readRecord() : {};
+    expect(recorded.anthropic).toBeUndefined();
+  });
+
   it("records NOTHING when the payload never stated a count", async () => {
     // Read positively, not inferred from absence: a truncated or shape-shifted
     // payload parses into the same emptiness as a real answer, and this verdict
@@ -125,6 +144,41 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
 
     const recorded = fs.existsSync(RECORD) ? readRecord() : {};
     expect(recorded.google).toBeUndefined();
+  });
+
+  it("records zero when the CLI listed rows and marked every one unroutable", async () => {
+    // The second shape of the same answer, and the one that fires while the CLI
+    // still has a catalogue to print. Our own transform drops an `available:
+    // false` row, so the published count is zero either way — what makes this an
+    // ANSWER rather than a failure is that the command ran and refused nothing.
+    mockList({
+      count: 2,
+      models: [
+        { key: "anthropic/claude-opus-5", name: "Claude Opus 5", contextWindow: 1_000_000, available: false, tags: [] },
+        { key: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", contextWindow: 1_000_000, available: false, tags: [] },
+      ],
+    });
+    await get("anthropic", "&refresh=1");
+
+    expect(await recordedCount("anthropic")).toBe(0);
+  });
+
+  it("records the rows the harness did not JUDGE, never against them", async () => {
+    // Measured on the OpenClaw box: with no Google credential all ten google
+    // rows come back `available: null`, while every row of the LINKED deepseek
+    // provider on the same box comes back `true`. `null` is "not determined",
+    // and writing a provider off for it would hide every one a box has not
+    // finished setting up — so these two rows are published and counted.
+    mockList({
+      count: 2,
+      models: [
+        { key: "openai/gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 400_000, available: null, tags: [] },
+        { key: "openai/gpt-5.4", name: "GPT-5.4", contextWindow: 400_000, tags: [] },
+      ],
+    });
+    await get("openai", "&refresh=1");
+
+    expect(await recordedCount("openai")).toBe(2);
   });
 
   it("records NOTHING when the CLI refused — an error is not an empty catalogue", async () => {

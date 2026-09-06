@@ -37,11 +37,17 @@ function recordEnumerations(counts: Record<string, number>) {
   writeFileSync(path.join(dir, "_enumerations.json"), JSON.stringify({ providers }), "utf8");
 }
 
-/** A box with an Anthropic key and a Google key, pointed at Anthropic. */
+/**
+ * A box pointed at Anthropic, with a Google key and ClawBox AI linked.
+ *
+ * Three connected rows on purpose: hiding Google has to leave the strip with
+ * something other than the default, or the "would this empty the strip?"
+ * refusal takes over and these cases would be testing that instead.
+ */
 function boxWithGoogleKey() {
   readConfig.mockResolvedValue({
     auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
-    models: { providers: { google: { apiKey: "AIza-secret" } } },
+    models: { providers: { google: { apiKey: "AIza-secret" }, deepseek: { apiKey: "claw_token" } } },
     agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
   });
 }
@@ -83,10 +89,11 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     recordEnumerations({ google: 0, anthropic: 9 });
     const body = await (await GET()).json();
 
-    expect(ids(body)).not.toContain("google");
+    // NAMED, and kept: the strip does the hiding, so the Connect list below it
+    // can still show this provider with its real connection label and its
+    // switch. Dropping the row server-side took both away.
     expect(body.unrunnable).toEqual(["google"]);
-    // Everything else is untouched.
-    expect(ids(body)).toEqual(expect.arrayContaining(["clawai", "openai", "anthropic", "openrouter"]));
+    expect(ids(body)).toEqual(expect.arrayContaining(["clawai", "openai", "anthropic", "openrouter", "google"]));
   });
 
   it("keeps the row on a box that can run at least one of that provider's models", async () => {
@@ -96,6 +103,74 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
 
     expect(ids(body)).toContain("google");
     expect(body.unrunnable).toEqual([]);
+  });
+
+  /**
+   * The refusal, measured against the rows the STRIP renders.
+   *
+   * Every record below is one the catalog route can actually write. Counting
+   * every row in the summary instead made this unsatisfiable on every box —
+   * `openai` stands for the never-enumerated `codex` catalogue, `clawai` is a
+   * two-row literal and `openrouter` never records a zero — while the harm it
+   * guards against stayed perfectly reachable.
+   */
+  describe("when hiding would leave the strip with the default row alone", () => {
+    /** ClawBox AI is the default and connected; `keys` name the other connected rows. */
+    function boxWithConnected(keys: string[]) {
+      const providers: Record<string, { apiKey: string }> = { deepseek: { apiKey: "claw_token" } };
+      for (const key of keys) providers[key] = { apiKey: `${key}-secret` };
+      readConfig.mockResolvedValue({
+        auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+        models: { providers },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      });
+    }
+
+    it("names none — the box with one connected provider that answered zero", async () => {
+      // The reachable harm: ClawBox AI the default, a Google key pasted, google
+      // enumerating nothing. Hiding it leaves the panel showing ClawBox AI and
+      // nothing else, which is never the honest reading of one zero.
+      boxWithConnected(["google"]);
+      recordEnumerations({ google: 0 });
+      const body = await (await GET()).json();
+
+      expect(body.unrunnable).toEqual([]);
+      expect(ids(body)).toContain("google");
+    });
+
+    it("still names the one that answered zero when another connected row survives", async () => {
+      // Anthropic is connected and enumerated fine, so hiding google leaves the
+      // strip with something to show and the rule does its job.
+      boxWithConnected(["google", "anthropic"]);
+      recordEnumerations({ google: 0, anthropic: 15 });
+      const body = await (await GET()).json();
+
+      expect(body.unrunnable).toEqual(["google"]);
+    });
+
+    it("names none when BOTH connected providers answered zero", async () => {
+      // One catalogue-load failure answers `count: 0` for several providers at
+      // once. Each is a clean zero per provider and none is a fact about what
+      // the box can run.
+      boxWithConnected(["google", "anthropic"]);
+      recordEnumerations({ google: 0, anthropic: 0 });
+      const body = await (await GET()).json();
+
+      expect(body.unrunnable).toEqual([]);
+    });
+
+    it("names nothing at all on the box's own catalogue", async () => {
+      // The counts this box really records (measured read-only, `merge` mode).
+      // Nothing is hidden, and the rule is silent.
+      boxWithConnected(["google", "anthropic"]);
+      recordEnumerations({ google: 10, anthropic: 15, openai: 27, clawai: 2, openrouter: 417 });
+      const body = await (await GET()).json();
+
+      expect(body.unrunnable).toEqual([]);
+      expect(ids(body)).toEqual(
+        expect.arrayContaining(["clawai", "openai", "anthropic", "google", "openrouter"]),
+      );
+    });
   });
 
   it("keeps the row when no enumeration has answered yet — unknown is not empty", async () => {
@@ -109,11 +184,13 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     expect(body.unrunnable).toEqual([]);
   });
 
-  it("never hides a provider the owner has not connected", async () => {
-    // That row IS the fix: connecting a cloud provider writes its configured
-    // model rows and `models.mode: "merge"`, which is exactly what turns a
-    // zero-row provider back into a routable one. Hiding it would leave the box
-    // with no way out of the state that hid it.
+  it("names a provider the box can run nothing from even before it is connected", async () => {
+    // The strip answers "what is this box set up with and can it run". A
+    // provider it can run nothing from does not belong in that answer whether
+    // or not a credential is sitting there — and the way OUT of that state is
+    // the "Connect AI Provider" list, which offers every provider
+    // unconditionally (see `AIModelsStep`). This is the pair: the strip may
+    // drop the row only because that list never does.
     readConfig.mockResolvedValue({
       auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
       agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
@@ -121,9 +198,7 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
     recordEnumerations({ google: 0 });
     const body = await (await GET()).json();
 
-    expect(ids(body)).toContain("google");
-    expect(body.providers.find((p: Row) => p.id === "google")!.state).toBe("disconnected");
-    expect(body.unrunnable).toEqual([]);
+    expect(body.unrunnable).toEqual(["google"]);
   });
 
   it("stops trusting a count older than the catalogue's own refresh interval", async () => {

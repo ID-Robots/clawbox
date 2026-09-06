@@ -193,6 +193,12 @@ export async function readProviderRunnable(): Promise<Map<string, ProviderRunnab
       ? now - record.atMs
       : Number.POSITIVE_INFINITY;
     if (ageMs > RECORD_TTL_MS) continue;
+    // ONE number decides it, and both ways the box says "nothing here" arrive
+    // as that number being zero: an enumeration that listed no rows at all, and
+    // one that listed rows the harness marked `available: false` — our own
+    // transform drops those, so the published count is zero either way. The
+    // catalog route is where the two are told apart from a FAILURE; by the time
+    // a count is recorded, zero means the box answered.
     verdicts.set(provider, record.models > 0 ? "some" : "none");
   }
   return verdicts;
