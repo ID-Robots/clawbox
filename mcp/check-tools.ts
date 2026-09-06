@@ -35,7 +35,7 @@ import { z } from "zod";
 import { contractViolations, type RegisteredToolInfo } from "./lib/register";
 // The directory the probes actually spawn in — imported, not restated: a third
 // copy of that path is a third thing to keep in step with the other two.
-import { DEFAULT_CWD } from "./lib/guard";
+import { DEFAULT_CWD, defaultSpawnCwd } from "./lib/guard";
 // The production reader, so the run fixture below cannot drift from it.
 import { runMedia } from "./lib/run-context";
 // The TYPE, so the postures below are checked against the interface they
@@ -116,13 +116,18 @@ function schemaShapeViolations(tool: RegisteredToolInfo, emitted: string): strin
  *
  * The registrars gate whole tool families on a device probe — `du`,
  * `journalctl`, a screen grabber, a readable mailbox, the coding harness, an
- * image backend, the Hermes provider list. Off a real box every probe answers
- * false (mcp/lib/guard.ts spawns in CLAWBOX_ROOT, which exists on a device and
- * nowhere else), so building the server the ordinary way here would examine a
- * FRACTION of the surface and print "Tool contract OK" over the rest: measured
- * on the dev PC, `du` is installed and none of disk_usage, disk_cleanup,
- * logs_tail or screen_capture appeared in this checker's own matrix. That is a
+ * image backend, the Hermes provider list. Off a real box MOST of those answer
+ * false — there is no device API to ask, and a runner has no scrot and no
+ * ImageMagick — so building the server the ordinary way here would examine a
+ * FRACTION of the surface and print "Tool contract OK" over the rest. That is a
  * false success, and the reason CI could not run this job as it stood.
+ *
+ * It used to be every probe, for a reason that was not about this host at all:
+ * the spawns ran in CLAWBOX_ROOT, and a missing directory made `hasBinary()`
+ * answer false for binaries that were installed (TASK-722). That is fixed in
+ * mcp/lib/guard.ts, so `du` and `journalctl` now probe true here — which
+ * narrows what the postures below are covering for, and does not remove the
+ * need for them.
  *
  * So the contract is checked over the DECLARED postures rather than over the
  * probed one alone — the full surface a real box registers, that surface as the
@@ -503,8 +508,33 @@ async function check(): Promise<void> {
   if (noteLines.length) {
     // The contract above WAS checked over every posture; what this host could
     // not do is tell you whether these particular probes work.
+    const cwd = defaultSpawnCwd();
+    // The POLICY, not a claim about where each probe ran: the fallback to `/`
+    // is also taken on the spawn's own refusal, which this side never sees. A
+    // note that named this directory outright would be wrong about exactly the
+    // host it is written for — one whose root exists and cannot be entered.
+    // "CLAWBOX_ROOT=<path>" over an UNSET variable is the same kind of false
+    // statement this whole note is being corrected for: on a shipped box the
+    // variable is not set at all (clawbox-setup.service's Environment= carries
+    // NODE_ENV, BUN_ENV, PORT, HOSTNAME and CLAWBOX_EDITION, and nothing else),
+    // so the path being reported is the module's hard-coded fallback and saying
+    // otherwise sends an operator looking for a setting that does not exist.
+    // Three states, not two: set to a path, set to the EMPTY string (which
+    // `DEFAULT_CWD`'s `||` treats as absent, so the fallback applies while the
+    // variable is very much present), and unset. An operator told "unset" about
+    // a variable something exported as empty would go looking in the wrong
+    // place.
+    const configured = process.env.CLAWBOX_ROOT;
+    const rootLabel = configured
+      ? `CLAWBOX_ROOT=${configured}`
+      : configured === undefined
+        ? `CLAWBOX_ROOT is unset, so the default ${DEFAULT_CWD} applies`
+        : `CLAWBOX_ROOT is set but empty, so the default ${DEFAULT_CWD} applies`;
+    const rootNote = cwd === DEFAULT_CWD
+      ? `${rootLabel}; a directory refusal retries in /`
+      : `${rootLabel}, and it cannot be entered — so the probes were NOT affected by it`;
     console.log(
-      `\nnote: probes that answered false on this host. Spawns run in CLAWBOX_ROOT=${DEFAULT_CWD};`
+      `\nnote: probes that answered false on this host. Spawns default to ${cwd} (${rootNote});`
       + `\n      device API probes call ${API_BASE}.`
       + `\n${noteLines.join("\n")}`
       + "\n      The contract and the matrix above come from the declared postures, which are the"

@@ -134,10 +134,12 @@ function instructionsFor(edition: Ed, profile: Profile): string {
  * `overrides` exists for that CHECKER, not for the running server. Several tool
  * families register only when a device probe says the box can do the thing —
  * `du`, `journalctl`, a screen grabber, a readable mailbox, the coding harness.
- * Off a real box every one of those probes answers false (mcp/lib/guard.ts
- * spawns in CLAWBOX_ROOT, which does not exist on a CI runner or a dev PC), so
- * a checker that built the server the ordinary way would examine a fraction of
- * the surface and report the whole thing OK. Nothing else passes it; the
+ * Off a real box most of those probes answer false — there is no device API to
+ * ask, and a runner has neither a screen grabber nor ImageMagick — so a checker
+ * that built the server the ordinary way would examine a fraction of the
+ * surface and report the whole thing OK. (It was ALL of them until TASK-722:
+ * the spawns ran in CLAWBOX_ROOT and a missing directory answered false for
+ * binaries that were installed.) Nothing else passes it; the
  * running server always takes the probes.
  *
  * It may override CAPABILITIES only. The server's identity — `edition`,
