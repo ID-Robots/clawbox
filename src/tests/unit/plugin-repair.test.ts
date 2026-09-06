@@ -118,4 +118,30 @@ describe("plugin-repair — which row a failure belongs to", () => {
     expect(repairFor(repairs, "openai")?.id).toBe("codex");
     expect(repairFor(repairs, "anthropic")).toBeNull();
   });
+  it("clears the row under whatever spelling the boot script wrote it as", async () => {
+    // `ensureChannelPlugin` enables the plugin under whichever key the registry
+    // answered to, and the boot script marks it under that same configured key
+    // — so the row can be `@openclaw/discord` while every caller here knows the
+    // plugin as `discord`. An exact-key delete left the "Needs repair" badge up
+    // on exactly the row it describes.
+    write({
+      "@openclaw/discord": { id: "@openclaw/discord", stage: "consent", reason: "no", atMs: 1, disabled: true },
+      "@openclaw/deepseek-provider": {
+        id: "@openclaw/deepseek-provider", stage: "install", reason: "no", atMs: 1, disabled: true,
+      },
+    });
+    const { clearPluginRepair, readPluginRepairs } = await load();
+    expect(await clearPluginRepair("discord")).toBe(true);
+    // …and the provider suffix too, which is how the boot script's own
+    // canonical id differs from the package name.
+    expect(await clearPluginRepair("deepseek")).toBe(true);
+    expect(await readPluginRepairs()).toEqual({});
+  });
+
+  it("still answers false when nothing matches, under any spelling", async () => {
+    write({ discord: { id: "discord", stage: "consent", reason: "no", atMs: 1, disabled: true } });
+    const { clearPluginRepair } = await load();
+    expect(await clearPluginRepair("whatsapp")).toBe(false);
+    expect(await clearPluginRepair("@openclaw/whatsapp")).toBe(false);
+  });
 });

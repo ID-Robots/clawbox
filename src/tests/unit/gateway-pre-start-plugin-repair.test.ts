@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { testEnv } from "@/tests/helpers/env";
+import { repairHelpers, sliceScript } from "@/tests/helpers/gateway-pre-start";
 
 // Starts a real process (bash / python3): vitest's 5 s test and 10 s hook
 // defaults are not enough on a loaded CI runner. See
@@ -40,22 +41,11 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 const d = hasPython3 && hasBash ? describe : describe.skip;
 
-function slice(from: string, to: string): string {
-  const src = readFileSync(SCRIPT, "utf-8");
-  const start = src.indexOf(from);
-  const end = src.indexOf(to, start);
-  if (start < 0 || end < 0) throw new Error(`gateway-pre-start.sh no longer contains ${from.trim()}`);
-  return src.slice(start, end);
-}
-
 /** The repair helpers plus the managed-plugin consent loop that uses them. */
 function block(): string {
   return [
-    slice(
-      "# ── Booting WITHOUT a plugin that could not be made loadable ",
-      "# A `.openclaw` INSIDE the state directory",
-    ),
-    slice(
+    repairHelpers(),
+    sliceScript(
       "# ── Capability consent for the OTHER ClawBox-managed plugins ",
       "# Codex reads its ChatGPT session",
     ),

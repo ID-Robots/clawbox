@@ -2622,7 +2622,16 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           // helper and clears the marker only after `plugins inspect --runtime`
           // says the plugin actually loaded, and a clear inside the installer
           // would have thrown the badge away before that question was asked.
-          await clearPluginRepair("deepseek").catch(() => false);
+          // SAID, not swallowed. The install succeeded and this route's own
+          // answer is about the provider, so a failed clear must not fail it —
+          // but a badge left on a row that works is a false failure the owner
+          // cannot act on, and the log is where it is looked for.
+          await clearPluginRepair("deepseek").catch((err: unknown) => {
+            console.warn(
+              "[AI Config] the deepseek repair marker could not be cleared; Settings may still show a Retry:",
+              err instanceof Error ? err.message : err,
+            );
+          });
         } else {
           console.warn(
             "[AI Config] deepseek provider plugin install did not complete:",

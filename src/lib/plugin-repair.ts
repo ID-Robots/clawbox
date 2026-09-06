@@ -163,8 +163,17 @@ export async function readPluginRepairs(): Promise<PluginRepairs> {
  */
 export async function clearPluginRepair(id: string): Promise<boolean> {
   const current = await readPluginRepairs();
-  if (!current[id]) return false;
-  delete current[id];
+  // MATCHED ON THE CANONICAL ID, not on the literal key. The boot script marks
+  // the plugin under the key openclaw.json carries — `@openclaw/discord` when
+  // `ensureChannelPlugin` enabled that spelling, `@openclaw/deepseek-provider`
+  // for the provider — while every caller here knows it by its bare name. An
+  // exact lookup answered `false` and left the "Needs repair" badge up on
+  // exactly the row it describes. `repairFor` above already reads it this way;
+  // the two now agree.
+  const wanted = canonicalPluginId(id);
+  const keys = Object.keys(current).filter((key) => canonicalPluginId(current[key].id) === wanted);
+  if (keys.length === 0) return false;
+  for (const key of keys) delete current[key];
   const target = pluginRepairPath();
   // The pid alone is not unique WITHIN a process: two clears in flight at once
   // would stage over each other and one rename would land a file the other was

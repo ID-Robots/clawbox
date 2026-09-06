@@ -51,6 +51,18 @@ vi.mock("@/lib/port-probe", async (orig) => ({
 const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
 
+// The TASK-606 marker, mocked so the clears the repair paths owe can be seen.
+// `readPluginRepairs` answers `{}`, which is what the real one answers under
+// this file's mocked `fs/promises` anyway — so nothing else moves.
+const { mockClearPluginRepair, mockReadPluginRepairs } = vi.hoisted(() => ({
+  mockClearPluginRepair: vi.fn(async () => true),
+  mockReadPluginRepairs: vi.fn(async () => ({})),
+}));
+vi.mock("@/lib/plugin-repair", () => ({
+  clearPluginRepair: mockClearPluginRepair,
+  readPluginRepairs: mockReadPluginRepairs,
+}));
+
 import { get, set, setMany } from "@/lib/config-store";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
@@ -681,6 +693,12 @@ describe("updater", () => {
       const restartIndexes = calls
         .map((call, index) => call.includes("systemctl restart clawbox-gateway.service") ? index : -1)
         .filter((index) => index >= 0);
+
+      // The OTHER half of the same repair (TASK-606): the boot script marked
+      // codex as needing repair, this update put the payload back, and a marker
+      // only the boot script ever cleared would leave a permanent "Needs
+      // repair" badge on a plugin that is now fine.
+      expect(mockClearPluginRepair.mock.calls.flat()).toContain("codex");
 
       expect(maskIndexes).toHaveLength(2);
       expect(stopIndexes).toHaveLength(2);

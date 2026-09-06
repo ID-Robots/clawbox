@@ -360,7 +360,12 @@ export async function ensureChannelPlugin(
   // The channel's plugin is installed and enabled, whoever asked for it. A
   // marker only the boot script cleared would leave a "Needs repair" badge on
   // the Discord row of a box the owner has just reconnected (TASK-606).
-  await clearPluginRepair(channelId).catch(() => false);
+  await clearPluginRepair(channelId).catch((err: unknown) => {
+    console.warn(
+      `[openclaw-channels] the ${channelId} repair marker could not be cleared; Settings may still show a Retry:`,
+      err instanceof Error ? err.message : err,
+    );
+  });
   return { ok: true, installed };
 }
 

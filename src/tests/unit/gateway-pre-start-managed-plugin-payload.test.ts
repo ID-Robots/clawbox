@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { testEnv } from "@/tests/helpers/env";
+import { repairHelpers } from "@/tests/helpers/gateway-pre-start";
 import { OFFICIAL_CHANNEL_PLUGINS } from "@/lib/openclaw-channels";
 
 // Starts a real process (bash / python3): vitest's 5 s test and 10 s hook
@@ -44,26 +45,9 @@ function extractBlock(): string {
   return src.slice(start, end + "\n  done\nfi\n".length);
 }
 
-/**
- * The repair helpers the loop calls, also verbatim (TASK-606).
- *
- * A refusal this block cannot repair now ends in `clawbox_plugin_boot_without`
- * rather than a warning, so the loop no longer runs without them: the payload
- * reinstall is the FIRST answer to a missing payload and booting without the
- * plugin is the second, and a slice carrying only one of the two would run
- * green here while the shipped script did something else.
- */
-function extractHelpers(): string {
-  const src = readFileSync(SCRIPT, "utf-8");
-  const from = "# ── Booting WITHOUT a plugin that could not be made loadable ";
-  const to = "# A `.openclaw` INSIDE the state directory";
-  const start = src.indexOf(from);
-  const end = src.indexOf(to, start);
-  if (start < 0 || end < 0) throw new Error("the plugin repair helpers are not in gateway-pre-start.sh");
-  return src.slice(start, end);
-}
-
-const BLOCK = hasBash && hasPython3 ? `${extractHelpers()}\n${extractBlock()}` : "";
+// A refusal this loop cannot repair now ends in `clawbox_plugin_boot_without`
+// rather than a warning, so the block no longer runs without those helpers.
+const BLOCK = hasBash && hasPython3 ? `${repairHelpers()}\n${extractBlock()}` : "";
 
 let dir: string;
 

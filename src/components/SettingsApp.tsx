@@ -3862,6 +3862,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <PluginRepairNotice
                         repair={repair}
                         onRepaired={() => {
+                          // DROP THE ROW FIRST. `PluginRepairNotice` calls this
+                          // only after the device verified the repair, so the
+                          // badge is wrong from this moment on — while
+                          // `fetchPluginRepairs` answers null on a failed GET
+                          // (deliberately: a box that cannot answer keeps the
+                          // rows it had), and the GET right after a gateway
+                          // restart is exactly the one that fails. That left
+                          // the badge up until the section was re-entered.
+                          setPluginRepairs((rows) => rows.filter((row) => row.pluginId !== repair.pluginId));
                           void fetchPluginRepairs().then((rows) => { if (rows) setPluginRepairs(rows); });
                           void refreshChannel();
                         }}

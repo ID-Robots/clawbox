@@ -9,6 +9,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
 import { restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   canonicalPluginId,
   clearPluginRepair,
@@ -90,13 +91,17 @@ async function harnessSaysLoaded(pluginId: string): Promise<boolean | null> {
   } catch {
     return null;
   }
-  let parsed: RuntimeInspection;
+  let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout) as RuntimeInspection;
+    parsed = JSON.parse(stdout);
   } catch {
     return null;
   }
-  const plugin = parsed.plugin;
+  // `JSON.parse("null")` succeeds and the cast changes nothing at runtime, so
+  // reading `.plugin` off it threw out of POST as an unstructured 500 — where
+  // "the box could not be asked" already has an answer the panel renders.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const plugin = (parsed as RuntimeInspection).plugin;
   if (!plugin || typeof plugin !== "object") return null;
   if (plugin.status === undefined && plugin.activated === undefined) return null;
   // BOTH, and neither inferred from the other: a plugin can be discovered
@@ -127,6 +132,14 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   if (!(await hasOwnerSession(req))) {
     return NextResponse.json({ ok: false, code: "owner_only" }, { status: 403 });
+  }
+  // And from OUR page. The owner's cookie rides on a POST any other site fires
+  // at the box, and the owner gate above cannot tell the two apart. The marker
+  // keeps the blast radius small — nothing attacker-chosen reaches an argv —
+  // but this installs a package and restarts the gateway, so it gets the same
+  // guard the other state-changing owner routes use (same-origin.ts).
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ ok: false, code: "cross_origin" }, { status: 403 });
   }
   if ((await getActiveHarness().catch(() => "openclaw")) === "hermes") {
     return NextResponse.json({ ok: false, code: "not_supported" }, { status: 404 });
@@ -223,7 +236,11 @@ export async function POST(req: Request) {
     }
   }
 
-  await clearPluginRepair(entry.id).catch(() => false);
+  // NOT a failure of the repair, which has already been proved: turning it into
+  // one would be the false failure this card exists to remove. But not a plain
+  // success either — the badge the owner just cleared is still on his screen,
+  // and the answer says so instead of leaving him to wonder.
+  const markerCleared = await clearPluginRepair(entry.id).then(() => true).catch(() => false);
 
   // AND RESTART, like every other route that installs a plugin. `plugins
   // install` prints "Restart the gateway to load plugins" for a reason: without
@@ -238,5 +255,5 @@ export async function POST(req: Request) {
   } catch {
     restarted = false;
   }
-  return NextResponse.json({ ok: true, pluginId: entry.id, restarted });
+  return NextResponse.json({ ok: true, pluginId: entry.id, restarted, markerCleared });
 }

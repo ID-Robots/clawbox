@@ -1594,11 +1594,40 @@ async function repairPluginsBlockingReadiness(
       // One spec, not two: the unpinned fallback exists for a payload that is
       // GONE and may not be published under the pin's build suffix. Here the
       // package is on disk and only its consent record is stale.
-      await reinstallManagedPluginPayload("@openclaw/codex", false);
+      //
+      // AND CLEAR THE MARKER, the same statement `recordPluginCapabilityConsent`
+      // makes after its own `enable`: the boot script's row is the only thing
+      // telling Settings this plugin needs repair, and one that only the boot
+      // script ever cleared is a permanent badge on a plugin this update has
+      // just put back (TASK-606).
+      if (await reinstallManagedPluginPayload("@openclaw/codex", false)) {
+        await clearRepairMarker(pluginId);
+      }
       continue;
     }
     if (!(await pluginConsentRepairIsAllowed(pluginId))) continue;
     await recordPluginCapabilityConsent(pluginId);
+  }
+}
+
+/**
+ * Clear a TASK-606 repair marker after a repair that actually worked — and SAY
+ * so when the clear itself fails.
+ *
+ * Never fatal: the repair happened, and failing an update over the bookkeeping
+ * would be a false failure. But a marker left behind is a "Needs repair" badge
+ * on a plugin that is now fine, which the owner cannot act on because the Retry
+ * it offers will succeed and change nothing he can see — so it goes in the
+ * update log, where that is looked for.
+ */
+async function clearRepairMarker(pluginId: string): Promise<void> {
+  try {
+    await clearPluginRepair(pluginId);
+  } catch (err) {
+    console.warn(
+      `[Updater] the "${pluginId}" repair marker could not be cleared; Settings may still offer a Retry:`,
+      err instanceof Error ? err.message : err,
+    );
   }
 }
 
@@ -1632,7 +1661,11 @@ async function repairManagedPluginPayload(
     ? await codexCapabilityRepairIsAllowed()
     : await pluginConsentRepairIsAllowed(pluginId);
   if (!allowed) return false;
-  return reinstallManagedPluginPayload(npmPackage, options.fallbackToUnpinned !== false);
+  const installed = await reinstallManagedPluginPayload(npmPackage, options.fallbackToUnpinned !== false);
+  // Same reason as the Codex arm above: a payload this update put back is not
+  // a plugin Settings should go on offering a Retry for.
+  if (installed) await clearRepairMarker(pluginId);
+  return installed;
 }
 
 /**
@@ -1717,7 +1750,7 @@ async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
     // script wrote and only the boot script cleared would leave a permanent
     // "Needs repair" badge on a plugin this update just consented — the false
     // failure that costs a support ticket over a box that is now fine.
-    await clearPluginRepair(pluginId).catch(() => false);
+    await clearRepairMarker(pluginId);
   } catch (err) {
     // Best effort, like the Codex branch above: the clean restart and the
     // positive port probe decide the result, and this must not replace a

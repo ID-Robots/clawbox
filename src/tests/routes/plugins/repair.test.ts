@@ -184,4 +184,50 @@ describe("plugins/repair — the Retry", () => {
     getActiveHarness.mockResolvedValue("hermes");
     expect((await post({ pluginId: "codex" })).status).toBe(404);
   });
+  it("refuses a POST that another site's page fired at the box", async () => {
+    // The owner's cookie rides on a cross-site POST, and `hasOwnerSession`
+    // alone cannot tell the two apart. The blast radius is small — the marker
+    // is the allow-list and the spec comes from it, so nothing attacker-chosen
+    // reaches an argv — but a state-changing owner route that installs a
+    // package and restarts the gateway should not be startable from anywhere.
+    const r = await POST(new Request("http://box.local/setup-api/plugins/repair", {
+      method: "POST",
+      headers: { origin: "http://evil.example", host: "box.local" },
+      body: JSON.stringify({ pluginId: "codex" }),
+    }));
+    expect(r.status).toBe(403);
+    expect(await r.json()).toMatchObject({ ok: false, code: "cross_origin" });
+    expect(execCalls).toEqual([]);
+  });
+
+  it("allows the box's own page", async () => {
+    stubExec(async () => ({ stdout: LOADED }));
+    const r = await POST(new Request("http://box.local/setup-api/plugins/repair", {
+      method: "POST",
+      headers: { origin: "http://box.local", host: "box.local" },
+      body: JSON.stringify({ pluginId: "codex" }),
+    }));
+    expect(r.status).toBe(200);
+  });
+
+  it("answers unverified when the runtime inspection prints literal null", async () => {
+    // `JSON.parse("null")` succeeds, so reading `.plugin` off it threw out of
+    // POST as an unstructured 500 — where the route's own answer for "the box
+    // could not be asked" is a 502 the panel already renders.
+    stubExec(async (_cmd, args) => ({ stdout: args[1] === "inspect" ? "null" : "" }));
+    const r = await post({ pluginId: "codex" });
+    expect(r.status).toBe(502);
+    expect(await r.json()).toMatchObject({ ok: false, code: "unverified" });
+  });
+
+  it("says the badge may still be there when the marker could not be cleared", async () => {
+    // The repair DID happen, so this is not a failure — turning it into one
+    // would be the false failure this card is full of. What the owner must not
+    // get is a plain success over a badge that is still on screen.
+    stubExec(async () => ({ stdout: LOADED }));
+    clearPluginRepair.mockRejectedValue(new Error("read-only filesystem"));
+    const r = await post({ pluginId: "codex" });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({ ok: true, markerCleared: false });
+  });
 });

@@ -12,6 +12,8 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { repairHelpers } from "@/tests/helpers/gateway-pre-start";
+
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
 // src/tests/unit/test-timeout-hygiene.test.ts.
@@ -113,21 +115,7 @@ function extractManagedConsentFlow(): string {
   return SCRIPT_SOURCE.slice(start, end);
 }
 
-/**
- * The plugin-repair helpers both flows call (TASK-606). They live ~1300 lines
- * earlier in the script, so an extract that started at either flow would run a
- * call to a function that is not there — exit 127, `clawbox_plugin_boot_without:
- * command not found`. Prepended rather than stubbed, so these suites keep
- * running the shipped code rather than a stand-in for it.
- */
-function extractRepairHelpers(): string {
-  const start = SCRIPT_SOURCE.indexOf("# \u2500\u2500 Booting WITHOUT a plugin that could not be made loadable ");
-  const end = SCRIPT_SOURCE.indexOf("# A `.openclaw` INSIDE the state directory", start);
-  if (start < 0 || end < 0) throw new Error("plugin-repair helpers not found");
-  return SCRIPT_SOURCE.slice(start, end);
-}
-
-const REPAIR_HELPERS = extractRepairHelpers();
+const REPAIR_HELPERS = repairHelpers();
 const PLUGIN_FLOW = `${REPAIR_HELPERS}\n${extractPluginFlow()}`;
 const MANAGED_CONSENT_FLOW = `${REPAIR_HELPERS}\n${extractManagedConsentFlow()}`;
 
@@ -218,6 +206,10 @@ function runPluginFlow(options: PluginFlowOptions): string[] {
   execFileSync("bash", ["-c", `set -euo pipefail\n${PLUGIN_FLOW}`], {
     env: {
       ...process.env,
+      // The prepended repair helpers write `$CLAWBOX_ROOT/data/plugin-repair.json`:
+      // this case's own directory, so the marker cannot leak into another one
+      // through the run-wide root `vitest.config.ts` sets.
+      CLAWBOX_ROOT: dir,
       CLAWBOX_OPENCLAW_V2: options.v2 ? "1" : "0",
       NEEDS_CODEX_PLUGIN: options.needsCodex ? "1" : "0",
       CODEX_PLUGIN_ENABLED: options.enabledByConfig ? "1" : "0",
@@ -263,6 +255,10 @@ function runManagedConsentFlow(options: {
   execFileSync("bash", ["-c", `set -euo pipefail\n${MANAGED_CONSENT_FLOW}`], {
     env: {
       ...process.env,
+      // The prepended repair helpers write `$CLAWBOX_ROOT/data/plugin-repair.json`:
+      // this case's own directory, so the marker cannot leak into another one
+      // through the run-wide root `vitest.config.ts` sets.
+      CLAWBOX_ROOT: dir,
       CLAWBOX_OPENCLAW_V2: options.v2 === false ? "0" : "1",
       OPENCLAW_CONFIG: config,
       OPENCLAW_BIN: fakeOpenClaw,
