@@ -24,7 +24,10 @@ vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) => <a href={href}>{children}</a>,
 }));
 vi.mock("next/image", () => ({ default: () => null }));
-vi.mock("@/lib/client-harness", () => ({ fetchHarness: vi.fn(async () => ({ active: "openclaw" })) }));
+// Hoisted so a case can decide what the probe answers — including answering
+// without an `active`, which is what a failed probe looks like to this route.
+const harnessMock = vi.hoisted(() => vi.fn(async (): Promise<{ active?: string }> => ({ active: "openclaw" })));
+vi.mock("@/lib/client-harness", () => ({ fetchHarness: harnessMock }));
 
 interface StubUi {
   wallpaperId: string;
@@ -79,6 +82,7 @@ let posts: Record<string, unknown>[];
 beforeEach(() => {
   posts = [];
   localStorage.clear();
+  harnessMock.mockResolvedValue({ active: "openclaw" });
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -202,6 +206,120 @@ describe("/app/settings — Appearance", () => {
     fireEvent.click(screen.getByTestId("pick-custom-0"));
     fireEvent.click(screen.getByTestId("delete-custom-0"));
     expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+  });
+
+  it("shows the fallback for a selection this browser's uploads cannot answer, and leaves the box's own alone", async () => {
+    // `wp_id` is box-wide, the pictures are this browser's `localStorage`: a
+    // phone that never uploaded anything cannot answer the laptop's
+    // `custom-2`. What the card shows is the fallback; what the box holds is
+    // untouched, because opening a page is not a choice.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ ...SAVED, wp_id: "custom-2" }) };
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+
+    render(<StandaloneAppPage />);
+    // `wp_fit` proves the box's answer LANDED — "clawbox" is also this page's
+    // initial state, so asserting it alone would pass before the fetch.
+    await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(posts.some((body) => "wp_id" in body)).toBe(false);
+  });
+
+  it("does not renumber a selection that is not an index into this browser's list", async () => {
+    // The phone is the surface most likely to be holding a `wp_id` it did not
+    // choose. Two pictures of its own, the laptop's `custom-5` from the box:
+    // deleting one of ITS two must not shift that id down a slot and write it
+    // back — this handler is a second copy of the desktop's, and this is the
+    // case that catches the two drifting apart.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (init?.method === "POST") {
+          posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        if (url.includes("keys=wp_id")) return { ok: true, json: async () => ({ ...SAVED, wp_id: "custom-5" }) };
+        return { ok: true, json: async () => ({}) };
+      }),
+    );
+    localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]));
+
+    render(<StandaloneAppPage />);
+    // `wp_fit` proves the box's answer landed, as above.
+    await waitFor(() => expect(screen.getByTestId("ui-fit").textContent).toBe("center"));
+    expect(screen.getByTestId("ui-custom").textContent).toBe("2");
+    posts.length = 0;
+
+    fireEvent.click(screen.getByTestId("delete-custom-0"));
+    // This browser's own list did shrink — the delete is not being refused.
+    expect(screen.getByTestId("ui-custom").textContent).toBe("1");
+    // Rendered locally, persisted nowhere: the card shows the fallback and the
+    // box keeps the selection it holds. Well past the 500 ms debounce.
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(posts.some((body) => "wp_id" in body)).toBe(false);
+  });
+
+  it("does not move the selection when the shortened list cannot be stored", async () => {
+    // Site data blocked, or a locked-down profile. The list is what the next
+    // load paints and `wp_id` is a position into it — moving the id over a
+    // list that never shrank leaves a DIFFERENT picture on screen after a
+    // reload, with nothing said. So the delete does not happen at all.
+    localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]));
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-custom").textContent).toBe("2"));
+
+    fireEvent.click(screen.getByTestId("pick-custom-1"));
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("custom-1");
+
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+    try {
+      fireEvent.click(screen.getByTestId("delete-custom-0"));
+    } finally {
+      setItem.mockRestore();
+    }
+
+    expect(screen.getByTestId("ui-custom").textContent).toBe("2");
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("custom-1");
+    expect(JSON.parse(localStorage.getItem("clawbox-custom-wallpapers") || "[]")).toHaveLength(2);
+  });
+
+  it("writes no edition fallback when the probe never said which edition this is", async () => {
+    // This route answers `d?.active || "unknown"` on a failed probe, and
+    // "unknown" reads as OpenClaw wherever it is turned into a wallpaper. So
+    // deleting the picture in use on a Hermes box whose probe failed persisted
+    // "clawbox" box-wide — permanently, from a delete that had nothing to do
+    // with the edition. The guess is fine to PAINT and not fine to WRITE.
+    harnessMock.mockResolvedValue({});
+    localStorage.setItem("clawbox-custom-wallpapers", JSON.stringify(["data:image/png;base64,AAAA"]));
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-custom").textContent).toBe("1"));
+
+    fireEvent.click(screen.getByTestId("pick-custom-0"));
+    await waitFor(() => expect(posts.at(-1)).toMatchObject({ wp_id: "custom-0" }), SAVED_SOON);
+    posts.length = 0;
+
+    // The delete is not blocked — a local operation must not wait on a probe.
+    fireEvent.click(screen.getByTestId("delete-custom-0"));
+    expect(screen.getByTestId("ui-custom").textContent).toBe("0");
+    // Painted locally…
+    expect(screen.getByTestId("ui-wallpaper").textContent).toBe("clawbox");
+    // …and not written. Well past the 500 ms debounce.
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(posts.some((body) => body.wp_id === "clawbox")).toBe(false);
   });
 
   it("offers the wallpapers this browser already uploaded, and asks the file input for a new one", async () => {

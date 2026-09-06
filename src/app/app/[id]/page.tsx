@@ -6,6 +6,12 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
+import {
+  customWallpaperId,
+  customWallpaperIndex,
+  isCustomWallpaperInRange,
+  wallpaperIdAfterDelete,
+} from "@/lib/custom-wallpapers";
 import { apps } from "@/lib/desktop-apps";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
@@ -115,7 +121,18 @@ function usePreferenceSaver(loadedRef: { current: boolean }) {
  * `ui_mascot_hidden`) and the same uploaded-wallpaper list, so a change made
  * from a phone is the change the desktop would have made.
  */
-function useAppearance(enabled: boolean) {
+function useAppearance(enabled: boolean, activeHarness: string | null) {
+  // What a box with no custom wallpaper selected shows: the harness's own art,
+  // the same default the desktop opens a first boot on. An unresolved harness
+  // reads as ClawBox, which is also this page's initial `wallpaperId` — the
+  // probe is a same-origin call that answers long before a card can be opened
+  // and a picture deleted on it.
+  const harnessDefaultWallpaperId = activeHarness === "hermes" ? "hermes" : "clawbox";
+  // Painted vs persisted, exactly as on the desktop: this route answers
+  // `d?.active || "unknown"` on a probe that failed, and "unknown" reads as
+  // OpenClaw above. Null means the delete writes no fallback at all.
+  const persistableDefaultWallpaperId =
+    activeHarness === "hermes" || activeHarness === "openclaw" ? harnessDefaultWallpaperId : null;
   const [wallpaperId, setWallpaperId] = useState("clawbox");
   const [wpFit, setWpFit] = useState<WpFit>("fill");
   const [wpBgColor, setWpBgColor] = useState("#000000");
@@ -136,8 +153,23 @@ function useAppearance(enabled: boolean) {
   const applyCustomWallpapers = useCallback((next: string[]) => {
     customRef.current = next;
     setCustomWallpapers(next);
-    try { localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next)); } catch {}
   }, []);
+  // The STORED list is the OUTCOME of an upload or a delete, so it is written
+  // first and its failure is the whole operation's — the desktop's rule, and
+  // the same reasoning: it is what the next load paints and `wp_id` is a
+  // box-wide position into it, so moving the card over a list that never
+  // changed leaves a DIFFERENT picture on screen after a reload. There is no
+  // toast surface on this route (ToastHost is the desktop's), and the picture
+  // staying put is the honest answer: the operation did not happen.
+  const storeCustomWallpapers = useCallback((next: string[]) => {
+    try {
+      localStorage.setItem(CUSTOM_WPS_KEY, JSON.stringify(next));
+    } catch {
+      return false;
+    }
+    applyCustomWallpapers(next);
+    return true;
+  }, [applyCustomWallpapers]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -160,6 +192,12 @@ function useAppearance(enabled: boolean) {
       .finally(() => { if (alive) setHydrated(true); });
     return () => { alive = false; };
   }, [enabled]);
+
+  const renderedWallpaperId =
+    customWallpaperIndex(wallpaperId) !== null
+      && !isCustomWallpaperInRange(wallpaperId, customWallpapers.length)
+      ? harnessDefaultWallpaperId
+      : wallpaperId;
 
   const save = usePreferenceSaver(loaded);
   useEffect(() => {
@@ -184,19 +222,25 @@ function useAppearance(enabled: boolean) {
     const reader = new FileReader();
     reader.onload = () => {
       const next = [...customRef.current, reader.result as string];
-      applyCustomWallpapers(next);
-      setWallpaperId(`custom-${next.length - 1}`);
+      // The picture is not there to be selected unless it was stored.
+      if (!storeCustomWallpapers(next)) return;
+      setWallpaperId(customWallpaperId(next.length - 1));
       setWpOpacity(100);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
-  }, [applyCustomWallpapers]);
+  }, [storeCustomWallpapers]);
 
   return {
     uploadRef,
     onUploadFile,
     ui: {
-      wallpaperId,
+      // What is on screen, not what the box holds. `wp_id` is box-wide and the
+      // pictures are this browser's, so a `custom-<n>` a phone cannot answer
+      // is the laptop's selection, still valid there — the card shows the
+      // fallback and leaves the box's own value alone. Only an explicit choice
+      // below ever writes it.
+      wallpaperId: renderedWallpaperId,
       wpFit,
       wpBgColor,
       wpOpacity,
@@ -210,19 +254,21 @@ function useAppearance(enabled: boolean) {
       onMascotToggle: setMascotHidden,
       onWallpaperUpload: () => uploadRef.current?.click(),
       onCustomWallpaperDelete: (idx: number) => {
-        const next = customRef.current.filter((_, i) => i !== idx);
-        applyCustomWallpapers(next);
+        const before = customRef.current;
+        const next = before.filter((_, i) => i !== idx);
+        // Nothing was removed, so nothing is renumbered.
+        if (!storeCustomWallpapers(next)) return;
         // `custom-<n>` is an INDEX into that list, so deleting one renumbers
-        // every picture after it. Clearing only the exact match left a
-        // selection past the hole pointing at its neighbour — the wallpaper
-        // silently became a different picture, or none once the last entry
-        // went. The same rule is in src/app/page.tsx's own handler; keep the
-        // two in step, as with the list above it.
-        const selected = wallpaperId.startsWith("custom-")
-          ? Number.parseInt(wallpaperId.slice("custom-".length), 10)
-          : NaN;
-        if (selected === idx) setWallpaperId("clawbox");
-        else if (Number.isInteger(selected) && selected > idx) setWallpaperId(`custom-${selected - 1}`);
+        // every picture after it. Through the SHARED rule, not a fourth
+        // spelling of it: this handler and the desktop's write the same
+        // box-wide `wp_id`, and the fallback is the harness's own art — a
+        // Hermes box whose only custom wallpaper is deleted must not land on
+        // the ClawBox one (TASK-719).
+        // `before` is the list as it stood immediately ahead of THIS delete,
+        // captured before the store above advances the ref to the shortened
+        // one — not the list the saved id was originally chosen against, which
+        // may have been another browser's entirely.
+        setWallpaperId(wallpaperIdAfterDelete(wallpaperId, idx, before, persistableDefaultWallpaperId));
       },
     },
   };
@@ -263,10 +309,10 @@ export default function StandaloneAppPage() {
   const { id } = useParams<{ id: string }>();
   // Only /app/settings reads the appearance preferences — every other page
   // here would be paying for a request it never renders.
-  const appearance = useAppearance(id === "settings");
   // null while unresolved — a harness-only app must not paint before we know
   // which harness this device actually runs.
   const [harness, setHarness] = useState<string | null>(null);
+  const appearance = useAppearance(id === "settings", harness);
 
   useEffect(() => {
     let alive = true;

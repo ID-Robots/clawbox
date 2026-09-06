@@ -43,6 +43,7 @@ import BackgroundJobsPanel from "./BackgroundJobsPanel";
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
 import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
+import { customWallpaperId, customWallpaperIndex } from "@/lib/custom-wallpapers";
 
 /* ── Types ── */
 
@@ -3291,7 +3292,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   );
                 })}
                 {ui.customWallpapers.map((dataUrl, i) => {
-                  const selected = ui.wallpaperId === `custom-${i}`;
+                  const selected = ui.wallpaperId === customWallpaperId(i);
                   // The last two names on this card that never followed the UI
                   // language: an uploaded wallpaper announced itself as
                   // "Custom 1" beside tiles whose names were translated.
@@ -3305,7 +3306,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         type="button"
                         aria-pressed={selected}
                         aria-label={customName}
-                        onClick={() => ui.onWallpaperChange(`custom-${i}`)}
+                        onClick={() => ui.onWallpaperChange(customWallpaperId(i))}
                         className={`relative w-full h-full rounded-xl overflow-hidden transition-all cursor-pointer border-none p-0 ${
                           selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
                         }`}
@@ -6221,9 +6222,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return { subtitle: null };
       }
       case "appearance": {
-        const sub = ui.wallpaperId.startsWith("custom-")
-          ? `Custom ${parseInt(ui.wallpaperId.split("-")[1] || "0") + 1}`
-          : ui.wallpaperId;
+        // `ui.wallpaperId` is what the page is PAINTING, so a slot named here
+        // is one the grid below can highlight — the row used to print
+        // "Custom 3" over a grid of two with nothing selected. Through `t()`,
+        // like the tile it names: this was the last name on the card that
+        // never followed the UI language.
+        const customIdx = customWallpaperIndex(ui.wallpaperId);
+        const sub = customIdx === null
+          // A built-in's NAME, not its id — the row printed the raw slug
+          // `deep-space` beside a tile labelled "Deep Space".
+          ? (ui.wallpapers.find((w) => w.id === ui.wallpaperId)?.name ?? ui.wallpaperId)
+          : t("settings.customWallpaper", { n: customIdx + 1 });
         return { subtitle: sub };
       }
       case "wifi":
