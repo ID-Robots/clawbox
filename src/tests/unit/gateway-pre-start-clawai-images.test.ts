@@ -918,6 +918,11 @@ describe.skipIf(!hasPython3)("standing down when the credential has been refused
     // the script that is invoked bare under `set -euo pipefail`: an escape here
     // aborts the ExecStartPre and the box gets no gateway at all.
     ["a store that is not decodable at all", { bytes: Buffer.from([0x7b, 0xff]) } as DeviceStore],
+    // Python's `json` accepts these where `JSON.parse` does not, and the
+    // TypeScript writer rejects them with `Number.isFinite`. The two readers of
+    // this key have to agree on every value either can meet.
+    ["a non-finite stamp", { body: '{"clawai_credential_refused_at": Infinity}' } as DeviceStore],
+    ["a NaN stamp", { body: '{"clawai_credential_refused_at": NaN}' } as DeviceStore],
   ])("arms as before over %s — not knowing is not a refusal", (_label, store) => {
     const { cfg } = migrate(pairedBox(), false, store);
 

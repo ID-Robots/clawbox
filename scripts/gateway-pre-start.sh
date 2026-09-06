@@ -1860,6 +1860,8 @@ def _clawai_credential_refused():
     `data/config.json` — a torn write after a power cut — raises: a corrupt byte
     in a hint file would have stopped the box from booting.
     """
+    import math
+
     _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
     if not _store_path:
         return False
@@ -1871,7 +1873,18 @@ def _clawai_credential_refused():
     if not isinstance(_store, dict):
         return False
     _at = _store.get(CLAWBOX_CREDENTIAL_REFUSED_KEY)
-    return isinstance(_at, (int, float)) and not isinstance(_at, bool) and _at > 0
+    # `math.isfinite` because Python's `json` accepts `Infinity` and `NaN` where
+    # `JSON.parse` does not, and the TypeScript writer's `isRecordedRefusal`
+    # rejects them with `Number.isFinite`. Nothing ClawBox writes can produce
+    # one — `JSON.stringify` maps a non-finite number to `null` — but a
+    # hand-edited `data/config.json` can, and the two readers of this key must
+    # agree on every value either can meet, not only on the ones we write.
+    return (
+        isinstance(_at, (int, float))
+        and not isinstance(_at, bool)
+        and math.isfinite(_at)
+        and _at > 0
+    )
 
 
 # Only boxes that actually have ClawBox AI get an image provider — the token is
