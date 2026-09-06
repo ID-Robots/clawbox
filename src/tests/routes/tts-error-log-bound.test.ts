@@ -109,7 +109,14 @@ describe("a failed voice write writes one bounded journal line", () => {
     const res = await POST(post({ action: "language", language: "en" }));
     expect(res.status).toBe(500);
 
-    const line = String((warnSpy.mock.calls.at(-1) as [string, unknown])[1]);
+    // ONE record, and the route's own prefix on it, before reading the detail:
+    // `at(-1)` alone would be satisfied by a sanitised second line written after
+    // an unsanitised first one, which is exactly the regression this case is
+    // for.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const [prefix, detail] = warnSpy.mock.calls.at(-1) as [string, unknown];
+    expect(prefix).toBe("[setup-api/tts] language failed:");
+    const line = String(detail);
     expect(line.split(String.fromCharCode(10))).toHaveLength(1);
     expect(line).not.toContain(`${String.fromCharCode(10)}WARN`);
   });
