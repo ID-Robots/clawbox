@@ -138,6 +138,13 @@ export async function set(key: string, value: unknown): Promise<void> {
  * actually matters, rather than an enumeration of the values that have it. To
  * delete a key, `set` it to `undefined`.
  *
+ * The VALUE half only. A `__proto__` KEY produces the same outcome by a
+ * different mechanism — `config[key] = value` hits `Object.prototype`'s setter,
+ * so the key never lands — and is NOT covered here, because it is identical in
+ * `set` and `setMany` and belongs with a store-wide fix rather than a third
+ * copy of one. Unreachable from the only caller, which passes a module
+ * constant.
+ *
  * Same strict read as `set`, for the same reason: a write over a store nobody
  * can read must throw rather than replace it with the one key being saved.
  */

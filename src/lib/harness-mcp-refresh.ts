@@ -45,8 +45,10 @@ import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reloa
  * Hermes' own MCP children, which is worth having: they answer truthfully for
  * the next switch back. The OpenClaw side is not asked and does not need to be —
  * it spawns the ClawBox MCP server per session and reaps it after ten idle
- * minutes, so it self-heals. `reportMcpReloadRefused` is for the box where there
- * is no dashboard up at all.
+ * minutes, so it self-heals. `reportMcpReloadRefused` is for the box that has no
+ * dashboard up, or has one that said no — a `confirm_required` or an error
+ * frame is a refusal too, and the line it writes is the one an operator can act
+ * on.
  *
  * Never throws and never reports to the caller: the selection is PERSISTED by
  * the time this runs, and a best-effort refresh must not turn a switch that
