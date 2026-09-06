@@ -30,8 +30,10 @@ vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") 
 // Key-aware: the GET now answers with the harness's OWN `model.default` while
 // ClawBox AI is the active provider (TASK-713), so a blanket "clawai" would
 // stand in for the model as well as the provider.
+/** What `hermes config get <key>` answers in a given test. */
+const hermesConfig: Record<string, string> = {};
 vi.mock("@/lib/hermes-config-cache", () => ({
-  hermesConfigGet: vi.fn(async (key: string) => (key === "model.provider" ? "clawai" : "")),
+  hermesConfigGet: vi.fn(async (key: string) => hermesConfig[key] ?? ""),
 }));
 vi.mock("@/lib/hermes-cli", () => ({
   runHermesCli: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
@@ -169,21 +171,28 @@ describe("POST /setup-api/hermes/clawai", () => {
 describe("GET /setup-api/hermes/clawai", () => {
   beforeEach(() => {
     for (const key of Object.keys(store)) delete store[key];
+    for (const key of Object.keys(hermesConfig)) delete hermesConfig[key];
     store.clawai_token = "claw_token_abc";
   });
 
   it("names the tier's model when the owner has picked none", async () => {
+    // Some other provider is active, so this is what a LINK would write.
+    hermesConfig["model.provider"] = "anthropic";
+    hermesConfig["model.default"] = "anthropic/claude-opus-5";
     store.clawai_tier = "flash";
 
     const body = await (await GET()).json();
 
     expect(body.model).toBe("deepseek-v4-flash");
+    expect(body.active).toBe(false);
     expect(body.tier).toBe("flash");
   });
 
   it("names the owner's own model when there is one, whatever the badge says", async () => {
-    // ClawBox AI is not the active provider in this fixture (`model.default` is
-    // empty), so the answer is what a link WOULD write: the pick, not the badge.
+    // Again a link's answer, not the box's: ClawBox AI is not the active
+    // provider here, so the pick is what would be written.
+    hermesConfig["model.provider"] = "anthropic";
+    hermesConfig["model.default"] = "anthropic/claude-opus-5";
     store.clawai_tier = "flash";
     store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
 
@@ -193,5 +202,20 @@ describe("GET /setup-api/hermes/clawai", () => {
     // The badge itself is untouched — it is the PLAN, and it is still what the
     // plan card renders.
     expect(body.tier).toBe("flash");
+  });
+
+  it("names what the box is CONFIGURED with while ClawBox AI is the active provider", async () => {
+    // Nothing derived can beat the harness's own answer. A pick that disagrees
+    // with `model.default` — an out-of-band `hermes config set`, a link that
+    // half-landed — must not be painted as the model in use.
+    hermesConfig["model.provider"] = "clawai";
+    hermesConfig["model.default"] = "deepseek-v4-flash";
+    store.clawai_tier = "pro";
+    store[EXPLICIT_MODEL_PICKS_KEY] = { clawai: "deepseek/deepseek-v4-pro" };
+
+    const body = await (await GET()).json();
+
+    expect(body.model).toBe("deepseek-v4-flash");
+    expect(body.active).toBe(true);
   });
 });

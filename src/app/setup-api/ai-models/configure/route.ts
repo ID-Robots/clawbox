@@ -100,7 +100,6 @@ import {
   EXPLICIT_MODEL_PICKS_KEY,
   decideClawboxAiModelId,
   explicitPicksFrom,
-  forgetExplicitModelPick,
 } from "@/lib/explicit-model-pick";
 import {
   isClaudeSubscriptionOnly,
@@ -2120,6 +2119,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // plan moved and the model deliberately did not, rather than returning 200
     // over a screen where nothing appears to have happened.
     let explicitPickKept = false;
+    // The picks map minus the ClawBox AI entry, when this save links a DIFFERENT
+    // ClawBox AI account. Written in the same batch as the new token below.
+    let clawaiPicksToStore: Record<string, string> | null = null;
 
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
@@ -2181,15 +2183,22 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // has ever picked a ClawBox AI model, which is what the marker records.
       //
       // A pick belongs to the ACCOUNT that made it. On a token change — the same
-      // signal that unpairs ClawKeep at step 8 — it is dropped before it is
-      // read, so the previous owner's Max choice is not imposed on a Pro plan
-      // the new one is paying for.
+      // signal that unpairs ClawKeep at step 8 — it is not read, so the previous
+      // owner's Max choice is not imposed on a Pro plan the new one is paying
+      // for; and it is CLEARED in the same `setMany` that stores the new token,
+      // so the two cannot come apart. A separate delete could fail on its own
+      // and leave account A's pick beside account B's token, waiting for the
+      // next re-pair to apply it.
       const clawaiAccountChanged = Boolean(
         previousClawaiToken && clawboxAiToken && previousClawaiToken !== clawboxAiToken,
       );
-      if (clawaiAccountChanged) await forgetExplicitModelPick("clawai");
+      const storedPicks = explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]);
+      if (clawaiAccountChanged && storedPicks.clawai) {
+        delete storedPicks.clawai;
+        clawaiPicksToStore = storedPicks;
+      }
       const clawaiDecision = decideClawboxAiModelId({
-        picks: clawaiAccountChanged ? {} : explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]),
+        picks: clawaiAccountChanged ? {} : storedPicks,
         tierModelId: CLAWBOX_AI_MODEL_ID_BY_TIER[resolvedClawboxTier],
       });
       explicitPickKept = clawaiDecision.explicit;
@@ -2889,17 +2898,21 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         ai_model_configured_at: new Date().toISOString(),
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
-        // The owner named a model in this save (TASK-713). In the same batch
-        // as the other facts about it, so a save that landed and a pick that
-        // was remembered cannot come apart.
+        // The owner named a model in this save (TASK-713), or this save linked a
+        // different ClawBox AI account and the previous owner's pick goes with
+        // it. Either way in the SAME batch as the other facts about the save, so
+        // a token that landed and a pick that was remembered — or forgotten —
+        // cannot come apart.
         ...(explicitPickToRecord
           ? {
             [EXPLICIT_MODEL_PICKS_KEY]: {
-              ...explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]),
+              ...(clawaiPicksToStore ?? explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY])),
               [normalizeProviderId(ocProvider) ?? ocProvider]: explicitPickToRecord,
             },
           }
-          : {}),
+          : clawaiPicksToStore
+            ? { [EXPLICIT_MODEL_PICKS_KEY]: clawaiPicksToStore }
+            : {}),
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();

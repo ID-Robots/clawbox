@@ -702,7 +702,12 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       expect(res.status).toBe(200);
       expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-flash"]);
-      expect(mockSetMany).toHaveBeenCalledWith({ ai_model_explicit_picks: {} });
+      // Cleared in the SAME write that stores the replacement token, so a failed
+      // clear cannot leave account A's pick beside account B's token.
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+        clawai_token: "claw_ACCOUNT_B",
+        ai_model_explicit_picks: {},
+      }));
     });
 
     it("does NOT read the model the box is running as a choice", async () => {

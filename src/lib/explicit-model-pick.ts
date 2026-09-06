@@ -190,29 +190,6 @@ export async function recordExplicitModelPick(model: string): Promise<void> {
   }
 }
 
-/**
- * Drop one provider's pick.
- *
- * For a ClawBox AI ACCOUNT switch: the choice belonged to the account that has
- * just been replaced, and imposing it on the next one hands the new owner a
- * model their plan may refuse. Same signal the configure route already unpairs
- * ClawKeep on.
- */
-export async function forgetExplicitModelPick(provider: string): Promise<void> {
-  try {
-    const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
-    const picks = explicitPicksFrom(value);
-    if (!(provider in picks)) return;
-    delete picks[provider];
-    await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: picks });
-  } catch (err) {
-    console.warn(
-      "[explicit-model-pick] could not clear the model pick:",
-      err instanceof Error ? err.message : err,
-    );
-  }
-}
-
 /** The stored picks, for a caller that has not already loaded the whole store. */
 export async function readExplicitModelPicks(): Promise<ExplicitModelPicks> {
   const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);

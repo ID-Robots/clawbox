@@ -111,7 +111,12 @@ describe("a Hermes re-pair and the owner's own model", () => {
     await applyClawaiToHermes("claw_token_ACCOUNT_B", "flash");
 
     expect(modelDefaultWrite()).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
-    expect(setManyMock).toHaveBeenCalledWith({ [EXPLICIT_MODEL_PICKS_KEY]: {} });
+    // Cleared in the SAME write that stores the replacement token, so a failed
+    // clear cannot leave account A's pick beside account B's token.
+    expect(setManyMock).toHaveBeenCalledWith(expect.objectContaining({
+      clawai_token: "claw_token_ACCOUNT_B",
+      [EXPLICIT_MODEL_PICKS_KEY]: {},
+    }));
   });
 
   it("keeps the pick when the same account re-pairs", async () => {

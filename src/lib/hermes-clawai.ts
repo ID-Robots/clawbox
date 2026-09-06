@@ -1,5 +1,9 @@
 import { getKnown, setMany } from "@/lib/config-store";
-import { decideClawboxAiModelId, forgetExplicitModelPick, readExplicitModelPicks } from "@/lib/explicit-model-pick";
+import {
+  EXPLICIT_MODEL_PICKS_KEY,
+  decideClawboxAiModelId,
+  readExplicitModelPicks,
+} from "@/lib/explicit-model-pick";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli, type HermesCliResult } from "@/lib/hermes-cli";
@@ -145,14 +149,25 @@ export async function applyClawaiToHermes(
   // press, so what settles it is whether the owner has ever picked a ClawBox AI
   // model here.
   //
-  // A pick belongs to the ACCOUNT that made it, so a token change drops it
-  // before it is read: the previous owner's Max choice must not be imposed on
-  // the Pro plan the new one is paying for. Read before the first write, like
-  // every other before/after fact this function samples.
+  // A pick belongs to the ACCOUNT that made it, so a token change means it is
+  // not read here — the previous owner's Max choice must not be imposed on the
+  // Pro plan the new one is paying for — and it is CLEARED in the same
+  // `setMany` that stores the new token at the bottom, so the two cannot come
+  // apart. A separate delete could fail on its own and leave account A's pick
+  // beside account B's token, waiting for the next link to apply it.
+  // Read before the first write, like every other before/after fact this
+  // function samples.
   const previousToken = await getStoredClawaiToken();
-  if (previousToken && previousToken !== trimmed) await forgetExplicitModelPick(CLAWAI_PROVIDER);
+  const accountChanged = Boolean(previousToken && previousToken !== trimmed);
+  const storedPicks = await readExplicitModelPicks();
+  let picksToStore: Record<string, string> | null = null;
+  if (accountChanged && storedPicks[CLAWAI_PROVIDER]) {
+    const next = { ...storedPicks };
+    delete next[CLAWAI_PROVIDER];
+    picksToStore = next;
+  }
   const clawaiDecision = decideClawboxAiModelId({
-    picks: previousToken && previousToken !== trimmed ? {} : await readExplicitModelPicks(),
+    picks: accountChanged ? {} : storedPicks,
     tierModelId: clawaiModelForTier(tier),
   });
   if (clawaiDecision.explicit) {
@@ -382,6 +397,9 @@ export async function applyClawaiToHermes(
     ai_model_configured: true,
     ai_model_provider: CLAWAI_PROVIDER,
     ai_model_configured_at: new Date().toISOString(),
+    // The previous account's model pick, dropped in the same write as its
+    // replacement token (TASK-713).
+    ...(picksToStore ? { [EXPLICIT_MODEL_PICKS_KEY]: picksToStore } : {}),
   });
 
   // The device's provider/model just changed — don't serve the old selection.
