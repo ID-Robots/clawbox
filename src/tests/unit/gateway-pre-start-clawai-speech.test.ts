@@ -616,16 +616,36 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts h
     expect((cfg.messages as { tts: unknown }).tts).toEqual(legacy);
   });
 
-  it("still writes the v2 home when the legacy block holds no providers", () => {
-    // The stand-down is about a legacy block with something IN it. An empty or
-    // provider-less `messages.tts` is not a migration in flight, and treating
-    // it as one would leave a Max box with no cloud voice for ever.
-    const { cfg, changed } = migrate({ messages: { tts: {} } }, { v2: true });
+  it("stands down on the KEY, whatever the legacy block holds", () => {
+    // The core refuses `messages.tts` for EXISTING, not for its contents:
+    // measured against 2026.8.1, `{}`, `{"provider": …}` and `{"providers": {}}`
+    // each give `messages: Unrecognized key: "tts"` with exit 1. A
+    // contents-based discriminator went on writing the v2 home beside the three
+    // shapes that carry no providers map — and `{"provider": "tts-local-cli"}`,
+    // the selection written and the map never wired, is a state install.sh
+    // already has an error message for.
+    //
+    // Not a Max box left without a voice, either: the block at the top of this
+    // script runs the core's own `doctor --fix` over a config the core refuses
+    // BEFORE this program, so the next boot sees the key moved and writes the
+    // cloud voice then.
+    for (const legacy of [{}, { provider: "tts-local-cli" }, { providers: {} }]) {
+      const { cfg, changed } = migrate({ messages: { tts: legacy } }, { v2: true });
+
+      expect(changed).toBe(false);
+      expect(cfg).not.toHaveProperty("tts");
+      expect((cfg.messages as { tts: unknown }).tts).toEqual(legacy);
+    }
+  });
+
+  it("writes the v2 home when there is no legacy key at all", () => {
+    // The other side of the same guard: standing down on a key that is not
+    // there would leave every entitled box without a cloud voice.
+    const { cfg, changed } = migrate({ messages: { provider: "telegram" } }, { v2: true });
 
     expect(changed).toBe(true);
     const tts = cfg.tts as { providers?: Record<string, SpeechEntry> } | undefined;
     expect(tts?.providers?.openai).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
-    expect((cfg.messages as { tts: unknown }).tts).toEqual({});
   });
 });
 
