@@ -3061,6 +3061,25 @@ for p in d.get("plugins", []):
       case "$pkg" in
         @openclaw/*) spec="$pkg@$TARGET" ;;
       esac
+      # Matched on the NORMALISED id: the registry can key a plugin as
+      # `openclaw-discord` or `@openclaw/discord`. Hoisted above the refresh so
+      # the pin repair below and the consent whitelist further down ask about
+      # the same name.
+      local PLUGIN_KEY="${plugin#@openclaw/}"
+      PLUGIN_KEY="${PLUGIN_KEY#openclaw-}"
+      # Rebuild the pin when the package could not be derived (TASK-602). A
+      # plugin whose payload a core upgrade orphaned is listed by `plugins list
+      # --json` with no rootDir/source, so `$pkg` is empty, `$spec` stays the
+      # BARE id and npm resolves it as @latest — the exact drift this block was
+      # written to prevent, on the boxes that most need the refresh. For the
+      # plugins ClawBox installs from the @openclaw scope the package name IS
+      # the id, so the pinned spec can be rebuilt from it; anything else keeps
+      # the bare id, which is the caller's own plugin and its owner's business.
+      if [ "$spec" = "$plugin" ] && [ -n "$TARGET" ]; then
+        case "$PLUGIN_KEY" in
+          codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
+        esac
+      fi
       echo "    - $spec"
       # --accept-capabilities, for the plugins CLAWBOX installs and only those.
       #
@@ -3089,8 +3108,6 @@ for p in d.get("plugins", []):
       # silently, behind the WARN below. `$spec` keeps the raw name, which is
       # what the CLI has to be given.
       local CAP_ARGS=()
-      local PLUGIN_KEY="${plugin#@openclaw/}"
-      PLUGIN_KEY="${PLUGIN_KEY#openclaw-}"
       case "$PLUGIN_KEY" in
         codex|deepseek|discord|whatsapp|clawbox-email-directives)
           openclaw_is_v2 && CAP_ARGS=(--accept-capabilities)

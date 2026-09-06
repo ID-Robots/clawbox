@@ -1101,7 +1101,10 @@ describe("updater", () => {
 
     it("continues to doctor and restart when the targeted Codex repair fails", async () => {
       setupExecFileMock({
-        "plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities": new Error(
+        // BOTH specs: the pinned one and the unpinned fallback behind it. With
+        // only the pinned one refused this would exercise the fallback path
+        // succeeding, not the failure this case is about.
+        "plugins install @openclaw/codex": new Error(
           "Codex repair timed out",
         ),
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
@@ -1139,11 +1142,195 @@ describe("updater", () => {
         "[Updater] payload repair for \"@openclaw/codex\" did not complete:",
         "Codex repair timed out",
       );
+      // ONE spec for a consent refusal: the package is on disk, only its
+      // consent record is stale, so the unpinned fallback (which exists for a
+      // payload that is gone) would be a second npm minute for nothing.
+      expect(calls.filter((call) => call.includes("plugins install @openclaw/codex")))
+        .toHaveLength(1);
       expect(calls.some((call) => call.includes("openclaw doctor --fix --yes --non-interactive")))
         .toBe(true);
       expect(calls.some((call) => call.includes("systemctl restart clawbox-gateway.service")))
         .toBe(true);
       warnSpy.mockRestore();
+    });
+
+    it("falls back to the unpinned spec when the pinned payload is not published", async () => {
+      // npm republishes a release under a build suffix (2026.7.1 -> 2026.7.1-2)
+      // and a plugin published only under the base version 404s on a pin
+      // carrying one. `deepseekPluginSpecs` already answers this the same way.
+      setupExecFileMock({
+        "plugins install @openclaw/whatsapp@2026.8.1": new Error("404 Not Found"),
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: '- Plugin "whatsapp": configured plugin payload verification failed '
+            + "(missing-install-path): install path is missing.\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`
+            .includes("plugins install @openclaw/whatsapp --force --accept-capabilities"),
+        ),
+      );
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.filter((call) => call.includes("plugins install @openclaw/whatsapp")))
+        .toEqual([
+          expect.stringContaining("plugins install @openclaw/whatsapp@2026.8.1 --force --accept-capabilities"),
+          expect.stringContaining("plugins install @openclaw/whatsapp --force --accept-capabilities"),
+        ]);
+    });
+
+    it("still records local consent when the payload install could not run", async () => {
+      // `plugins enable` is the one repair here that touches no registry, and
+      // the network is often exactly why the update is being repaired. Treating
+      // an ATTEMPTED reinstall as a repair would drop it.
+      setupExecFileMock({
+        "plugins install @openclaw/discord": new Error("getaddrinfo ENOTFOUND registry.npmjs.org"),
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: [
+            '- Plugin "discord": configured plugin payload verification failed '
+              + "(missing-install-path): install path is missing.",
+            'Plugin "discord" requires capability consent; rerun with --accept-capabilities.',
+            "",
+          ].join("\n"),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        "/bin/bash": { stdout: "", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`
+            .includes("plugins enable discord --accept-capabilities"),
+        ),
+      );
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins enable discord --accept-capabilities")))
+        .toBe(true);
+    });
+
+    it("does not re-install a payload the gateway pre-start just put back", async () => {
+      // The pre-start reinstalls the channel payloads too, and it runs a moment
+      // before this. Re-issuing the identical install would pay a second npm
+      // fetch per plugin for a package already back on disk.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: '- Plugin "discord": configured plugin payload verification failed '
+            + "(missing-install-path): install path is missing.\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+        // The pre-start's own report, in its own words.
+        "/bin/bash": {
+          stdout: "  discord plugin payload reinstalled (@openclaw/discord@2026.8.1)\n",
+          stderr: "",
+        },
+      });
+
+      // The pre-start has to actually RUN for its report to exist.
+      const priorRoot = process.env.CLAWBOX_ROOT;
+      process.env.CLAWBOX_ROOT = process.cwd();
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      mockGatewayUp.mockImplementation(async () =>
+        mockExecFile.mock.calls.some(([cmd, args]) =>
+          `${cmd} ${(args as string[]).join(" ")}`
+            .includes("systemctl restart clawbox-gateway.service"),
+        ),
+      );
+      updater = await import("@/lib/updater");
+      if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
+      else process.env.CLAWBOX_ROOT = priorRoot;
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("scripts/gateway-pre-start.sh"))).toBe(true);
+      expect(calls.some((call) => call.includes("plugins install @openclaw/discord"))).toBe(false);
+    });
+
+    it("spends no npm install after the pre-start itself failed", async () => {
+      // A payload reinstall is minutes per plugin on a `customRun` step whose
+      // timeoutMs is unenforced, spent after a pre-start that just died — and
+      // the update reports that failure either way. Consent only there.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: '- Plugin "discord": configured plugin payload verification failed '
+            + "(missing-install-path): install path is missing.\n",
+          stderr: "",
+        },
+        "/bin/bash": new Error("pre-start failed"),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const priorRoot = process.env.CLAWBOX_ROOT;
+      process.env.CLAWBOX_ROOT = process.cwd();
+      vi.resetModules();
+      mockGet.mockResolvedValue(true);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+      if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
+      else process.env.CLAWBOX_ROOT = priorRoot;
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+      expect(calls.some((call) => call.includes("plugins install @openclaw/discord"))).toBe(false);
     });
 
     it("retries a failed maintenance unmask and surfaces the cleanup failure", async () => {

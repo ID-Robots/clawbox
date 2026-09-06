@@ -998,9 +998,25 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
   return outcome.value;
 }
 
+/**
+ * Every plugin id the pre-start says it put back, normalised.
+ *
+ * The script prints `  <id> plugin payload reinstalled (<spec>)` for each one.
+ * Reading its own report is what stops this file re-issuing the identical npm
+ * install a moment later for a package that is already back on disk.
+ */
+function pluginPayloadsRepairedByPreStart(preStartOutput: string): Set<string> {
+  const repaired = new Set<string>();
+  const re = /^\s*(\S+) plugin payload reinstalled \(/gim;
+  for (const match of preStartOutput.matchAll(re)) {
+    repaired.add(normalizeManagedPluginId(match[1]));
+  }
+  return repaired;
+}
+
 /** Run the newly checked-out pre-start repair while the gateway is stopped. */
-async function runCurrentGatewayPreStart(): Promise<void> {
-  if (!existsSync(CURRENT_GATEWAY_PRE_START)) return;
+async function runCurrentGatewayPreStart(): Promise<string> {
+  if (!existsSync(CURRENT_GATEWAY_PRE_START)) return "";
   const home = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
   const openclawHome = process.env.CLAWBOX_OPENCLAW_HOME
     || process.env.OPENCLAW_HOME
@@ -1023,7 +1039,7 @@ async function runCurrentGatewayPreStart(): Promise<void> {
     OPENCLAW_CONFIG_PATH: path.join(openclawHome, "openclaw.json"),
   };
   delete env.OPENCLAW_HOME;
-  await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
+  const { stdout } = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
     // Match the unit's 600s TimeoutStartSec with a little process overhead.
     // Killing this halfway through a plugin migration recreates the lock race
     // this maintenance path exists to avoid.
@@ -1031,6 +1047,7 @@ async function runCurrentGatewayPreStart(): Promise<void> {
     maxBuffer: 4 * 1024 * 1024,
     env,
   });
+  return stdout ?? "";
 }
 
 /**
@@ -1048,32 +1065,34 @@ async function runCurrentGatewayPreStart(): Promise<void> {
  * consents for everything blocked, including his.
  */
 const CLAWBOX_MANAGED_PLUGIN_IDS: ReadonlySet<string> = new Set([
+  // The ones `scripts/gateway-pre-start.sh` installs and owns the repair for.
   "codex",
   "deepseek",
-  "discord",
-  "whatsapp",
   "clawbox-email-directives",
+  // …and every channel the Settings panel can install, read from the map it
+  // installs from rather than copied: a channel added there and forgotten here
+  // would be classified as the OWNER's plugin and logged as one ClawBox may
+  // not answer for, over a package ClawBox itself put on the box.
+  ...Object.keys(OFFICIAL_CHANNEL_PLUGINS),
 ]);
 
 /**
  * The npm package behind each managed plugin whose payload this file may
  * reinstall, keyed by the normalised plugin id.
  *
- * Only the plugins that come from npm AND are pinned to the core, because a
- * payload repair is `plugins install <pkg>@<core target>`: the core generation
- * is what orphaned the payload, so the replacement has to be built for the
- * core now on the box. `OFFICIAL_CHANNEL_PLUGINS` is the same map the Settings
- * panel installs from, imported rather than copied — a second list here would
- * be one more place to forget when a channel is added.
+ * Only the plugins that are an npm `<package>@<version>` spec, because that is
+ * what the repair is: the core generation is what orphaned the payload, so the
+ * replacement has to be built for the core now on the box.
+ * `OFFICIAL_CHANNEL_PLUGINS` is the same map the Settings panel installs from,
+ * imported rather than copied — a second list here would be one more place to
+ * forget when a channel is added.
  *
- * The two managed plugins deliberately absent both have a repair that runs
- * BEFORE this one, in the pre-start `runCurrentGatewayPreStart()` has just
- * finished: `scripts/gateway-pre-start.sh` reinstalls `@openclaw/codex` when
- * its package directory is missing, installs the pinned DeepSeek provider from
- * ClawHub (not npm, and not a `<pkg>@<version>` spec), and copies
- * `clawbox-email-directives` out of the checkout. Codex IS listed: its own
- * pinned reinstall is the repair this file has always run for it, for a
- * migrated-v1 project as well as for an orphaned payload.
+ * The two managed plugins deliberately absent are absent for their SHAPE, not
+ * for who repairs them: `deepseek` is a ClawHub spec (`clawhub:@openclaw/…`)
+ * and `clawbox-email-directives` is copied out of the checkout, so an
+ * `@openclaw/<id>@<version>` guess would fetch a package that is not the
+ * plugin. `scripts/gateway-pre-start.sh` owns both, and
+ * `runCurrentGatewayPreStart()` has just run it.
  */
 const MANAGED_PLUGIN_NPM_PACKAGES: ReadonlyMap<string, string> = new Map([
   ["codex", "@openclaw/codex"],
@@ -1190,8 +1209,29 @@ async function pluginConsentRepairIsAllowed(pluginId: string): Promise<boolean> 
  * callback it has no way to answer there; the installed bundle exposes no
  * config key and no environment variable for it, only the CLI flag.
  */
-async function repairPluginsBlockingReadiness(journal: string): Promise<void> {
-  const payload = pluginsNamedInRefusals(journal, PLUGIN_PAYLOAD_VERIFICATION_RE);
+interface PluginRepairOptions {
+  /**
+   * Consent only — no npm install.
+   *
+   * For the path where the pre-start FAILED: a payload reinstall is up to six
+   * minutes per plugin (`gateway_verify` is a `customRun` step, so its
+   * `timeoutMs` is unenforced and nothing bounds the total), spent after a
+   * pre-start that just died — possibly mid plugin migration, with OpenClaw's
+   * five-minute state leases held — and ending in that pre-start's failure
+   * anyway. `plugins enable` is local, ~12 s and safe there.
+   */
+  consentOnly?: boolean;
+  /** Normalised ids whose payload the gateway pre-start has already put back. */
+  alreadyRepaired?: Iterable<string>;
+}
+
+async function repairPluginsBlockingReadiness(
+  journal: string,
+  options: PluginRepairOptions = {},
+): Promise<void> {
+  const payload = options.consentOnly
+    ? { managed: [], unmanaged: [] }
+    : pluginsNamedInRefusals(journal, PLUGIN_PAYLOAD_VERIFICATION_RE);
   const consent = pluginsNamedInRefusals(journal, PLUGIN_CAPABILITY_CONSENT_RE);
   for (const pluginId of [...payload.unmanaged, ...consent.unmanaged]) {
     // Said out loud rather than skipped in silence: this is the one case where
@@ -1205,11 +1245,21 @@ async function repairPluginsBlockingReadiness(journal: string): Promise<void> {
   // consent pass below: `plugins install --accept-capabilities` puts the
   // package back AND records the reviewed surface, so a following `enable`
   // would be a second ~12 s CLI cold start for a question already answered.
-  const repaired = new Set<string>();
+  // Only a reinstall that SUCCEEDED counts: `plugins enable` is the one repair
+  // here that touches no registry, and skipping it because a network install
+  // was attempted would drop the repair that could still have worked on a box
+  // whose network is why the update is being repaired.
+  const repaired = new Set<string>(options.alreadyRepaired ?? []);
   for (const pluginId of payload.managed) {
-    if (await repairManagedPluginPayload(pluginId)) {
-      repaired.add(normalizeManagedPluginId(pluginId));
+    const key = normalizeManagedPluginId(pluginId);
+    // The pre-start reinstalls the channel payloads too, and it ran a moment
+    // ago against this same box. Re-issuing the byte-identical install would
+    // pay a second npm fetch per plugin for a package already back on disk.
+    if (repaired.has(key)) {
+      console.info(`[Updater] "${pluginId}" payload was already reinstalled by the gateway pre-start`);
+      continue;
     }
+    if (await repairManagedPluginPayload(pluginId)) repaired.add(key);
   }
   for (const pluginId of consent.managed) {
     if (repaired.has(normalizeManagedPluginId(pluginId))) continue;
@@ -1218,7 +1268,12 @@ async function repairPluginsBlockingReadiness(journal: string): Promise<void> {
     // as a project declaration with no `node_modules`, where `enable` says
     // "Plugin not found".
     if (normalizeManagedPluginId(pluginId) === "codex") {
-      await repairManagedPluginPayload(pluginId);
+      // One spec, not two: the unpinned fallback exists for a payload that is
+      // GONE and may not be published under the pin's build suffix. Here the
+      // package is on disk — only its consent record is stale — and this path
+      // also runs after a FAILED pre-start, where every extra npm minute is
+      // spent on an update that is going to report that failure anyway.
+      await repairManagedPluginPayload(pluginId, { fallbackToUnpinned: false });
       continue;
     }
     if (!(await pluginConsentRepairIsAllowed(pluginId))) continue;
@@ -1229,12 +1284,15 @@ async function repairPluginsBlockingReadiness(journal: string): Promise<void> {
 /**
  * Put a managed plugin's payload back, pinned to the core now on the box.
  *
- * Returns whether the reinstall was ATTEMPTED, not whether it worked — the
- * clean restart and the port probe decide that, as everywhere else in this
- * recovery. False means nothing was tried: the owner switched the plugin off,
- * Codex is not in use, or the payload is not this file's to replace.
+ * Returns whether the package is believed to be back. False covers both
+ * "nothing was tried" — the owner switched the plugin off, Codex is not in
+ * use, the payload is not this file's to replace — and "the install failed",
+ * because both leave the consent repair below worth attempting.
  */
-async function repairManagedPluginPayload(pluginId: string): Promise<boolean> {
+async function repairManagedPluginPayload(
+  pluginId: string,
+  options: { fallbackToUnpinned?: boolean } = {},
+): Promise<boolean> {
   const key = normalizeManagedPluginId(pluginId);
   const npmPackage = MANAGED_PLUGIN_NPM_PACKAGES.get(key);
   if (!npmPackage) {
@@ -1253,8 +1311,7 @@ async function repairManagedPluginPayload(pluginId: string): Promise<boolean> {
     ? await codexCapabilityRepairIsAllowed()
     : await pluginConsentRepairIsAllowed(pluginId);
   if (!allowed) return false;
-  await reinstallManagedPluginPayload(npmPackage);
-  return true;
+  return reinstallManagedPluginPayload(npmPackage, options.fallbackToUnpinned !== false);
 }
 
 /**
@@ -1269,33 +1326,45 @@ async function repairManagedPluginPayload(pluginId: string): Promise<boolean> {
  * idempotent operation. OpenClaw state leases live for five minutes after a
  * killed startup, so this budget must outlast that bounded stale lease.
  */
-async function reinstallManagedPluginPayload(npmPackage: string): Promise<void> {
+async function reinstallManagedPluginPayload(
+  npmPackage: string,
+  fallbackToUnpinned: boolean,
+): Promise<boolean> {
   let target = OPENCLAW_VERSION_FALLBACK;
   try {
     target = (await readFile(OPENCLAW_TARGET_FILE, "utf-8")).trim().split(/\s+/)[0] || target;
   } catch {
     // The compiled fallback is the same pin used by the installer.
   }
-  try {
-    await execFile(
-      OPENCLAW_BIN,
-      [
-        "plugins",
-        "install",
-        `${npmPackage}@${target}`,
-        "--force",
-        "--accept-capabilities",
-      ],
-      { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
-    );
-  } catch (err) {
-    // Best effort: the clean restart and positive port probe below decide the
-    // result. This must not replace a preceding pre-start failure either.
-    console.warn(
-      `[Updater] payload repair for "${npmPackage}" did not complete:`,
-      err instanceof Error ? err.message : err,
-    );
+  // Pinned first, then unpinned — the shape `deepseekPluginSpecs` already uses
+  // in this repo, and for its reason: npm republishes a release under a build
+  // suffix (2026.7.1 -> 2026.7.1-2), and a plugin published only under the base
+  // version 404s on a pin carrying one. The unpinned spec is safe as a LAST
+  // resort because the core checks the plugin's own `compat.pluginApi` against
+  // the running host and refuses a mismatch.
+  const specs = fallbackToUnpinned
+    ? [`${npmPackage}@${target}`, npmPackage]
+    : [`${npmPackage}@${target}`];
+  let lastError: unknown;
+  for (const spec of specs) {
+    try {
+      await execFile(
+        OPENCLAW_BIN,
+        ["plugins", "install", spec, "--force", "--accept-capabilities"],
+        { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
+      );
+      return true;
+    } catch (err) {
+      lastError = err;
+    }
   }
+  // Best effort: the clean restart and positive port probe below decide the
+  // result. This must not replace a preceding pre-start failure either.
+  console.warn(
+    `[Updater] payload repair for "${npmPackage}" did not complete:`,
+    lastError instanceof Error ? lastError.message : lastError,
+  );
+  return false;
 }
 
 /**
@@ -1482,16 +1551,20 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // is fatal here: restarting after killing a migration midway is unsafe.
   await withGatewayQuiesced(async () => {
     const journal = await readGatewayJournalTail();
+    let preStartOutput: string;
     try {
-      await runCurrentGatewayPreStart();
+      preStartOutput = await runCurrentGatewayPreStart();
     } catch (err) {
       // If an earlier pre-start migration fails, still record the narrowly
       // scoped consent named by the existing journal. Do not restart after a
       // partial pre-start; propagate its failure once the repair is recorded.
-      await repairPluginsBlockingReadiness(journal);
+      // Consent only here — see PluginRepairOptions.
+      await repairPluginsBlockingReadiness(journal, { consentOnly: true });
       throw err;
     }
-    await repairPluginsBlockingReadiness(journal);
+    await repairPluginsBlockingReadiness(journal, {
+      alreadyRepaired: pluginPayloadsRepairedByPreStart(preStartOutput),
+    });
     await runOpenclawDoctorFix();
   });
   // `awaitReady: false` on both restarts in this function, and only here: the

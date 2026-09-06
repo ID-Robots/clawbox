@@ -59,12 +59,14 @@ afterEach(() => {
 interface RunOptions {
   /** `plugins.entries` as openclaw.json carries it. */
   entries: Record<string, { enabled: boolean }>;
-  /** Plugin ids whose `plugins enable` the fake CLI refuses. */
+  /** Plugin ids whose `plugins enable` answers the core's "Plugin not found". */
+  payloadMissing?: string[];
+  /** Plugin ids whose `plugins enable` fails for some OTHER reason. */
   enableFails?: string[];
   /** Install specs (argv[3]) the fake CLI refuses. */
   installFails?: string[];
-  /** The core target as the script resolved it; "" = unknown. */
-  target?: string;
+  /** The INSTALLED core's release as the script resolved it; "" = unknown. */
+  effective?: string;
 }
 
 function run(opts: RunOptions): { argv: string[]; stdout: string } {
@@ -79,8 +81,12 @@ function run(opts: RunOptions): { argv: string[]; stdout: string } {
       "#!/usr/bin/env bash",
       `echo "$*" >> "${log}"`,
       'if [ "$2" = "enable" ]; then',
+      // The core's own sentence for a package that is not on disk, verbatim.
+      `  for r in ${(opts.payloadMissing ?? []).map((s) => `'${s}'`).join(" ")}; do`,
+      '    if [ "$3" = "$r" ]; then echo "Plugin not found: $3. Run \`openclaw plugins list\` to see installed plugins." >&2; exit 1; fi',
+      "  done",
       `  for r in ${(opts.enableFails ?? []).map((s) => `'${s}'`).join(" ")}; do`,
-      '    if [ "$3" = "$r" ]; then exit 1; fi',
+      '    if [ "$3" = "$r" ]; then echo "timeout" >&2; exit 124; fi',
       "  done",
       "fi",
       'if [ "$2" = "install" ]; then',
@@ -93,14 +99,16 @@ function run(opts: RunOptions): { argv: string[]; stdout: string } {
   );
   chmodSync(bin, 0o755);
 
-  const result = spawnSync("bash", ["-c", BLOCK], {
+  // Under the shipped script's own options, so an `&&` list or a failing
+  // pipeline in the extracted block fails here the way it would on a box.
+  const result = spawnSync("bash", ["-c", "set -euo pipefail\n" + BLOCK], {
     encoding: "utf-8",
     env: testEnv({
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       CLAWBOX_OPENCLAW_V2: "1",
       OPENCLAW_CONFIG: config,
       OPENCLAW_BIN: bin,
-      OPENCLAW_TARGET: opts.target ?? "2026.8.1",
+      CLAWBOX_OPENCLAW_EFFECTIVE: opts.effective ?? "2026.8.1",
     }),
   });
   if (result.status !== 0) throw new Error(`block exited ${result.status}: ${result.stderr}`);
@@ -120,10 +128,10 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     expect(argv).toEqual(["plugins enable discord --accept-capabilities"]);
   });
 
-  it("reinstalls the pinned payload when the consent verb cannot find the plugin", () => {
+  it("reinstalls the pinned payload when the core says the package is not there", () => {
     const { argv, stdout } = run({
       entries: { discord: { enabled: true } },
-      enableFails: ["discord"],
+      payloadMissing: ["discord"],
     });
     expect(argv).toEqual([
       "plugins enable discord --accept-capabilities",
@@ -132,12 +140,27 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     expect(stdout).toContain("discord plugin payload reinstalled");
   });
 
+  it("does NOT reinstall when the consent verb failed for any other reason", () => {
+    // A cold-Jetson `plugins enable` that overran its 60 s budget, a config
+    // lock, a registry hiccup: none of them is a missing payload, and a 120 s
+    // npm install on a BLOCKING ExecStartPre is not their repair.
+    const { argv, stdout } = run({
+      entries: { discord: { enabled: true }, whatsapp: { enabled: true } },
+      enableFails: ["discord", "whatsapp"],
+    });
+    expect(argv).toEqual([
+      "plugins enable discord --accept-capabilities",
+      "plugins enable whatsapp --accept-capabilities",
+    ]);
+    expect(stdout).toContain("WARN: could not confirm discord plugin capabilities");
+  });
+
   it("repairs the payload under the alias the registry answers to", () => {
     // `ensureChannelPlugin` can enable the plugin as `openclaw-whatsapp`, and
     // the npm package is `@openclaw/whatsapp` either way.
     const { argv } = run({
       entries: { "openclaw-whatsapp": { enabled: true } },
-      enableFails: ["openclaw-whatsapp"],
+      payloadMissing: ["openclaw-whatsapp"],
     });
     expect(argv).toEqual([
       "plugins enable openclaw-whatsapp --accept-capabilities",
@@ -145,24 +168,27 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     ]);
   });
 
-  it("warns and keeps booting when the reinstall fails too", () => {
+  it("says the reinstall failed, not that capabilities are unconfirmed", () => {
+    // The boot log is the primary evidence for this failure mode; "could not
+    // confirm capabilities" would send whoever reads it after the wrong thing.
     const { stdout } = run({
       entries: { discord: { enabled: true } },
-      enableFails: ["discord"],
+      payloadMissing: ["discord"],
       installFails: ["@openclaw/discord@2026.8.1"],
     });
-    expect(stdout).toContain("WARN: could not confirm discord plugin capabilities");
+    expect(stdout).toContain("could not reinstall the discord plugin payload");
   });
 
   it("leaves a managed plugin with no npm package of ours to its own installer", () => {
     // deepseek comes from ClawHub and clawbox-email-directives is copied out of
     // the checkout; both have their own block in this script, and an
     // `@openclaw/<id>` guess would fetch a package that is not the plugin.
-    const { argv } = run({
+    const { argv, stdout } = run({
       entries: { deepseek: { enabled: true } },
-      enableFails: ["deepseek"],
+      payloadMissing: ["deepseek"],
     });
     expect(argv).toEqual(["plugins enable deepseek --accept-capabilities"]);
+    expect(stdout).toContain("ClawBox has no npm package of its own for it");
   });
 
   it("repairs exactly the channel plugins the Settings panel installs", () => {
@@ -171,7 +197,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     // loses that channel — and its gateway — on the next core bump, with no
     // reboot that heals it.
     const src = readFileSync(SCRIPT, "utf-8");
-    const shellCase = /\n\s+([a-z|-]+)\)\n\s+\[ -n "\$OPENCLAW_TARGET" \]/.exec(src);
+    const shellCase = /\n\s+([a-z|-]+)\)\s+MANAGED_PLUGIN_PKG="@openclaw\/\$MANAGED_PLUGIN_KEY"/.exec(src);
     expect(shellCase, "the payload-repair case arm was not found").not.toBeNull();
     expect(shellCase?.[1].split("|").sort())
       .toEqual(Object.keys(OFFICIAL_CHANNEL_PLUGINS).sort());
@@ -182,14 +208,18 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     }
   });
 
-  it("does not guess a spec when the core target is unknown", () => {
-    // An unpinned `@openclaw/discord` resolves @latest, which is how the codex
-    // plugin drifted ahead of the pinned core and crashed every chat.
+  it("falls back to the unpinned spec only when the installed core is unknown", () => {
+    // Pinned to the INSTALLED core, not to the checkout's pin file: this script
+    // never installs the core, so a box that pulled new ClawBox code before its
+    // core update landed would otherwise install a plugin its runtime refuses.
     const { argv } = run({
       entries: { discord: { enabled: true } },
-      enableFails: ["discord"],
-      target: "",
+      payloadMissing: ["discord"],
+      effective: "",
     });
-    expect(argv).toEqual(["plugins enable discord --accept-capabilities"]);
+    expect(argv).toEqual([
+      "plugins enable discord --accept-capabilities",
+      "plugins install @openclaw/discord --force --accept-capabilities",
+    ]);
   });
 });

@@ -72,10 +72,36 @@ describe("install.sh plugin refresh", () => {
     // default arm and be refreshed without consent — silently, behind the WARN
     // — while `$spec` still has to carry the raw name for the CLI.
     const built = LINES.findIndex((l) => l.includes("CAP_ARGS=(--accept-capabilities)"));
-    const region = LINES.slice(Math.max(0, built - 8), built).join("\n");
+    // The whole loop body, not a fixed window above the guard: `PLUGIN_KEY` is
+    // hoisted to the top of the iteration because the pin repair reads it too,
+    // so a window would only pin where the assignment happens to sit today.
+    const loopStart = LINES.findIndex((l) => l.includes("read -r plugin pkg; do"));
+    expect(loopStart).toBeGreaterThanOrEqual(0);
+    expect(loopStart).toBeLessThan(built);
+    const region = LINES.slice(loopStart, built).join("\n");
     expect(region).toContain("${plugin#@openclaw/}");
     expect(region).toContain("${PLUGIN_KEY#openclaw-}");
-    expect(region).toContain('case "$PLUGIN_KEY" in');
+    // Still adjacent to the guard: the whitelist is matched on the normalised
+    // id, never on the raw one.
+    expect(LINES[built - 2]).toContain('case "$PLUGIN_KEY" in');
+  });
+
+  it("never refreshes a ClawBox plugin at @latest because its payload is gone", () => {
+    // TASK-602. A core upgrade re-keys the npm project directories, so
+    // `plugins list --json` lists the orphaned plugin with no rootDir/source;
+    // the package derivation above then yields "" and `$spec` stays the BARE
+    // id, which npm resolves as @latest — on the very boxes this refresh
+    // exists for. The pin has to be rebuilt from the id for the @openclaw
+    // packages ClawBox installs, and left alone for anyone else's plugin.
+    const loopStart = LINES.findIndex((l) => l.includes("read -r plugin pkg; do"));
+    const install = LINES.findIndex(
+      (l, i) => i > loopStart && l.includes('plugins install "$spec" --force'),
+    );
+    expect(loopStart).toBeGreaterThanOrEqual(0);
+    expect(install).toBeGreaterThan(loopStart);
+    const region = LINES.slice(loopStart, install).join("\n");
+    expect(region).toContain('if [ "$spec" = "$plugin" ] && [ -n "$TARGET" ]; then');
+    expect(region).toContain('codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;');
   });
 
   it("has no `plugins install` or `plugins enable` that skips consent entirely", () => {
