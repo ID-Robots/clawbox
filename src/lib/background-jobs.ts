@@ -11,8 +11,11 @@ import { readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConf
 // the journal logged "[heartbeat] started" twice in an evening, and the alerts
 // go to `commands.ownerAllowFrom` — one Telegram user. None of it was asked
 // for, all of it spends the owner's subscription or his ClawBox AI credits, and
-// ClawBox wrote none of the keys. `scripts/gateway-pre-start.sh` seeds the
-// opt-outs once; this module is how the owner changes his mind.
+// ClawBox wrote none of the keys. The opt-outs are seeded once per box by the
+// boot script that owns each harness's config — `scripts/gateway-pre-start.sh`
+// on OpenClaw, `scripts/register-mcp.sh` on Hermes, where the same shared
+// config lock is already held — and this module is how the owner changes his
+// mind afterwards.
 //
 // HARNESS FIRST — every one of these is the harness's own documented key, read
 // and written through the harness's own writer. Nothing here invents a store.

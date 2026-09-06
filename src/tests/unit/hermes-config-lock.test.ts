@@ -67,14 +67,25 @@ describe("both writers share ONE lock file", () => {
     // matching. Each time the -1 guard below is what caught it, which is the
     // argument for keeping the marker as loose as the ordering claim needs.
     const cliCall = REGISTER_SRC.search(/^.*"\$HERMES_BIN" tools disable browser/m);
+    // The THIRD write: the TASK-609 background-job opt-out seed, which does its
+    // own PyYAML load->safe_dump of the same file. It was first written as a
+    // Node boot hook calling `patchHermesConfig`, which cannot take this lock —
+    // moving it in here is the whole point, and nothing else in CI says it has
+    // to stay. Marked on the env line that carries the record path, at column 0.
+    const optoutSeed = REGISTER_SRC.search(/^CLAWBOX_OPTOUT_STATE=/m);
     // Every marker must have been FOUND before their order means anything: a
     // `search` miss returns -1, and -1 < anything, so an ordering assertion over
     // a moved marker passes while checking nothing.
     expect(call, "register-mcp.sh: no top-level acquire_config_lock call").toBeGreaterThan(-1);
     expect(reconcile, "register-mcp.sh: no PyYAML reconcile block").toBeGreaterThan(-1);
     expect(cliCall, "register-mcp.sh: no `hermes tools disable browser` call").toBeGreaterThan(-1);
+    expect(optoutSeed, "register-mcp.sh: no background-job opt-out seed").toBeGreaterThan(-1);
     expect(call).toBeLessThan(reconcile);
     expect(call).toBeLessThan(cliCall);
+    expect(call).toBeLessThan(optoutSeed);
+    // And AFTER the CLI call, because that one re-saves the whole config: a
+    // read-back above it would not be the last word on what the boot leaves.
+    expect(cliCall).toBeLessThan(optoutSeed);
 
     expect(AUTH_SRC).toContain("flock -w 120 9");
     expect(REGISTER_SRC).toContain("flock -w 120 9");
