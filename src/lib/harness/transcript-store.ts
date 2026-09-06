@@ -1,7 +1,7 @@
 import fsp from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
-import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "./transcript-key";
+import { DESKTOP_TRANSCRIPT_KEY, safeTranscriptKey, transcriptKeyIsSafe } from "./transcript-key";
 
 /**
  * A durable transcript for a harness whose transport does not keep one.
@@ -164,13 +164,21 @@ export interface TranscriptRecord {
  * `transcript-key.ts` so the client can share them without importing `fs`;
  * they are re-exported here for the callers that always found them here.
  */
-export { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe };
+export { DESKTOP_TRANSCRIPT_KEY, safeTranscriptKey, transcriptKeyIsSafe };
 
+/**
+ * The file one key names — joined from the REBUILT key, never the argument.
+ *
+ * See `safeTranscriptKey`: the routes test a key before it gets here, and a
+ * test leaves the caller's string in play. This is the last door, so it takes
+ * the rebuild's answer and joins that.
+ */
 function transcriptPath(key: string): string {
-  if (!transcriptKeyIsSafe(key)) {
+  const safe = safeTranscriptKey(key);
+  if (safe === null) {
     throw new Error("Invalid transcript key");
   }
-  return path.join(TRANSCRIPT_DIR, `${key}.jsonl`);
+  return path.join(TRANSCRIPT_DIR, `${safe}.jsonl`);
 }
 
 /** Clamp one tool chip to what a line is allowed to carry. */

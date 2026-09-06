@@ -27,7 +27,15 @@ import {
 } from "@/lib/provider-status";
 
 export type SetProviderEnabledResult =
-  | { ok: true }
+  /**
+   * `provider` is the id the box actually flipped, taken from ITS OWN rows
+   * rather than from the caller's spelling — `deepseek` comes back as
+   * `clawai`. A caller that wants to name the switch in a log line, or repaint
+   * a row, would otherwise have to re-derive the canonical id, and the one
+   * that did not was writing request text into the journal (TASK-723,
+   * `js/log-injection`).
+   */
+  | { ok: true; provider: string }
   | { ok: false; kind: "is_default" | "unknown_provider"; error: string };
 
 /**
@@ -75,8 +83,14 @@ export async function setProviderEnabled(id: string, enabled: boolean): Promise<
   // flip: the strip hides the row, it does not forget the provider. Answering
   // "not known to this box" for one would be a false failure — and would leave
   // whatever the switch was last set to stuck for good.
-  const hidden = !row && !!canonical && status.unrunnable.includes(canonical);
-  if ((!row && !hidden) || !canonical) {
+  // Taken from the row (or from the unrunnable list) rather than re-stated
+  // from `canonical`, so what comes back is a string this box wrote — the
+  // caller's copy of the id never leaves this function.
+  const hiddenId = !row && canonical
+    ? status.unrunnable.find((candidate) => candidate === canonical)
+    : undefined;
+  const known = row?.id ?? hiddenId;
+  if (!known || !canonical) {
     return { ok: false, kind: "unknown_provider", error: "That AI provider is not known to this box." };
   }
   if (!enabled && row?.isDefault) {
@@ -90,5 +104,5 @@ export async function setProviderEnabled(id: string, enabled: boolean): Promise<
     // Sorted so the stored list is stable across flips and diffs cleanly.
     await setConfigValue(DISABLED_PROVIDERS_KEY, [...disabled].sort());
   });
-  return { ok: true };
+  return { ok: true, provider: known };
 }

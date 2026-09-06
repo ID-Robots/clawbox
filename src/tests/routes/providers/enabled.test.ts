@@ -158,17 +158,78 @@ describe("what it refuses before writing", () => {
 });
 
 describe("the log line", () => {
-  it("records the body's spelling of the id as ONE line, control characters replaced", async () => {
-    // The rule matched the id to a row; the line still carries what the body
-    // sent. A newline in it would have written a second, forged record.
-    setProviderEnabled.mockResolvedValueOnce({ ok: true });
+  // TASK-723. The line used to be built from the BODY's spelling of the id,
+  // run through `logSafe` — which CodeQL does not recognise as a barrier (the
+  // note in ai-models/configure/route.ts says so), and which is only ever
+  // damage control over text a request chose. The rule has already matched the
+  // id to one of the box's own rows by this point, so the honest thing to name
+  // is that row: an id from our enumeration, not from `request.json()`.
+  it("names the id the box flipped, not the caller's spelling of it", async () => {
+    // The real rule, no mock: `deepseek` is ClawBox AI's wire id in
+    // openclaw.json and `clawai` is the row — and the key the switch is stored
+    // under. An operator grepping the journal for the switch that moved wants
+    // the id the box actually flipped.
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await asOwner({ provider: "openrouter\n[providers] forged line", enabled: false });
+
+    const res = await asOwner({ provider: "deepseek", enabled: false });
+
     expect(res.status).toBe(200);
+    expect(store.get("ai_disabled_providers")).toEqual(["clawai"]);
     const lines = error.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("switched off"));
+    expect(lines).toEqual(["[providers] clawai switched off by the owner"]);
+  });
+
+  it("cannot be made to carry a second, forged record", async () => {
+    // A newline in the body used to reach the journal as U+FFFD — one line, so
+    // not a forged RECORD, but still a sentence a request wrote into an
+    // operator's log. Nothing off the body reaches the line now.
+    //
+    // The REAL rule, deliberately not a mock: `normalizeProviderId` collapses
+    // this onto `openrouter` through its `startsWith` arm and the fixture has
+    // that row, so the whole chain answers — a mocked `{ok:true, provider}`
+    // would only pin that the route interpolates the field it is handed.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await asOwner({ provider: "openrouter\n[providers] forged line", enabled: false });
+
+    expect(res.status).toBe(200);
+    expect(store.get("ai_disabled_providers")).toEqual(["openrouter"]);
+    const lines = error.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("switched off"));
+    expect(lines).toEqual(["[providers] openrouter switched off by the owner"]);
+  });
+
+  it("keeps one line even when the ROW's own id carries a newline", async () => {
+    // The id is the box's, not the request's — and that is a statement about
+    // WHO wrote it, not about its shape. `readOpenclawStatus` pushes the prefix
+    // of `agents.defaults.model.primary` as a row of its own (provider-status
+    // `rows.push({ id: defaultProvider … })`) and `normalizeProviderId` only
+    // trims and lowercases, so an agent that may run `openclaw config set` —
+    // and may NOT post here — chooses that id. `logSafe` is what keeps the
+    // record one bounded line whatever it says.
+    //
+    // Switched ON, not off: the `is_default` refusal covers only the off
+    // direction, so this is the reachable path where such a row's id actually
+    // reaches the journal.
+    const forged = "boot\n[providers] anthropic switched on by the owner";
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
+      models: { providers: { openrouter: { apiKey: "sk-or-secret" } } },
+      agents: { defaults: { model: { primary: `${forged}/x` } } },
+    });
+    store.set("ai_disabled_providers", [forged]);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await asOwner({ provider: forged, enabled: true });
+
+    expect(res.status).toBe(200);
+    const lines = error.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("switched on"));
     expect(lines).toHaveLength(1);
+    // ONE record: the newline is replaced rather than passed through, so the
+    // owner's flip cannot write the agent's sentence as a second journal line.
     expect(lines[0]).not.toContain("\n");
-    expect(lines[0]).toContain("[providers] openrouter�[providers] forged line switched off by the owner");
+    expect(lines[0]).toBe(
+      "[providers] boot�[providers] anthropic switched on by the owner switched on by the owner",
+    );
   });
 });
 
