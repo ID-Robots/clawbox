@@ -840,6 +840,54 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(orderCall?.[0]).toEqual(expect.arrayContaining(["--agent", "main"]));
   });
 
+  it("writes the ClawBox AI credential to the agent the box actually runs", async () => {
+    // TASK-730. A customer was dead for two days on HTTP 403 because his box
+    // held TWO ClawBox AI credentials and the gateway served the revoked one:
+    //   deepseek:default = claw_bd1…  <- sent, revoked, 403
+    //   models.json      = claw_c98…  <- present, ignored
+    // with the profile read out of `agents/main/agent/…` while the box's own
+    // models.json lived under `agents/pro-agent/`. ClawBox pinned `--agent
+    // main` for every `models auth …` call, so on a box whose roster names a
+    // different agent the credential is written into a store the gateway never
+    // reads — and whatever was in the real store, however stale, keeps
+    // serving turns. The core's own rule for a WRITE is
+    // `resolveSoleAgentId`: a declared sole agent wins, and `main` is only
+    // the answer when no roster is declared at all
+    // (agent-scope-config: listAgentIds → LEGACY_IMPLICIT_AGENT_ID = "main").
+    mockReadOpenClawConfig.mockResolvedValue({
+      agents: { list: [{ id: "pro-agent" }] },
+      auth: { profiles: {} },
+    } as never);
+
+    await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "claw_c98000000000000000000000000000",
+      authMode: "subscription",
+    }));
+
+    const paste = pasteCallFor("deepseek:default");
+    expect(paste?.[0]).toEqual(expect.arrayContaining(["--agent", "pro-agent"]));
+  });
+
+  it("still says `main` when the box declares no agent roster at all", async () => {
+    // The other half, and the reason this is a resolution rather than a
+    // rename: a stock box has no `agents.entries`/`agents.list`, and there the
+    // core's implicit agent IS `main`. Guessing anything else would move every
+    // existing box's credential into a store nothing reads — the same defect,
+    // pointed the other way.
+    mockReadOpenClawConfig.mockResolvedValue({ auth: { profiles: {} } } as never);
+
+    await configurePost(jsonRequest({
+      provider: "clawai",
+      apiKey: "claw_c98000000000000000000000000000",
+      authMode: "subscription",
+    }));
+
+    expect(pasteCallFor("deepseek:default")?.[0]).toEqual(
+      expect.arrayContaining(["--agent", "main"]),
+    );
+  });
+
   it("names both OpenAI profiles, the sign-in first, when the box holds an API key too", async () => {
     // An explicit order REPLACES the core's candidate list rather than
     // reordering it, so a one-entry order written here made a later
