@@ -22,8 +22,6 @@ import { saveEnv } from "@/tests/helpers/env";
 const ENV = ["HOME", "OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME"];
 
 export interface ManifestFixture {
-  /** The temporary home every candidate path is resolved under. */
-  home: string;
   /**
    * An absolute `openclaw` binary path whose bundled candidate
    * (`<bin>/../lib/node_modules/openclaw/dist/extensions`) lands inside the
@@ -44,7 +42,7 @@ export interface ManifestFixture {
   cleanup(): void;
 }
 
-function writeJson(file: string, raw: string): void {
+function writeFile(file: string, raw: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, raw);
 }
@@ -62,12 +60,11 @@ export function createManifestFixture(prefix: string): ManifestFixture {
     path.join(home, "lib", "node_modules", "openclaw", "dist", "extensions", provider, "openclaw.plugin.json");
 
   return {
-    home,
     bin: path.join(home, "bin", "openclaw"),
-    writeManifest: (provider, body) => writeJson(beside(provider), JSON.stringify(body)),
-    writeRawManifest: (provider, raw) => writeJson(beside(provider), raw),
-    writeBundledManifest: (provider, body) => writeJson(bundled(provider), JSON.stringify(body)),
-    writeRawBundledManifest: (provider, raw) => writeJson(bundled(provider), raw),
+    writeManifest: (provider, body) => writeFile(beside(provider), JSON.stringify(body)),
+    writeRawManifest: (provider, raw) => writeFile(beside(provider), raw),
+    writeBundledManifest: (provider, body) => writeFile(bundled(provider), JSON.stringify(body)),
+    writeRawBundledManifest: (provider, raw) => writeFile(bundled(provider), raw),
     cleanup: () => {
       restoreEnv();
       fs.rmSync(home, { recursive: true, force: true });

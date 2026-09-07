@@ -235,6 +235,50 @@ describe("coreModelRetired", () => {
     expect(coreRetiredModels("anthropic").has("claude-opus-4-8")).toBe(true);
   });
 
+  it("goes back to the better manifest once it parses again", async () => {
+    // The other half of the fall-through, and the reason the answer read past a
+    // broken candidate is not cached: the staleness check re-stats ONE file —
+    // the one that was cached — so caching the beside-config answer here would
+    // key the whole provider on it and the repaired bundled manifest would
+    // never be looked at again. That is the probe-once class, in the file
+    // written to defeat it: a single unlucky read during an update would pin
+    // the wrong source for the life of the web server.
+    //
+    // This also pins the candidate ORDER for the case above it: the assertion
+    // can only flip if the bundled path really is where the module looks.
+    fixture.writeRawBundledManifest("anthropic", "}{ not json");
+    fixture.writeManifest("anthropic", { models: [{ id: "claude-opus-4-8", status: "deprecated" }] });
+    bin.override = fixture.bin;
+    const { coreRetiredModels } = await loadLifecycle();
+    expect(coreRetiredModels("anthropic").has("claude-opus-4-8")).toBe(true);
+
+    fixture.writeBundledManifest("anthropic", { models: [{ id: "claude-opus-4-7", status: "deprecated" }] });
+    // Time frozen, so a cached set would still be inside the stat floor and the
+    // new answer can only have come from a re-read of both candidates.
+    vi.useFakeTimers();
+    try {
+      const retired = coreRetiredModels("anthropic");
+      expect(retired.has("claude-opus-4-7")).toBe(true);
+      expect(retired.has("claude-opus-4-8")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not read the deepseek manifest for the clawai catalogue", async () => {
+    // The asymmetry the module docblock records as deliberate: ClawBox's own
+    // `clawai` catalogue is served by deepseek models through the ClawBox AI
+    // proxy, and the lookup is keyed on the CATALOGUE provider with no inverse
+    // mapping — what the proxy accepts is our contract with the customer, not
+    // the upstream provider's lifecycle. Pinned so that "fixing the missing
+    // mapping" cannot pass the suite, exactly as the codex/openai twin is
+    // pinned in curated-defaults-offerable.test.ts.
+    fixture.writeManifest("deepseek", { models: [{ id: "deepseek-v4-flash", status: "deprecated" }] });
+    const { coreRetiredModels } = await loadLifecycle();
+    expect(coreRetiredModels("deepseek").has("deepseek-v4-flash")).toBe(true);
+    expect(coreRetiredModels("clawai").has("deepseek-v4-flash")).toBe(false);
+  });
+
   it("refuses a provider id that could name anything but a directory", async () => {
     // The id reaches this module from a request query string by way of the
     // catalogue payload and is joined into a filesystem path. Nothing the core

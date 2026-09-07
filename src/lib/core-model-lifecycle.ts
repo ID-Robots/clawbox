@@ -83,9 +83,12 @@ interface CachedManifest {
 const cache = new Map<string, CachedManifest>();
 
 /**
- * The two places the manifest lives, in the order `gateway-pre-start.sh` tries
- * them: bundled in the core's `dist/extensions`, or beside the config once
- * OpenClaw 2 unbundled the provider into its own installed plugin.
+ * The two places the manifest lives, in the order `gateway-pre-start.sh`
+ * resolves them: bundled in the core's `dist/extensions`, or beside the config
+ * once OpenClaw 2 unbundled the provider into its own installed plugin. The
+ * PATHS are that script's; the fallback RULE is not the same one — it falls
+ * back on existence alone (`[ ! -f … ]`) and gives up outright on a manifest it
+ * cannot parse, while this reads on to the next candidate.
  */
 /**
  * A provider id that can only ever name a directory, never traverse out of one.
@@ -190,6 +193,15 @@ function retiredFor(provider: string): Set<string> {
     }
     cache.delete(provider);
   }
+  // Set when a candidate EXISTED and could not be used — read or parsed. The
+  // answer that follows then comes from a lower-priority file, and caching it
+  // would key the staleness check on that file alone (`cached.file` is the only
+  // path re-stat'ed above), so the moment the better manifest became readable
+  // again nothing would look at it: one bad read would pin the wrong source for
+  // the life of the process. A candidate that is simply ABSENT is not that —
+  // that is the ordinary shape of an OpenClaw 2 box, where the bundled path
+  // never exists and the beside-config answer is the right one to cache.
+  let degraded = false;
   for (const file of manifestPaths(provider)) {
     // Opened ONCE and both stat and read taken from the descriptor. A
     // `statSync` followed by a `readFileSync` of the same path is two lookups
@@ -210,6 +222,7 @@ function retiredFor(provider: string): Set<string> {
       stat = fsSync.fstatSync(fd);
       raw = fsSync.readFileSync(fd, "utf-8");
     } catch {
+      degraded = true;
       continue;
     } finally {
       try {
@@ -222,16 +235,24 @@ function retiredFor(provider: string): Set<string> {
     try {
       collect(catalogueFor(JSON.parse(raw), provider), retired);
     } catch {
-      // A manifest we cannot parse is a manifest we know nothing from — and it
-      // is NOT cached, so a half-written file is re-read rather than believed.
-      // The NEXT candidate is still tried: `npm install -g openclaw@latest`
-      // renaming `dist/extensions` underneath is what leaves the first one
-      // half-written, and the copy beside the config is untouched by it.
-      // Failing open is the rule for a file this cannot read, not a reason to
-      // stop reading the one beside it.
+      // A manifest we cannot parse is a manifest we know nothing from — but the
+      // NEXT candidate may still be readable, and giving up on the lookup threw
+      // that away. What actually produces unparsable bytes here is a write in
+      // PLACE: `gateway-pre-start.sh` rewrites this very file with python on
+      // every gateway start to declare deepseek's xhigh effort, and a truncated
+      // write (a full disk, a killed process) leaves the remains behind.
+      // `npm install -g`'s rename is not one of those cases — a rename is
+      // atomic, so a reader sees the whole old file or ENOENT, which the
+      // `openSync` catch above has always carried to the next candidate.
+      //
+      // Nothing is cached: neither this file (the next boot may repair it) nor
+      // the answer read past it (see `degraded`).
+      degraded = true;
       continue;
     }
-    cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
+    if (!degraded) {
+      cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
+    }
     return retired;
   }
   // Nothing found. Deliberately NOT cached: on a box with no core yet, or one
@@ -250,8 +271,10 @@ function retiredFor(provider: string): Set<string> {
  * route, holds a LIST and goes through `coreRetiredModels` so a payload of
  * hundreds of rows costs one lookup rather than hundreds. This is the
  * single-row form — what the cases in `core-model-lifecycle.test.ts` are
- * written against, and what a caller asking about ONE model should use instead
- * of re-deriving the trim-and-membership test against the set.
+ * written against. It is not exactly the set test: it TRIMS the id first, while
+ * `withoutRetiredModels` asks the set for the id its catalogue holds. So a
+ * per-row caller may use either, but converting a loop from one to the other
+ * changes the answer for a padded id.
  */
 export function coreModelRetired(provider: string, id: string): boolean {
   if (!provider || !id) return false;
