@@ -39,6 +39,18 @@ import { findOpenclawBin } from "@/lib/openclaw-config";
  * that ships none, a shape this does not recognise — all answer "not retired",
  * so the picker keeps offering exactly what it offers today. The failure this
  * must never have is the other one: a parse slip that empties a model list.
+ *
+ * KEYED ON THE CATALOGUE PROVIDER, with no inverse mapping, and that is a
+ * decision rather than an oversight. ClawBox's own `clawai` catalogue is served
+ * by deepseek models (`deepseek-v4-flash` and its siblings in
+ * `provider-models.ts`) through the ClawBox AI proxy, and the core ships the
+ * manifest under `deepseek` — so a `clawai` lookup finds no manifest and every
+ * clawai row is answered "not retired". Adding the mapping would let a
+ * lifecycle the core publishes about the DIRECT deepseek route decide what our
+ * proxied plan offers, and those are not the same surface: what the proxy
+ * accepts is our contract with the customer, not the upstream provider's. The
+ * same asymmetry, for the same reason, is documented at `withoutRetiredModels`
+ * for `codex` vs `openai` and pinned by `curated-defaults-offerable.test.ts`.
  */
 
 /** What the harness treats as "do not offer this any more". */
@@ -212,7 +224,12 @@ function retiredFor(provider: string): Set<string> {
     } catch {
       // A manifest we cannot parse is a manifest we know nothing from — and it
       // is NOT cached, so a half-written file is re-read rather than believed.
-      return new Set();
+      // The NEXT candidate is still tried: `npm install -g openclaw@latest`
+      // renaming `dist/extensions` underneath is what leaves the first one
+      // half-written, and the copy beside the config is untouched by it.
+      // Failing open is the rule for a file this cannot read, not a reason to
+      // stop reading the one beside it.
+      continue;
     }
     cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
     return retired;
@@ -228,6 +245,13 @@ function retiredFor(provider: string): Set<string> {
  *
  * `id` may be the bare id (`claude-opus-4-8`) or the fully-qualified one
  * (`z-ai/glm-5.1`); both forms are indexed.
+ *
+ * NO PRODUCTION CALLER TODAY, deliberately: the only consumer, the catalogue
+ * route, holds a LIST and goes through `coreRetiredModels` so a payload of
+ * hundreds of rows costs one lookup rather than hundreds. This is the
+ * single-row form — what the cases in `core-model-lifecycle.test.ts` are
+ * written against, and what a caller asking about ONE model should use instead
+ * of re-deriving the trim-and-membership test against the set.
  */
 export function coreModelRetired(provider: string, id: string): boolean {
   if (!provider || !id) return false;
