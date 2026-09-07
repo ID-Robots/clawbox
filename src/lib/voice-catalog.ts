@@ -11,34 +11,46 @@
 
 export interface VoiceOption {
   id: string;
+  /** The English floor — what the `en` pack carries under `labelKey`. */
   label: string;
+  /** The catalogue key the Voice tab draws the entry from: the descriptor
+   *  ("male, warm") is prose, and a German dropdown carried it in English
+   *  (locale sweep DE-8, 2026-09-07). */
+  labelKey: string;
+}
+
+/** The key segment is the id in camelCase (`af_heart` → `afHeart`): the
+ *  catalogue's naming rule allows no underscore in a key. */
+function voice(id: string, label: string): VoiceOption {
+  const segment = id.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+  return { id, label, labelKey: `settings.voice.name.${segment}` };
 }
 
 /** Kokoro voices the local script accepts, named for people. English only. */
 export const LOCAL_VOICES: readonly VoiceOption[] = [
-  { id: "af_heart", label: "Heart — female, American" },
-  { id: "af_bella", label: "Bella — female, American" },
-  { id: "am_adam", label: "Adam — male, American" },
-  { id: "am_michael", label: "Michael — male, American" },
-  { id: "bf_emma", label: "Emma — female, British" },
-  { id: "bm_george", label: "George — male, British" },
+  voice("af_heart", "Heart — female, American"),
+  voice("af_bella", "Bella — female, American"),
+  voice("am_adam", "Adam — male, American"),
+  voice("am_michael", "Michael — male, American"),
+  voice("bf_emma", "Emma — female, British"),
+  voice("bm_george", "George — male, British"),
 ];
 
 export const DEFAULT_LOCAL_VOICE = "af_heart";
 
 /** The OpenAI-compatible voices the ClawBox AI cloud speaks with. Any language. */
 export const CLOUD_VOICES: readonly VoiceOption[] = [
-  { id: "alloy", label: "Alloy — neutral" },
-  { id: "ash", label: "Ash — male, warm" },
-  { id: "ballad", label: "Ballad — male, soft" },
-  { id: "coral", label: "Coral — female, bright" },
-  { id: "echo", label: "Echo — male, calm" },
-  { id: "fable", label: "Fable — British, expressive" },
-  { id: "nova", label: "Nova — female, friendly" },
-  { id: "onyx", label: "Onyx — male, deep" },
-  { id: "sage", label: "Sage — female, calm" },
-  { id: "shimmer", label: "Shimmer — female, clear" },
-  { id: "verse", label: "Verse — male, expressive" },
+  voice("alloy", "Alloy — neutral"),
+  voice("ash", "Ash — male, warm"),
+  voice("ballad", "Ballad — male, soft"),
+  voice("coral", "Coral — female, bright"),
+  voice("echo", "Echo — male, calm"),
+  voice("fable", "Fable — British, expressive"),
+  voice("nova", "Nova — female, friendly"),
+  voice("onyx", "Onyx — male, deep"),
+  voice("sage", "Sage — female, calm"),
+  voice("shimmer", "Shimmer — female, clear"),
+  voice("verse", "Verse — male, expressive"),
 ];
 
 export const DEFAULT_CLOUD_VOICE = "alloy";

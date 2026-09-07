@@ -530,7 +530,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
               void post({ action: "voice", engine: source, voice: e.target.value });
             }}
           >
-            {voices.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
+            {voices.map((v) => <option key={v.id} value={v.id}>{t(v.labelKey)}</option>)}
           </select>
         </div>
         {source === "local" && status.language !== "en" && (

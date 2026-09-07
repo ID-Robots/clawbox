@@ -170,7 +170,7 @@ export default function HarnessPicker() {
           </span>
           <span className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
             <span className="material-symbols-rounded" style={{ fontSize: 13 }}>lock</span>
-            This edition
+            {t("settings.harnessThisEdition")}
           </span>
         </div>
       ) : (

@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 import ProviderRadioRow from "./ProviderRadioRow";
 import { useT } from "@/lib/i18n";
-import { CLAWBOX_AI_DESCRIPTION } from "@/lib/clawbox-ai-tiers";
+import { CLAWBOX_AI_DESCRIPTION_KEY } from "@/lib/clawbox-ai-tiers";
 
 // The ClawBox AI radio row, shared by the OpenClaw wizard (AIModelsStep) and the
 // Hermes provider panel (HermesProviderConfig).
@@ -48,7 +48,10 @@ export default function ClawboxAiProviderRow({
       onSelect={onSelect}
       isDefault={isDefault}
       name="ClawBox AI"
-      description={CLAWBOX_AI_DESCRIPTION}
+      // The catalogue, not the English constant: every locale carries this
+      // line, and the German desktop showed the English one for months
+      // (locale sweep DE-1, 2026-09-07).
+      description={t(CLAWBOX_AI_DESCRIPTION_KEY)}
       statusSlot={statusSlot}
       badges={
         <>
