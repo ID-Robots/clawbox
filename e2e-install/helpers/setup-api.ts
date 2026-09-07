@@ -431,7 +431,13 @@ async function diagnoseLostUpdate(): Promise<string> {
     "bash", "-lc",
     "python3 -c \"import json;d=json.load(open('/home/clawbox/clawbox/data/config.json'));"
     + "h=d.get('update_lock_holder');"
-    + "h=(h if not isinstance(h,dict) else {'recorded':True,'at':h.get('at'),'pid_present':bool(h.get('pid'))});"
+    + "a=(h.get('at') if isinstance(h,dict) else None);"
+    // EVERY shape is reduced, not just the dict: a string, a list or a number
+    // under that key would otherwise have gone down verbatim, and `at` is only
+    // repeated when it looks like the timestamp this code writes.
+    + "h=({'recorded':False} if h is None else "
+    + "{'recorded':True,'at':(a if isinstance(a,str) and len(a)<40 else None),'pid_present':bool(h.get('pid'))} "
+    + "if isinstance(h,dict) else {'recorded':True,'shape':type(h).__name__});"
     + "print({k:d.get(k) for k in ('update_in_progress','update_needs_continuation',"
     + "'update_interrupted_at','update_completed','update_completed_at')}, 'holder=', h)\" 2>&1 || true",
   ]);

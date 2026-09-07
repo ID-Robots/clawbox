@@ -9171,7 +9171,18 @@ log "Installing Hermes (on the hermes and dual editions)..."
 # marker already invalidated, so the flash host would see no verdict at all.
 # The step prints its own reason; on this path that report is the outcome, and a
 # box that is otherwise fully provisioned is worth more than an aborted install.
-step_hermes_install || echo "  Warning: Hermes is not runnable after this step — install it manually, then re-run install.sh (non-fatal)" >&2
+# RECORDED, not only printed: on the hermes and dual SKUs the agent IS the
+# product, so a box that finished provisioning without a runnable one — or on a
+# build we do not ship — is not a complete install, and `record_provision_failure`
+# is the channel this file already has for saying so. It reaches the operator's
+# "Steps that failed:" line and the `[provision-status]` marker the flash host
+# parses, which is exactly what the bare call was destroying by aborting before
+# either could be written. Idempotent, and never reached on openclaw (the step
+# returns 0 immediately where there is no Hermes harness).
+if ! step_hermes_install; then
+  record_provision_failure hermes_install
+  echo "  Warning: Hermes is not runnable after this step — install it manually, then re-run install.sh (non-fatal)" >&2
+fi
 
 log "Installing and configuring OpenClaw..."
 step_openclaw_setup

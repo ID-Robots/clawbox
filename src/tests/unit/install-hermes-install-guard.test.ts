@@ -1030,14 +1030,21 @@ describe("setup-hermes-edition.sh does not repeat the shim-only check", () => {
  * `[provision-status]` sentinel at all, with the marker already invalidated.
  */
 describe.skipIf(!hasBash)("its call sites, where errexit is live", () => {
-  /** The one top-level call: column 0, not the definition. */
-  const topLevelCall = INSTALL_SH.split(NL).find(
-    (l) => /^step_hermes_install\b/.test(l) && !l.includes("() {"),
-  );
+  /** The top-level call and its guard: from `if ! step_hermes_install` to `fi`. */
+  const topLevelCall = (() => {
+    const lines = INSTALL_SH.split(NL);
+    const start = lines.findIndex((l) => /^if ! step_hermes_install; then$/.test(l));
+    if (start < 0) return undefined;
+    const end = lines.indexOf("fi", start);
+    return end < 0 ? undefined : lines.slice(start, end + 1).join(NL);
+  })();
 
   it("is guarded on the full-install path", () => {
-    expect(topLevelCall, "the top-level call has moved or vanished").toBeDefined();
-    expect(topLevelCall).toMatch(/^step_hermes_install\s*\|\|/);
+    expect(topLevelCall, "the top-level call is bare, or has moved").toBeDefined();
+    // And the failure is RECORDED, not only printed: on hermes and dual the
+    // agent is the product, so a box provisioned without a runnable one is not
+    // a complete install and the flash host's marker has to say so.
+    expect(topLevelCall).toContain("record_provision_failure hermes_install");
   });
 
   /** Run one line under install.sh's own shell options with the step failing. */
@@ -1051,6 +1058,7 @@ describe.skipIf(!hasBash)("its call sites, where errexit is live", () => {
           // install.sh:22, verbatim — the condition that makes this matter.
           "set -euo pipefail",
           "step_hermes_install() { echo STEP_FAILED >&2; return 1; }",
+          'record_provision_failure() { echo "RECORDED $1"; }',
           callLine,
           // Everything the installer still has to do: the services, VNC, and
           // the verdict banner the flash host reads.
@@ -1068,6 +1076,9 @@ describe.skipIf(!hasBash)("its call sites, where errexit is live", () => {
     const r = afterFailedStep(topLevelCall!);
     expect(r.code, r.out).toBe(0);
     expect(r.out).toContain("STEP_FAILED");
+    // …and the verdict it reaches names the failure rather than reporting a
+    // complete provision over a box with no agent.
+    expect(r.out).toContain("RECORDED hermes_install");
     expect(r.out).toContain("PROVISIONING VERDICT REACHED");
   });
 
