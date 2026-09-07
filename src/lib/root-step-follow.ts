@@ -13,6 +13,7 @@
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { startRootStep } from "@/lib/root-step-runner";
+import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 const execFile = promisify(execFileCb);
 
@@ -31,10 +32,6 @@ export interface FollowRootStepOptions {
   label: string;
 }
 
-export function rootStepUnit(step: string): string {
-  return `clawbox-root-update@${step}.service`;
-}
-
 async function unitState(unit: string): Promise<{ active: string; result: string }> {
   try {
     const { stdout } = await execFile(
@@ -51,11 +48,20 @@ async function unitState(unit: string): Promise<{ active: string; result: string
   }
 }
 
-async function journalLines(unit: string, lines: number): Promise<string[]> {
+/**
+ * What THIS run of the step has said so far.
+ *
+ * Bounded by `sinceMs`, the moment this follow started it: the journal is
+ * persistent, so an unbounded read hands the last attempt's lines to a caller
+ * that is showing them as live progress — and the poll before the unit writes
+ * anything is exactly when that happens. A second install of the voice would
+ * open by showing the first one's error.
+ */
+async function journalLines(step: string, sinceMs: number, lines: number): Promise<string[]> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", unit, "-n", String(lines), "--no-pager", "-o", "cat"],
+      rootStepJournalArgs(step, { sinceMs, lines }),
       { timeout: 10_000 },
     );
     return stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
@@ -64,8 +70,8 @@ async function journalLines(unit: string, lines: number): Promise<string[]> {
   }
 }
 
-async function lastJournalLine(unit: string, lines: number): Promise<string | null> {
-  const all = await journalLines(unit, lines);
+async function lastJournalLine(step: string, sinceMs: number, lines: number): Promise<string | null> {
+  const all = await journalLines(step, sinceMs, lines);
   return all.length > 0 ? all[all.length - 1] : null;
 }
 
@@ -85,8 +91,8 @@ export function failureReason(lines: readonly string[]): string | null {
   return telling ?? (said.length > 0 ? said[said.length - 1] : null);
 }
 
-async function failureLine(unit: string): Promise<string | null> {
-  return failureReason(await journalLines(unit, 40));
+async function failureLine(step: string, sinceMs: number): Promise<string | null> {
+  return failureReason(await journalLines(step, sinceMs, 40));
 }
 
 function running(active: string): boolean {
@@ -95,10 +101,13 @@ function running(active: string): boolean {
 
 export async function followRootStep(step: string, opts: FollowRootStepOptions): Promise<{ ok: boolean; error?: string }> {
   const unit = rootStepUnit(step);
+  // Before the start, so nothing this run writes falls outside the window the
+  // journal reads below are bounded by.
+  const startedAt = Date.now();
   try {
     await startRootStep(step, { noBlock: true, timeoutMs: SYSTEMCTL_QUERY_TIMEOUT_MS });
   } catch (err) {
-    const line = await lastJournalLine(unit, 40);
+    const line = await lastJournalLine(step, startedAt, 40);
     return { ok: false, error: line || (err instanceof Error ? err.message : `Could not start ${opts.label}.`) };
   }
 
@@ -111,7 +120,7 @@ export async function followRootStep(step: string, opts: FollowRootStepOptions):
     const { active, result } = await unitState(unit);
     if (running(active)) sawRunning = true;
 
-    const line = await lastJournalLine(unit, 5);
+    const line = await lastJournalLine(step, startedAt, 5);
     if (line && line !== lastLine) {
       lastLine = line;
       // A listener that is gone (the stream's client cancelled) must not
@@ -121,13 +130,13 @@ export async function followRootStep(step: string, opts: FollowRootStepOptions):
     }
 
     if (active === "failed") {
-      return { ok: false, error: (await failureLine(unit)) || `${opts.label} failed (${result || "unknown"})` };
+      return { ok: false, error: (await failureLine(step, startedAt)) || `${opts.label} failed (${result || "unknown"})` };
     }
 
     if (!running(active)) {
       if (sawRunning || gracePolls >= START_GRACE_POLLS) {
         if (result && result !== "success") {
-          return { ok: false, error: (await failureLine(unit)) || `${opts.label} failed (${result})` };
+          return { ok: false, error: (await failureLine(step, startedAt)) || `${opts.label} failed (${result})` };
         }
         return { ok: true };
       }

@@ -449,6 +449,11 @@ import {
 // string work with no `fs` behind it, and taking it from the reader would tie a
 // pure helper to that module's surface for no reason.
 import { canonicalPluginId } from "./plugin-repair-id";
+// The journal of THIS run of a root step, in one place: `systemctl show -p
+// InvocationID` cannot answer it (systemd has collected the instance by the
+// time anyone asks), and the same read is owed to the follow in
+// root-step-follow.ts.
+import { rootStepJournalArgs } from "./root-step-journal";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -635,49 +640,24 @@ const STEP_WARNING_LINE = /^CLAWBOX-WARN(?:\[([a-z0-9._:-]{1,60})\])?:\s*(.+)$/i
 const STEP_WARNING_MAX_CHARS = 300;
 
 /**
- * The systemd invocation of the run that JUST happened, so the journal read
- * below cannot answer with an older one.
- *
- * `journalctl -u <unit>` returns that unit's whole history — the journal is
- * persistent on this box (`step_persistent_journal` makes sure of it) — so a
- * marker from last week's update, or from a failed run the owner retried five
- * minutes ago, would be raised over a run that did not produce it. That is a
- * false failure created by the reader. Systemd's own per-start id is the exact
- * bound, and it costs one `systemctl show`; where it cannot be read, nothing is
- * raised, because a guess about WHICH run a warning came from is worse than no
- * warning at all.
- */
-async function rootStepInvocationId(stepId: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFile(
-      "/usr/bin/systemctl",
-      ["show", `clawbox-root-update@${stepId}.service`, "-p", "InvocationID", "--value"],
-      { timeout: 10_000 },
-    );
-    const id = String(stdout ?? "").trim();
-    return /^[0-9a-f]{32}$/i.test(id) ? id : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Raise every marker THIS invocation of a root step left in its journal.
+ * Raise every marker THIS dispatch of a root step left in its journal.
  *
  * Read after the step settles, whatever its outcome: a step that failed reports
  * through its own error, and one that succeeded — or overran its advisory
  * budget — over a fixup that did not is the case nothing else could see.
  * Bounded like `readRootStepFailure` and never fatal: a journal that cannot be
  * read must not fail an update that worked.
+ *
+ * `sinceMs` is when the runner dispatched this step, and it is what keeps a
+ * previous update's markers out of this run's cards — see root-step-journal.ts
+ * for why it, and not systemd's invocation id, is the bound.
  */
-async function collectRootStepWarnings(stepId: string): Promise<void> {
-  const invocation = await rootStepInvocationId(stepId);
-  if (!invocation) return;
+async function collectRootStepWarnings(stepId: string, sinceMs: number): Promise<void> {
   let stdout = "";
   try {
     ({ stdout } = await execFile(
       "/usr/bin/journalctl",
-      [`_SYSTEMD_INVOCATION_ID=${invocation}`, "-n", "500", "--no-pager", "-o", "cat"],
+      rootStepJournalArgs(stepId, { sinceMs, lines: 500 }),
       { timeout: 10_000 },
     ));
   } catch {
@@ -4199,6 +4179,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // ten-minute run.
     if (ownsTheDesktop) await setUpdateLock();
 
+    // The window the warning read below is bounded by. Taken BEFORE the
+    // dispatch, so nothing this step writes can fall outside it, and per step,
+    // so one step's marker is never raised over the next one's.
+    const stepStartedAt = Date.now();
+
     console.log(`[Updater] Running step: ${step.label}`);
 
     try {
@@ -4219,7 +4204,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // A root step that SUCCEEDED can still have skipped a fixup: install.sh's
       // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
       // that reaches the owner instead of only the journal.
-      if (step.requiresRoot) await collectRootStepWarnings(step.id);
+      if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
@@ -4232,7 +4217,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         // and an overrun is its ORDINARY shape on the repair path (a Hermes
         // clone plus a 3.2 GB model fetch) — so this is the run most likely to
         // have skipped a fixup, and the one where the step is shown green.
-        if (step.requiresRoot) await collectRootStepWarnings(step.id);
+        if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
         state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
         continue;
@@ -4248,7 +4233,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // list of them is the only record of which. Raised as warnings beside the
       // step's own error, never instead of it — `state.steps[i].error` below is
       // untouched.
-      if (step.requiresRoot) await collectRootStepWarnings(step.id);
+      if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       state.steps[i].status = "failed";
       state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);

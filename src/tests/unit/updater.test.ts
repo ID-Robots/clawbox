@@ -522,13 +522,65 @@ describe("updater", () => {
       expect(warning?.code).toBe("post-update-fixups");
     });
 
-    it("raises nothing when systemd cannot say which run this was", async () => {
+    it("raises the marker after systemd has UNLOADED the step's unit", async () => {
+      // The shape a box actually has, measured on hardware 2026-09-07: a
+      // `clawbox-root-update@<step>.service` instance is started ad hoc and
+      // referenced by nothing, so systemd garbage-collects it the moment it
+      // exits and `systemctl show -p InvocationID` answers EMPTY — while the
+      // marker the step wrote is still in the persistent journal. A reader
+      // bound to the invocation id therefore raises nothing on every box,
+      // every time, and the owner is told an update landed whole when a fixup
+      // was skipped.
+      setupExecFileMock({
+        InvocationID: { stdout: "\n", stderr: "" },
+        // The journal answers by UNIT NAME, which outlives the unit: the
+        // entries carry `_SYSTEMD_UNIT` from when they were written.
+        "-u clawbox-root-update@apt_update.service": {
+          stdout: [
+            "Starting ClawBox Root Update Step (apt_update).",
+            "  Warning: update_smoke step failed (non-fatal)",
+            "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped: update_smoke",
+            "clawbox-root-update@apt_update.service: Deactivated successfully.",
+          ].join(String.fromCharCode(10)),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        const step = updater.getUpdateState().steps.find((s) => s.id === "apt_update");
+        expect(step?.status).toBe("completed");
+      });
+
+      const warning = updater.getUpdateState().warnings?.find((w) => w.code === "post-update-fixups");
+      expect(warning, "the skipped fixup never reached the owner").toBeDefined();
+      expect(warning?.message).toContain("update_smoke");
+    });
+
+    it("bounds the marker read to THIS run's dispatch of the step", async () => {
       // A guess about WHICH run a marker came from is worse than no warning:
       // the journal is persistent, so an unbounded read answers with the last
-      // update's failures over a clean one.
+      // update's failures over a clean one. Systemd's invocation id used to be
+      // that bound and cannot be — it is empty once the instance is collected
+      // — so the bound is the step's own start time and the OS does the
+      // filtering. Assert the ARGV: a window that is never asked for is a read
+      // that reports a previous run's failures as this one's, and the mock
+      // would answer it just the same.
+      const runStartedAtSeconds = Math.floor(Date.now() / 1000);
       setupExecFileMock({
-        "InvocationID": { stdout: "\n", stderr: "" },
-        "/usr/bin/journalctl": {
+        InvocationID: { stdout: "\n", stderr: "" },
+        "-u clawbox-root-update@apt_update.service": {
           stdout: "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped: firewall",
           stderr: "",
         },
@@ -547,10 +599,21 @@ describe("updater", () => {
       updater.resetUpdateState();
       updater.startUpdate();
       await vi.waitFor(() => {
-        expect(updater.getUpdateState().steps.some((s) => s.status === "completed")).toBe(true);
+        const step = updater.getUpdateState().steps.find((s) => s.id === "apt_update");
+        expect(step?.status).toBe("completed");
       });
 
-      expect(updater.getUpdateState().warnings?.some((w) => w.message.includes("firewall"))).toBeFalsy();
+      const journalRead = mockExecFile.mock.calls
+        .map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`)
+        .find((call) =>
+          call.includes("journalctl") && call.includes("clawbox-root-update@apt_update.service"),
+        );
+      expect(journalRead, "the step's journal was never read").toBeDefined();
+      // By unit NAME, which outlives the unit systemd has already collected.
+      expect(journalRead).toContain("-u clawbox-root-update@apt_update.service");
+      const since = /--since @(\d+)/.exec(journalRead ?? "")?.[1];
+      expect(since, "the read is not bounded to this run").toBeDefined();
+      expect(Number(since)).toBeGreaterThanOrEqual(runStartedAtSeconds);
     });
 
     it("does not raise a line that merely QUOTES the marker", async () => {
