@@ -950,6 +950,100 @@ as_clawbox_login() {
   su - "$CLAWBOX_USER" -c "export PATH=\"${cuda_prefix}$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"
 }
 
+# The marker the third-party cua-driver-rs installer writes above its PATH
+# export, and the fence ClawBox wraps the survivor in. Matched as an ASCII
+# prefix: the vendor's own line ends in an em dash and a URL.
+CUA_BASHRC_MARKER='# Added by cua-driver-rs installer'
+CUA_BASHRC_FENCE_OPEN='# >>> ClawBox: cua-driver-rs PATH (collapsed) >>>'
+CUA_BASHRC_FENCE_CLOSE='# <<< ClawBox: cua-driver-rs PATH (collapsed) <<<'
+
+# Collapse repeated third-party PATH blocks in the clawbox user's ~/.bashrc.
+#
+# NOTHING IN THIS REPOSITORY WRITES THAT BLOCK, which is why there is no writer
+# to make idempotent: the vendor's own `cua-driver` binary appends it, and
+# Hermes' agent keeps invoking that binary on its own
+# (tools/computer_use/cua_backend.py, cua_driver_update_check). Measured
+# read-only on 2026-09-07: 23 copies and 7,049 B on the Hermes box against 1
+# copy and 4,431 B on the OpenClaw box, whose driver was installed once and
+# never updated — so the writer reaches BOTH editions and only the rate differs.
+# Each copy costs every login shell another ~119 B and nothing bounds it.
+#
+# So the fix is at this end, and it runs on EVERY update rather than once,
+# precisely because the writer is not ours and will append again: the copies
+# collapse to one, fenced, and the next append collapses into the same fence.
+#
+# Only a file with a genuine duplicate is rewritten — a box with one copy is
+# left byte-for-byte alone. The vendor's own comment is kept INSIDE the fence:
+# it says who put the path there, and it is what the next collapse matches on.
+# The block's export line is byte-identical to the one inside the Codex
+# installer's fence, so the COMMENT is the key and never the export.
+dedupe_vendor_bashrc_path_blocks() {
+  local BASHRC="$1"
+  [ -f "$BASHRC" ] || return 0
+
+  local copies=0
+  copies=$(grep -cF "$CUA_BASHRC_MARKER" "$BASHRC" 2>/dev/null) || copies=0
+  [ "$copies" -gt 1 ] 2>/dev/null || return 0
+
+  local tmp=""
+  tmp=$(mktemp "$BASHRC.clawbox.XXXXXX" 2>/dev/null) || {
+    echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (mktemp failed)"
+    return 0
+  }
+
+  # A blank line belongs to the block that FOLLOWS it (the vendor writes
+  # blank/comment/export), so blanks are buffered and one is dropped with each
+  # block that goes. Our own fence lines are dropped on the way in and written
+  # back out, which is what makes a second run a no-op.
+  if awk \
+      -v MARKER="$CUA_BASHRC_MARKER" \
+      -v FOPEN="$CUA_BASHRC_FENCE_OPEN" \
+      -v FCLOSE="$CUA_BASHRC_FENCE_CLOSE" '
+      function flush(  i) { for (i = 0; i < blanks; i++) print ""; blanks = 0 }
+      BEGIN { kept = 0; blanks = 0 }
+      $0 == FOPEN || $0 == FCLOSE { next }
+      /^$/ { blanks++; next }
+      index($0, MARKER) == 1 {
+        first = $0
+        got = (getline second)
+        if (got > 0 && second ~ /^export PATH=/) {
+          if (kept) { if (blanks > 0) blanks--; next }
+          kept = 1
+          flush()
+          print FOPEN
+          print first
+          print second
+          print FCLOSE
+          next
+        }
+        flush()
+        print first
+        if (got > 0) { if (second == "") blanks++; else print second }
+        next
+      }
+      { flush(); print }
+      END { flush() }
+    ' "$BASHRC" > "$tmp"; then
+    # An empty result means the rewrite lost the file; keep what is on disk.
+    if [ -s "$tmp" ]; then
+      chown --reference="$BASHRC" "$tmp" 2>/dev/null \
+        || chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp" 2>/dev/null || true
+      chmod --reference="$BASHRC" "$tmp" 2>/dev/null || chmod 0644 "$tmp" 2>/dev/null || true
+      # Guarded: this runs under `set -euo pipefail` from a step the dispatcher
+      # calls plainly, so a .bashrc that cannot be replaced must warn, not end
+      # the update at this line.
+      if mv -f "$tmp" "$BASHRC"; then
+        echo "  Collapsed $copies duplicate cua-driver-rs PATH blocks in .bashrc to one"
+        return 0
+      fi
+    fi
+  fi
+
+  rm -f "$tmp"
+  echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (rewrite failed)"
+  return 0
+}
+
 ensure_clawbox_bashrc_path() {
   # Make ~/.npm-global/bin and ~/.local/bin available in the clawbox user's
   # interactive shells (e.g. the in-UI terminal) so CLIs like openclaw, claude,
@@ -970,6 +1064,9 @@ export PATH="$HOME/.local/bin:$PATH"
 PATHEOF
     chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
   fi
+  # Third-party appends to the same file, bounded here because their writer is
+  # not ours to fix (TASK-758).
+  dedupe_vendor_bashrc_path_blocks "$BASHRC"
 }
 
 node_satisfies_openclaw_engine() {
