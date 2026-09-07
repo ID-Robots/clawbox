@@ -129,6 +129,11 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(),
   setPrimaryModelWithoutCatalogValidation: vi.fn().mockResolvedValue(undefined),
   inferConfiguredLocalModel: vi.fn(),
+  // Pure helper — mirrored like compactionReserveFloorForContext above: the
+  // fallback writer's capability probe (ollama-capabilities.ts) falls back to
+  // this name rule when Ollama cannot be asked, and an omitted export made the
+  // whole configure call a 500.
+  ollamaModelNameCanChat: (modelId: string) => !/embed/i.test(modelId),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawDoctorFix: vi.fn().mockResolvedValue(undefined),
   spawnOpenclawCli: vi.fn().mockResolvedValue(""),
@@ -1569,6 +1574,61 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
+  });
+
+  // chat/model refuses an embedding-only Ollama model for the picker through
+  // Ollama's own capability list, and this writer still took the store and
+  // `inferConfiguredLocalModel` at their word — the name rule both apply
+  // cannot see an embedder with no "embed" in its tag (the review of the
+  // 2026-09-07 sweep batch). The probe is the REAL one here: `/api/show` is
+  // answered by the fetch stub, so the wiring is what is under test.
+  describe("an Ollama model that Ollama says can only embed", () => {
+    function answerOllamaShow(capabilities: string[]): string[] {
+      const shows: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/api/show")) {
+          shows.push(String(init?.body ?? ""));
+          return { ok: true, status: 200, json: async () => ({ capabilities } as unknown) };
+        }
+        throw new Error("network disabled in tests");
+      }));
+      return shows;
+    }
+
+    it("is not written as the fallback when the openclaw config inference names it", async () => {
+      mockInferConfiguredLocalModel.mockReturnValue({ provider: "ollama", model: "ollama/bge-m3" });
+      const shows = answerOllamaShow(["embedding"]);
+
+      await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key" }));
+
+      // Asked by its bare tag, the name Ollama itself knows it by.
+      expect(shows).toContain(JSON.stringify({ model: "bge-m3" }));
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["ollama/bge-m3"] --json');
+      expect(commands).toContain("config set agents.defaults.model.fallbacks [] --json");
+    });
+
+    it("is not written as the fallback when the store names it outright", async () => {
+      mockGetAll.mockResolvedValue({ local_ai_configured: true, local_ai_model: "ollama/bge-m3" });
+      answerOllamaShow(["embedding"]);
+
+      await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key" }));
+
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["ollama/bge-m3"] --json');
+      expect(commands).toContain("config set agents.defaults.model.fallbacks [] --json");
+    });
+
+    it("stays the fallback when Ollama says it can chat", async () => {
+      mockInferConfiguredLocalModel.mockReturnValue({ provider: "ollama", model: "ollama/qwen2.5:0.5b" });
+      answerOllamaShow(["completion", "tools"]);
+
+      await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-openai-key" }));
+
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain('config set agents.defaults.model.fallbacks ["ollama/qwen2.5:0.5b"] --json');
+    });
   });
 
   it("skips a local engine the owner switched off when picking the fallback", async () => {

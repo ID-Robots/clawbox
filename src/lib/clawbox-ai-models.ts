@@ -194,6 +194,43 @@ function isClawboxAiModelRef(ref: string): boolean {
   return provider === CLAWBOX_AI_PROVIDER || provider === "clawai";
 }
 
+/** The translation keys a picker draws one ClawBox AI chat tier with. */
+export interface ClawboxAiTierTextKeys {
+  labelKey: string;
+  hintKey: string;
+}
+
+/**
+ * What a picker CALLS each chat tier, as translation KEYS.
+ *
+ * Keys rather than words, because this module is import-safe from the server
+ * and from every client bundle, and the words belong to the locale: the chat
+ * composer's model chip said "Max Tier" beside a Settings page that called the
+ * same plan "Max-Tarif" (the UI sweep of 2026-09-07). The Max label is the
+ * plan name Settings already uses (`ai.planNameMax`), so the two surfaces
+ * cannot drift apart again; the Flash tier has no single plan behind it and
+ * carries its own key.
+ */
+export const CLAWBOX_AI_TIER_TEXT_KEYS: Readonly<Record<ClawboxAiTier, ClawboxAiTierTextKeys>> = {
+  flash: { labelKey: "ai.clawboxTierFlash", hintKey: "ai.clawboxTierFlashHint" },
+  pro: { labelKey: "ai.planNameMax", hintKey: "ai.clawboxTierMaxHint" },
+};
+
+/**
+ * The tier text keys for `model` — a bare id (`deepseek-v4-pro`, the shape a
+ * catalogue row carries) or a ClawBox AI ref (`clawai/…`, `deepseek/…`) — and
+ * null for anything else, including another provider's model that happens to
+ * share the id. The caller keeps whatever label it already had for a null.
+ */
+export function clawboxAiTierTextKeys(model: string | null | undefined): ClawboxAiTierTextKeys | null {
+  if (typeof model !== "string") return null;
+  if (model.includes("/") && !isClawboxAiModelRef(model)) return null;
+  const id = bareModelId(model);
+  if (id === CLAWBOX_AI_FLASH_MODEL_ID.toLowerCase()) return CLAWBOX_AI_TIER_TEXT_KEYS.flash;
+  if (id === CLAWBOX_AI_PRO_MODEL_ID.toLowerCase()) return CLAWBOX_AI_TIER_TEXT_KEYS.pro;
+  return null;
+}
+
 /**
  * Does the portal POSITIVELY refuse `model` for this device's account?
  *
