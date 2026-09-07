@@ -258,10 +258,11 @@ verify_file() {
 # copying the tree is only safe at a moment when the tree is not the attacker's
 # to choose. config/clawbox-root-step.sh calls it only after `--verify` said the
 # tree still matches the root-owned record, and install.sh calls it only from
-# write_root_exec_manifest, which re-records the tree at the two points the
-# update mechanism defines as "this is the new code" (a full install run by an
-# operator, and immediately after its own `git reset --hard` to the update
-# branch). Adding a third caller is a privilege decision.
+# write_root_exec_manifest, which either re-records the tree at the two points
+# the update mechanism defines as "this is the new code" (a full install run by
+# an operator, and immediately after its own `git reset --hard` to the update
+# branch), or — everywhere else — refuses unless the record it is NOT rewriting
+# still describes the tree. Adding a third caller is a privilege decision.
 mirror_tree() {
   # The record is what the staged copy is checked against below, so there is
   # nothing to stage without one.
@@ -275,9 +276,12 @@ mirror_tree() {
 
   local staging="$MIRROR_DIR.new" previous="$MIRROR_DIR.old" parent f mode
   parent="$(dirname "$MIRROR_DIR")"
-  if [ ! -d "$parent" ]; then
-    install -d -o root -g root -m 0755 "$parent" || die "cannot create $parent" 66
-  fi
+  # Unconditionally, not only when it is absent. The mirror's whole guarantee is
+  # that the directory holding it is not clawbox's to write, and a parent that
+  # merely exists says nothing about that. Every creator today is root and
+  # clawbox cannot write /var/lib, so this states the assumption rather than
+  # repairing anything — but it is the assumption everything below rests on.
+  install -d -o root -g root -m 0755 "$parent" || die "cannot create $parent" 66
 
   # ONE restage at a time, fleet-wide-fixed names and all.
   #
@@ -292,6 +296,20 @@ mirror_tree() {
   exec 9>"$MIRROR_DIR.lock" || die "cannot open the mirror lock" 66
   flock -w 120 9 || die "another root step is restaging $MIRROR_DIR" 66
 
+  # An interrupted swap is the one way $MIRROR_DIR goes missing while a perfectly
+  # good build exists: between the two renames at the end of this function the
+  # mirror is $previous and nothing else. That window is microseconds, but what
+  # lands in it is a power cut or an OOM kill during an update — and
+  # `rebuild_reboot` reboots the box on purpose. Nothing else ever looks in
+  # $previous: the dispatcher refuses on a missing $ENTRYPOINT, and the line
+  # below would DELETE the only copy. So put it back first. Then a restage that
+  # goes on to refuse — the tree stopped matching the record, which is exactly
+  # what an update in flight looks like — leaves the box running the previous
+  # root-established build instead of refusing every root step, including the
+  # two that would let it finish the update, on an appliance with no console.
+  if [ ! -d "$MIRROR_DIR" ] && [ -d "$previous" ]; then
+    mv -T "$previous" "$MIRROR_DIR" || true
+  fi
   rm -rf "$staging" "$previous" || die "cannot clear the mirror staging area" 66
   install -d -o root -g root -m 0755 "$staging" || die "cannot create $staging" 66
 

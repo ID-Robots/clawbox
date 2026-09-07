@@ -202,14 +202,23 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     ], { user: "root" });
     expect(before.trim(), "the marker must not be there before the test writes it").toBe("0");
 
+    // The backup is taken on its own, BEFORE anything is mutated: a failure
+    // here leaves the checkout untouched and there is nothing to restore. Every
+    // mutation is inside the try, so a throw from the record write — which
+    // happens after the file has already changed — still runs the finally. This
+    // suite is `mode: "serial"`, so a checkout left modified poisons the cases
+    // after it rather than failing this one.
     await dockerExec([
-      "bash", "-lc",
-      `cp ${covered} /tmp/e2e-733-covered.bak`
-      + ` && printf '\\n${marker}\\n' >> ${covered}`
-      + " && /usr/local/libexec/clawbox/clawbox-root-manifest.sh --write",
+      "bash", "-lc", `cp ${covered} /tmp/e2e-733-covered.bak`,
     ], { user: "root" });
 
     try {
+      await dockerExec([
+        "bash", "-lc",
+        `printf '\\n${marker}\\n' >> ${covered}`
+        + " && /usr/local/libexec/clawbox/clawbox-root-manifest.sh --write",
+      ], { user: "root" });
+
       const dispatched = await dockerExec([
         "bash", "-lc",
         "sudo -n /usr/local/libexec/clawbox/clawbox-run-root-step.sh fix_git_perms 2>&1"

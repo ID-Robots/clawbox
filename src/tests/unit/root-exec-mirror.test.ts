@@ -194,6 +194,37 @@ d("the root-owned mirror", () => {
     expect(fs.existsSync(`${mirror}.new`), "staging litter survived the refusal").toBe(false);
   });
 
+  it("puts back a mirror an interrupted swap left aside, instead of deleting it", () => {
+    // The swap is two renames, and between them $MIRROR_DIR does not exist and
+    // $MIRROR_DIR.old holds the only root-established build. A power cut there
+    // is not exotic: `rebuild_reboot` reboots the box, and an update is when
+    // this function runs. The next restage used to open with
+    // `rm -rf "$staging" "$previous"` — destroying that only copy — and if the
+    // tree no longer verified (which is exactly the state an update in flight
+    // leaves it in) the staging was thrown away too. The box then refuses EVERY
+    // root step, including the two that would let it finish the update and heal
+    // itself, with a perfectly good mirror one rename away and no console to
+    // repair it from.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
+    const good = fs.readFileSync(path.join(mirror, "install.sh"), "utf-8");
+
+    fs.renameSync(mirror, `${mirror}.old`);          // killed between the renames
+    fs.writeFileSync(path.join(project, "install.sh"), stubInstall("PAYLOAD"), { mode: 0o755 });
+
+    const r = sh(`"${helper}" --mirror`);
+    expect(r.status, "a tree that no longer matches the record was mirrored anyway").not.toBe(0);
+    expect(fs.existsSync(path.join(mirror, "install.sh")), "the only good mirror was deleted").toBe(true);
+    expect(fs.readFileSync(path.join(mirror, "install.sh"), "utf-8")).toBe(good);
+    expect(fs.existsSync(`${mirror}.old`), "the aside copy was left to be found again").toBe(false);
+
+    // ...and the customer-visible half: root steps still run, out of the
+    // previous root-established build, rather than the box refusing all of them.
+    const d2 = sh(`"${dispatcher}" post_update`);
+    expect(d2.status, d2.stderr).toBe(0);
+    expect(ran()).toBe(`tree from=${path.join(mirror, "install.sh")} args=--step post_update`);
+  });
+
   it("replaces the previous mirror rather than merging into it", () => {
     // Not probe-once, and not additive: a file dropped from the tree has to
     // disappear from the copy root runs, or root keeps executing code that no
@@ -315,17 +346,17 @@ d("clawbox-root-step.sh — the exempt family", () => {
   });
 });
 
-d("install.sh::root_exec_may_anchor — who may re-record what root runs", () => {
-  /** Lift one function out of install.sh, so the gate under test is the real one. */
-  function shellFn(name: string): string {
-    const text = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
-    const start = text.indexOf(`${name}() {`);
-    if (start < 0) throw new Error(`${name} not found in install.sh`);
-    const end = text.indexOf("\n}", start);
-    if (end < 0) throw new Error(`${name} has no closing brace`);
-    return text.slice(start, end + 2);
-  }
+/** Lift one function out of install.sh, so the code under test is the real one. */
+function shellFn(name: string): string {
+  const text = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
+  const start = text.indexOf(`${name}() {`);
+  if (start < 0) throw new Error(`${name} not found in install.sh`);
+  const end = text.indexOf("\n}", start);
+  if (end < 0) throw new Error(`${name} has no closing brace`);
+  return text.slice(start, end + 2);
+}
 
+d("install.sh::root_exec_may_anchor — who may re-record what root runs", () => {
   /** Whether the tree still matches the record is set up by each test. */
   function anchor(opts: { fromTree: boolean; resynced: boolean }) {
     return sh([
@@ -364,9 +395,109 @@ d("install.sh::root_exec_may_anchor — who may re-record what root runs", () =>
     expect(anchor({ fromTree: true, resynced: false })).toBe("ANCHOR-ALLOWED");
   });
 
-  it("allows a no-op re-record over a tree that still matches", () => {
+  it("refuses even over a tree that still matches — there is nothing to re-record", () => {
+    // A tree that matches is not a licence to re-record it; it is the reason no
+    // record needs writing at all. write_root_exec_manifest below brings such a
+    // record forward without a second walk, which is what closes the window
+    // between this gate returning and the walk that fills the record.
     sh(`"${helper}" --write`);
-    expect(anchor({ fromTree: false, resynced: false })).toBe("ANCHOR-ALLOWED");
+    expect(anchor({ fromTree: false, resynced: false })).toBe("ANCHOR-REFUSED");
+  });
+});
+
+d("install.sh::write_root_exec_manifest — the record is never re-walked on a hunch", () => {
+  /** Verbs the helper under test was asked for, in order. */
+  const verbs = () => (fs.existsSync(`${tmp}/verbs`)
+    ? fs.readFileSync(`${tmp}/verbs`, "utf-8").trim().split("\n").filter(Boolean)
+    : []);
+
+  /**
+   * Drive the real function against a WRAPPER around the real helper: it logs
+   * the verbs, and can rewrite the tree at the instant the record-writing walk
+   * starts. That stands in for a foothold's poller winning the window between
+   * the gate's answer and the bytes that reach the record — the same way the
+   * suite above simulates the mid-copy race, because a real race would make the
+   * test flaky rather than the defect absent.
+   */
+  function writeManifest(opts: { fromTree: boolean; resynced: boolean; poisonOnWrite?: boolean }) {
+    const wrapper = path.join(tmp, "wrapper.sh");
+    fs.writeFileSync(wrapper, [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "$1" >> ${JSON.stringify(`${tmp}/verbs`)}`,
+      ...(opts.poisonOnWrite
+        ? [
+          `if [ "$1" = "--write" ]; then`,
+          `  cat > ${JSON.stringify(path.join(project, "install.sh"))} <<'PAYLOAD_EOF'`,
+          stubInstall("PAYLOAD"),
+          "PAYLOAD_EOF",
+          `  chmod 0755 ${JSON.stringify(path.join(project, "install.sh"))}`,
+          "fi",
+        ]
+        : []),
+      `exec ${JSON.stringify(helper)} "$@"`,
+      "",
+    ].join("\n"), { mode: 0o755 });
+
+    const r = sh([
+      "set -uo pipefail",
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      `SRC_DIR=${JSON.stringify(opts.fromTree ? project : mirror)}`,
+      `ROOT_EXEC_TREE_RESYNCED=${opts.resynced ? 1 : 0}`,
+      `ROOT_EXEC_MANIFEST_HELPER=${JSON.stringify(wrapper)}`,
+      "clear_provision_failure() { :; }",
+      shellFn("root_exec_manifest_helper_alive"),
+      shellFn("root_exec_may_anchor"),
+      shellFn("root_exec_helper_knows_mirror"),
+      shellFn("write_root_exec_manifest"),
+      "if write_root_exec_manifest; then echo WRITE=ok; else echo WRITE=failed; fi",
+    ].join("\n"));
+    return { out: `${r.stdout}${r.stderr}`, verdict: /WRITE=(\w+)/.exec(r.stdout)?.[1] ?? "" };
+  }
+
+  it("brings a matching record forward without re-walking the tree", () => {
+    // M-1. The old third clause of root_exec_may_anchor asked `--verify` about
+    // $PROJECT_DIR and the answer was stale the instant it returned; `--write`
+    // then walked the tree AGAIN and recorded whatever was there by then. A
+    // foothold that restores the tree, starts post_update (→ install_root_libexec
+    // → here, where SRC_DIR is the mirror and nothing was resynced, so that
+    // clause is the one that decided) and swaps install.sh between the two walks
+    // got its bytes into the record — and from the record into the mirror, whose
+    // staged-copy check compares against that same poisoned record.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
+    const benign = fs.readFileSync(path.join(mirror, "install.sh"), "utf-8");
+
+    const r = writeManifest({ fromTree: false, resynced: false, poisonOnWrite: true });
+    expect(r.verdict, r.out).toBe("ok");
+    expect(verbs(), "the record was re-walked over a tree this run did not put there").not.toContain("--write");
+    expect(
+      fs.readFileSync(path.join(mirror, "install.sh"), "utf-8"),
+      "a payload swapped in mid-record reached the copy root execs",
+    ).toBe(benign);
+  });
+
+  it("still refuses when the record does not describe the tree", () => {
+    sh(`"${helper}" --write`);
+    fs.writeFileSync(path.join(project, "install.sh"), stubInstall("PAYLOAD"), { mode: 0o755 });
+    const r = writeManifest({ fromTree: false, resynced: false });
+    expect(r.verdict).toBe("failed");
+    expect(r.out).toContain("refusing to re-record the root-exec manifest");
+    expect(verbs()).not.toContain("--write");
+  });
+
+  it("still re-records at the two moments that may anchor", () => {
+    // The gate must not have been turned into "never write": an update that has
+    // just reset the tree, and an operator running install.sh out of it, are
+    // exactly when the record has to be rewritten — including the very first
+    // time, when there is no record to bring forward at all.
+    for (const opts of [{ fromTree: false, resynced: true }, { fromTree: true, resynced: false }]) {
+      fs.rmSync(`${tmp}/verbs`, { force: true });
+      fs.rmSync(manifest, { force: true });
+      const r = writeManifest(opts);
+      expect(r.verdict, r.out).toBe("ok");
+      expect(verbs(), JSON.stringify(opts)).toContain("--write");
+      expect(fs.existsSync(path.join(mirror, "install.sh"))).toBe(true);
+    }
   });
 });
 

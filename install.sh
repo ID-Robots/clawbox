@@ -317,6 +317,27 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       # Temp name + rename, NEVER a copy over the live file: a copy that fails
       # halfway leaves behind exactly the stub described above.
       _mf_restage() {
+        # ROOT MAY ONLY TAKE THIS FILE OUT OF A TREE IT IS ALREADY EXECUTING.
+        #
+        # $_mf_src is $_b/config/clawbox-root-manifest.sh — the clawbox-writable
+        # checkout — and what follows installs it root-owned 0755 into libexec
+        # and then runs it as root. Where $_self is $_b (an operator's
+        # `sudo bash install.sh`, the flash host, the one-time transition) that
+        # grants nothing new: root is already executing those bytes, which is
+        # root_exec_may_anchor's own first clause. On a DISPATCHED step it is the
+        # whole of TASK-733 by another verb — root came out of the root-owned
+        # mirror, `bootstrap_updater`, `post_update` and `rebuild_reboot` are
+        # startable by the web server through the NOPASSWD launcher, and the copy
+        # does not merely run once: it BECOMES the installed helper, the file
+        # that decides which bytes root executes from then on.
+        #
+        # Refusing costs one pass — install_root_libexec installs the helper
+        # later in the same run out of $SRC_DIR, the copy root vouched for — and
+        # fails closed, which is the direction everything here fails in.
+        if [ "$_self" != "$_b" ]; then
+          echo "[bootstrap] WARN: not restaging the root-exec manifest helper from $_b — root is running out of $_self and will not execute a file the clawbox account can rewrite" >&2
+          return 1
+        fi
         # Once per run. Both call sites below are reachable in a single pass — a
         # helper that was not answering is replaced, answers, and then fails
         # --write — and staging the same bytes a second time cannot change that
@@ -340,7 +361,7 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
         if _mf_alive; then
           _mf_ok=1
         else
-          echo "[bootstrap] WARN: the installed root-exec manifest helper is not answering — replacing it" >&2
+          echo "[bootstrap] WARN: the installed root-exec manifest helper is not answering" >&2
           if _mf_restage && _mf_alive; then _mf_ok=1; fi
         fi
         if [ "$_mf_ok" = "0" ]; then
@@ -352,7 +373,7 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
           # Repair before reporting. The most likely reason the INSTALLED helper
           # failed is that it is the one from before this reset, so replace it
           # from the tree we just checked out and try once more.
-          echo "[bootstrap] WARN: could not re-record the root-exec manifest — refreshing the helper and retrying" >&2
+          echo "[bootstrap] WARN: could not re-record the root-exec manifest" >&2
           _mf_restage || true
           if ! { _mf_alive && "$_mf" --write && "$_mf" --verify >/dev/null; }; then
             # Carried into the re-exec rather than acted on here: the process
@@ -5681,13 +5702,22 @@ ROOT_EXEC_TREE_RESYNCED=0
 # because that step is web-startable and runs install.sh out of the ROOT-OWNED
 # mirror — a re-anchor over an unverified tree would take a rewritten install.sh,
 # copy it into the mirror, and hand it to root on the next step: the whole of
-# TASK-733, restored through the back door. So outside those two moments the
-# record is only ever re-written over a tree that still MATCHES it, which is a
-# no-op on a healthy box and a refusal on a tampered one.
+# TASK-733, restored through the back door.
+#
+# Outside those two moments the record is not re-written AT ALL. It used to be,
+# over a tree that still verified, on the argument that rewriting a record which
+# already matches is a no-op — but `--verify` is asked about $PROJECT_DIR and the
+# answer is stale the instant it returns, and `--write` then walks the tree AGAIN
+# and records whatever is there by then. A foothold that restores the tree,
+# starts `post_update` and swaps install.sh between the two walks got its bytes
+# into the record, and from the record into the mirror, whose staged-copy check
+# compares against that same record. write_root_exec_manifest keeps the no-op
+# without the second walk instead: it requires the record to still describe the
+# tree, and writes nothing.
 root_exec_may_anchor() {
   [ "$SRC_DIR" = "$PROJECT_DIR" ] && return 0
   [ "$ROOT_EXEC_TREE_RESYNCED" = "1" ] && return 0
-  "$ROOT_EXEC_MANIFEST_HELPER" --verify >/dev/null 2>&1
+  return 1
 }
 
 # Does the installed helper know about the mirror at all?
@@ -5703,11 +5733,16 @@ root_exec_helper_knows_mirror() {
 # caller must treat that as a failure.
 write_root_exec_manifest() {
   root_exec_manifest_helper_alive "$ROOT_EXEC_MANIFEST_HELPER" || return 1
-  if ! root_exec_may_anchor; then
+  if root_exec_may_anchor; then
+    "$ROOT_EXEC_MANIFEST_HELPER" --write || return 1
+  elif ! "$ROOT_EXEC_MANIFEST_HELPER" --verify >/dev/null 2>&1; then
+    # Not one of the two anchoring moments, so the record is brought FORWARD
+    # rather than rewritten — and that is only defensible while it still
+    # describes the tree. When it does not, this run cannot say what root should
+    # execute and must not guess. See root_exec_may_anchor.
     echo "  Error: refusing to re-record the root-exec manifest — $PROJECT_DIR does not match what root recorded, and this run did not put it there" >&2
     return 1
   fi
-  "$ROOT_EXEC_MANIFEST_HELPER" --write || return 1
   # VERIFY, then clear — never the other way round. `--write` returning 0 says
   # the helper believes it wrote a manifest, not that the record now matches the
   # tree; a write that landed somewhere else, or a tree that moved while it ran,

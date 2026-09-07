@@ -42,15 +42,25 @@ exists:
 
 * `config/clawbox-root-step.sh` restages it on every dispatch, and only while
   `--verify` says the tree still matches the root-owned record.
-* `install.sh` restages it from `write_root_exec_manifest`, which re-records the
-  tree — and `root_exec_may_anchor` allows that at exactly two moments: when
-  `install.sh` is itself running out of the tree (an operator's
+* `install.sh` restages it from `write_root_exec_manifest`, and
+  `root_exec_may_anchor` allows that function to RE-RECORD at exactly two
+  moments: when `install.sh` is itself running out of the tree (an operator's
   `sudo bash install.sh`, the flash host's provisioning run, the one-time
   transition below — root is already executing that tree, so recording it grants
   nothing new), and immediately after this run's own `git reset --hard` to the
-  update branch. Everywhere else the record is only re-written over a tree that
-  still matches it, which is a no-op on a healthy box and a refusal on a
-  tampered one.
+  update branch.
+
+  Outside those two moments nothing is written. The record is only brought
+  FORWARD — it must still describe the tree, or the run refuses. It used to be
+  re-written there too, on the argument that rewriting a record which already
+  matches is a no-op; it is not, because `--verify` is asked about
+  `$PROJECT_DIR` and the answer is stale the instant it returns, and `--write`
+  then walks the tree again and records whatever is there by then. A foothold
+  that restores the tree, starts `post_update` (→ `step_systemd_services` →
+  `install_root_libexec`, where `SRC_DIR` is the mirror) and swaps `install.sh`
+  between the two walks got its bytes into the record — and from the record into
+  the mirror, whose staged-copy check compares against that same record. Not
+  writing is the same no-op with no second walk to win.
 
 So a tree that changed because an update replaced it is re-recorded at that
 moment and mirrors on the next dispatch; a tree that changed because something
@@ -72,18 +82,31 @@ could between them leave `$MIRROR_DIR` absent.
 `install.sh`'s own self-update bootstrap still runs on a dispatched step: it
 finds the checkout at `/home/clawbox/clawbox` rather than beside itself, and
 re-execs the **mirror** copy it restages from the tree it just reset — never the
-tree. Keying that block on "is there a `.git` next to me" would have switched the
+tree. Its repair for a manifest helper that will not answer follows the same
+rule: it may install `$_b/config/clawbox-root-manifest.sh` into
+`/usr/local/libexec/clawbox` and run it as root only where `$_self` IS `$_b`,
+i.e. where root already executes that checkout. On a dispatched step it refuses
+and carries the failure forward instead; `install_root_libexec` installs the
+helper later in the same run out of `$SRC_DIR`. Root installing a
+clawbox-writable file and then executing it is this whole document's subject
+whatever the verb — `install` counts as much as `exec` does, and the copy is
+worse than a single exec because it BECOMES the file that decides which bytes
+root runs afterwards. Keying that block on "is there a `.git` next to me" would have switched the
 whole thing off for every dispatched step, and with it the fleet's ability to
 deliver a fix to the updater *in* the update that carries it.
 
-`git` over the checkout stopped running as root at the same time, because it is
-the same class of hole by another route: `fetch` honours `remote.<name>.uploadpack`
+Every `git` that writes the checkout, or that can execute a program the checkout
+configures, stopped running as root at the same time, because it is the same
+class of hole by another route: `fetch` honours `remote.<name>.uploadpack`
 and `url.*.insteadOf`, `checkout` runs `.git/hooks/post-checkout`, and any
 checkout runs `filter.*.smudge` — all named by `.git/config` or by files under
 `.git/hooks`, inside the clawbox-writable tree and deliberately outside the
-record. `install.sh` now runs git as whoever owns the checkout
+record. `install.sh` now runs those as whoever owns the checkout
 (`use_tree_owner_for_git`), which is what `scripts/force-update.sh` has always
-done.
+done. The read-only ref plumbing that resolves which branch a detached checkout
+belongs to (`for-each-ref`, `name-rev`, `rev-parse`, `symbolic-ref`) still runs
+as root: it touches neither the index nor the working tree, so it reaches none of
+`.git/hooks`, `filter.*.smudge`, `core.fsmonitor` or `remote.*.uploadpack`.
 
 ## Rollout ordering — read this before shipping
 
@@ -134,6 +157,15 @@ Nothing strands.
   dispatcher itself on the next dispatch, from a tree that verifies. The refresh
   is idempotent — the same walk over the same bytes — so it is safe to repeat and
   is repeated on **every** dispatch rather than once at install time.
+* An **interrupted swap** is recovered. The swap is two renames, and a kill
+  between them — a power cut, an OOM kill, the reboot `rebuild_reboot` performs
+  — leaves `$MIRROR_DIR` absent with the only root-established build sitting in
+  `$MIRROR_DIR.old`. `mirror_tree` puts it back before it clears its staging
+  area, so a restage that then refuses (the tree stopped matching, which is what
+  an update in flight looks like) leaves the box running the previous build.
+  Without that the next restage deleted the copy and the box refused every root
+  step — including `post_update` and `bootstrap_updater`, the two that would let
+  it finish the update and heal itself.
 * A box with no mirror AND a tree that does not verify refuses the step (exit 65)
   and prints the repair, which is the one an operator already knows:
   `sudo bash /home/clawbox/clawbox/install.sh --step systemd_services`.
@@ -168,6 +200,15 @@ The journal line for an exempt step names the mirror path as the script root
 executed. Nothing under `/home/clawbox` should appear as a root `ExecStart` or a
 root `bash` target.
 
+`--verify` is the load-bearing line of that recipe, not `ls`. `scripts/force-update.sh`
+hard-syncs and rebuilds as `clawbox` and never re-records, so after one the tree
+is newer than the record: every command above still prints a healthy-looking
+mirror, `--verify` fails, and the box goes on running the PREVIOUS build's units,
+sudoers and scripts on the root side until something re-records
+(`sudo bash /home/clawbox/clawbox/install.sh --step systemd_services`, or the
+next in-app update). The dispatcher says so on every dispatch — "does not match
+the root-exec manifest — running the mirror staged &lt;time&gt;".
+
 ## What this does not close
 
 * **The mirror is a copy, not a signature.** It stops a clawbox-level foothold
@@ -180,7 +221,9 @@ root `bash` target.
   hook/filter code-execution half of it.
 * **A one-instant window inside the swap.** `mirror_tree` builds a staging
   directory and swaps it in with two renames; a dispatch landing between them
-  refuses (exit 65) rather than running anything. A retry, not a root exec.
+  refuses (exit 65) rather than running anything. A retry, not a root exec. A
+  process *killed* between them is recovered by the next restage (above); it is
+  only a concurrent dispatch that sees the gap.
 * **Paths deliberately left on the tree.** `install.sh` still names
   `$PROJECT_DIR/scripts/...` where it `chmod`s or `chown`s the tree copy, where a
   `User=clawbox` unit's `ExecStart` points at it (`start-vnc.sh` and
