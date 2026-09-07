@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useContext, useState, useCallback, useEffect, useRef, type ReactNode } from "react";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 export type Locale = "en" | "bg" | "de" | "es" | "fr" | "it" | "ja" | "nl" | "sv" | "zh";
 
@@ -107,7 +108,13 @@ export function I18nProvider({ children }: { children: ReactNode }) {
       setLocaleState(next);
       setLocaleResolved(true);
     };
-    fetch("/setup-api/preferences?keys=ui_language")
+    // The one preference read the middleware answers with no session, built
+    // from the same object the middleware and the route use: /login mounts
+    // this provider too, and before that carve-out it was answered 401 and
+    // fell back to the browser's language — so a box set to German greeted
+    // its owner in English. A key added HERE alone would put it back there;
+    // see src/lib/ui-language-read.ts.
+    fetch(UI_LANGUAGE_READ.url)
       .then((r) => r.json())
       .then((data) => {
         const saved = data.ui_language;

@@ -152,8 +152,11 @@ export default function ChromeShelf({
   const pinnedApps = isMobile
     ? apps.filter(a => a.id === "settings" && a.isPinned !== false)
     : apps.filter(a => a.isPinned !== false);
+  // Every OPEN app on the phone, whether the desktop shelf pins it or not —
+  // an unpinned Settings is still open, and an open app the bar does not draw
+  // is one that vanishes the moment it is switched away from.
   const unpinnedApps = isMobile
-    ? apps.filter(a => a.isOpen && a.id !== "settings")
+    ? apps.filter(a => a.isOpen && !pinnedApps.some(p => p.id === a.id))
     : apps.filter(a => a.isPinned === false);
   // Priority: restoring (orange) > backup running (green) > lapsed (amber)
   // > never-protected (red) > ok.
@@ -272,7 +275,7 @@ export default function ChromeShelf({
         openedAt.current = Date.now();
         setCtxMenu({ x: e.clientX, y: e.clientY, app });
       }}
-      className="relative w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
+      className="relative shrink-0 w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
       title={app.name}
       aria-label={app.name}
     >
@@ -336,8 +339,12 @@ export default function ChromeShelf({
       >
         {isMobile ? (
           <>
-            {/* Every mobile bar button shares a 40×40 container for a single baseline. */}
-            <div className="absolute left-2 flex items-center">
+            {/* Every mobile bar button shares a 40×40 container for a single
+                baseline. Three in-flow flex items rather than two absolute
+                clusters around a centred one: the app row in the middle has
+                to be bounded by the launcher and the tray, or a fifth open app
+                would sit under the power button. */}
+            <div className="flex-none flex items-center">
               <button
                 onClick={onLauncherClick}
                 className="w-10 h-10 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -350,18 +357,35 @@ export default function ChromeShelf({
                 </div>
               </button>
             </div>
-            {showChatButton && !isPortraitPhone && (
-              <button
-                onClick={onChatClick}
-                data-testid="shelf-chat-button"
-                className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-                title={t("shelf.chat")}
-                aria-label={t("shelf.chat")}
-              >
-                <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
-              </button>
-            )}
-            <div className="absolute right-2 flex items-center gap-1">
+            {/* Settings and the apps that are OPEN — the row `pinnedApps` and
+                `unpinnedApps` are filtered for above and that this bar never
+                drew: nothing said which apps were open, and an app minimized
+                with "Switch app" vanished without a trace. It scrolls past
+                what it cannot fit, centred `safe` so the first entry stays
+                reachable once it overflows. */}
+            <div
+              className="flex-1 min-w-0 flex items-center justify-center-safe gap-1 overflow-x-auto px-1"
+              data-testid="shelf-mobile-apps"
+            >
+              {pinnedApps.map(renderApp)}
+              {unpinnedApps.map(renderApp)}
+            </div>
+            {/* The tray, in the desktop bar's order. The chat crab sits HERE,
+                fixed, never in the row: with a handful of apps open the row
+                overflows, and the one button that opens the assistant would
+                scroll out of sight with them. */}
+            <div className="flex-none flex items-center gap-1">
+              {showChatButton && !isPortraitPhone && (
+                <button
+                  onClick={onChatClick}
+                  data-testid="shelf-chat-button"
+                  className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+                  title={t("shelf.chat")}
+                  aria-label={t("shelf.chat")}
+                >
+                  <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
+                </button>
+              )}
               {!isPortraitPhone && renderShieldButton()}
               {!isPortraitPhone && (
                 <button

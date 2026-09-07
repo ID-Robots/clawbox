@@ -23,10 +23,46 @@ vi.mock("@/lib/pending-actions", () => ({
 
 import { notifyOwner } from "@/lib/email-notify";
 import { apps } from "@/lib/desktop-apps";
-import { NOTIFY_ACTION_TARGETS, OPEN_EMAIL_SETTINGS, parseNotifyAction, toastDetailForNotice } from "@/lib/notify-action";
+import { NOTIFY_ACTION_TARGETS, OPEN_EMAIL_SETTINGS, notifyActionLabel, parseNotifyAction, toastDetailForNotice } from "@/lib/notify-action";
+import { translations } from "@/lib/translations";
+import type { Locale } from "@/lib/i18n";
 
 beforeEach(() => {
   pushed.length = 0;
+});
+
+/**
+ * The label a click target carries in the toast's accessible name. It used to
+ * be English on every desktop — the shell's aria labels were the one thing a
+ * screen reader on a German box still heard in English (UI sweep 2026-09-07,
+ * shell-7) — so it is now built from the catalogue: the app's phrase with the
+ * section named the way the Settings sidebar names it.
+ */
+describe("notifyActionLabel", () => {
+  const LOCALES: Locale[] = ["en", "bg", "de", "es", "fr", "it", "ja", "nl", "sv", "zh"];
+  const tFor = (locale: Locale) => (key: string, params?: Record<string, string | number>) => {
+    let str = translations[locale][key] ?? key;
+    for (const [k, v] of Object.entries(params ?? {})) str = str.replaceAll(`{${k}}`, String(v));
+    return str;
+  };
+
+  it("says where the click goes in the desktop's language", () => {
+    expect(notifyActionLabel(OPEN_EMAIL_SETTINGS, tFor("en"))).toBe("Open Settings → Email");
+    expect(notifyActionLabel(OPEN_EMAIL_SETTINGS, tFor("de"))).toBe("Einstellungen öffnen → E-Mail");
+  });
+
+  it("resolves to words, not keys or slots, in every locale", () => {
+    for (const locale of LOCALES) {
+      const label = notifyActionLabel(OPEN_EMAIL_SETTINGS, tFor(locale));
+      expect(label, `'${locale}'`).not.toMatch(/desktop\.toast\.openSettings|settings\.email|\{section\}/);
+    }
+  });
+
+  it("names only section keys the catalogue carries", () => {
+    for (const sections of Object.values(NOTIFY_ACTION_TARGETS)) {
+      for (const key of Object.values(sections)) expect(translations.en, `${key} is not a catalogue key`).toHaveProperty(key);
+    }
+  });
 });
 
 describe("parseNotifyAction", () => {

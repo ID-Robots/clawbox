@@ -53,8 +53,13 @@ function getInitialPosition(width: number, height: number, rInset = 0) {
   if (typeof window === "undefined") return { x: 100, y: 50 };
   const maxWidth = window.innerWidth - rInset;
   const maxHeight = window.innerHeight - shelfHeight();
+  const centredX = Math.max(20, (maxWidth - width) / 2);
   return {
-    x: Math.max(20, (maxWidth - width) / 2),
+    // Beside a docked chat the 20px floor alone could still put the right end
+    // of a strip-wide window — where its controls live — under the panel, so
+    // the window ends DESKTOP_GAP before the chat's edge, the margin a
+    // maximized window keeps there.
+    x: rInset > 0 ? Math.min(centredX, Math.max(DESKTOP_GAP, maxWidth - DESKTOP_GAP - width)) : centredX,
     y: Math.max(20, (maxHeight - height) / 2),
   };
 }
@@ -83,7 +88,13 @@ export default function ChromeWindow({
   // window restored with its title bar under the shelf or its controls past the
   // right edge cannot be reached by hand, and minimize/restore and every reload
   // put it back in exactly the same place.
-  const [size, setSize] = useState(() => fitWindowSize(initialSize || getSavedSize(appId, defaultWidth, defaultHeight)));
+  // A window the desktop places for the FIRST time is fitted to the strip
+  // beside a docked chat as well (see `fitWindowSize`); one restored to a
+  // saved place keeps the size it had there, like every window already open.
+  const [size, setSize] = useState(() => fitWindowSize(
+    initialSize || getSavedSize(appId, defaultWidth, defaultHeight),
+    initialPosition ? 0 : rightInset,
+  ));
   const [position, setPosition] = useState(() => (
     initialPosition
       ? clampWindowPosition({ ...initialPosition, ...size })
@@ -364,11 +375,11 @@ export default function ChromeWindow({
   }, [appId, onGeometryChange]);
 
   const handleClose = useCallback(() => {
-    // Save window size per app
-    if (appId) {
-      const cur = currentSizeRef.current;
-      kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
-    }
+    // No size write here: the resize-end path saves what the owner chose the
+    // moment they let go, and a close-time write of `currentSizeRef` saved
+    // whatever geometry the window ended in — the strip beside a docked chat
+    // it was fitted to, or a snap after the owner's own resize — as the
+    // app's remembered size (the sweep of 2026-09-07 and its review).
     setClosing(true);
     setTimeout(() => onClose(), 150);
   }, [onClose, appId]);

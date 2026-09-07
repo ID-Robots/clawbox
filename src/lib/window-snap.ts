@@ -150,12 +150,21 @@ export function clampWindowPosition(
  * viewport that shrank — never from a resize the owner is performing, and never
  * against the strip a docked chat reserves: that narrows the desktop, it does
  * not resize the windows on it.
+ *
+ * The one exception is a window being OPENED beside the chat (`rInset`, the
+ * strip the panel takes): it has no size of its own yet, and centred at its
+ * default width in the 576px left of an 858px panel it landed with its right
+ * 534px — minimize, maximize and close among them — under the chat, reachable
+ * only by dragging it out by the sliver of title bar still showing or by
+ * undocking the chat. Such a window may be as wide as a maximized one beside
+ * the chat: DESKTOP_GAP short of the panel and of the left edge.
  */
 export function fitWindowSize(
   size: { width: number; height: number },
+  rInset = 0,
 ): { width: number; height: number } {
   if (typeof window === "undefined") return { width: size.width, height: size.height };
-  const availW = window.innerWidth;
+  const availW = rInset > 0 ? window.innerWidth - rInset - DESKTOP_GAP * 2 : window.innerWidth;
   const availH = window.innerHeight - shelfHeight();
   return {
     width: Math.max(MIN_WINDOW_WIDTH, Math.min(size.width, availW)),

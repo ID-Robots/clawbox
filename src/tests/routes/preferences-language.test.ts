@@ -20,6 +20,13 @@ vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn().mockResolvedValue("openclaw"),
 }));
 
+// The read side asks `requireSession` before answering anything wider than
+// `ui_language` (the `all=1` read below is wider). This suite is about the
+// language value, not about who asks: every caller here is the owner.
+vi.mock("@/lib/route-auth", () => ({
+  requireSession: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock("fs/promises", () => ({
   default: {
     mkdir: vi.fn().mockResolvedValue(undefined),

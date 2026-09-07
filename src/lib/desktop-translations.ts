@@ -116,6 +116,10 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "tray.restart": "Restart",
     "tray.shutDown": "Shut Down",
     "tray.lock": "Lock",
+    "tray.internet": "Internet · {ms} ms",
+    "tray.noInternet": "No internet",
+    "desktop.toast.dismiss": "Dismiss",
+    "desktop.toast.openSettings": "Open Settings → {section}",
 
     // === ChatApp ===
     "chat.title": "Chat",

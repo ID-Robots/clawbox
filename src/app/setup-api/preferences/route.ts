@@ -9,8 +9,26 @@ import {
   writeLanguagePersona,
 } from "@/lib/language-persona";
 import { logSafe } from "@/lib/log-safe";
+import { requireSession } from "@/lib/route-auth";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 export const dynamic = "force-dynamic";
+
+// The keys a caller with NO session may read: the ones UI_LANGUAGE_READ names
+// — the box's UI language, nothing else. /login sits inside the same
+// I18nProvider as the desktop and asks for the language before anyone has
+// signed in, so the page can greet the owner in it (UI sweep 2026-09-07,
+// shell-5). The middleware admits exactly that query, built from the same
+// object; this is the route's own half of the cut, so a request that reached
+// the handler by another door — a matcher gap, a rewrite — is still told
+// nothing but the language. The owner's name, the wallpaper and the installed
+// apps stay behind the session.
+const ANONYMOUS_READABLE_KEYS: ReadonlySet<string> = new Set<string>(UI_LANGUAGE_READ.keys);
+
+function isAnonymousReadable(allParam: string | null, keysParam: string | null): boolean {
+  if (allParam || keysParam === null) return false;
+  return keysParam.split(",").every((key) => ANONYMOUS_READABLE_KEYS.has(key));
+}
 
 // Allowed preference keys (prefix-based whitelist)
 const ALLOWED_PREFIXES = ["wp_", "desktop_", "ui_", "app_", "installed_", "icon_", "pinned_", "hidden_"];
@@ -54,6 +72,16 @@ const MAX_KEYS_PER_READ = 32;
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const allParam = url.searchParams.get("all");
+  const keysParam = url.searchParams.get("keys");
+
+  // Asked only for a read wider than the language, so the one request /login
+  // makes never pays for a cookie verification; `requireSession` mirrors the
+  // middleware's own order (bearer, cookie, test mode), so the MCP tool's
+  // `preferences_get` and the e2e harness keep the door they have.
+  if (!isAnonymousReadable(allParam, keysParam)) {
+    const denied = await requireSession(req);
+    if (denied) return denied;
+  }
 
   if (allParam) {
     // Return all preferences
@@ -71,7 +99,6 @@ export async function GET(req: Request) {
     return NextResponse.json(sanitizePreferences(result));
   }
 
-  const keysParam = url.searchParams.get("keys");
   if (!keysParam) {
     return NextResponse.json({ error: "keys or all param required" }, { status: 400 });
   }

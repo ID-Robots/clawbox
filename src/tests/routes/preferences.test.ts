@@ -25,10 +25,22 @@ vi.mock("@/lib/owner-session", () => ({
   hasOwnerSession: vi.fn().mockResolvedValue(false),
 }));
 
+// Who may READ: the route asks `requireSession` (bearer, cookie, test mode —
+// middleware's own order) before answering anything wider than the UI
+// language. Mocked so a test says "no session" outright; the helper's own
+// suite covers the credentials.
+vi.mock("@/lib/route-auth", () => ({
+  requireSession: vi.fn(),
+}));
+
+import { NextResponse } from "next/server";
 import * as config from "@/lib/config-store";
+import { requireSession } from "@/lib/route-auth";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 const mockGetAll = vi.mocked(config.getAll);
 const mockSetMany = vi.mocked(config.setMany);
+const mockRequireSession = vi.mocked(requireSession);
 
 describe("/setup-api/preferences", () => {
   let GET: (req: Request) => Promise<Response>;
@@ -39,6 +51,7 @@ describe("/setup-api/preferences", () => {
     vi.clearAllMocks();
     mockGetAll.mockResolvedValue({});
     mockSetMany.mockResolvedValue(undefined);
+    mockRequireSession.mockResolvedValue(null);
     const fsMod = (await import("fs/promises")).default;
     vi.mocked(fsMod.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fsMod.readFile).mockResolvedValue("# USER.md\n");
@@ -51,6 +64,50 @@ describe("/setup-api/preferences", () => {
     const mod = await import("@/app/setup-api/preferences/route");
     GET = mod.GET;
     POST = mod.POST;
+  });
+
+  /**
+   * /login sits inside the same I18nProvider as the desktop and asks for the
+   * box's UI language before anyone has signed in; answered 401, the page fell
+   * back to the browser's language (UI sweep 2026-09-07, shell-5). That ONE
+   * read is answered to a caller with no session. Everything else the store
+   * holds — the owner's name, the wallpaper, the installed apps — is not.
+   */
+  describe("GET without a session", () => {
+    beforeEach(() => {
+      mockRequireSession.mockImplementation(async () =>
+        NextResponse.json({ error: "Authentication required" }, { status: 401 }));
+      mockGetAll.mockResolvedValue({ "pref:ui_language": "de", "pref:ui_user_name": "Alice", "pref:wp_opacity": 80 });
+    });
+
+    it("answers the UI language alone, without asking for a session", async () => {
+      const res = await GET(new Request(`http://localhost${UI_LANGUAGE_READ.url}`));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ui_language: "de" });
+      expect(mockRequireSession).not.toHaveBeenCalled();
+    });
+
+    it("has a readable set of exactly the language — the shared object names no second key", () => {
+      // The route builds ANONYMOUS_READABLE_KEYS from this list, the
+      // middleware its match and the provider its fetch: widening it is a
+      // one-place, deliberate change, and this is where it is noticed.
+      expect([...UI_LANGUAGE_READ.keys]).toEqual(["ui_language"]);
+    });
+
+    it.each([
+      "?keys=ui_language,ui_user_name",
+      "?keys=ui_user_name",
+      "?keys=installed_meta",
+      "?all=1",
+      "?keys=ui_language&all=1",
+      "?keys=",
+      "",
+    ])("refuses anything wider with the session's own 401 and reads nothing: %s", async (query) => {
+      const res = await GET(new Request(`http://localhost/setup-api/preferences${query}`));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "Authentication required" });
+      expect(mockGetAll).not.toHaveBeenCalled();
+    });
   });
 
   describe("GET", () => {
