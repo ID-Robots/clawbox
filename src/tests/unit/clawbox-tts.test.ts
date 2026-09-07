@@ -840,8 +840,13 @@ describe("install.sh wires TTS to the on-device chain", () => {
     // oc_config_set retries 3x then returns 1. Naming tts-local-cli as THE
     // provider after its definition failed to land points the box at a
     // provider that does not exist and breaks every spoken reply.
-    expect(step).toContain('if ! tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT"; then');
-    const defineIndex = step.indexOf('if ! tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT"; then');
+    // Three arguments since TASK-733: the path REGISTERED with the harness
+    // ($TTS_SCRIPT, the tree — the mirror is rebuilt on every root dispatch and
+    // a provider pointing into it would find nothing mid-restage) and the copy
+    // ROOT EXECUTES for the timeout probe ($TTS_SCRIPT_SRC, the root-owned one).
+    const define = 'if ! tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT" "$TTS_SCRIPT_SRC"; then';
+    expect(step).toContain(define);
+    const defineIndex = step.indexOf(define);
     const selectIndex = step.indexOf('oc_config_set "$TTS_HOME.provider" ');
     expect(selectIndex).toBeGreaterThan(defineIndex);
     expect(step.slice(defineIndex, selectIndex)).toContain("return 1");
