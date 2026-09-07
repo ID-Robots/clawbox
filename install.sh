@@ -331,9 +331,13 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
         # does not merely run once: it BECOMES the installed helper, the file
         # that decides which bytes root executes from then on.
         #
-        # Refusing costs one pass — install_root_libexec installs the helper
-        # later in the same run out of $SRC_DIR, the copy root vouched for — and
-        # fails closed, which is the direction everything here fails in.
+        # Refusing fails closed, which is the direction everything here fails
+        # in, and it costs at most one pass: install_root_libexec installs the
+        # helper later out of $SRC_DIR, the copy root vouched for. On the branch
+        # where this refusal actually fires that $SRC_DIR is still the PREVIOUS
+        # build's mirror, so it reinstalls the same helper rather than a newer
+        # one — see the retry note below for why that is the right outcome and
+        # not a deferred repair.
         if [ "$_self" != "$_b" ]; then
           echo "[bootstrap] WARN: not restaging the root-exec manifest helper from $_b — root is running out of $_self and will not execute a file the clawbox account can rewrite" >&2
           return 1
@@ -370,9 +374,14 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
         # --write AND --verify, never --write alone: the write's own status says
         # the helper believes it recorded something, not that the record matches.
         elif ! { "$_mf" --write && "$_mf" --verify >/dev/null; }; then
-          # Repair before reporting. The most likely reason the INSTALLED helper
-          # failed is that it is the one from before this reset, so replace it
-          # from the tree we just checked out and try once more.
+          # Repair before reporting, WHERE root may: the most likely reason the
+          # INSTALLED helper failed is that it is the one from before this reset,
+          # so replace it from the tree we just checked out and try once more.
+          # On a dispatched step _mf_restage refuses (root is not running that
+          # checkout) and the retry re-runs the same helper — which is the right
+          # answer there, because a post-transition box's installed helper is the
+          # same generation as the mirror it came out of, so a failing --write is
+          # environmental and a fresh copy would fail identically.
           echo "[bootstrap] WARN: could not re-record the root-exec manifest" >&2
           _mf_restage || true
           if ! { _mf_alive && "$_mf" --write && "$_mf" --verify >/dev/null; }; then

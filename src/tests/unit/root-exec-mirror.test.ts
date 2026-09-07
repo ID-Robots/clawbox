@@ -194,7 +194,13 @@ d("the root-owned mirror", () => {
     expect(fs.existsSync(`${mirror}.new`), "staging litter survived the refusal").toBe(false);
   });
 
-  it("puts back a mirror an interrupted swap left aside, instead of deleting it", () => {
+  it("puts back a mirror an interrupted swap left aside, for mirror_tree's own callers", () => {
+    // This case covers `mirror_tree`'s OWN callers only — install.sh's operator
+    // repair (`--step systemd_services`) and a flash-host run, neither of which
+    // goes through the dispatcher. It calls `--mirror` directly over a tree that
+    // no longer verifies, which no caller does; the dispatch path is the case
+    // below, and it is the one that actually strands a box.
+    //
     // The swap is two renames, and between them $MIRROR_DIR does not exist and
     // $MIRROR_DIR.old holds the only root-established build. A power cut there
     // is not exotic: `rebuild_reboot` reboots the box, and an update is when
@@ -248,6 +254,53 @@ d("the root-owned mirror", () => {
       `tree from=${path.join(mirror, "install.sh")} args=--step post_update`,
     );
     expect(fs.readFileSync(path.join(mirror, "install.sh"), "utf-8")).toBe(good);
+  });
+
+  it("restages in the very dispatch that recovered, so the lock is not still held", () => {
+    // The subshell around the dispatcher's recovery. mirror_tree opens its own
+    // fd on $MIRROR_DIR.lock in a CHILD process, so a dispatcher that recovered
+    // while still holding that lock on its own fd would send `--mirror` into
+    // `flock -w 120` and then into `die "another root step is restaging"` — a
+    // deadlock this script inflicted on itself, on every dispatch that recovers.
+    // Here the tree still verifies, so one dispatch does both things in order.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
+    fs.renameSync(mirror, `${mirror}.old`);
+    fs.rmSync(marker, { force: true });
+
+    const started = Date.now();
+    const r = sh(`"${dispatcher}" post_update`);
+    expect(Date.now() - started, "the restage blocked on a lock the recovery never released").toBeLessThan(20_000);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).toMatch(/recovered .*interrupted/);
+    expect(fs.existsSync(`${mirror}.old`), "the restage that follows the recovery did not run").toBe(false);
+    expect(ran()).toBe(`tree from=${path.join(mirror, "install.sh")} args=--step post_update`);
+  });
+
+  it("waits for a restage in flight instead of resurrecting the copy it moved aside", () => {
+    // The recovery fires in exactly the window mirror_tree is in between its two
+    // renames, so without the lock it races the function it is recovering from:
+    // it would put $MIRROR_DIR.old back, the restage's own `mv -T` would then
+    // fail with ENOTEMPTY, its rollback would find no $previous, and it would
+    // die — leaving the box running the PREVIOUS build with the verified new
+    // staging orphaned, while the updater reports success.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
+    fs.renameSync(mirror, `${mirror}.old`);          // mid-swap, lock held below
+
+    const held = path.join(tmp, "held");
+    sh(
+      `flock "${mirror}.lock" -c 'touch "${held}"; sleep 3' >/dev/null 2>&1 &
+`
+      + `until [ -f "${held}" ]; do sleep 0.05; done
+`
+      + `timeout 1 "${dispatcher}" post_update >/dev/null 2>&1
+`
+      + "true",
+    );
+
+    expect(fs.existsSync(`${mirror}.old`), "the copy a restage in flight had moved aside was taken").toBe(true);
+    expect(fs.existsSync(mirror), "the mirror was resurrected under a live restage").toBe(false);
   });
 
   it("replaces the previous mirror rather than merging into it", () => {

@@ -241,14 +241,59 @@ fi
 # `bootstrap_updater`, the two that would let it finish the update and heal
 # itself, on an appliance with no console.
 #
-# Not a trust decision: both names are root-owned directories under a root-owned
-# /var/lib/clawbox, so this moves bytes root staged and vouched for itself. A
-# recovered copy that is a PREVIOUS build is still checked against the record for
-# the pinned family below, exactly as any other mirror is.
+# Not a trust decision: $MIRROR_DIR.old is written by exactly one line —
+# mirror_tree's own `mv -T "$MIRROR_DIR" "$previous"` — so it is always a former
+# $MIRROR_DIR, i.e. a staging directory that passed the sha256 check against the
+# root-owned record before it was installed. A recovered copy that is a PREVIOUS
+# build is still checked against the record for the pinned family below, exactly
+# as any other mirror is.
+#
+# UNDER THE SAME LOCK mirror_tree takes, and in a SUBSHELL. Both halves are
+# load-bearing:
+#
+#   * without the lock this races the very function it is recovering from. The
+#     window it fires in IS mirror_tree's swap window, so a concurrent restage
+#     that has just moved $MIRROR_DIR aside would find its own `mv -T` refused
+#     with ENOTEMPTY, its rollback would find no $previous to put back, and it
+#     would die 66 — leaving the box quietly running the PREVIOUS build with its
+#     verified staging orphaned. Waiting turns that into the retry it should be.
+#   * without the subshell fd 9 would still be held when `--mirror` runs below.
+#     mirror_tree opens its own fd 9 in a child process, so it would block on
+#     `flock -w 120` and then die "another root step is restaging" — a deadlock
+#     this script inflicted on itself, on every dispatch.
+#
+# The cheap test outside the lock keeps a healthy dispatch from paying for any of
+# it; the one inside is what decides.
 if [ ! -d "$MIRROR_DIR" ] && [ -d "$MIRROR_DIR.old" ]; then
-  if mv -T "$MIRROR_DIR.old" "$MIRROR_DIR" 2>/dev/null; then
-    echo "clawbox-root-step: recovered $MIRROR_DIR from a restage that was interrupted part way through" >&2
-  fi
+  (
+    # No `2>/dev/null` on this line: `exec` applies EVERY redirection it is
+    # given for the rest of the shell, so that would silence fd 2 for the whole
+    # subshell and throw away the two messages below. A failure here says why on
+    # its own (a read-only or full /var), which is what should be in the journal.
+    exec 9>"$MIRROR_DIR.lock" || exit 0
+    flock -w 120 9 || exit 0
+    [ ! -d "$MIRROR_DIR" ] || exit 0
+    [ -d "$MIRROR_DIR.old" ] || exit 0
+    # The mirror's whole guarantee is that the directory holding it is not the
+    # clawbox account's to write. mirror_tree asserts that too, but only on the
+    # path where the tree verifies — and this recovery fires by construction on
+    # the dispatch where it does not, so the assertion has to be made here as
+    # well. Fail CLOSED: an empty answer (bad modes, no find, no directory) is a
+    # refusal, not a pass.
+    _parent="$(dirname "$MIRROR_DIR")"
+    if ! { [ -O "$_parent" ] && [ -n "$(find "$_parent" -maxdepth 0 ! -perm /022 2>/dev/null)" ]; }; then
+      echo "clawbox-root-step: refusing to recover $MIRROR_DIR — $_parent is not owned by this user and closed to group and other writes" >&2
+      exit 0
+    fi
+    if mv -T "$MIRROR_DIR.old" "$MIRROR_DIR" 2>/dev/null; then
+      echo "clawbox-root-step: recovered $MIRROR_DIR from a restage that was interrupted part way through" >&2
+    else
+      # SAID, not inferred from silence: without this the refusal below tells an
+      # operator to reinstall while a good build sits one rename away, and the
+      # real cause — a full or read-only /var — is nowhere in the journal.
+      echo "clawbox-root-step: WARNING: $MIRROR_DIR is missing and $MIRROR_DIR.old could not be moved back into place — is /var full or read-only?" >&2
+    fi
+  ) || true
 fi
 
 if [ "$tree_matches_record" -eq 1 ]; then

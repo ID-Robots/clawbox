@@ -276,12 +276,21 @@ mirror_tree() {
 
   local staging="$MIRROR_DIR.new" previous="$MIRROR_DIR.old" parent f mode
   parent="$(dirname "$MIRROR_DIR")"
-  # Unconditionally, not only when it is absent. The mirror's whole guarantee is
-  # that the directory holding it is not clawbox's to write, and a parent that
-  # merely exists says nothing about that. Every creator today is root and
-  # clawbox cannot write /var/lib, so this states the assumption rather than
-  # repairing anything — but it is the assumption everything below rests on.
-  install -d -o root -g root -m 0755 "$parent" || die "cannot create $parent" 66
+  if [ ! -d "$parent" ]; then
+    install -d -o root -g root -m 0755 "$parent" || die "cannot create $parent" 66
+  fi
+  # ASSERTED, never repaired. The mirror's whole guarantee is that the directory
+  # holding it is not clawbox's to write, and a parent that merely exists says
+  # nothing about that. Repairing it silently would be worse than checking:
+  # /var/lib/clawbox is SHARED — the sudoers quarantine and staging directories,
+  # clawbox-power-mode.sh's clock snapshot, the first-boot VNC marker — so a
+  # chown/chmod here would undo a deliberate tightening with no line anywhere,
+  # and would make the guarantee true by side effect instead of saying whether it
+  # was true. Fail CLOSED: an empty answer (bad modes, no find) is a refusal.
+  # The dispatcher makes the same check before its own recovery, because that one
+  # runs on the dispatch that never reaches this function.
+  { [ -O "$parent" ] && [ -n "$(find "$parent" -maxdepth 0 ! -perm /022 2>/dev/null)" ]; } \
+    || die "$parent is not owned by this user and closed to group and other writes — refusing to stage the copy root executes" 66
 
   # ONE restage at a time, fleet-wide-fixed names and all.
   #

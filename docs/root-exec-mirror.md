@@ -228,11 +228,14 @@ the root-exec manifest — running the mirror staged &lt;time&gt;".
   update fetches. That is a different finding with a different fix (a signed
   release), and it is not made worse here: running git unprivileged removes the
   hook/filter code-execution half of it.
-* **A one-instant window inside the swap.** `mirror_tree` builds a staging
-  directory and swaps it in with two renames; a dispatch landing between them
-  refuses (exit 65) rather than running anything. A retry, not a root exec. A
-  process *killed* between them is recovered by the next restage (above); it is
-  only a concurrent dispatch that sees the gap.
+* **A one-instant window inside the swap — now a wait, not a refusal.**
+  `mirror_tree` builds a staging directory and swaps it in with two renames, and
+  `$MIRROR_DIR` does not exist between them. A dispatch landing there takes the
+  same `flock` the restage holds, waits for it, and finds the new mirror in
+  place; it neither refuses nor runs anything out of the tree. What is left is
+  the case where that wait times out (120 s), where the box refuses (exit 65) and
+  the step is retried — a retry, not a root exec, which is the direction this
+  whole file fails in.
 * **Paths deliberately left on the tree.** `install.sh` still names
   `$PROJECT_DIR/scripts/...` where it `chmod`s or `chown`s the tree copy, where a
   `User=clawbox` unit's `ExecStart` points at it (`start-vnc.sh` and
