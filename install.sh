@@ -4029,7 +4029,14 @@ step_edition_lock() {
   # after this is a failing rename of the second file, immediately after a
   # successful copy of it into the same directory; the step answers non-zero,
   # so the update reports it and the next run rewrites both from the top.
-  mkdir -p /etc/systemd/system/clawbox-setup.service.d
+  # The drop-in's DIRECTORY counts as part of staging it: created after the
+  # lock was committed, a failure here would leave the same split the ordering
+  # above exists to prevent.
+  if ! mkdir -p /etc/systemd/system/clawbox-setup.service.d; then
+    rm -f "$_edition_tmp"
+    echo "  Error: could not create the drop-in directory for $LEGACY_EDITION_DROPIN" >&2
+    return 1
+  fi
   local _dropin_tmp
   _dropin_tmp="$(mktemp)"
   if ! printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"; then

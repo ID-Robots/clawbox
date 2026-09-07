@@ -169,8 +169,12 @@ describe("edition persistence (H7 / H9)", () => {
    * path, so nothing else catches it.
    */
   describe.skipIf(!hasBash)("a staging write that fails", () => {
-    /** Run the real step with every side effect stubbed and ONE mktemp poisoned. */
-    function runStep(poison: "lock" | "dropin"): { out: string; rc: string } {
+    /**
+     * Run the real step with every side effect stubbed and ONE staging step
+     * poisoned: the lock's temp, the drop-in's temp, or the drop-in's own
+     * directory.
+     */
+    function runStep(poison: "lock" | "dropin" | "dropin-dir"): { out: string; rc: string } {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-edition-stage-"));
       try {
         const bad = path.join(dir, "no-such-directory", "tmp");
@@ -183,7 +187,7 @@ describe("edition persistence (H7 / H9)", () => {
           `CLAWBOX_EDITION_FILE=${JSON.stringify(path.join(dir, "edition.env"))}`,
           `LEGACY_EDITION_DROPIN=${JSON.stringify(path.join(dir, "edition.conf"))}`,
           "install() { :; }",
-          "mkdir() { :; }",
+          `mkdir() { ${poison === "dropin-dir" ? "return 1" : ":"}; }`,
           "systemctl() { :; }",
           "step_edition_gateway_state() { echo GATEWAY_STATE; }",
           "step_edition_foreign_teardown() { echo TEARDOWN; }",
@@ -216,6 +220,17 @@ describe("edition persistence (H7 / H9)", () => {
       expect(out).not.toContain("INSTALL_ROOT_FILE");
       // And the step stopped: the gateway state must not run over a lock the
       // box does not have.
+      expect(out).not.toContain("GATEWAY_STATE");
+    });
+
+    it("publishes NEITHER record when the drop-in's own directory cannot be made", () => {
+      // `mkdir -p` is part of staging the second record: made AFTER the lock
+      // was committed, a failure here would leave exactly the split the
+      // ordering above exists to prevent.
+      const { out, rc } = runStep("dropin-dir");
+      expect(rc, out).not.toBe("0");
+      expect(out).toMatch(/could not create the drop-in directory/);
+      expect(out).not.toContain("INSTALL_ROOT_FILE");
       expect(out).not.toContain("GATEWAY_STATE");
     });
 
