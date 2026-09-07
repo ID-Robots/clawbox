@@ -11,7 +11,10 @@ const SPAWN_TIMEOUT_MS = 20_000;
 
 /**
  * `step_edition_foreign_teardown` and the clawbox user's USER-scope
- * hermes-gateway unit (2026-09-07).
+ * hermes-gateway unit (2026-09-07), listed in FOREIGN_EDITION_USER_UNITS —
+ * the registry beside FOREIGN_EDITION_UNITS, built by the same negation, so
+ * the function names no unit itself (install-foreign-edition-teardown.test.ts
+ * pins that) and dual stays untouched by construction.
  *
  * A swap to Hermes installs the message gateway as the clawbox user's own
  * systemd unit — `hermes gateway install`, no root — because the system
@@ -71,6 +74,8 @@ function run(edition: string, env: Record<string, string> = {}): Run {
     "FOREIGN_EDITION_UNITS=()",
     "if ! has_hermes_harness; then FOREIGN_EDITION_UNITS+=(clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service hermes-gateway.service); fi",
     'if [ "$CLAWBOX_EDITION" = hermes ]; then FOREIGN_EDITION_UNITS+=(clawbox-gateway.service); fi',
+    "FOREIGN_EDITION_USER_UNITS=()",
+    "if ! has_hermes_harness; then FOREIGN_EDITION_USER_UNITS+=(hermes-gateway.service); fi",
     "id() { echo 1000; }",
     "systemctl() {",
     `  printf 'systemctl %s\\n' "$*" >> ${JSON.stringify(calls)}`,

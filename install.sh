@@ -1065,7 +1065,17 @@ if ! has_openclaw_harness; then
   # correctly provisioned Hermes box reports nothing twice.
   FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
 fi
-
+# The same registry for the clawbox USER's manager. `hermes gateway install`
+# (no --system) writes hermes-gateway.service under ~/.config/systemd/user —
+# what a box provisioned without a terminal ends up with (the harness swap,
+# this installer's own Hermes step), since the system install needs a sudo
+# that is refused on purpose. It polls the same bot token, the system-scope
+# loop cannot see it, and step_edition_foreign_teardown reaches it through the
+# user's session bus. Built by the same negation, so dual is untouched.
+FOREIGN_EDITION_USER_UNITS=()
+if ! has_hermes_harness; then
+  FOREIGN_EDITION_USER_UNITS+=(hermes-gateway.service)
+fi
 # Read one KEY=VALUE out of a file this script does NOT trust.
 #
 # Everything under $PROJECT_DIR/data is written by the web server, i.e. by the
@@ -3968,36 +3978,34 @@ step_edition_foreign_teardown() {
     brought_down+=("$funit (was active=$f_active enabled=$f_enabled)")
   done
 
-  # The USER-scope hermes-gateway unit: what `hermes gateway install` (no
-  # --system) writes under ~/.config/systemd/user, and what a box provisioned
-  # without a terminal — the harness swap, this installer's own Hermes step —
-  # ends up with, since the system install needs a sudo that is refused on
-  # purpose. It polls the same bot token and the loop above cannot see it, so
-  # it is brought down through the clawbox user's session bus, the way
+  # The clawbox USER's units belonging to the other edition
+  # (FOREIGN_EDITION_USER_UNITS, built beside the list above by the same
+  # negation): reached through the user's session bus, the way
   # pause_engine_user_unit reaches the voice units. Stopped and disabled, not
-  # removed: `hermes gateway install` puts it back on the next swap to Hermes.
-  if ! has_hermes_harness && [ "${CLAWBOX_KEEP_FOREIGN_UNITS:-0}" != "1" ]; then
-    local hg_uid hg_state
-    hg_uid="$(id -u "$CLAWBOX_USER" 2>/dev/null || true)"
-    if [ -n "$hg_uid" ] && sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" \
-        systemctl --user cat hermes-gateway.service >/dev/null 2>&1; then
-      hg_state="$(sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" systemctl --user is-active hermes-gateway.service 2>/dev/null || true)"
+  # removed: `hermes gateway install` puts the unit back on the next swap.
+  if [ "${#FOREIGN_EDITION_USER_UNITS[@]}" -gt 0 ] && [ "${CLAWBOX_KEEP_FOREIGN_UNITS:-0}" != "1" ]; then
+    local uunit u_user u_uid u_state
+    u_user="${CLAWBOX_USER:-clawbox}"
+    u_uid="$(id -u "$u_user" 2>/dev/null || true)"
+    for uunit in "${FOREIGN_EDITION_USER_UNITS[@]}"; do
+      [ -n "$u_uid" ] || break
+      sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" \
+        systemctl --user cat "$uunit" >/dev/null 2>&1 || continue
+      u_state="$(sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" systemctl --user is-active "$uunit" 2>/dev/null || true)"
       # Never reported as brought down on faith: a unit the user's manager
       # would not disable is still the second poller, and the owner has to be
-      # told so with the command that finishes the job (step_validate_services
-      # reports the state too; this is where it is named).
-      if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" \
-          systemctl --user disable --now hermes-gateway.service >/dev/null 2>&1; then
-        brought_down+=("hermes-gateway.service (the clawbox user's unit; was active=${hg_state:-unknown})")
+      # told so with the command that finishes the job.
+      if sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" \
+          systemctl --user disable --now "$uunit" >/dev/null 2>&1; then
+        brought_down+=("$uunit (the clawbox user's unit; was active=${u_state:-unknown})")
       else
-        echo "  Warning: could not disable the clawbox user's hermes-gateway.service (was active=${hg_state:-unknown});" >&2
+        echo "  Warning: could not disable the clawbox user's $uunit (was active=${u_state:-unknown});" >&2
         echo "    it goes on polling the Telegram bot beside the OpenClaw gateway until it is stopped:" >&2
-        echo "    sudo -u $CLAWBOX_USER XDG_RUNTIME_DIR=/run/user/$hg_uid systemctl --user disable --now hermes-gateway.service" >&2
+        echo "    sudo -u $u_user XDG_RUNTIME_DIR=/run/user/$u_uid systemctl --user disable --now $uunit" >&2
       fi
-    fi
+    done
   fi
-
-  if [ "${#brought_down[@]}" -eq 0 ]; then
+if [ "${#brought_down[@]}" -eq 0 ]; then
     return 0
   fi
 
