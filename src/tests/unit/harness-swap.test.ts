@@ -40,10 +40,12 @@ const h = vi.hoisted(() => ({
   execCalls: [] as string[][],
 }));
 
-vi.mock("@/lib/config-store", async (orig) => ({
-  ...(await orig<typeof import("@/lib/config-store")>()),
-  get: h.get,
-}));
+vi.mock("@/lib/config-store", async (orig) => {
+  const actual = await orig<typeof import("@/lib/config-store")>();
+  // `set` named, not only spread: openclaw-config-mock-completeness.test.ts
+  // reads factories by their text and wants both of the reader's exports.
+  return { ...actual, get: h.get, set: actual.set };
+});
 vi.mock("@/lib/clawai-plan-tier", () => ({ readClawaiEntitlementTier: h.entitlementTier }));
 vi.mock("@/lib/hermes-clawai", () => ({ applyClawaiToHermes: h.applyClawaiToHermes }));
 vi.mock("@/lib/hermes-telegram", () => ({
