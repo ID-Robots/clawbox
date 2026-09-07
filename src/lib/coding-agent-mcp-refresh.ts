@@ -1,7 +1,7 @@
-import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
+import { MCP_RELOAD_ALREADY, MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
 /**
- * Ask the agent to rebuild its MCP tool list when the coding agent becomes
+ * Ask HERMES to rebuild its MCP tool list when the coding agent becomes
  * usable, or stops being.
  *
  * WHY THIS EXISTS. Three tools — `coding_agent_run`, `coding_agent_status` and
@@ -24,7 +24,7 @@ import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reloa
  * instance of one shape: #486 fixed it for `email_list`/`email_read` and #503
  * for the image tools, and this was the call site left out.
  *
- * The mechanism is the agent's own `reload.mcp`, shared with both siblings — see
+ * The mechanism is HERMES' own `reload.mcp`, shared with the four siblings — see
  * `hermes-mcp-reload.ts`. What belongs HERE is the rule for when it is worth
  * paying for, below.
  */
@@ -102,7 +102,7 @@ export async function refreshCodingAgentToolsIfReadinessChanged(
   if (options.alreadyReloaded) {
     // Nothing to ask for: the respawn that already happened in this request
     // rebuilt EVERY family's tool list, this one included.
-    console.log(`[coding-agent/mcp-refresh] ${became}; the MCP servers were already reloaded for this change`);
+    console.log(`[coding-agent/mcp-refresh] ${became}; ${MCP_RELOAD_ALREADY}`);
     return;
   }
   // `.catch` even though `reloadMcpServers` documents that it never throws: the
@@ -116,5 +116,5 @@ export async function refreshCodingAgentToolsIfReadinessChanged(
     await reportMcpReloadRefused("coding-agent/mcp-refresh", became);
     return;
   }
-  console.log(`[coding-agent/mcp-refresh] ${became}; asked the agent to reload its MCP servers`);
+  console.log(`[coding-agent/mcp-refresh] ${became}; ${MCP_RELOAD_ASKED}`);
 }

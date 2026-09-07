@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * The fourth boot-time snapshot, and the rule for when refreshing it is worth
@@ -52,8 +53,14 @@ function payload(rows: Row[], current = "openrouter") {
 
 let logSpy: ReturnType<typeof vi.spyOn>;
 let errorSpy: ReturnType<typeof vi.spyOn>;
+let restoreEnv: () => void;
 
 beforeEach(() => {
+  // The EDITION is what decides whether a refused reload is worth an error
+  // line — the dashboard runs on hermes AND dual, whichever harness is active —
+  // and every case here is a box that has one.
+  restoreEnv = saveEnv("CLAWBOX_EDITION");
+  process.env.CLAWBOX_EDITION = "hermes";
   rpcMock.mockReset();
   rpcMock.mockResolvedValue({ status: "ok" });
   optionsMock.mockReset();
@@ -64,6 +71,7 @@ beforeEach(() => {
 afterEach(() => {
   logSpy.mockRestore();
   errorSpy.mockRestore();
+  restoreEnv();
 });
 
 describe("readUsableProviderIds", () => {

@@ -1,4 +1,4 @@
-import { getActiveHarness } from "@/lib/harness";
+import { readEditionSource } from "@/lib/edition-source";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
 import { logSafe } from "@/lib/log-safe";
 
@@ -72,6 +72,24 @@ export async function reloadMcpServers(): Promise<boolean> {
 }
 
 /**
+ * What a family may say about a reload that HAPPENED — one sentence, here,
+ * because there is one mechanism.
+ *
+ * `reloadMcpServers` talks to HERMES' dashboard JSON-RPC and to nothing else.
+ * Two of the five families said "asked the agent to reload its MCP servers",
+ * which reads as "whichever harness now serves the owner" — and on the dual SKU
+ * that is exactly wrong in the away direction: Hermes answers this call after
+ * the box has moved to OpenClaw, and an operator reading the journal for "the
+ * agent still thinks it is on Hermes" was told the OpenClaw child had been
+ * reloaded when it was never asked. `harness/select` already said Hermes, with
+ * a comment saying why; this is that comment made into the shared string.
+ */
+export const MCP_RELOAD_ASKED = "asked Hermes to reload its MCP servers";
+
+/** …and when another family in the same request already paid for the respawn. */
+export const MCP_RELOAD_ALREADY = "the MCP servers were already reloaded for this change";
+
+/**
  * Say that a wanted reload did not happen — in the words that are TRUE for THIS
  * box, which is not the same sentence on both editions.
  *
@@ -90,10 +108,23 @@ export async function reloadMcpServers(): Promise<boolean> {
  * HAS a dashboard and it said no. Everything else is a `console.log` that says
  * what will actually happen next.
  *
- * UNKNOWN IS NOT OPENCLAW. `getActiveHarness()` swallows its own read failures
- * and answers `openclaw` by default, but if the call itself throws we keep the
- * error — a harness lookup that fell over must not be the thing that quiets a
- * real Hermes failure.
+ * THE QUESTION IS THE EDITION, NOT THE ACTIVE HARNESS. Which agent serves the
+ * owner right now and whether this box HAS a Hermes dashboard are different
+ * questions on the premium `dual` SKU: `install.sh` enables
+ * `clawbox-hermes-dashboard.service` for hermes AND dual, so the dashboard runs
+ * on a dual box whichever harness is active. Asking `getActiveHarness()` there
+ * turned a real refusal — the dashboard up and answering `confirm_required` —
+ * into the benign "this edition has no dashboard" line, on the one line that
+ * exists to make the refusal visible: the false-success shape, on the report of
+ * a false success. The predicate is `hasHermesHarness()`'s (edition `hermes` or
+ * `dual`, the mirror of install.sh's own `has_hermes_harness()`), read from ONE
+ * `readEditionSource()` so the two halves of the decision cannot come from two
+ * reads of a file `install.sh` rewrites.
+ *
+ * UNKNOWN IS NOT OPENCLAW. An edition nothing on the device named — no lock
+ * file, no `CLAWBOX_EDITION` — is this module's own default, not an answer, so
+ * it keeps the error: a lookup that could not say must not be the thing that
+ * quiets a real Hermes failure.
  *
  * @param tag   the caller's log prefix, e.g. `coding-agent/mcp-refresh`
  * @param what  what changed, in the caller's own words, e.g. "the coding agent
@@ -110,13 +141,17 @@ export async function reportMcpReloadRefused(tag: string, what: string): Promise
   // are rebuilt at their own source (see `harness-mcp-refresh.ts`); this is the
   // record's own rule.
   const line = `[${logSafe(tag, 60)}] ${logSafe(what)}`;
-  const harness = await getActiveHarness().catch(() => null);
-  if (harness !== null && harness !== "hermes") {
+  const { edition, defaulted } = readEditionSource();
+  const mayHaveDashboard = defaulted || edition === "hermes" || edition === "dual";
+  if (!mayHaveDashboard) {
     console.log(
       `${line}; this edition has no dashboard to ask — the tool list re-probes `
         + "when the MCP server is next spawned",
     );
     return;
   }
-  console.error(`${line}, but the agent would not reload its MCP servers`);
+  // Names the mechanism, like the success sentences above and for the same
+  // reason: what was asked is Hermes' dashboard, whatever this box calls its
+  // agent.
+  console.error(`${line}, but Hermes would not reload its MCP servers`);
 }

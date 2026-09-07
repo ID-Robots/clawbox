@@ -1,9 +1,9 @@
 import { getModelOptions } from "@/lib/hermes-model-options";
-import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
+import { MCP_RELOAD_ALREADY, MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 import { logSafe } from "@/lib/log-safe";
 
 /**
- * Ask the agent to re-advertise WHICH PROVIDERS it may switch this device to,
+ * Ask HERMES to re-advertise WHICH PROVIDERS it may switch this device to,
  * when a write changed the answer.
  *
  * WHY THIS EXISTS — the fourth of four. `mcp/lib/context.ts` probes this device
@@ -27,7 +27,7 @@ import { logSafe } from "@/lib/log-safe";
  * just succeeded. It is #514's shape (the panel updated, the running agent
  * stale) wearing #513's (advice that loops).
  *
- * The mechanism is the agent's own `reload.mcp`, shared with all three siblings —
+ * The mechanism is HERMES' own `reload.mcp`, shared with the four siblings —
  * see `hermes-mcp-reload.ts`. What belongs HERE is the rule for when it is worth
  * paying for.
  */
@@ -191,7 +191,7 @@ export async function refreshProviderToolsIfSetChanged(
   if (options.alreadyReloaded) {
     // Nothing to ask for: the respawn that already happened in this request
     // rebuilt EVERY family's tool list, this one included.
-    console.log(`[hermes/provider-refresh] ${moved}; the MCP servers were already reloaded for this change`);
+    console.log(`[hermes/provider-refresh] ${moved}; ${MCP_RELOAD_ALREADY}`);
     return true;
   }
   // `.catch` even though `reloadMcpServers` documents that it never throws: the
@@ -204,7 +204,7 @@ export async function refreshProviderToolsIfSetChanged(
     await reportMcpReloadRefused("hermes/provider-refresh", moved);
     return false;
   }
-  console.log(`[hermes/provider-refresh] ${moved}; asked the agent to reload its MCP servers`);
+  console.log(`[hermes/provider-refresh] ${moved}; ${MCP_RELOAD_ASKED}`);
   return true;
 }
 

@@ -1,6 +1,6 @@
 import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
-import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
+import { MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
 /**
  * Make the RUNNING Hermes serve the image backend that linking just installed.
@@ -94,7 +94,15 @@ async function runningAgentCanDraw(): Promise<boolean | null> {
  *          second one.
  */
 async function reloadMcpTools(why: string): Promise<boolean> {
-  if (await reloadMcpServers().catch(() => false)) return true;
+  if (await reloadMcpServers().catch(() => false)) {
+    // Said out loud, in the sentence the other four families share. This arm
+    // used to return silently, so an operator chasing "the agent still refuses
+    // to draw" got a line when the reload FAILED and nothing at all when it
+    // worked — the one asymmetry in the five, and the reason a reader could not
+    // tell "it was asked and done" from "it was never asked".
+    console.log(`[hermes/image-refresh] ${why}; ${MCP_RELOAD_ASKED}`);
+    return true;
+  }
   // Logged, not surfaced, and in the words that are true for this edition. Worth
   // a line because "the agent still refuses to draw" is otherwise invisible from
   // the outside, and this is the one place that knows the refresh was wanted and

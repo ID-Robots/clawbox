@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * The narrow trigger that keeps `email_list`/`email_read` in step with the
@@ -26,12 +27,26 @@ const mockRpc = vi.mocked(dashboardRpc);
 const mockHarness = vi.mocked(getActiveHarness);
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
+let restoreEnv: () => void;
+
+/**
+ * Which EDITION the box is, which is what decides whether a refusal is worth an
+ * error line: the dashboard the reload is asked of runs on `hermes` AND `dual`
+ * (install.sh enables it for both), whichever harness is active. `saveEnv`
+ * restores the suite-wide floor afterwards.
+ */
+function setEdition(edition: string | null): void {
+  if (edition === null) delete process.env.CLAWBOX_EDITION;
+  else process.env.CLAWBOX_EDITION = edition;
+}
 
 beforeEach(() => {
   mockRpc.mockReset();
   mockRpc.mockResolvedValue({ status: "ok" });
   mockHarness.mockReset();
   mockHarness.mockResolvedValue("hermes");
+  restoreEnv = saveEnv("CLAWBOX_EDITION");
+  setEdition("hermes");
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 });
@@ -39,6 +54,7 @@ beforeEach(() => {
 afterEach(() => {
   errorSpy.mockRestore();
   logSpy.mockRestore();
+  restoreEnv();
 });
 
 describe("refreshEmailToolsIfReadabilityChanged", () => {
@@ -95,7 +111,7 @@ describe("refreshEmailToolsIfReadabilityChanged", () => {
     // OpenClaw box has no dashboard BY DESIGN, so a refusal there is the
     // edition, not a fault. Its MCP server is spawned per session and reaped
     // when idle, so the tool list catches up on its own.
-    mockHarness.mockResolvedValue("openclaw");
+    setEdition("openclaw");
     mockRpc.mockResolvedValue(null);
     await refreshEmailToolsIfReadabilityChanged(false, true);
     expect(errorSpy).not.toHaveBeenCalled();
@@ -103,7 +119,7 @@ describe("refreshEmailToolsIfReadabilityChanged", () => {
   });
 
   it("still reports a HERMES box whose dashboard refused", async () => {
-    mockHarness.mockResolvedValue("hermes");
+    setEdition("hermes");
     mockRpc.mockResolvedValue(null);
     await refreshEmailToolsIfReadabilityChanged(false, true);
     expect(errorSpy).toHaveBeenCalled();
