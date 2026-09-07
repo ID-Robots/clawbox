@@ -1499,16 +1499,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return () => window.removeEventListener('resize', report)
   }, [isOpen, panelMode, mobile, pos, size, visible, onFloatingRectChange])
 
+  // The width the panel was docked at before Undock, so Dock to right puts it
+  // back rather than at the default: a brief undock used to cost a resized
+  // panel its size — 858 became 420, and 420 is what was then persisted (the
+  // UI sweep of 2026-09-07). The memory is this page's alone: the desktop
+  // persists `ui_chat_panel_width` as 0 the moment the panel undocks (the
+  // width doubles as its docked flag), so a reload while undocked still docks
+  // at the default.
+  const widthBeforeUndockRef = useRef<number | null>(null)
+
   const togglePanelMode = useCallback(() => {
     if (panelMode) {
+      widthBeforeUndockRef.current = panelWidth
       setPanelWidth(null)
       onPanelModeChange?.(0)
     } else {
-      setPanelWidth(DEFAULT_PANEL_WIDTH)
-      onPanelModeChange?.(DEFAULT_PANEL_WIDTH)
+      const width = widthBeforeUndockRef.current ?? DEFAULT_PANEL_WIDTH
+      setPanelWidth(width)
+      onPanelModeChange?.(width)
     }
     setPos(null)
-  }, [panelMode, onPanelModeChange])
+  }, [panelMode, panelWidth, onPanelModeChange])
 
   const handlePanelResizeStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault()
@@ -5020,21 +5031,39 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [isOpen, visible, status])
 
   // Close on Escape — but only when nothing is open ON TOP of the chat, since
-  // Escape closes the innermost thing first. An open image preview swallows the
-  // key before it reaches here (useModalDialog stops it at the document capture
-  // phase) and so does an open pill menu (HeaderDropdown, same phase). The New
-  // app card cannot: it is a popover over the composer whose own handler is a
-  // plain document listener, so the key reached both and one Escape dismissed
-  // the card AND the whole conversation — un-docking a docked panel with it.
+  // Escape closes the innermost thing first. Every surface that opens over the
+  // chat stops the key before it reaches here: an image preview at the
+  // document's capture phase (useModalDialog), a pill menu the same way
+  // (HeaderDropdown), and the New app card at the document's bubble phase
+  // (NewAppWizardCard). Reading `showNewApp` here was no substitute for the
+  // last one: the browser flushes the card's close between the card's listener
+  // and this one, so this listener was re-registered with the card already
+  // gone before the key arrived, and one Escape dismissed the card AND the
+  // whole conversation — un-docking a docked panel with it.
   useEffect(() => {
     if (!isOpen) return
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || showNewApp) return
+      if (e.key !== 'Escape') return
       onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [isOpen, onClose, showNewApp])
+  }, [isOpen, onClose])
+
+  // The composer grows with what is typed (the textarea's onInput) and only
+  // onInput resized it, so a sent three-line message left an empty box three
+  // lines tall until the next keystroke (the UI sweep of 2026-09-07), and a
+  // draft put back by a tab switch sat in a one-row box. Both set `input`
+  // without an input event, so this is onInput's own measurement, once more,
+  // for every change of `input`: `auto` is the one-row height an empty box
+  // gets, and a box that is not laid out (0) is left at it rather than pinned
+  // to nothing.
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    if (input && el.scrollHeight > 0) el.style.height = Math.min(el.scrollHeight, 100) + 'px'
+  }, [input])
 
   // Listen for skill installs — flag for /new after reconnect
   const skillInstalledRef = useRef(false)

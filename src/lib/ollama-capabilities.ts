@@ -27,9 +27,15 @@
  */
 
 import { getOllamaBaseUrl } from "@/lib/local-ai-runtime";
+import { ollamaModelNameCanChat } from "@/lib/openclaw-config";
 
 const THINKING_CAPABILITY = "thinking";
+const COMPLETION_CAPABILITY = "completion";
 const PROBE_TIMEOUT_MS = 3_000;
+// Shorter than the thinking probe's, because the chat header's poll asks this:
+// an Ollama still coming up must not hold the picker for long — the name
+// answers in the meantime.
+const CHAT_PROBE_TIMEOUT_MS = 2_000;
 /** Long enough that a chat turn never pays for the probe twice, short enough
  *  that re-pulling a tag is picked up without a restart. */
 export const OLLAMA_CAPABILITY_TTL_MS = 60_000;
@@ -40,10 +46,12 @@ interface CacheEntry {
 }
 
 const cache = new Map<string, CacheEntry>();
+const chatCache = new Map<string, { canChat: boolean; at: number }>();
 
-/** Test seam — the cache is process-global, so a test must be able to clear it. */
+/** Test seam — the caches are process-global, so a test must be able to clear them. */
 export function _resetOllamaCapabilityCacheForTests(): void {
   cache.clear();
+  chatCache.clear();
 }
 
 interface ShowPayload {
@@ -116,4 +124,37 @@ export async function ollamaModelCanThink(model: string): Promise<boolean | null
   const canThink = payload.capabilities.includes(THINKING_CAPABILITY);
   cache.set(id, { canThink, at: Date.now() });
   return canThink;
+}
+
+/**
+ * Can this Ollama model answer a chat turn?
+ *
+ * Ollama says so itself: `/api/show` lists `completion` for a model that
+ * generates text and only `embedding` for one that does not. Where it cannot
+ * be asked — stopped for its idle standby, or too old to report capabilities —
+ * the name decides (`ollamaModelNameCanChat`), because nobody tags a chat
+ * model "embed". Neither answer wakes the unit: this is the bare port, not the
+ * proxy.
+ *
+ * Only Ollama's own verdict is cached, the thinking probe's rule. The chat
+ * header polls this, and on this box most polls land on the bare port refused
+ * (the idle standby stops the unit ten minutes after use): a guess kept for a
+ * minute would outlive the chat turn that wakes Ollama — exactly the window in
+ * which an embedding-only tag with no "embed" in its name (bge-m3, all-minilm)
+ * would be offered as the chat row. A refused connect is instant, so asking
+ * again costs the poll nothing.
+ */
+export async function ollamaModelCanChat(model: string): Promise<boolean> {
+  const id = model.trim();
+  if (!id) return false;
+
+  const hit = chatCache.get(id);
+  if (hit && Date.now() - hit.at < OLLAMA_CAPABILITY_TTL_MS) return hit.canChat;
+
+  const result = await fetchOllamaShow(id, CHAT_PROBE_TIMEOUT_MS);
+  const capabilities = result.status === "ok" ? (result.payload as ShowPayload | null)?.capabilities : undefined;
+  if (!Array.isArray(capabilities)) return ollamaModelNameCanChat(id);
+  const canChat = capabilities.includes(COMPLETION_CAPABILITY);
+  chatCache.set(id, { canChat, at: Date.now() });
+  return canChat;
 }

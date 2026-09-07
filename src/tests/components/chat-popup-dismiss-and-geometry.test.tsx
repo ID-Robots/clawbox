@@ -8,10 +8,18 @@
 //   - Resize and drag were floored at the minimum size but never capped at the
 //     viewport, so the popup could be grown or dragged past the screen edge
 //     with its header buttons and composer outside it.
+//
+// And what the sweep of 2026-09-07 found once those were in:
+//
+//   - The Escape guard held in jsdom and not in a browser, which flushes the
+//     card's close between the card's listener and the chat's.
+//   - The composer kept its grown height after a multi-line message was sent.
+//   - Undock then Dock to right docked at the default width, not the owner's.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushSync } from "react-dom";
 import { cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
-import { installHermesBox } from "@/tests/helpers/hermes-chat-box";
+import { installHermesBox, mountHermesChat } from "@/tests/helpers/hermes-chat-box";
 import { resetHarnessCache } from "@/lib/client-harness";
 
 const VIEWPORT = { w: 1440, h: 900 };
@@ -75,6 +83,28 @@ describe("Escape inside the chat", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("closes only the Create app card when the browser flushes its close before the key reaches the window", async () => {
+    const onClose = vi.fn();
+    render(<ChatPopup isOpen onClose={onClose} />);
+    fireEvent.click(await screen.findByTestId("chat-new-app-toggle"));
+    await screen.findByTestId("chat-new-app");
+    // A browser runs a microtask checkpoint after each listener, and React
+    // flushes the card's close in it — so by the time the key reaches the
+    // window, the chat's listener has been re-registered with the card gone.
+    // jsdom runs no checkpoint between listeners; this listener, registered
+    // after the card's so it runs after it, stands in for that flush.
+    const flushBetweenListeners = () => flushSync(() => {});
+    document.addEventListener("keydown", flushBetweenListeners);
+    try {
+      fireEvent.keyDown(document.body, { key: "Escape" });
+    } finally {
+      document.removeEventListener("keydown", flushBetweenListeners);
+    }
+
+    await waitFor(() => expect(screen.queryByTestId("chat-new-app")).toBeNull());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("still closes the chat when nothing is open on top of it", async () => {
     const onClose = vi.fn();
     render(<ChatPopup isOpen onClose={onClose} />);
@@ -109,6 +139,56 @@ describe("closing a docked chat", () => {
     await waitFor(() => expect(onPanelModeChange).toHaveBeenLastCalledWith(420));
     // Not the 520x680 floating popup the owner kept being handed.
     expect(screen.getByTestId("chat-popup").style.width).toBe("420px");
+  });
+});
+
+describe("the composer after a send", () => {
+  it("shrinks back to one row instead of keeping the height the message grew it to", async () => {
+    const box = installHermesBox();
+    const textarea = await mountHermesChat(box);
+    // Three lines' worth, the way the textarea's own onInput measures it.
+    Object.defineProperty(textarea, "scrollHeight", { value: 70, configurable: true });
+    fireEvent.input(textarea);
+    expect(textarea.style.height).toBe("70px");
+
+    fireEvent.change(textarea, { target: { value: "one\ntwo\nthree" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+
+    await waitFor(() => expect((textarea as HTMLTextAreaElement).value).toBe(""));
+    // `auto` is the one-row height (`rows={1}`); the box used to sit at 70px
+    // with only the placeholder in it until the next keystroke.
+    expect(textarea.style.height).toBe("auto");
+  });
+});
+
+describe("a draft put back without a keystroke", () => {
+  it("grows the composer to fit it, the way a keystroke would", async () => {
+    const box = installHermesBox();
+    const textarea = await mountHermesChat(box);
+    Object.defineProperty(textarea, "scrollHeight", { value: 70, configurable: true });
+    // `change` reaches React's onChange and never the textarea's onInput —
+    // the shape of a tab switch putting a stashed draft back with setInput
+    // alone. Shrinking on a send while leaving this at one row would have
+    // traded the sweep's defect for a three-line draft behind a scrollbar.
+    fireEvent.change(textarea, { target: { value: "one\ntwo\nthree" } });
+    await waitFor(() => expect(textarea.style.height).toBe("70px"));
+  });
+});
+
+describe("undocking and docking again", () => {
+  it("docks back at the width the owner had, not the default", async () => {
+    const onPanelModeChange = vi.fn();
+    render(<ChatPopup isOpen onClose={() => {}} initialPanelWidth={858} onPanelModeChange={onPanelModeChange} />);
+    await waitFor(() => expect(screen.getByTestId("chat-popup").style.width).toBe("858px"));
+
+    fireEvent.click(screen.getByTitle("Undock panel"));
+    expect(onPanelModeChange).toHaveBeenLastCalledWith(0);
+
+    fireEvent.click(screen.getByTitle("Dock to right"));
+    // 420 — the default — is what a brief undock used to cost a resized panel,
+    // and what the desktop then persisted.
+    expect(onPanelModeChange).toHaveBeenLastCalledWith(858);
+    expect(screen.getByTestId("chat-popup").style.width).toBe("858px");
   });
 });
 

@@ -1219,6 +1219,28 @@ function toLocalModel(provider: "llamacpp" | "ollama", modelId: string | null | 
   return `${provider}/${trimmed}`;
 }
 
+/**
+ * The name half of "can this Ollama model chat?": nobody tags a chat model
+ * "embed". `ollamaModelCanChat` (ollama-capabilities.ts) asks Ollama's own
+ * `/api/show` first and falls back to this; `inferConfiguredLocalModel` below
+ * runs with no Ollama to ask, so for it the name is the whole rule.
+ */
+export function ollamaModelNameCanChat(modelId: string): boolean {
+  return !/embed/i.test(modelId);
+}
+
+// An Ollama model that only embeds is no local CHAT model. The llama.cpp
+// migration leaves the retired embedder declared under `models.providers
+// .ollama.models`, and taking that list's first entry made it the box's local
+// model for EVERY reader of this — the picker, `setup/status`, and the
+// fallback writer, which then put it in `agents.defaults.model.fallbacks`,
+// where a cloud outage would route the chat to a model that cannot produce a
+// word, and where this inference would then find it FIRST (the UI sweep of
+// 2026-09-07). Refused here, at the inference, rather than at one consumer.
+function isLocalChatCandidate(provider: "llamacpp" | "ollama", modelId: string): boolean {
+  return provider !== "ollama" || ollamaModelNameCanChat(modelId);
+}
+
 export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "llamacpp" | "ollama"; model: string } | null {
   const modelDefaults = config.agents?.defaults?.model;
   const localCandidates = [
@@ -1230,6 +1252,7 @@ export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "
       const [provider, ...rest] = value.split("/");
       const normalizedProvider = normalizeLocalProvider(provider);
       if (!normalizedProvider || rest.length === 0) return null;
+      if (!isLocalChatCandidate(normalizedProvider, rest.join("/"))) return null;
       return { provider: normalizedProvider, model: value };
     })
     .filter((value): value is { provider: "llamacpp" | "ollama"; model: string } => value !== null);
@@ -1240,7 +1263,9 @@ export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "
 
   const providerDefs = config.models?.providers ?? {};
   for (const provider of ["llamacpp", "ollama"] as const) {
-    const candidate = toLocalModel(provider, providerDefs[provider]?.models?.[0]?.id);
+    const declared = providerDefs[provider]?.models ?? [];
+    const first = declared.find((entry) => typeof entry?.id === "string" && isLocalChatCandidate(provider, entry.id));
+    const candidate = toLocalModel(provider, first?.id);
     if (candidate) {
       return { provider, model: candidate };
     }
