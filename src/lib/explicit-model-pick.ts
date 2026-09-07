@@ -233,6 +233,55 @@ export async function recordExplicitModelPick(model: string): Promise<void> {
 }
 
 /**
+ * Forget the ClawBox AI pick, because the BOX has just moved off it.
+ *
+ * WHY A PICK MUST BE FORGETTABLE (TASK-769, closing the hole the read opened).
+ * The chat's entitlement guard drops a Max model the portal positively refuses
+ * down to Flash and posts it `automatic: true`, which correctly records no new
+ * pick — recording the box's own recovery as the owner's decision would pin the
+ * box to Flash for good. But it left the refused pick in the store for ever,
+ * and nothing else clears it: {@link picksWithoutProvider} is wired only to a
+ * ClawBox AI TOKEN change, and the same account keeps its token through a plan
+ * downgrade. Until the row read this the stale value was inert; the moment the
+ * row honours it, a downgraded box offers Max on the one ClawBox AI row it has,
+ * every click on it is refused by the same guard, and ClawBox AI becomes
+ * unreachable from the picker — the very failure this card is about, moved to
+ * another account state. (It also already had teeth: `decideClawboxAiModelId`
+ * writes that stale Max id as the primary on the next pair or re-pair.)
+ *
+ * WHY THIS IS SAFE TO DRIVE FROM AN AUTOMATIC SWITCH, and why it cannot fire
+ * from the OTHER caller that sends `automatic`. Only two things post an
+ * automatic ClawBox AI model: the entitlement guard, which fires solely on a
+ * positive `portalDeniesClawboxAiModel` (false on any doubt, so never on a
+ * network blip); and `/setup-api/providers/default`, which resolves the ROW's
+ * own model — and with this card's fix that row IS the pick, so the ids match
+ * and nothing is cleared. Hence the test is "the box automatically moved to a
+ * DIFFERENT ClawBox AI model than the one on record".
+ *
+ * FAIL-SOFT like its sibling: this is bookkeeping behind a model change that
+ * has already landed on disk.
+ */
+export async function forgetClawboxAiPickIfMovedOff(model: string): Promise<void> {
+  const landed = clawboxAiModelIdOf(model);
+  if (!landed) return;
+  return serialise(async () => {
+    try {
+      const { value } = await getKnown(EXPLICIT_MODEL_PICKS_KEY);
+      const picks = explicitPicksFrom(value);
+      const picked = clawboxAiModelIdOf(picks.clawai);
+      if (!picked || picked === landed) return;
+      const next = picksWithoutProvider(picks, "clawai");
+      if (next) await setMany({ [EXPLICIT_MODEL_PICKS_KEY]: next });
+    } catch (err) {
+      console.warn(
+        "[explicit-model-pick] could not clear a ClawBox AI pick the box moved off:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  });
+}
+
+/**
  * The picks map without one provider's entry, or null when it had none.
  *
  * The shape every ClawBox AI token writer needs: a pick belongs to the ACCOUNT
@@ -254,6 +303,52 @@ export function picksWithoutProvider(
   const next = { ...picks };
   delete next[provider];
   return next;
+}
+
+/**
+ * The ClawBox AI model the owner picked, as a BARE id, when `offered` still
+ * carries it — or null, meaning "fall through to this surface's own default".
+ *
+ * WHY A ROW BUILDER NEEDS THIS (TASK-769). A provider's picker row is
+ * represented by the primary while the primary is that provider's, and by a
+ * DEFAULT the rest of the time. The ClawBox AI list is ordered Flash first
+ * ({@link CLAWBOX_AI_CHAT_MODEL_IDS}, and the live list on a paired box), so
+ * one switch to another provider turned the ClawBox AI row from the Max model
+ * the owner had chosen into Flash — and clicking "ClawBox AI" to come back
+ * landed on Flash with no notice and no route back to Max from the picker at
+ * all. TASK-713's ruling is that a default fills a gap and never overwrites a
+ * choice; both editions already RECORD the choice on every switch and neither
+ * read it back.
+ *
+ * CLAWBOX AI ONLY, deliberately, and the other four slots are a stated gap
+ * rather than an oversight. Two things are true of `clawai` and of nothing
+ * else in this map. Its slot is EXACT: `clawboxAiModelIdOf` decides membership
+ * from a closed set of two ids and accepts every spelling the surfaces write
+ * (`deepseek/…`, `clawai/…`, and Hermes' bare id), so no prefix has to be
+ * guessed at — and guessing is not idle, because Hermes records a bare
+ * `openai/gpt-5.4` for an OPENROUTER save, which `pickSlotFor` files under
+ * `openai`. And its slot is ACCOUNT-BOUND: three writers drop it in the same
+ * `setMany` that stores a new ClawBox AI token ({@link picksWithoutProvider}),
+ * so it cannot outlive the account that made it. Neither holds for
+ * `anthropic`, `openai`, `openrouter` or `google`, and honouring a slot whose
+ * spelling is ambiguous and whose account binding nobody maintains would
+ * resurrect one account's model as another's default.
+ *
+ * VALIDATED AGAINST WHAT THE SURFACE STILL OFFERS. Not an entitlement check
+ * and not claimed as one: both tiers are declared on EVERY box whatever the
+ * plan (see `CLAWBOX_AI_CHAT_MODEL_IDS`), and the portal is what gates them.
+ * What this rejects is an id that has left the list — a retired alias, a
+ * provider row rewritten by hand — so the row can never name a model the
+ * surface has no entry for.
+ */
+export function pickedClawboxAiModelIdAmong(
+  picks: ExplicitModelPicks,
+  offered: Iterable<string>,
+): string | null {
+  const picked = clawboxAiModelIdOf(picks.clawai);
+  if (!picked) return null;
+  for (const id of offered) if (id === picked) return picked;
+  return null;
 }
 
 /** The stored picks, for a caller that has not already loaded the whole store. */
