@@ -231,6 +231,26 @@ d("the root-owned mirror", () => {
     expect(ran()).toBe(`tree from=${path.join(mirror, "install.sh")} args=--step post_update`);
   });
 
+  it("refuses rather than clear the aside copy when it cannot be put back", () => {
+    // The restore is `mv -T "$previous" "$MIRROR_DIR"`, and the line after it is
+    // `rm -rf "$staging" "$previous"`. If the rename fails, tolerating it throws
+    // away the only usable mirror on the very next line — the defect the restore
+    // exists to prevent, reached through the restore itself. A non-directory
+    // sitting at $MIRROR_DIR is enough to make `mv -T` fail that way.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
+    const good = fs.readFileSync(path.join(mirror, "install.sh"), "utf-8");
+
+    fs.renameSync(mirror, `${mirror}.old`);          // killed between the renames
+    fs.writeFileSync(mirror, "not a directory\n");   // ...and something is in the way
+
+    const r = sh(`"${helper}" --mirror`);
+    expect(r.status, "the restage carried on over a mirror it could not put back").not.toBe(0);
+    expect(fs.existsSync(`${mirror}.old`), "the only usable mirror was deleted anyway").toBe(true);
+    expect(fs.readFileSync(path.join(`${mirror}.old`, "install.sh"), "utf-8")).toBe(good);
+    expect(r.stderr).toMatch(/cannot put back the mirror/);
+  });
+
   it("recovers an interrupted swap on the dispatch path too, where nothing calls --mirror", () => {
     // The sibling of the case above, and the one that actually strands a box.
     // The helper only recovers $MIRROR_DIR.old when something asks it to restage
@@ -288,16 +308,21 @@ d("the root-owned mirror", () => {
     expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
     fs.renameSync(mirror, `${mirror}.old`);          // mid-swap, lock held below
 
+    // The wait for the holder is BOUNDED and its outcome checked: `sh` has no
+    // spawnSync timeout, so an environment without `flock` would leave the
+    // sentinel absent and spin until this file's 30 s vitest timeout, failing as
+    // an opaque timeout instead of saying what was missing.
     const held = path.join(tmp, "held");
-    sh(
-      `flock "${mirror}.lock" -c 'touch "${held}"; sleep 3' >/dev/null 2>&1 &
-`
-      + `until [ -f "${held}" ]; do sleep 0.05; done
-`
-      + `timeout 1 "${dispatcher}" post_update >/dev/null 2>&1
-`
-      + "true",
-    );
+    const setup = sh([
+      `command -v flock >/dev/null || { echo NO-FLOCK; exit 0; }`,
+      `flock "${mirror}.lock" -c 'touch "${held}"; sleep 3' >/dev/null 2>&1 &`,
+      `for _ in $(seq 1 100); do [ -f "${held}" ] && break; sleep 0.05; done`,
+      `[ -f "${held}" ] || { echo HOLDER-NEVER-STARTED; exit 0; }`,
+      `timeout 1 "${dispatcher}" post_update >/dev/null 2>&1`,
+      `echo DISPATCHED`,
+    ].join("\n"));
+    expect(setup.stdout.trim(), `lock holder setup failed: ${setup.stdout}${setup.stderr}`)
+      .toContain("DISPATCHED");
 
     expect(fs.existsSync(`${mirror}.old`), "the copy a restage in flight had moved aside was taken").toBe(true);
     expect(fs.existsSync(mirror), "the mirror was resurrected under a live restage").toBe(false);

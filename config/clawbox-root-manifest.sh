@@ -316,8 +316,14 @@ mirror_tree() {
   # what an update in flight looks like — leaves the box running the previous
   # root-established build instead of refusing every root step, including the
   # two that would let it finish the update, on an appliance with no console.
+  #
+  # A restore that FAILS must stop the function, not carry on: the next line
+  # clears $previous, so tolerating the failure throws away the only usable
+  # mirror through the very path that exists to save it. `mv -T` fails that way
+  # whenever something that is not a directory occupies $MIRROR_DIR.
   if [ ! -d "$MIRROR_DIR" ] && [ -d "$previous" ]; then
-    mv -T "$previous" "$MIRROR_DIR" || true
+    mv -T "$previous" "$MIRROR_DIR" \
+      || die "cannot put back the mirror an interrupted swap left in $previous — refusing to clear it" 66
   fi
   rm -rf "$staging" "$previous" || die "cannot clear the mirror staging area" 66
   install -d -o root -g root -m 0755 "$staging" || die "cannot create $staging" 66

@@ -179,6 +179,18 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
       "bash", "-lc",
       "journalctl -u 'clawbox-root-update@post_update.service' --no-pager -o cat | tail -n 400 || true",
     ], { user: "root" });
+    // Anchored so an EMPTY journal cannot pass it. The assertion below is an
+    // absence, and `|| true` above means a renamed unit, a rotated journal or a
+    // container without a persistent one yields "" — which satisfies any
+    // absence check and proves nothing. That is the false-success class this PR
+    // is about, in the test that guards it.
+    //
+    // The positive form is deliberately NOT asserted here: measured on a real
+    // box, the clawbox-root-update@ units log no exec path at all, mirror or
+    // tree, so requiring the mirror path would fail for the wrong reason. What
+    // proves root ran the mirror is the case below, which drives the real
+    // `sudo clawbox-run-root-step.sh` grant and watches the copy follow.
+    expect(journal.trim(), "no journal for post_update — the absence check below would pass vacuously").not.toBe("");
     expect(journal).not.toMatch(/Starting.*\/home\/clawbox\/clawbox\/install\.sh/);
   });
 

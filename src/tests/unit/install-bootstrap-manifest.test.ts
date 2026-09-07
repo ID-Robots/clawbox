@@ -373,6 +373,11 @@ function runVerdict(opts: {
   // these tests keep exercising the real gate. TASK-733.
   const writer = [
     fn("root_exec_may_anchor"),
+    // Lifted too, not stubbed: write_root_exec_manifest calls it, and an
+    // UNDEFINED function inside an `if` condition does not trip `set -e` — the
+    // fixture would silently take the else branch, report WRITE=ok and never
+    // reach `--mirror`, i.e. pass for its own shape rather than the code's.
+    fn("root_exec_helper_knows_mirror"),
     fn("write_root_exec_manifest"),
     fn("refresh_root_exec_manifest"),
   ].join("\n");
