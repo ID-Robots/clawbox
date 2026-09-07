@@ -33,6 +33,7 @@ import {
 } from "@/lib/hermes-dashboard-control";
 import { get } from "@/lib/config-store";
 import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
+import { pickedClawboxAiModelIdAmong, readExplicitModelPicks } from "@/lib/explicit-model-pick";
 import {
   CLAWAI_PROVIDER,
   HERMES_AUTO_PROVIDER,
@@ -1067,10 +1068,33 @@ export async function scopeFromPayload(
 
   let defaultModel = inScopeCurrent;
   if (!defaultModel && models.length) {
-    const recommended = await recommendedDefault(provider, payload.fetchedAt);
-    defaultModel = models.some((m) => m.id === recommended)
-      ? recommended
-      : (models.find((m) => m.featured)?.id ?? models[0].id);
+    // The owner's own ClawBox AI pick outranks every default there is — the
+    // dashboard's recommendation, Hermes' `featured` flag and the list's own
+    // order alike (TASK-769). `/setup-api/hermes/models` RECORDS that pick on
+    // a save that names a model and never read it back, so a device saved on
+    // another provider was offered the ClawBox AI scope's FIRST id — Flash —
+    // and an owner who had chosen Max came back to Flash with no notice.
+    //
+    // CLAWBOX AI ONLY, and the store is not even read for another scope. The
+    // reason is `pickedClawboxAiModelIdAmong`'s: Hermes saves model ids BARE,
+    // so `pickSlotFor` files an OpenRouter save of `openai/gpt-5.4` under
+    // `openai` and records nothing at all for a slashless `claude-opus-4-8`.
+    // Only ClawBox AI's two ids survive that intact, through a closed set
+    // rather than a guessed prefix. Every other Hermes provider still lands on
+    // `recommendedDefault` after a switch — the harness's own
+    // `pick_silent_default_model`, which is the right answer for a provider
+    // whose pick this box cannot reliably remember.
+    const picked = provider === CLAWAI_PROVIDER
+      ? pickedClawboxAiModelIdAmong(await readExplicitModelPicks(), models.map((m) => m.id))
+      : null;
+    if (picked) {
+      defaultModel = picked;
+    } else {
+      const recommended = await recommendedDefault(provider, payload.fetchedAt);
+      defaultModel = models.some((m) => m.id === recommended)
+        ? recommended
+        : (models.find((m) => m.featured)?.id ?? models[0].id);
+    }
   }
 
   return {

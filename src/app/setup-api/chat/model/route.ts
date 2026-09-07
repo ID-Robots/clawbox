@@ -20,6 +20,7 @@ import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provi
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import {
+  CLAWBOX_AI_CHAT_MODEL_IDS,
   CLAWBOX_AI_MODEL_BY_TIER,
   CLAWBOX_AI_DEFAULT_TIER,
 } from "@/lib/clawbox-ai-models";
@@ -39,7 +40,13 @@ import {
 } from "@/lib/provider-status";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
-import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
+import {
+  explicitPicksFrom,
+  forgetClawboxAiPickIfMovedOff,
+  pickedClawboxAiModelIdAmong,
+  recordExplicitModelPick,
+  EXPLICIT_MODEL_PICKS_KEY,
+} from "@/lib/explicit-model-pick";
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
@@ -475,6 +482,9 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     sqliteGet(PRIMARY_MODEL_KEY).catch(() => null),
   ]);
   const authProfiles = openclawConfig.auth?.profiles ?? {};
+  // Off the store `getAll()` has already returned — the same read
+  // `ai-models/configure` does for the same map, and no second file read.
+  const explicitPicks = explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]);
   // Subscription-only providers, computed ONCE: the row attribution below and
   // the `subscriptionProviders` the answer carries are the same walk of the
   // same profile map, and doing it twice per GET on a Jetson is a walk that
@@ -602,8 +612,10 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     // Pick which model represents this provider in the dropdown:
     //  1. activeModel if it belongs to this provider (so the row's
     //     "model" field matches what the gateway is actually using).
-    //  2. The first model in the openclaw provider definition.
-    //  3. The hard-coded default for this provider.
+    //  2. For the ClawBox AI row only: the model the owner picked, while the
+    //     row still offers it (`pickedClawboxAiModelIdAmong`, TASK-769).
+    //  3. The first model in the openclaw provider definition.
+    //  4. The hard-coded default for this provider.
     const providerDef = providerDefinitions[rawProvider];
     // Minus the ClawBox AI image entry, and nothing else: `models.providers
     // .openai.models[]` carries it on every paired box, and on a box with an
@@ -622,6 +634,18 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
         typeof m?.id === "string" && m.id.trim().length > 0 && !isClawboxAiImageModelId(m.id),
     );
 
+    // The owner's own ClawBox AI pick, judged against what the row still
+    // offers: the configured list where there is one, and otherwise the closed
+    // set itself, so a legacy install carrying no `models.providers.deepseek`
+    // entry — the case `DEFAULT_PROVIDER_MODELS` exists for — keeps the choice
+    // too. `pickedClawboxAiModelIdAmong` says why this is the one slot read.
+    const pickedModelId = provider === "clawai"
+      ? pickedClawboxAiModelIdAmong(
+          explicitPicks,
+          definedModels.length > 0 ? definedModels.map((m) => m.id) : CLAWBOX_AI_CHAT_MODEL_IDS,
+        )
+      : null;
+
     let model: string | null = null;
     // `!isClawboxAiImageModelRef` matters here, not only in the filter above:
     // this branch wins whenever the primary belongs to this provider, so on
@@ -632,6 +656,8 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     // provider" is what lets the owner's configured rows be consulted.
     if (activeModel && !isClawboxAiImageModelRef(activeModel) && uiProviderForModel(activeModel) === provider) {
       model = activeModel;
+    } else if (pickedModelId) {
+      model = `${rawProvider}/${pickedModelId}`;
     } else if (!isChatgptSignIn && definedModels.length > 0) {
       model = `${rawProvider}/${definedModels[0].id}`;
     } else {
@@ -1268,6 +1294,10 @@ export async function POST(request: Request) {
       // exists for a caller that does arrive — an API client, a future picker
       // that stops short-circuiting — and is honest for it.
       if (!automaticSwitch) await recordExplicitModelPick(targetModel);
+      // ...and its mirror: a switch the BOX made to a different ClawBox AI
+      // model retires the pick it moved off, so the entitlement guard's
+      // recovery cannot leave a refused Max id on the row for ever (TASK-769).
+      else await forgetClawboxAiPickIfMovedOff(targetModel);
       // Already the primary — but a ChatGPT pick can arrive as `codex/<id>`
       // and remap onto a primary that IS `openai/<id>` already, on a box whose
       // Codex runtime entry is missing (written by an older ClawBox, or lost).
@@ -1409,6 +1439,11 @@ export async function POST(request: Request) {
     //       that as a choice would pin the box to Flash for good — the box's
     //       own recovery, read back as the owner's decision.
     if (!automaticSwitch) await recordExplicitModelPick(targetModel);
+    //       And its mirror, for the same reason the exemption exists: the
+    //       guard's drop to Flash must also RETIRE the Max pick it moved off,
+    //       or the row this card teaches to honour a pick would offer a model
+    //       the portal refuses and leave ClawBox AI unreachable (TASK-769).
+    else await forgetClawboxAiPickIfMovedOff(targetModel);
 
     // 1c. The other side of the arm: a pick that is NOT the subscription's, on
     //     a reference an earlier ChatGPT pick armed, has to clear it — a

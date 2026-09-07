@@ -92,7 +92,8 @@ import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
-import { setMany } from "@/lib/config-store";
+import { getKnown, setMany } from "@/lib/config-store";
+import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { promisify } from "util";
 
 describe("/setup-api/chat/model", () => {
@@ -546,6 +547,42 @@ describe("/setup-api/chat/model", () => {
       });
     });
 
+    it("retires a ClawBox AI pick the box automatically moved OFF", async () => {
+      // The entitlement guard drops a refused Max model to Flash with
+      // `automatic: true`. Recording that as a choice would pin the box to
+      // Flash; leaving the refused Max pick on record makes the row this card
+      // teaches to honour a pick offer a model every click is refused for, so
+      // it is retired instead (TASK-769).
+      boxWithClawaiAndAnthropic();
+      vi.mocked(getKnown).mockResolvedValue({
+        value: { clawai: "deepseek/deepseek-v4-pro", anthropic: "anthropic/claude-opus-5" },
+        known: true,
+      });
+
+      expect((await post({ model: "deepseek/deepseek-v4-flash", automatic: true })).status).toBe(200);
+
+      expect(setMany).toHaveBeenCalledWith({
+        ai_model_explicit_picks: { anthropic: "anthropic/claude-opus-5" },
+      });
+    });
+
+    it("leaves the pick alone when the automatic switch lands ON it", async () => {
+      // `/setup-api/providers/default` also posts `automatic` — it resolves the
+      // ROW's own model, which with this card's fix IS the pick. Same id, so
+      // there is nothing to retire and the owner's choice must survive.
+      boxWithClawaiAndAnthropic();
+      vi.mocked(getKnown).mockResolvedValue({
+        value: { clawai: "deepseek/deepseek-v4-pro" },
+        known: true,
+      });
+
+      expect((await post({ model: "deepseek/deepseek-v4-pro", automatic: true })).status).toBe(200);
+
+      expect(setMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
+      );
+    });
+
     it("records NOTHING for a switch the box made for itself", async () => {
       // The chat's entitlement guard drops a Max model the portal refuses down
       // to Flash so chat keeps working. Remembering the box's own recovery as
@@ -558,6 +595,144 @@ describe("/setup-api/chat/model", () => {
       expect(setMany).not.toHaveBeenCalledWith(
         expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
       );
+    });
+  });
+
+  describe("offering back the model the OWNER chose (TASK-769)", () => {
+    /**
+     * The READ half of TASK-713's ruling, and the half that was missing.
+     *
+     * A provider's row is built from `models.providers.<p>.models[0]` whenever
+     * the primary belongs to some OTHER provider — and the ClawBox AI list is
+     * ordered Flash first (`CLAWBOX_AI_CHAT_MODEL_IDS`, and the live list on a
+     * paired box: `deepseek-v4-flash`, `deepseek-v4-pro`, ...). So one switch
+     * to Anthropic turned the ClawBox AI row from the Max model the owner had
+     * picked into Flash, and clicking "ClawBox AI" to come back landed on
+     * Flash with no notice and no way back to Max from the picker at all.
+     */
+    function boxOnAnthropicAfterPickingMax(store: Record<string, unknown>) {
+      vi.mocked(getAll).mockResolvedValue(store);
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "anthropic:default": { provider: "anthropic", mode: "oauth" },
+          },
+        },
+        models: { providers: { deepseek: { models: [
+          { id: "deepseek-v4-flash", name: "ClawBox AI Flash" },
+          { id: "deepseek-v4-pro", name: "ClawBox AI Pro" },
+        ] } } },
+        agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } },
+      } as never);
+    }
+
+    async function clawaiRow() {
+      const body = await (await GET()).json();
+      return body.options.find(
+        (option: { provider: string | null }) => option.provider === "clawai",
+      );
+    }
+
+    it("keeps the recorded pick on the row while another provider is active", async () => {
+      boxOnAnthropicAfterPickingMax({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+
+      expect(await clawaiRow()).toMatchObject({
+        id: "deepseek/deepseek-v4-pro",
+        model: "deepseek/deepseek-v4-pro",
+        label: "ClawBox AI",
+      });
+    });
+
+    it("falls back to the provider's first model when the owner never picked one", async () => {
+      // The other half of the ruling: a default still FILLS a gap. Nothing
+      // recorded is nothing to honour, and the row is beta's answer.
+      boxOnAnthropicAfterPickingMax({});
+
+      expect(await clawaiRow()).toMatchObject({
+        id: "deepseek/deepseek-v4-flash",
+        model: "deepseek/deepseek-v4-flash",
+      });
+    });
+
+    it("honours the pick on a legacy install that declares no models at all", async () => {
+      // `models.providers.deepseek.models` is absent on an install that
+      // predates the explicit V4 aliases — the case `DEFAULT_PROVIDER_MODELS`
+      // exists for. ClawBox AI's own closed set is what the pick is judged
+      // against there, so such a box keeps the choice too instead of falling
+      // to the tier default.
+      vi.mocked(getAll).mockResolvedValue({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+      });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "anthropic:default": { provider: "anthropic", mode: "oauth" },
+          },
+        },
+        models: { mode: "replace", providers: {} },
+        agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } },
+      } as never);
+
+      expect(await clawaiRow()).toMatchObject({
+        model: "deepseek/deepseek-v4-pro",
+      });
+    });
+
+    it("ignores a recorded pick the row no longer offers", async () => {
+      // Judged against what the surface still lists — a retired alias, a
+      // provider row rewritten by hand — so the row can never name a model
+      // there is no entry for. NOT an entitlement check: both tiers are
+      // declared on every box whatever the plan, and the portal gates them.
+      boxOnAnthropicAfterPickingMax({
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v3-retired" },
+      });
+
+      expect(await clawaiRow()).toMatchObject({
+        model: "deepseek/deepseek-v4-flash",
+      });
+    });
+
+    it("reads the ClawBox AI slot and no other", async () => {
+      // Hermes records model ids BARE, so `pickSlotFor` files an OpenRouter
+      // save of `openai/gpt-5.4` under `openai` and drops a slashless
+      // `claude-opus-4-8` entirely; and only the clawai slot is dropped when
+      // the account's token changes. Honouring another slot would let one
+      // account's choice become another's row.
+      vi.mocked(getAll).mockResolvedValue({
+        ai_model_explicit_picks: { anthropic: "anthropic/claude-haiku-4.5" },
+      });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
+        models: { providers: { anthropic: { models: [
+          { id: "claude-opus-5" },
+          { id: "claude-haiku-4.5" },
+        ] } } },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      } as never);
+
+      const body = await (await GET()).json();
+      const anthropic = body.options.find(
+        (option: { provider: string | null }) => option.provider === "anthropic",
+      );
+      expect(anthropic).toMatchObject({ model: "anthropic/claude-opus-5" });
+    });
+
+    it("survives the round trip through the surface that records the pick", async () => {
+      // The fixtures above inject the map by hand. This one records through
+      // `recordExplicitModelPick` the way a picker click does, then reads the
+      // row back — so the two halves cannot drift apart in spelling.
+      boxOnAnthropicAfterPickingMax({});
+      vi.mocked(setMany).mockImplementation(async (patch: Record<string, unknown>) => {
+        vi.mocked(getAll).mockResolvedValue(patch);
+      });
+
+      await recordExplicitModelPick("deepseek/deepseek-v4-pro");
+
+      expect(await clawaiRow()).toMatchObject({ model: "deepseek/deepseek-v4-pro" });
     });
   });
 
