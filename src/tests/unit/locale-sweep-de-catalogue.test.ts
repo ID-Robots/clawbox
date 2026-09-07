@@ -39,7 +39,7 @@ describe("German catalogue shapes", () => {
     }
   });
 
-  it("renders 'in 16 Std 32 Min' for a run sixteen and a half hours out", () => {
+  it("renders 'in 16 Std. 32 Min.' for a run sixteen and a half hours out", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-07T09:00:00Z"));
     const t = (key: string, params?: Record<string, string | number>) => {
@@ -48,6 +48,6 @@ describe("German catalogue shapes", () => {
       return str;
     };
     const when = Date.now() + (16 * 60 + 32) * 60_000;
-    expect(formatNextRun(when, t)).toBe("in 16 Std 32 Min");
+    expect(formatNextRun(when, t)).toBe("in 16 Std. 32 Min.");
   });
 });
