@@ -365,7 +365,7 @@ describe("a step that can now fail must not abort the install", () => {
     "install.sh:%s guards the call",
     (_line, text) => {
       // `optional_step` is the guard in post_update now: it cannot fail the step and it records the name, so a skipped repair reaches the update's own status rather than only the journal.
-      expect(text).toMatch(/\|\|\s*echo|optional_step \S+ /);
+      expect(text).toMatch(/(\|\|\s*echo)|(^\s*optional_step \S+ )/);
     },
   );
 });

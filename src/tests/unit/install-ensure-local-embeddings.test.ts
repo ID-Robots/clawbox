@@ -386,7 +386,10 @@ describe("ensure_local_embeddings never fails the update", () => {
       'as_clawbox_login() { eval "$*"; }',
       `sed -n '/^ensure_local_embeddings() {/,/^}/p' "$1" > "${tmp}/fn.sh"`,
       `. "${tmp}/fn.sh"`,
-      "ensure_local_embeddings; echo RC=$?",
+      // Called the way `optional_step` calls it — `if "$@"` — so a non-zero
+      // return is REPORTED rather than aborting this fixture's own shell under
+      // `set -e`, which is exactly the difference the wrapper makes on the box.
+      "if ensure_local_embeddings; then echo RC=0; else echo RC=$?; fi",
     ].join(NL);
     let out: string;
     let code = 0;
@@ -408,13 +411,20 @@ describe("ensure_local_embeddings never fails the update", () => {
     expect(r.out).toContain("MODEL_STEP_RAN");
     expect(r.out).toContain("HELPER_RAN");
     expect(r.out.indexOf("MODEL_STEP_RAN")).toBeLessThan(r.out.indexOf("HELPER_RAN"));
-    expect(r.out).toContain("RC=0");
+    // The fixture's core is `/bin/false`, so nothing answers the status probe —
+    // the state the case below names — and the function now SAYS so instead of
+    // answering 0 over a verdict it could not read. It still cannot fail the
+    // update: `step_post_update` runs it through `optional_step`, which records
+    // the name and returns 0 itself.
+    expect(r.out).toContain("RC=1");
+    expect(r.out).toMatch(/could not read an embedder/i);
   });
 
   it("still runs the helper when the model cache fails — the unit fetches on first use", () => {
     const r = run({ modelStepFails: true });
     expect(r.out).toContain("HELPER_RAN");
-    expect(r.out).toContain("RC=0");
+    // Same fixture, same unanswered core (see above).
+    expect(r.out).toContain("RC=1");
   });
 
   it("bounds the helper so it cannot hold a quiesced gateway open for ever", () => {
@@ -428,9 +438,9 @@ describe("ensure_local_embeddings never fails the update", () => {
     expect(r.out).not.toContain("Local embeddings ready");
   });
 
+  // The two SKIPS: nothing to do on this box, so nothing to report.
   for (const [name, opts] of [
     ["a hermes box with no core to point at the model", { hermes: true }],
-    ["a checkout whose helper is missing", { helper: false }],
     ["the e2e container", { testMode: true }],
   ] as const) {
     it(`returns 0 on ${name}`, () => {
@@ -441,4 +451,17 @@ describe("ensure_local_embeddings never fails the update", () => {
       expect(r.out).not.toContain("MODEL_STEP_RAN");
     });
   }
+
+  it("reports a checkout whose helper is missing, rather than skipping it quietly", () => {
+    // Not a state of the box: the script is part of the tree the update just
+    // checked out, so its absence is this installer's own gap and the owner's
+    // memory search silently stays on lexical FTS. `optional_step` records it
+    // without failing the update.
+    const r = run({ helper: false });
+    // The sentence itself goes to stderr, which this fixture does not capture
+    // on a shell that exits 0; the RETURN is the contract `optional_step` reads.
+    expect(r.out).toContain("RC=1");
+    expect(r.out).not.toContain("HELPER_RAN");
+    expect(r.out).not.toContain("MODEL_STEP_RAN");
+  });
 });

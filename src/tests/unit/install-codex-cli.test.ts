@@ -240,7 +240,7 @@ describe("delivery to devices already in the field", () => {
     const line = extractShellFunction("step_post_update")
       .split("\n")
       .find((l) => l.includes("step_codex_cli"));
-    expect(line).toMatch(/\|\|\s*echo|optional_step \S+ step_codex_cli/);
+    expect(line).toMatch(/^\s*optional_step \S+ step_codex_cli\b/);
   });
 
   it("a fresh install ships it too", () => {

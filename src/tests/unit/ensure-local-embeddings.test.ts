@@ -819,6 +819,14 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
 
   interface Report {
     out: string;
+    /**
+     * What the block ANSWERED — 0 when it had nothing to report, non-zero for a
+     * state it could not read or do. `step_post_update` runs it through
+     * `optional_step`, which records that without failing the update, so the
+     * fixture below calls it the same way (`if "$@"`) rather than bare under
+     * `set -e`.
+     */
+    rc: number;
     /** Every argv the stub `openclaw` was called with, one per line. */
     cliCalls: string;
     /** One line per stub invocation: "model-step" for step_embed_model, "ran" for the helper. */
@@ -837,6 +845,7 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     const project = path.join(dir, "device", "project");
     const stubBin = path.join(dir, "device", "bin");
     const cliLog = path.join(dir, "device", "openclaw-calls.log");
+    const rcLog = path.join(dir, "device", "rc.log");
     const stepLog = path.join(dir, "device", "steps.log");
     mkdirSync(path.join(home, ".openclaw"), { recursive: true });
     mkdirSync(path.join(project, "scripts"), { recursive: true });
@@ -890,7 +899,11 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
       "ensure_local_embeddings() {",
       BLOCK,
       "}",
-      "ensure_local_embeddings",
+      // EXACTLY how `optional_step` invokes it on the box: `if "$@"`, which is
+      // what makes a non-zero answer a recorded warning rather than an aborted
+      // step. Bare under `set -e` this fixture would stop at the first honest
+      // "could not read the core" and call the contract broken.
+      `if ensure_local_embeddings; then printf '0\\n' > ${JSON.stringify(rcLog)}; else printf '%s\\n' "$?" > ${JSON.stringify(rcLog)}; fi`,
       "",
     ].join("\n");
 
@@ -903,6 +916,7 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     expect(run.status).toBe(0);
     return {
       out: `${run.stdout ?? ""}${run.stderr ?? ""}`,
+      rc: existsSync(rcLog) ? Number(readFileSync(rcLog, "utf-8").trim()) : -1,
       cliCalls: existsSync(cliLog) ? readFileSync(cliLog, "utf-8") : "",
       steps: existsSync(stepLog) ? readFileSync(stepLog, "utf-8").trim().split("\n").filter(Boolean) : [],
     };
@@ -928,6 +942,8 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
 
   it("caches the model first, then runs the helper, then asks the core", () => {
     const run = report({ cli: status(PROVIDER) });
+    // A healthy on-device embedder has nothing to report.
+    expect(run.rc).toBe(0);
     expect(run.steps).toEqual(["model-step", "ran"]);
     expect(run.cliCalls).toContain("memory status --agent main --deep --json");
     // -k, because `timeout` alone sends SIGTERM only and
@@ -953,6 +969,10 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     expect(run.out).not.toContain(READY);
     expect(run.out).not.toMatch(/cloud/i);
     expect(run.out).toMatch(/no address recorded/i);
+    // And it ANSWERS that, so the update's own status carries it. It used to
+    // return 0 over every one of these, which made the `optional_step` wrapper
+    // in step_post_update inert for this helper.
+    expect(run.rc).toBe(1);
   });
 
   it("does not call a box on a stale legacy block ready", () => {
@@ -965,6 +985,10 @@ describe.skipIf(!canRun)("install.sh local embeddings post-run check", () => {
     expect(run.out).not.toContain(READY);
     expect(run.out).toMatch(/cloud/i);
     expect(run.out).toContain("openai");
+    // Deliberately NOT a finding: a cloud embedder is a state an owner chose
+    // and the Memory Shard app can change, and `optional_step` renders a
+    // non-zero return as "this fixup failed and was skipped".
+    expect(run.rc).toBe(0);
   });
 
   it("treats the old on-device providers as local whatever the model is", () => {

@@ -71,7 +71,7 @@ describe("delivery to devices already in the field", () => {
     const fn = extractShellFunction("step_post_update");
     // `optional_step` is the guard in post_update now: it cannot fail the step and it records the name, so a skipped repair reaches the update's own status rather than only the journal.
     const line = fn.split("\n").find((l) => l.includes("step_coding_harness"));
-    expect(line).toMatch(/\|\|\s*echo|optional_step \S+ step_coding_harness/);
+    expect(line).toMatch(/^\s*optional_step \S+ step_coding_harness\b/);
   });
 });
 

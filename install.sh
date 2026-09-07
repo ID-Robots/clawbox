@@ -7224,7 +7224,11 @@ ensure_local_embeddings() {
   fi
   if [ ! -x "$helper" ]; then
     echo "  Warning: $helper is missing or not executable - semantic memory stays on lexical FTS" >&2
-    return 0
+    # Non-zero, and `optional_step` is what makes that safe: the helper being
+    # absent from the checkout is this installer's own gap, not a state of the
+    # box, and reporting it as a completed fixup is the false success this
+    # whole change removes.
+    return 1
   fi
   step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
   as_clawbox_login "timeout -k 10 600 $helper" || true
@@ -7299,8 +7303,17 @@ else:
 PY
 )"
   fi
+  # Which of the states below are FINDINGS — something this run could not do or
+  # could not read — as opposed to facts about a box that is configured the way
+  # its owner configured it. Only the findings answer non-zero, because
+  # `optional_step` renders a non-zero return as "this fixup failed and was
+  # skipped": saying that over a deliberate cloud embedder, or over memory
+  # search the owner switched off, would be a false failure in place of the
+  # false success.
+  local EMBED_FINDINGS=0
   case "$EMBED_STATE" in
     unknown)
+      EMBED_FINDINGS=1
       echo "  WARN: memory search is on an OpenAI-compatible embedder with no address recorded, so this run cannot say whether it is on this box; the Memory Shard app shows the real state"
       ;;
     local:qwen3-embedding-0.6b)
@@ -7323,6 +7336,7 @@ PY
       ;;
     noparser)
       # Named as the installer's own gap, not the core's.
+      EMBED_FINDINGS=1
       echo "  WARN: python3 is not installed on this box, so this run cannot read the embedder answer the core gave; the Memory Shard app shows the real state"
       ;;
     disabled)
@@ -7333,10 +7347,15 @@ PY
       # answer": the CLI was missing, failed or timed out; its output could
       # not be parsed; or the core answered and named no provider at all --
       # providerLocation()'s own "unknown".
+      EMBED_FINDINGS=1
       echo "  WARN: could not read an embedder from the core (openclaw memory status did not answer, or named no provider), so this run puts no verdict on semantic memory; the Memory Shard app shows the real state"
       ;;
   esac
-  return 0
+  # A cloud embedder and a switched-off memory search are deliberately NOT
+  # findings: both are states an owner chose and the Memory Shard app can
+  # change, and an update that called them failed fixups would cry wolf on
+  # every run.
+  return "$EMBED_FINDINGS"
 }
 
 step_ollama_install() {
