@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * Linking ClawBox AI under a RUNNING agent has to make that agent able to draw.
@@ -46,6 +47,7 @@ function methods(): string[] {
 }
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
+let restoreEnv: () => void;
 
 beforeEach(() => {
   rpcMock.mockReset();
@@ -54,11 +56,16 @@ beforeEach(() => {
   bounceMock.mockResolvedValue("restarted");
   reloadMcpMock.mockResolvedValue(true);
   agentSaysItCanDraw(true);
+  restoreEnv = saveEnv("CLAWBOX_EDITION");
+  // The box this whole file is about: the edition decides whether a refused
+  // reload is worth an error line, and every case here is a Hermes box.
+  process.env.CLAWBOX_EDITION = "hermes";
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
   errorSpy.mockRestore();
+  restoreEnv();
 });
 
 describe("refreshHermesImageTools", () => {

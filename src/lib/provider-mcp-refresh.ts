@@ -3,7 +3,7 @@ import { MCP_RELOAD_ALREADY, MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReload
 import { logSafe } from "@/lib/log-safe";
 
 /**
- * Ask the agent to re-advertise WHICH PROVIDERS it may switch this device to,
+ * Ask HERMES to re-advertise WHICH PROVIDERS it may switch this device to,
  * when a write changed the answer.
  *
  * WHY THIS EXISTS — the fourth of four. `mcp/lib/context.ts` probes this device
@@ -27,7 +27,7 @@ import { logSafe } from "@/lib/log-safe";
  * just succeeded. It is #514's shape (the panel updated, the running agent
  * stale) wearing #513's (advice that loops).
  *
- * The mechanism is the agent's own `reload.mcp`, shared with all three siblings —
+ * The mechanism is HERMES' own `reload.mcp`, shared with the four siblings —
  * see `hermes-mcp-reload.ts`. What belongs HERE is the rule for when it is worth
  * paying for.
  */

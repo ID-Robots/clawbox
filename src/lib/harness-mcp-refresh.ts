@@ -2,7 +2,7 @@ import { MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/li
 import type { Harness } from "@/lib/harness";
 
 /**
- * Ask the agent to rebuild its tool list when the ACTIVE HARNESS moved under it.
+ * Ask HERMES to rebuild its tool list when the ACTIVE HARNESS moved under it.
  *
  * WHY THIS EXISTS — the fifth of five, and the biggest of them. The ClawBox MCP
  * server probes this device ONCE, while its stdio child boots
@@ -108,9 +108,9 @@ export async function refreshHarnessToolsIfSwitched(
     await reportMcpReloadRefused("harness/select", moved);
     return false;
   }
-  // Names WHO was asked, in the sentence every family shares — this module made
-  // the argument first (see `MCP_RELOAD_ASKED`) and two siblings still said "the
-  // agent", which reads as "whichever harness now serves the owner".
+  // Names WHO was asked, in the sentence every family shares: the mechanism is
+  // Hermes' dashboard, and "the agent" reads as "whichever harness now serves
+  // the owner" — wrong in the away direction on dual. See `MCP_RELOAD_ASKED`.
   console.log(`[harness/select] ${moved}; ${MCP_RELOAD_ASKED}`);
   return true;
 }

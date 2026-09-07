@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * The narrow trigger that keeps `coding_agent_run` / `_status` / `_stop` in step
@@ -28,12 +29,26 @@ const mockRpc = vi.mocked(dashboardRpc);
 const mockHarness = vi.mocked(getActiveHarness);
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
+let restoreEnv: () => void;
+
+/**
+ * Which EDITION the box is, which is what decides whether a refusal is worth an
+ * error line: the dashboard the reload is asked of runs on `hermes` AND `dual`
+ * (install.sh enables it for both), whichever harness is active. `saveEnv`
+ * restores the suite-wide floor afterwards.
+ */
+function setEdition(edition: string | null): void {
+  if (edition === null) delete process.env.CLAWBOX_EDITION;
+  else process.env.CLAWBOX_EDITION = edition;
+}
 
 beforeEach(() => {
   mockRpc.mockReset();
   mockRpc.mockResolvedValue({ status: "ok" });
   mockHarness.mockReset();
   mockHarness.mockResolvedValue("hermes");
+  restoreEnv = saveEnv("CLAWBOX_EDITION");
+  setEdition("hermes");
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 });
@@ -41,6 +56,7 @@ beforeEach(() => {
 afterEach(() => {
   errorSpy.mockRestore();
   logSpy.mockRestore();
+  restoreEnv();
 });
 
 describe("refreshCodingAgentToolsIfReadinessChanged", () => {
@@ -100,7 +116,7 @@ describe("refreshCodingAgentToolsIfReadinessChanged", () => {
     // the probe re-runs and the tool list catches up on its own. An ERROR line
     // over an operation that needed no repair is the recurring false-alarm
     // shape, not a diagnosis.
-    mockHarness.mockResolvedValue("openclaw");
+    setEdition("openclaw");
     mockRpc.mockResolvedValue(null);
     await refreshCodingAgentToolsIfReadinessChanged(false, true);
     expect(errorSpy).not.toHaveBeenCalled();
@@ -111,16 +127,17 @@ describe("refreshCodingAgentToolsIfReadinessChanged", () => {
   it("still reports a HERMES box whose dashboard refused", async () => {
     // The one case a human should act on: a box that HAS a dashboard and it
     // said no. Softening this one too would trade a false alarm for a silence.
-    mockHarness.mockResolvedValue("hermes");
+    setEdition("hermes");
     mockRpc.mockResolvedValue(null);
     await refreshCodingAgentToolsIfReadinessChanged(false, true);
     expect(errorSpy).toHaveBeenCalled();
   });
 
   it("keeps the error when the edition cannot be read at all", async () => {
-    // Unknown is not "OpenClaw". A harness lookup that throws must not be the
-    // thing that quiets a real Hermes failure.
-    mockHarness.mockRejectedValue(new Error("no config"));
+    // Unknown is not "OpenClaw". An edition nothing on the device named — no
+    // lock file, no CLAWBOX_EDITION — is this module's own default, not an
+    // answer, and must not be the thing that quiets a real Hermes failure.
+    setEdition(null);
     mockRpc.mockResolvedValue(null);
     await refreshCodingAgentToolsIfReadinessChanged(false, true);
     expect(errorSpy).toHaveBeenCalled();

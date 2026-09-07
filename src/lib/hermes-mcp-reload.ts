@@ -1,4 +1,4 @@
-import { getActiveHarness } from "@/lib/harness";
+import { readEditionSource } from "@/lib/edition-source";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
 import { logSafe } from "@/lib/log-safe";
 
@@ -108,10 +108,23 @@ export const MCP_RELOAD_ALREADY = "the MCP servers were already reloaded for thi
  * HAS a dashboard and it said no. Everything else is a `console.log` that says
  * what will actually happen next.
  *
- * UNKNOWN IS NOT OPENCLAW. `getActiveHarness()` swallows its own read failures
- * and answers `openclaw` by default, but if the call itself throws we keep the
- * error — a harness lookup that fell over must not be the thing that quiets a
- * real Hermes failure.
+ * THE QUESTION IS THE EDITION, NOT THE ACTIVE HARNESS. Which agent serves the
+ * owner right now and whether this box HAS a Hermes dashboard are different
+ * questions on the premium `dual` SKU: `install.sh` enables
+ * `clawbox-hermes-dashboard.service` for hermes AND dual, so the dashboard runs
+ * on a dual box whichever harness is active. Asking `getActiveHarness()` there
+ * turned a real refusal — the dashboard up and answering `confirm_required` —
+ * into the benign "this edition has no dashboard" line, on the one line that
+ * exists to make the refusal visible: the false-success shape, on the report of
+ * a false success. The predicate is `hasHermesHarness()`'s (edition `hermes` or
+ * `dual`, the mirror of install.sh's own `has_hermes_harness()`), read from ONE
+ * `readEditionSource()` so the two halves of the decision cannot come from two
+ * reads of a file `install.sh` rewrites.
+ *
+ * UNKNOWN IS NOT OPENCLAW. An edition nothing on the device named — no lock
+ * file, no `CLAWBOX_EDITION` — is this module's own default, not an answer, so
+ * it keeps the error: a lookup that could not say must not be the thing that
+ * quiets a real Hermes failure.
  *
  * @param tag   the caller's log prefix, e.g. `coding-agent/mcp-refresh`
  * @param what  what changed, in the caller's own words, e.g. "the coding agent
@@ -128,8 +141,9 @@ export async function reportMcpReloadRefused(tag: string, what: string): Promise
   // are rebuilt at their own source (see `harness-mcp-refresh.ts`); this is the
   // record's own rule.
   const line = `[${logSafe(tag, 60)}] ${logSafe(what)}`;
-  const harness = await getActiveHarness().catch(() => null);
-  if (harness !== null && harness !== "hermes") {
+  const { edition, defaulted } = readEditionSource();
+  const mayHaveDashboard = defaulted || edition === "hermes" || edition === "dual";
+  if (!mayHaveDashboard) {
     console.log(
       `${line}; this edition has no dashboard to ask — the tool list re-probes `
         + "when the MCP server is next spawned",

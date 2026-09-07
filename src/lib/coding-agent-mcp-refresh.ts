@@ -1,7 +1,7 @@
 import { MCP_RELOAD_ALREADY, MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
 /**
- * Ask the agent to rebuild its MCP tool list when the coding agent becomes
+ * Ask HERMES to rebuild its MCP tool list when the coding agent becomes
  * usable, or stops being.
  *
  * WHY THIS EXISTS. Three tools — `coding_agent_run`, `coding_agent_status` and
@@ -24,7 +24,7 @@ import { MCP_RELOAD_ALREADY, MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReload
  * instance of one shape: #486 fixed it for `email_list`/`email_read` and #503
  * for the image tools, and this was the call site left out.
  *
- * The mechanism is the agent's own `reload.mcp`, shared with both siblings — see
+ * The mechanism is HERMES' own `reload.mcp`, shared with the four siblings — see
  * `hermes-mcp-reload.ts`. What belongs HERE is the rule for when it is worth
  * paying for, below.
  */

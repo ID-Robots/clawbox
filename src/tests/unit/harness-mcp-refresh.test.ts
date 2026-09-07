@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * The fifth boot-time snapshot, and the biggest: WHICH HARNESS IS ACTIVE.
@@ -30,8 +31,21 @@ import { LOG_FIELD_MAX_LENGTH } from "@/lib/log-safe";
 let logSpy: ReturnType<typeof vi.spyOn>;
 let warnSpy: ReturnType<typeof vi.spyOn>;
 let errorSpy: ReturnType<typeof vi.spyOn>;
+let restoreEnv: () => void;
+
+/**
+ * Which EDITION the box is. That, not the active harness, is what decides
+ * whether a refused reload is worth an error line: the dashboard it is asked of
+ * runs on `hermes` AND `dual` (install.sh enables it for both), whichever
+ * harness is active at the time.
+ */
+function setEdition(edition: string): void {
+  process.env.CLAWBOX_EDITION = edition;
+}
 
 beforeEach(() => {
+  restoreEnv = saveEnv("CLAWBOX_EDITION");
+  setEdition("hermes");
   rpcMock.mockReset();
   activeHarnessMock.mockReset();
   activeHarnessMock.mockResolvedValue("hermes");
@@ -44,6 +58,7 @@ afterEach(() => {
   logSpy.mockRestore();
   warnSpy.mockRestore();
   errorSpy.mockRestore();
+  restoreEnv();
 });
 
 describe("the agent's tool list, after the owner switches harness", () => {
@@ -123,8 +138,8 @@ describe("the harness names that reach the journal", () => {
   });
 
   it("keeps the same rule on the arm that reports a refusal", async () => {
-    // The Hermes box that HAS a dashboard and it said no — `console.error`,
-    // hermes-mcp-reload.ts:110, the third of the three alerts.
+    // The Hermes box that HAS a dashboard and it said no — the error arm of
+    // `reportMcpReloadRefused`, the third of the three alerts.
     rpcMock.mockResolvedValue({ status: "confirm_required" });
 
     await refreshHarnessToolsIfSwitched("openclaw", "hermes\nWARN root login accepted");
@@ -147,7 +162,7 @@ describe("the harness names that reach the journal", () => {
  */
 describe("reportMcpReloadRefused bounds the record", () => {
   it("keeps one value to one line on the no-dashboard arm", async () => {
-    activeHarnessMock.mockResolvedValue("openclaw");
+    setEdition("openclaw");
 
     await reportMcpReloadRefused("provider/refresh", "gained a\nWARN root login accepted");
 
@@ -157,7 +172,7 @@ describe("reportMcpReloadRefused bounds the record", () => {
   });
 
   it("caps a caller-sized value on the refusal arm", async () => {
-    activeHarnessMock.mockResolvedValue("hermes");
+    setEdition("hermes");
 
     await reportMcpReloadRefused("provider/refresh", "x".repeat(LOG_FIELD_MAX_LENGTH + 500));
 
