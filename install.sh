@@ -1048,19 +1048,23 @@ dedupe_vendor_bashrc_path_blocks() {
     # bound silently gone. An empty result means the rewrite lost the file.
     local collapsed=0
     collapsed=$(grep -cF "$CUA_BASHRC_MARKER" "$tmp" 2>/dev/null) || collapsed=0
-    local now=""
-    now=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || now=""
-    if [ -z "$snapshot" ] || [ "$now" != "$snapshot" ]; then
-      # Somebody wrote to .bashrc while it was being collapsed. The rewrite
-      # describes a file that no longer exists; the next update collapses it.
-      rm -f "$tmp"
-      echo "  Warning: .bashrc changed while it was being collapsed — left untouched"
-      return 0
-    fi
     if [ "$collapsed" -eq 1 ] 2>/dev/null && [ -s "$tmp" ]; then
+      # Ownership and mode FIRST, so the divergence check below is the last
+      # thing between the look and the rename. There is no atomic
+      # compare-and-rename, so the window cannot be closed — only made as
+      # narrow as one `stat` and one `rename`.
       chown --reference="$BASHRC" "$tmp" 2>/dev/null \
         || chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp" 2>/dev/null || true
       chmod --reference="$BASHRC" "$tmp" 2>/dev/null || chmod 0644 "$tmp" 2>/dev/null || true
+      local now=""
+      now=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || now=""
+      if [ -z "$snapshot" ] || [ "$now" != "$snapshot" ]; then
+        # Somebody wrote to .bashrc while it was being collapsed. The rewrite
+        # describes a file that no longer exists; the next update collapses it.
+        rm -f "$tmp"
+        echo "  Warning: .bashrc changed while it was being collapsed — left untouched"
+        return 0
+      fi
       # Guarded: this runs under `set -euo pipefail` from a step the dispatcher
       # calls plainly, so a .bashrc that cannot be replaced must warn, not end
       # the update at this line.

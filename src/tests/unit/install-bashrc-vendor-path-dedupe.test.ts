@@ -319,6 +319,16 @@ d("~/.bashrc keeps ONE vendor PATH block, however often the vendor appends", () 
     expect(fs.readFileSync(real, "utf-8")).toBe(bashrcFixture(23));
   });
 
+  /** A shell function that shadows `name` and appends a vendor block after it runs. */
+  function appendingWrapper(name: string): string {
+    return [
+      `${name}() {`,
+      `  command ${name} "$@"`,
+      `  printf '\\n%s\\n%s\\n' ${JSON.stringify(VENDOR_MARKER)} ${JSON.stringify(VENDOR_EXPORT)} >> ${JSON.stringify(bashrc)}`,
+      "}",
+    ].join("\n");
+  }
+
   it("leaves the file alone when something wrote to it mid-collapse", () => {
     // The `mv` is an atomic rename, so no reader sees half a file — but a
     // rename replaces the INODE, and an append that lands between the read and
@@ -327,19 +337,28 @@ d("~/.bashrc keeps ONE vendor PATH block, however often the vendor appends", () 
     fs.writeFileSync(bashrc, bashrcFixture(23), "utf-8");
 
     // A writer that appends the moment the transform has read the file.
-    const concurrent = [
-      "awk() {",
-      '  command awk "$@"',
-      `  printf '\\n%s\\n%s\\n' ${JSON.stringify(VENDOR_MARKER)} ${JSON.stringify(VENDOR_EXPORT)} >> ${JSON.stringify(bashrc)}`,
-      "}",
-    ].join("\n");
-
-    const run = runBashrcHygiene(sandbox, concurrent);
+    const run = runBashrcHygiene(sandbox, appendingWrapper("awk"));
 
     expect(run.status, run.stderr).toBe(0);
     expect(run.stdout).toContain("changed while it was being collapsed");
     expect(run.stdout).not.toContain("Collapsed");
     // The concurrent append survives — it was not swapped away with the inode.
+    expect(countOf(read(), VENDOR_MARKER)).toBe(24);
+  });
+
+  it("looks once more after the mode is set, not before it", () => {
+    // The check has to be the LAST thing between the look and the rename:
+    // `chown` and `chmod` run on the temp file in between, and an append
+    // landing in that gap would still be swapped away with the old inode.
+    // There is no atomic compare-and-rename, so the window cannot be closed —
+    // only narrowed to one `stat` and one `rename`.
+    fs.writeFileSync(bashrc, bashrcFixture(23), "utf-8");
+
+    const run = runBashrcHygiene(sandbox, appendingWrapper("chmod"));
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain("changed while it was being collapsed");
+    expect(run.stdout).not.toContain("Collapsed");
     expect(countOf(read(), VENDOR_MARKER)).toBe(24);
   });
 
