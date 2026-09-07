@@ -433,19 +433,31 @@ describe("config-store", () => {
       // `NaN` on the write, and the store ended up holding `null` under a key
       // the write had reported success for. What is stored is now what was
       // checked, and the counter proves the value is serialised ONCE.
-      let calls = 0;
-      const shifty = {
-        toJSON() {
-          calls += 1;
-          return calls === 1 ? 7 : NaN;
-        },
+      //
+      // Driven through ALL THREE writers, because the failure this whole change
+      // exists to remove has never been in one of them: reverting `swap` or
+      // `setMany` alone to persist the original value passed the entire suite
+      // while `set` was pinned.
+      const shifty = () => {
+        let calls = 0;
+        return { calls: () => calls, value: { toJSON: () => (++calls === 1 ? 7 : NaN) } };
       };
 
-      await configStore.set("session_generation", shifty);
-
-      expect(calls, "the value must be serialised once, not once per pass").toBe(1);
+      const forSet = shifty();
+      await configStore.set("session_generation", forSet.value);
+      expect(forSet.calls(), "the value must be serialised once, not once per pass").toBe(1);
       expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8")).session_generation).toBe(7);
       expect(await configStore.get("session_generation")).toBe(7);
+
+      const forSwap = shifty();
+      await configStore.swap("swapped", forSwap.value);
+      expect(forSwap.calls(), "swap must serialise once too").toBe(1);
+      expect(await configStore.get("swapped")).toBe(7);
+
+      const forMany = shifty();
+      await configStore.setMany({ batched: forMany.value });
+      expect(forMany.calls(), "setMany must serialise once too").toBe(1);
+      expect(await configStore.get("batched")).toBe(7);
     });
   });
 
