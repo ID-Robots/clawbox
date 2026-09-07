@@ -1401,7 +1401,15 @@ async function configureClawboxAi(
   const currentImageModel = typeof currentImageModelSlot === "object" && currentImageModelSlot !== null
     ? currentImageModelSlot
     : undefined;
-  const currentPrimary = typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
+  // COERCED the way the core coerces it, so the managed-slot move below can see
+  // a bare string. Leaving a string alone is right when it names the OWNER's
+  // model; it is wrong when it names one of OURS, because that arm exists to
+  // carry our own previous vision id to the resolved one in both directions,
+  // and a slot it cannot read keeps pointing at an id the provider block no
+  // longer defines. `currentImageModel` stays object-only: the move spreads it.
+  const currentPrimary = typeof currentImageModelSlot === "string"
+    ? currentImageModelSlot.trim()
+    : typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
   const currentBareId = currentPrimary.startsWith(`${CLAWBOX_AI_PROVIDER}/`)
     ? currentPrimary.slice(CLAWBOX_AI_PROVIDER.length + 1)
     : currentPrimary;
@@ -1455,6 +1463,10 @@ async function configureClawboxAi(
     console.log(`[AI Config] Moving agents.defaults.imageModel ${currentPrimary} -> ${visionRef}`);
     visionOps.push([
       "agents.defaults.imageModel",
+      // `...currentImageModel` is `undefined` for a bare string, which spreads
+      // nothing — the fallbacks a string cannot carry are not lost, because
+      // there were none. Never `...currentImageModelSlot`: spreading a string
+      // builds `{0:"d",1:"e",…}`.
       JSON.stringify({ ...currentImageModel, primary: visionRef }),
       "--json",
     ]);

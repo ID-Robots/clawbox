@@ -383,6 +383,35 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     expect(callFor("agents.defaults.imageModel")).toBeUndefined();
   });
 
+  it("leaves a bare string the OWNER wrote alone (TASK-755)", async () => {
+    // The core coerces a string and resolves a model from it, so this is a
+    // configured slot; reading it as empty replaced the model the owner chose
+    // for looking at the pictures he sends.
+    mockReadConfig.mockResolvedValue({
+      agents: { defaults: { imageModel: "google/gemini-2.5-flash" } },
+    });
+
+    await connectClawai();
+
+    expect(callFor("agents.defaults.imageModel")).toBeUndefined();
+  });
+
+  it("carries OUR own previous id to the resolved one even as a bare string", async () => {
+    // The other half, and the reason the string is COERCED rather than merely
+    // treated as occupied: this arm moves our own previous vision id to the
+    // resolved one in both directions, and a slot it cannot read keeps pointing
+    // at an id the provider block no longer defines. A string carries no
+    // fallbacks, so it is replaced rather than spread.
+    mockReadConfig.mockResolvedValue({
+      agents: { defaults: { imageModel: `deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}` } },
+    });
+
+    await connectClawai();
+
+    expect(JSON.parse(callFor("agents.defaults.imageModel")?.[1] ?? "null"))
+      .toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
+  });
+
   it("claims an imageModel that is empty in OpenClaw's sense", async () => {
     mockReadConfig.mockResolvedValue({
       agents: { defaults: { imageModel: { primary: "  ", fallbacks: ["", " "] } } },

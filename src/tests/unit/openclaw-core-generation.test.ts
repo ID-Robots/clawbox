@@ -75,6 +75,8 @@ describe("which OpenClaw core generation is installed", () => {
 
   it.each([
     ["a git install", "0.0.0-development"],
+    ["a month that is not a month", "2026.13.0"],
+    ["a zero month", "2026.0.0"],
     ["a version that does not begin with a date", "v2026.8.1"],
     ["not a string", 20268],
     ["absent", undefined],

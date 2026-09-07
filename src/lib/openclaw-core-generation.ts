@@ -56,12 +56,17 @@ function coreManifestPath(): string {
  * gateway refuses. Something that does not BEGIN with a date says nothing about
  * the generation and reads as `unknown`.
  *
+ * The MONTH is bounded 1-12: `2026.0.0` and `2026.13.0` are not release
+ * versions of anything, and answering `v1`/`v2` over one would be a
+ * classification of a string this reader does not understand — the same
+ * fail-safe rule the year already has.
+ *
  * ONE SOURCE, unlike the boot script, which falls back to a bounded `openclaw
  * --version` when the manifest cannot be read. That fallback costs ~8 s and
  * this is the Save path, so an unreadable manifest here means neither home is
  * written and the boot script claims the slot at the next start instead.
  */
-const CORE_VERSION_RE = /^(20\d{2})\.(\d+)\.(\d+)/;
+const CORE_VERSION_RE = /^(20\d{2})\.(0?[1-9]|1[0-2])\.(\d+)/;
 
 /** Never throws: an unreadable manifest is `unknown`, which is an answer. */
 export async function installedOpenclawCoreGeneration(): Promise<OpenclawCoreGeneration> {

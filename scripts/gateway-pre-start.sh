@@ -2068,11 +2068,18 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
             )
         )
     )
-    # The MOVE arm below rewrites `_vision_model_cfg["primary"]` in place, so it
-    # may only ever consider a dict: a bare string is left exactly as the owner
-    # wrote it, which is what `_vision_primary = ""` achieves here.
+    # COERCED the way the core coerces it, so the MOVE arm below can see a bare
+    # string. Leaving a string alone is right when it names the OWNER's model;
+    # it is wrong when it names one of OURS, because that arm exists to carry
+    # our own previous vision id to the resolved one in both directions, and a
+    # slot it cannot read keeps pointing at an id this block's provider entry no
+    # longer defines. The move itself is written per shape below: a dict is
+    # mutated in place so the owner's fallbacks ride along, a string has none to
+    # carry and is replaced outright.
     _vision_primary = (
-        _vision_model_cfg.get("primary") if isinstance(_vision_model_cfg, dict) else None
+        _vision_model_cfg
+        if isinstance(_vision_model_cfg, str)
+        else _vision_model_cfg.get("primary") if isinstance(_vision_model_cfg, dict) else None
     )
     _vision_primary = _vision_primary.strip() if isinstance(_vision_primary, str) else ""
     if not _has_vision_model:
@@ -2084,9 +2091,14 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
     ):
         # The slot names one of OUR vision ids — the previous default is ours
         # to move to the resolved one, both directions. Anything else in the
-        # slot is the owner's choice and stays — and the move changes ONLY
-        # `primary`, so fallbacks the owner added ride along.
-        _vision_model_cfg["primary"] = CLAWBOX_VISION_MODEL_REF
+        # slot is the owner's choice and stays — and over a dict the move
+        # changes ONLY `primary`, so fallbacks the owner added ride along. A
+        # bare string carries none, so it is replaced with the shape this block
+        # writes everywhere else.
+        if isinstance(_vision_model_cfg, dict):
+            _vision_model_cfg["primary"] = CLAWBOX_VISION_MODEL_REF
+        else:
+            agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
         changed = True
 
 # Set by the image-generation migration below, on the one path where it decides

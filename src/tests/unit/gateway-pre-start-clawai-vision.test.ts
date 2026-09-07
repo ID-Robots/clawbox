@@ -335,6 +335,23 @@ describe.skipIf(!hasPython3)("a bare string is a vision model too (TASK-755)", (
     expect(imageModel(cfg)).toBe("openai/gpt-4o");
   });
 
+  it("carries OUR own previous id to the resolved one even as a bare string", () => {
+    // Leaving a string alone is right when it names the OWNER's model, and
+    // wrong when it names one of ours: this arm exists to move our own previous
+    // vision id to the resolved one in both directions, and a slot it cannot
+    // read keeps pointing at an id the provider entry no longer defines. A
+    // string carries no fallbacks, so it is replaced with the shape this block
+    // writes everywhere else rather than mutated in place.
+    const { cfg } = migrate(pairedBox({
+      models: [
+        { id: CLAWBOX_AI_LEGACY_VISION_MODEL_ID, name: CLAWBOX_AI_VISION_MODEL_LABEL, input: ["text", "image"], maxTokens: 128000 },
+      ],
+      defaults: { imageModel: `deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}` },
+    }));
+
+    expect(imageModel(cfg)).toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
+  });
+
   it("still claims the slot when it holds a blank string", () => {
     const { cfg } = migrate(pairedBox({ defaults: { imageModel: "   " } }));
 
