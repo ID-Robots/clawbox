@@ -109,7 +109,7 @@ export function assertStorableKey(key: string): void {
   }
 }
 
-function assertStorableValue(key: string, value: unknown): void {
+function assertStorableValue(key: string, value: unknown): string {
   // The WHOLE value first, because the walk below cannot see it: JSON drops a
   // top-level function or symbol entirely, and the write then RENAMES a config
   // without the key over the one that had it — `set("active_harness", () => …)`
@@ -128,7 +128,7 @@ function assertStorableValue(key: string, value: unknown): void {
   // ARRAY becomes a `null` MEMBER, at any depth: the list still has its length
   // and one entry is now nothing, which is the same false success as the
   // numbers below.
-  JSON.stringify(value, function (this: unknown, field: string, held: unknown) {
+  const json = JSON.stringify(value, function (this: unknown, field: string, held: unknown) {
     // `held instanceof Number` as well as the primitive: a boxed non-finite
     // number reaches the replacer as an OBJECT and is written as `null` just
     // the same, so the "at any depth" claim above would be half true without
@@ -156,6 +156,28 @@ function assertStorableValue(key: string, value: unknown): void {
     }
     return held;
   });
+  // The catch-all behind the named guards, shared by all three writers: a
+  // `toJSON` that answers `undefined` drops the whole key with none of the
+  // shapes above, and the rename then lands a config WITHOUT it.
+  if (json === undefined) {
+    throw new TypeError(`config-store: ${key} cannot hold a value JSON omits entirely`);
+  }
+  return json;
+}
+
+/**
+ * The value as the guard SAW it — the bytes it approved, parsed back.
+ *
+ * The walk above already serialised the value, and `writeConfig` serialised it
+ * a second time: two answers from one value, and a `toJSON` that does not give
+ * the same answer twice slipped between them. A counter returning a number on
+ * the first call and `NaN` on the second passed every check and left the store
+ * holding `null` under a key the write had reported success for — the same
+ * false success, through the guard itself. What is stored is now what was
+ * checked, so there is no second answer to differ.
+ */
+function storableValue(key: string, value: unknown): unknown {
+  return JSON.parse(assertStorableValue(key, value)) as unknown;
 }
 
 /**
@@ -227,15 +249,16 @@ export async function set(key: string, value: unknown): Promise<void> {
   // and on the WRITE branch only, because `delete config["__proto__"]` does
   // remove an own property and is the way a store that already holds one is
   // cleaned.
+  let storable: unknown;
   if (value !== undefined) {
     assertStorableKey(key);
-    assertStorableValue(key, value);
+    storable = storableValue(key, value);
   }
   const config = readConfigStrict();
   if (value === undefined) {
     delete config[key];
   } else {
-    config[key] = value;
+    config[key] = storable;
   }
   writeConfig(config);
 }
@@ -275,19 +298,10 @@ export async function swap(key: string, value: unknown): Promise<unknown> {
     throw new TypeError(`config-store: swap(${key}) replaces, it cannot delete — use set()`);
   }
   assertStorableKey(key);
-  assertStorableValue(key, value);
-  // The catch-all behind the named guards, and the reason it comes AFTER them:
-  // they say what is wrong ("cannot hold a function", "an invalid Date"), while
-  // this only knows that nothing would be written. It still has to be here —
-  // a `toJSON` that answers `undefined` drops the whole key with none of the
-  // shapes above — and "use set()" is deliberately not its advice, since `set`
-  // refuses every one of these too.
-  if (JSON.stringify(value) === undefined) {
-    throw new TypeError(`config-store: ${key} cannot hold a value JSON omits entirely`);
-  }
+  const storable = storableValue(key, value);
   const config = readConfigStrict();
   const previous = held(config, key);
-  config[key] = value;
+  config[key] = storable;
   writeConfig(config);
   return previous;
 }
@@ -295,17 +309,18 @@ export async function swap(key: string, value: unknown): Promise<unknown> {
 export async function setMany(entries: Record<string, unknown>): Promise<void> {
   // The WHOLE batch, before the read: a caller handed a refusal must not find
   // half its entries applied around the one that could never land.
+  const storable = new Map<string, unknown>();
   for (const [key, value] of Object.entries(entries)) {
     if (value === undefined) continue;
     assertStorableKey(key);
-    assertStorableValue(key, value);
+    storable.set(key, storableValue(key, value));
   }
   const config = readConfigStrict();
   for (const [key, value] of Object.entries(entries)) {
     if (value === undefined) {
       delete config[key];
     } else {
-      config[key] = value;
+      config[key] = storable.get(key);
     }
   }
   writeConfig(config);

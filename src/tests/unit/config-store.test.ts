@@ -402,18 +402,50 @@ describe("config-store", () => {
       expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
     });
 
-    it("refuses a value JSON omits entirely, whatever shape it arrives in", async () => {
+    it("refuses a value JSON omits entirely — in ALL THREE writers", async () => {
       // The catch-all behind the named guards: a `toJSON` that answers
       // `undefined` drops the whole key, with none of the shapes the guards
-      // recognise. `swap` said "use set()" for this, which stopped being advice
-      // the moment `set` refused it too.
+      // recognise, and the rename then lands a config WITHOUT it. It lived in
+      // `swap` alone, so `set` and `setMany` resolved and DELETED the stored
+      // value while reporting success — the same false success, through the one
+      // door the other two do not share.
       await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "hermes" }), "utf-8");
-      await expect(configStore.swap("active_harness", { toJSON: () => undefined })).rejects.toThrow(
+      const dropped = { toJSON: () => undefined };
+
+      await expect(configStore.set("active_harness", dropped)).rejects.toThrow(
+        /cannot hold a value JSON omits entirely/,
+      );
+      await expect(configStore.setMany({ active_harness: dropped })).rejects.toThrow(
+        /cannot hold a value JSON omits entirely/,
+      );
+      await expect(configStore.swap("active_harness", dropped)).rejects.toThrow(
         /cannot hold a value JSON omits entirely/,
       );
       // And `undefined` itself still gets the advice that IS true for it.
       await expect(configStore.swap("active_harness", undefined)).rejects.toThrow(/use set\(\)/);
       expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ active_harness: "hermes" });
+    });
+
+    it("stores what the guard CHECKED, so a value cannot change between the two", async () => {
+      // The walk already serialised the value and `writeConfig` serialised it
+      // again — two answers from one value, and a `toJSON` that does not give
+      // the same one twice slipped between them: valid on the guard's walk,
+      // `NaN` on the write, and the store ended up holding `null` under a key
+      // the write had reported success for. What is stored is now what was
+      // checked, and the counter proves the value is serialised ONCE.
+      let calls = 0;
+      const shifty = {
+        toJSON() {
+          calls += 1;
+          return calls === 1 ? 7 : NaN;
+        },
+      };
+
+      await configStore.set("session_generation", shifty);
+
+      expect(calls, "the value must be serialised once, not once per pass").toBe(1);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8")).session_generation).toBe(7);
+      expect(await configStore.get("session_generation")).toBe(7);
     });
   });
 
