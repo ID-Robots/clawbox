@@ -1,4 +1,4 @@
-import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
+import { MCP_RELOAD_ALREADY, MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
 /**
  * Ask the agent to rebuild its MCP tool list when the coding agent becomes
@@ -102,7 +102,7 @@ export async function refreshCodingAgentToolsIfReadinessChanged(
   if (options.alreadyReloaded) {
     // Nothing to ask for: the respawn that already happened in this request
     // rebuilt EVERY family's tool list, this one included.
-    console.log(`[coding-agent/mcp-refresh] ${became}; the MCP servers were already reloaded for this change`);
+    console.log(`[coding-agent/mcp-refresh] ${became}; ${MCP_RELOAD_ALREADY}`);
     return;
   }
   // `.catch` even though `reloadMcpServers` documents that it never throws: the
@@ -116,5 +116,5 @@ export async function refreshCodingAgentToolsIfReadinessChanged(
     await reportMcpReloadRefused("coding-agent/mcp-refresh", became);
     return;
   }
-  console.log(`[coding-agent/mcp-refresh] ${became}; asked the agent to reload its MCP servers`);
+  console.log(`[coding-agent/mcp-refresh] ${became}; ${MCP_RELOAD_ASKED}`);
 }

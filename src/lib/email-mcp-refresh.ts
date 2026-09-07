@@ -1,4 +1,4 @@
-import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
+import { MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
 /**
  * Ask Hermes to rebuild its MCP tool list when the mailbox becomes readable, or
@@ -62,5 +62,5 @@ export async function refreshEmailToolsIfReadabilityChanged(before: boolean, aft
     await reportMcpReloadRefused("email/mcp-refresh", became);
     return;
   }
-  console.log(`[email/mcp-refresh] ${became}; asked Hermes to reload its MCP servers`);
+  console.log(`[email/mcp-refresh] ${became}; ${MCP_RELOAD_ASKED}`);
 }

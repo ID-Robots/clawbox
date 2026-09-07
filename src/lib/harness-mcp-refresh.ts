@@ -1,4 +1,4 @@
-import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
+import { MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 import type { Harness } from "@/lib/harness";
 
 /**
@@ -108,11 +108,9 @@ export async function refreshHarnessToolsIfSwitched(
     await reportMcpReloadRefused("harness/select", moved);
     return false;
   }
-  // Names WHO was asked. "the agent" read as "whichever harness now serves the
-  // owner", which is wrong in the away direction: on dual, Hermes answers this
-  // call after the box has moved to OpenClaw, and an operator reading the
-  // journal for "the agent still thinks it is on Hermes" must not be told the
-  // OpenClaw child was reloaded.
-  console.log(`[harness/select] ${moved}; asked Hermes to reload its MCP servers`);
+  // Names WHO was asked, in the sentence every family shares — this module made
+  // the argument first (see `MCP_RELOAD_ASKED`) and two siblings still said "the
+  // agent", which reads as "whichever harness now serves the owner".
+  console.log(`[harness/select] ${moved}; ${MCP_RELOAD_ASKED}`);
   return true;
 }

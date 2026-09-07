@@ -72,6 +72,24 @@ export async function reloadMcpServers(): Promise<boolean> {
 }
 
 /**
+ * What a family may say about a reload that HAPPENED — one sentence, here,
+ * because there is one mechanism.
+ *
+ * `reloadMcpServers` talks to HERMES' dashboard JSON-RPC and to nothing else.
+ * Two of the five families said "asked the agent to reload its MCP servers",
+ * which reads as "whichever harness now serves the owner" — and on the dual SKU
+ * that is exactly wrong in the away direction: Hermes answers this call after
+ * the box has moved to OpenClaw, and an operator reading the journal for "the
+ * agent still thinks it is on Hermes" was told the OpenClaw child had been
+ * reloaded when it was never asked. `harness/select` already said Hermes, with
+ * a comment saying why; this is that comment made into the shared string.
+ */
+export const MCP_RELOAD_ASKED = "asked Hermes to reload its MCP servers";
+
+/** …and when another family in the same request already paid for the respawn. */
+export const MCP_RELOAD_ALREADY = "the MCP servers were already reloaded for this change";
+
+/**
  * Say that a wanted reload did not happen — in the words that are TRUE for THIS
  * box, which is not the same sentence on both editions.
  *
@@ -118,5 +136,8 @@ export async function reportMcpReloadRefused(tag: string, what: string): Promise
     );
     return;
   }
-  console.error(`${line}, but the agent would not reload its MCP servers`);
+  // Names the mechanism, like the success sentences above and for the same
+  // reason: what was asked is Hermes' dashboard, whatever this box calls its
+  // agent.
+  console.error(`${line}, but Hermes would not reload its MCP servers`);
 }

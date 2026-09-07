@@ -185,7 +185,11 @@ vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn() }));
 // The transport the refresh ends at. Mocked HERE rather than mocking
 // `refreshCodingAgentToolsIfReadinessChanged` itself, so the real guard runs and
 // the assertion is about the agent being asked, not about a call being made.
-vi.mock("@/lib/hermes-mcp-reload", () => ({
+// Spread the real module: the refresh families import its shared log sentences
+// (`MCP_RELOAD_ASKED`), and a factory that lists only the two functions makes
+// every one of them fail to import here rather than in production.
+vi.mock("@/lib/hermes-mcp-reload", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-mcp-reload")>()),
   reloadMcpServers: vi.fn(),
   reportMcpReloadRefused: vi.fn(),
 }));
