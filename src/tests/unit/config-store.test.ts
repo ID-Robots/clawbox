@@ -261,6 +261,29 @@ describe("config-store", () => {
     });
   });
 
+  describe("a __proto__ the FILE already carries", () => {
+    // Refusing to CREATE one is only half an invariant: a store that acquired
+    // the key before this build — a hand-edit, a restored backup of an older
+    // data/ — would otherwise re-emit it on every settings change with no
+    // supported way out, and the read side would go on answering
+    // Object.prototype for it.
+    it("is dropped on the way in and does not come back out", async () => {
+      await fs.writeFile(CONFIG_PATH, '{"__proto__":{"polluted":true},"keep":"kept"}', "utf-8");
+      expect(await configStore.get("__proto__")).toBeUndefined();
+      expect(await configStore.getAll()).toEqual({ keep: "kept" });
+      expect((await configStore.getKnown("__proto__")).value).toBeUndefined();
+
+      await configStore.set("keep", "still kept");
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "still kept" });
+    });
+
+    it("can still be deleted, because a delete is not a write", async () => {
+      await fs.writeFile(CONFIG_PATH, '{"__proto__":{"polluted":true},"keep":"kept"}', "utf-8");
+      await expect(configStore.set("__proto__", undefined)).resolves.toBeUndefined();
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+  });
+
   describe("a number JSON cannot write", () => {
     // `JSON.stringify(NaN)` is the string "null", so a non-finite number walks
     // straight through the `=== undefined` guard and the file ends up holding
@@ -268,20 +291,44 @@ describe("config-store", () => {
     // sees "unset" where the caller stored a figure, and the write reported
     // success — the same false success, one type further in.
     it("swap refuses NaN and Infinity instead of storing null", async () => {
-      await fs.writeFile(CONFIG_PATH, JSON.stringify({ clawkeep_last_backup_ms: 5 }), "utf-8");
-      await expect(configStore.swap("clawkeep_last_backup_ms", NaN)).rejects.toThrow(TypeError);
-      await expect(configStore.swap("clawkeep_last_backup_ms", Infinity)).rejects.toThrow(TypeError);
-      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ clawkeep_last_backup_ms: 5 });
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ clawai_credential_refused_at: 5 }), "utf-8");
+      await expect(configStore.swap("clawai_credential_refused_at", NaN)).rejects.toThrow(TypeError);
+      await expect(configStore.swap("clawai_credential_refused_at", Infinity)).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ clawai_credential_refused_at: 5 });
     });
 
     it("set and setMany refuse it too, nested as well as bare", async () => {
-      // Nested because that is how the store actually holds figures — the
-      // schedule objects, the plan tiers, the updater's step records — and a
-      // NaN one field deep is written as `null` just as quietly.
+      // Nested as well, because an object one field deep is written as `null`
+      // just as quietly as a bare figure.
       await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
-      await expect(configStore.set("clawkeep_schedule", { hour: NaN })).rejects.toThrow(TypeError);
-      await expect(configStore.setMany({ update_started_at: -Infinity })).rejects.toThrow(TypeError);
+      await expect(configStore.set("setup_progress_step", { step: NaN })).rejects.toThrow(TypeError);
+      await expect(configStore.setMany({ session_generation: -Infinity })).rejects.toThrow(TypeError);
       expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+  });
+
+  describe("a list with a member JSON cannot write", () => {
+    it("is refused rather than stored with a null in it", async () => {
+      // The other value JSON turns into `null`, and the one the top-level
+      // `=== undefined` test cannot see: inside an ARRAY, `undefined`, a
+      // function and a symbol are all written as a null MEMBER, so the list
+      // keeps its length and one entry becomes nothing. A `map` that can yield
+      // a hole — the approved-sender names, the disabled-provider list — would
+      // land that under a key the caller believes holds names.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
+      await expect(configStore.set("telegram_approved_names", ["a", undefined, "b"]))
+        .rejects.toThrow(TypeError);
+      await expect(configStore.swap("telegram_approved_names", [{ names: [Symbol("x")] }]))
+        .rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+
+    it("still stores a property JSON omits, because nothing is misreported there", async () => {
+      // An OBJECT property whose value is `undefined` is left out of the file
+      // and reads back as `undefined` — which is what the caller stored. The
+      // guard is about values that come back as something ELSE.
+      await configStore.set("email_account", { address: "a@b.c", fromName: undefined });
+      expect(await configStore.get("email_account")).toEqual({ address: "a@b.c" });
     });
   });
 

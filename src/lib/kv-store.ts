@@ -1,6 +1,6 @@
 import path from "path";
 import fs from "fs";
-import { DATA_DIR } from "./config-store";
+import { assertStorableKey, DATA_DIR } from "./config-store";
 
 // JSON-file-backed key-value store for persistent client state.
 // Replaces browser localStorage so state survives browser changes
@@ -43,10 +43,23 @@ function writeKV(data: Record<string, string>): void {
 }
 
 export function kvGet(key: string): string | null {
-  return readKV()[key] ?? null;
+  const data = readKV();
+  // Own keys only. `data["__proto__"]` reaches Object.prototype's getter and
+  // would hand back the prototype OBJECT under a signature that says
+  // `string | null` — a caller doing `String(kvGet(k))` gets
+  // "[object Object]". The same reasoning as the write guard below.
+  return Object.hasOwn(data, key) ? data[key] ?? null : null;
 }
 
 export function kvSet(key: string, value: string): void {
+  // The same store-wide rule as config-store, from the same helper rather than
+  // a second copy of it: `data["__proto__"] = value` reaches Object.prototype's
+  // setter, stores nothing and reports success. `/setup-api/kv` refuses that
+  // name (and `constructor`/`prototype`, which DO land as ordinary own
+  // properties) before it gets here, but the route is not the only door — the
+  // notice ring, the mascot phrases and the uninstall sweep all call in
+  // directly.
+  assertStorableKey(key);
   const data = readKV();
   data[key] = value;
   writeKV(data);
@@ -69,6 +82,8 @@ export function kvGetAll(prefix?: string): Record<string, string> {
 }
 
 export function kvSetMany(entries: Record<string, string>): void {
+  // The whole batch first, so a refusal never leaves half of it applied.
+  for (const key of Object.keys(entries)) assertStorableKey(key);
   const data = readKV();
   for (const [key, value] of Object.entries(entries)) {
     data[key] = value;
