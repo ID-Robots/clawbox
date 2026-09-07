@@ -38,6 +38,7 @@ import {
   providerRowRunnable,
 } from "@/lib/provider-status";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
+import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
@@ -136,6 +137,8 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
 function isLocalModel(model: string | null | undefined): boolean {
   return !!model && (model.startsWith("llamacpp/") || model.startsWith("ollama/"));
 }
+
+const OLLAMA_PREFIX = "ollama/";
 
 function normalizeProvider(provider: unknown): string | null {
   if (typeof provider !== "string" || !provider.trim()) return null;
@@ -497,7 +500,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     ? openclawConfig.agents.defaults.model.primary
     : null;
   const inferredLocal = inferConfiguredLocalModel(openclawConfig);
-  const localModel = typeof configStore.local_ai_model === "string"
+  const configuredLocalModel = typeof configStore.local_ai_model === "string"
     ? configStore.local_ai_model
     : inferredLocal?.model ?? null;
   const localProvider = normalizeProvider(
@@ -505,6 +508,19 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
       ? configStore.local_ai_provider
       : inferredLocal?.provider ?? null,
   );
+  // An Ollama model that can only embed is not a chat provider. The llama.cpp
+  // migration left the retired embedder declared under `models.providers
+  // .ollama.models`, and the picker offered "Ollama Local" backed by a model
+  // that cannot produce a word — a pick would have pointed the box's chat at
+  // it (the UI sweep of 2026-09-07). `inferConfiguredLocalModel` now refuses
+  // such a model by NAME; this is the capability half, for a tag with no
+  // "embed" in it and for a `local_ai_model` the store names outright. Such a
+  // model is no local model at all here: the row becomes the "set up Local
+  // AI" placeholder.
+  const localModel = configuredLocalModel?.startsWith(OLLAMA_PREFIX)
+    && !(await ollamaModelCanChat(configuredLocalModel.slice(OLLAMA_PREFIX.length)))
+    ? null
+    : configuredLocalModel;
   const localLabel = localModel
     ? labelForProvider(localProvider, "Local AI")
     : null;

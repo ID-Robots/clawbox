@@ -120,6 +120,13 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     // === ChatApp ===
     "chat.title": "Chat",
     "chat.connectingGateway": "Connecting to gateway...",
+    "chat.switchingProvider": "Switching AI provider...",
+    "chat.restartingChat": "Restarting chat...",
+    "chat.reloadMayTake": "This may take up to 30 seconds",
+    "chat.reloadProgress": "Reload progress",
+    "chat.maxTierDowngraded": "{max} needs a Max subscription. [Upgrade in the ClawBox portal]({url}) to unlock it — switched you to {flash} so chat keeps working.",
+    "chat.modelNeedsMax": "{model} requires a Max subscription. [Upgrade in the ClawBox portal]({url}) to unlock it. Staying on the current model.",
+    "chat.modelNotInPlan": "{model} is not included in your ClawBox AI plan. [Manage it in the ClawBox portal]({url}). Staying on the current model.",
     "chat.reconnect": "Reconnect",
     "chat.connectionFailed": "Connection failed",
     "chat.saySomething": "Say something!",
