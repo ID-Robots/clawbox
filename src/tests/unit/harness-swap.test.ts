@@ -40,12 +40,14 @@ const h = vi.hoisted(() => ({
   execCalls: [] as string[][],
 }));
 
-vi.mock("@/lib/config-store", async (orig) => {
-  const actual = await orig<typeof import("@/lib/config-store")>();
-  // `set` named, not only spread: openclaw-config-mock-completeness.test.ts
-  // reads factories by their text and wants both of the reader's exports.
-  return { ...actual, get: h.get, set: actual.set };
-});
+// A partial mock over the real module — spelled with `importOriginal` so
+// openclaw-config-mock-completeness.test.ts, which reads factories by their
+// text, sees that `set` (the credential-refusal reader's other export) is the
+// real one and not missing.
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
+  get: h.get,
+}));
 vi.mock("@/lib/clawai-plan-tier", () => ({ readClawaiEntitlementTier: h.entitlementTier }));
 vi.mock("@/lib/hermes-clawai", () => ({ applyClawaiToHermes: h.applyClawaiToHermes }));
 vi.mock("@/lib/hermes-telegram", () => ({
