@@ -42,6 +42,15 @@ const MAX_TOOL_NAME = 128;
  *   - content that arrives as the turn's PROMPT rather than as a tool result —
  *     an inbound email routed to the chat, a stranger's Telegram message. That
  *     is a different seam (`message_received`), not this one.
+ *
+ * AND THE WEAKNESS OF ANY ALLOWLIST, stated the way the path guard states its
+ * own ("a tool id nobody has taught it about is the only thing it lets past"):
+ * a web-reading tool this file has never heard of does not taint. An installed
+ * search plugin brings its own ids (Firecrawl ships `firecrawl_scrape` and
+ * `firecrawl_search` beside the `web_search` provider), and the core's
+ * `view_image` accepts a URL. The browser-family drift test below is the
+ * counterweight for the tools ClawBox itself ships; a third-party plugin's are
+ * not covered, and cannot be from a static list.
  */
 export const WEB_CONTENT_TOOLS = new Set([
   // Core-native (the pinned core's docs/tools/index.md).
@@ -75,18 +84,19 @@ export const WEB_CONTENT_TOOLS = new Set([
  * ClawBox MCP server's own tool, which the core shows the model as
  * `clawbox__bash`.
  *
- * `coding_agent_run` and `coding_team_run` are the shell ONE HOP OUT: each
- * spawns a headless Claude Code session with its own unrestricted shell, from a
- * `task` string the model composes — which in a tainted turn is a string a web
- * page can have written. They are gated here for the same reason `bash` is.
+ * THE SPAWNS ARE HERE FOR THE SAME REASON, and they are the subtle half. A
+ * spawned run gets its own `runId`, so the core clears the parent's mark for it
+ * and the child's shell is ungated — which makes a spawn the way to launder the
+ * command out of a tainted turn. `coding_agent_run` and `coding_team_run` each
+ * start a headless Claude Code session with an unrestricted shell, and the
+ * core's own `sessions_spawn`/`subagents`/`spawn_agent` start an agent run,
+ * every one of them from a prompt the model composes — which in a tainted turn
+ * is a string a web page can have written. Gating the SPAWN is what closes that
+ * without having to carry taint across it.
  *
  * WHAT IS STILL OUTSIDE, said rather than left to be discovered: the file
  * writers (`write_file`/`edit_file`/`apply_patch`, whose destructive shapes the
- * path guard already refuses outright) and `app_install`/`skill_install`, and —
- * the one that is a boundary rather than a choice — a CHILD run. A spawned run
- * gets its own `runId`, so the core clears the parent's mark for it and the
- * child's own shell calls are ungated. Carrying taint across a spawn needs
- * `subagent_spawned`, which is a second seam and a second decision.
+ * path guard already refuses outright) and `app_install`/`skill_install`.
  */
 export const DANGEROUS_TOOLS = new Set([
   "exec",
@@ -94,8 +104,12 @@ export const DANGEROUS_TOOLS = new Set([
   "code_execution",
   "process",
   "terminal",
+  // The shell one hop out: a delegated run with a shell of its own.
   "coding_agent_run",
   "coding_team_run",
+  "sessions_spawn",
+  "subagents",
+  "spawn_agent",
 ]);
 
 /**

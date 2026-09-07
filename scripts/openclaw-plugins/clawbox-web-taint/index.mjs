@@ -60,6 +60,12 @@
 // guard's silent deny wins whatever the order — the priority only saves this
 // handler from being asked about a command that is already refused.
 //
+// ONE MORE LIMIT, only where code mode is switched on: a `code_mode_exec` call
+// (`toolKind` on the hook event) can call other tools from inside itself, so the
+// web read and the shell happen within ONE tool call and no `after_tool_call`
+// runs between them. Nothing on a shipped box enables `tools.codeMode`, and the
+// gate cannot see inside such a call from here.
+//
 // WHAT IS NOT TAINT. Content that arrives as the turn's PROMPT rather than as a
 // tool result — an inbound email routed to the chat, a stranger's message on a
 // channel — is outside this gate. `email_read` being in the web-content list
@@ -198,7 +204,10 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
     let wrote = false;
     try {
       const sources = readSources(runId);
-      const next = sources.includes(event.toolName) ? sources : [...sources, event.toolName].slice(0, MAX_SOURCES);
+      // The NEWEST kept, not the oldest: in a long turn the card should name
+      // what just tainted it, and `slice(0, …)` on a grown array kept the first
+      // four and silently dropped the new one.
+      const next = sources.includes(event.toolName) ? sources : [...sources, event.toolName].slice(-MAX_SOURCES);
       wrote = runContext.setRunContext({ runId, namespace: TAINT_NAMESPACE, value: { sources: next } }) === true;
     } catch {
       wrote = false;

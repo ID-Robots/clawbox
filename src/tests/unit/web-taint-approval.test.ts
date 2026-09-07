@@ -207,9 +207,13 @@ describe("what the plugin calls web content and what it calls dangerous", () => 
     expect(isDangerousTool("read_file")).toBe(false);
   });
 
-  it("gates the delegated shells too — a coding run is a shell one hop out", () => {
-    expect(isDangerousTool("clawbox__coding_agent_run")).toBe(true);
-    expect(isDangerousTool("clawbox__coding_team_run")).toBe(true);
+  it("gates the spawns too — a delegated run is a shell one hop out", () => {
+    // A spawned run gets its own runId, so the core clears the parent's mark
+    // for it and the child's shell is ungated. Gating the SPAWN is what stops a
+    // tainted turn laundering the command through a clean child.
+    for (const name of ["clawbox__coding_agent_run", "clawbox__coding_team_run", "sessions_spawn", "subagents", "spawn_agent"]) {
+      expect(isDangerousTool(name), name).toBe(true);
+    }
   });
 
   it("never knows fewer shells than the path guard's deny rule", () => {
@@ -357,6 +361,19 @@ describe("the taint is per turn, and cleared by the harness rather than by us", 
     const g = gate();
     g.onAfterToolCall({ toolName: "web_fetch", params: {}, result: "…" }, ctx());
     expect([...g.runContext.store.keys()]).toEqual([`${RUN} ${TAINT_NAMESPACE}`]);
+  });
+
+  it("names what tainted the turn most recently, not first", () => {
+    const g = gate();
+    for (const toolName of ["web_fetch", "web_search", "x_search", "email_read", "browser_open"]) {
+      g.onAfterToolCall({ toolName, params: {}, result: "…" }, ctx());
+    }
+    const asked = g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx());
+    // Bounded so the card stays readable — and the bound drops the OLDEST, or a
+    // long turn's card would name what tainted it first and never the tool that
+    // just did.
+    expect(asked?.requireApproval?.description).toContain("browser_open");
+    expect(asked?.requireApproval?.description).not.toContain("web_fetch");
   });
 });
 

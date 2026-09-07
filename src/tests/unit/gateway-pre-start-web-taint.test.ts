@@ -180,7 +180,7 @@ d("gateway-pre-start.sh — the web-taint approval gate", () => {
     writeFileSync(sourceFile("web-taint.mjs"), src);
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("did not load or did not gate a shell call after a web read");
+    expect(r.stderr).toContain("answered the wrong way about a tainted turn or a clean one");
   });
 
   it("says so when the installed copy gates a turn that read nothing", () => {
@@ -195,7 +195,28 @@ d("gateway-pre-start.sh — the web-taint approval gate", () => {
     writeFileSync(sourceFile("index.mjs"), src);
     const r = run();
     expect(r.status).toBe(0);
-    expect(r.stderr).toContain("did not load or did not gate a shell call after a web read");
+    // The same line for both directions, deliberately: an earlier draft printed
+    // "did not gate a shell call after a web read" for the OVER-gating failure,
+    // which is the opposite of what happened, and this case passed by agreeing
+    // with it.
+    expect(r.stderr).toContain("the owner is asked about commands in turns that read nothing");
+  });
+
+  it("says so when the registration never reaches the core's run store", () => {
+    // A `register` that read the wrong property — `api.run_context`, the
+    // deprecated flat `api.getRunContext` — installs, enables and registers both
+    // hooks, and ships a gate that arms its fail-closed window on every web
+    // read. Only driving the handlers the REGISTRATION handed over, with an api
+    // shaped like the core's, tells the difference.
+    const src = readFileSync(sourceFile("index.mjs"), "utf-8").replace(
+      "createWebTaintGate({ runContext: api?.runContext })",
+      "createWebTaintGate({ runContext: api?.run_context })",
+    );
+    expect(src).toContain("api?.run_context");
+    writeFileSync(sourceFile("index.mjs"), src);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("did not load, or answered the wrong way");
   });
 
   it("leaves an installed copy alone when the sources cannot be read", () => {
