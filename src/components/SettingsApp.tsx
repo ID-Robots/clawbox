@@ -202,7 +202,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -306,6 +306,12 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // land on Local AI.
   { id: "ai", icon: "smart_toy", labelKey: "settings.providers" },
   { id: "localAi", icon: "memory", labelKey: "settings.localAi" },
+  // The harness page: the engine that runs the agent (the harness picker)
+  // and what that engine does on its own (the background-jobs switches).
+  // Both used to sit at the top of System, where their switches pushed the
+  // device's own figures off the screen (the owner's request, 2026-09-07);
+  // beside the AI pages because they are about the agent, not the box.
+  { id: "harness", icon: "hub", labelKey: "settings.harness" },
   // The coding agent's settings — its switch, folder, effort and GitHub
   // account — moved here from the Coding Agent app, which keeps the runs.
   // Next to the AI pages because it is the other thing the assistant does
@@ -5726,23 +5732,28 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Harness ─── */}
+        {activeSection === "harness" && (
+          <div className="max-w-xl space-y-5" data-testid="settings-harness-page">
+            {/* The engine that runs the agent, and what it does WITHOUT being
+                asked (TASK-609) — the only place on the box that says those
+                jobs exist at all. Both moved here from the top of System,
+                where their switches pushed the device's own figures off the
+                screen. */}
+            <HarnessPicker />
+            <BackgroundJobsPanel />
+          </div>
+        )}
+
         {/* ─── System ─── */}
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
-
-            <HarnessPicker />
 
             {/* Desktop environment + Performance mode. Above the read-only
                 stats cards on purpose: these are the two controls on this tab
                 that change what the box does, and the cards below are what
                 they change. TASK-455. */}
             <SystemProfilePanel />
-
-            {/* What the box does WITHOUT being asked (TASK-609). Beside the two
-                panels above for the same reason they are here: it changes what
-                the device does rather than reporting on it — and it is the only
-                place on the box that says these jobs exist at all. */}
-            <BackgroundJobsPanel />
 
             {stats ? (
               <>
