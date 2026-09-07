@@ -3463,6 +3463,10 @@ step_hermes_install() {
   local venv_python="$agent_dir/venv/bin/python"
   local installed=""
   local pin="$HERMES_PIN_COMMIT"
+  # Whether an upgrade this step performed landed somewhere other than the pin.
+  # `local`, so a second call in one shell cannot inherit the first one's
+  # answer.
+  local _hermes_off_pin=0
 
   # The pin is spliced into a URL below and the file that URL returns is piped
   # into bash, so it is validated before it is used. A malformed value — a tag
@@ -3683,6 +3687,12 @@ step_hermes_install() {
     if [ "$at_commit" = "$pin" ]; then
       echo "  Hermes installed ($installed) at the pinned commit"
     else
+      # An upgrade that did not reach the pin is a fixup that did not do its
+      # job, and the warning below is stderr — which reaches the journal and
+      # nothing else. `optional_step` reads the RETURN, so record it there too
+      # and let the update's own status carry it. Not a rollback and not fatal:
+      # the agent RUNS, and the copy moved aside was unpinned as well.
+      _hermes_off_pin=1
       # The agent RUNS, so it is NOT rolled back: a working unpinned agent is
       # worth more than the copy moved aside, which was unpinned too. Loud,
       # because it means the pin did not take — upstream dropping
@@ -3765,7 +3775,12 @@ step_hermes_install() {
   # The same two-part test the step's own probe makes (a shim alone is a
   # four-line wrapper and proves nothing about the agent under ~/.hermes).
   if [ -x "$shim" ] && [ -x "$venv_python" ]; then
-    return 0
+    # Runnable — and `$_hermes_off_pin` is the second half of the answer: an
+    # install that landed off the pin leaves the box working on a build we do
+    # not ship, which the fleet has to hear about even though nothing here is
+    # broken. Default 0, so every path that never attempted an upgrade returns
+    # 0 exactly as before.
+    return "$_hermes_off_pin"
   fi
   echo "  Warning: the Hermes agent is still not runnable after this step" >&2
   return 1

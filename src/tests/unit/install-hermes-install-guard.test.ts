@@ -845,7 +845,11 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
     const r = run({ installHead: OTHER_COMMIT });
 
-    expect(r.code).toBe(0);
+    // Reported through the RETURN as well as the warning: the box works, but
+    // it is not on the build we ship, and `optional_step` in step_post_update
+    // is what carries that to the update's own status — a stderr line reaches
+    // the journal and nobody. It is still not fatal and still not rolled back.
+    expect(r.code).toBe(1);
     expect(r.out).toMatch(/but HEAD is/);
     expect(r.out).not.toMatch(/Restored the previous agent/);
     expect(exists(path.join(agentDir(), "venv", "bin", "python"))).toBe(true);
