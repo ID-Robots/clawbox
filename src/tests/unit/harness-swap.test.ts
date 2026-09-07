@@ -19,6 +19,7 @@ const h = vi.hoisted(() => ({
   applyClawaiToHermes: vi.fn(async () => ({ provider: "clawai", model: "m", tier: "flash", explicitPickKept: false })),
   setHermesTelegramToken: vi.fn(async () => {}),
   ensureHermesGateway: vi.fn(async () => ({ installed: true, running: true, scope: "system", applied: true })),
+  retireHermesUserGateway: vi.fn(async () => true),
   readConfig: vi.fn(async (): Promise<Record<string, unknown>> => ({})),
   setTelegramToken: vi.fn(async () => {}),
   restartGateway: vi.fn(async () => {}),
@@ -48,6 +49,7 @@ vi.mock("@/lib/hermes-clawai", () => ({ applyClawaiToHermes: h.applyClawaiToHerm
 vi.mock("@/lib/hermes-telegram", () => ({
   setHermesTelegramToken: h.setHermesTelegramToken,
   ensureHermesGateway: h.ensureHermesGateway,
+  retireHermesUserGateway: h.retireHermesUserGateway,
 }));
 // PARTIAL, over the real module — see openclaw-config-mock-completeness.test.ts.
 vi.mock("@/lib/openclaw-config", async (orig) => ({
@@ -141,6 +143,7 @@ beforeEach(() => {
   h.applyClawaiToHermes.mockReset().mockResolvedValue({ provider: "clawai", model: "m", tier: "flash", explicitPickKept: false });
   h.setHermesTelegramToken.mockReset().mockResolvedValue(undefined);
   h.ensureHermesGateway.mockReset().mockResolvedValue({ installed: true, running: true, scope: "system", applied: true });
+  h.retireHermesUserGateway.mockReset().mockResolvedValue(true);
   h.readConfig.mockReset().mockResolvedValue({});
   h.setTelegramToken.mockReset().mockResolvedValue(undefined);
   h.restartGateway.mockReset().mockResolvedValue(undefined);
@@ -658,6 +661,8 @@ describe("the carry-over after the lock has flipped", () => {
   it("→ OpenClaw: refreshes the shared identity into the OpenClaw workspace, the runtime switcher's way", async () => {
     store({});
     const notes = await carryOverAfterSwap("openclaw", emit);
+    // Hermes' user-scope message gateway must not go on polling the bot.
+    expect(h.retireHermesUserGateway).toHaveBeenCalledTimes(1);
     const sync = h.execCalls.find((call) => call.some((arg) => arg.endsWith("scripts/clawbox-identity-sync.sh")));
     expect(sync).toBeDefined();
     expect(sync?.[0]).toBe("bash");
@@ -675,6 +680,17 @@ describe("the carry-over after the lock has flipped", () => {
     h.unitError = null;
     await carryOverAfterSwap("hermes", emit);
     expect(h.execCalls.find((call) => call.some((arg) => arg.includes("identity-sync")))).toBeUndefined();
+  });
+
+  it("says so when Hermes' user gateway would not retire on the way to OpenClaw, and never asks towards Hermes", async () => {
+    store({});
+    h.retireHermesUserGateway.mockResolvedValue(false);
+    expect(await carryOverAfterSwap("openclaw", emit)).toEqual([SWAP_NOTES.clawaiSignIn, SWAP_NOTES.hermesGatewayLeft]);
+    h.retireHermesUserGateway.mockRejectedValue(new Error("hermes: timed out"));
+    expect(await carryOverAfterSwap("openclaw", emit)).toContain(SWAP_NOTES.hermesGatewayLeft);
+    h.retireHermesUserGateway.mockClear();
+    await carryOverAfterSwap("hermes", emit);
+    expect(h.retireHermesUserGateway).not.toHaveBeenCalled();
   });
 
   it("→ OpenClaw: says sign in again when openclaw.json carries no ClawBox AI provider — never a faked success", async () => {

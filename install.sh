@@ -3968,6 +3968,26 @@ step_edition_foreign_teardown() {
     brought_down+=("$funit (was active=$f_active enabled=$f_enabled)")
   done
 
+  # The USER-scope hermes-gateway unit: what `hermes gateway install` (no
+  # --system) writes under ~/.config/systemd/user, and what a box provisioned
+  # without a terminal — the harness swap, this installer's own Hermes step —
+  # ends up with, since the system install needs a sudo that is refused on
+  # purpose. It polls the same bot token and the loop above cannot see it, so
+  # it is brought down through the clawbox user's session bus, the way
+  # pause_engine_user_unit reaches the voice units. Stopped and disabled, not
+  # removed: `hermes gateway install` puts it back on the next swap to Hermes.
+  if ! has_hermes_harness && [ "${CLAWBOX_KEEP_FOREIGN_UNITS:-0}" != "1" ]; then
+    local hg_uid hg_state
+    hg_uid="$(id -u "$CLAWBOX_USER" 2>/dev/null || true)"
+    if [ -n "$hg_uid" ] && sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" \
+        systemctl --user cat hermes-gateway.service >/dev/null 2>&1; then
+      hg_state="$(sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" systemctl --user is-active hermes-gateway.service 2>/dev/null || true)"
+      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" \
+        systemctl --user disable --now hermes-gateway.service >/dev/null 2>&1 || true
+      brought_down+=("hermes-gateway.service (the clawbox user's unit; was active=${hg_state:-unknown})")
+    fi
+  fi
+
   if [ "${#brought_down[@]}" -eq 0 ]; then
     return 0
   fi

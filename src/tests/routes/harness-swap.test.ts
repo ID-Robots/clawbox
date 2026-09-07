@@ -80,6 +80,7 @@ vi.mock("@/lib/hermes-clawai", () => ({ applyClawaiToHermes: h.applyClawaiToHerm
 vi.mock("@/lib/hermes-telegram", () => ({
   setHermesTelegramToken: h.setHermesTelegramToken,
   ensureHermesGateway: h.ensureHermesGateway,
+  retireHermesUserGateway: vi.fn(async () => true),
 }));
 // PARTIAL, over the real module — see openclaw-config-mock-completeness.test.ts.
 vi.mock("@/lib/openclaw-config", async (orig) => ({

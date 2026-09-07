@@ -39,7 +39,7 @@ import { CONFIG_ROOT, DATA_DIR, get } from "@/lib/config-store";
 import type { EditionSource } from "@/lib/edition-source";
 import { HARNESSES, type Harness } from "@/lib/harness";
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
-import { ensureHermesGateway, setHermesTelegramToken } from "@/lib/hermes-telegram";
+import { ensureHermesGateway, retireHermesUserGateway, setHermesTelegramToken } from "@/lib/hermes-telegram";
 import { memAvailableMb } from "@/lib/mem-available";
 import { findOpenclawBin, readConfig, restartGateway, setTelegramToken } from "@/lib/openclaw-config";
 import { freeBytes } from "@/lib/project-import";
@@ -106,6 +106,8 @@ export const SWAP_NOTES = {
     "The Telegram bot token could not be carried over — enter it again in Settings → Channels",
   identityNotSynced:
     "The agent's persona could not be refreshed for OpenClaw — it keeps what its workspace already had",
+  hermesGatewayLeft:
+    "Hermes' message gateway may still be running — run `hermes gateway uninstall` in the Terminal so it does not fight OpenClaw for the Telegram bot",
 } as const;
 
 // ── Which way, and for whom ──────────────────────────────────────────────────
@@ -742,6 +744,21 @@ export async function carryOverAfterSwap(target: Harness, emit: SwapEmit): Promi
     } catch (err) {
       emit(`The persona could not be refreshed: ${withoutSecrets(errorText(err), secrets)}`);
       notes.push(SWAP_NOTES.identityNotSynced);
+    }
+    // Hermes' USER-scope message gateway — the one a swap to Hermes installs
+    // without root — is not a unit the root step can see: its teardown stops
+    // the system units. Left running it long-polls the same Telegram bot
+    // OpenClaw is about to take, and two pollers on one token terminate each
+    // other's getUpdates for ever.
+    try {
+      if (await retireHermesUserGateway()) emit("Hermes' message gateway retired.");
+      else {
+        emit("Hermes' message gateway could not be retired.");
+        notes.push(SWAP_NOTES.hermesGatewayLeft);
+      }
+    } catch (err) {
+      emit(`Hermes' message gateway could not be retired: ${withoutSecrets(errorText(err), secrets)}`);
+      notes.push(SWAP_NOTES.hermesGatewayLeft);
     }
   }
 
