@@ -18,5 +18,9 @@ test("the shelf clock opens System Settings instead of acting like a dead button
 
   const settings = page.getByTestId("chrome-window-settings");
   await expect(settings).toBeVisible();
-  await expect(settings.getByRole("heading", { name: "Agent harness" })).toBeVisible();
+  // The System page: its Device card. The harness card that used to stand
+  // here moved to the Harness page (owner's request, 2026-09-07), so its
+  // heading is exactly what the System page must NOT show any more.
+  await expect(settings.getByText("Device", { exact: true })).toBeVisible();
+  await expect(settings.getByRole("heading", { name: "Agent harness" })).toHaveCount(0);
 });

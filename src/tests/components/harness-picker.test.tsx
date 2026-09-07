@@ -193,3 +193,21 @@ describe("HarnessPicker shell-scan warning", () => {
     expect(screen.queryByTestId("shell-scan-warning")).toBeNull();
   });
 });
+
+describe("HarnessPicker locked badge copy", () => {
+  // The title, hint and buttons were keyed already; the "This edition" chip
+  // beside the lock stayed a literal, so it was the one English word on a
+  // German Harness page (locale sweep DE-2, 2026-09-07). With the catalogue
+  // withheld, the chip must show the KEY it asked for — a literal would show
+  // English here and pass every locale by accident.
+  it("asks the catalogue for the 'This edition' chip rather than printing English", async () => {
+    catalogueMissing = true;
+    mockStatus(locked(true));
+    render(<HarnessPicker />);
+
+    await screen.findByTestId("harness-locked-dot");
+    expect(screen.getByText("settings.harnessThisEdition")).toBeInTheDocument();
+    expect(screen.queryByText("This edition")).toBeNull();
+    expect(translations.en["settings.harnessThisEdition"]).toBe("This edition");
+  });
+});

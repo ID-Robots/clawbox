@@ -34,6 +34,7 @@ import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 import { QRCodeSVG } from "qrcode.react";
 import { cleanVersion } from "@/lib/version-utils";
+import { formatBytes as formatByteCount } from "@/lib/format-bytes";
 import { BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
@@ -191,7 +192,7 @@ interface SystemStats {
   overview: { hostname: string; os: string; kernel: string; uptime: string; arch: string; platform: string };
   cpu: { usage: number; model: string; cores: number; loadAvg: string[]; speed: number };
   memory: { total: number; used: number; free: number; usedPercent: number; swap: SwapStats };
-  temperature?: { value: number | null; display: string };
+  temperature?: { value: number | null };
   gpu?: { usage: number };
   storage: DiskMount[];
   network: NetworkIface[];
@@ -202,7 +203,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -306,6 +307,12 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // land on Local AI.
   { id: "ai", icon: "smart_toy", labelKey: "settings.providers" },
   { id: "localAi", icon: "memory", labelKey: "settings.localAi" },
+  // The harness page: the engine that runs the agent (the harness picker)
+  // and what that engine does on its own (the background-jobs switches).
+  // Both used to sit at the top of System, where their switches pushed the
+  // device's own figures off the screen (the owner's request, 2026-09-07);
+  // beside the AI pages because they are about the agent, not the box.
+  { id: "harness", icon: "hub", labelKey: "settings.harness" },
   // The coding agent's settings — its switch, folder, effort and GitHub
   // account — moved here from the Coding Agent app, which keeps the runs.
   // Next to the AI pages because it is the other thing the assistant does
@@ -382,11 +389,41 @@ function toDiscordMembers(value: unknown): DiscordMemberOption[] {
   return out;
 }
 
-function formatBytes(b: number): string {
+// The System page's figures take the UI locale: a German desktop read
+// "5.8 GB", "56.1°C" and "Load 2.69" between German words (locale sweep
+// DE-11, 2026-09-07). Fraction digits are pinned at both ends and grouping is
+// off, so the English figures are exactly what `toFixed` printed before — it
+// never grouped, and a grouped "1.010" is a fraction to a German reader.
+function localeFixed(n: number, digits: number, locale: string): string {
+  return n.toLocaleString(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits, useGrouping: false });
+}
+
+// The stats route hands the disk figures over as `df -h` printed them —
+// "391G", "5.8G": the English decimal point, and a unit style ("G") the
+// memory line above it does not use ("GB"). Read the figure back into bytes
+// (`-h` is binary: K, M, G, T… are powers of 1024, at most one decimal) and
+// print it through the UI locale like every other size on the page. A string
+// df wrote some other way — "-" for a pseudo filesystem — is shown as sent.
+const DF_HUMAN_UNITS = "KMGTPE";
+function diskFigure(raw: string, locale: string): string {
+  const m = /^(\d+(?:[.,]\d+)?)([KMGTPE])?$/.exec(raw.trim());
+  if (!m) return raw;
+  const bytes = Number(m[1].replace(",", ".")) * 1024 ** (m[2] ? DF_HUMAN_UNITS.indexOf(m[2]) + 1 : 0);
+  return formatByteCount(bytes, locale) ?? "0 B";
+}
+
+function formatBytes(b: number, locale: string): string {
   if (!b) return "0 B";
   const u = ["B", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(b) / Math.log(1024));
-  return (b / Math.pow(1024, i)).toFixed(1) + " " + u[i];
+  return localeFixed(b / Math.pow(1024, i), 1, locale) + " " + u[i];
+}
+
+/** The stats route sends load averages as `toFixed(2)` strings; a value that
+ *  is not a number is shown as sent rather than as "NaN". */
+function formatLoad(load: string | number, locale: string): string {
+  const n = Number(load);
+  return Number.isFinite(n) ? localeFixed(n, 2, locale) : String(load);
 }
 
 function barColor(pct: number): string {
@@ -5726,23 +5763,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Harness ─── */}
+        {activeSection === "harness" && (
+          <div className="max-w-xl space-y-5" data-testid="settings-harness-page">
+            {/* The engine that runs the agent, and what it does WITHOUT being
+                asked (TASK-609) — the only place on the box that says those
+                jobs exist at all. Both moved here from the top of System,
+                where their switches pushed the device's own figures off the
+                screen. */}
+            <HarnessPicker />
+            <BackgroundJobsPanel />
+          </div>
+        )}
+
         {/* ─── System ─── */}
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
-
-            <HarnessPicker />
-
-            {/* Desktop environment + Performance mode. Above the read-only
-                stats cards on purpose: these are the two controls on this tab
-                that change what the box does, and the cards below are what
-                they change. TASK-455. */}
-            <SystemProfilePanel />
-
-            {/* What the box does WITHOUT being asked (TASK-609). Beside the two
-                panels above for the same reason they are here: it changes what
-                the device does rather than reporting on it — and it is the only
-                place on the box that says these jobs exist at all. */}
-            <BackgroundJobsPanel />
 
             {stats ? (
               <>
@@ -5779,7 +5815,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                     <div className="flex items-center justify-between mt-1.5">
                       <span className="text-[10px] text-[var(--text-muted)] opacity-50 font-mono truncate max-w-[60%]">{stats.cpu.model}</span>
-                      <span className="text-[10px] text-[var(--text-muted)] opacity-50">{stats.cpu.cores} {t("settings.cores")} &middot; Load {stats.cpu.loadAvg[0]}</span>
+                      <span className="text-[10px] text-[var(--text-muted)] opacity-50">{stats.cpu.cores} {t("settings.cores")} &middot; {t("settings.load")} {formatLoad(stats.cpu.loadAvg[0], locale)}</span>
                     </div>
                   </div>
 
@@ -5787,12 +5823,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="mb-4">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="text-xs text-[var(--text-muted)]">{t("settings.memory")}</span>
-                      <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.used)} / {formatBytes(stats.memory.total)}</span>
+                      <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.used, locale)} / {formatBytes(stats.memory.total, locale)}</span>
                     </div>
                     <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
                       <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.memory.usedPercent}%`, backgroundColor: barColor(stats.memory.usedPercent) }} />
                     </div>
-                    <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{stats.memory.usedPercent}% &middot; {formatBytes(stats.memory.free)} free</div>
+                    <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{stats.memory.usedPercent}% &middot; {t("settings.freeAmount", { amount: formatBytes(stats.memory.free, locale) })}</div>
                   </div>
 
                   {/* Swap bar (if any) */}
@@ -5800,12 +5836,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <div>
                       <div className="flex items-center justify-between mb-1.5">
                         <span className="text-xs text-[var(--text-muted)]">{t("settings.swap")}</span>
-                        <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.swap.used)} / {formatBytes(stats.memory.swap.total)}</span>
+                        <span className="text-xs font-mono text-[var(--text-muted)]">{formatBytes(stats.memory.swap.used, locale)} / {formatBytes(stats.memory.swap.total, locale)}</span>
                       </div>
                       <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
                         <div className="h-full rounded-full transition-all duration-700" style={{ width: `${stats.memory.swap.percent}%`, backgroundColor: "#a855f7" }} />
                       </div>
-                      <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{stats.memory.swap.percent}% used</div>
+                      <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{t("settings.percentUsed", { percent: stats.memory.swap.percent })}</div>
                     </div>
                   )}
 
@@ -5832,7 +5868,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                     <div className="flex items-end gap-3">
                       <span className="text-3xl font-mono font-bold" style={{ color: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee" }}>
-                        {stats.temperature.display}
+                        {localeFixed(stats.temperature.value, 1, locale)}°C
                       </span>
                       <span className="text-xs text-[var(--text-muted)] opacity-50 mb-1.5">
                         {stats.temperature.value > 80 ? t("settings.critical") : stats.temperature.value > 60 ? t("settings.warm") : t("settings.normal")}
@@ -5864,12 +5900,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <div key={m.mountpoint}>
                         <div className="flex items-center justify-between mb-1.5">
                           <span className="text-xs text-[var(--text-secondary)] font-mono">{m.mountpoint}</span>
-                          <span className="text-xs text-white/35 font-mono">{m.used} / {m.size}</span>
+                          <span className="text-xs text-white/35 font-mono">{diskFigure(m.used, locale)} / {diskFigure(m.size, locale)}</span>
                         </div>
                         <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
                           <div className="h-full rounded-full transition-all duration-700" style={{ width: `${m.usePercent}%`, backgroundColor: barColor(m.usePercent) }} />
                         </div>
-                        <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{m.usePercent}% &middot; {m.avail} free</div>
+                        <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{m.usePercent}% &middot; {t("settings.freeAmount", { amount: diskFigure(m.avail, locale) })}</div>
                       </div>
                     ))}
                   </div>
@@ -5990,6 +6026,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
             </div>
 
+
+            {/* Desktop environment + Performance mode — under the password
+                card, at the owner's request (2026-09-07): the two switches
+                are set once and the figures above them are what the page is
+                opened for. (TASK-455 had them above the figures for the
+                opposite reason; the owner ruled.) */}
+            <SystemProfilePanel />
           </div>
         )}
 

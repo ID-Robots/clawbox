@@ -119,7 +119,7 @@ export default function HarnessPicker() {
           body: JSON.stringify({ harness: id }),
         });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Switch failed");
+        if (!res.ok) throw new Error(data.error || t("settings.harnessSwitchFailed"));
         // The desktop chat resolves its harness on mount and stays mounted, so
         // a live switch wouldn't reach an already-open chat. Reload so the whole
         // desktop re-mounts against the newly-selected harness — a clean, sure
@@ -127,11 +127,11 @@ export default function HarnessPicker() {
         window.location.reload();
         return;
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Switch failed");
+        setError(e instanceof Error ? e.message : t("settings.harnessSwitchFailed"));
         setSwitching(null);
       }
     },
-    [switching, status],
+    [switching, status, t],
   );
 
   const activeEntry = status?.harnesses?.find((h) => h.id === status.active);
@@ -144,11 +144,11 @@ export default function HarnessPicker() {
           hub
         </span>
         <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest m-0">
-          Agent harness
+          {t("settings.harnessTitle")}
         </h3>
       </div>
       <p className="text-xs text-[var(--text-muted)] mb-3">
-        The engine that runs your agent. One shared identity; each harness keeps its own providers.
+        {t("settings.harnessHint")}
       </p>
       {status?.locked ? (
         // Single-harness edition: no switcher, just a read-only badge for the
@@ -161,7 +161,7 @@ export default function HarnessPicker() {
                 only health signal the user gets. */}
             <span
               data-testid="harness-locked-dot"
-              title={activeEntry && !activeEntry.healthy ? `${activeEntry.label} is not running` : undefined}
+              title={activeEntry && !activeEntry.healthy ? t("settings.harnessNotRunning", { name: activeEntry.label }) : undefined}
               className={`w-2 h-2 rounded-full ${activeEntry?.healthy ? "bg-emerald-400" : "bg-white/25"}`}
             />
             <span className="text-sm text-[var(--text-primary)] font-medium">
@@ -170,7 +170,7 @@ export default function HarnessPicker() {
           </span>
           <span className="flex items-center gap-1 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
             <span className="material-symbols-rounded" style={{ fontSize: 13 }}>lock</span>
-            This edition
+            {t("settings.harnessThisEdition")}
           </span>
         </div>
       ) : (
@@ -183,7 +183,7 @@ export default function HarnessPicker() {
               key={h.id}
               onClick={() => select(h.id)}
               disabled={!!switching || active || !h.healthy}
-              title={!h.healthy ? `${h.label} is not available on this device` : undefined}
+              title={!h.healthy ? t("settings.harnessUnavailable", { name: h.label }) : undefined}
               className={`flex items-center justify-between rounded-xl border p-3 text-left transition-colors ${
                 active
                   ? "border-[var(--coral-bright)] bg-orange-500/10"
@@ -195,7 +195,7 @@ export default function HarnessPicker() {
                 <span className="text-sm text-[var(--text-primary)] font-medium">{h.label}</span>
               </span>
               <span className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
-                {busy ? "…" : active ? "Active" : h.healthy ? "Switch" : "Offline"}
+                {busy ? "…" : active ? t("settings.harnessActive") : h.healthy ? t("settings.harnessSwitch") : t("settings.harnessOffline")}
               </span>
             </button>
           );

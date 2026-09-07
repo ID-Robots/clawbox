@@ -804,6 +804,33 @@ describe("SettingsApp providers and Local AI pages", () => {
     expect(labels.findIndex((l) => l.includes("settings.localAi"))).toBe(labels.findIndex((l) => l.includes("settings.providers")) + 1);
   });
 
+  it("carries a Harness section holding the harness picker and the background jobs, which System no longer does", async () => {
+    // Both used to sit at the top of System, where their switches pushed the
+    // device's own figures off the screen (the owner's request, 2026-09-07).
+    // The background-jobs panel draws nothing until its status answers, so
+    // the stub answers it here.
+    const inner = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => (
+      input.toString() === "/setup-api/background-jobs"
+        ? jsonResponse({ harness: "openclaw", degraded: false, jobs: [{ id: "checkIns", enabled: false, supported: true, key: "agents.defaults.heartbeat.every" }] })
+        : inner(input, init)
+    )));
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const labels = navButtons(container).map((b) => b.textContent ?? "");
+    // Beside the AI pages: right after Local AI.
+    expect(labels.findIndex((l) => l.includes("settings.harness"))).toBe(labels.findIndex((l) => l.includes("settings.localAi")) + 1);
+
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "harness" } }));
+    const page = await screen.findByTestId("settings-harness-page");
+    expect(within(page).getByText("settings.harnessTitle")).toBeInTheDocument();
+    expect(await within(page).findByTestId("settings-background-jobs")).toBeInTheDocument();
+
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "system" } }));
+    await waitFor(() => expect(screen.queryByTestId("settings-harness-page")).toBeNull());
+    expect(screen.queryByText("settings.harnessTitle")).toBeNull();
+    expect(screen.queryByTestId("settings-background-jobs")).toBeNull();
+  });
+
   it("carries no Coding Agent section — its settings live in the Coding Agent app now", async () => {
     // The switch, folder, effort and GitHub card moved back into the app at
     // the owner's request; the sidebar must not offer a dead entry, and the

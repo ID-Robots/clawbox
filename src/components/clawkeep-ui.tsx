@@ -38,7 +38,13 @@ export function timeAgo(ms: number, t: Translator, nowMs?: number): string {
   return t("clawkeep.daysAgo", { count: days });
 }
 
-export function formatBytes(n: number): string {
+/** `locale` is the caller's UI locale (`useT().locale`): "24.1 GB" on a German
+ *  desktop was the one English thing on the card (locale sweep DE-11,
+ *  2026-09-07). English by default so a caller without one still gets the
+ *  figure `src/lib/format-bytes.ts` would give for the same bytes, and with
+ *  grouping off for the reason that module gives: "1.010 B" is a fraction
+ *  of a byte to a German reader, not a thousand of them. */
+export function formatBytes(n: number, locale = "en"): string {
   if (!n || n < 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let i = 0;
@@ -47,7 +53,8 @@ export function formatBytes(n: number): string {
     v /= 1024;
     i++;
   }
-  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
+  const digits = v >= 100 || i === 0 ? 0 : 1;
+  return `${v.toLocaleString(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits, useGrouping: false })} ${units[i]}`;
 }
 
 /** "8 s", "2 min 10 s" — the length of a run, in units no locale spells out differently. */

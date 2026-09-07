@@ -140,12 +140,15 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
 
 export const CLAWAI_TIER_ORDER: readonly ClawaiTier[] = ["free", "flash", "pro"] as const;
 
-/** The one marketing line for ClawBox AI. Both panels render this string. */
+/** The one marketing line for ClawBox AI, in English. No component renders
+ *  this string any more — the shared row asks the catalogue through the key
+ *  below (locale sweep DE-1, 2026-09-07). It is what the `en` pack must carry
+ *  under that key, and `clawbox-ai-plan-copy.test.ts` pins the two together so
+ *  the catalogue and this copy cannot drift. */
 export const CLAWBOX_AI_DESCRIPTION =
   "All-in cloud AI for ClawBox — backups, remote desktop, full support";
 
-/** Its translation key, for a caller that has a `t()` to hand — the constant
- *  above stays the English floor for the ones that do not. */
+/** The catalogue key both panels draw the line from. */
 export const CLAWBOX_AI_DESCRIPTION_KEY = "ai.clawboxAiDescription";
 
 export function normalizeClawaiUiTier(value: unknown): ClawaiTier | null {
