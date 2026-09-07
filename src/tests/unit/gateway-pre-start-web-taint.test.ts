@@ -51,7 +51,12 @@ const PLUGIN_ID = "clawbox-web-taint";
 
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
-const d = hasBash && hasPython3 ? describe : describe.skip;
+// `node` too, and not only because the self-test needs it: without it the block
+// writes its "not exercised here" NOTE, and the first case below asserts an
+// EMPTY stderr. A runner with no node would fail this suite over a line the
+// script is right to print.
+const hasNode = spawnSync("node", ["--version"], { stdio: "ignore" }).status === 0;
+const d = hasBash && hasPython3 && hasNode ? describe : describe.skip;
 
 /** One section of the shipped script, by its heading and the next heading. */
 function section(from: string, to: string): string {
