@@ -83,14 +83,6 @@ interface CachedManifest {
 const cache = new Map<string, CachedManifest>();
 
 /**
- * The two places the manifest lives, in the order `gateway-pre-start.sh`
- * resolves them: bundled in the core's `dist/extensions`, or beside the config
- * once OpenClaw 2 unbundled the provider into its own installed plugin. The
- * PATHS are that script's; the fallback RULE is not the same one — it falls
- * back on existence alone (`[ ! -f … ]`) and gives up outright on a manifest it
- * cannot parse, while this reads on to the next candidate.
- */
-/**
  * A provider id that can only ever name a directory, never traverse out of one.
  *
  * The id reaches this module from a request query string by way of the catalogue
@@ -100,6 +92,14 @@ const cache = new Map<string, CachedManifest>();
  */
 const SAFE_PROVIDER_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
+/**
+ * The two places the manifest lives, in the order `gateway-pre-start.sh`
+ * resolves them: bundled in the core's `dist/extensions`, or beside the config
+ * once OpenClaw 2 unbundled the provider into its own installed plugin. The
+ * PATHS are that script's; the fallback RULE is not the same one — it falls
+ * back on existence alone (`[ ! -f … ]`) and gives up outright on a manifest it
+ * cannot parse, while this reads on to the next candidate.
+ */
 function manifestPaths(provider: string): string[] {
   const bin = findOpenclawBin();
   const paths: string[] = [];
@@ -193,7 +193,8 @@ function retiredFor(provider: string): Set<string> {
     }
     cache.delete(provider);
   }
-  // Set when a candidate EXISTED and could not be used — read or parsed. The
+  // Set when a candidate EXISTED and could not be used — it would not open, or
+  // would not read, or would not parse. The
   // answer that follows then comes from a lower-priority file, and caching it
   // would key the staleness check on that file alone (`cached.file` is the only
   // path re-stat'ed above), so the moment the better manifest became readable
@@ -213,7 +214,14 @@ function retiredFor(provider: string): Set<string> {
     let fd: number;
     try {
       fd = fsSync.openSync(file, "r");
-    } catch {
+    } catch (err) {
+      // ENOENT is genuine ABSENCE — the ordinary OpenClaw 2 layout, where the
+      // provider is unbundled and only the copy beside the config exists.
+      // Anything else (EACCES after a bad chown, EIO on a failing eMMC, EMFILE
+      // under load, ENOTDIR mid-upgrade) is a candidate that IS there and could
+      // not be used, and treating it as absence caches the lower-priority
+      // answer under a re-stat that only ever watches that lower-priority file.
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") degraded = true;
       continue;
     }
     let stat: fsSync.Stats;

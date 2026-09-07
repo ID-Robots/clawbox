@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fsSync from "fs";
 import { createManifestFixture, loadLifecycle, type ManifestFixture } from "@/tests/helpers/core-model-manifests";
 
 /**
@@ -260,6 +261,66 @@ describe("coreModelRetired", () => {
       const retired = coreRetiredModels("anthropic");
       expect(retired.has("claude-opus-4-7")).toBe(true);
       expect(retired.has("claude-opus-4-8")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not treat a manifest it cannot OPEN as one that is not there", async () => {
+    // EACCES after a bad chown, EIO on a failing eMMC, EMFILE under load: the
+    // file is there and cannot be used, which is the same degraded read as a
+    // truncated one — and caching the answer found past it keys the whole
+    // provider on the lower-priority file, since the staleness re-stat only
+    // ever stats the file it cached. The repaired manifest would then never be
+    // looked at again for the life of the web server.
+    fixture.writeBundledManifest("anthropic", { models: [{ id: "claude-opus-4-7", status: "deprecated" }] });
+    fixture.writeManifest("anthropic", { models: [{ id: "claude-opus-4-8", status: "deprecated" }] });
+    bin.override = fixture.bin;
+
+    // The permission failure, mocked rather than chmod'ed: a suite that runs as
+    // root — every container CI job — reads a 000 file perfectly well, and the
+    // case would pass by testing nothing.
+    let refuseBundled = true;
+    const realOpen = fsSync.openSync;
+    vi.spyOn(fsSync, "openSync").mockImplementation(((file: fsSync.PathLike, ...rest: unknown[]) => {
+      if (refuseBundled && String(file).includes("dist/extensions")) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return (realOpen as (...args: unknown[]) => number)(file, ...rest);
+    }) as typeof fsSync.openSync);
+
+    const { coreRetiredModels } = await loadLifecycle();
+    expect(coreRetiredModels("anthropic").has("claude-opus-4-8")).toBe(true);
+
+    // Repaired. Time frozen, so a cached answer would still be inside the stat
+    // floor and only a re-read of both candidates can change what is returned.
+    refuseBundled = false;
+    vi.useFakeTimers();
+    try {
+      const retired = coreRetiredModels("anthropic");
+      expect(retired.has("claude-opus-4-7")).toBe(true);
+      expect(retired.has("claude-opus-4-8")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still caches the answer when the better candidate is simply not there", async () => {
+    // The other half of the rule, and the load-bearing one: on every OpenClaw 2
+    // box the bundled path does not exist at all, and that is not a degraded
+    // read. Without this the whole provider would re-open and re-read a file on
+    // every catalogue request — the syscall storm the stat floor exists to stop.
+    fixture.writeManifest("openai", { models: [{ id: "gpt-5.5", status: "deprecated" }] });
+    bin.override = fixture.bin; // absolute, so the bundled candidate is TRIED
+    const { coreRetiredModels } = await loadLifecycle();
+    expect(coreRetiredModels("openai").has("gpt-5.5")).toBe(true);
+
+    // Rewritten under a frozen clock: a cached answer is the only thing that
+    // can still say "retired" here.
+    fixture.writeManifest("openai", { models: [{ id: "gpt-5.5" }] });
+    vi.useFakeTimers();
+    try {
+      expect(coreRetiredModels("openai").has("gpt-5.5")).toBe(true);
     } finally {
       vi.useRealTimers();
     }
