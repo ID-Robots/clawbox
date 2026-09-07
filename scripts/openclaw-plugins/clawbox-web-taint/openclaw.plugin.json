@@ -1,0 +1,7 @@
+{
+  "id": "clawbox-web-taint",
+  "name": "ClawBox web-taint approval gate",
+  "description": "Asks the owner before a shell command runs in a turn that read a web page, a search result or an email.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}
