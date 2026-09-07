@@ -481,11 +481,9 @@ describe("updater", () => {
       // re-stated on a `CLAWBOX-WARN:` line now, and this is where it becomes
       // something the OWNER sees.
       setupExecFileMock({
-        // The invocation bound: the reader asks systemd which start this was
-        // and reads only that one, so a marker from a previous update — the
-        // journal is persistent on this box — cannot be raised over a clean
-        // run.
-        "InvocationID": { stdout: "0123456789abcdef0123456789abcdef\n", stderr: "" },
+        // The run bound is the step's own dispatch time — asserted on the argv
+        // by the case below — so a marker from a previous update, on a box
+        // whose journal is persistent, cannot be raised over a clean run.
         "/usr/bin/journalctl": {
           stdout: [
             "Applying system fixups",
@@ -568,26 +566,69 @@ describe("updater", () => {
       expect(warning?.message).toContain("update_smoke");
     });
 
-    it("bounds the marker read to THIS run's dispatch of the step", async () => {
+    it("opens the marker window BEFORE the step is dispatched, not after", async () => {
       // A guess about WHICH run a marker came from is worse than no warning:
       // the journal is persistent, so an unbounded read answers with the last
       // update's failures over a clean one. Systemd's invocation id used to be
       // that bound and cannot be — it is empty once the instance is collected
       // — so the bound is the step's own start time and the OS does the
-      // filtering. Assert the ARGV: a window that is never asked for is a read
-      // that reports a previous run's failures as this one's, and the mock
-      // would answer it just the same.
+      // filtering.
+      //
+      // Which means the ONE regression that silently restores the original bug
+      // is the window being opened after the dispatch instead of before it:
+      // every argv assertion still passes and no marker is ever raised again.
+      // So the mock is the OS here — it serves the marker only to a window
+      // that opened at or before the dispatch — and the dispatch takes time,
+      // because a window floored to the second cannot tell before from after
+      // when the step returns instantly.
       const runStartedAtSeconds = Math.floor(Date.now() / 1000);
+      let dispatchedAt = 0;
       setupExecFileMock({
-        InvocationID: { stdout: "\n", stderr: "" },
-        "-u clawbox-root-update@apt_update.service": {
-          stdout: "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped: firewall",
-          stderr: "",
-        },
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
       });
+      const marker = "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped: firewall";
+      const fallback = mockExecFile.getMockImplementation()!;
+      mockExecFile.mockImplementation(((
+        cmd: string,
+        args: string[],
+        optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+        maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+      ) => {
+        const key = `${cmd} ${args.join(" ")}`;
+        const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+        const answer = (stdout: string, delayMs = 0) => {
+          const result = { stdout, stderr: "" };
+          const settle = () => callback?.(null, result);
+          if (delayMs > 0) setTimeout(settle, delayMs); else settle();
+          const thenable = {
+            then: (resolve: (value: { stdout: string; stderr: string }) => void) => {
+              if (delayMs > 0) setTimeout(() => resolve(result), delayMs); else resolve(result);
+              return thenable;
+            },
+            catch: () => thenable,
+          };
+          return thenable as unknown as ReturnType<typeof childProcess.execFile>;
+        };
+
+        if (key.includes("clawbox-run-root-step.sh apt_update")) {
+          dispatchedAt = Date.now();
+          return answer("", 1_100);
+        }
+        if (key.includes("journalctl") && key.includes("clawbox-root-update@apt_update.service")) {
+          const since = Number(/--since @(\d+)/.exec(key)?.[1] ?? NaN);
+          // The journal answers a window that opened after the step wrote with
+          // nothing at all — which is what a box would do.
+          return answer(since * 1000 <= dispatchedAt ? marker : "");
+        }
+        return (fallback as unknown as (
+          cmd: string,
+          args: string[],
+          optsOrCallback?: unknown,
+          maybeCallback?: unknown,
+        ) => ReturnType<typeof childProcess.execFile>)(cmd, args, optsOrCallback, maybeCallback);
+      }) as unknown as typeof childProcess.execFile);
 
       vi.resetModules();
       mockGet.mockResolvedValue(undefined);
@@ -601,15 +642,18 @@ describe("updater", () => {
       await vi.waitFor(() => {
         const step = updater.getUpdateState().steps.find((s) => s.id === "apt_update");
         expect(step?.status).toBe("completed");
-      });
+      }, { timeout: 4_000, interval: 25 });
+
+      const warning = updater.getUpdateState().warnings?.find((w) => w.code === "post-update-fixups");
+      expect(warning, "the window opened after the step ran — no marker can ever be read").toBeDefined();
 
       const journalRead = mockExecFile.mock.calls
         .map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`)
         .find((call) =>
           call.includes("journalctl") && call.includes("clawbox-root-update@apt_update.service"),
         );
-      expect(journalRead, "the step's journal was never read").toBeDefined();
-      // By unit NAME, which outlives the unit systemd has already collected.
+      // By unit NAME, which outlives the unit systemd has already collected,
+      // and never earlier than this run.
       expect(journalRead).toContain("-u clawbox-root-update@apt_update.service");
       const since = /--since @(\d+)/.exec(journalRead ?? "")?.[1];
       expect(since, "the read is not bounded to this run").toBeDefined();
@@ -621,7 +665,6 @@ describe("updater", () => {
       // other steps print git and npm output: a quoted marker is not this box
       // raising a warning.
       setupExecFileMock({
-        "InvocationID": { stdout: "0123456789abcdef0123456789abcdef\n", stderr: "" },
         "/usr/bin/journalctl": {
           stdout: [
             "  doctor said: grep for CLAWBOX-WARN[post-update-fixups]: nothing to see",

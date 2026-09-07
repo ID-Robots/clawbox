@@ -3,6 +3,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { requireSession } from "@/lib/route-auth";
 import { UI_ROOT_STEPS } from "@/lib/root-steps";
+import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 import { startRootStep } from "@/lib/root-step-runner";
 
 export const dynamic = "force-dynamic";
@@ -34,11 +35,19 @@ const ALLOWED_STEPS = new Set(UI_ROOT_STEPS);
 // stare at a stuck request.
 const STEP_TIMEOUT_MS = 10 * 60 * 1000;
 
-async function getJournalTail(unit: string): Promise<string> {
+/**
+ * What THIS run of the step wrote, for the failure the caller is shown.
+ *
+ * Bounded by `sinceMs`, the moment this request started the unit: the journal
+ * is persistent, so a 60-line tail of a step the owner has already retried
+ * runs back through the previous attempt and offers its output as evidence for
+ * this one. root-step-journal.ts carries the rest of the reasoning.
+ */
+async function getJournalTail(step: string, sinceMs: number): Promise<string> {
   try {
     const { stdout } = await execFileAsync(
       "/usr/bin/journalctl",
-      ["-u", unit, "-n", "60", "--no-pager", "-o", "cat"],
+      rootStepJournalArgs(step, { sinceMs, lines: 60 }),
       { timeout: 10_000 },
     );
     return stdout.trim();
@@ -78,7 +87,9 @@ export async function POST(req: Request) {
     );
   }
 
-  const serviceName = `clawbox-root-update@${step}.service`;
+  const serviceName = rootStepUnit(step);
+  // Before the start: the journal read in the catch is bounded to this run.
+  const startedAt = Date.now();
   try {
     // Through the root-owned launcher, which clears a previous failure
     // itself and builds the unit name from a step it validates. This used to
@@ -93,7 +104,7 @@ export async function POST(req: Request) {
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (err) {
-    const tail = await getJournalTail(serviceName);
+    const tail = await getJournalTail(step, startedAt);
     // Persist a structured failure record so post-mortems don't have to
     // scrape the response body. journalctl is the source of truth, but
     // having the same tail in our service logs makes it discoverable

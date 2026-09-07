@@ -453,7 +453,7 @@ import { canonicalPluginId } from "./plugin-repair-id";
 // InvocationID` cannot answer it (systemd has collected the instance by the
 // time anyone asks), and the same read is owed to the follow in
 // root-step-follow.ts.
-import { rootStepJournalArgs } from "./root-step-journal";
+import { rootStepJournalArgs, rootStepUnit } from "./root-step-journal";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -479,7 +479,7 @@ async function getRootStepResult(stepId: string): Promise<string | null> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/systemctl",
-      ["show", `clawbox-root-update@${stepId}.service`, "-p", "Result", "--value"],
+      ["show", rootStepUnit(stepId), "-p", "Result", "--value"],
       { timeout: 10_000 },
     );
     return stdout.trim() || null;
@@ -541,13 +541,13 @@ async function readBuildId(): Promise<string> {
  * as a failed step with the real error, and only systemd killing us counts
  * as success — this function never returns normally.
  */
-async function waitForRebuildToTakeOver(): Promise<never> {
+async function waitForRebuildToTakeOver(dispatchedAt: number): Promise<never> {
   const deadline = Date.now() + REBUILD_TAKEOVER_TIMEOUT_MS;
   let message = "Rebuild did not restart the device within the expected window";
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
     if (rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP))) {
-      const lastLog = await readRootStepFailure(REBUILD_ROOT_STEP);
+      const lastLog = await readRootStepFailure(REBUILD_ROOT_STEP, dispatchedAt);
       message = lastLog
         ? `Rebuild failed: ${lastLog}`
         : "Rebuild failed — see clawbox-root-update@rebuild_reboot logs";
@@ -645,8 +645,9 @@ const STEP_WARNING_MAX_CHARS = 300;
  * Read after the step settles, whatever its outcome: a step that failed reports
  * through its own error, and one that succeeded — or overran its advisory
  * budget — over a fixup that did not is the case nothing else could see.
- * Bounded like `readRootStepFailure` and never fatal: a journal that cannot be
- * read must not fail an update that worked.
+ * Bounded like `readRootStepFailure` — to this run, and to a line and time
+ * ceiling — and never fatal: a journal that cannot be read must not fail an
+ * update that worked.
  *
  * `sinceMs` is when the runner dispatched this step, and it is what keeps a
  * previous update's markers out of this run's cards — see root-step-journal.ts
@@ -682,12 +683,30 @@ async function collectRootStepWarnings(stepId: string, sinceMs: number): Promise
   if (seen.size > 0) await persistWarnings();
 }
 
-async function readRootStepFailure(stepId: string): Promise<string | null> {
-  const unit = `clawbox-root-update@${stepId}.service`;
+/**
+ * The line that says why THIS run of a root step failed.
+ *
+ * Bounded by `sinceMs` for the same reason the warning read above is: the
+ * journal is persistent and a failed unit's tail runs back through the
+ * owner's previous attempt. A second run killed by its timeout before
+ * install.sh printed an error of its own would otherwise be reported with the
+ * FIRST attempt's `Error:` line — `getStepFailureLine` takes the newest error
+ * line in what it is given, and unbounded that is not necessarily this run's.
+ *
+ * `sinceMs: null` is the one caller that cannot know: the post-reboot
+ * continuation check runs in a process that did not dispatch the rebuild, so
+ * no start time survives to it. It reads the unit's history as it always has
+ * — bounding it needs a dispatch epoch persisted across the restart, which is
+ * a change to what the update records, not to how it reads.
+ */
+async function readRootStepFailure(stepId: string, sinceMs: number | null): Promise<string | null> {
+  const unit = rootStepUnit(stepId);
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", unit, "-n", "40", "--no-pager", "-o", "cat"],
+      sinceMs === null
+        ? ["-u", unit, "-n", "40", "--no-pager", "-o", "cat"]
+        : rootStepJournalArgs(stepId, { sinceMs, lines: 40 }),
       { timeout: 10_000 },
     );
     return getStepFailureLine(stdout, unit);
@@ -1414,8 +1433,11 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // few seconds between unit failure and our watcher noticing would reset the
   // unit's systemd state and let the continuation fake a completed update.
   await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  // Captured before the dispatch, so the failure read below cannot miss a line
+  // the unit wrote in its first moments — nor pick up the previous attempt's.
+  const rebuildDispatchedAt = Date.now();
   await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
-  await waitForRebuildToTakeOver();
+  await waitForRebuildToTakeOver(rebuildDispatchedAt);
 }
 
 // First-time `npm install -g openclaw` on cold Jetson caches routinely runs
@@ -3163,7 +3185,6 @@ function applicableSteps(): UpdateStepDef[] {
  * arbitrary root with no password. TASK-539.
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
-  const serviceName = `clawbox-root-update@${stepId}.service`;
   const startedAt = Date.now();
   try {
     await startRootStep(stepId, { timeoutMs: timeoutMs + 30_000 });
@@ -3185,7 +3206,7 @@ async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
 }
 
 async function waitForRootStepToSettle(stepId: string): Promise<void> {
-  const serviceName = `clawbox-root-update@${stepId}.service`;
+  const serviceName = rootStepUnit(stepId);
   const deadline = Date.now() + ROOT_STEP_SETTLE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
@@ -3206,6 +3227,7 @@ async function waitForRootStepToSettle(stepId: string): Promise<void> {
 
 /** Run root steps that mutate OpenClaw without a live gateway/SQLite writer. */
 async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
   await withGatewayQuiesced(async () => {
     gatewayNeedsRecovery = true;
     try {
@@ -3219,7 +3241,7 @@ async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number):
       await waitForRootStepToSettle(stepId);
       if (rootStepResultFailed(await getRootStepResult(stepId))) {
         throw new Error(
-          (await readRootStepFailure(stepId)) ?? `${stepId} failed after exceeding its wait budget`,
+          (await readRootStepFailure(stepId, startedAt)) ?? `${stepId} failed after exceeding its wait budget`,
         );
       }
       throw err;
@@ -3964,7 +3986,9 @@ async function resumeContinuation(): Promise<boolean> {
   const buildMissing = currentBuildId === "";
   if (unitFailed || buildUnchanged || buildMissing) {
     const message = unitFailed
-      ? (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart"
+      // No start time survives the restart this check runs after — see
+      // readRootStepFailure.
+      ? (await readRootStepFailure(REBUILD_ROOT_STEP, null)) ?? "Rebuild failed before the restart"
       : buildMissing
         ? "The device restarted with no build at all (.next/BUILD_ID is missing) — see clawbox-root-update@rebuild_reboot logs"
         : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
@@ -4226,7 +4250,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // FAILED — on a generic budget overrun its last journal line can still
       // be whatever fixup happened to finish most recently.
       if (step.requiresRoot && rootStepResultFailed(await getRootStepResult(step.id))) {
-        const rootFailure = await readRootStepFailure(step.id);
+        const rootFailure = await readRootStepFailure(step.id, stepStartedAt);
         if (rootFailure) message = rootFailure;
       }
       // A step that FAILED can still have skipped fixups before it did, and the
