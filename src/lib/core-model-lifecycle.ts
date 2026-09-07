@@ -164,14 +164,16 @@ function catalogueFor(manifest: unknown, provider: string): unknown {
   const modelCatalog = (manifest as { modelCatalog?: unknown } | null)?.modelCatalog;
   const providers = (modelCatalog as { providers?: unknown } | null)?.providers;
   if (providers && typeof providers === "object" && !Array.isArray(providers)) {
-    const own = (providers as Record<string, unknown>)[provider];
-    if (own !== undefined) return own;
+    if (Object.prototype.hasOwnProperty.call(providers, provider)) {
+      return (providers as Record<string, unknown>)[provider];
+    }
     return {};
   }
   const topLevelProviders = (manifest as { providers?: unknown } | null)?.providers;
   if (topLevelProviders && typeof topLevelProviders === "object" && !Array.isArray(topLevelProviders)) {
-    const shared = (topLevelProviders as Record<string, unknown>)[provider];
-    if (shared !== undefined) return shared;
+    if (Object.prototype.hasOwnProperty.call(topLevelProviders, provider)) {
+      return (topLevelProviders as Record<string, unknown>)[provider];
+    }
   }
   return manifest;
 }

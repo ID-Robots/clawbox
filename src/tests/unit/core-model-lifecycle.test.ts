@@ -141,6 +141,20 @@ describe("coreModelRetired", () => {
     expect(coreModelRetired("openrouter", "glm-5.2")).toBe(false);
   });
 
+  it("ignores inherited provider names before falling back to the flat catalogue", async () => {
+    // A provider id may legally match an Object.prototype property. That must
+    // not hide the manifest's flat catalogue merely because `providers`
+    // inherits `constructor` from Object.prototype.
+    writeManifest("constructor", {
+      providers: {
+        openrouter: { models: [{ id: "other-model" }] },
+      },
+      models: [{ id: "root-retired", status: "deprecated" }],
+    });
+    const { coreModelRetired } = await load();
+    expect(coreModelRetired("constructor", "root-retired")).toBe(true);
+  });
+
   it("re-reads a manifest the core replaced under a live process", async () => {
     // The in-app OpenClaw-only update runs INSIDE this server and deliberately
     // does not restart it, so "cached for the process lifetime" would keep a
