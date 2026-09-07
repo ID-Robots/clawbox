@@ -12,10 +12,23 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 // telegram-pairing.test.ts keeps covering the legacy files (v1 boxes).
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn() }));
-vi.mock("@/lib/harness", () => ({
-  getActiveHarness: vi.fn(async () => "openclaw"),
-  getEdition: vi.fn(() => "openclaw"),
-}));
+// `getActiveHarnessSource` answers from the same mock this suite drives, so the
+// routes' one resolution says what these cases set. The single-read contract
+// itself is pinned in harness-edition-read-once / harness-status, not here.
+vi.mock("@/lib/harness", () => {
+  const getActiveHarness = vi.fn(async () => "openclaw");
+  const getEdition = vi.fn(() => "openclaw");
+  return {
+    getActiveHarness,
+    getEdition,
+    getActiveHarnessSource: async () => ({
+      active: await getActiveHarness(),
+      defaulted: false,
+      edition: getEdition(),
+      locked: true,
+    }),
+  };
+});
 vi.mock("@/lib/hermes-telegram", () => ({
   approveHermesPairing: vi.fn(),
   listHermesPairing: vi.fn(),

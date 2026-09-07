@@ -11,14 +11,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * a component that box will never have.
  */
 
-const getActiveHarness = vi.fn(async () => "hermes");
 /** What the one resolution answers — the whole of what the route may use. */
-const harnessSource = vi.fn(async () => ({
-  active: await getActiveHarness(),
-  defaulted: false,
-  edition: "hermes" as string,
-  locked: true,
-}));
+let source = { active: "hermes", defaulted: false, edition: "hermes", locked: true };
+const harnessSource = vi.fn(async () => source);
+/**
+ * Deliberately INDEPENDENT of the resolution above, and deliberately answering
+ * a different harness: the contract this suite pins is that the whole response
+ * comes from ONE read, so a route that also asked this would be answering about
+ * another box — which is only visible if the two can disagree. It also must
+ * never be called at all; the last case asserts that.
+ */
+const getActiveHarness = vi.fn(async () => "openclaw");
 /** Every harness these tests name is up; health is not what they are about. */
 const harnessHealthy = vi.fn(async (harness: string) => Boolean(harness));
 vi.mock("@/lib/harness", () => ({
@@ -78,7 +81,7 @@ async function get(): Promise<{
 
 beforeEach(() => {
   vi.clearAllMocks();
-  getActiveHarness.mockResolvedValue("hermes");
+  source = { active: "hermes", defaulted: false, edition: "hermes", locked: true };
 });
 
 describe("GET /setup-api/harness/status — shell scanning posture", () => {
@@ -101,24 +104,23 @@ describe("GET /setup-api/harness/status — shell scanning posture", () => {
   });
 
   it("says nothing about scanning on the OpenClaw harness, which has no scanner", async () => {
-    getActiveHarness.mockResolvedValue("openclaw");
+    source = { active: "openclaw", defaulted: false, edition: "openclaw", locked: true };
 
     const body = await get();
 
     expect(body.shellScan).toBeNull();
     expect(readShellScanStatus).not.toHaveBeenCalled();
+    // From the one resolution and nowhere else: `getActiveHarness` answers the
+    // other harness here, so a second read would have shown up as a scan report
+    // about a box this is not.
+    expect(getActiveHarness).not.toHaveBeenCalled();
   });
 });
 
 describe("GET /setup-api/harness/status — one edition per response", () => {
   it("reports the edition and the lock the harness was resolved WITH", async () => {
     // A licensed dual: unlocked, so both harnesses are probed and offered.
-    harnessSource.mockResolvedValueOnce({
-      active: "hermes",
-      defaulted: false,
-      edition: "dual",
-      locked: false,
-    });
+    source = { active: "hermes", defaulted: false, edition: "dual", locked: false };
 
     const body = await get();
 
@@ -131,12 +133,7 @@ describe("GET /setup-api/harness/status — one edition per response", () => {
   it("probes only the active harness when that one resolution says locked", async () => {
     // The other half: on a locked device the other harness's runtime is not
     // installed, so probing it would report a missing gateway as a fault.
-    harnessSource.mockResolvedValueOnce({
-      active: "hermes",
-      defaulted: false,
-      edition: "hermes",
-      locked: true,
-    });
+    source = { active: "hermes", defaulted: false, edition: "hermes", locked: true };
 
     const body = await get();
 

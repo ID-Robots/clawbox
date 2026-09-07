@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { set } from "@/lib/config-store";
-import { getActiveHarness } from "@/lib/harness";
+import { getActiveHarnessSource } from "@/lib/harness";
 import {
   clearTelegramPairingState,
   GatewayNotReadyError,
@@ -134,7 +134,8 @@ export async function POST(request: Request) {
     // device has no OpenClaw gateway at all (the unit is masked, the port is
     // closed), so the OpenClaw path there stored a token nothing ever read and
     // the bot never answered.
-    const harness = await getActiveHarness();
+    const harnessSource = await getActiveHarnessSource();
+    const harness = harnessSource.active;
 
     // A different bot means a fresh allowlist — previously-approved senders
     // belong to the old bot. Detect a real token change (re-saving the same
@@ -171,7 +172,7 @@ export async function POST(request: Request) {
     // clearing the allowlist is the safe reading of that. The guard next door
     // asks a different question — "would these two pollers collide" — where the
     // id is the whole point.
-    const previous = await readActiveTelegramBot(harness);
+    const previous = await readActiveTelegramBot(harnessSource);
     const tokenChanged = previous.known
       ? previous.token !== null && previous.token !== botToken
       : previous.token !== botToken;

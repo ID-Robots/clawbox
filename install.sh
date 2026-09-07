@@ -4009,14 +4009,30 @@ step_edition_lock() {
   _edition_tmp="$(mktemp)"
   printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
     "$CLAWBOX_EDITION" > "$_edition_tmp"
-  install_root_file "$_edition_tmp" "$CLAWBOX_EDITION_FILE" 0644
+  # The return value is CHECKED, and it has to be on this step specifically.
+  # `install_root_file` answers 1 when the copy or the rename did not land, and
+  # the update path calls this step from an OR-list — for the whole body of
+  # which bash switches errexit OFF (the same trap `install_root_libexec`
+  # records above). Dropped, a failed write was followed by successful commands,
+  # the function returned the LAST step's status, the non-fatal warning never
+  # printed, and the update reported success over a lock that still names the
+  # previous SKU — with the two records free to disagree.
+  if ! install_root_file "$_edition_tmp" "$CLAWBOX_EDITION_FILE" 0644; then
+    rm -f "$_edition_tmp"
+    echo "  Error: could not write the edition lock at $CLAWBOX_EDITION_FILE" >&2
+    return 1
+  fi
   rm -f "$_edition_tmp"
 
   mkdir -p /etc/systemd/system/clawbox-setup.service.d
   local _dropin_tmp
   _dropin_tmp="$(mktemp)"
   printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"
-  install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644
+  if ! install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644; then
+    rm -f "$_dropin_tmp"
+    echo "  Error: could not write the edition drop-in at $LEGACY_EDITION_DROPIN" >&2
+    return 1
+  fi
   rm -f "$_dropin_tmp"
   systemctl daemon-reload 2>/dev/null || true
 

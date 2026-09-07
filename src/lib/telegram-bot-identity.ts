@@ -29,7 +29,13 @@
 // allowed to make a save gate refuse.
 
 import { get as configGet } from "@/lib/config-store";
-import { getActiveHarnessSource, getEdition, getEditionSource, type Harness } from "@/lib/harness";
+import {
+  getActiveHarnessSource,
+  getEdition,
+  getEditionSource,
+  type ActiveHarnessSource,
+  type Harness,
+} from "@/lib/harness";
 import { readHermesTelegramToken } from "@/lib/hermes-telegram";
 import { readConfigStrict, type OpenClawConfig } from "@/lib/openclaw-config";
 
@@ -179,21 +185,27 @@ function installedHarnesses(): Harness[] {
  * answer rather than reporting a working bot as gone. `known` still says which
  * of the two it was.
  *
- * `harness` is optional so a caller that has already resolved it does not pay
- * for a second lookup.
+ * The first argument is optional so a caller that has already resolved the
+ * harness does not pay for a second lookup — and it takes the whole
+ * `ActiveHarnessSource` rather than the bare harness, because the edition below
+ * has to come from the SAME read as `active`. Every route that resolves the
+ * harness for its own reasons passes the source; a caller that names a fixed
+ * harness (the two OpenClaw-only notifiers) passes that and pays for the one
+ * edition read here, which is still a single read for the call.
  */
 export async function readActiveTelegramBot(
-  harness?: Harness,
+  harness?: Harness | ActiveHarnessSource,
   clawboxConfig?: Record<string, unknown>,
 ): Promise<ActiveTelegramBot> {
-  // ONE resolution when this call has to make it: the edition below is read
-  // from the same one. `install.sh` rewrites the edition lock on every update,
-  // and a second read landing in that window answers "openclaw" — the dual
-  // guard is then skipped and the mirror is returned as the ACTIVE harness's
-  // bot, which is the exact "report a working bot on a harness that has none"
-  // the guard exists to stop.
-  const source = harness ? null : await getActiveHarnessSource();
-  const active = harness ?? source!.active;
+  // ONE resolution for the whole answer. `install.sh` rewrites the edition lock
+  // on every update, and a second read landing in that window answers
+  // "openclaw" — the dual guard is then skipped and the mirror is returned as
+  // the ACTIVE harness's bot, which is the exact "report a working bot on a
+  // harness that has none" the guard exists to stop. A `Harness` is a string,
+  // so the shape of the argument says which case this is.
+  const source =
+    typeof harness === "object" ? harness : harness ? null : await getActiveHarnessSource();
+  const active = source ? source.active : (harness as Harness);
   const stored = await storeFor(active)();
   if (stored.token) return stored;
   // The mirror is one value for the whole box, and on `dual` the configure

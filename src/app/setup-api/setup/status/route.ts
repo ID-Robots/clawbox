@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
 import { inferConfiguredLocalModel, readConfig as readOpenClawConfig, type OpenClawConfig } from "@/lib/openclaw-config";
-import { getActiveHarness } from "@/lib/harness";
+import { getActiveHarnessSource } from "@/lib/harness";
 import { hasValidSession, readSetupGateFacts } from "@/lib/route-auth";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 
@@ -36,7 +36,7 @@ export async function GET(request: Request) {
       // a read whose answer it never receives. It stays a plain file read
       // either way: no probe belongs on this route.
       authenticated
-        ? getActiveHarness().then((harness) => readActiveTelegramBot(harness, config))
+        ? getActiveHarnessSource().then((source) => readActiveTelegramBot(source, config))
         : Promise.resolve(null),
     ]);
     const hasExplicitLocalAiFlag = Object.prototype.hasOwnProperty.call(config, "local_ai_configured");

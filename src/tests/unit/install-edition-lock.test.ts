@@ -131,6 +131,36 @@ describe("edition persistence (H7 / H9)", () => {
     expect(writer).toContain('mv -f "$dst.new" "$dst"');
   });
 
+  it("a write that did not land fails the step, on the path that swallows it", () => {
+    // `install_root_file` answers 1 when the copy or the rename failed, and the
+    // update path calls this step from an OR-list — for the whole body of which
+    // bash switches errexit OFF. Dropped, the failed write was followed by
+    // successful commands, the step returned the LAST one's status, the
+    // non-fatal warning never printed and the update reported success over a
+    // lock still naming the previous SKU.
+    const fn = extractShellFunction("step_edition_lock");
+    expect(fn).toMatch(/if ! install_root_file "\$_edition_tmp" "\$CLAWBOX_EDITION_FILE" 0644; then/);
+    expect(fn).toMatch(/if ! install_root_file "\$_dropin_tmp" "\$LEGACY_EDITION_DROPIN" 0644; then/);
+  });
+
+  it("the OTHER writer of the same two records is atomic too", () => {
+    // `setup-hermes-edition.sh` writes THE SAME lock and THE SAME drop-in, and
+    // install.sh dispatches it (`step_hermes_edition`, on WEB_ROOT_STEPS) on
+    // every in-app update of a hermes or dual box. A truncating redirect there
+    // leaves the window the step above closed wide open on the two SKUs where
+    // answering "openclaw" is the damaging answer.
+    expect(HERMES_EDITION_SH).not.toMatch(/>\s*"\$EDITION_FILE"/);
+    expect(HERMES_EDITION_SH).not.toMatch(/>\s*"\$EDITION_DROPIN"/);
+    expect(HERMES_EDITION_SH).toContain('write_root_file "$EDITION_FILE" 0644');
+    expect(HERMES_EDITION_SH).toContain('write_root_file "$EDITION_DROPIN" 0644');
+    // Its writer really renames rather than truncating in place…
+    expect(HERMES_EDITION_SH).toMatch(/mv -f "\$tmp" "\$dst"/);
+    // …and a write that did not land is recorded, so the script's own exit
+    // code carries it back to the update.
+    expect(HERMES_EDITION_SH).toMatch(/\|\| fail "could not write the edition lock/);
+    expect(HERMES_EDITION_SH).toMatch(/\|\| fail "could not write the edition drop-in/);
+  });
+
   it("clawbox-setup.service loads it AFTER the clawbox-writable .env", () => {
     const lines = SETUP_UNIT.split("\n").map((l) => l.trim());
     const userEnv = lines.indexOf("EnvironmentFile=-/home/clawbox/clawbox/.env");
