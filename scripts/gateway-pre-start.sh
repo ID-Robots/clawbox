@@ -4676,7 +4676,10 @@ fi
 # installs four more: deepseek (the provider ClawBox AI rides on), discord and
 # whatsapp (installed by the Settings panel when the owner asks for that
 # channel) and clawbox-email-directives (ours, copied out of the checkout
-# below).
+# below). The other two ClawBox plugins copied out of the checkout below —
+# clawbox-path-guard and clawbox-web-taint — are deliberately NOT on the list
+# under `MANAGED`: a plugin with no install record can never raise a
+# capability-consent diagnostic, so there is nothing here to repair for them.
 #
 # WHY IT MATTERS THAT THIS IS THE BOOT PATH. src/lib/updater.ts repairs the same
 # state from the gateway's journal, but only during an update. A box that is
@@ -5407,12 +5410,17 @@ install_clawbox_hook_plugin "$CLAWBOX_WEB_TAINT_ID" "$CLAWBOX_WEB_TAINT_DST" \
   "$CLAWBOX_WEB_TAINT_SRC/index.mjs" \
   "$CLAWBOX_WEB_TAINT_SRC/web-taint.mjs"
 
-# PROVE THE COPY IS A WORKING GATE, the same way and for the same reason the
+# PROVE THE COPY IS A WORKING RULE, the same way and for the same reason the
 # path guard's copy is proved above: one node start against the INSTALLED files,
 # asking the two questions a file list cannot — does the module import, and does
 # the rule it loaded still ask after a web read while leaving a clean turn
 # alone. A gate that answered "no opinion" to both would be indistinguishable
 # from no gate at all, which is the false success this step exists to catch.
+#
+# IT DOES NOT PROVE THE GATEWAY IMPORTED IT — the same caveat the path-guard
+# block above carries. That claim is `openclaw plugins inspect --runtime`, which
+# only the EMAIL: plugin below pays for; this removes every failure the install
+# itself can cause, at a cost the boot budget can afford.
 CLAWBOX_WEB_TAINT_NODE="$(command -v node 2>/dev/null || true)"
 if [ "$CLAWBOX_HOOK_PLUGIN_READY" != "1" ]; then
   :

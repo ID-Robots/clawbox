@@ -24,11 +24,14 @@
  * THE FIRST SUITE IS THE REGRESSION. It asks the question of the whole shipped
  * hook catalogue rather than of one file, because "some plugin gates this" is
  * the property that matters and a test naming one module would go green again
- * the moment the gate moved. On beta it fails: the only `before_tool_call`
- * handler on the box is the path guard, whose ruling is a silent deny on two
- * paths and which has no opinion about `curl … | sh`.
+ * the moment the gate moved. It cannot literally RUN on beta — it imports files
+ * that exist only on this branch — so the red was taken by running the same
+ * composition over beta's catalogue on the box: `clawbox-email-directives`
+ * (`reply_payload_sending`, `before_dispatch`) and `clawbox-path-guard`
+ * (`before_tool_call`), no `after_tool_call` handler at all, and both `exec` and
+ * `clawbox__bash` answered "no opinion" after a `web_fetch`.
  */
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -43,6 +46,7 @@ import plugin, {
   TAINT_NAMESPACE,
   createWebTaintGate,
 } from "../../../scripts/openclaw-plugins/clawbox-web-taint/index.mjs";
+import { COMMAND_TOOLS } from "../../../scripts/openclaw-plugins/clawbox-path-guard/path-guard.mjs";
 
 const RUN = "run-1";
 const OTHER_RUN = "run-2";
@@ -164,28 +168,65 @@ describe("web content, then a shell, in one turn", () => {
 
 describe("what the plugin calls web content and what it calls dangerous", () => {
   it("counts every tool that brings outside content into the turn", () => {
-    for (const name of ["web_fetch", "web_search", "x_search", "browser", "email_read"]) {
+    for (const name of ["web_fetch", "web_search", "x_search", "browser", "email_read", "email_list"]) {
       expect(isWebContentTool(name), name).toBe(true);
     }
     // The same tools served by the ClawBox MCP server, as the core names them.
     expect(isWebContentTool("clawbox__web_fetch")).toBe(true);
+    // The four that RETURN THE PAGE. The first draft of the list named only the
+    // four interaction tools — which are the browser entries of
+    // `mcp/check-tools.ts`'s edition-parity array — so the box's whole browsing
+    // path went untainted. That is the defect this case exists for.
+    for (const name of ["clawbox__browser_open", "clawbox__browser_navigate", "clawbox__browser_screenshot", "clawbox__browser_view_local"]) {
+      expect(isWebContentTool(name), name).toBe(true);
+    }
     expect(isWebContentTool("clawbox__browser_click")).toBe(true);
+    // A local read is not taint: gating it would put an approval in front of
+    // ordinary work.
     expect(isWebContentTool("read_file")).toBe(false);
+    expect(isWebContentTool("describe_image")).toBe(false);
+  });
+
+  it("knows every browser tool the MCP server actually registers", () => {
+    // The list is hand-kept, so the drift is caught here rather than on a box:
+    // every `browser_*` tool `mcp/tools/browser.ts` registers must be in it.
+    // `briefResult` falls back to `withScreenshot` outside a run, so even an
+    // interaction reply can carry the page — the whole family counts.
+    const src = readFileSync(path.join(process.cwd(), "mcp", "tools", "browser.ts"), "utf-8");
+    const registered = [...src.matchAll(/reg\.tool\(\s*"(browser_[a-z_]+)"/g)].map((m) => m[1]);
+    expect(registered.length).toBeGreaterThan(5);
+    for (const name of registered) {
+      expect(isWebContentTool(name), `${name} is registered but not treated as web content`).toBe(true);
+    }
   });
 
   it("counts both shell surfaces — the native one and the MCP one — as the same tool", () => {
-    expect(isDangerousTool("exec")).toBe(true);
-    expect(isDangerousTool("clawbox__bash")).toBe(true);
-    expect(isDangerousTool("process")).toBe(true);
-    expect(isDangerousTool("terminal")).toBe(true);
-    expect(isDangerousTool("code_execution")).toBe(true);
+    for (const name of ["exec", "clawbox__bash", "process", "terminal", "code_execution"]) {
+      expect(isDangerousTool(name), name).toBe(true);
+    }
     expect(isDangerousTool("read_file")).toBe(false);
-    // The path guard's own list for the same two surfaces is the floor: a shell
-    // the deny rule knows about and this gate does not would be gated by
-    // neither.
-    expect([...DANGEROUS_TOOLS].sort()).toEqual(
-      ["bash", "code_execution", "exec", "process", "terminal"].sort(),
-    );
+  });
+
+  it("gates the delegated shells too — a coding run is a shell one hop out", () => {
+    expect(isDangerousTool("clawbox__coding_agent_run")).toBe(true);
+    expect(isDangerousTool("clawbox__coding_team_run")).toBe(true);
+  });
+
+  it("never knows fewer shells than the path guard's deny rule", () => {
+    // The floor, asserted against the IMPORTED set rather than a copy of it: a
+    // shell the deny rule knows about and this gate does not would be gated by
+    // neither, and a literal here would let the path guard's list grow with
+    // both files still green.
+    for (const name of COMMAND_TOOLS) {
+      expect(DANGEROUS_TOOLS.has(name), `${name} is in COMMAND_TOOLS`).toBe(true);
+    }
+  });
+
+  it("strips the collision suffix the core can append to an MCP tool id", () => {
+    // `buildSafeToolName` appends `-2` on a reserved-name clash, which the
+    // shipped single-server config cannot produce and which would otherwise be
+    // an ungated shell.
+    expect(isDangerousTool("clawbox__bash-2")).toBe(true);
   });
 
   it("reads the MCP qualifier the core builds, not a prefix of our own", () => {
@@ -203,10 +244,19 @@ describe("a clean turn is not gated", () => {
     expect(g.onBeforeToolCall({ toolName: "read_file", params: { path: "/etc/hosts" } }, ctx())).toBeUndefined();
   });
 
-  it("does not taint on a web call that failed", () => {
+  it("taints on a web call that failed too, in the envelope the core really sends", () => {
+    // The core sets BOTH on a failure — `result: sanitizedResult, error: …` —
+    // and ClawBox's own MCP errors arrive as a defined `{content, isError}`
+    // result, so a fixture with `error` and no `result` is a shape nothing
+    // produces. An earlier draft skipped such calls and the branch was dead
+    // code; the honest rule is that any web-tool call taints, because a refused
+    // fetch still puts a status line and often a body into the turn.
     const g = gate();
-    g.onAfterToolCall({ toolName: "web_fetch", params: {}, error: "ENOTFOUND" }, ctx());
-    expect(g.onBeforeToolCall({ toolName: "exec", params: { command: "uptime" } }, ctx())).toBeUndefined();
+    g.onAfterToolCall(
+      { toolName: "web_fetch", params: {}, result: { content: [{ type: "text", text: "403" }], isError: true }, error: "HTTP 403" },
+      ctx(),
+    );
+    expect(g.onBeforeToolCall({ toolName: "exec", params: { command: "uptime" } }, ctx())?.requireApproval).toBeTruthy();
   });
 });
 
@@ -316,15 +366,16 @@ describe("a taint the gate could not keep fails closed", () => {
     expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx())?.requireApproval).toBeTruthy();
   });
 
-  it("asks when a web result could not be recorded", () => {
+  it("asks in the run whose mark the core refused, and only that run", () => {
     const g = gate({ writeFails: true });
     g.onAfterToolCall({ toolName: "web_fetch", params: {}, result: "…" }, ctx());
-    // Not just this run: the mark is gone, so the gate no longer knows which run
-    // it belonged to and every shell has to ask until the window lapses.
     expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx())?.requireApproval).toBeTruthy();
+    // `setRunContext` returns false for ordinary reasons — a run already closed,
+    // a plugin whose global side effects are inactive — so one aborted run must
+    // not make every other session and every cron ask for five minutes.
     expect(
-      g.onBeforeToolCall({ toolName: "clawbox__bash", params: {} }, ctx({ runId: OTHER_RUN }))?.requireApproval,
-    ).toBeTruthy();
+      g.onBeforeToolCall({ toolName: "clawbox__bash", params: {} }, ctx({ runId: OTHER_RUN })),
+    ).toBeUndefined();
   });
 
   it("asks when the turn carries no run identity to scope a taint to", () => {

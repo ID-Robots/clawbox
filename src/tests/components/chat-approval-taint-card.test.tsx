@@ -253,7 +253,9 @@ describe("the taint gate's approval, on the chat card", () => {
         pendingTaintApproval({
           status: "allowed",
           decision: "allow-once",
-          reason: "telegram",
+          // The core's own terminal reason for a person's answer, wherever it
+          // was given: `OPERATOR_APPROVAL_TERMINAL_REASONS` has no "telegram".
+          reason: "user",
           resolvedAtMs: Date.now(),
         }),
         "terminal",

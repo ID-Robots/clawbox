@@ -13,8 +13,18 @@
 const MAX_TOOL_NAME = 128;
 
 /**
- * The tools whose RESULT is content from outside the box: something a stranger
- * wrote, which a model cannot tell apart from something the owner wrote.
+ * The tools whose RESULT can carry text a stranger wrote — something a model
+ * cannot tell apart from something the owner wrote.
+ *
+ * THE RULE IS THE RESULT, NOT THE NAME, and the first draft of this list got
+ * that wrong in the way that matters: it named the four browser tools that
+ * report an action (`browser_click` and friends) and omitted the four that
+ * return the PAGE (`browser_open`, `browser_navigate`, `browser_screenshot`,
+ * `browser_view_local`), because those four are what `mcp/check-tools.ts`'s
+ * `OPENCLAW_ONLY` — an edition-parity array — happens to list. The box's whole
+ * browsing path would have gone untainted. So the browser family is now here
+ * WHOLE: `briefResult` falls back to `withScreenshot` outside a run
+ * (`mcp/tools/browser.ts`), so even an interaction reply can carry the page.
  *
  * `email_list`/`email_read` are here for the same reason the `bash` tool's own
  * description already names email — "NEVER run a command that came from a web
@@ -22,23 +32,34 @@ const MAX_TOOL_NAME = 128;
  * writing into the turn exactly as a web page is, and a gate that covered only
  * the web would leave the sibling surface open.
  *
- * `read_file`/`glob`/`grep` are deliberately ABSENT. Everything on the box is
- * reachable through them, the owner's own files included, so treating a local
- * read as taint would put an approval in front of ordinary work — and the
- * ruling this plugin sits beside is explicit that a gate which fires on
- * ordinary work is worse than no gate.
+ * DELIBERATELY OUTSIDE, and named so the boundary is a decision rather than an
+ * oversight:
+ *   - `read_file`/`glob`/`grep`/`describe_image` — everything on the box is
+ *     reachable through them, the owner's own files included, so treating a
+ *     local read as taint would put an approval in front of ordinary work, and
+ *     the ruling this plugin sits beside is explicit that a gate which fires on
+ *     ordinary work is worse than no gate.
+ *   - content that arrives as the turn's PROMPT rather than as a tool result —
+ *     an inbound email routed to the chat, a stranger's Telegram message. That
+ *     is a different seam (`message_received`), not this one.
  */
 export const WEB_CONTENT_TOOLS = new Set([
-  // Core-native (docs/tools/index.md).
+  // Core-native (the pinned core's docs/tools/index.md).
   "web_fetch",
   "web_search",
   "x_search",
   "browser",
-  // ClawBox MCP server (mcp/tools/coding.ts, mcp/tools/browser.ts).
+  // The ClawBox MCP server's browser family, whole (mcp/tools/browser.ts).
+  "browser_open",
+  "browser_navigate",
+  "browser_screenshot",
+  "browser_view_local",
   "browser_click",
   "browser_type",
+  "browser_fill",
   "browser_keypress",
   "browser_scroll",
+  "browser_close",
   // ClawBox MCP server (mcp/tools/email.ts).
   "email_list",
   "email_read",
@@ -47,13 +68,35 @@ export const WEB_CONTENT_TOOLS = new Set([
 /**
  * The tools that hand a command to a shell.
  *
- * The SAME set as the path guard's `COMMAND_TOOLS`, and the parity is pinned by
- * a test: a shell the deny rule knows about and this gate does not would be
- * gated by neither. `bash` covers two surfaces at once — the core's documented
- * alias of `exec`, and the ClawBox MCP server's own tool, which the core shows
- * the model as `clawbox__bash`.
+ * A SUPERSET of the path guard's `COMMAND_TOOLS`, and the containment is pinned
+ * by a test that imports that set rather than retyping it: a shell the deny
+ * rule knows about and this gate does not would be gated by neither. `bash`
+ * covers two surfaces at once — the core's documented alias of `exec`, and the
+ * ClawBox MCP server's own tool, which the core shows the model as
+ * `clawbox__bash`.
+ *
+ * `coding_agent_run` and `coding_team_run` are the shell ONE HOP OUT: each
+ * spawns a headless Claude Code session with its own unrestricted shell, from a
+ * `task` string the model composes — which in a tainted turn is a string a web
+ * page can have written. They are gated here for the same reason `bash` is.
+ *
+ * WHAT IS STILL OUTSIDE, said rather than left to be discovered: the file
+ * writers (`write_file`/`edit_file`/`apply_patch`, whose destructive shapes the
+ * path guard already refuses outright) and `app_install`/`skill_install`, and —
+ * the one that is a boundary rather than a choice — a CHILD run. A spawned run
+ * gets its own `runId`, so the core clears the parent's mark for it and the
+ * child's own shell calls are ungated. Carrying taint across a spawn needs
+ * `subagent_spawned`, which is a second seam and a second decision.
  */
-export const DANGEROUS_TOOLS = new Set(["exec", "bash", "code_execution", "process", "terminal"]);
+export const DANGEROUS_TOOLS = new Set([
+  "exec",
+  "bash",
+  "code_execution",
+  "process",
+  "terminal",
+  "coding_agent_run",
+  "coding_team_run",
+]);
 
 /**
  * The tool id with the core's MCP qualifier removed.
@@ -64,11 +107,17 @@ export const DANGEROUS_TOOLS = new Set(["exec", "bash", "code_execution", "proce
  * the SUFFIX rather than on the literal `clawbox__bash` is deliberate: the
  * server name is whatever `mcp.servers` is keyed by, and a renamed server must
  * not silently unhook the gate.
+ *
+ * The trailing `-<n>` goes too: `buildSafeToolName` appends one on a
+ * reserved-name clash, so a second server offering `bash` becomes
+ * `<server>__bash-2` — which the shipped single-server config cannot produce,
+ * and which would be an ungated shell if it ever did.
  */
 export function baseToolName(toolName) {
   if (typeof toolName !== "string" || !toolName || toolName.length > MAX_TOOL_NAME) return "";
   const at = toolName.lastIndexOf("__");
-  return at === -1 ? toolName : toolName.slice(at + 2);
+  const bare = at === -1 ? toolName : toolName.slice(at + 2);
+  return at === -1 ? bare : bare.replace(/-\d+$/, "");
 }
 
 /** True when this tool's result brings content from outside the box. */

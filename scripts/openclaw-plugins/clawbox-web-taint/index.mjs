@@ -37,22 +37,46 @@
 // timeout, cancellation and "no approval route" all block). The tool does not
 // run first and ask afterwards.
 //
+// WHAT HAPPENS ON A TURN NOBODY IS WATCHING, stated because it is a behaviour
+// change and not an accident. The core will not raise a plugin approval on a
+// non-user turn at all: `resolveUnavailablePluginApprovalSurfaceReason` answers
+// "<trigger> runs have no approval-capable initiating surface" for every
+// trigger but `user`, and the call is then BLOCKED with
+// `deniedReason: "plugin-approval-unavailable"`. So on a cron or heartbeat turn
+// a shell call after a web read does not ask — it is refused, and the agent is
+// told why. That is the safe direction for an unattended turn that just read a
+// stranger's text, and it is deliberate; a scheduled "fetch a page then run a
+// script" automation stops working and its owner has to move the fetch and the
+// shell into different turns. The plugin cannot soften this from here: the tool
+// hook context carries no trigger, and guessing one from `requester` would
+// gate the ClawBox chat itself on any harness that cannot prove a requester.
+//
 // WHY IT IS NOT PART OF clawbox-path-guard. That plugin encodes the owner's
 // 2026-09-04 ruling — a hard, SILENT deny on two paths, "narrower, but silent
 // when it bites" — and `src/tests/unit/protected-paths.test.ts` pins that it
 // never emits `requireApproval`. Two different rulings do not belong in one
-// handler. They do share an ordering: this gate registers at a LOWER priority
-// than the guard (higher priority runs first, default 0), so a command the
-// ruling refuses outright is refused without first asking the owner a question
-// whose "yes" would change nothing.
+// handler. The `-10` priority is a courtesy, not the mechanism: the core checks
+// `block` before `requireApproval` and a block is sticky and terminal, so the
+// guard's silent deny wins whatever the order — the priority only saves this
+// handler from being asked about a command that is already refused.
 //
-// THE OTHER EDITION. Hermes is not covered and cannot be from here: the tools
-// this gates — `bash`, `web_fetch`, `web_search`, the browser family — are
-// OpenClaw-edition only (`mcp/check-tools.ts` `OPENCLAW_ONLY`), and Hermes'
-// own tool gate is `approvals.deny`, a list of fnmatch globs that blocks
-// unconditionally with no "ask" outcome, while `hermes-dashboard-turn.ts`
-// answers Hermes' own approval frames with `once`. Recorded as a gap in the PR
-// rather than papered over with a second approval surface.
+// WHAT IS NOT TAINT. Content that arrives as the turn's PROMPT rather than as a
+// tool result — an inbound email routed to the chat, a stranger's message on a
+// channel — is outside this gate. `email_read` being in the web-content list
+// invites the opposite reading, so: this hook sees tool RESULTS. The inbound
+// seam is `message_received`, a different decision.
+//
+// THE OTHER EDITION. Hermes is not covered and cannot be from here. The shell
+// is what is OpenClaw-only (`bash`, and the coordinate browser tools —
+// `mcp/check-tools.ts` `OPENCLAW_ONLY`); several of the tainting tools
+// (`browser_open`, `browser_navigate`, `browser_screenshot`,
+// `browser_view_local`, `email_list`, `email_read`) do run on Hermes, so the
+// gap is that Hermes has no seam of this shape to gate them with: its own tool
+// gate is `approvals.deny`, fnmatch globs that block unconditionally with no
+// "ask" outcome. And ClawBox itself would defeat a naive port —
+// `src/lib/hermes-dashboard-turn.ts` answers Hermes' own approval frames with
+// `once` by design. Recorded as a gap in the PR rather than papered over with a
+// second approval surface.
 
 import { isDangerousTool, isWebContentTool, taintApprovalRequest } from "./web-taint.mjs";
 
@@ -74,6 +98,14 @@ const UNSCOPED_TAINT_WINDOW_MS = 5 * 60_000;
 
 /** How many distinct source tools the mark names, so the card stays bounded. */
 const MAX_SOURCES = 4;
+
+/**
+ * How many runs may hold an unrecordable taint before the gate stops tracking
+ * them one by one and falls back to the process-wide window. A bound, not a
+ * policy: it keeps a gateway that has lost its run store from growing a map,
+ * and it fails in the safe direction.
+ */
+const MAX_UNRECORDED_RUNS = 64;
 
 /** Lower than the path guard's default 0, so its silent deny is answered first. */
 const GATE_PRIORITY = -10;
@@ -100,8 +132,36 @@ const GATE_PRIORITY = -10;
  * @param {{ runContext?: WebTaintRunStore, now?: () => number }} [options]
  */
 export function createWebTaintGate({ runContext, now = Date.now } = {}) {
-  /** Set when a taint could not be scoped; read as "assume tainted" until then. */
+  /**
+   * Taints the harness would not keep, held here instead: `runId` → when this
+   * gate may stop assuming it. Bounded, and swept on every write, because a
+   * gateway runs for weeks.
+   */
+  const unrecordedTaintRuns = new Map();
+
+  /**
+   * The same thing for a turn that carried NO run identity at all — the only
+   * case where there is nothing to key on, so the window has to be
+   * process-wide. It is armed by a web read and by nothing else, so a box that
+   * never reads the web never sees it.
+   */
   let unscopedTaintUntilMs = 0;
+
+  const rememberUnrecordedTaint = (runId) => {
+    const until = now() + UNSCOPED_TAINT_WINDOW_MS;
+    for (const [key, expires] of unrecordedTaintRuns) if (expires <= now()) unrecordedTaintRuns.delete(key);
+    if (unrecordedTaintRuns.size >= MAX_UNRECORDED_RUNS) unscopedTaintUntilMs = until;
+    else unrecordedTaintRuns.set(runId, until);
+  };
+
+  const hasUnrecordedTaint = (runId) => {
+    if (now() < unscopedTaintUntilMs) return true;
+    const until = unrecordedTaintRuns.get(runId);
+    if (until === undefined) return false;
+    if (until > now()) return true;
+    unrecordedTaintRuns.delete(runId);
+    return false;
+  };
 
   const runIdOf = (event, ctx) => {
     const runId = event?.runId ?? ctx?.runId;
@@ -122,12 +182,14 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
    */
   function onAfterToolCall(event, ctx) {
     if (!isWebContentTool(event?.toolName)) return;
-    // A failed call that brought nothing back holds no content to distrust, and
-    // tainting on it would make an offline box ask forever. A call that carries
-    // BOTH an error and a result does taint: whatever came back came from
-    // outside, and the safe direction here is to remember more, not less.
-    if (event.error && event.result === undefined) return;
-
+    // EVERY call of a web tool taints, a failed one included. An earlier draft
+    // skipped `event.error` calls, which read well and was dead code: the
+    // embedded runner sets `result` on failures too (`result: sanitizedResult,
+    // error: …`), and ClawBox's own MCP errors come back as a defined
+    // `{content, isError: true}` result, so the branch could not fire on any
+    // path that reaches this box. It is gone rather than left as a comforting
+    // no-op — and the honest reading is the safe one anyway: a refused fetch
+    // still puts a status line and often a body into the turn.
     const runId = runIdOf(event, ctx);
     if (!runId || !runContext) {
       unscopedTaintUntilMs = now() + UNSCOPED_TAINT_WINDOW_MS;
@@ -141,7 +203,13 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
     } catch {
       wrote = false;
     }
-    if (!wrote) unscopedTaintUntilMs = now() + UNSCOPED_TAINT_WINDOW_MS;
+    // A write the core refused is a taint we cannot hand to the harness, so it
+    // is kept HERE — against this run, not against the whole process. The core
+    // refuses for ordinary reasons (a run already closed, a plugin whose global
+    // side effects are inactive), and one aborted run must not make every other
+    // session and every cron ask for five minutes.
+    if (wrote) unrecordedTaintRuns.delete(runId);
+    else rememberUnrecordedTaint(runId);
   }
 
   /**
@@ -156,9 +224,9 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
 
     const runId = runIdOf(event, ctx);
     let sources = [];
-    // A taint this gate could not record is still a taint; until the window
-    // lapses, no turn can be shown to be clean.
-    let cannotProveClean = now() < unscopedTaintUntilMs;
+    // A taint this gate could not record is still a taint; until its window
+    // lapses, this run cannot be shown to be clean.
+    let cannotProveClean = hasUnrecordedTaint(runId);
     if (runId && runContext) {
       try {
         sources = readSources(runId);
