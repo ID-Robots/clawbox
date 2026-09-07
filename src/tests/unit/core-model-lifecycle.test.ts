@@ -114,7 +114,7 @@ describe("coreModelRetired", () => {
     expect(coreModelRetired("anthropic", "claude-opus-4-8")).toBe(true);
   });
 
-  it("does not read sibling provider blocks when the provider map exists", async () => {
+  it("falls back to the whole manifest when the nested provider map misses", async () => {
     writeManifest("deepseek", {
       modelCatalog: {
         providers: {
@@ -126,19 +126,20 @@ describe("coreModelRetired", () => {
       },
     });
     const { coreModelRetired } = await load();
-    expect(coreModelRetired("deepseek", "deepseek-local")).toBe(false);
-    expect(coreModelRetired("deepseek", "deepseek-web")).toBe(false);
+    expect(coreModelRetired("deepseek", "deepseek-local")).toBe(true);
+    expect(coreModelRetired("deepseek", "deepseek-web")).toBe(true);
   });
 
-  it("falls back to top-level providers when modelCatalog.providers is absent", async () => {
+  it("walks the whole flat manifest instead of selecting a top-level provider block", async () => {
     writeManifest("openrouter", {
       providers: {
         openrouter: { models: [{ id: "glm-5.1", status: "deprecated" }] },
       },
+      models: [{ id: "root-retired", status: "deprecated" }],
     });
     const { coreModelRetired } = await load();
     expect(coreModelRetired("openrouter", "glm-5.1")).toBe(true);
-    expect(coreModelRetired("openrouter", "glm-5.2")).toBe(false);
+    expect(coreModelRetired("openrouter", "root-retired")).toBe(true);
   });
 
   it("ignores inherited provider names before falling back to the flat catalogue", async () => {

@@ -167,13 +167,6 @@ function catalogueFor(manifest: unknown, provider: string): unknown {
     if (Object.prototype.hasOwnProperty.call(providers, provider)) {
       return (providers as Record<string, unknown>)[provider];
     }
-    return {};
-  }
-  const topLevelProviders = (manifest as { providers?: unknown } | null)?.providers;
-  if (topLevelProviders && typeof topLevelProviders === "object" && !Array.isArray(topLevelProviders)) {
-    if (Object.prototype.hasOwnProperty.call(topLevelProviders, provider)) {
-      return (topLevelProviders as Record<string, unknown>)[provider];
-    }
   }
   return manifest;
 }
