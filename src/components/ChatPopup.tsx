@@ -333,7 +333,7 @@ import {
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
-import { isClawboxAiProModel, portalDeniesClawboxAiModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
+import { isClawboxAiProModel, portalDeniesClawboxAiModel, clawboxAiTierTextKeys, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_TIER_TEXT_KEYS } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
@@ -4598,12 +4598,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // not something to veto an explicit pick with. An unanswered entitlement
     // (portal unreachable, poll failed) is not a refusal either: the pick goes
     // through and the proxy has the last word.
+    //
+    // `target.label` is what the picker SHOWED for the row — the tier's name
+    // in the owner's language for a ClawBox AI row — never the bare id: the
+    // sentence is worded in the desktop's language like the automatic drop's
+    // (`chat.maxTierDowngraded`), and "deepseek-v4-pro requires …" in English
+    // under a menu that said "Max-Tarif" named a model the menu never showed.
     if (portalDeniesClawboxAiModel(target.model, clawboxLogin.allowedModels)) {
       setMessages(prev => [...prev, {
         role: 'system',
         text: isClawboxAiProModel(target.model)
-          ? `${target.label} requires a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it. Staying on the current model.`
-          : `${target.label} is not included in your ClawBox AI plan. [Manage it in the ClawBox portal](${PORTAL_DASHBOARD_URL}). Staying on the current model.`,
+          ? tr(
+            'chat.modelNeedsMax',
+            '{model} requires a Max subscription. [Upgrade in the ClawBox portal]({url}) to unlock it. Staying on the current model.',
+            { model: target.label, url: PORTAL_DASHBOARD_URL },
+          )
+          : tr(
+            'chat.modelNotInPlan',
+            '{model} is not included in your ClawBox AI plan. [Manage it in the ClawBox portal]({url}). Staying on the current model.',
+            { model: target.label, url: PORTAL_DASHBOARD_URL },
+          ),
         timestamp: Date.now(),
         variant: 'error',
       }])
@@ -4665,7 +4679,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel, clawboxLogin.allowedModels])
+  }, [chatModelState, connect, switchingModel, clawboxLogin.allowedModels, tr])
 
   // The dropdown gate above only catches picks the user *clicks*. An account
   // the portal refuses can also boot with the Max model already saved as the
@@ -4724,7 +4738,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // that other switch finishes.
     if (switchingModel) return
     tierGuardAttemptRef.current = { model: active, allowed: clawboxLogin.allowedModels }
-    void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: 'Pro Tier', automatic: true })
+    // The tiers by the names Settings gives them, in the owner's language —
+    // this notice said "Max Tier" on a desktop whose Settings page called the
+    // same plan "Max-Tarif" (the UI sweep of 2026-09-07).
+    const maxTier = tr(CLAWBOX_AI_TIER_TEXT_KEYS.pro.labelKey, 'Max plan')
+    const flashTier = tr(CLAWBOX_AI_TIER_TEXT_KEYS.flash.labelKey, 'Free/Pro plan')
+    void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: flashTier, automatic: true })
       .then(switched => {
         // Posted from the SUCCESS path only. This sentence says the box was
         // moved, and until the POST comes back that is not known — announcing
@@ -4733,12 +4752,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (!switched) return
         setMessages(prev => [...prev, {
           role: 'system',
-          text: `Max Tier needs a Max subscription. [Upgrade in the ClawBox portal](${PORTAL_DASHBOARD_URL}) to unlock it — switched you to Pro Tier so chat keeps working.`,
+          text: tr(
+            'chat.maxTierDowngraded',
+            '{max} needs a Max subscription. [Upgrade in the ClawBox portal]({url}) to unlock it — switched you to {flash} so chat keeps working.',
+            { max: maxTier, flash: flashTier, url: PORTAL_DASHBOARD_URL },
+          ),
           timestamp: Date.now(),
           variant: 'error',
         }])
       })
-  }, [isOpen, chatModelState?.activeModel, clawboxLogin.allowedModels, clawboxLogin.loading, switchChatModel, switchingModel])
+  }, [isOpen, chatModelState?.activeModel, clawboxLogin.allowedModels, clawboxLogin.loading, switchChatModel, switchingModel, tr])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)
@@ -5659,9 +5682,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 <div style={SPINNER_STYLE} />
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: '100%' }}>
                   {/* Two states only: a skill change no longer restarts the
-                      gateway, so it never raises this overlay (TASK-508). */}
-                  <span>{reloadReason === 'provider' ? 'Switching AI provider...' : 'Restarting chat...'}</span>
-                  <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress >= 100 ? 100 : undefined} aria-busy={reloadProgress < 100} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
+                      gateway, so it never raises this overlay (TASK-508).
+                      Worded through `tr` with the English as the floor, not
+                      bare `t`: with no I18nProvider above this component the
+                      key comes back as itself, and the three regression tests
+                      that pin a terminal socket failure TEARING THIS OVERLAY
+                      DOWN (TASK-712) assert on the English words — a raw
+                      'chat.switchingProvider' would make their "not on
+                      screen" pass whether the overlay was stuck or not. */}
+                  <span>{reloadReason === 'provider' ? tr('chat.switchingProvider', 'Switching AI provider...') : tr('chat.restartingChat', 'Restarting chat...')}</span>
+                  <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress >= 100 ? 100 : undefined} aria-busy={reloadProgress < 100} aria-label={tr('chat.reloadProgress', 'Reload progress')} style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
                     {/* Compositor-only fill: a transform:scaleX keyframe eases
                         0→90% and holds; when the gateway answers (reloadProgress
                         hits 100) we drop the animation and transition to full.
@@ -5676,7 +5706,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       willChange: 'transform',
                     }} />
                   </div>
-                  <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>This may take up to 30 seconds</span>
+                  <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>{tr('chat.reloadMayTake', 'This may take up to 30 seconds')}</span>
                 </div>
               </div>
             ) : (
@@ -6687,16 +6717,42 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   { id: activeModelId, label: activeModelId, hint: 'Custom model' },
                   ...catalog.models,
                 ]
+            // ClawBox AI's rows reach this picker with English words on them
+            // ("Max Tier"), from the static list and the catalogue route
+            // alike, whatever the desktop's language. The tier is named HERE,
+            // from the keys Settings already draws the plan with, so the chip
+            // and the Providers page cannot call one plan two things (the UI
+            // sweep of 2026-09-07). Every other provider's rows are the
+            // catalogue's own — a model's name is not a word to translate.
+            // The catalogue's own words are the floor under each key, so a
+            // render with no locale above it (a test with no I18nProvider)
+            // draws "Max Tier" rather than "ai.planNameMax".
+            const rowText = (option: { id: string; label: string; hint?: string }) => {
+              const keys = activeOption.provider === 'clawai' ? clawboxAiTierTextKeys(option.id) : null
+              return keys
+                ? { label: tr(keys.labelKey, option.label), hint: tr(keys.hintKey, option.hint ?? '') }
+                : { label: option.label, hint: option.hint }
+            }
             // Same de-duplication as the Hermes branch: the provider pill to
             // the left already says "Claude", so this pill shows "Sonnet 4.6",
             // not "Claude Sonnet 4.6". The popover keeps the full label.
-            const activeModelLabel = modelOptions.find(o => o.id === activeModelId)?.label
-              ?? activeModelId
+            //
+            // A ClawBox AI TIER is handed to the pill whole. Its name is a
+            // plan ("Free/Pro plan"), not a `vendor/model` slug, and
+            // `shortModelPillLabel` reads that slash as the path separator it
+            // strips — the chip said "Pro plan" (and "Pro Tier" before the
+            // words were the locale's) for the Flash tier, which on a Free
+            // box names a plan the owner is not on. There is nothing to
+            // de-duplicate against the provider pill in it either.
+            const activeRow = modelOptions.find(o => o.id === activeModelId)
+            const activeModelLabel = activeRow ? rowText(activeRow).label : activeModelId
+            const activeIsTier = !!activeRow && activeOption.provider === 'clawai'
+              && clawboxAiTierTextKeys(activeRow.id) !== null
             return (
               <HeaderDropdown
                 ariaLabel={tr('chat.pillProviderModel', '{provider} model', { provider: activeOption.label })}
                 value={activeModelId}
-                triggerLabel={shortModelPillLabel(
+                triggerLabel={activeIsTier ? activeModelLabel : shortModelPillLabel(
                   activeModelLabel,
                   getProviderPillText(activeOption),
                 )}
@@ -6707,10 +6763,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 // be the same lie in the other direction.
                 options={modelOptions.map(option => {
                   const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
+                  const text = rowText(option)
                   return {
                     id: option.id,
-                    label: option.label,
-                    hint: option.hint,
+                    label: text.label,
+                    hint: text.hint,
                     disabled: blocked,
                     unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
                   }
@@ -6740,7 +6797,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   void switchChatModel({
                     provider: activeOption.provider,
                     model: `${wireProvider}/${nextId}`,
-                    label: nextId,
+                    // The words the row was drawn with, so a refusal names
+                    // the tier the owner picked rather than its id; `next`
+                    // is only ever missing for an id the list never held.
+                    label: next ? rowText(next).label : nextId,
                   })
                 }}
                 onPointerDown={stopHeaderDrag}

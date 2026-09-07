@@ -52,6 +52,7 @@ import {
 } from "@/lib/llamacpp";
 import { activateLocalAiProvider, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { HERMES_MINIMUM_CONTEXT_TOKENS, probeOllamaModel } from "@/lib/ollama-model-context";
+import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import { unpairLocal as unpairClawKeep } from "@/lib/clawkeep";
 import { getLocalAiToken, markLocalAiTokenMigrated } from "@/lib/local-ai-token";
 import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
@@ -1603,6 +1604,24 @@ async function readDisabledProviders(): Promise<Set<string>> {
   return parseDisabledProviders((await getAll())[DISABLED_PROVIDERS_KEY]);
 }
 
+/**
+ * An Ollama model that only embeds is no fallback for a CHAT. `chat/model`
+ * already refuses one for the picker through Ollama's own capability list;
+ * this slot has to ask the same question, because the writer took the store's
+ * `local_ai_model` and `inferConfiguredLocalModel` at their word, and the name
+ * rule both apply cannot see an embedder with no "embed" in its tag (bge-m3,
+ * all-minilm) — which then went into `agents.defaults.model.fallbacks`, where
+ * a cloud outage would route the chat to a model that cannot produce a word
+ * (the review of the 2026-09-07 sweep batch). A llama.cpp model is never
+ * asked: the probe is Ollama's `/api/show`, and where Ollama cannot be asked
+ * the probe itself falls back to the name, so a stopped unit refuses nothing.
+ */
+async function localFallbackCanChat(model: string): Promise<boolean> {
+  const ollamaPrefix = "ollama/";
+  if (!model.startsWith(ollamaPrefix)) return true;
+  return ollamaModelCanChat(model.slice(ollamaPrefix.length));
+}
+
 async function pickLocalFallbackModel(
   primaryModel?: string | null,
   preferredLocalModel?: string,
@@ -1611,7 +1630,10 @@ async function pickLocalFallbackModel(
   const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
     .filter((model): model is string => !!model && model !== primaryModel)
     .filter((model) => !disabled.has(normalizeProviderId(model.split("/")[0]) ?? ""));
-  return fallbackCandidates[0] ?? null;
+  for (const candidate of fallbackCandidates) {
+    if (await localFallbackCanChat(candidate)) return candidate;
+  }
+  return null;
 }
 
 async function ensureFallbackModel(
