@@ -519,13 +519,44 @@ function warnNoReclamation(why) {
   );
 }
 
+/**
+ * THE ONE GATE, shared by every `register()` call in this module instance.
+ *
+ * MEASURED ON THE BOX, and the reason this is not a plain local: the core calls
+ * `register()` TWICE in one gateway process. That made two gates with two
+ * independent mark maps, and the two halves of the fix landed on different
+ * ones — the tool hooks that actually served calls belonged to one gate
+ * (`rememberTaint … sizeBefore=0,1`) while the terminal `lifecycle` event was
+ * dispatched to the other (`TERMINAL … hadMark=false size=0`). So the live
+ * gate's map was never reclaimed and grew for the life of the gateway, which is
+ * exactly the unbounded growth the reclamation was added to prevent.
+ *
+ * Giving each gate its own subscription id was tried first and did NOT fix it:
+ * the events still reached only one gate, because which subscriptions are
+ * dispatched is decided by which REGISTRY the core considers live, not by the
+ * id. One gate behind all registrations is what makes "the run ended" reach the
+ * map that holds the marks, whichever registry wins.
+ *
+ * The first registration's `api.runContext` is the one kept. That costs
+ * nothing: the mirror is best effort, no decision depends on it, and on this
+ * core the write is refused either way (`setRunContext … returned=false
+ * readBack=undefined`, observed).
+ */
+let sharedGate = null;
+
+/** Distinguishes each registration's subscription, so none is refused as a duplicate. */
+let registrationSeq = 0;
+
 const clawboxWebTaintPlugin = {
   id: PLUGIN_ID,
   name: "ClawBox web-taint approval gate",
   description:
     "Asks the owner before a shell command runs in a turn that read a web page, a search result or an email.",
   register(api) {
-    const gate = createWebTaintGate({ runContext: api?.runContext });
+    // One gate per module instance, however many times the core registers.
+    sharedGate ??= createWebTaintGate({ runContext: api?.runContext });
+    const gate = sharedGate;
+    const seq = (registrationSeq += 1);
     api.on("after_tool_call", gate.onAfterToolCall);
     api.on("before_tool_call", gate.onBeforeToolCall, { priority: GATE_PRIORITY });
     // THE HARNESS RECLAIMS THE MARK. `registerAgentEventSubscription` is the
@@ -545,7 +576,11 @@ const clawboxWebTaintPlugin = {
     } else {
       try {
         subscribe({
-          id: `${PLUGIN_ID}-run-end`,
+          // Per REGISTRATION: the core refuses a second subscription with the
+          // same `{pluginId, id}` pair, so a fixed id would silently drop every
+          // registration after the first — and the one it keeps is not
+          // necessarily the one whose registry dispatches events.
+          id: `${PLUGIN_ID}-run-end-${seq}`,
           description: "Drops this run's web-taint mark when the run ends.",
           streams: ["lifecycle"],
           handle: gate.onAgentEvent,

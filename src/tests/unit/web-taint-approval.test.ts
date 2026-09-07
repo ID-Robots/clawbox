@@ -106,10 +106,23 @@ type ToolHook = (event: Record<string, unknown>, hookCtx: Record<string, unknown
  * order — `block` and `requireApproval` are both terminal for the first handler
  * that answers, so the first non-empty result is the turn's answer.
  */
+let composedCatalogues = 0;
+
 async function shippedToolHooks() {
   const before: Array<{ handler: ToolHook; priority: number }> = [];
   const after: ToolHook[] = [];
   const runContext = fakeRunContext();
+  // A RUN OF ITS OWN per composed catalogue. The web-taint plugin shares one
+  // gate across every `register()` call in a module instance — it has to,
+  // because the core calls `register()` twice per gateway process and the two
+  // halves of the fix would otherwise land on different maps — and Node caches
+  // the module, so a second `shippedToolHooks()` in the same file reuses that
+  // gate. Distinct run ids keep these cases independent without a
+  // reset-for-tests hatch in shipped code, and they are the honest shape
+  // anyway: two catalogues are two runs.
+  composedCatalogues += 1;
+  const catalogueRun = `${RUN}-catalogue-${composedCatalogues}`;
+  const catalogueCtx = () => ctx({ runId: catalogueRun });
   const ids = readdirSync(PLUGIN_ROOT, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
@@ -129,10 +142,10 @@ async function shippedToolHooks() {
   before.sort((a, b) => b.priority - a.priority);
   return {
     ids,
-    runWebRead: (toolName: string, hookCtx = ctx()) => {
+    runWebRead: (toolName: string, hookCtx = catalogueCtx()) => {
       for (const handler of after) handler({ toolName, params: {}, result: "<html>bad advice</html>" }, hookCtx);
     },
-    runToolCall: (toolName: string, params: Record<string, unknown>, hookCtx = ctx()) => {
+    runToolCall: (toolName: string, params: Record<string, unknown>, hookCtx = catalogueCtx()) => {
       for (const { handler } of before) {
         const result = handler({ toolName, params }, hookCtx) as
           | { block?: boolean; requireApproval?: unknown }
@@ -786,6 +799,44 @@ describe("the harness reclaims the mark when the run ends", () => {
     // plugin every tool argument on the box for no reason.
     expect(subscriptions[0]?.streams).toEqual(["lifecycle"]);
     expect(typeof subscriptions[0]?.handle).toBe("function");
+  });
+
+  it("shares ONE gate across every register() call, and names each subscription apart", () => {
+    // MEASURED ON THE BOX, not theorised: one gateway pid calls `register()`
+    // twice. That made two gates with two independent maps, and the halves
+    // landed on different ones — the tool hooks that served calls marked one
+    // gate while the terminal lifecycle event was dispatched to the other,
+    // which is why the live map was never reclaimed. Observed as
+    // `gid=A rememberTaint …` against `gid=B TERMINAL … hadMark=false size=0`.
+    //
+    // Two properties keep that closed: ONE gate behind all registrations (so
+    // "the run ended" reaches the map that holds the marks, whichever registry
+    // the core decides is live), and a DISTINCT subscription id per
+    // registration (so the core does not refuse the later ones as duplicates).
+    const subscriptions: Array<Record<string, unknown>> = [];
+    const api = () => ({
+      on: () => {},
+      runContext: fakeRunContext(),
+      agent: {
+        events: { registerAgentEventSubscription: (sub: Record<string, unknown>) => subscriptions.push(sub) },
+      },
+    });
+    plugin.register(api());
+    plugin.register(api());
+    expect(subscriptions).toHaveLength(2);
+    expect(subscriptions[0]?.id).not.toBe(subscriptions[1]?.id);
+    for (const sub of subscriptions) {
+      expect(String(sub.id)).toContain("clawbox-web-taint-run-end-");
+      expect(sub.streams).toEqual(["lifecycle"]);
+    }
+    // The decisive half: a mark made through one registration's hooks must be
+    // released by the OTHER registration's run-end handler. Two gates cannot do
+    // this; one gate behind both can.
+    const first = subscriptions[0]?.handle as (e: unknown) => void;
+    const second = subscriptions[1]?.handle as (e: unknown) => void;
+    expect(first).not.toBe(undefined);
+    expect(second).not.toBe(undefined);
+    expect(first).toBe(second);
   });
 
   it("still installs the gate on a core with no agent-event feed", () => {
