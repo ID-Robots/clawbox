@@ -128,6 +128,30 @@ describe("GET /setup-api/harness/active — the dual SKU, whose harness is a run
     expect(await get()).toEqual({ active: "openclaw", edition: "dual", activeKnown: true });
   });
 
+  it("reports the edition its harness was resolved FROM, not one read later", async () => {
+    // `install.sh` truncates and rewrites /etc/clawbox/edition.env on every
+    // update, and this SKU's answer contains an AWAIT — the config-store read —
+    // so the route's own `edition` read landed after it. Answered from two
+    // reads, the response could pair `active: "hermes"` with
+    // `edition: "openclaw"`, which no real SKU can be in: the openclaw edition
+    // is locked to its own harness. A caller that reads `edition` to decide
+    // what this box is then draws for the wrong product.
+    licenseDual();
+    vi.doMock("@/lib/config-store", async (orig) => ({
+      ...(await orig<typeof import("@/lib/config-store")>()),
+      getKnown: async () => {
+        // The rewrite, in the window it really happens in. The mtime is pushed
+        // forward explicitly because `edition-source` caches by it and a second
+        // write inside the same millisecond would be served from the cache.
+        fs.writeFileSync(lockPath, "# ClawBox edition lock\n# (being rewritten)\n");
+        const later = new Date(Date.now() + 2_000);
+        fs.utimesSync(lockPath, later, later);
+        return { value: "hermes", known: true };
+      },
+    }));
+    expect(await get()).toEqual({ active: "hermes", edition: "dual", activeKnown: true });
+  });
+
   it("says the harness is NOT resolved when the config store cannot be read", async () => {
     // The gap this pair of tests exists for. `data/config.json` left root-owned
     // by a `sudo` script: the forgiving reader answers "openclaw" for a box

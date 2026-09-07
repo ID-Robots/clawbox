@@ -15,6 +15,13 @@ const getActiveHarness = vi.fn(async () => "hermes");
 /** Every harness these tests name is up; health is not what they are about. */
 const harnessHealthy = vi.fn(async (harness: string) => Boolean(harness));
 vi.mock("@/lib/harness", () => ({
+  // The route reads the harness AND the edition from one call now, so the
+  // response cannot be half about one edition and half about another.
+  getActiveHarnessSource: async () => ({
+    active: await getActiveHarness(),
+    defaulted: false,
+    edition: "hermes",
+  }),
   getActiveHarness: () => getActiveHarness(),
   harnessHealthy: (h: string) => harnessHealthy(h),
   getEdition: () => "hermes",

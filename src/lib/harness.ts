@@ -59,6 +59,18 @@ export function getEditionSource(): EditionSource {
 }
 
 /**
+ * ONE EDITION PER ANSWER, for the three functions below.
+ *
+ * Each takes the edition as an optional argument and reads it only when the
+ * caller did not. `/etc/clawbox/edition.env` is a file another process rewrites
+ * — `install.sh` truncates and re-`printf`s it on every update — so each read is
+ * a fresh chance to land in that window and get this module's "openclaw"
+ * default back. A caller that reads it once and threads it through cannot
+ * answer half its question about one edition and half about another; a caller
+ * with nothing to thread keeps the old shape and pays one read.
+ */
+
+/**
  * True when the dual/switcher feature is active: edition "dual" AND a valid
  * license we signed.
  *
@@ -70,24 +82,23 @@ export function getEditionSource(): EditionSource {
  * locked, never to open up. verifyDualLicense() already returns false when no
  * key is configured, so this is the whole check.
  */
-export function isDualUnlocked(): boolean {
-  if (getEdition() !== "dual") return false;
+export function isDualUnlocked(edition: Edition = getEdition()): boolean {
+  if (edition !== "dual") return false;
   return verifyDualLicense();
 }
 
 /** True when the device is pinned to a single harness (switcher disabled) —
  *  either a single-harness edition, or "dual" without a valid license. */
-export function isSingleHarnessEdition(): boolean {
-  return !isDualUnlocked();
+export function isSingleHarnessEdition(edition: Edition = getEdition()): boolean {
+  return !isDualUnlocked(edition);
 }
 
 /** The harness this device is locked to, or null when the switcher is unlocked.
  *  A single edition locks to itself; "dual" without a license degrades to the
  *  default harness rather than exposing a switcher. */
-export function lockedHarness(): Harness | null {
-  if (isDualUnlocked()) return null;
-  const e = getEdition();
-  return e === "hermes" ? "hermes" : e === "openclaw" ? "openclaw" : DEFAULT_HARNESS;
+export function lockedHarness(edition: Edition = getEdition()): Harness | null {
+  if (isDualUnlocked(edition)) return null;
+  return edition === "hermes" ? "hermes" : edition === "openclaw" ? "openclaw" : DEFAULT_HARNESS;
 }
 
 export interface HarnessInfo {
@@ -144,18 +155,38 @@ export interface ActiveHarnessSource {
    * harness take `active` and are right either way.
    */
   defaulted: boolean;
+  /**
+   * The edition `active` was resolved FROM — the same read, not a later one.
+   *
+   * Reported so a caller needing both cannot take them from two moments: the
+   * `/harness/active` route used to add its own `getEdition()` after the await
+   * below, and answered `active: "hermes"` beside `edition: "openclaw"` when the
+   * lock was rewritten in between.
+   */
+  edition: Edition;
 }
 
 export async function getActiveHarnessSource(): Promise<ActiveHarnessSource> {
-  if (readEditionSource().defaulted) return { active: DEFAULT_HARNESS, defaulted: true };
+  // READ ONCE, thread it through. This used to take three reads of the edition
+  // lock — its own, and `lockedHarness()`'s two — with the route adding a fourth
+  // for the `edition` it reports beside the answer, and that one lands AFTER the
+  // await below. Every read is a separate syscall against a file `install.sh`
+  // truncates and rewrites on every update, so a later read can answer the
+  // module default where the first read had the real edition: a Hermes box
+  // reported as `{ active: "openclaw", defaulted: false }` — a guess presented
+  // as a fact, which is the one thing `defaulted` exists to prevent — or a
+  // response pairing `active: "hermes"` with `edition: "openclaw"`, which no
+  // real SKU can be in.
+  const source = readEditionSource();
+  if (source.defaulted) return { active: DEFAULT_HARNESS, defaulted: true, edition: source.edition };
   // A locked (single-harness / unlicensed-dual) device ignores the stored value
   // entirely — the edition is the source of truth, so editing config.json can't
   // change which agent runs.
-  const locked = lockedHarness();
-  if (locked) return { active: locked, defaulted: false };
+  const locked = lockedHarness(source.edition);
+  if (locked) return { active: locked, defaulted: false, edition: source.edition };
   const { value, known } = await getKnown(HARNESS_CONFIG_KEY);
-  if (!known) return { active: DEFAULT_HARNESS, defaulted: true };
-  return { active: isHarness(value) ? value : DEFAULT_HARNESS, defaulted: false };
+  if (!known) return { active: DEFAULT_HARNESS, defaulted: true, edition: source.edition };
+  return { active: isHarness(value) ? value : DEFAULT_HARNESS, defaulted: false, edition: source.edition };
 }
 
 export async function getActiveHarness(): Promise<Harness> {

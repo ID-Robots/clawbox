@@ -40,7 +40,7 @@ import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
-import { fetchHarness } from "@/lib/client-harness";
+import { resolveHarnessProbe } from "@/lib/harness-probe";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
 import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
@@ -387,49 +387,34 @@ function ChromeDesktopInner() {
   // product's artwork on the customer's screen half the time.
   const [wallpaperHarness, setWallpaperHarness] = useState<string | null>(null);
   useEffect(() => {
-    let alive = true;
-    // Backing off and giving up, shared by the two ways this can fail to
-    // answer: no reply at all, and a reply that could not name the harness.
-    const retry = (attempt: number) => {
-      if (!alive || attempt >= 2) return; // stay unresolved = stay closed
-      setTimeout(() => { if (alive) load(attempt + 1); }, 500 * (attempt + 1));
-    };
-    const load = async (attempt: number): Promise<void> => {
-      try {
-        const d = await fetchHarness({ force: attempt > 0 });
-        if (!alive) return;
-        if (d?.active) {
-          setActiveHarness(d.active);
-          const branding = brandingHarness(d);
-          setWallpaperHarness(branding);
-          // A device that has never picked a wallpaper opens on its OWN
-          // edition's art — and on a device that has named no edition it opens
-          // on neither, since `brandWallpaperId` answers null there and no
-          // wallpaper is chosen at all. Guarded on wallpaperChosen because the
-          // preferences request and this one race, and a saved choice must
-          // survive whichever order they land in.
-          const brand = brandWallpaperId(branding);
-          if (brand && !wallpaperChosen.current) {
-            wallpaperChosen.current = true;
-            setWallpaperId(brand);
-          }
-          // A device that could not name its harness has not given a settled
-          // answer, only the honest one for now — and `force` re-reads the
-          // route rather than the cache, so asking again is not asking the same
-          // stale reply. install.sh truncates and rewrites the edition lock on
-          // EVERY update and the desktop reloads right after it, so a mount
-          // inside that window would otherwise wear no branding, and write no
-          // `wp_id`, for the life of the tab: the probe-once class.
-          if (!branding) retry(attempt);
-          return;
+    const probe = new AbortController();
+    // Backing off and asking again — `install.sh` truncates and rewrites the
+    // edition lock on EVERY update and the desktop reloads right after it, so a
+    // mount inside that window would otherwise wear no branding, and write no
+    // `wp_id`, for the life of the tab: the probe-once class. The rule lives in
+    // `resolveHarnessProbe` because `/app/<id>` needs exactly the same one and
+    // had none; `onAnswer` fires for every answer, settled or not, so the honest
+    // one paints at once and a later one improves it.
+    void resolveHarnessProbe({
+      signal: probe.signal,
+      onAnswer: (d) => {
+        setActiveHarness(d.active);
+        const branding = brandingHarness(d);
+        setWallpaperHarness(branding);
+        // A device that has never picked a wallpaper opens on its OWN
+        // edition's art — and on a device that has named no edition it opens
+        // on neither, since `brandWallpaperId` answers null there and no
+        // wallpaper is chosen at all. Guarded on wallpaperChosen because the
+        // preferences request and this one race, and a saved choice must
+        // survive whichever order they land in.
+        const brand = brandWallpaperId(branding);
+        if (brand && !wallpaperChosen.current) {
+          wallpaperChosen.current = true;
+          setWallpaperId(brand);
         }
-        throw new Error("no harness");
-      } catch {
-        retry(attempt);
-      }
-    };
-    load(0);
-    return () => { alive = false; };
+      },
+    });
+    return () => { probe.abort(); };
   }, []);
 
   // The harness-specific apps hidden on this edition (OpenClaw Control-UI +
