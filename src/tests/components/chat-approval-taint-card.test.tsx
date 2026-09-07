@@ -227,6 +227,37 @@ describe("the taint gate's approval, on the chat card", () => {
     expect(decisionButtons().map((el) => el.getAttribute("data-decision"))).toEqual(["allow-once", "deny"]);
   });
 
+  it("offers Allow all only while more than one approval waits, and answers each allow-once", async () => {
+    // The owner's ask (2026-09-07): a turn that had read the web raised a card
+    // per shell command, each wanting its own press. One card alone offers no
+    // batch; two do, and the batch is allow-once per card — never a standing
+    // allow, which this gate does not offer.
+    resolveAnswer = {
+      applied: true,
+      approval: { status: "allowed", decision: "allow-once", reason: "user", resolvedAtMs: Date.now() },
+    };
+    await mountReady();
+    act(() => { socket()?.emit(approvalEvent(pendingTaintApproval(), "pending")); });
+    await screen.findByTestId("chat-approval");
+    expect(screen.queryAllByTestId("chat-approval-allow-all")).toHaveLength(0);
+    act(() => { socket()?.emit(approvalEvent(pendingTaintApproval({ id: "plugin:second", urlPath: "/approve/plugin%3Asecond" }), "pending")); });
+    await waitFor(() => expect(screen.getAllByTestId("chat-approval")).toHaveLength(2));
+    const allowAll = screen.getAllByTestId("chat-approval-allow-all");
+    expect(allowAll).toHaveLength(2);
+    // The i18n mock answers keys; the count travels on the button itself.
+    expect(allowAll[0]?.getAttribute("data-pending-count")).toBe("2");
+    expect(allowAll[0]?.textContent).toBe("chat.approval.allowAll");
+    // The per-card decisions are untouched: still allow-once and deny, no always.
+    expect(decisionButtons().map((el) => el.getAttribute("data-decision"))).toEqual(["allow-once", "deny", "allow-once", "deny"]);
+    fireEvent.click(allowAll[0] as HTMLElement);
+    await settleFrames();
+    await waitFor(() => expect(framesFor("approval.resolve")).toHaveLength(2));
+    const frames = framesFor("approval.resolve");
+    expect(frames.map((f) => (f.params as { id: string; decision: string }).decision)).toEqual(["allow-once", "allow-once"]);
+    expect(frames.map((f) => (f.params as { id: string }).id).sort()).toEqual([APPROVAL_ID, "plugin:second"].sort());
+    await waitFor(() => expect(screen.getAllByTestId("chat-approval").map((el) => el.getAttribute("data-approval-status"))).toEqual(["allowed", "allowed"]));
+  });
+
   it("answers Deny through the core's own approval.resolve, once", async () => {
     await mountReady();
     act(() => { socket()?.emit(approvalEvent(pendingTaintApproval(), "pending")); });

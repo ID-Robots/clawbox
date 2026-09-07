@@ -101,6 +101,7 @@ import {
   openDashboardTurn,
   resetHermesStreamProbe,
   type DashboardActivity,
+  THINKING_STATUS,
 } from "@/lib/hermes-dashboard-turn";
 
 /** The socket the module just made, after letting the constructor run. */
@@ -505,7 +506,9 @@ describe("reporting what a turn is DOING while it does it", () => {
     socket.event("tool.complete", { tool_id: "call_7", name: "web_search", summary: "3 results" });
     socket.event("message.complete", { text: "Here they are.", status: "complete" });
     await running;
-    expect(seen).toEqual([
+    // The status line ("Thinking…", at submit and after the result) is its own
+    // test; this one is about the pills.
+    expect(seen.filter((a) => a.kind === "tool")).toEqual([
       { kind: "tool", phase: "start", id: "call_7", name: "web_search", detail: "clawbox docs" },
       { kind: "tool", phase: "result", id: "call_7", name: "web_search", detail: "3 results", status: "ok" },
     ]);
@@ -541,7 +544,7 @@ describe("reporting what a turn is DOING while it does it", () => {
     socket.event("message.complete", { text: "ok", status: "complete" });
     expect((await running).text).toBe("ok");
     // The only pill is the one that can be closed: the call with an id.
-    expect(seen).toEqual([{ kind: "tool", phase: "start", id: "toolu_01Nf", name: "web_search" }]);
+    expect(seen.filter((a) => a.kind === "tool")).toEqual([{ kind: "tool", phase: "start", id: "toolu_01Nf", name: "web_search" }]);
   });
 
   it("hands the spinner over as STATUS, and never as reasoning", async () => {
@@ -561,10 +564,44 @@ describe("reporting what a turn is DOING while it does it", () => {
     socket.event("reasoning.delta", { text: "The user asked for one word." });
     socket.event("message.complete", { text: "one", status: "complete" });
     const final = await running;
-    expect(seen).toEqual([{ kind: "status", text: "(⌐■_■) computing..." }]);
+    // The submit's own line, then the spinner's heartbeat — both in OpenClaw's
+    // words, never the kaomoji (see THINKING_STATUS).
+    expect(seen).toEqual([
+      { kind: "status", text: THINKING_STATUS },
+      { kind: "status", text: THINKING_STATUS },
+    ]);
     expect(final.reasoning).toBe("The user asked for one word.");
     expect(final.reasoning).not.toContain("computing");
     expect(final.reasoning).not.toContain("(⌐■_■)");
+  });
+
+  it("draws the same status line OpenClaw's chat draws: up at submit, kept while thinking, back after a tool", async () => {
+    // The owner's ask (2026-09-07): on Hermes the chat showed the desktop's
+    // own spinner verb ("Fluttering…") for a whole silent turn, because no
+    // status arrived until Hermes' kaomoji spinner did — and that one is the
+    // TUI's whimsy. OpenClaw's gateway says "Thinking…" from the first
+    // moment; so does this transport now.
+    const { turn, socket } = await connect();
+    const seen: DashboardActivity[] = [];
+    const running = turn!.run(
+      () => {},
+      (activity) => seen.push(activity),
+    );
+    await Promise.resolve();
+    expect(seen).toEqual([{ kind: "status", text: "Thinking…" }]);
+    socket.event("thinking.delta", { text: "(◔_◔) musing..." });
+    socket.event("tool.start", { tool_id: "call_7", name: "terminal", context: "uname -r" });
+    socket.event("tool.complete", { tool_id: "call_7", name: "terminal", summary: "5.15.185-tegra" });
+    socket.event("message.complete", { text: "5.15.185-tegra", status: "complete" });
+    await running;
+    expect(seen.map((a) => (a.kind === "status" ? `status:${a.text}` : a.kind === "tool" ? `tool:${a.phase}` : a.kind))).toEqual([
+      "status:Thinking…",
+      "status:Thinking…",
+      "tool:start",
+      "tool:result",
+      "status:Thinking…",
+    ]);
+    expect(JSON.stringify(seen)).not.toContain("musing");
   });
 
   it("runs exactly as it did for a caller that passes no onActivity", async () => {

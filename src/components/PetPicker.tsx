@@ -6,14 +6,18 @@ import { announcePetChanged } from '@/lib/pet-client'
 
 // ── Settings → Appearance → Mascot pet ──
 //
-// Hermes-only, and it gates itself: `/setup-api/pets` answers `supported:
-// false` on an OpenClaw box (there is no `hermes` binary there), so this whole
-// card renders nothing and the crab section above it is untouched.
+// On every edition since 2026-09-07 (the owner's ask: "add the mascots when we
+// are on openclaw"). It still gates itself on the route: a server that
+// predates pets, or one that cannot be reached, answers no `supported: true`
+// and this whole card renders nothing.
 //
-// Picking a pet writes through `hermes pets install` + `hermes pets select`,
-// which means config.yaml — the same store the Hermes CLI, TUI and desktop app
-// read. ClawBox keeps no selection of its own, so `hermes pets select boba` in
-// the in-UI terminal moves this picker too.
+// On Hermes a pick writes through `hermes pets install` + `hermes pets
+// select`, which means config.yaml — the same store the Hermes CLI, TUI and
+// desktop app read, so `hermes pets select boba` in the in-UI terminal moves
+// this picker too. On OpenClaw the same route downloads the curated sheet
+// into ClawBox's own store and keeps the pick in the config store. The first
+// tile is what the desktop wears with no pet: the crab where ClawBox's own
+// harness runs (`placeholder: "crab"`), "None" — the egg — on Hermes.
 //
 // The tiles show `by <author>`: Petdex art stays credited to whoever submitted
 // it, and the footer says plainly where the sprites come from and that they
@@ -30,6 +34,8 @@ interface GalleryPet {
 
 interface Gallery {
   supported: boolean
+  /** What the desktop wears with no pet picked; absent from an older server. */
+  placeholder?: 'crab' | 'egg'
   enabled: boolean
   activeSlug: string
   defaultSlug?: string
@@ -94,17 +100,29 @@ export default function PetPicker() {
       <p className="text-[11px] text-[var(--text-muted)] mb-4">{t('settings.mascot.petHint')}</p>
 
       <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
-        {/* "No pet" — `hermes pets off`. Keeps the desktop bare rather than
-            falling back to the crab, which is the OpenClaw mascot. */}
+        {/* "No pet". On Hermes that is `hermes pets off` and the desktop stays
+            bare (the egg) rather than falling back to the crab, which is
+            ClawBox's own brand; where ClawBox's own harness runs, the crab IS
+            what "no pet" wears, so the tile says and shows it. */}
         <button
+          data-testid="pet-tile-none"
           onClick={() => choose(null)}
           disabled={busySlug !== null}
           className={`relative rounded-xl overflow-hidden aspect-square transition-all cursor-pointer border-none p-0 flex flex-col items-center justify-center gap-1 bg-white/[0.03] disabled:opacity-50 ${
             activeSlug === '' ? 'ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117]' : 'hover:ring-1 hover:ring-white/20'
           }`}
         >
-          <span className="material-symbols-rounded text-white/40" style={{ fontSize: 22 }}>block</span>
-          <span className="text-[10px] text-white/50 font-medium">{t('settings.mascot.petNone')}</span>
+          {gallery.placeholder === 'crab' ? (
+            <>
+              <img src="/clawbox-crab.png" alt="" className="w-12 h-12 object-contain" />
+              <span className="text-[10px] text-white/70 font-medium">{t('settings.mascot.petCrab')}</span>
+            </>
+          ) : (
+            <>
+              <span className="material-symbols-rounded text-white/40" style={{ fontSize: 22 }}>block</span>
+              <span className="text-[10px] text-white/50 font-medium">{t('settings.mascot.petNone')}</span>
+            </>
+          )}
         </button>
 
         {gallery.pets.map(p => {

@@ -1,6 +1,8 @@
-// Edition gating is the whole contract of these routes: pets are a Hermes
-// feature, the `hermes` binary does not exist on an OpenClaw box, and an
-// OpenClaw desktop must keep the crab with no pet code running at all.
+// Pets on every edition (since 2026-09-07), through one route and two stores:
+// on Hermes the `hermes` CLI and its config.yaml, on OpenClaw — where no such
+// binary exists — ClawBox's own `data/pets` and the config store. The one
+// fact the edition still decides is what the desktop wears with NO pet: the
+// crab wherever ClawBox's own harness runs, the egg on a Hermes-only box.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
@@ -19,9 +21,10 @@ vi.mock("@/lib/edition-source", () => ({
 
 const cliCalls: string[][] = [];
 let cliExit = 0;
+let directUrl: string | null = null;
 vi.mock("@/lib/petdex-manifest", () => ({
-  PETDEX_ASSET_HOSTS: new Set<string>(),
-  petdexSheetUrl: async () => null,
+  PETDEX_ASSET_HOSTS: new Set<string>(["assets.petdex.dev"]),
+  petdexSheetUrl: async () => directUrl,
 }));
 
 vi.mock("@/lib/hermes-cli", () => ({
@@ -65,7 +68,10 @@ function post(body: unknown) {
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-pets-route-"));
   process.env.HERMES_HOME = tmpHome;
+  // The OpenClaw arm's store and config live under CLAWBOX_ROOT/data.
+  process.env.CLAWBOX_ROOT = tmpHome;
   petsDir = path.join(tmpHome, "pets");
+  directUrl = null;
   edition = "hermes";
   petConfig = { enabled: false, slug: "" };
   cliCalls.length = 0;
@@ -75,18 +81,30 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.HERMES_HOME;
+  delete process.env.CLAWBOX_ROOT;
   fs.rmSync(tmpHome, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
 
 describe("GET /setup-api/pets — edition gating", () => {
-  it("answers 'not supported' on OpenClaw and lists nothing", async () => {
+  it("offers the curated shortlist on OpenClaw too, with the crab as what 'no pet' wears", async () => {
     edition = "openclaw";
     const res = await (await getRoute())(new Request("http://localhost/setup-api/pets?gallery=1"));
     const body = await res.json();
-    expect(body.supported).toBe(false);
+    expect(body.supported).toBe(true);
+    expect(body.placeholder).toBe("crab");
     expect(body.active).toBeNull();
-    expect(body.pets).toEqual([]);
+    expect(body.pets.length).toBe(CURATED_PETS.length);
+    // No Hermes CLI was asked for anything on the way.
+    expect(cliCalls).toEqual([]);
+  });
+
+  it("names the egg as what 'no pet' wears on a Hermes-only box, and the crab on dual", async () => {
+    let res = await (await getRoute())(new Request("http://localhost/setup-api/pets"));
+    expect((await res.json()).placeholder).toBe("egg");
+    edition = "dual";
+    res = await (await getRoute())(new Request("http://localhost/setup-api/pets"));
+    expect((await res.json()).placeholder).toBe("crab");
   });
 
   it("offers the curated shortlist on Hermes", async () => {
@@ -135,11 +153,37 @@ describe("GET /setup-api/pets — edition gating", () => {
 });
 
 describe("POST /setup-api/pets/select", () => {
-  it("is a 404 on OpenClaw — nothing to select", async () => {
+  it("on OpenClaw downloads the curated sheet into data/pets and keeps the pick in the config store", async () => {
     edition = "openclaw";
+    directUrl = "https://assets.petdex.dev/curated/boba/sprite-v2.webp";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(Buffer.from("RIFF-not-really-a-webp"), { status: 200, headers: { "content-length": "22" } }),
+    );
     const res = await (await selectRoute())(post({ slug: "boba" }));
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
+    expect((await res.json()).active).toMatchObject({ slug: "boba" });
+    expect(fetchSpy).toHaveBeenCalledWith(directUrl, expect.objectContaining({ redirect: "manual" }));
+    // ClawBox's own store, not Hermes' — and no CLI call on the way.
+    expect(fs.existsSync(path.join(tmpHome, "data", "pets", "boba", "spritesheet.webp"))).toBe(true);
+    expect(fs.existsSync(path.join(petsDir, "boba"))).toBe(false);
     expect(cliCalls).toEqual([]);
+    const store = JSON.parse(fs.readFileSync(path.join(tmpHome, "data", "config.json"), "utf-8"));
+    expect(store.mascot_pet).toEqual({ enabled: true, slug: "boba" });
+    // The GET now reports it, and a null slug turns it off in the same store.
+    expect((await (await (await getRoute())(new Request("http://localhost/setup-api/pets"))).json()).active).toMatchObject({ slug: "boba" });
+    const off = await (await selectRoute())(post({ slug: null }));
+    expect(off.status).toBe(200);
+    expect(JSON.parse(fs.readFileSync(path.join(tmpHome, "data", "config.json"), "utf-8")).mascot_pet).toEqual({ enabled: false, slug: "boba" });
+  });
+
+  it("on OpenClaw answers 502 when the sheet cannot be fetched, and stores nothing", async () => {
+    edition = "openclaw";
+    directUrl = "https://assets.petdex.dev/curated/boba/sprite-v2.webp";
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const res = await (await selectRoute())(post({ slug: "boba" }));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ reason: "install-failed" });
+    expect(fs.existsSync(path.join(tmpHome, "data", "config.json"))).toBe(false);
   });
 
   it("installs and activates, then reports the new active pet", async () => {

@@ -660,6 +660,99 @@ export interface HermesGatewayEnsureResult extends HermesGatewayStatus {
 }
 
 /**
+ * The environment a `systemctl --user` call needs from INSIDE the web server: a
+ * system service has no session bus address, so every `--user` answer is
+ * "Failed to connect" unless it is pointed at the clawbox user's runtime dir.
+ * The same shape `startUserEngine` (local-models.ts) uses for the voice units.
+ * Hermes' own user-scope `gateway install/uninstall/restart` run `systemctl
+ * --user` underneath, so the CLI gets it too.
+ */
+function userScopeEnv(): Record<string, string> {
+  return { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}` };
+}
+
+/**
+ * Install the gateway as the clawbox user's USER service — `hermes gateway
+ * install`, the shape Hermes' own installer writes by default and the one that
+ * needs no root at all. It starts at boot through the user's linger, which
+ * install-voice.sh enables on every SKU for the voice engines.
+ *
+ * This is the path a box takes when the system install below could not be
+ * granted: before it, a box provisioned without a terminal (the harness swap,
+ * install.sh's non-interactive Hermes install) saved the Telegram token and
+ * never received a message, because the only installer was `sudo hermes
+ * gateway install --system` and that sudo is refused on purpose.
+ */
+async function installHermesGatewayUserService(signal?: AbortSignal): Promise<boolean> {
+  try {
+    const res = await runHermesCli(["gateway", "install", "--start-now", "--start-on-login"], {
+      timeoutMs: GATEWAY_TIMEOUT_MS,
+      signal,
+      env: userScopeEnv(),
+    });
+    if (res.code !== 0) {
+      console.error(`[hermes] user gateway install exited ${res.code}: ${res.stderr || res.stdout}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("[hermes] user gateway install failed:", err);
+    return false;
+  }
+}
+
+/**
+ * Make sure a USER-scope unit comes back at boot. Best effort and idempotent:
+ * install.sh's foreign-edition teardown DISABLES the unit when the box is
+ * re-baked as OpenClaw, and a later swap back finds it installed but not
+ * enabled — a restart alone would leave it off after the next reboot.
+ */
+async function enableHermesGatewayUserService(signal?: AbortSignal): Promise<void> {
+  try {
+    await execFileAsync("/usr/bin/systemctl", ["--user", "enable", HERMES_GATEWAY_UNIT], {
+      timeout: GATEWAY_TIMEOUT_MS,
+      signal,
+      env: { ...process.env, ...userScopeEnv() },
+    });
+  } catch (err) {
+    console.error("[hermes] user gateway enable failed:", err);
+  }
+}
+
+/**
+ * Take the clawbox user's USER-scope gateway back out — `hermes gateway
+ * uninstall`, no sudo — so it stops polling the Telegram bot the box is about
+ * to hand to OpenClaw (two pollers on one token terminate each other's
+ * getUpdates for ever). The SYSTEM unit is not this function's: install.sh's
+ * `step_edition_foreign_teardown` stops and disables that one as root.
+ *
+ * Answers true when there is nothing left to retire — no user unit, or a
+ * system one — and false only when a user unit is there and would not go, or
+ * the gateway could not be asked at all.
+ */
+export async function retireHermesUserGateway(signal?: AbortSignal): Promise<boolean> {
+  const { value: before, answered } = await readHermesGatewayStatus(signal);
+  if (!answered) return false;
+  if (!before.installed || before.scope !== "user") return true;
+  try {
+    const res = await runHermesCli(["gateway", "uninstall"], {
+      timeoutMs: GATEWAY_TIMEOUT_MS,
+      signal,
+      env: userScopeEnv(),
+    });
+    invalidateHermesGatewayStatus();
+    if (res.code !== 0) {
+      console.error(`[hermes] user gateway uninstall exited ${res.code}: ${res.stderr || res.stdout}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("[hermes] user gateway uninstall failed:", err);
+    return false;
+  }
+}
+
+/**
  * Restart the gateway's SYSTEM unit through systemctl.
  *
  * Not `sudo hermes gateway restart --system`: that execs
@@ -753,9 +846,14 @@ export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesG
   if (before.installed) {
     // A system unit can only be controlled by root; a user unit must NOT be,
     // or systemctl --user would be aimed at root's session bus.
-    const applied = before.scope === "system"
-      ? await restartHermesGatewayUnit(signal)
-      : await restartHermesGatewayUserService(signal);
+    let applied: boolean;
+    if (before.scope === "system") {
+      applied = await restartHermesGatewayUnit(signal);
+    } else {
+      applied = await restartHermesGatewayUserService(signal);
+      // A unit the edition teardown disabled comes back at boot again.
+      if (applied) await enableHermesGatewayUserService(signal);
+    }
     invalidateHermesGatewayStatus();
     return { ...(await hermesGatewayStatus(signal)), applied };
   }
@@ -769,11 +867,14 @@ export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesG
   // started with, so the caller must not claim the change is live.
   if (before.running) return { ...before, applied: false };
 
-  // First-time provisioning only, and deliberately ungranted in sudoers: this
-  // writes a unit into /etc/systemd/system, and the only way to allow-list it
-  // would be a NOPASSWD grant on a clawbox-writable binary. `sudo -n` fails in
-  // milliseconds on a narrowed box; the `applied` flag carries that outward
-  // instead of it disappearing into a status probe.
+  // First-time provisioning. The SYSTEM unit is tried first and is
+  // deliberately ungranted in sudoers: it writes a unit into
+  // /etc/systemd/system, and the only way to allow-list it would be a
+  // NOPASSWD grant on a clawbox-writable binary. `sudo -n` fails in
+  // milliseconds on a narrowed box — every shipped box — and then the USER
+  // service takes over: no root, Hermes' own default, started at boot by the
+  // clawbox user's linger. Before that fallback a box provisioned with no
+  // terminal saved the token and never received a message.
   let applied = false;
   try {
     const res = await runHermesCli(
@@ -792,6 +893,7 @@ export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesG
   } catch (err) {
     console.error("[hermes] gateway install failed:", err);
   }
+  if (!applied) applied = await installHermesGatewayUserService(signal);
   invalidateHermesGatewayStatus();
   return { ...(await hermesGatewayStatus(signal)), applied };
 }

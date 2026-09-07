@@ -3,7 +3,6 @@ export const dynamic = "force-dynamic";
 import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
-import { hasHermesHarness } from "@/lib/edition-source";
 import { loadPet, safePetSlug } from "@/lib/hermes-pets";
 
 const MIME: Record<string, string> = {
@@ -23,7 +22,6 @@ const MIME: Record<string, string> = {
  * rev → new URL) is what makes the browser refetch.
  */
 export async function GET(request: Request) {
-  if (!hasHermesHarness()) return new NextResponse(null, { status: 404 });
 
   const slug = safePetSlug(new URL(request.url).searchParams.get("slug"));
   if (!slug) return new NextResponse(null, { status: 400 });

@@ -243,9 +243,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   // ── Which body this mascot wears ──
   //
-  // OpenClaw boxes wear the crab and nothing here changes for them: the route
-  // answers `supported: false` from the edition lock, so no pet code runs.
-  // Hermes boxes wear the pet the user picked in Settings — the crab is
+  // Every edition wears the pet the user picked in Settings → Appearance
+  // (since 2026-09-07 OpenClaw has the same picker, on ClawBox's own store).
+  // With NO pet picked the route's `placeholder` decides: the crab wherever
+  // ClawBox's own harness runs, the egg on a Hermes-only box — the crab is
   // ClawBox's own brand and is not offered on a device that does not run
   // ClawBox's own harness.
   //
@@ -1545,10 +1546,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // box does not read as a broken one and the picker is one click away.
   //
   // This is the ONLY way `EggMascot` is reached, which is what keeps it off
-  // OpenClaw: `supported` is true only when the server confirmed a Hermes
-  // harness, and every fail-open path in `pet-client.ts` answers
-  // `supported: false` — an unreachable pets route keeps the crab.
-  if (petStatus.supported && !pet) return <EggMascot />
+  // OpenClaw: the route says `placeholder: "crab"` wherever ClawBox's own
+  // harness runs, and every fail-open path in `pet-client.ts` answers
+  // `supported: false` with the crab — an unreachable pets route keeps it.
+  if (petStatus.supported && !pet && petStatus.placeholder === "egg") return <EggMascot />
 
   /** The body box this mascot occupies. Every offset below is relative to it. */
   const bodyPx = pet ? PET_BODY_PX : CRAB_BODY_PX

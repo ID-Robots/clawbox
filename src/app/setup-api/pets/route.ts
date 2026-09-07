@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { hasHermesHarness, readEdition } from "@/lib/edition-source";
+import { readEdition } from "@/lib/edition-source";
 import { CURATED_PETS, curatedPet, DEFAULT_PET_SLUG, PETDEX_URL } from "@/lib/pet-curated";
 import {
   activePetDescriptor,
@@ -27,9 +27,10 @@ import {
  */
 export async function GET(request: Request) {
   const edition = readEdition();
-  if (!hasHermesHarness()) {
-    return NextResponse.json({ supported: false, edition, enabled: false, active: null, pets: [] });
-  }
+  // What the desktop wears with NO pet picked: the crab wherever ClawBox's own
+  // harness runs (openclaw, dual), the egg on a Hermes-only box — the crab is
+  // ClawBox's brand and is not a stand-in on someone else's harness.
+  const placeholder = edition === "hermes" ? "egg" : "crab";
 
   const wantGallery = new URL(request.url).searchParams.get("gallery") === "1";
 
@@ -46,6 +47,7 @@ export async function GET(request: Request) {
     return NextResponse.json({
       supported: true,
       edition,
+      placeholder,
       enabled: config.enabled,
       activeSlug: active?.slug ?? "",
       active,
@@ -83,6 +85,7 @@ export async function GET(request: Request) {
   return NextResponse.json({
     supported: true,
     edition,
+    placeholder,
     enabled: config.enabled,
     activeSlug: active?.slug ?? "",
     active,

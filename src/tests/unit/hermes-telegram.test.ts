@@ -635,3 +635,137 @@ describe("clearHermesTelegramPairingState", () => {
     await expect(fs.access(path.join(storeDir, "telegram-approved.json"))).rejects.toThrow();
   });
 });
+
+// ── The gateway's first-time install, and its retirement ──
+//
+// `hermes gateway status` output, verbatim shapes: no service, a user service,
+// a system service.
+const STATUS_NONE = "✗ Gateway is not running\n\nTo start:\n  hermes gateway run\n  hermes gateway install  # Install as user service\n";
+const STATUS_USER_RUNNING = "✓ User gateway service is running (PID 4242)\n";
+const STATUS_USER_STOPPED = "✗ User gateway service is stopped\n";
+const STATUS_SYSTEM_RUNNING = "✓ System gateway service is running (PID 4242)\n";
+
+/** Drive the CLI mock by verb: `status` answers `status`, everything else answers `code`. */
+function cliAnswers(status: () => string, code = 0) {
+  runHermesCliMock.mockImplementation(async (args: string[]) => {
+    if (args[0] === "gateway" && args[1] === "status") return { code: 0, stdout: status(), stderr: "" };
+    return { code, stdout: "", stderr: code === 0 ? "" : "refused" };
+  });
+}
+const cliCalls = () => runHermesCliMock.mock.calls.map((c) => (c[0] as string[]).join(" "));
+const cliOpts = (verb: string) =>
+  runHermesCliMock.mock.calls.find((c) => (c[0] as string[]).join(" ").startsWith(verb))?.[1] as Record<string, unknown> | undefined;
+const gatewayLib = () => import("@/lib/hermes-telegram");
+
+describe("ensureHermesGateway — first-time install", () => {
+  beforeEach(async () => {
+    runHermesCliMock.mockReset();
+    execFileMock.mockReset();
+    (await gatewayLib()).invalidateHermesGatewayStatus();
+  });
+
+  it("falls back to the clawbox user's USER service when the system install is refused", async () => {
+    // The sudo'd system install is deliberately ungranted: the CLI answers a
+    // non-zero exit. The user service — Hermes' own default — is then installed
+    // with no sudo, and reported as installed once status says so.
+    let installed = false;
+    runHermesCliMock.mockImplementation(async (args: string[], opts?: Record<string, unknown>) => {
+      const verb = args.join(" ");
+      if (verb === "gateway status") return { code: 0, stdout: installed ? STATUS_USER_RUNNING : STATUS_NONE, stderr: "" };
+      if (verb.startsWith("gateway install --system")) return { code: 1, stdout: "", stderr: "sudo: a password is required" };
+      if (verb === "gateway install --start-now --start-on-login") {
+        expect(opts?.sudo).toBeUndefined();
+        installed = true;
+        return { code: 0, stdout: "✓ Gateway service installed", stderr: "" };
+      }
+      throw new Error(`unexpected CLI call: ${verb}`);
+    });
+
+    const res = await (await gatewayLib()).ensureHermesGateway();
+
+    expect(res).toMatchObject({ applied: true, installed: true, running: true, scope: "user" });
+    expect(cliCalls()).toEqual([
+      "gateway status",
+      "gateway install --system --run-as-user clawbox --start-now --start-on-login",
+      "gateway install --start-now --start-on-login",
+      "gateway status",
+    ]);
+    // A `systemctl --user` from inside a system service needs the user's bus.
+    expect((cliOpts("gateway install --start-now")?.env as Record<string, string>).XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
+  });
+
+  it("does not install the user service when the system install was granted", async () => {
+    let installed = false;
+    runHermesCliMock.mockImplementation(async (args: string[]) => {
+      const verb = args.join(" ");
+      if (verb === "gateway status") return { code: 0, stdout: installed ? STATUS_SYSTEM_RUNNING : STATUS_NONE, stderr: "" };
+      if (verb.startsWith("gateway install --system")) { installed = true; return { code: 0, stdout: "", stderr: "" }; }
+      throw new Error(`unexpected CLI call: ${verb}`);
+    });
+    const res = await (await gatewayLib()).ensureHermesGateway();
+    expect(res).toMatchObject({ applied: true, scope: "system" });
+    expect(cliCalls().filter((c) => c.startsWith("gateway install"))).toHaveLength(1);
+  });
+
+  it("reports applied: false when neither install took", async () => {
+    cliAnswers(() => STATUS_NONE, 1);
+    const res = await (await gatewayLib()).ensureHermesGateway();
+    expect(res).toMatchObject({ applied: false, installed: false });
+    expect(cliCalls().filter((c) => c.startsWith("gateway install"))).toHaveLength(2);
+  });
+
+  it("restarts AND re-enables an installed user service, so it comes back at boot", async () => {
+    // install.sh's foreign-edition teardown disables the user unit on the way
+    // to OpenClaw; a later swap back must not leave it off after a reboot.
+    cliAnswers(() => STATUS_USER_STOPPED);
+    execFileSucceeds();
+    const res = await (await gatewayLib()).ensureHermesGateway();
+    expect(res.applied).toBe(true);
+    expect(cliCalls()).toContain("gateway restart");
+    const enable = execFileMock.mock.calls.find((c) => (c[1] as string[]).includes("enable"));
+    expect(enable?.[0]).toBe("/usr/bin/systemctl");
+    expect(enable?.[1]).toEqual(["--user", "enable", "hermes-gateway.service"]);
+    expect((enable?.[2] as { env: Record<string, string> }).env.XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
+  });
+
+  it("never touches the user bus for a system service", async () => {
+    cliAnswers(() => STATUS_SYSTEM_RUNNING);
+    execFileSucceeds();
+    await (await gatewayLib()).ensureHermesGateway();
+    expect(execFileMock.mock.calls.some((c) => (c[1] as string[]).includes("--user"))).toBe(false);
+    expect(execFileMock.mock.calls[0]?.[1]).toEqual(["-n", "/usr/bin/systemctl", "restart", "hermes-gateway.service"]);
+  });
+});
+
+describe("retireHermesUserGateway", () => {
+  beforeEach(async () => {
+    runHermesCliMock.mockReset();
+    (await gatewayLib()).invalidateHermesGatewayStatus();
+  });
+
+  it("uninstalls a user-scope service through the CLI, with the user's bus", async () => {
+    cliAnswers(() => STATUS_USER_RUNNING);
+    expect(await (await gatewayLib()).retireHermesUserGateway()).toBe(true);
+    expect(cliCalls()).toEqual(["gateway status", "gateway uninstall"]);
+    expect(cliOpts("gateway uninstall")?.sudo).toBeUndefined();
+    expect((cliOpts("gateway uninstall")?.env as Record<string, string>).XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
+  });
+
+  it("leaves a SYSTEM service to install.sh's teardown, and a box with none alone", async () => {
+    cliAnswers(() => STATUS_SYSTEM_RUNNING);
+    expect(await (await gatewayLib()).retireHermesUserGateway()).toBe(true);
+    expect(cliCalls()).toEqual(["gateway status"]);
+    runHermesCliMock.mockReset();
+    cliAnswers(() => STATUS_NONE);
+    expect(await (await gatewayLib()).retireHermesUserGateway()).toBe(true);
+    expect(cliCalls()).toEqual(["gateway status"]);
+  });
+
+  it("answers false when the uninstall failed or the gateway could not be asked", async () => {
+    cliAnswers(() => STATUS_USER_RUNNING, 1);
+    expect(await (await gatewayLib()).retireHermesUserGateway()).toBe(false);
+    runHermesCliMock.mockReset();
+    runHermesCliMock.mockRejectedValue(new Error("hermes: timed out"));
+    expect(await (await gatewayLib()).retireHermesUserGateway()).toBe(false);
+  });
+});

@@ -65,11 +65,30 @@ afterEach(() => {
 });
 
 describe("PetPicker", () => {
-  it("renders nothing on OpenClaw", async () => {
+  it("renders nothing for a server that predates pets or cannot be reached", async () => {
     stubFetch({ supported: false, edition: "openclaw", enabled: false, pets: [] });
     const { container } = render(<PetPicker />);
     await waitFor(() => expect(container.querySelector("button")).toBeNull());
     expect(container.textContent).toBe("");
+  });
+
+  it("on OpenClaw shows the crab as the first tile — what 'no pet' wears there", async () => {
+    stubFetch(galleryPayload({ edition: "openclaw", placeholder: "crab", enabled: false, activeSlug: "" }));
+    const { container, getByTestId } = render(<PetPicker />);
+    await waitFor(() => expect(container.querySelectorAll("button").length).toBe(3));
+    const none = getByTestId("pet-tile-none");
+    expect(none.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy();
+    expect(none.textContent).toContain("settings.mascot.petCrab");
+    expect(none.textContent).not.toContain("settings.mascot.petNone");
+  });
+
+  it("on Hermes the first tile is 'none' — the egg, never the crab", async () => {
+    stubFetch(galleryPayload({ placeholder: "egg" }));
+    const { getByTestId } = render(<PetPicker />);
+    await waitFor(() => expect(getByTestId("pet-tile-none")).toBeTruthy());
+    const none = getByTestId("pet-tile-none");
+    expect(none.querySelector("img")).toBeNull();
+    expect(none.textContent).toContain("settings.mascot.petNone");
   });
 
   it("shows a tile per pet plus a 'no pet' tile on Hermes", async () => {

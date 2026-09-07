@@ -781,6 +781,15 @@ CLAWBOX_RECORDED_EDITION="$(_normalise_edition "$CLAWBOX_RECORDED_EDITION_RAW")"
 # how an edition is legitimately chosen. Untouched.
 if [ -n "$CLAWBOX_RECORDED_EDITION" ] && [ "$CLAWBOX_RECORDED_EDITION" != "$CLAWBOX_EDITION" ]; then
   if [ "$CLAWBOX_ALLOW_EDITION_CHANGE" = "1" ]; then
+    if [ -n "${CLAWBOX_EDITION_CHANGE_REASON:-}" ]; then
+      # step_harness_swap re-execs this file per sub-step as the target edition
+      # and the swap route carries the sign-in across afterwards, so the
+      # paragraph below — "finish the transition by hand", "no usable model" —
+      # would be untrue in the one journal the owner is watching. One line that
+      # names the caller is the honest version; the paragraph stays for an
+      # operator's own CLAWBOX_ALLOW_EDITION_CHANGE=1, where it is true.
+      echo "[edition] installing '$CLAWBOX_EDITION' over '$CLAWBOX_RECORDED_EDITION' — ${CLAWBOX_EDITION_CHANGE_REASON}" >&2
+    else
     cat >&2 <<EOF
 
 WARNING: CLAWBOX_ALLOW_EDITION_CHANGE=1 — installing '$CLAWBOX_EDITION' over
@@ -792,6 +801,7 @@ WARNING: CLAWBOX_ALLOW_EDITION_CHANGE=1 — installing '$CLAWBOX_EDITION' over
          You are expected to finish the transition by hand.
 
 EOF
+    fi
   else
     cat >&2 <<EOF
 
@@ -1055,7 +1065,17 @@ if ! has_openclaw_harness; then
   # correctly provisioned Hermes box reports nothing twice.
   FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
 fi
-
+# The same registry for the clawbox USER's manager. `hermes gateway install`
+# (no --system) writes hermes-gateway.service under ~/.config/systemd/user —
+# what a box provisioned without a terminal ends up with (the harness swap,
+# this installer's own Hermes step), since the system install needs a sudo
+# that is refused on purpose. It polls the same bot token, the system-scope
+# loop cannot see it, and step_edition_foreign_teardown reaches it through the
+# user's session bus. Built by the same negation, so dual is untouched.
+FOREIGN_EDITION_USER_UNITS=()
+if ! has_hermes_harness; then
+  FOREIGN_EDITION_USER_UNITS+=(hermes-gateway.service)
+fi
 # Read one KEY=VALUE out of a file this script does NOT trust.
 #
 # Everything under $PROJECT_DIR/data is written by the web server, i.e. by the
@@ -3996,7 +4016,34 @@ step_edition_foreign_teardown() {
     brought_down+=("$funit (was active=$f_active enabled=$f_enabled)")
   done
 
-  if [ "${#brought_down[@]}" -eq 0 ]; then
+  # The clawbox USER's units belonging to the other edition
+  # (FOREIGN_EDITION_USER_UNITS, built beside the list above by the same
+  # negation): reached through the user's session bus, the way
+  # pause_engine_user_unit reaches the voice units. Stopped and disabled, not
+  # removed: `hermes gateway install` puts the unit back on the next swap.
+  if [ "${#FOREIGN_EDITION_USER_UNITS[@]}" -gt 0 ] && [ "${CLAWBOX_KEEP_FOREIGN_UNITS:-0}" != "1" ]; then
+    local uunit u_user u_uid u_state
+    u_user="${CLAWBOX_USER:-clawbox}"
+    u_uid="$(id -u "$u_user" 2>/dev/null || true)"
+    for uunit in "${FOREIGN_EDITION_USER_UNITS[@]}"; do
+      [ -n "$u_uid" ] || break
+      sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" \
+        systemctl --user cat "$uunit" >/dev/null 2>&1 || continue
+      u_state="$(sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" systemctl --user is-active "$uunit" 2>/dev/null || true)"
+      # Never reported as brought down on faith: a unit the user's manager
+      # would not disable is still the second poller, and the owner has to be
+      # told so with the command that finishes the job.
+      if sudo -u "$u_user" XDG_RUNTIME_DIR="/run/user/$u_uid" \
+          systemctl --user disable --now "$uunit" >/dev/null 2>&1; then
+        brought_down+=("$uunit (the clawbox user's unit; was active=${u_state:-unknown})")
+      else
+        echo "  Warning: could not disable the clawbox user's $uunit (was active=${u_state:-unknown});" >&2
+        echo "    it goes on polling the Telegram bot beside the OpenClaw gateway until it is stopped:" >&2
+        echo "    sudo -u $u_user XDG_RUNTIME_DIR=/run/user/$u_uid systemctl --user disable --now $uunit" >&2
+      fi
+    done
+  fi
+if [ "${#brought_down[@]}" -eq 0 ]; then
     return 0
   fi
 
@@ -4139,6 +4186,368 @@ step_hermes_edition() {
   # mirror would stop at install.sh's own edge. TASK-733.
   CLAWBOX_EDITION="$CLAWBOX_EDITION" CLAWBOX_SRC_DIR="$SRC_DIR" \
     bash "$SRC_DIR/scripts/setup-hermes-edition.sh"
+}
+
+# ── The harness swap: OpenClaw ↔ Hermes on a box that is already provisioned ──
+#
+# Settings → Harness's button (the owner, 2026-09-07). The route writes
+# $PROJECT_DIR/data/harness-swap.env and starts this step through the granted
+# launcher; everything below runs as ROOT off a file the clawbox ACCOUNT can
+# write — the web server, the Terminal app, the agent's shell and a coding run
+# all can, and each can start the step too. So, as with data/timezone.env, the
+# VALUE gate is the boundary and not who asked: the file is parsed and never
+# sourced, the target has to be exactly one of the two single editions, the
+# request has to be recent, and the worst thing the account can obtain is a
+# swap the owner did not ask for — loud in the journal and on the desktop, and
+# reversible with the same button.
+#
+# The sub-steps are the installer's own edition steps, RE-EXECUTED one at a
+# time as the target edition (`bash "$SRC_DIR/install.sh" --step <s>` with
+# CLAWBOX_EDITION=<target>). Calling the step functions in THIS process would
+# run them against this process's edition globals, which were computed at
+# parse time for the edition the box still IS: the predicates, the service
+# lists and FOREIGN_EDITION_UNITS all carry the old answer, so
+# step_edition_lock would tear down the wrong harness. A fresh parse is the
+# only way to get them for the target. The re-exec is safe by construction:
+# nothing on the --step path takes a lock, the child's own EXIT trap turns a
+# recorded provisioning failure into a non-zero exit this process reads, and
+# its output inherits the unit's journal so the route's tail sees it.
+#
+# ORDER is the whole safety story: the harness being SWAPPED TO is installed
+# and PROVED to run before the lock flips, so an install that fails — no
+# network, a mirror down, a broken installer — leaves the box exactly what it
+# was. Only after the proof does anything irreversible happen.
+
+# What the route wrote, parsed and gated. Prints the target edition on 0.
+#   1  no request on disk (a genuine no-op)
+#   2  TARGET_EDITION is not exactly `openclaw` or `hermes`
+#   3  data/harness-swap.env is not the plain file the route writes
+#   4  REQUESTED_AT is missing, not a number, older than an hour or in the future
+read_configured_harness_swap() {
+  local req="$PROJECT_DIR/data/harness-swap.env" line target at now
+  # Same shape rule as read_configured_timezone, for the same reason: `[ -f ]`
+  # follows a symlink and is false for a directory or a FIFO, so every planted
+  # shape would otherwise read as "no request" and exit 0 — and a FIFO would
+  # park the grep below for ever.
+  if [ -L "$req" ] || { [ -e "$req" ] && [ ! -f "$req" ]; }; then
+    echo "Error: $req is not the plain file the harness-swap route writes — refusing to read it." >&2
+    return 3
+  fi
+  [ -f "$req" ] || return 1
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?TARGET_EDITION=" "$req" 2>/dev/null)" || return 2
+  target="${line#*=}"
+  case "$target" in
+    \"*\") target="${target#\"}"; target="${target%\"}" ;;
+    \'*\') target="${target#\'}"; target="${target%\'}" ;;
+  esac
+  # Exactly the two single editions, case-sensitive: this value becomes
+  # CLAWBOX_EDITION for a root re-exec of this file, and `dual` is a SKU, not
+  # a swap target.
+  case "$target" in
+    openclaw|hermes) ;;
+    *) return 2 ;;
+  esac
+  # A request is an INTENT with a time on it, not a standing order: the route
+  # deletes the file when its stream ends, but one that outlived a crashed web
+  # server must not swap the box on some later, unrelated start of this step.
+  # An hour is longer than any swap takes; the five minutes forward is clock
+  # skew, not a grant.
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?REQUESTED_AT=" "$req" 2>/dev/null)" || return 4
+  at="${line#*=}"
+  case "$at" in
+    \"*\") at="${at#\"}"; at="${at%\"}" ;;
+    \'*\') at="${at#\'}"; at="${at%\'}" ;;
+  esac
+  case "$at" in ''|*[!0-9]*) return 4 ;; esac
+  # Twelve digits outlast the epoch by centuries; anything longer is not a
+  # time and must not reach the arithmetic below.
+  [ "${#at}" -le 12 ] || return 4
+  now="$(date +%s)"
+  [ "$at" -le $((now + 300)) ] || return 4
+  [ "$at" -ge $((now - 3600)) ] || return 4
+  printf '%s' "$target"
+}
+
+# One installer step, run as the TARGET edition, out of the copy of install.sh
+# root is already executing ($SRC_DIR — the mirror on a dispatched step).
+#
+# CLAWBOX_ALLOW_EDITION_CHANGE=1 is what the top-level refusal requires while
+# the lock still names the edition being left; CLAWBOX_EDITION_CHANGE_REASON
+# turns its "finish the transition by hand" paragraph into one line naming
+# this step, because that paragraph is untrue here and this is the one journal
+# the owner is watching. CLAWBOX_INSTALL_BOOTSTRAPPED=1 pins the child to the
+# on-disk copy: a swap must not fetch or reset the tree, and this process was
+# itself pinned by the dispatcher.
+harness_swap_substep() {
+  local name="$1" target="$2"
+  echo "  -> install.sh --step $name (as the $(harness_swap_label "$target") edition)"
+  CLAWBOX_EDITION="$target" CLAWBOX_ALLOW_EDITION_CHANGE=1 \
+    CLAWBOX_EDITION_CHANGE_REASON="harness swap in progress (install.sh --step harness_swap)" \
+    CLAWBOX_INSTALL_BOOTSTRAPPED=1 \
+    bash "$SRC_DIR/install.sh" --step "$name"
+}
+
+# The harness as the Settings page names it. The swap route's own sentences
+# say "Hermes" and "OpenClaw" (HARNESSES[target].label), and the one line of
+# this journal the owner reads is drawn beside them in the same modal — so it
+# must not be the one place that spells the SKU ids.
+harness_swap_label() {
+  case "$1" in
+    hermes) echo "Hermes" ;;
+    openclaw) echo "OpenClaw" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# A failure is TWO lines, and the split is a contract with the swap route:
+# failureReason (src/lib/root-step-follow.ts) hands the owner's modal the LAST
+# journal line that says "error", verbatim. So the sentence carries what the
+# owner needs — which phase failed, what the box now is, what is missing, the
+# harness by its name — and nothing that is an operator's: no path, no account
+# name, no command (the voice route's rule: the stated reason reaches the
+# owner, never the install hint). The repair goes on a second line worded so
+# that it never contains "error" and is never the one picked; the journal
+# keeps it. Only prints — the caller's `return 1` is the failure, so `set -e`
+# cannot cut the sentence off between the two lines.
+harness_swap_say_failed() {
+  local phase="$1" sentence="$2" repair="${3:-}"
+  echo "Error: the $phase phase failed — $sentence" >&2
+  if [ -n "$repair" ]; then
+    echo "  Repair: $repair" >&2
+  fi
+}
+
+# ": <last non-empty line>" of a probe's captured stderr, or nothing when it
+# said nothing — the one line that says WHY, for the sentence above.
+harness_swap_last_line() {
+  local last
+  last="$(printf '%s\n' "$1" | sed -e '/^[[:space:]]*$/d' | tail -n 1)"
+  if [ -n "$last" ]; then
+    printf ': %s' "$last"
+  fi
+}
+
+# Why the harness being swapped to does not run, for the failure sentence;
+# set by the two probes below, read only after one of them returned 1.
+HARNESS_SWAP_PROBE_SAID=""
+
+# Does Hermes RUN on this box? step_hermes_install is non-fatal by design — a
+# box with no network must not lose the agent it has — so its exit status says
+# nothing, and this proof is the swap's own. The same three facts that step
+# checks: the shim, the interpreter it execs, and the shim answering as the
+# clawbox user (a root probe leaves root-owned __pycache__ in a clawbox tree).
+# The probe's stderr is CAPTURED, not discarded — the way apply_timezone keeps
+# timedatectl's refusal — because its last line is the one that says why, and
+# thrown away it left the owner a red modal with no reason on it.
+harness_swap_hermes_runnable() {
+  local shim="$CLAWBOX_HOME/.local/bin/hermes"
+  local venv_python="$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python"
+  local said
+  HARNESS_SWAP_PROBE_SAID=""
+  if [ ! -x "$shim" ]; then
+    HARNESS_SWAP_PROBE_SAID="its launcher is missing"
+    return 1
+  fi
+  if [ ! -x "$venv_python" ]; then
+    HARNESS_SWAP_PROBE_SAID="its Python environment is missing"
+    return 1
+  fi
+  if said="$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" "$shim" --help 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  harness_swap_print_probe "$said"
+  HARNESS_SWAP_PROBE_SAID="its launcher does not start$(harness_swap_last_line "$said")"
+  return 1
+}
+
+harness_swap_openclaw_runnable() {
+  local said
+  HARNESS_SWAP_PROBE_SAID=""
+  if [ ! -x "$OPENCLAW_BIN" ]; then
+    HARNESS_SWAP_PROBE_SAID="its command is missing"
+    return 1
+  fi
+  if said="$("$OPENCLAW_BIN" --version 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  harness_swap_print_probe "$said"
+  HARNESS_SWAP_PROBE_SAID="its command does not answer --version$(harness_swap_last_line "$said")"
+  return 1
+}
+
+# The whole of what a failed probe said, indented, for the journal — BEFORE
+# the sentence, so a line of its own that happens to say "error" is never the
+# one the modal picks.
+harness_swap_print_probe() {
+  [ -n "$1" ] || return 0
+  printf '%s\n' "$1" | sed -e 's/^/    | /'
+}
+
+harness_swap_to_hermes() {
+  local from="$1" was
+  was="$(harness_swap_label "$from")"
+  echo "[harness-swap] phase=install"
+  if ! harness_swap_substep hermes_install hermes; then
+    harness_swap_say_failed install "the Hermes install step did not finish. This box is still the $was edition and nothing was changed." \
+      "nothing to undo; the install step's own lines are above — swap again from Settings → Harness"
+    return 1
+  fi
+  if ! harness_swap_hermes_runnable; then
+    harness_swap_say_failed install "Hermes does not run on this box after its install step ($HARNESS_SWAP_PROBE_SAID). This box is still the $was edition and nothing was changed." \
+      "nothing to undo; swap again from Settings → Harness once that is answered"
+    return 1
+  fi
+  echo "  Hermes runs"
+  echo "[harness-swap] phase=lock"
+  # step_edition_lock can only fail at the lock or drop-in write itself (its
+  # two state steps return 0 unconditionally), so the lock may still name the
+  # edition being left, and a repair has to re-bake it AS THE TARGET before
+  # any provisioning step can do anything: run as the recorded edition,
+  # hermes_edition hits `has_hermes_harness || return 0` and exits clean
+  # having provisioned nothing.
+  if ! harness_swap_substep edition_lock hermes; then
+    harness_swap_say_failed lock "the edition lock step did not finish. This box may now be the Hermes edition with the OpenClaw gateway gone and no Hermes dashboard." \
+      "sudo CLAWBOX_EDITION=hermes CLAWBOX_ALLOW_EDITION_CHANGE=1 bash $PROJECT_DIR/install.sh --step edition_lock && sudo bash $PROJECT_DIR/install.sh --step hermes_edition"
+    return 1
+  fi
+  echo "[harness-swap] phase=provision"
+  if ! harness_swap_substep hermes_edition hermes; then
+    harness_swap_say_failed provision "the Hermes provisioning step did not finish. This box is now the Hermes edition without a working dashboard." \
+      "sudo bash $PROJECT_DIR/install.sh --step hermes_edition"
+    return 1
+  fi
+  local unit what
+  for unit in clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service; do
+    if [ "$(systemctl is-enabled "$unit" 2>/dev/null || true)" != "enabled" ]; then
+      case "$unit" in
+        *-proxy.service) what="the Hermes dashboard's proxy" ;;
+        *) what="the Hermes dashboard" ;;
+      esac
+      harness_swap_say_failed provision "$what is not enabled after provisioning. This box is now the Hermes edition with its dashboard not enabled." \
+        "sudo systemctl enable --now $unit"
+      return 1
+    fi
+  done
+  echo "  Hermes dashboard units enabled"
+}
+
+# openclaw_install before the lock (a pinned core that will not install leaves
+# the box what it was), gateway_setup after it (the lock unmasks the unit that
+# setup copies back — the other order writes the unit file into /dev/null),
+# openclaw_patch because it is idempotent on both generations, and deliberately
+# NO openclaw_config: gateway-pre-start.sh owns the gateway auth on every start,
+# the unit runs --allow-unconfigured, and the sign-in and the bot are carried
+# across by the route afterwards. On OpenClaw 2 that step seeds nothing a swap
+# needs — the model is left unset for onboarding, compaction is the
+# generation's own, and its ClawBox AI fallback comes only from the CI-only
+# CLAWBOX_AI_API_KEY — while an `openclaw config set` after gateway_setup would
+# restart the gateway under the listener wait below, which reads a restart as
+# a crash loop; and over an owner's existing openclaw.json it would re-seed
+# what they chose.
+harness_swap_to_openclaw() {
+  local from="$1" was
+  was="$(harness_swap_label "$from")"
+  echo "[harness-swap] phase=install"
+  if ! harness_swap_substep openclaw_install openclaw; then
+    harness_swap_say_failed install "the OpenClaw install step did not finish. This box is still the $was edition and nothing was changed." \
+      "nothing to undo; the install step's own lines are above — swap again from Settings → Harness"
+    return 1
+  fi
+  if ! harness_swap_openclaw_runnable; then
+    harness_swap_say_failed install "OpenClaw does not run on this box after its install step ($HARNESS_SWAP_PROBE_SAID). This box is still the $was edition and nothing was changed." \
+      "nothing to undo; swap again from Settings → Harness once that is answered"
+    return 1
+  fi
+  echo "  OpenClaw runs"
+  echo "[harness-swap] phase=lock"
+  # As above: the lock may still say the edition being left, and run that way
+  # `--step gateway_setup` copies the unit into the mask at /dev/null — the
+  # exact case step_edition_gateway_state's own comment warns about — so the
+  # repair re-bakes the lock as the target first.
+  if ! harness_swap_substep edition_lock openclaw; then
+    harness_swap_say_failed lock "the edition lock step did not finish. This box may now be the OpenClaw edition with the Hermes units down and no gateway unit." \
+      "sudo CLAWBOX_EDITION=openclaw CLAWBOX_ALLOW_EDITION_CHANGE=1 bash $PROJECT_DIR/install.sh --step edition_lock && sudo bash $PROJECT_DIR/install.sh --step gateway_setup"
+    return 1
+  fi
+  echo "[harness-swap] phase=provision"
+  if ! harness_swap_substep gateway_setup openclaw; then
+    harness_swap_say_failed provision "the gateway setup step did not finish. This box is now the OpenClaw edition with its gateway not installed." \
+      "sudo bash $PROJECT_DIR/install.sh --step gateway_setup"
+    return 1
+  fi
+  if ! harness_swap_substep openclaw_patch openclaw; then
+    harness_swap_say_failed provision "the gateway patch step did not finish. This box is now the OpenClaw edition with its gateway unpatched." \
+      "sudo bash $PROJECT_DIR/install.sh --step openclaw_patch"
+    return 1
+  fi
+  # The box's own wait, not a private one: wait_for_gateway_port gives the
+  # listener 180 s in 3 s polls and stops the moment the unit stops trying or
+  # RESTARTS (a crash loop spends its time `activating`, which a state check
+  # alone reads as "still starting"). The brief said "retry ≤ 60 s", and a
+  # 60 s loop is what shipped first — but the listener came 14 s after
+  # `Started` behind an ExecStartPre measured at 31, 86 and 120 s on this box
+  # (2026-09-06), so on the slower half of its own starts the swap was
+  # reported failed — lock flipped, carry-over skipped — over a gateway that
+  # listened a minute later. The budget is this step's alone:
+  # GATEWAY_READY_SPENT is 0 in a fresh dispatch and nothing before this spent
+  # any of it.
+  if ! wait_for_gateway_port; then
+    harness_swap_say_failed provision "the OpenClaw gateway did not start listening on port ${GATEWAY_PORT:-18789} (it stopped, is restarting, or took longer than ${CLAWBOX_GATEWAY_READY_BUDGET_S:-180} s). This box is now the OpenClaw edition with its gateway down." \
+      "journalctl -u clawbox-gateway.service"
+    return 1
+  fi
+  echo "  OpenClaw gateway is listening"
+}
+
+# Every phase is announced on ONE line of exactly this shape, because the swap
+# route reads them out of the journal to draw its progress: request → install
+# → lock → provision → done. The `done` here ends the ROOT STEP, not the swap —
+# the route relays it as a plain line, carries the credentials across, and
+# prints its own `carry` and `done`. Nothing here prints a credential.
+step_harness_swap() {
+  local req="$PROJECT_DIR/data/harness-swap.env" target rc=0
+  target="$(read_configured_harness_swap)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) echo "  No harness swap requested — nothing to do"; return 0 ;;
+    2) echo "Error: data/harness-swap.env does not name an edition this box can be swapped to (openclaw or hermes) — refusing." >&2; return 1 ;;
+    3) echo "Error: the harness-swap request was refused — leaving the edition alone." >&2; return 1 ;;
+    4) echo "Error: the harness-swap request is stale (older than an hour, or dated in the future) — ask for the swap again." >&2; return 1 ;;
+    *) echo "Error: could not read the harness-swap request (rc=$rc) — leaving the edition alone." >&2; return 1 ;;
+  esac
+  echo "[harness-swap] phase=request"
+  local recorded="${CLAWBOX_RECORDED_EDITION:-}"
+  case "$recorded" in
+    dual)
+      echo "Error: a dual box switches harness at runtime — refusing to swap its edition." >&2
+      return 1
+      ;;
+    "")
+      # No lock and no legacy drop-in: nothing on the box says what it IS, so
+      # there is nothing to swap FROM. The route never asks in this state
+      # (its target is null while the edition is defaulted); refusing here
+      # keeps that true for the account that can write the file directly.
+      echo "Error: this box has no edition lock — refusing to swap an edition it never recorded." >&2
+      return 1
+      ;;
+  esac
+  local name
+  name="$(harness_swap_label "$target")"
+  if [ "$recorded" = "$target" ]; then
+    rm -f "$req"
+    echo "  Already the $name edition — nothing to do"
+    return 0
+  fi
+  echo "  Swapping this box from the $(harness_swap_label "$recorded") edition to $name"
+  case "$target" in
+    hermes) harness_swap_to_hermes "$recorded" ;;
+    openclaw) harness_swap_to_openclaw "$recorded" ;;
+  esac
+  echo "[harness-swap] phase=done"
+  # Only now: a request left on disk is how a failed swap stays tellable from
+  # a finished one, and deleting it after a failure is the route's to do.
+  rm -f "$req"
+  echo "  This box is now the $name edition"
 }
 
 step_openclaw_install() {
@@ -9100,6 +9509,9 @@ DISPATCH_STEPS=(
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
   # box ended up running edition-blind updates that reinstalled OpenClaw.
   edition_lock edition_foreign_teardown hermes_install hermes_edition
+  # `harness_swap` is the owner's Settings → Harness button: value-gated by
+  # data/harness-swap.env, it re-execs the edition steps above as the target.
+  harness_swap
   network_setup set_hostname set_timezone setup_config system_config
   git_pull build rebuild rebuild_reboot restart restart_ap recover
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services

@@ -3470,7 +3470,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
             </div>
 
-            {/* Mascot pet — Hermes editions only; renders nothing on OpenClaw. */}
+            {/* Mascot pet — every edition; renders nothing only when the route cannot be reached. */}
             <PetPicker />
           </div>
         )}

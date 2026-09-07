@@ -1,4 +1,4 @@
-// ── Client-side view of the active Hermes pet ──
+// ── Client-side view of the active mascot pet ──
 //
 // One shared fetch of `/setup-api/pets`, so the mascot and the Settings picker
 // do not each pay for it, and one event so a pick in Settings reaches the
@@ -27,14 +27,20 @@ export interface PetDescriptor {
 }
 
 export interface PetStatus {
-  /** False on OpenClaw — there is no Hermes on the box, so there are no pets. */
+  /** False only when the route could not be reached or predates pets — the
+   *  fail-open shape, which keeps the crab. Every edition supports pets now. */
   supported: boolean;
   edition: string;
+  /** What the desktop wears with no pet picked: the crab wherever ClawBox's
+   *  own harness runs, the egg on a Hermes-only box. Absent from a server
+   *  that predates the OpenClaw arm — those only ever said `supported` for
+   *  Hermes, so the egg is the right reading of silence. */
+  placeholder: "crab" | "egg";
   enabled: boolean;
   active: PetDescriptor | null;
 }
 
-const OFF: PetStatus = { supported: false, edition: "openclaw", enabled: false, active: null };
+const OFF: PetStatus = { supported: false, edition: "openclaw", placeholder: "crab", enabled: false, active: null };
 
 /** Fired after a successful pick so the mascot re-reads without a reload. */
 export const PET_CHANGED_EVENT = "clawbox-pet-changed";
@@ -77,6 +83,7 @@ function coerce(data: unknown): PetStatus {
   return {
     supported: true,
     edition: typeof d.edition === "string" ? d.edition : "hermes",
+    placeholder: d.placeholder === "crab" ? "crab" : "egg",
     enabled: d.enabled === true,
     active,
   };

@@ -30,6 +30,22 @@ import { isHermesCliProvider } from "@/lib/hermes-providers";
  */
 
 /** The dashboard's own event names, kept as a set so a rename is one edit. */
+/**
+ * The status line the chat draws while Hermes thinks — the SAME words
+ * OpenClaw's gateway puts on its own status line, so the two harnesses' chats
+ * look alike (the owner's ask, 2026-09-07: on Hermes the line read
+ * "Fluttering…", the desktop's own spinner verb, for the whole of a turn's
+ * silence, because Hermes sends nothing the desktop could show until its
+ * kaomoji spinner arrives — and that spinner, `(⌐■_■) computing...`, is the
+ * TUI's whimsy, not the status a customer expects beside the crab's).
+ *
+ * Emitted when the prompt is submitted, for every `thinking.delta` (the
+ * heartbeat keeps its meaning, the words are ours), and after every tool
+ * result, since the model is thinking again and the tool's name would
+ * otherwise stay on the line until the answer lands.
+ */
+export const THINKING_STATUS = "Thinking…";
+
 const EVENT = {
   ready: "gateway.ready",
   messageStart: "message.start",
@@ -1230,6 +1246,8 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
               params: { session_id: transportSid, text: req.text, ...(queued ? { queued: true } : {}) },
             }),
           );
+          // The line is up the moment the turn is in, as OpenClaw's is.
+          if (onActivity) onActivity({ kind: "status", text: THINKING_STATUS });
         };
         try {
           // ── A message arriving on a session parked on a question ─────────
@@ -1437,8 +1455,10 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 // one: forwarded as ACTIVITY, which no path folds into the
                 // monologue. Arriving here has already restarted the idle
                 // clock, in `nextFrame`, for every frame alike.
+                // The frame's own words are Hermes' kaomoji spinner; the line
+                // shown is the one OpenClaw's chat shows (THINKING_STATUS).
                 const status = payloadText(frame);
-                if (status && onActivity) onActivity({ kind: "status", text: status });
+                if (status && onActivity) onActivity({ kind: "status", text: THINKING_STATUS });
                 break;
               }
               case EVENT.toolGenerating:
@@ -1481,6 +1501,9 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                     ...(summary ? { detail: summary } : {}),
                     status: "ok",
                   });
+                  // The model is thinking again; the tool's name must not
+                  // stay on the line until the answer lands.
+                  onActivity({ kind: "status", text: THINKING_STATUS });
                 }
                 break;
               }
