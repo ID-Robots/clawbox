@@ -662,7 +662,7 @@ function SwapDialog({
                       data-state={state}
                       className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] ${
                         state === "current"
-                          ? "animate-pulse border-[var(--coral-bright)] text-[var(--text-primary)]"
+                          ? "motion-safe:animate-pulse border-[var(--coral-bright)] text-[var(--text-primary)]"
                           : state === "done"
                             ? "border-emerald-400/40 text-emerald-300"
                             : "border-[var(--border-subtle)] text-[var(--text-muted)]"
@@ -880,7 +880,7 @@ export default function HarnessPicker() {
               role="status"
               className="mt-3 flex items-center gap-2 rounded-xl border border-amber-400/40 bg-amber-400/10 p-3 text-xs text-[var(--text-primary)]"
             >
-              <span className="material-symbols-rounded text-amber-400 animate-spin shrink-0" style={{ fontSize: 16 }} aria-hidden="true">
+              <span className="material-symbols-rounded text-amber-400 motion-safe:animate-spin shrink-0" style={{ fontSize: 16 }} aria-hidden="true">
                 progress_activity
               </span>
               {t("settings.harnessSwapInProgress", { name: inProgressName })}

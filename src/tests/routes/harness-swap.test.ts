@@ -580,7 +580,34 @@ describe("POST /setup-api/harness/swap — the stream", () => {
     h.follow.mockRejectedValue(new Error("sudo: a password is required"));
     const out = await lines(await POST(post({ harness: "hermes" })));
     expect(out[out.length - 1]).toEqual({ error: "sudo: a password is required", code: "swap_failed" });
+    await expect(fs.access(REQUEST_PATH)).rejects.toThrow();
     expect(await (await GET()).json()).toMatchObject({ inProgress: false });
+  });
+
+  it("keeps the request and closes still_running when the follow threw while the unit is still working", async () => {
+    // The unit outlives a follow that threw (a lost journal, a killed poll):
+    // the file the step still reads is not pulled out from under it.
+    h.follow.mockImplementation(async () => {
+      h.unitState = "ActiveState=active\n";
+      throw new Error("journalctl: connection reset");
+    });
+    const out = await lines(await POST(post({ harness: "hermes" })));
+    expect(out[out.length - 1]).toMatchObject({ code: "still_running" });
+    expect(await fs.readFile(REQUEST_PATH, "utf8")).toMatch(/^TARGET_EDITION=hermes\n/);
+    expect(await (await GET()).json()).toMatchObject({ inProgress: true, inProgressTarget: "hermes" });
+  });
+
+  it("tells the desktop to reload when a throw came after the lock flipped", async () => {
+    h.follow.mockImplementation(async () => {
+      h.edition = { edition: "hermes", defaulted: false };
+      return { ok: true };
+    });
+    // The carry-over folds its writers' failures into notes; the refresh is
+    // the one awaited call after the lock that can still throw.
+    h.refresh.mockRejectedValue(new Error("dashboard: ECONNRESET"));
+    const out = await lines(await POST(post({ harness: "hermes" })));
+    expect(out[out.length - 1]).toMatchObject({ code: "swap_failed", active: "hermes", reload: true, lockFlipped: true });
+    await expect(fs.access(REQUEST_PATH)).rejects.toThrow();
   });
 
   it("answers a second POST 409 busy while the first is streaming, and GET names the target", async () => {

@@ -224,8 +224,26 @@ export async function POST(req: Request) {
         emit(controller, { phase: "done", status: swapPhaseStatus("done", target) });
         emit(controller, { success: true, active: target, reload: true, notes });
       } catch (err) {
-        await removeSwapRequest();
-        emit(controller, { error: err instanceof Error ? err.message : `The swap to ${name} failed.`, code: "swap_failed" });
+        const message = err instanceof Error ? err.message : `The swap to ${name} failed.`;
+        // The unit outlives a follow that threw: the request the step still
+        // reads must not be pulled out from under it, and GET keeps reporting
+        // the swap from the unit's state until it ends.
+        if (await harnessSwapUnitActive().catch(() => false)) {
+          emit(controller, {
+            error: `The swap to ${name} is still running on this box. Settings → Harness shows it as in progress until it ends; the desktop reloads onto ${name} once it has.`,
+            code: "still_running",
+          });
+        } else {
+          await removeSwapRequest();
+          const after = getEditionSource();
+          // A throw AFTER the lock flipped (the carry-over, the refresh): the
+          // box IS the target edition and the desktop has to land on it.
+          if (after.edition === target && !after.defaulted) {
+            emit(controller, { error: message, code: "swap_failed", active: target, reload: true, lockFlipped: true, notes: [] });
+          } else {
+            emit(controller, { error: message, code: "swap_failed" });
+          }
+        }
       } finally {
         releaseSwap();
         try { controller.close(); } catch { /* already closed */ }

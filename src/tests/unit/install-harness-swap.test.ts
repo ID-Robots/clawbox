@@ -11,6 +11,10 @@ import { SELF_UPDATING_ROOT_STEPS, UI_ROOT_STEPS, WEB_ROOT_STEPS } from "@/lib/r
 // Starts a real bash per case: vitest's 5 s test and 10 s hook defaults are not
 // enough on a loaded CI runner. See src/tests/unit/test-timeout-hygiene.test.ts.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+// `spawnSync` blocks the worker, so vitest's timeout cannot interrupt it: a
+// regressed plain-file gate would park `grep` on the FIFO case for ever. A
+// timed-out spawn answers a null status, which `r.status ?? -1` reports.
+const SPAWN_TIMEOUT_MS = 20_000;
 
 /**
  * The privileged half of the harness swap (Settings → Harness, 2026-09-07).
@@ -210,7 +214,7 @@ function readConfigured(contents: string | null): { code: number; value: string 
     "out=$(read_configured_harness_swap); rc=$?",
     'printf "[%s] rc=%s" "$out" "$rc"',
   ].join("\n");
-  const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: driverEnv() });
+  const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: driverEnv(), timeout: SPAWN_TIMEOUT_MS });
   const out = (r.stdout ?? "").trim();
   return { code: Number(/rc=(\d+)/.exec(out)?.[1] ?? -1), value: out.replace(/ rc=\d+$/, "") };
 }
@@ -267,7 +271,7 @@ function runStep(recorded: string, extra: Record<string, string> = {}): StepRun 
     ...SWAP_FUNCTIONS.map(extractShellFunction),
     "step_harness_swap",
   ].join("\n");
-  const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: driverEnv(extra) });
+  const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: driverEnv(extra), timeout: SPAWN_TIMEOUT_MS });
   const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
   const calls = fs.readFileSync(callsFile, "utf-8").split("\n").filter(Boolean);
   return {
@@ -764,6 +768,7 @@ d("the top-level edition block, re-entered by the swap", () => {
     const r = spawnSync("bash", ["-c", script], {
       encoding: "utf-8",
       env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV, ...env },
+      timeout: SPAWN_TIMEOUT_MS,
     });
     return { status: r.status ?? -1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   }
