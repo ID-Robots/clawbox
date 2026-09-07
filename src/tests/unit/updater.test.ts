@@ -2603,6 +2603,42 @@ describe("updater", () => {
       expect(doctorWarning?.message).not.toContain("Command failed:");
     });
 
+    it("names the approvals file and the step the owner can take, not the advice for the command it blocks", async () => {
+      // TASK-754. The warning IS the Settings → System Update surface, and on
+      // this box it repeated the core's own closing sentence — "Run `openclaw
+      // doctor --fix` … before using exec approvals" — which is advice for the
+      // command that is blocked. #754 removed exactly that sentence from the
+      // subscription sign-in route; this is the same defect on the update path,
+      // and the one manual step the boot repair leaves for the owner.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: refusedJournal, stderr: "" },
+        [DOCTOR]: Object.assign(new Error("Command failed: openclaw doctor --fix"), {
+          stdout: "",
+          stderr: "Legacy exec approvals exist at /home/clawbox/.openclaw/exec-approvals.json."
+            + " Run `openclaw doctor --fix` with OPENCLAW_STATE_DIR set to /home/clawbox/.openclaw"
+            + " before using exec approvals.\n",
+        }),
+        [VALIDATE]: validateRefusal,
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      const doctorWarning = state.warnings?.find((w) => w.code === "openclaw-doctor-fix-failed");
+      // The file the owner has to move, taken from the core's own sentence so a
+      // box with a non-standard state directory is named correctly.
+      expect(doctorWarning?.message).toContain("/home/clawbox/.openclaw/exec-approvals.json");
+      // …and what to do with it, which is his to do: nothing here may move a
+      // file that holds approvals of his.
+      expect(doctorWarning?.message).toContain("move it aside by hand");
+      // NOT the core's advice for the command that is blocked.
+      expect(doctorWarning?.message).not.toContain("before using exec approvals");
+      expect(doctorWarning?.message).not.toContain("OPENCLAW_STATE_DIR");
+    });
+
     it("keys the mock on argv that cannot collide with the binary's own path", () => {
       // NOT decoration. `setupExecFileMock` matches on
       // `key.includes(k) || k.includes(cmd)`, and `cmd` is whatever

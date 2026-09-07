@@ -17,6 +17,7 @@ import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
 import { getLocalAiToken } from "@/lib/local-ai-token";
+import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
 
 const exec = promisify(execFile);
 
@@ -2653,17 +2654,6 @@ export function gatewayIsAbsent(): boolean {
  * EVERY OTHER failure still throws, untouched.
  */
 export type OpenclawDoctorFixOutcome = "completed" | "blocked-by-legacy-exec-approvals";
-
-/**
- * The core's own words for the blocker, matched rather than re-derived.
- *
- * Three matchers now read this one English sentence — `install.sh`,
- * `install-x64.sh` and `scripts/gateway-pre-start.sh` grep it case-sensitively,
- * this one is case-insensitive. All three fail SAFE: a reworded upstream
- * sentence simply reverts each to its old, stricter behaviour. A fourth site
- * would be the point at which this deserves one shared constant.
- */
-const LEGACY_EXEC_APPROVALS_RE = /Legacy exec approvals exist at/i;
 
 export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
   if (gatewayIsAbsent()) return "completed";

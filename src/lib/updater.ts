@@ -13,6 +13,10 @@ import {
   openclawIsAbsent,
   gatewayIsAbsent,
 } from "./openclaw-config";
+import {
+  LEGACY_EXEC_APPROVALS_RE,
+  legacyExecApprovalsBlocker,
+} from "./openclaw-doctor-blocker";
 import { hasHermesHarness, readEdition, type EditionName } from "./edition-source";
 import { runHermesCli } from "./hermes-cli";
 import { waitForPortOpen } from "./port-probe";
@@ -1286,6 +1290,23 @@ async function runOpenclawDoctorFix(): Promise<void> {
       env: openclawChildEnv(),
     });
   } catch (err) {
+    // WHICH failure this was, and what the owner can do about it (TASK-754).
+    // A doctor blocked by a legacy exec-approvals file migrated NOTHING, and
+    // its own closing sentence is advice for the command that is blocked —
+    // exactly what #754 removed from the subscription sign-in route. This
+    // warning IS the Settings → System Update surface, and on the one box the
+    // core-upgrade chain still leaves dark (an approvals file holding a real
+    // decision, which `gateway-pre-start.sh` will not move) the one manual step
+    // is the owner's: move that file aside himself.
+    const said = commandOutput(err);
+    if (LEGACY_EXEC_APPROVALS_RE.test(said)) {
+      const blocker = legacyExecApprovalsBlocker(said, openclawTreePaths().openclawHome);
+      warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` migrated nothing. `
+        + `Legacy exec approvals exist at ${blocker}, and the core refuses every config and session `
+        + `migration while that file is there. ClawBox never moves one that holds approvals of yours: `
+        + `review it, move it aside by hand, and restart the gateway.`);
+      return;
+    }
     warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` did not complete. `
       + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err)}`);
   }

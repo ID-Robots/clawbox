@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -55,6 +55,8 @@ let binDir: string;
 let stateDir: string;
 let configPath: string;
 let stampPath: string;
+let coreDistDir: string;
+let tmpDir: string;
 
 /**
  * An `openclaw` that behaves like 2026.8.1 on a 2026.7 config.
@@ -121,6 +123,11 @@ function run(version = "2026.8.1", extraEnv: Record<string, string> = {}) {
       OPENCLAW_CONFIG: configPath,
       OC_CALLS: path.join(dir, "calls.log"),
       OC_STATE: stateDir,
+      OC_CORE_PY: path.join(binDir, "core.py"),
+      // The block builds its migration preview under TMPDIR, so the "nothing is
+      // left behind" checks have to look where it actually writes. Per test, so
+      // one case cannot see another's leftovers or the machine's.
+      TMPDIR: tmpDir,
       ...extraEnv,
     }),
     timeout: 30_000,
@@ -150,6 +157,10 @@ beforeEach(() => {
   root = path.join(dir, "clawbox");
   binDir = path.join(dir, "bin");
   stateDir = path.join(dir, "openclaw");
+  // The block builds its migration preview under TMPDIR; per test, so one case
+  // cannot see another's leftovers or the machine's.
+  tmpDir = path.join(dir, "tmp");
+  mkdirSync(tmpDir, { recursive: true });
   mkdirSync(path.join(root, "data"), { recursive: true });
   mkdirSync(binDir, { recursive: true });
   mkdirSync(stateDir, { recursive: true });
@@ -567,5 +578,435 @@ d("gateway pre-start: the config-repair block's own edges", () => {
     // repair ever fired.
     expect(approvalsFiles().filter((n) => n.includes(".legacy-"))).toHaveLength(2);
     expect(existsSync(path.join(stateDir, "exec-approvals.json"))).toBe(false);
+  });
+});
+
+/**
+ * TASK-754 — the 25-hour outage was a DIAGNOSIS problem, not a missing repair.
+ *
+ * Measured against the pinned 2026.8.1 core, in throwaway homes, with a legacy
+ * `exec-approvals.json` holding a real approval present throughout:
+ *
+ *   * a 2026.7 config whose migrated form VALIDATES — `openclaw gateway run`
+ *     migrates it ITSELF and reaches `ready`. The core's own automatic startup
+ *     config repair does it, and the approvals file does not stop it, because
+ *     it is not doctor.
+ *   * a 2026.7 config whose migrated form does NOT validate — exit 78, config
+ *     untouched, with or without the approvals file.
+ *
+ * So there is nothing for ClawBox to carry across: where that would help the
+ * core has already done it, and where it would not, running the same table
+ * produces the same refusal. What nothing on the box does is say WHICH key is
+ * in the way. The gateway names the pre-migration keys — every one of which the
+ * core would have handled — while the key that really blocks it exists only
+ * after those migrations have run. `tts.voiceId` is the incident's own: the
+ * `messages.tts → tts` move is verbatim, `voiceId` is renamed only inside
+ * provider scopes, and `doctor --fix` gets past it in a LATER step that DELETES
+ * it (`stripUnknownConfigKeys`) — a step this block does not perform, because
+ * naming a key of the owner's and deleting it are different decisions.
+ */
+d("gateway pre-start: naming what the core still refuses after its own migrations", () => {
+  /** The shape #746 refuses to move: a decision of the owner's. */
+  const realApproval = JSON.stringify({
+    version: 1,
+    socket: { path: "/run/user/1000/openclaw/exec-approvals.sock", token: "6f2c" },
+    defaults: { deny: ["rm -rf /"] },
+    agents: {},
+  });
+
+  /** The incident's own 2026.7 layout: four legacy keys, one of them fatal. */
+  function incidentConfig(): Record<string, unknown> {
+    return {
+      agents: {
+        defaults: {
+          memorySearch: { enabled: true },
+          imageGenerationModel: { primary: "openai/gpt-image-1" },
+        },
+      },
+      messages: { tts: { enabled: true, voiceId: "nova" } },
+    };
+  }
+
+  /**
+   * The 2026.7 → 2026.8 rename table and the v2 schema, as a stand-in core.
+   *
+   * `issues` is what `config validate --json` reports about a FILE — so a
+   * preview built by anything other than doctor is judged on its content the
+   * way the real core judges it — and `migrate` is what `doctor --fix` does,
+   * which includes the strip step the block under test deliberately does not.
+   * Both halves model behaviour measured on 2026.8.1.
+   */
+  function stubCorePython() {
+    writeFileSync(
+      path.join(binDir, "core.py"),
+      `import json, sys
+
+MODE, CFG = sys.argv[1], sys.argv[2]
+doc = json.load(open(CFG))
+defaults = (doc.get("agents") or {}).get("defaults") or {}
+legacy = [k for k in ("memorySearch", "imageGenerationModel") if k in defaults]
+
+if MODE == "issues":
+    out = []
+    if legacy:
+        keys = ", ".join('QQ%sQQ' % k for k in legacy)
+        out.append('{"path":"agents.defaults","message":"Unrecognized keys: %s"}' % keys)
+    if "tts" in (doc.get("messages") or {}):
+        out.append('{"path":"messages","message":"Unrecognized key: QQttsQQ"}')
+    # The key the whole card is about: the move is verbatim and voiceId is
+    # renamed only inside provider scopes, so it reaches a .strict() schema.
+    if "voiceId" in (doc.get("tts") or {}):
+        out.append('{"path":"tts","message":"Unrecognized key: QQvoiceIdQQ"}')
+    sys.stdout.write(",".join(out).replace("QQ", chr(92) + chr(34)))
+    sys.exit(0)
+
+if "imageGenerationModel" in defaults:
+    defaults.setdefault("mediaModels", {}).setdefault("image", defaults.pop("imageGenerationModel"))
+if "memorySearch" in defaults:
+    doc.setdefault("memory", {}).setdefault("search", defaults.pop("memorySearch"))
+if "tts" in (doc.get("messages") or {}):
+    moved = doc["messages"].pop("tts")
+    if moved.pop("enabled", None):
+        moved["auto"] = "always"
+    doc.setdefault("tts", moved)
+# doctor's LATER step, stripUnknownConfigKeys, which the block does not perform.
+(doc.get("tts") or {}).pop("voiceId", None)
+json.dump(doc, open(CFG, "w"), indent=2)
+`,
+    );
+  }
+
+  /**
+   * The core's own migration, where the block looks for it.
+   *
+   * Found by its DECLARATION text and picked out by function NAME, because a
+   * bundle renames the export binding (`applyLegacyDoctorMigrations as A`) and
+   * not the declaration — both indirections are reproduced here, so a discovery
+   * that only worked on a matching export name fails. It performs the moves and
+   * NOT the strip, exactly as the real one does.
+   */
+  function stubCoreMigrationChunk() {
+    mkdirSync(coreDistDir, { recursive: true });
+    writeFileSync(
+      path.join(coreDistDir, "legacy-pGW3ZP3t.js"),
+      `function applyLegacyDoctorMigrations(raw, context, options) {
+  if (!raw || typeof raw !== "object") return { next: null, changes: [] };
+  const next = structuredClone(raw);
+  const changes = [];
+  const defaults = next.agents && next.agents.defaults;
+  if (defaults && Object.hasOwn(defaults, "imageGenerationModel")) {
+    const mediaModels = defaults.mediaModels || {};
+    if (mediaModels.image === undefined) mediaModels.image = defaults.imageGenerationModel;
+    defaults.mediaModels = mediaModels;
+    delete defaults.imageGenerationModel;
+    changes.push("Moved agents.defaults.imageGenerationModel -> agents.defaults.mediaModels.image.");
+  }
+  if (defaults && Object.hasOwn(defaults, "memorySearch")) {
+    next.memory = next.memory || {};
+    if (next.memory.search === undefined) next.memory.search = defaults.memorySearch;
+    delete defaults.memorySearch;
+    changes.push("Moved agents.defaults.memorySearch -> memory.search.");
+  }
+  if (next.messages && Object.hasOwn(next.messages, "tts")) {
+    if (next.tts === undefined) {
+      const moved = next.messages.tts;
+      if (moved && moved.enabled) { delete moved.enabled; moved.auto = "always"; }
+      next.tts = moved;
+    }
+    delete next.messages.tts;
+    changes.push("Moved messages.tts -> tts.");
+  }
+  if (changes.length === 0) return { next: null, changes: [] };
+  return { next, changes };
+}
+export { applyLegacyDoctorMigrations as A };
+`,
+    );
+  }
+
+  /** An `openclaw` that judges the FILE it is pointed at, like the real one. */
+  function stubContentAwareOpenclaw() {
+    const p = path.join(binDir, "openclaw");
+    writeFileSync(
+      p,
+      `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$OC_CALLS"
+CFG="\${OPENCLAW_CONFIG_PATH:-\${OPENCLAW_CONFIG}}"
+if [ "$1" = "config" ] && [ "$2" = "validate" ]; then
+  if [ -n "\${OC_VALIDATE_RC:-}" ] && [ "\${OC_VALIDATE_RC}" != "0" ] && [ "\${OC_VALIDATE_RC}" != "1" ]; then
+    exit "\$OC_VALIDATE_RC"
+  fi
+  ISSUES="\$(python3 "$OC_CORE_PY" issues "\$CFG")" || ISSUES='{"path":"config","message":"unreadable"}'
+  if [ -z "\$ISSUES" ]; then
+    printf '{"valid":true,"path":"%s","warnings":[]}\\n' "\$CFG"
+    exit 0
+  fi
+  printf '{"valid":false,"issues":[%s]}\\n' "\$ISSUES"
+  exit 1
+fi
+if [ "$1" = "doctor" ]; then
+  for f in "$OC_STATE/exec-approvals.json" "$OC_STATE/exec-approvals.json.doctor-importing"; do
+    if [ -e "\$f" ]; then
+      echo "Legacy exec approvals exist at \$f. Run \\\`openclaw doctor --fix\\\` before using exec approvals."
+      exit 1
+    fi
+  done
+  python3 "$OC_CORE_PY" migrate "\$CFG"
+  touch "$OC_STATE/migrated"
+  exit 0
+fi
+exit 0
+`,
+    );
+    chmodSync(p, 0o755);
+  }
+
+  function withRealApproval() {
+    writeFileSync(path.join(stateDir, "exec-approvals.json"), realApproval);
+  }
+
+  /**
+   * Everything the block's migration preview could have left behind.
+   *
+   * BOTH places, because the preview moved: it used to sit beside openclaw.json
+   * in the state directory and now lives in its own directory under TMPDIR. A
+   * helper that looked only at the old place, under the old name, made every
+   * "nothing is left behind" assertion unfailable — verified by mutation: with
+   * the three `rm -rf "$preview_dir"` lines removed from the block, the
+   * migrated config (secrets and all) is left as `openclaw.json` inside a
+   * `clawbox-config-preview-` directory, and the old helper still answered
+   * with an empty list.
+   */
+  function previewFiles(): string[] {
+    const listing = (at: string) =>
+      spawnSync("bash", ["-c", `ls -A ${JSON.stringify(at)} 2>/dev/null || true`], { encoding: "utf-8" })
+        .stdout.split("\n").filter(Boolean);
+    return [
+      ...listing(stateDir).filter((n) => n.includes("preview")),
+      ...listing(tmpDir).filter((n) => n.includes("preview")),
+    ];
+  }
+
+  /**
+   * The node the block runs the core's own migration with.
+   *
+   * Placed BESIDE the openclaw bin, which is the nvm and npm-global layout —
+   * `node` and `openclaw` in one bin directory — and the layout the block looks
+   * at first, for the same reason it looks for the bundle there: this unit sets
+   * no `Environment=PATH`, so an nvm node is not on the one systemd hands it.
+   * Measured 2026-09-07: this repo's CI runner is bun-only and has no
+   * `/usr/bin/node`, so a PATH-only lookup made the whole arm a silent no-op
+   * there while it worked on the box.
+   */
+  function installNodeBesideTheCore() {
+    symlinkSync(process.execPath, path.join(binDir, "node"));
+  }
+
+  beforeEach(() => {
+    coreDistDir = path.join(dir, "lib", "node_modules", "openclaw", "dist");
+    writeFileSync(configPath, JSON.stringify(incidentConfig(), null, 2));
+    stubCorePython();
+    stubCoreMigrationChunk();
+    stubContentAwareOpenclaw();
+    installNodeBesideTheCore();
+  });
+
+  it("names the key that is actually in the way, not the ones the core would have handled", () => {
+    withRealApproval();
+    const before = readFileSync(configPath, "utf-8");
+
+    const r = run();
+
+    expect(r.status).toBe(0);
+    // The keys the gateway itself reports — all four of which the core migrates.
+    expect(r.stderr).toContain('agents.defaults: Unrecognized keys: "memorySearch", "imageGenerationModel"');
+    // …and the one that is left once it has, which is the one to fix. This
+    // sentence is what the incident's manual repair had to derive by hand.
+    expect(r.stderr).toContain("after the core's own migrations these remain");
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(r.stderr).not.toContain("these remain, and they are what to fix: agents.defaults");
+    // NOTHING was written: not the config, not a preview, not a stamp.
+    expect(readFileSync(configPath, "utf-8")).toBe(before);
+    expect(previewFiles()).toEqual([]);
+    expect(existsSync(stampPath)).toBe(false);
+    // …and the owner's approval is byte-identical, under its own name.
+    expect(readFileSync(path.join(stateDir, "exec-approvals.json"), "utf-8")).toBe(realApproval);
+    expect(approvalsFiles()).toEqual(["exec-approvals.json"]);
+  });
+
+  it("names the file that blocks the repair as the one manual step", () => {
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("refuses to start while");
+    expect(r.stderr).toContain(path.join(stateDir, "exec-approvals.json"));
+    expect(r.stderr).toContain("move it aside by hand");
+  });
+
+  it("says the core will repair this one itself, instead of predicting exit 78 over it", () => {
+    // THE BOX THAT WAS NEVER BROKEN. Measured on 2026.8.1 with a real approval
+    // present throughout: `openclaw gateway run` migrates this config ITSELF
+    // and reaches `ready`, because the approvals gate is doctor's and the
+    // startup repair is not doctor. Telling that owner his gateway will exit 78
+    // and asking him to move a file holding his own deny rules aside would be
+    // wrong on the first box that reads this block — and the answer is already
+    // in hand two frames down, so throwing it away is the defect.
+    const carryable = incidentConfig() as { messages: { tts: Record<string, unknown> } };
+    delete carryable.messages.tts.voiceId;
+    writeFileSync(configPath, JSON.stringify(carryable, null, 2));
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stdout).toContain("it applies them itself when the gateway starts");
+    expect(r.stderr).not.toContain("the core still refuses this config");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    // …and this PR's own manual step is not asked for over a box that is about
+    // to come up. (The approvals clearing loop's own NOTE above is beta's and
+    // is about the file, not about the gateway's fate.)
+    expect(r.stderr).not.toContain("refuses to start while");
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("says nothing about a remainder, and asks for nothing, when the validator could not run", () => {
+    // The rule this block's own `*)` arm states one screen down: a validator
+    // that could not be run says nothing about the config. A 124 there must not
+    // become a sentence about the owner's exec approvals.
+    withRealApproval();
+
+    const r = run("2026.8.1", { OC_VALIDATE_RC: "124" });
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("could not ask the installed core");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(r.stderr).not.toContain("refuses to start while");
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("asks the core once per config, and still says it on every boot", () => {
+    // 125 s on a box with no gateway is worth paying once; on a `Restart=always`
+    // unit it is not worth paying every five seconds. The ANSWER is remembered
+    // against the same fingerprint the acceptance stamp uses — the sentence is
+    // not, so the owner reads it whenever he looks.
+    withRealApproval();
+
+    const first = run();
+    const afterFirst = calls().length;
+    const second = run();
+
+    expect(first.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(second.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    // Boot one spends three `config validate` (the verdict, the preview, the
+    // re-ask after doctor) and one doctor; boot two spends the same MINUS the
+    // preview's, because that answer is remembered. Asserted exactly, because
+    // an inequality would also hold for a boot that skipped the arm entirely.
+    expect(calls().filter((c) => c === "config validate --json")).toHaveLength(5);
+    expect(calls().length - afterFirst).toBe(afterFirst - 1);
+    // …and it asks again the moment the file changes, so this is not a verdict
+    // remembered for ever.
+    const fixed = incidentConfig() as { messages: { tts: Record<string, unknown> } };
+    delete fixed.messages.tts.voiceId;
+    writeFileSync(configPath, JSON.stringify(fixed, null, 2));
+    expect(run().stderr).not.toContain("after the core's own migrations these remain");
+  });
+
+  it("says nothing about a remainder when the core's own table cannot be read", () => {
+    // "Read the table from the installed bundle" is the whole of the harness
+    // claim here. A bundle that is not there is not a licence to guess the
+    // moves from a copy in this file, and a diagnosis nobody can stand behind
+    // is worse than none.
+    rmSync(coreDistDir, { recursive: true, force: true });
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("the core still refuses this config");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("finds the interpreter beside the core when it is not on PATH at all", () => {
+    // The failure this replaced: the bundle was located relative to
+    // `$OPENCLAW_BIN` and the interpreter was looked up on PATH only, so on any
+    // box (or CI runner) whose node is not on the unit's PATH the whole arm
+    // returned 1 and said one NOTE. PATH here carries no node at all.
+    withRealApproval();
+
+    const r = run("2026.8.1", { PATH: "/usr/bin:/bin" });
+
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(r.stderr).not.toContain("could not be worked out here");
+  });
+
+  /**
+   * A PATH carrying every tool this block uses and NO node.
+   *
+   * Built rather than assumed: this dev PC has `/usr/bin/node` and the CI
+   * runner does not, so a case that just names `/usr/bin:/bin` would be
+   * measuring the machine instead of the code.
+   */
+  function pathWithoutNode(): string {
+    const toolsDir = path.join(dir, "tools-without-node");
+    mkdirSync(toolsDir, { recursive: true });
+    for (const tool of [
+      "bash", "sh", "head", "grep", "dirname", "cp", "rm", "mv", "mktemp",
+      "timeout", "date", "stat", "sed", "tr", "cut", "ls", "python3", "readlink",
+    ]) {
+      const found = spawnSync("bash", ["-c", `command -v ${tool} || true`], { encoding: "utf-8" })
+        .stdout.trim();
+      if (found) symlinkSync(found, path.join(toolsDir, tool));
+    }
+    return `${binDir}:${toolsDir}`;
+  }
+
+  it("fails closed, and says so, when there is no node anywhere", () => {
+    rmSync(path.join(binDir, "node"), { force: true });
+    withRealApproval();
+    const before = readFileSync(configPath, "utf-8");
+
+    const r = run("2026.8.1", { PATH: pathWithoutNode() });
+
+    // Nothing invented, nothing written, and the honest refusal still printed.
+    expect(r.stderr).toContain("could not be worked out here");
+    expect(r.stderr).toContain("the core still refuses this config");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(readFileSync(configPath, "utf-8")).toBe(before);
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("stands down on a $include spelled the way JSON also allows", () => {
+    // `"\u0024include"` decodes to `$include`, so the core's own
+    // `containsConfigIncludeDirective` sees it and no grep over the raw bytes
+    // can. The authoritative test is therefore made on the decoded document.
+    writeFileSync(
+      configPath,
+      `{"\\u0024include":"./extra.json",${JSON.stringify(incidentConfig()).slice(1)}`,
+    );
+    withRealApproval();
+
+    const r = run();
+
+    // The arm WAS reached — the core refuses this config — and stood down.
+    expect(r.stderr).toContain("the core still refuses this config");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("stands down on a config that carries a $include", () => {
+    // The core's own startup repair refuses an include for the same reason: the
+    // file on disk is not the whole config, so a preview built from it alone
+    // would name keys an included file may already answer for.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ ...incidentConfig(), $include: "./extra.json" }, null, 2),
+    );
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("the core still refuses this config");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(previewFiles()).toEqual([]);
   });
 });
