@@ -668,6 +668,120 @@ describe("updater", () => {
       );
     });
 
+    /**
+     * TASK-757. Measured on the OpenClaw box on 2026-09-07 at beta `21539548`,
+     * after a clean in-app update: `phase: "completed"`, `error: null`, and two
+     * warnings that were false about the box as it then was — the second of
+     * them ending in "run Update to realign", over the run that had just
+     * realigned it.
+     *
+     * They are the PRE-RUN diagnosis, kept on purpose (a box 71 commits behind
+     * its own pin must not update in silence) and never re-asked once the run
+     * succeeded. Both codes describe a tree step 1 moved and the rebuild
+     * replaced, so a finished run has to retire them.
+     */
+    it("retires the pre-run drift warnings once the run has resolved them", async () => {
+      const OLD_SHA = "673817a8e0a1b2c3d4e5f60718293a4b5c6d7e8f";
+      const NEW_SHA = "21539548c554b30799ad6e19a94213e26eb23f2f";
+      // Exactly what the box answered, as the run restored it from disk.
+      const capturedBeforeStepOne = JSON.stringify([
+        {
+          code: "checkout-behind-pin",
+          message: `The code on disk (${OLD_SHA.slice(0, 7)}) is not the tested commit for beta (${NEW_SHA.slice(0, 7)}).`,
+        },
+        {
+          code: "build-from-other-commit",
+          message: `This box is running a build made from ${OLD_SHA.slice(0, 7)} but the code on disk is ${NEW_SHA.slice(0, 7)} — run Update to realign.`,
+        },
+      ]);
+
+      vi.resetModules();
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_warnings" ? capturedBeforeStepOne : true);
+      // The box AFTER the run: the rebuild stamped the commit the checkout is
+      // on, and the pin file names the branch it is on. `builtAt` is what keeps
+      // this read off `fs/promises.stat`, which this file does not mock.
+      mockReadFile.mockImplementation(async (file) => {
+        const p = String(file);
+        if (p.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (p.endsWith(".update-branch")) return "beta\n";
+        if (p.endsWith("build-info.json")) {
+          return JSON.stringify({
+            commit: NEW_SHA,
+            shortCommit: NEW_SHA.slice(0, 7),
+            branch: "beta",
+            dirty: false,
+            untracked: 0,
+            committedAt: "2026-09-07T00:42:00Z",
+            builtAt: "2026-09-07T00:54:17Z",
+            buildId: "rebuilt-build-id",
+            node: "v22.0.0",
+            bun: "1.2.10",
+            packageVersion: "3.10.0",
+            hermesPin: null,
+            openclawPin: null,
+          });
+        }
+        throw new Error("ENOENT");
+      });
+      setupExecFileMock({
+        "rev-parse --abbrev-ref HEAD": { stdout: "beta\n", stderr: "" },
+        "rev-parse HEAD": { stdout: `${NEW_SHA}\n`, stderr: "" },
+        "status --porcelain": { stdout: "", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("completed");
+      });
+
+      const warnings = updater.getUpdateState().warnings ?? [];
+      const codes = warnings.map((w) => w.code);
+      expect(codes, "a finished update must not still be reporting the tree it replaced")
+        .not.toContain("checkout-behind-pin");
+      expect(codes).not.toContain("build-from-other-commit");
+      // The sentence the owner acted on.
+      expect(warnings.filter((w) => w.message.includes("run Update"))).toEqual([]);
+      // Kept, in the past tense, as the run's own history.
+      const history = warnings.find((w) => w.code === "drift-resolved");
+      expect(history?.message, JSON.stringify(warnings)).toMatch(/^When this update started, /);
+      expect(history?.message).toContain("realigned the box");
+    });
+
+    it("keeps them live when the run FAILED — nothing was realigned", async () => {
+      const capturedBeforeStepOne = JSON.stringify([
+        {
+          code: "checkout-behind-pin",
+          message: "The code on disk (673817a) is not the tested commit for beta (2153954).",
+        },
+      ]);
+
+      vi.resetModules();
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockGet.mockImplementation(async (key: string) =>
+        key === "update_warnings" ? capturedBeforeStepOne : true);
+      mockRebuiltBox();
+      // `gateway_verify` is failFast: the second half stops there.
+      mockGatewayUp.mockResolvedValue(false);
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("failed");
+      });
+
+      expect(updater.getUpdateState().warnings?.map((w) => w.code)).toEqual(["checkout-behind-pin"]);
+    });
+
     it("does not stop the gateway while its pre-start is still running", async () => {
       // At boot clawbox-gateway.service and clawbox-setup.service start
       // together, and the gateway's ExecStartPre (gateway-pre-start.sh) can
