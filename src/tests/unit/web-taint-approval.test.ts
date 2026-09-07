@@ -711,6 +711,25 @@ describe("a taint the gate could not keep fails closed", () => {
     expect(asked?.requireApproval?.description).toContain("could not be kept");
   });
 
+  it("treats a store with no reader as having no copy, not as a failure", () => {
+    // A core that supplies `api.runContext` WITHOUT `getRunContext` used to
+    // throw a TypeError into the read, which the gate reads as "this turn
+    // cannot be shown to be clean" — so every dangerous tool in every run would
+    // raise a sourceless card, permanently and silently. A missing reader means
+    // there is no harness copy, which is what an empty list already says.
+    const partial = { setRunContext: () => true, clearRunContext: () => {} };
+    const g = createWebTaintGate({
+      runContext: partial as unknown as ReturnType<typeof fakeRunContext>,
+      now: () => 1_000,
+    });
+    // A clean run stays clean...
+    expect(g.onBeforeToolCall({ toolName: "exec", params: { command: "uptime" } }, ctx())).toBeUndefined();
+    // ...and a tainted one is still gated, from this gate's own mark.
+    g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx());
+    const asked = g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx());
+    expect(asked?.requireApproval?.description).toContain("web_fetch");
+  });
+
   it("asks, and says it cannot tell, when the store throws and nothing was marked", () => {
     const g = gate({ readThrows: true });
     const asked = g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx());

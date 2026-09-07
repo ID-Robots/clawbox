@@ -141,10 +141,12 @@ export const TAINT_NAMESPACE = "clawbox.web-taint";
 /**
  * How long a taint with NO RUN TO KEY ON keeps every shell asking.
  *
- * This is the fail-closed path and nothing else: it is armed only when a web
- * tool call arrived that carried no run id at all, or when the mark for a run
- * had to be evicted to keep the map bounded. A clean turn never arms it, so
- * ordinary work, cron included, is untouched.
+ * This is the fail-closed path and nothing else, and it now has exactly ONE
+ * trigger: a web tool call that arrived carrying no run id, so there was
+ * nothing to scope the taint to. An eviction deliberately does NOT arm it —
+ * see `rememberTaint`, where arming from the bound is the failure that made an
+ * earlier draft of this gate ask about every shell on the box for ever. A clean
+ * turn never arms it, so ordinary work, cron included, is untouched.
  */
 const UNSCOPED_TAINT_WINDOW_MS = 5 * 60_000;
 
@@ -162,8 +164,9 @@ const MAX_SOURCES = 4;
  *
  * This bound only matters on a core that offers no such subscription, where
  * marks would otherwise accumulate for the process lifetime. Eviction is
- * least-recently-marked and SILENT — see `rememberTaint` for why arming the
- * process-wide window here would be far worse than the taint it protects.
+ * least-recently-marked, age-gated and SILENT: it arms nothing — see
+ * `rememberTaint` for why arming the process-wide window from the bound would
+ * be far worse than the taint it protects.
  */
 const MAX_TRACKED_RUNS = 1024;
 
@@ -306,24 +309,13 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
   };
 
   /**
-   * Drops a run's mark, for the core's run-end signal to call.
-   *
-   * THIS IS THE HARNESS DOING THE RECLAIMING, which is the point: the core
-   * dispatches plugin agent-event subscriptions and, on a terminal `lifecycle`
-   * event, marks the run closed and clears its own per-run plugin context in
-   * the same place (`dispatchPluginAgentEventSubscriptions`). Hooking the same
-   * event keeps this gate's copy in step with the core's instead of inventing a
-   * lifetime of our own.
-   */
-  /**
    * Releases a run's taint from BOTH stores.
    *
    * Both, or the mirror outlives the mark it mirrors: `onBeforeToolCall` reads
    * the two together, so a run whose local mark was released but whose mirror
-   * was not is still gated by a taint this gate believes it has let go. The
-   * core clears its own store at run end anyway, but only for stores the core
-   * owns and only on that one event — asking explicitly makes "this run is
-   * released" mean one thing here rather than two.
+   * was not is still gated by a taint this gate believes it has let go. That
+   * was a real defect in a draft of this file, where eviction dropped only the
+   * map entry.
    */
   const dropRun = (runId) => {
     marksByRun.delete(runId);
@@ -335,6 +327,16 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
     }
   };
 
+  /**
+   * Drops a run's taint because the run has ENDED.
+   *
+   * THIS IS THE HARNESS DOING THE RECLAIMING, which is the point: the core
+   * dispatches plugin agent-event subscriptions and, on a terminal `lifecycle`
+   * event, marks the run closed and clears its own per-run plugin context in
+   * the same place (`dispatchPluginAgentEventSubscriptions`). Hooking the same
+   * event keeps this gate's copy in step with the core's instead of inventing a
+   * lifetime of our own.
+   */
   const forgetRun = (runId) => {
     if (typeof runId !== "string" || !runId) return;
     dropRun(runId);
@@ -370,6 +372,13 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
    * exists.
    */
   const coreSources = (runId) => {
+    // A store that does not offer a reader is not a store that FAILED to
+    // answer: it has no copy to give, which is what an empty list means. Calling
+    // through would throw, and the caller reads a throw as "this turn cannot be
+    // shown to be clean" — so a core with a partial `api.runContext` would put a
+    // sourceless card in front of every shell on the box, permanently and
+    // silently.
+    if (typeof runContext.getRunContext !== "function") return [];
     const value = runContext.getRunContext({ runId, namespace: TAINT_NAMESPACE });
     const sources = value && typeof value === "object" ? value.sources : undefined;
     return Array.isArray(sources) ? sources.filter((name) => typeof name === "string") : [];
