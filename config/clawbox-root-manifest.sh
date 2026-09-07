@@ -302,7 +302,10 @@ mirror_tree() {
   # nothing to put back and $MIRROR_DIR is left ABSENT. Every root step then
   # exits 65 until a dispatch whose tree verifies rebuilds it. The lock is what
   # makes the fixed names below safe.
-  exec 9>"$MIRROR_DIR.lock" || die "cannot open the mirror lock" 66
+  # `>>`, not `>`: fd 9 is only ever flocked, never written. The parent is
+  # already asserted above, so this is defence in depth — it means no ordering
+  # mistake here can turn the lock into a way for root to truncate a file.
+  exec 9>>"$MIRROR_DIR.lock" || die "cannot open the mirror lock" 66
   flock -w 120 9 || die "another root step is restaging $MIRROR_DIR" 66
 
   # An interrupted swap is the one way $MIRROR_DIR goes missing while a perfectly

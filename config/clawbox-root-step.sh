@@ -266,25 +266,36 @@ fi
 # it; the one inside is what decides.
 if [ ! -d "$MIRROR_DIR" ] && [ -d "$MIRROR_DIR.old" ]; then
   (
-    # No `2>/dev/null` on this line: `exec` applies EVERY redirection it is
-    # given for the rest of the shell, so that would silence fd 2 for the whole
-    # subshell and throw away the two messages below. A failure here says why on
-    # its own (a read-only or full /var), which is what should be in the journal.
-    exec 9>"$MIRROR_DIR.lock" || exit 0
-    flock -w 120 9 || exit 0
-    [ ! -d "$MIRROR_DIR" ] || exit 0
-    [ -d "$MIRROR_DIR.old" ] || exit 0
+    # THE PARENT IS ASSERTED BEFORE ANYTHING UNDER IT IS OPENED.
+    #
     # The mirror's whole guarantee is that the directory holding it is not the
     # clawbox account's to write. mirror_tree asserts that too, but only on the
     # path where the tree verifies — and this recovery fires by construction on
     # the dispatch where it does not, so the assertion has to be made here as
     # well. Fail CLOSED: an empty answer (bad modes, no find, no directory) is a
     # refusal, not a pass.
+    #
+    # ORDER IS THE POINT. Opening the lock first would defeat the check on
+    # exactly the box it exists for: a `>` open truncates, so a $MIRROR_DIR.lock
+    # planted as a symlink in a parent that is not root's alone would have its
+    # target emptied by root before this refusal was ever printed. mirror_tree
+    # asserts first for the same reason.
     _parent="$(dirname "$MIRROR_DIR")"
     if ! { [ -O "$_parent" ] && [ -n "$(find "$_parent" -maxdepth 0 ! -perm /022 2>/dev/null)" ]; }; then
       echo "clawbox-root-step: refusing to recover $MIRROR_DIR — $_parent is not owned by this user and closed to group and other writes" >&2
       exit 0
     fi
+    # `>>`, not `>`: fd 9 is only ever flocked, never written, so appending
+    # removes the truncation primitive altogether rather than relying on the
+    # ordering above to keep it out of reach. And no `2>/dev/null` on this line:
+    # `exec` applies EVERY redirection it is given for the rest of the shell, so
+    # that would silence fd 2 for the whole subshell and throw away the two
+    # messages below. A failure here says why on its own (a read-only or full
+    # /var), which is what should be in the journal.
+    exec 9>>"$MIRROR_DIR.lock" || exit 0
+    flock -w 120 9 || exit 0
+    [ ! -d "$MIRROR_DIR" ] || exit 0
+    [ -d "$MIRROR_DIR.old" ] || exit 0
     if mv -T "$MIRROR_DIR.old" "$MIRROR_DIR" 2>/dev/null; then
       echo "clawbox-root-step: recovered $MIRROR_DIR from a restage that was interrupted part way through" >&2
     else

@@ -328,6 +328,32 @@ d("the root-owned mirror", () => {
     expect(fs.existsSync(mirror), "the mirror was resurrected under a live restage").toBe(false);
   });
 
+  it("asserts the parent before it OPENS anything under it", () => {
+    // Ordering, and it is the whole value of the assertion. The lock is opened
+    // with `>`, which truncates. Asserting the parent afterwards means that on
+    // exactly the box the assertion exists for — one where /var/lib/clawbox is
+    // not root's alone — root truncates whatever $MIRROR_DIR.lock points at
+    // before the refusal is ever printed. mirror_tree asserts first for this
+    // reason; the dispatcher's recovery has to as well.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
+    fs.renameSync(mirror, `${mirror}.old`);          // the state the recovery fires in
+
+    const victim = path.join(tmp, "victim");
+    fs.writeFileSync(victim, "MUST-SURVIVE\n");
+    fs.rmSync(`${mirror}.lock`, { force: true });
+    fs.symlinkSync(victim, `${mirror}.lock`);        // planted where the lock is opened
+    fs.chmodSync(tmp, 0o777);                        // ...a parent that must fail the check
+
+    const r = sh(`"${dispatcher}" post_update`);
+    expect(
+      fs.readFileSync(victim, "utf-8"),
+      "root truncated the lock's symlink target before refusing",
+    ).toBe("MUST-SURVIVE\n");
+    expect(r.stderr).toMatch(/refusing to recover/);
+    fs.chmodSync(tmp, 0o700);
+  });
+
   it("replaces the previous mirror rather than merging into it", () => {
     // Not probe-once, and not additive: a file dropped from the tree has to
     // disappear from the copy root runs, or root keeps executing code that no
