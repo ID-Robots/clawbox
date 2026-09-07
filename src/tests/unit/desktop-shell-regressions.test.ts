@@ -161,3 +161,73 @@ describe("desktop icon labels", () => {
     for (const label of labels) expect(label).toContain("break-words");
   });
 });
+
+describe("the browser's Back button", () => {
+  // Next's app router patches `pushState`: while the current entry is its own,
+  // it writes `__NA` and its route tree onto whatever is pushed
+  // (`copyNextJsInternalHistoryState`). This is that write, in the strict mode
+  // every module runs under.
+  const nextWritesItsFields = (state: unknown) => {
+    const data = (state ?? {}) as { __NA?: boolean };
+    data.__NA = true;
+    return data;
+  };
+
+  it("pushes an entry Next can write its own fields onto — an object, never a string", () => {
+    // "Back to Desktop" is a client-side Link to `/`, so the desktop mounted
+    // with Next's entry current; the mount pushed the string "clawbox", the
+    // write threw, and Next's error page stood where the desktop should have.
+    expect(() => nextWritesItsFields("clawbox")).toThrow(TypeError);
+    expect(() => nextWritesItsFields({ clawbox: true })).not.toThrow();
+    expect(src).not.toMatch(/pushState\("clawbox"/);
+    expect(src).toMatch(/window\.history\.pushState\(\{ clawbox: true \}, ""\)/);
+  });
+
+  it("knows its own entry by the marker field, so a Back can close the top window", () => {
+    // After the first Back the restored entry is Next's, and `handleBack`
+    // re-pushes FIRST: with a string that push threw before the window-closing
+    // code below it, so Back closed nothing on the desktop and the Android
+    // back gesture did nothing on the phone. Next adds its fields to the
+    // object it is handed, so the entry is known by the marker, not compared
+    // whole.
+    expect(src).not.toMatch(/window\.history\.state !== "clawbox"/);
+    expect(src).toMatch(/\(state as \{ clawbox\?: unknown \}\)\.clawbox === true/);
+    expect(src).toMatch(/if \(!isDesktopEntry\(window\.history\.state\)\) \{\n\s+window\.history\.pushState\(\{ clawbox: true \}, ""\);/);
+  });
+});
+
+describe("the shelf clock", () => {
+  it("is written in the desktop's language, not the browser's", () => {
+    // `[]` is navigator.language: a German box opened from an en-US browser
+    // showed "09:27 AM" on the shelf and "Monday, September 7" in the power
+    // menu, while About's build date beside them was in German.
+    expect(src).not.toMatch(/toLocale(Time|Date)String\(\[\]/);
+    expect(src).toMatch(/now\.toLocaleTimeString\(tag, \{ hour: "2-digit", minute: "2-digit" \}\)/);
+    expect(src).toMatch(/now\.toLocaleDateString\(tag, \{ weekday: "long", month: "long", day: "numeric" \}\)/);
+    // The locale the desktop already reads, and a re-format once it resolves,
+    // since every provider starts on a provisional "en".
+    expect(src).toMatch(/const \{ t, locale \} = useT\(\);/);
+    expect(src).toMatch(/return \(\) => clearInterval\(interval\);\n  \}, \[locale\]\);/);
+  });
+
+  // The expression the pin below holds the source to: `locale` is a bare
+  // language tag, and a bare "en" is en-US to Intl.
+  const regionalTag = (languages: readonly string[] | undefined, locale: string) =>
+    languages?.find((l) => l.toLowerCase().startsWith(`${locale}-`)) ?? locale;
+
+  it("takes the browser's region for that language, so a UK browser keeps its 24-hour clock", () => {
+    // `locale` alone made "09:27 AM" of every English desktop — the en-GB,
+    // en-IE and en-ZA browsers that read "09:27" until then included — and
+    // ~52px of it inside the phone bar's 40px clock button.
+    expect(src).toMatch(/const tag = navigator\.languages\?\.find\(\(l\) => l\.toLowerCase\(\)\.startsWith\(`\$\{locale\}-`\)\) \?\? locale;/);
+    expect(regionalTag(["en-GB", "en"], "en")).toBe("en-GB");
+    // Only a REGIONAL entry is worth taking: a bare "en" ahead of "en-GB"
+    // adds nothing over `locale`.
+    expect(regionalTag(["en", "en-GB"], "en")).toBe("en-GB");
+    // The box's language still wins — the German box above, opened from an
+    // en-US browser, finds no "de-…" entry and keeps "de".
+    expect(regionalTag(["en-US", "en"], "de")).toBe("de");
+    // A browser with no list at all (an old WebView) is the bare tag.
+    expect(regionalTag(undefined, "en")).toBe("en");
+  });
+});

@@ -27,16 +27,26 @@
  * are offered. Adding a section here is what makes it reachable from a toast;
  * adding an APP also needs an arm in ToastHost's `openNotifyAction`.
  *
- * Each label says where the click goes; ToastHost puts it after the notice's
- * own text in the button's accessible name. In English, like ToastHost's own
- * "Dismiss": the desktop shell's aria labels are not translated today, and a
- * label that lied would be worse than one that is untranslated.
+ * Each section names its own TRANSLATION KEY — the label the Settings sidebar
+ * already draws for it — and `notifyActionLabel` puts it into the app's phrase
+ * ("Open Settings → {section}"). ToastHost places that after the notice's own
+ * text in the button's accessible name. Keys rather than English because the
+ * shell's aria labels were the one part of a German or Japanese desktop a
+ * screen reader still heard in English (UI sweep 2026-09-07, shell-7).
  */
 export const NOTIFY_ACTION_TARGETS = {
-  settings: { email: "Open Settings → Email" },
+  settings: { email: "settings.email" },
 } as const;
 
 type NotifyActionApp = keyof typeof NOTIFY_ACTION_TARGETS;
+
+/** The phrase that says where a click goes, per app, with the section's name in `{section}`. */
+const NOTIFY_ACTION_PHRASE_KEYS: Record<NotifyActionApp, string> = {
+  settings: "desktop.toast.openSettings",
+};
+
+/** The `t` of `useT()` — handed in rather than imported, so this module stays free of React. */
+export type NotifyTranslate = (key: string, params?: Record<string, string | number>) => string;
 
 /** One allowlisted destination: which app, and which section of it. */
 export type NotifyAction = {
@@ -64,10 +74,10 @@ export function parseNotifyAction(value: unknown): NotifyAction | null {
   return { open, section } as NotifyAction;
 }
 
-/** The phrase that says where clicking such a notice goes. */
-export function notifyActionLabel(action: NotifyAction): string {
+/** The phrase that says where clicking such a notice goes, in the desktop's language. */
+export function notifyActionLabel(action: NotifyAction, t: NotifyTranslate): string {
   const sections: Record<string, string> = NOTIFY_ACTION_TARGETS[action.open];
-  return sections[action.section];
+  return t(NOTIFY_ACTION_PHRASE_KEYS[action.open], { section: t(sections[action.section]) });
 }
 
 /** What `ToastHost` is handed for one notice: the words, and where clicking goes. */

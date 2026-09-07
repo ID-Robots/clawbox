@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  DESKTOP_GAP,
   DESKTOP_LAYERS,
   MIN_WINDOW_HEIGHT,
   MIN_WINDOW_WIDTH,
@@ -162,6 +163,21 @@ describe("fitWindowSize", () => {
       width: MIN_WINDOW_WIDTH,
       height: MIN_WINDOW_HEIGHT,
     });
+  });
+
+  it("fits a window being OPENED beside a docked chat to the strip, with a maximized window's margins", () => {
+    // Files at its 1090px default, centred in the 576px left of an 858px
+    // panel, landed with its right 534px — minimize, maximize and close among
+    // them — under the chat.
+    const inset = 400 + DESKTOP_GAP;
+    expect(fitWindowSize({ width: 800, height: 600 }, inset)).toEqual({
+      width: W - inset - DESKTOP_GAP * 2,
+      height: 600,
+    });
+  });
+
+  it("leaves a window that fits the strip at its own size", () => {
+    expect(fitWindowSize({ width: 400, height: 600 }, 400 + DESKTOP_GAP)).toEqual({ width: 400, height: 600 });
   });
 });
 

@@ -8,6 +8,7 @@ import { readEdition } from "@/lib/edition-source";
 import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
 import { isSetupApiPath } from "@/lib/clawbox-namespaces";
 import { UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
@@ -603,6 +604,23 @@ export async function middleware(request: NextRequest) {
     if (app && readConfigCached().publicWebapps.has(app)) {
       return NextResponse.next();
     }
+  }
+
+  // 4c. No session — the box's UI language, and nothing else: the ONE
+  // preference read /login's I18nProvider makes before anyone has signed in
+  // (UI_LANGUAGE_READ, src/lib/ui-language-read.ts — the provider sends it and
+  // the preferences route answers it from the same object, so the three
+  // cannot disagree about what an anonymous caller is told). The RAW path and
+  // the raw query, byte for byte: the router routes the original string, and
+  // an exact match is what keeps this from being a prefix. Anything wider —
+  // `keys=ui_language,ui_user_name`, `all=1`, a POST — is not this request
+  // and stays behind the session.
+  if (
+    request.method === "GET"
+    && request.nextUrl.pathname === UI_LANGUAGE_READ.pathname
+    && request.nextUrl.search === UI_LANGUAGE_READ.search
+  ) {
+    return NextResponse.next();
   }
 
   // 5. Auth failed — choose a JSON 401 or an HTML login redirect.

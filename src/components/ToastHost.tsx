@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useT } from "@/lib/i18n";
 import { notifyActionLabel, parseNotifyAction, type NotifyAction } from "@/lib/notify-action";
 import { dispatchOpenSettingsSection } from "@/lib/ui-events";
 import { NOTICE_AUTO_HIDE_MS } from "@/lib/use-auto-hide";
@@ -71,6 +72,7 @@ function openNotifyAction(action: NotifyAction): void {
 }
 
 export default function ToastHost() {
+  const { t } = useT();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((toast) => toast.id !== id));
@@ -135,7 +137,7 @@ export default function ToastHost() {
                 // announcement is computed from its subtree's accessible
                 // names, so a screen reader would hear the destination and
                 // never the notice itself.
-                aria-label={`${toast.message} — ${notifyActionLabel(action)}`}
+                aria-label={`${toast.message} — ${notifyActionLabel(action, t)}`}
                 onClick={() => {
                   openNotifyAction(action);
                   dismiss(toast.id);
@@ -149,7 +151,7 @@ export default function ToastHost() {
             )}
             <button
               type="button"
-              aria-label="Dismiss"
+              aria-label={t("desktop.toast.dismiss")}
               onClick={() => dismiss(toast.id)}
               className="shrink-0 cursor-pointer pl-1 pr-4 py-3 text-white/50 hover:text-white"
             >

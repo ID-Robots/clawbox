@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ChromeShelf from "@/components/ChromeShelf";
 import { desktopTranslations } from "@/lib/desktop-translations";
@@ -192,5 +192,77 @@ describe("ChromeShelf", () => {
 
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByText(EN["shelf.unpinFromShelf"])).not.toBeInTheDocument();
+  });
+});
+
+describe("the phone bar", () => {
+  const baseProps = {
+    apps: [makeApp("settings", "Settings")],
+    onAppClick: vi.fn(),
+    onLauncherClick: vi.fn(),
+    onTrayClick: vi.fn(),
+    time: "12:34",
+  };
+
+  beforeEach(() => {
+    Object.defineProperty(window, "innerWidth", { value: 390, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 844, configurable: true });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "innerWidth", { value: 1024, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 768, configurable: true });
+  });
+
+  it("draws Settings and the apps that are open, so an app switched away from can be reached again", () => {
+    // `pinnedApps`/`unpinnedApps` were filtered for the phone and never drawn:
+    // the bar was launcher, fullscreen and power, nothing said which apps were
+    // open, and an app minimized with "Switch app" vanished without a trace.
+    const onAppClick = vi.fn();
+    const files = { ...makeApp("files", "Files"), isOpen: true, isPinned: false };
+    // Pinned on the desktop shelf but closed: the phone's home grid already has it.
+    const terminal = makeApp("terminal", "Terminal");
+    render(
+      <ChromeShelf {...baseProps} apps={[makeApp("settings", "Settings"), files, terminal]} onAppClick={onAppClick} />,
+    );
+
+    const row = screen.getByTestId("shelf-mobile-apps");
+    expect(row).toContainElement(screen.getByTestId("shelf-app-settings"));
+    expect(row).toContainElement(screen.getByTestId("shelf-app-files"));
+    expect(screen.queryByTestId("shelf-app-terminal")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("shelf-app-files"));
+    expect(onAppClick).toHaveBeenCalledWith("files");
+  });
+
+  it("still draws an open Settings the owner unpinned", () => {
+    const settings = { ...makeApp("settings", "Settings"), isOpen: true, isPinned: false };
+    render(<ChromeShelf {...baseProps} apps={[settings]} />);
+
+    expect(screen.getByTestId("shelf-app-settings")).toBeInTheDocument();
+  });
+
+  it("keeps the chat button in the tray, out of the scrolling app row, in the desktop bar's order", () => {
+    // A phone in landscape (or a small tablet): narrower than 768 and wider
+    // than it is tall — the one phone bar that draws the crab at all. It sat
+    // in the app row for a moment, after every open app: with a handful open
+    // the row overflows, and the one button that opens the assistant scrolled
+    // out of sight with them.
+    Object.defineProperty(window, "innerWidth", { value: 667, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 375, configurable: true });
+    const onChatClick = vi.fn();
+    const files = { ...makeApp("files", "Files"), isOpen: true, isPinned: false };
+    render(
+      <ChromeShelf {...baseProps} apps={[makeApp("settings", "Settings"), files]} showChatButton onChatClick={onChatClick} />,
+    );
+
+    const chat = screen.getByTestId("shelf-chat-button");
+    expect(screen.getByTestId("shelf-mobile-apps")).not.toContainElement(chat);
+    // Ahead of the clock, where the desktop bar keeps it.
+    const tray = screen.getByTestId("shelf-tray-button");
+    expect(chat.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(chat);
+    expect(onChatClick).toHaveBeenCalledTimes(1);
   });
 });

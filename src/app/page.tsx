@@ -288,7 +288,7 @@ interface OpenWindow {
 }
 
 function ChromeDesktopInner() {
-  const { t } = useT();
+  const { t, locale } = useT();
   // English is the floor for a key the locale packs do not carry yet: a raw
   // `window.switchApp` in an aria-label is what a screen reader would read out.
   const tr = useCallback((key: string, english: string) => {
@@ -1220,17 +1220,29 @@ function ChromeDesktopInner() {
   }, [snapToGrid, selectedIcons, isMobile, allIconIds, iconGeometry, iconCanonicalOrder]);
 
 
-  // Update clock
+  // Update clock — in the desktop's own language, never the browser's: `[]`
+  // meant navigator.language, so a German box opened from an en-US browser
+  // showed "09:27 AM" on the shelf and "Monday, September 7" in the power
+  // menu while About printed its build date in German. Re-run when the
+  // locale resolves, since every provider starts on a provisional "en".
   useEffect(() => {
+    // …with the browser's REGION for that language, when it offers one:
+    // `locale` is a bare tag, and a bare "en" is en-US to Intl — "09:27 AM" for
+    // every English desktop, the en-GB, en-IE and en-ZA browsers that read
+    // "09:27" until now included. The box's language still wins: the German
+    // box above finds no "de-…" entry in an en-US browser's list and keeps
+    // "de". A bare "en" ahead of "en-GB" in the list adds nothing over
+    // `locale`, so only a regional entry is taken.
+    const tag = navigator.languages?.find((l) => l.toLowerCase().startsWith(`${locale}-`)) ?? locale;
     const updateClock = () => {
       const now = new Date();
-      setTime(now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-      setDate(now.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" }));
+      setTime(now.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" }));
+      setDate(now.toLocaleDateString(tag, { weekday: "long", month: "long", day: "numeric" }));
     };
     updateClock();
     const interval = setInterval(updateClock, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [locale]);
 
   // Install app handler — called after AppStore's server-side install completes
   const handleInstallApp = useCallback((app: StoreApp) => {
@@ -1540,10 +1552,20 @@ function ChromeDesktopInner() {
 
   // ─── Android back button / browser back handling ───
   useEffect(() => {
-    // Push a dummy history state so back button triggers popstate instead of leaving
+    // Push a dummy history state so back button triggers popstate instead of
+    // leaving. An OBJECT with a marker field, a fresh one per push — never a
+    // string: Next's app router patches `pushState` and, while the current
+    // entry is its own, writes its fields (`__NA`, its route tree) onto
+    // whatever is pushed. On a string that is a TypeError, and it threw at
+    // mount on every client-side arrival at `/` ("Back to Desktop" handed the
+    // owner Next's error page instead of the desktop) and from `handleBack`
+    // on every browser Back after the first, so the window-closing code
+    // below never ran and the Android back gesture did nothing at all.
+    const isDesktopEntry = (state: unknown) =>
+      typeof state === "object" && state !== null && (state as { clawbox?: unknown }).clawbox === true;
     const pushState = () => {
-      if (window.history.state !== "clawbox") {
-        window.history.pushState("clawbox", "");
+      if (!isDesktopEntry(window.history.state)) {
+        window.history.pushState({ clawbox: true }, "");
       }
     };
     pushState();

@@ -289,7 +289,7 @@ export default function SystemTray({
             <div className="px-4 py-2.5 border-b border-white/10 flex items-center gap-2">
               <span aria-hidden="true" className={`w-2 h-2 rounded-full ${internet.online ? "bg-green-400" : "bg-red-400"}`} />
               <span className="text-xs text-white/70">
-                {internet.online ? `Internet · ${internet.latencyMs ?? "?"} ms` : "No internet"}
+                {internet.online ? t("tray.internet", { ms: internet.latencyMs ?? "?" }) : t("tray.noInternet")}
               </span>
             </div>
           )}

@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 describe("middleware", () => {
   let middleware: typeof import("@/middleware").middleware;
@@ -360,6 +361,66 @@ describe("middleware", () => {
       await new Promise((r) => setTimeout(r, 15));
       writeConfig(meta);
       expect((await mw(createRequest("/setup-api/webapps?app=shared-game"))).status).toBe(200);
+    });
+  });
+
+  describe("the login page's language read (UI_LANGUAGE_READ)", () => {
+    // /login mounts the desktop's I18nProvider, which asks for the box's UI
+    // language before a session exists; answered 401, the page fell back to
+    // the browser's language (UI sweep 2026-09-07, shell-5). That one request
+    // — the exact path with the exact query, GET — is answered. The rest of
+    // the preference store stays behind the session.
+    async function load() {
+      markSetupComplete();
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      return (await import("@/middleware")).middleware;
+    }
+
+    it("answers the request the provider sends — UI_LANGUAGE_READ.url — without a session", async () => {
+      const mw = await load();
+      expect(UI_LANGUAGE_READ.url).toBe("/setup-api/preferences?keys=ui_language");
+      expect((await mw(createRequest(UI_LANGUAGE_READ.url))).status).toBe(200);
+    });
+
+    it("compares the raw path and query the shared object is built from", () => {
+      // The middleware matches `pathname` and `search`, the provider fetches
+      // `url`, the route reads `keys` — one object (src/lib/ui-language-read.ts),
+      // so none of the three can drift from the others.
+      expect(UI_LANGUAGE_READ.url).toBe(`${UI_LANGUAGE_READ.pathname}${UI_LANGUAGE_READ.search}`);
+      expect(UI_LANGUAGE_READ.search).toBe(`?keys=${UI_LANGUAGE_READ.keys.join(",")}`);
+    });
+
+    it.each([
+      "/setup-api/preferences?keys=ui_language,ui_user_name",
+      "/setup-api/preferences?keys=ui_user_name",
+      "/setup-api/preferences?keys=installed_meta",
+      "/setup-api/preferences?all=1",
+      "/setup-api/preferences?keys=ui_language&all=1",
+      "/setup-api/preferences?all=1&keys=ui_language",
+      "/setup-api/preferences?keys=ui_language%2Cui_user_name",
+      "/setup-api/preferences",
+      "/setup-api/preferences/?keys=ui_language",
+      "/setup-api/Preferences?keys=ui_language",
+    ])("keeps every other read behind the session: %s", async (path) => {
+      const mw = await load();
+      const res = await mw(createRequest(path));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "Authentication required" });
+    });
+
+    it("is a read, never a write", async () => {
+      const mw = await load();
+      const post = new NextRequest(new URL("http://localhost/setup-api/preferences?keys=ui_language"), { method: "POST" });
+      expect((await mw(post)).status).toBe(401);
+    });
+
+    it("sits after the session check, so the owner's wider read is untouched", async () => {
+      const mw = await load();
+      const req = new NextRequest(new URL("http://localhost/setup-api/preferences?all=1"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}` },
+      });
+      expect((await mw(req)).status).toBe(200);
     });
   });
 

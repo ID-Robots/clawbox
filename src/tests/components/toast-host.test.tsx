@@ -6,11 +6,30 @@
  * listened — the events fired into the void. This pins that a dispatched
  * message is rendered as text, can be dismissed, and that junk is ignored.
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ToastHost, { TOAST_EVENT } from "@/components/ToastHost";
 import { OPEN_APP_EVENT, OPEN_SETTINGS_SECTION_EVENT } from "@/lib/ui-events";
 import { NOTICE_AUTO_HIDE_MS } from "@/lib/use-auto-hide";
+import { translations } from "@/lib/translations";
+import type { Locale } from "@/lib/i18n";
+
+// The desktop's language, switchable per test. English by default, so the
+// names the assertions below use ("Dismiss", "Open Settings → Email") are what
+// the CATALOGUE says rather than what the component used to hard-code.
+const locale = vi.hoisted(() => ({ current: "en" as "en" | "de" }));
+vi.mock("@/lib/i18n", async () => {
+  const { translations: catalogue } = await import("@/lib/translations");
+  return {
+    useT: () => ({
+      t: (key: string, params?: Record<string, string | number>) => {
+        let str = catalogue[locale.current][key] ?? key;
+        for (const [k, v] of Object.entries(params ?? {})) str = str.replaceAll(`{${k}}`, String(v));
+        return str;
+      },
+    }),
+  };
+});
 
 function dispatch(detail: unknown) {
   act(() => {
@@ -19,6 +38,24 @@ function dispatch(detail: unknown) {
 }
 
 describe("ToastHost", () => {
+  beforeEach(() => {
+    locale.current = "en";
+  });
+  afterEach(() => {
+    locale.current = "en";
+  });
+
+  it("has its own words in every locale", () => {
+    const LOCALES: Locale[] = ["en", "bg", "de", "es", "fr", "it", "ja", "nl", "sv", "zh"];
+    for (const l of LOCALES) {
+      expect(translations[l]["desktop.toast.dismiss"], `'${l}' has no toast.dismiss`).toBeTruthy();
+      expect(translations[l]["desktop.toast.openSettings"], `'${l}' lost the section slot`).toContain("{section}");
+      if (l === "en") continue;
+      expect(translations[l]["desktop.toast.dismiss"], `'${l}' still English`).not.toBe(translations.en["desktop.toast.dismiss"]);
+      expect(translations[l]["desktop.toast.openSettings"], `'${l}' still English`).not.toBe(translations.en["desktop.toast.openSettings"]);
+    }
+  });
+
   it("renders nothing until a notice arrives, then shows it as text", () => {
     render(<ToastHost />);
     expect(screen.queryByTestId("toast-host")).not.toBeInTheDocument();
@@ -144,6 +181,21 @@ describe("ToastHost — a notice that can be acted on", () => {
       expect(screen.queryByRole("status")).not.toBeInTheDocument();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it("names the X and the destination in the desktop's language", () => {
+    // The aria labels were the one part of a German desktop a screen reader
+    // still heard in English (UI sweep 2026-09-07, shell-7).
+    locale.current = "de";
+    try {
+      render(<ToastHost />);
+      dispatch({ message: "Eine E-Mail wartet", action: { open: "settings", section: "email" } });
+      expect(screen.getByRole("button", { name: "Schließen" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Eine E-Mail wartet — Einstellungen öffnen → E-Mail" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Dismiss|Open Settings/ })).toBeNull();
+    } finally {
+      locale.current = "en";
     }
   });
 

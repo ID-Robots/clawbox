@@ -53,8 +53,13 @@ function getInitialPosition(width: number, height: number, rInset = 0) {
   if (typeof window === "undefined") return { x: 100, y: 50 };
   const maxWidth = window.innerWidth - rInset;
   const maxHeight = window.innerHeight - shelfHeight();
+  const centredX = Math.max(20, (maxWidth - width) / 2);
   return {
-    x: Math.max(20, (maxWidth - width) / 2),
+    // Beside a docked chat the 20px floor alone could still put the right end
+    // of a strip-wide window — where its controls live — under the panel, so
+    // the window ends DESKTOP_GAP before the chat's edge, the margin a
+    // maximized window keeps there.
+    x: rInset > 0 ? Math.min(centredX, Math.max(DESKTOP_GAP, maxWidth - DESKTOP_GAP - width)) : centredX,
     y: Math.max(20, (maxHeight - height) / 2),
   };
 }
@@ -83,7 +88,13 @@ export default function ChromeWindow({
   // window restored with its title bar under the shelf or its controls past the
   // right edge cannot be reached by hand, and minimize/restore and every reload
   // put it back in exactly the same place.
-  const [size, setSize] = useState(() => fitWindowSize(initialSize || getSavedSize(appId, defaultWidth, defaultHeight)));
+  // A window the desktop places for the FIRST time is fitted to the strip
+  // beside a docked chat as well (see `fitWindowSize`); one restored to a
+  // saved place keeps the size it had there, like every window already open.
+  const [size, setSize] = useState(() => fitWindowSize(
+    initialSize || getSavedSize(appId, defaultWidth, defaultHeight),
+    initialPosition ? 0 : rightInset,
+  ));
   const [position, setPosition] = useState(() => (
     initialPosition
       ? clampWindowPosition({ ...initialPosition, ...size })
@@ -114,6 +125,15 @@ export default function ChromeWindow({
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
   const rightInsetRef = useRef(rightInset);
+  // Whether the OWNER has resized this window — the one size worth remembering
+  // for the app. The close used to save whatever the window measured at that
+  // moment, and since a window opened beside a docked chat is fitted to the
+  // strip, Files fitted from 1090 to 564px and closed with the X came up 564
+  // wide on every open after — with the chat undocked too — until the owner
+  // resized it by hand: a placement-time courtesy had become the app's default
+  // size. The viewport fit shares the path and is left as it was — a screen is
+  // a fixed constraint of the device, the docked strip is transient.
+  const ownerResizedRef = useRef(false);
 
   useLayoutEffect(() => {
     rightInsetRef.current = rightInset;
@@ -308,6 +328,7 @@ export default function ChromeWindow({
         const pos = currentPosRef.current;
         setSize({ width: cur.width, height: cur.height });
         setPosition({ x: pos.x, y: pos.y });
+        ownerResizedRef.current = true;
         // Save resized size per app
         if (appId) {
           kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
@@ -354,8 +375,10 @@ export default function ChromeWindow({
   }, [appId, onGeometryChange]);
 
   const handleClose = useCallback(() => {
-    // Save window size per app
-    if (appId) {
+    // Save window size per app — only once the owner has resized it (see
+    // `ownerResizedRef`): a window that was only ever fitted to the strip
+    // beside the chat, or snapped, has no size of its own to remember.
+    if (appId && ownerResizedRef.current) {
       const cur = currentSizeRef.current;
       kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
     }
