@@ -18,8 +18,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const cliMock = vi.hoisted(() => vi.fn());
-/** What `clawai_credential_refused_at` holds, per case. */
-const refusalRecord = vi.hoisted(() => ({ value: undefined as unknown }));
+/** What `clawai_credential_refused_at` holds, per case — and whether the store
+ * could be read at all. */
+const refusalRecord = vi.hoisted(() => ({ value: undefined as unknown, known: true }));
 const envMock = vi.hoisted(() => vi.fn());
 const installMock = vi.hoisted(() => vi.fn());
 const drawsMock = vi.hoisted(() => vi.fn());
@@ -45,7 +46,11 @@ vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }
 // badge decides, exactly as it did before the marker existed.
 vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
-  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+  getKnown: vi.fn(async (key: string) =>
+    key === "clawai_credential_refused_at"
+      ? { value: refusalRecord.value, known: refusalRecord.known }
+      : { value: undefined, known: true },
+  ),
   // `get`/`set` too: the link asks whether the proxy has REFUSED this box's
   // credential before it arms the image slot, and a factory without them makes
   // that read take its catch and answer "no refusal" in every case —
@@ -138,6 +143,7 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     refreshMock.mockReset();
     hermesFake();
     refusalRecord.value = undefined;
+    refusalRecord.known = true;
     // Called twice per link: once before the writes, once after. The default is
     // the ordinary case — a box that could not draw, and now can.
     drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
@@ -163,6 +169,21 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     // keeps the config true for the moment the credential is replaced, and
     // neither turns anything on.
     expect(sets()).toContain(`image_gen.${HERMES_IMAGE_PLUGIN_NAME}.model=${CLAWBOX_AI_IMAGE_MODEL_ID}`);
+  });
+
+  it("does not arm it over a store it could not READ either", async () => {
+    // `readConfig` flattens EACCES, EIO and invalid JSON to `{}`, so the plain
+    // reader would call an unreadable store "no refusal" and arm anyway — and
+    // `image_gen.provider` is the key that makes both boot gates short-circuit
+    // ever after, so that is the one direction that cannot be taken back. The
+    // cost of declining is one Settings → Save on a box whose store works.
+    refusalRecord.known = false;
+
+    await applyClawaiToHermes("claw_token_abc", "flash", {
+      previousClawaiToken: "claw_token_abc",
+    });
+
+    expect(sets()).not.toContain(`image_gen.provider=${HERMES_IMAGE_PLUGIN_NAME}`);
   });
 
   it("arms it again for the re-link the refusal message asks for", async () => {

@@ -1,4 +1,4 @@
-import { get, set } from "@/lib/config-store";
+import { get, getKnown, set } from "@/lib/config-store";
 
 /**
  * The proxy refused this box's ClawBox AI credential, written down where the
@@ -59,6 +59,28 @@ function isRecordedRefusal(value: unknown): boolean {
  * Answers false to a store it cannot read, for the same reason the shell reader
  * does: not knowing is not a refusal.
  */
+/**
+ * The same question, with the third answer a WRITER needs: "refused", "clear",
+ * or "this box could not be asked".
+ *
+ * `clawaiCredentialRefusalOnRecord` deliberately answers false to a store it
+ * cannot read — for a caller that only REPORTS, not knowing is not a refusal
+ * and inventing one would be a false failure. A caller that ARMS has the
+ * opposite duty: `enableHermesImageGeneration` writes `image_gen.provider`, and
+ * that key is what makes both boot gates short-circuit ever after, so arming it
+ * over a store that could not be read would retire the stand-down on a guess
+ * and put the refused-call storm back with nothing left to stop it. `getKnown`
+ * is what tells an unreadable store (EACCES, EIO, invalid JSON — which
+ * `readConfig` flattens to `{}`) apart from a box that has never been refused.
+ */
+export type ClawaiRefusalState = "refused" | "clear" | "unknown";
+
+export async function clawaiRefusalState(): Promise<ClawaiRefusalState> {
+  const { value, known } = await getKnown(CLAWAI_CREDENTIAL_REFUSED_KEY);
+  if (!known) return "unknown";
+  return isRecordedRefusal(value) ? "refused" : "clear";
+}
+
 export async function clawaiCredentialRefusalOnRecord(): Promise<boolean> {
   try {
     return isRecordedRefusal(await get(CLAWAI_CREDENTIAL_REFUSED_KEY));

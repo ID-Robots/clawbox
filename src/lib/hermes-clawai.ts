@@ -34,7 +34,7 @@ import {
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
-import { clawaiCredentialRefusalOnRecord } from "@/lib/clawai-credential-refusal";
+import { clawaiRefusalState } from "@/lib/clawai-credential-refusal";
 // The PLAN this box's account pays for, and the badge behind it — the one rule
 // the panel and both boot scripts read for "may this box have the cloud voice"
 // (TASK-744). Written into the store by this module, read back below.
@@ -1313,9 +1313,19 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // The DESCRIBING writes above are deliberately not gated: naming our model
   // and proxy address keeps the config true for the moment the credential is
   // replaced, and neither turns anything on.
-  if (await clawaiCredentialRefusalOnRecord()) {
+  //
+  // FAIL CLOSED on a store that could not be READ, which is the third answer
+  // `clawaiRefusalState` exists to give: `readConfig` flattens EACCES, EIO and
+  // invalid JSON to `{}`, so the plain reader would have called an unreadable
+  // store "no refusal" and armed anyway — the one direction that cannot be
+  // taken back, since the key it writes is what makes both boot gates
+  // short-circuit ever after.
+  const refusal = await clawaiRefusalState();
+  if (refusal !== "clear") {
     console.log(
-      "[hermes/clawai] the proxy has refused this box's ClawBox AI credential — leaving image_gen.provider alone",
+      refusal === "refused"
+        ? "[hermes/clawai] the proxy has refused this box's ClawBox AI credential — leaving image_gen.provider alone"
+        : "[hermes/clawai] the device store could not be read, so whether this box's credential was refused is unknown — leaving image_gen.provider alone",
     );
     return;
   }
