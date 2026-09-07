@@ -77,6 +77,7 @@ const FILES_KEYS = [
 const SHELL_KEYS = [
   "terminal.connected", "terminal.disconnected", "terminal.error",
   "terminal.connectingToServer", "terminal.retrying", "terminal.tabsLabel",
+  "terminal.shellEnded", "terminal.exited",
   "launcher.page", "window.switchApp", "app.backToDesktop",
   "store.installedNotFromStore",
 ];

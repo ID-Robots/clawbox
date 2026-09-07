@@ -18,8 +18,10 @@ import React, {
   useState,
 } from "react";
 import dynamic from "next/dynamic";
+import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
+import { DESKTOP_LAYERS, shelfHeight } from "@/lib/window-snap";
 import "@xterm/xterm/css/xterm.css";
 
 /** What a keyboard shortcut in the terminal asks the tab strip around it to do. */
@@ -186,8 +188,15 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
   const termRef = useRef<import("@xterm/xterm").Terminal | null>(null);
   const fitAddonRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const statusRef = useRef<"connecting" | "connected" | "disconnected" | "error">("connecting");
-  const [status, setStatus] = useState<"connecting" | "connected" | "disconnected" | "error">("connecting");
+  // `exited`: the SHELL ended — `exit`, Ctrl+D — as opposed to the connection
+  // to it going away. The first is the owner's doing and gets no retry; the
+  // second is a dropped socket and gets one (sweep FT-4).
+  type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error" | "exited";
+  const statusRef = useRef<ConnectionStatus>("connecting");
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
+  // The Reconnect button's action, read by the key handler installed once at
+  // terminal creation so Enter after an ended shell starts a new one.
+  const reconnectRef = useRef<() => void>(() => {});
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(true);
   const inputDisposableRef = useRef<{ dispose: () => void } | null>(null);
@@ -304,6 +313,12 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         // turn, or leaves insert mode in vim.
         if (menuOpenRef.current && ev.key === "Escape") {
           if (ev.type === "keydown") setMenu(null);
+          return false;
+        }
+        // The shell is gone and the socket with it: Enter is the offer the
+        // status bar makes, and there is nothing else for the key to reach.
+        if (statusRef.current === "exited" && ev.key === "Enter") {
+          if (ev.type === "keydown") reconnectRef.current();
           return false;
         }
         if (ev.ctrlKey && ev.shiftKey && ev.key === "C" && ev.type === "keydown") {
@@ -436,7 +451,8 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
           }
         } else if (msg.type === "exit") {
           term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
-          updateStatus("disconnected");
+          term.writeln(`\x1b[2m${trRef.current("terminal.shellEnded", "The shell ended — press Enter or Reconnect to start a new one")}\x1b[0m`);
+          updateStatus("exited");
         }
       } catch {}
     };
@@ -457,6 +473,12 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
       resizeObserverRef.current = null;
 
       if (!mountedRef.current) return;
+      // The server closes the socket right after `exit`: that close is the
+      // end of a shell the owner finished, not a disconnect — it used to be
+      // reported as one and respawned a shell three seconds later, with the
+      // window's own URL in the bar (sweep FT-4). A new shell is one Enter or
+      // Reconnect away instead.
+      if (statusRef.current === "exited") return;
       if (statusRef.current !== "error") {
         updateStatus("disconnected");
         if (ev.code !== 1000) {
@@ -532,7 +554,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     e.preventDefault();
     const term = termRef.current;
     const x = Math.min(e.clientX, Math.max(0, window.innerWidth - MENU_W));
-    const y = Math.min(e.clientY, Math.max(0, window.innerHeight - MENU_H));
+    // Above the shelf, not merely inside the viewport: a menu opened in the
+    // lower rows of a window that reaches the shelf put Clear behind it, and
+    // the shelf took the click (sweep FT-2).
+    const y = Math.min(e.clientY, Math.max(0, window.innerHeight - shelfHeight() - MENU_H));
     setMenu({ x, y, hasSelection: Boolean(term?.getSelection()) });
   }, []);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -603,10 +628,12 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
 
   // Fallback keyboard handler — copy/paste is handled at the xterm level
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    // The right-click menu is rendered INSIDE the div this handler sits on, so
-    // every key pressed in the menu bubbles here — and the test below ("the
-    // textarea is not focused") is true precisely because focus is on a menu
-    // item. The menu was therefore losing the keyboard to xterm on its first
+    // The right-click menu is a child of this div in React's tree (a portal in
+    // the DOM — see the note where it is rendered), and React bubbles a
+    // synthetic event through a portal, so every key pressed in the menu
+    // arrives here — and the test below ("the textarea is not focused") is
+    // true precisely because focus is on a menu item. The menu was therefore
+    // losing the keyboard to xterm on its first
     // keystroke and the key's bytes went to the shell: Escape as \x1b (which
     // aborts a running claude-ds turn — the very thing the xterm-level guard
     // above exists to prevent), ArrowDown as \x1b[B (a stray `[B` on the
@@ -618,6 +645,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     if (xtermTextarea && document.activeElement !== xtermTextarea) {
       // Try to focus xterm first
       termRef.current?.focus();
+      if (statusRef.current === "exited") {
+        if (e.key === "Enter") { e.preventDefault(); reconnectRef.current(); }
+        return;
+      }
       // Map key to terminal data and send directly
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
@@ -644,6 +675,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     connected: "bg-green-400",
     disconnected: "bg-gray-500",
     error: "bg-red-400",
+    exited: "bg-gray-500",
   }[status];
 
   const statusLabel = {
@@ -651,6 +683,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     connected: tr("terminal.connected", "Connected"),
     disconnected: tr("terminal.disconnected", "Disconnected"),
     error: tr("terminal.error", "Error"),
+    // A state word, like the other four: the instruction is printed in the
+    // scrollback where Enter is the next keystroke, and the button it names
+    // is the next thing in this row.
+    exited: tr("terminal.exited", "Shell ended"),
   }[status];
 
   const handleReconnect = useCallback(() => {
@@ -661,6 +697,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
     }
     connect().catch(releaseAfterFailedConnect);
   }, [connect, releaseAfterFailedConnect]);
+  useEffect(() => { reconnectRef.current = handleReconnect; }, [handleReconnect]);
 
   return (
     <div
@@ -681,9 +718,13 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
           <span className="text-xs font-mono" style={{ color: "#9ca3af" }}>
             {statusLabel}
           </span>
-          <span className="text-xs font-mono ml-1" style={{ color: "#6b7280" }}>
-            — {wsUrl}
-          </span>
+          {/* The socket's address is a diagnostic for a connection that
+              failed; a shell the owner ended has nothing to diagnose. */}
+          {status !== "exited" && (
+            <span className="text-xs font-mono ml-1" style={{ color: "#6b7280" }}>
+              — {wsUrl}
+            </span>
+          )}
           <div className="flex-1" />
           <button
             onClick={handleReconnect}
@@ -713,14 +754,19 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
         onContextMenu={handleContextMenu}
       />
 
-      {menu && (
+      {/* On the body, not in the window: a window is its own stacking
+          context, so no z-index INSIDE it can reach above the shelf or the
+          docked chat — the menu's 99999 was measured against the window's
+          siblings and painted under the shelf's 10000 (sweep FT-2). Keys
+          still bubble here through React's tree, so the guards above hold. */}
+      {menu && createPortal(
         <div
           ref={menuRef}
           role="menu"
           data-terminal-menu
           data-testid="terminal-context-menu"
-          className="fixed z-[99999] min-w-[200px] py-1 bg-[#1c1c30] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
-          style={{ left: menu.x, top: menu.y }}
+          className="fixed min-w-[200px] py-1 bg-[#1c1c30] rounded-lg shadow-2xl border border-white/10 text-sm text-white/90"
+          style={{ left: menu.x, top: menu.y, zIndex: DESKTOP_LAYERS.menu }}
           onKeyDown={onMenuKeyDown}
         >
           <button type="button" role="menuitem" data-testid="terminal-menu-copy" disabled={!menu.hasSelection} onClick={menuCopy} className={MENU_ITEM}>
@@ -742,7 +788,8 @@ function TerminalInner({ initialCommand, active = true, onTabAction }: TerminalA
             <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">cleaning_services</span>
             {t("terminal.clear")}
           </button>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

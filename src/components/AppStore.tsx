@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useId, useRef, useMemo } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useId, useRef, useMemo } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
@@ -167,7 +167,7 @@ interface AppStoreProps {
 }
 
 export default function AppStore({ installedAppIds, onInstall, onUninstall }: AppStoreProps) {
-  const { t } = useT();
+  const { t, locale } = useT();
   const tr = useTr();
   const [search, setSearch] = useState("");
   const [installProgress, setInstallProgress] = useState<Record<string, InstallProgress>>({});
@@ -444,6 +444,37 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     onClose: dismissConfirmInstall,
   });
 
+  // Grid ↔ detail navigation gives focus back on both crossings, the way the
+  // Hermes skill store does (HermesSkillsStore.tsx). Opening a card unmounts
+  // the grid, so focus fell to <body>: a keyboard user had to Tab in from the
+  // top of the document and a screen reader announced nothing. The detail's
+  // heading takes it instead — it says what just opened, and the next Tab is
+  // Back. Back unmounts the detail the same way, so the card the owner came
+  // from is found again by id once the grid is back.
+  const returnFocusId = useRef<string | null>(null);
+  const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const openDetail = useCallback((app: StoreApp) => {
+    returnFocusId.current = app.id;
+    setSelectedApp(app);
+  }, []);
+  useEffect(() => {
+    if (selectedApp) detailHeadingRef.current?.focus();
+  }, [selectedApp]);
+  useLayoutEffect(() => {
+    if (selectedApp || !scrollContainerRef.current) return;
+    const id = returnFocusId.current;
+    if (!id) return;
+    returnFocusId.current = null;
+    // Matched on the dataset rather than through a built selector: a slug is
+    // ClawHub's to shape and is not guaranteed to be selector-safe.
+    for (const node of scrollContainerRef.current.querySelectorAll<HTMLElement>("[data-app-open]")) {
+      if (node.dataset.appOpen === id) {
+        node.focus();
+        break;
+      }
+    }
+  }, [selectedApp]);
+
   const clearProgress = useCallback((appId: string) => {
     setInstallProgress(prev => { const n = { ...prev }; delete n[appId]; return n; });
   }, []);
@@ -679,7 +710,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     // even for apps with thousands of installs — so only trust it when positive
     // and otherwise fall back to the list's bucketed "2800+" string. One value
     // feeds both the header and the Downloads stat so they can't disagree.
-    const installDisplay = detail?.installsAllTime && detail.installsAllTime > 0 ? detail.installsAllTime.toLocaleString() : selectedApp.installs;
+    const installDisplay = detail?.installsAllTime && detail.installsAllTime > 0 ? detail.installsAllTime.toLocaleString(locale) : selectedApp.installs;
     // The publisher namespace is what makes a ClawHub URL real. Best is the
     // handle ClawHub itself named (`ownerHandle`, via the detail proxy); the
     // store's `developer` is a guess that is only for an old server whose
@@ -701,9 +732,11 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         {confirmModal}
         {/* Back header */}
         <div className="shrink-0 px-4 py-3 border-b border-white/10 flex items-center gap-3">
-          <button onClick={() => setSelectedApp(null)}
+          {/* The glyph is a Material ligature, so without a name of its own
+              the button is announced as "arrow_back". */}
+          <button type="button" onClick={() => setSelectedApp(null)} aria-label={t("store.back")}
             className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-white/10 transition-colors cursor-pointer">
-            <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }}>arrow_back</span>
+            <span className="material-symbols-rounded text-white/70" style={{ fontSize: 20 }} aria-hidden="true">arrow_back</span>
           </button>
           <span className="text-sm font-medium text-white/70">{t("store.appStore")}</span>
         </div>
@@ -714,7 +747,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             <StoreAppIcon appId={selectedApp.id} name={selectedApp.name} color={selectedApp.color} size="w-20 h-20" />
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-xl font-bold">{selectedApp.name}</h2>
+                <h2 ref={detailHeadingRef} tabIndex={-1} className="text-xl font-bold focus:outline-none">{selectedApp.name}</h2>
                 {detail?.featured && (
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold" style={{ backgroundColor: `${BRAND_ORANGE}26`, color: BRAND_ORANGE_LIGHT }}>{t("store.featured")}</span>
                 )}
@@ -830,8 +863,11 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           <div>
             <h1 className="text-lg font-semibold">{t("store.title")}</h1>
             {/* No made-up count: before the first successful load (and after a
-                failed one) the subtitle carries no number at all. */}
-            <p className="text-xs text-white/50">{totalApps > 0 ? t("store.poweredBy", { count: totalApps }) : t("store.poweredByNoCount")}</p>
+                failed one) the subtitle carries no number at all. The count is
+                formatted in the UI's locale the way the detail view formats
+                installs — "9397" up here beside "18,389" down there read as
+                two conventions on one screen. */}
+            <p className="text-xs text-white/50">{totalApps > 0 ? t("store.poweredBy", { count: totalApps.toLocaleString(locale) }) : t("store.poweredByNoCount")}</p>
           </div>
         </div>
 
@@ -901,8 +937,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
               return (
                 <div
                   key={app.id}
-                  onClick={() => setSelectedApp(app)}
-                  className={`rounded-xl border p-3 transition-all duration-300 cursor-pointer ${
+                  className={`relative rounded-xl border p-3 transition-all duration-300 ${
                     isInstalling ? "scale-[0.98]" : ""
                   } ${
                     isError
@@ -921,7 +956,29 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1 min-w-0">
-                            <h3 className="font-medium text-sm truncate">{app.name}</h3>
+                            {/* The card is the way into the detail view, and
+                                as a div with an onClick it was unreachable from
+                                the keyboard: Tab landed on the Install button
+                                inside it, so Enter would start an install while
+                                the detail stayed out of reach. A stretched
+                                button on the name — the Hermes store's shape —
+                                keeps the whole card opening by mouse with
+                                exactly ONE tab stop for it and nothing
+                                interactive nested: a `role=button` on the card
+                                itself would make its children presentational,
+                                and VoiceOver then neither reaches the Install
+                                button nor hears the heading. The install row
+                                sits above the overlay. */}
+                            <h3 className="font-medium text-sm min-w-0">
+                              <button
+                                type="button"
+                                onClick={() => openDetail(app)}
+                                data-app-open={app.id}
+                                className="text-left w-full truncate cursor-pointer after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-white/40"
+                              >
+                                {app.name}
+                              </button>
+                            </h3>
                             {app.official && (
                               <span title={t("store.official")} aria-label={t("store.official")} className="shrink-0 inline-flex" style={{ color: BRAND_ORANGE_LIGHT }}>
                                 <span className="material-symbols-rounded" style={{ fontSize: 14 }}>verified</span>
@@ -939,7 +996,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
                         </div>
                       </div>
                       <p className="text-xs text-white/50 mt-1 line-clamp-2">{app.description}</p>
-                      <div className="mt-2 flex items-center gap-2">
+                      <div className="mt-2 flex items-center gap-2 relative z-10">
                         {renderInstallButton(app, true)}
                       </div>
                     </div>

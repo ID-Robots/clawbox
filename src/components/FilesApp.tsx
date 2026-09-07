@@ -257,10 +257,20 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
 
   // ─── Load directory ────────────────────────────────────────────────────────
 
+  // The folder on screen, readable from `load` without giving it a dependency
+  // that would remake it on every navigation.
+  const currentPathRef = useRef(currentPath);
   const load = useCallback(async (dir: string) => {
     setLoading(true);
     setError(null);
     setSelected(null);
+    // A message with no clock is meant to outlast the ACTION it answers, not
+    // the folder: "Error: Already exists" followed the owner two folders up
+    // and stood over the new listing's count (sweep FT-1). Leaving the folder
+    // clears the line; a reload of the same one that an ACTION fired — the
+    // one "Folder created" arms just before it — keeps it. A reload the owner
+    // asked for (the Refresh button) clears it at the button, not here.
+    if (dir !== currentPathRef.current) showStatus(null);
     // Recursive results are scoped to one directory — drop them when we move
     // to another folder (the typed filter in `query` is kept and re-applies to
     // the new listing). navigateTo also closes the search bar for result dirs.
@@ -277,12 +287,13 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
       });
       setFiles(sorted);
       setCurrentPath(dir);
+      currentPathRef.current = dir;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unknown error");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showStatus]);
 
   useEffect(() => { load(initialPath); }, [load, initialPath]);
 
@@ -680,7 +691,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
               {!narrow && <span>{t("files.newFolder")}</span>}
             </button>
             <button
-              onClick={() => load(currentPath)}
+              onClick={() => { showStatus(null); load(currentPath); }}
               className="p-1.5 rounded-md transition-colors text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] cursor-pointer"
               title={t("files.refresh")}
             >

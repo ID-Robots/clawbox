@@ -469,27 +469,38 @@ export default function CodingAgentApp() {
   }, [t]);
 
   const load = useCallback(async () => {
-    try {
-      const [s, r, g, p] = await Promise.all([
-        fetch("/setup-api/coding-agent/status", { cache: "no-store" }),
-        fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1`, { cache: "no-store" }),
-        fetch("/setup-api/coding-agent/git", { cache: "no-store" }),
-        // Read on the same cadence as the runs, and no faster: each project
-        // costs the device a `git log` per poll.
-        fetch("/setup-api/coding-agent/projects", { cache: "no-store" }),
-      ]);
+    // Four reads, each APPLIED AS IT LANDS rather than all four together:
+    // the projects read costs the device a `git log` per project and, on a
+    // busy box (a run going, a build), takes seconds — and while the four
+    // were awaited as one, the run page kept saying RUNNING for that long
+    // after Pause or Stop had answered (the sweep of 2026-09-07). The runs
+    // and the status are what an action's feedback needs, so they must not
+    // wait for the slowest reader.
+    const status = fetch("/setup-api/coding-agent/status", { cache: "no-store" }).then(async (s) => {
       if (!s.ok) throw new Error("status");
       setStatus(await s.json() as AppStatus);
-      if (r.ok) {
-        const data = await r.json() as { runs?: Run[] };
-        setRuns(Array.isArray(data.runs) ? data.runs : []);
-      }
+    });
+    const runs = fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1`, { cache: "no-store" }).then(async (r) => {
+      if (!r.ok) return;
+      const data = await r.json() as { runs?: Run[] };
+      setRuns(Array.isArray(data.runs) ? data.runs : []);
+    });
+    const github = fetch("/setup-api/coding-agent/git", { cache: "no-store" }).then(async (g) => {
       if (g.ok) setGithub(await g.json() as GitHubState);
-      if (p.ok) {
-        const data = await p.json() as { directory?: string | null; projects?: Project[] };
-        setProjects(Array.isArray(data.projects) ? data.projects : []);
-        setProjectsDir(typeof data.directory === "string" ? data.directory : null);
-      }
+    });
+    // Read on the same cadence as the runs, and no faster: each project
+    // costs the device a `git log` per poll.
+    const projects = fetch("/setup-api/coding-agent/projects", { cache: "no-store" }).then(async (p) => {
+      if (!p.ok) return;
+      const data = await p.json() as { directory?: string | null; projects?: Project[] };
+      setProjects(Array.isArray(data.projects) ? data.projects : []);
+      setProjectsDir(typeof data.directory === "string" ? data.directory : null);
+    });
+    try {
+      // The status read is the one whose failure is the page's failure; the
+      // other three fail quietly, as they always did.
+      const [statusOutcome] = await Promise.allSettled([status, runs, github, projects]);
+      if (statusOutcome.status === "rejected") throw statusOutcome.reason;
     } catch {
       setError(tRef.current("codingAgent.loadFailed"));
     } finally {
