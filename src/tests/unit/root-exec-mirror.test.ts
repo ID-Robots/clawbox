@@ -351,6 +351,12 @@ d("the root-owned mirror", () => {
       "root truncated the lock's symlink target before refusing",
     ).toBe("MUST-SURVIVE\n");
     expect(r.stderr).toMatch(/refusing to recover/);
+    // FAIL CLOSED, not merely loud: printing the refusal and then running the
+    // step anyway would satisfy the two assertions above. With the recovery
+    // declined there is no mirror, so the dispatcher must refuse with 65 and
+    // exec nothing.
+    expect(r.status, r.stderr).toBe(65);
+    expect(ran(), "a step ran with no mirror to run it from").toBe("");
     fs.chmodSync(tmp, 0o700);
   });
 
