@@ -297,7 +297,11 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
       // Insertion order is recency order, so once the oldest is too young to
       // evict, every other entry is too.
       if (now() - mark.at < EVICTABLE_AFTER_MS) break;
-      marksByRun.delete(key);
+      // BOTH copies. Dropping only this gate's would leave the mirror behind,
+      // and the mirror is read back beside the mark — so the run would still be
+      // gated by a taint the gate believes it has released, and the eviction
+      // would free a map entry while changing nothing else.
+      dropRun(key);
     }
   };
 
@@ -311,19 +315,29 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
    * event keeps this gate's copy in step with the core's instead of inventing a
    * lifetime of our own.
    */
-  const forgetRun = (runId) => {
-    if (typeof runId !== "string" || !runId) return;
+  /**
+   * Releases a run's taint from BOTH stores.
+   *
+   * Both, or the mirror outlives the mark it mirrors: `onBeforeToolCall` reads
+   * the two together, so a run whose local mark was released but whose mirror
+   * was not is still gated by a taint this gate believes it has let go. The
+   * core clears its own store at run end anyway, but only for stores the core
+   * owns and only on that one event — asking explicitly makes "this run is
+   * released" mean one thing here rather than two.
+   */
+  const dropRun = (runId) => {
     marksByRun.delete(runId);
-    // BOTH copies, or the mirror outlives the mark it mirrors. The core clears
-    // its own store for the run moments later anyway, but only for stores the
-    // core owns — asking explicitly makes the gate right against any of them,
-    // and makes "the run ended" mean one thing here rather than two.
     try {
       runContext?.clearRunContext?.({ runId, namespace: TAINT_NAMESPACE });
     } catch {
       // A store that refuses to forget is the harness's business, not the
       // gate's: the mark this gate reads is already gone.
     }
+  };
+
+  const forgetRun = (runId) => {
+    if (typeof runId !== "string" || !runId) return;
+    dropRun(runId);
   };
 
   /**

@@ -817,8 +817,9 @@ describe("the harness reclaims the mark when the run ends", () => {
     for (let i = 0; i < 1_100; i += 1) {
       g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx({ runId: `other-${i}` }));
     }
-    // The stale entry is gone, and a fresh unrelated run is untouched by it.
-    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx({ runId: "clean-run" }))).toBeUndefined();
+    // The stale entry itself is gone — asserting on an unrelated run id could
+    // not tell whether it was ever evicted.
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx())).toBeUndefined();
   });
 
   it("warns rather than degrading silently when the core offers no run-end feed", () => {
@@ -843,12 +844,23 @@ describe("the harness reclaims the mark when the run ends", () => {
     // read past the bound evicted a long-finished run and re-armed a
     // process-wide five-minute gate that never drained, so an entirely clean
     // cron `uptime` was asked about, for ever.
-    const g = gate();
+    //
+    // THE CLOCK HAS TO ADVANCE, or this case proves nothing: eviction refuses
+    // any mark younger than a day, so on a frozen clock the loop breaks on its
+    // first entry and no eviction is ever exercised. Two minutes a run puts the
+    // earliest marks well past the floor by the time the bound is crossed.
+    let clock = 1_000;
+    const runContext = fakeRunContext();
+    const g = createWebTaintGate({ runContext, now: () => clock });
     for (let i = 0; i < 1_100; i += 1) {
       g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx({ runId: `run-${i}` }));
+      clock += 2 * 60_000;
     }
+    // Eviction really happened: the earliest run, long past the floor, is gone.
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx({ runId: "run-0" }))).toBeUndefined();
+    // And it cost nothing to anyone else — no process-wide window was armed.
     expect(g.onBeforeToolCall({ toolName: "exec", params: { command: "uptime" } }, ctx({ runId: "clean-run" }))).toBeUndefined();
-    // The recent runs keep their marks; only the quietest are evicted.
+    // The recent runs keep their marks; only the ones past the floor are taken.
     expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx({ runId: "run-1099" }))?.requireApproval).toBeTruthy();
   });
 });
