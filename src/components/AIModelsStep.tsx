@@ -1015,6 +1015,7 @@ export default function AIModelsStep({
     llamaCppProgress,
     checkLlamaCppStatus,
     saveLlamaCppConfig,
+    activateLocalOnly,
   } = useLlamaCppModels(llamaCppCallbacks, configureScope);
 
   const getAvailableAuthOptionsForProvider = useCallback((providerId: string | null) => {
@@ -1167,7 +1168,15 @@ export default function AIModelsStep({
   ]);
 
   useEffect(() => {
-    if (selectedProvider !== "llamacpp" || !llamaCppSaving) return;
+    // Deliberately NOT gated on `selectedProvider` any more. `llamaCppSaving`
+    // is set by exactly one thing — this hook's install — so it is the whole
+    // condition. "Skip — I'll use only local AI" runs that install with a
+    // DIFFERENT radio still selected (ClawBox AI is the wizard's default and
+    // the customer never left it), and under the old gate its NDJSON status
+    // lines landed in `llamaCppProgress` and were simply never painted: an
+    // install that can spend minutes provisioning sat behind a form that
+    // looked idle.
+    if (!llamaCppSaving) return;
 
     const next = getLlamaCppOverlayProgress(llamaCppProgress, llamaCppInstallSteps.length);
     setConfiguringState({
@@ -1178,7 +1187,7 @@ export default function AIModelsStep({
       progressPercent: next.progressPercent,
       completed: false,
     });
-  }, [llamaCppInstallSteps.length, llamaCppProgress, llamaCppSaving, selectedProvider]);
+  }, [llamaCppInstallSteps.length, llamaCppProgress, llamaCppSaving]);
 
   const selectProvider = useCallback((id: string) => {
     userSelectedProviderRef.current = true;
@@ -1386,11 +1395,49 @@ export default function AIModelsStep({
     selectProvider(normalizedRequestedProvider);
   }, [allowedProviders, providerSelectionRequest, requestedProviderId, selectProvider]);
 
-  const handleSkipAction = useCallback(() => {
+  /**
+   * One button, two meanings — and only one of them is a decline.
+   *
+   * In the embedded Local-AI scope the label is a plain t("skip"), which claims
+   * nothing beyond moving on, so it still only moves on.
+   *
+   * In the wizard the label is t("ai.skipUseLocalOnly") — "Skip — I'll use only
+   * local AI" — which is a CHOICE of provider wearing a skip's clothes. It used
+   * to only advance, and the box it left behind had
+   * `agents.defaults.model.primary` set to `llamacpp/gemma4-e2b-it-q4_0` with
+   * `models.providers` still EMPTY: nothing had registered the provider that
+   * name resolves through, so every chat turn died with "Unknown model:
+   * llamacpp/gemma4-e2b-it-q4_0" on a box whose GGUF had been on disk the whole
+   * time. So configure it here, through the same request Settings → Local AI →
+   * "Make primary" sends (see `activateLocalOnly`).
+   */
+  const handleSkipAction = useCallback(async () => {
     setStatus(null);
     stopPolling();
-    onNext?.();
-  }, [onNext, stopPolling]);
+    // Only the wizard's primary-scope step makes the local-AI promise, and only
+    // a step that was actually given `llamacpp` to offer can keep it. A
+    // cloud-only `providerIds` list still gets the honest no-op rather than an
+    // install of a provider this screen is not configuring.
+    const canConfigureLocal =
+      configureScope !== "local"
+      && allowedProviders.some((provider) => provider.id === "llamacpp");
+    if (!canConfigureLocal) {
+      onNext?.();
+      return;
+    }
+    // The selected radio is deliberately left alone: the customer never chose
+    // it and moving it would abort a half-finished OAuth and discard a typed
+    // key (see syncProviderSelection). The progress overlay does not need it —
+    // its effect keys on `llamaCppSaving` alone.
+    //
+    // Deliberately no onNext() here either: the hook's callbacks own both
+    // terminal transitions. Success runs showSuccessAndContinue → the overlay's
+    // completion → onNext, so the wizard advances only once the box can
+    // actually answer; failure runs showError, which keeps the customer on this
+    // step with the reason instead of advancing a wizard that configured
+    // nothing and calling that "use only local AI".
+    await activateLocalOnly();
+  }, [activateLocalOnly, allowedProviders, configureScope, onNext, stopPolling]);
 
   // Save token received from any OAuth flow (device or redirect)
   const saveOAuthToken = useCallback(async (
@@ -2556,9 +2603,15 @@ export default function AIModelsStep({
             <button
               type="button"
               onClick={handleSkipAction}
-              disabled={saving}
+              // In the wizard this button now installs, starts and registers the
+              // local model, which takes tens of seconds — so it stays down for
+              // its own work as well as the Connect button's. The progress and
+              // any failure are reported by the same overlay and status line
+              // every other configure on this step uses.
+              disabled={saving || llamaCppSaving !== false}
               className="min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--fill-2)] bg-transparent border-none cursor-pointer transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] disabled:cursor-not-allowed"
             >
+              {llamaCppSaving !== false && ButtonSpinner}
               {configureScope === "local" ? t("skip") : t("ai.skipUseLocalOnly")}
             </button>
           </div>
