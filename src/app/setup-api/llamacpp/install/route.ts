@@ -19,13 +19,14 @@ import {
   writeLlamaCppPid,
 } from "@/lib/llamacpp-server";
 import { startRootStep } from "@/lib/root-step-runner";
+import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const encoder = new TextEncoder();
 const execFile = promisify(execFileCb);
 const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
-const LLAMACPP_INSTALL_SERVICE = "clawbox-root-update@llamacpp_install.service";
 const LLAMACPP_INSTALL_STEP = "llamacpp_install";
+const LLAMACPP_INSTALL_SERVICE = rootStepUnit(LLAMACPP_INSTALL_STEP);
 // Must stay >= TimeoutStartSec in config/clawbox-root-update@.service so
 // systemd, not us, owns the kill. A cold box builds llama.cpp from source with
 // CUDA and downloads a multi-GB GGUF; 30 min was not enough and the install
@@ -69,11 +70,20 @@ function shouldRepairLlamaCppRuntime(logLine: string | null): boolean {
     || normalized.includes("[llamacpp] missing local model");
 }
 
-async function readLlamaCppInstallLog(lines: number): Promise<string> {
+/**
+ * What THIS install run has written.
+ *
+ * Bounded by `sinceMs`, the moment this call started the unit: the journal is
+ * persistent and this is polled from the first second — before the unit has
+ * said anything — so an unbounded read answers with the LAST attempt's last
+ * line, which the loop below shows as live progress and then reports as this
+ * run's failure reason. root-step-journal.ts has the rest of the reasoning.
+ */
+async function readLlamaCppInstallLog(sinceMs: number, lines: number): Promise<string> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", LLAMACPP_INSTALL_SERVICE, "-n", String(lines), "--no-pager", "-o", "cat"],
+      rootStepJournalArgs(LLAMACPP_INSTALL_STEP, { sinceMs, lines }),
       { timeout: 10_000 },
     );
     return stdout;
@@ -82,8 +92,8 @@ async function readLlamaCppInstallLog(lines: number): Promise<string> {
   }
 }
 
-async function readLlamaCppInstallFailure(): Promise<string | null> {
-  return getLastLogLine(await readLlamaCppInstallLog(40));
+async function readLlamaCppInstallFailure(sinceMs: number): Promise<string | null> {
+  return getLastLogLine(await readLlamaCppInstallLog(sinceMs, 40));
 }
 
 /**
@@ -123,13 +133,16 @@ function isUnitRunning(active: string): boolean {
 async function repairLlamaCppRuntime(
   onStatus: (line: string) => void,
 ): Promise<{ ok: boolean; error?: string }> {
+  // Before the start, so nothing this run writes falls outside the window the
+  // journal reads are bounded by.
+  const startedAt = Date.now();
   try {
     await startRootStep(
       LLAMACPP_INSTALL_STEP,
       { noBlock: true, timeoutMs: SYSTEMCTL_QUERY_TIMEOUT_MS },
     );
   } catch (err) {
-    const failureLine = await readLlamaCppInstallFailure();
+    const failureLine = await readLlamaCppInstallFailure(startedAt);
     return {
       ok: false,
       error: failureLine || (err instanceof Error ? err.message : "Failed to repair llama.cpp runtime"),
@@ -145,7 +158,7 @@ async function repairLlamaCppRuntime(
     const { active, result } = await readInstallUnitState();
     if (isUnitRunning(active)) sawRunning = true;
 
-    const line = getLastLogLine(await readLlamaCppInstallLog(5));
+    const line = getLastLogLine(await readLlamaCppInstallLog(startedAt, 5));
     if (line && line !== lastLine) {
       lastLine = line;
       onStatus(line);
