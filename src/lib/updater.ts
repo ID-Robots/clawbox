@@ -23,7 +23,7 @@ import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
-import { setUpdateLock, clearUpdateLock, isUpdateLocked } from "./update-lock";
+import { setUpdateLock, clearUpdateLock, isUpdateLocked, updateLockHeldByLiveProcess } from "./update-lock";
 
 /**
  * "An update was accepted and then lost its process" — written where the lock
@@ -599,6 +599,107 @@ function getStepFailureLine(logText: string, unit: string): string | null {
     if (/^(?:error|fatal)\b/i.test(lines[i])) return lines[i];
   }
   return lines[lines.length - 1];
+}
+
+/**
+ * The marker install.sh writes for a fixup that failed WITHOUT failing its step.
+ *
+ * `step_post_update` runs nineteen fixups, every one of them non-fatal by
+ * design — refusing to finish an update because a VNC unit refresh failed would
+ * be the worse outcome — and each said so with `|| echo "  Warning: …"`, which
+ * reaches the journal and nothing else. The step exits 0, so the run reported
+ * "Applying system fixups" completed and the owner was told an update had
+ * worked in full when part of it had not. install.sh now re-states those
+ * failures on `CLAWBOX-WARN[<code>]:` lines, and the two `openclaw doctor --fix`
+ * refusals in `step_openclaw_install` carry the same marker.
+ *
+ * The CODE is part of the marker rather than derived from the prose, so a
+ * condition install.sh reports and a condition this file reports for itself
+ * collapse to one card: `warnUpdate` de-duplicates by code, and the doctor
+ * refusal is raised on both paths (`runOpenclawDoctorFix` during
+ * `gateway_verify`, and install.sh's own call inside `step_openclaw_install`).
+ *
+ * NOT a channel invented beside an existing one. install.sh's
+ * `record_provision_failure` is the non-fatal-failure channel it already has —
+ * and it is fatal by construction: it makes the dispatched step's exit code
+ * non-zero, which paints a whole good update red over a VNC refresh. Its own
+ * comment asks for exactly this ("there is no quieter surface for it today.
+ * Whoever adds one should start here", install.sh:1699-1705); this is that
+ * surface, and that block now points at it.
+ *
+ * `CLAWBOX-WARN[code]: message`, or `CLAWBOX-WARN: message` with no code.
+ */
+const STEP_WARNING_LINE = /^CLAWBOX-WARN(?:\[([a-z0-9._:-]{1,60})\])?:\s*(.+)$/i;
+
+/** How much of a marker line reaches the owner's card. */
+const STEP_WARNING_MAX_CHARS = 300;
+
+/**
+ * The systemd invocation of the run that JUST happened, so the journal read
+ * below cannot answer with an older one.
+ *
+ * `journalctl -u <unit>` returns that unit's whole history — the journal is
+ * persistent on this box (`step_persistent_journal` makes sure of it) — so a
+ * marker from last week's update, or from a failed run the owner retried five
+ * minutes ago, would be raised over a run that did not produce it. That is a
+ * false failure created by the reader. Systemd's own per-start id is the exact
+ * bound, and it costs one `systemctl show`; where it cannot be read, nothing is
+ * raised, because a guess about WHICH run a warning came from is worse than no
+ * warning at all.
+ */
+async function rootStepInvocationId(stepId: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", `clawbox-root-update@${stepId}.service`, "-p", "InvocationID", "--value"],
+      { timeout: 10_000 },
+    );
+    const id = String(stdout ?? "").trim();
+    return /^[0-9a-f]{32}$/i.test(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Raise every marker THIS invocation of a root step left in its journal.
+ *
+ * Read after the step settles, whatever its outcome: a step that failed reports
+ * through its own error, and one that succeeded — or overran its advisory
+ * budget — over a fixup that did not is the case nothing else could see.
+ * Bounded like `readRootStepFailure` and never fatal: a journal that cannot be
+ * read must not fail an update that worked.
+ */
+async function collectRootStepWarnings(stepId: string): Promise<void> {
+  const invocation = await rootStepInvocationId(stepId);
+  if (!invocation) return;
+  let stdout = "";
+  try {
+    ({ stdout } = await execFile(
+      "/usr/bin/journalctl",
+      [`_SYSTEMD_INVOCATION_ID=${invocation}`, "-n", "500", "--no-pager", "-o", "cat"],
+      { timeout: 10_000 },
+    ));
+  } catch {
+    return;
+  }
+  const seen = new Set<string>();
+  for (const raw of String(stdout ?? "").split(/\r?\n/)) {
+    // ANCHORED. `step_openclaw_install` prints doctor's whole transcript
+    // verbatim, and other steps print git/npm output: a line that merely
+    // QUOTES the marker is not this box raising a warning.
+    const match = STEP_WARNING_LINE.exec(raw.trim());
+    if (!match) continue;
+    const code = match[1] ? match[1].toLowerCase() : `step-warning:${stepId}`;
+    const message = match[2].trim().slice(0, STEP_WARNING_MAX_CHARS);
+    if (!message || seen.has(code)) continue;
+    seen.add(code);
+    warnUpdate(code, message);
+  }
+  // PERSISTED, like the drift warnings beside them: the premise of this whole
+  // branch is that the web server is replaced mid-run, and the second half
+  // restores its warnings from disk.
+  if (seen.size > 0) await persistWarnings();
 }
 
 async function readRootStepFailure(stepId: string): Promise<string | null> {
@@ -3794,6 +3895,23 @@ async function resumeContinuation(): Promise<boolean> {
     // runs on every status poll, so an unconditional clear would rewrite that
     // file every two seconds — beside install.sh and the gateway, which have it
     // open by their own paths.
+    // NOT AN INTERRUPTION WHILE THE UPDATE IS STILL RUNNING. This branch's whole
+    // evidence is "the lock is held and there is nothing to resume", and that is
+    // ALSO what a second web server sees while the first one is still working
+    // through the steps — an update restarts this process by design, and the old
+    // one keeps going until its last step lands. Read as a crash, the new
+    // process released the lock and stamped `update_interrupted_at`, so a run
+    // whose journal shows every step completing and BUILD IDENTITY OK was
+    // reported failed with all thirteen steps pending (the OpenClaw box,
+    // 2026-09-07). The lock records WHO took it, so "still running" and "died"
+    // are now different answers; everything it cannot prove falls back to the
+    // behaviour above.
+    if (await updateLockHeldByLiveProcess()) {
+      console.log(
+        "[Updater] The lock is held by an update still running in another process — leaving it alone.",
+      );
+      return false;
+    }
     const released = (await isUpdateLocked()) && (await clearUpdateLock());
     const markers = await readSettledMarkers();
     // A store that could not be read decides NOTHING — it neither stamps a
@@ -4098,6 +4216,10 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           maxBuffer: 2 * 1024 * 1024,
         });
       }
+      // A root step that SUCCEEDED can still have skipped a fixup: install.sh's
+      // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
+      // that reaches the owner instead of only the journal.
+      if (step.requiresRoot) await collectRootStepWarnings(step.id);
       state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
@@ -4106,6 +4228,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // gateway writers have already waited for the root unit to settle before
       // reaching this catch, so advancing cannot overlap its remaining work.
       if (err instanceof BudgetOverrunError && step.advisoryOnOverrun) {
+        // The marker is read HERE too. `post_update` is the one advisory step,
+        // and an overrun is its ORDINARY shape on the repair path (a Hermes
+        // clone plus a 3.2 GB model fetch) — so this is the run most likely to
+        // have skipped a fixup, and the one where the step is shown green.
+        if (step.requiresRoot) await collectRootStepWarnings(step.id);
         state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
         continue;
@@ -4117,6 +4244,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         const rootFailure = await readRootStepFailure(step.id);
         if (rootFailure) message = rootFailure;
       }
+      // A step that FAILED can still have skipped fixups before it did, and the
+      // list of them is the only record of which. Raised as warnings beside the
+      // step's own error, never instead of it — `state.steps[i].error` below is
+      // untouched.
+      if (step.requiresRoot) await collectRootStepWarnings(step.id);
       state.steps[i].status = "failed";
       state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);

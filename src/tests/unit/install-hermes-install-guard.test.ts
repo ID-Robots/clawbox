@@ -299,19 +299,29 @@ describe("an in-app update can heal a device a factory reset broke", () => {
     // Without this the ONLY repair path was SSH. The in-app updater runs
     // post_update and rebuild_reboot; neither reached step_hermes_install, so
     // clicking UPDATE on a bricked box did nothing for it.
-    expect(POST_UPDATE).toMatch(/^\s*step_hermes_install\b/m);
+    expect(POST_UPDATE).toMatch(/^\s*optional_step \S+ step_hermes_install\b/m);
   });
 
   it("post_update re-caches the offline model", () => {
-    expect(POST_UPDATE).toMatch(/^\s*step_llamacpp_model\b/m);
+    expect(POST_UPDATE).toMatch(/^\s*optional_step \S+ step_llamacpp_model\b/m);
   });
 
-  it("both are non-fatal, in the surrounding style", () => {
+  it("both are non-fatal, in the surrounding style — and their failure is REPORTED", () => {
+    // `optional_step` is that style now: it never fails the step (an update
+    // must not be refused because a VNC unit refresh failed) and it records the
+    // name, which `report_optional_step_failures` re-states on the
+    // `CLAWBOX-WARN:` line the updater turns into a warning on the update's own
+    // status. `|| echo` reached the journal and nothing else, so the run was
+    // reported as having worked in full when part of it had not.
     for (const step of ["step_hermes_install", "step_llamacpp_model"]) {
-      const line = POST_UPDATE.split(NL).find((l) => l.trim().startsWith(step));
+      const line = POST_UPDATE.split(NL).find((l) => l.trim().endsWith(` ${step}`));
       expect(line, `${step} must be called in post_update`).toBeDefined();
-      expect(line, `${step} must not be able to fail the update`).toContain("|| echo");
+      expect(line, `${step} must not be able to fail the update`).toContain("optional_step ");
     }
+    const wrapper = shellCode(extractShellFunction("optional_step"));
+    expect(wrapper).toContain("POST_UPDATE_FAILED_STEPS=");
+    expect(wrapper).toContain("return 0");
+    expect(POST_UPDATE).toContain("report_optional_step_failures");
   });
 
   it("repairs the agent BEFORE the updater's hermes_edition step runs", () => {
@@ -722,8 +732,11 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
     const r = run({ installOk: false });
 
-    // step_post_update's `|| echo` depends on this not being a hard failure.
-    expect(r.code).toBe(0);
+    // The step now ANSWERS whether the agent runs: the restore put back the
+    // same unrunnable checkout, so this is a repair that did not work and the
+    // step says so. `optional_step` in step_post_update records that as a
+    // warning without failing the update, which is what keeps it non-fatal.
+    expect(r.code).toBe(1);
     expect(r.out).toMatch(/Warning: Hermes still does not run/);
     expect(r.out).toMatch(/Restored the previous agent/);
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
@@ -763,7 +776,8 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     run({ installOk: false });
     const r = run({ installOk: false });
 
-    expect(r.code).toBe(0);
+    // Still not runnable after round 2, so still reported as a failed repair.
+    expect(r.code).toBe(1);
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
     expect(fs.readdirSync(path.join(tmp, ".hermes")).filter((e) => e.includes(".broken"))).toEqual(
       [],
@@ -877,7 +891,9 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
     const r = run({ fetchOk: false });
 
-    expect(r.code).toBe(0);
+    // A download that never arrived leaves the same unrunnable agent behind,
+    // so the step reports the failed repair rather than answering 0.
+    expect(r.code).toBe(1);
     expect(r.out).toMatch(/Hermes install failed \(non-fatal\)/);
     // …and the box is still whole.
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");

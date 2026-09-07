@@ -54,15 +54,16 @@ describe("the embedding model is repaired on an update, not only on a fresh inst
   const POST_UPDATE = shellCode(extractShellFunction("step_post_update"));
 
   it("post_update calls it", () => {
-    expect(POST_UPDATE).toMatch(/^\s*ensure_local_embeddings\b/m);
+    expect(POST_UPDATE).toMatch(/^\s*optional_step \S+ ensure_local_embeddings\b/m);
   });
 
   it("and cannot be failed by it", () => {
     // errexit is live and step bodies are called bare, so a missing embedding
     // model must never be the reason an update stops.
-    const line = POST_UPDATE.split(NL).find((l) => l.trim().startsWith("ensure_local_embeddings"));
+    // `optional_step` is what makes it non-fatal now: it cannot fail the step and it RECORDS the name, so a skipped fixup reaches the update's own status through the `CLAWBOX-WARN:` line instead of only the journal.
+    const line = POST_UPDATE.split(NL).find((l) => l.trim().endsWith("ensure_local_embeddings"));
     expect(line).toBeDefined();
-    expect(line).toContain("|| echo");
+    expect(line).toContain("optional_step ");
   });
 
   it("runs after the unit, its sudoers grant and its memory cap are installed", () => {

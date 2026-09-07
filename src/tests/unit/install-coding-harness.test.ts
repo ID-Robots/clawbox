@@ -69,8 +69,9 @@ describe("delivery to devices already in the field", () => {
     // Every optional step in post_update is guarded; an unguarded one would
     // stop the update at whatever comes after it.
     const fn = extractShellFunction("step_post_update");
+    // `optional_step` is the guard in post_update now: it cannot fail the step and it records the name, so a skipped repair reaches the update's own status rather than only the journal.
     const line = fn.split("\n").find((l) => l.includes("step_coding_harness"));
-    expect(line).toMatch(/\|\|\s*echo/);
+    expect(line).toMatch(/\|\|\s*echo|optional_step \S+ step_coding_harness/);
   });
 });
 

@@ -1099,8 +1099,16 @@ describe("the installer reports what it actually installed", () => {
       'record_provision_failure() { echo "provision-failure: $1"; }',
       body,
       opts.shape === "update"
-        // Verbatim from step_post_update.
-        ? 'step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"'
+        // The shipped call shape, taken from install.sh rather than restated:
+        // `step_post_update` runs its fixups through `optional_step`, which
+        // cannot fail the step and RECORDS the name for the marker line the
+        // updater reads. A hand-written `|| echo` here would go on passing
+        // while the real call shape moved.
+        ? [
+            'POST_UPDATE_FAILED_STEPS=""',
+            shellFunction("optional_step"),
+            "optional_step nm_dispatcher step_nm_dispatcher",
+          ].join("\n")
         : "step_nm_dispatcher",
     ].join("\n");
 

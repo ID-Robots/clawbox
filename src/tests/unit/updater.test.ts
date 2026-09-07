@@ -473,6 +473,120 @@ describe("updater", () => {
      * and all; the step here is apt_update only because it is the one this
      * harness can drive, the reader is the same one.
      */
+    it("raises a warning for a fixup a SUCCEEDED root step skipped", async () => {
+      // install.sh's `step_post_update` runs nineteen fixups, every one of them
+      // non-fatal by design, and used to report a failure with `|| echo` — the
+      // journal and nothing else. The step exits 0, so the run was reported as
+      // having worked in full when part of it had not. The failures are
+      // re-stated on a `CLAWBOX-WARN:` line now, and this is where it becomes
+      // something the OWNER sees.
+      setupExecFileMock({
+        // The invocation bound: the reader asks systemd which start this was
+        // and reads only that one, so a marker from a previous update — the
+        // journal is persistent on this box — cannot be raised over a clean
+        // run.
+        "InvocationID": { stdout: "0123456789abcdef0123456789abcdef\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: [
+            "Applying system fixups",
+            "  Warning: firewall step failed (non-fatal)",
+            "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped: firewall vnc_refresh",
+            "clawbox-root-update@apt_update.service: Deactivated successfully.",
+          ].join(String.fromCharCode(10)),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().warnings?.some((w) => w.message.includes("firewall"))).toBe(true);
+      });
+
+      const warning = updater.getUpdateState().warnings?.find((w) => w.message.includes("firewall"));
+      expect(warning?.message).toContain("vnc_refresh");
+      // The marker itself is not the message: the owner reads the sentence.
+      expect(warning?.message).not.toContain("CLAWBOX-WARN");
+      // And the CODE is install.sh's, so a condition both sides can report —
+      // the doctor refusal — collapses to one card rather than two.
+      expect(warning?.code).toBe("post-update-fixups");
+    });
+
+    it("raises nothing when systemd cannot say which run this was", async () => {
+      // A guess about WHICH run a marker came from is worse than no warning:
+      // the journal is persistent, so an unbounded read answers with the last
+      // update's failures over a clean one.
+      setupExecFileMock({
+        "InvocationID": { stdout: "\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped: firewall",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.some((s) => s.status === "completed")).toBe(true);
+      });
+
+      expect(updater.getUpdateState().warnings?.some((w) => w.message.includes("firewall"))).toBeFalsy();
+    });
+
+    it("does not raise a line that merely QUOTES the marker", async () => {
+      // `step_openclaw_install` prints doctor's whole transcript verbatim, and
+      // other steps print git and npm output: a quoted marker is not this box
+      // raising a warning.
+      setupExecFileMock({
+        "InvocationID": { stdout: "0123456789abcdef0123456789abcdef\n", stderr: "" },
+        "/usr/bin/journalctl": {
+          stdout: [
+            "  doctor said: grep for CLAWBOX-WARN[post-update-fixups]: nothing to see",
+            "clawbox-root-update@apt_update.service: Deactivated successfully.",
+          ].join(String.fromCharCode(10)),
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.some((s) => s.status === "completed")).toBe(true);
+      });
+
+      expect(updater.getUpdateState().warnings?.some((w) => w.message.includes("nothing to see"))).toBeFalsy();
+    });
+
     it("names the step's own error, not systemd's epilogue, when a root step fails", async () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),

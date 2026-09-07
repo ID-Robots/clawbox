@@ -426,7 +426,7 @@ async function diagnoseLostUpdate(): Promise<string> {
     "bash", "-lc",
     "python3 -c \"import json;d=json.load(open('/home/clawbox/clawbox/data/config.json'));"
     + "print({k:d.get(k) for k in ('update_in_progress','update_needs_continuation',"
-    + "'update_interrupted_at','update_completed','update_completed_at')})\" 2>&1 || true",
+    + "'update_interrupted_at','update_completed','update_completed_at','update_lock_holder')})\" 2>&1 || true",
   ]);
   // REDACTED, and only the web server's own unit. This message becomes a
   // Playwright error and is uploaded as a CI artifact on a PUBLIC repository,

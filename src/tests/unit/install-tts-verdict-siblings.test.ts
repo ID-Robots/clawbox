@@ -591,6 +591,14 @@ function runPostUpdate(ttsExit: number) {
     // so post_update would return 127 over a step that succeeded.
     "pause_engine_unit() { :; }",
     "resume_paused_engines() { :; }",
+    // The non-fatal wrapper every fixup goes through, and the line it prints
+    // at the end — taken from install.sh itself, so this cannot pass against a
+    // wrapper that has stopped behaving like the shipped one.
+    extractShellFn(INSTALL_SH, "optional_step"),
+    extractShellFn(INSTALL_SH, "report_optional_step_failures"),
+    'POST_UPDATE_FAILED_STEPS=""',
+    // The non-step helper post_update calls for the embedder.
+    "ensure_local_embeddings() { :; }",
     `step_openclaw_tts() { return ${ttsExit}; }`,
     body,
     "step_post_update",
