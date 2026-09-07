@@ -213,6 +213,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.approval.summary": "The assistant is asking to do this. Nothing happens until you answer.",
     "chat.approval.allowOnce": "Allow once",
     "chat.approval.allowAlways": "Always allow",
+    "chat.approval.allowAll": "Allow all ({count})",
     "chat.approval.deny": "Deny",
     "chat.approval.working": "Answering…",
     "chat.approval.allowed": "Allowed.",

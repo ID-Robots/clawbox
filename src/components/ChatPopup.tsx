@@ -25,6 +25,7 @@ import {
   mergeApprovalCard,
   readApproval,
   subscribeSessionApprovals,
+  approvalIsActionable,
   type ApprovalCard,
   type ApprovalDecision,
 } from '@/lib/gateway-approvals'
@@ -3982,6 +3983,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [wsRequest])
 
+  // "Allow all": every approval still waiting, answered allow-once, one
+  // resolve each and in order — the batch of the consent each card already
+  // offers, never a standing allow (see ApprovalPrompt's `pendingCount`).
+  const actionableApprovals = approvals.filter(card => approvalIsActionable(card, approvalNow))
+  const allowAllApprovals = useCallback(async () => {
+    for (const card of actionableApprovals) await decideApproval(card, 'allow-once')
+  }, [actionableApprovals, decideApproval])
+
   /**
    * Send the drafts the owner ticked — one request, whatever N is.
    *
@@ -6044,6 +6053,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             card={card}
             nowMs={approvalNow}
             onDecide={decideApproval}
+            pendingCount={actionableApprovals.length}
+            onAllowAll={allowAllApprovals}
           />
         ))}
 

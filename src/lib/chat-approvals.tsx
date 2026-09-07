@@ -40,9 +40,20 @@ export interface ApprovalPromptProps {
   nowMs: number;
   /** Resolve through the gateway. One call per press; the caller marks it busy. */
   onDecide: (card: ApprovalCard, decision: ApprovalDecision) => void | Promise<void>;
+  /**
+   * How many approvals are waiting on the chat right now, this one included.
+   * Above one, a card that offers allow-once also offers "Allow all (N)" —
+   * the owner's ask of 2026-09-07, when a turn that had read the web raised a
+   * card per shell command and each wanted its own press. It answers every
+   * waiting card with allow-once, one resolve each: a batch of the consent
+   * the card already offers, never a standing allow, so a gate that refuses
+   * `allow-always` (the web-taint gate) is not widened by it.
+   */
+  pendingCount?: number;
+  /** Answer every waiting approval with allow-once. */
+  onAllowAll?: () => void | Promise<void>;
 }
-
-export function ApprovalPrompt({ card, nowMs, onDecide }: ApprovalPromptProps) {
+export function ApprovalPrompt({ card, nowMs, onDecide, pendingCount = 1, onAllowAll }: ApprovalPromptProps) {
   const { t } = useT();
   const actionable = approvalIsActionable(card, nowMs);
   // Pending but past its window is NOT "still waiting": the gateway would
@@ -182,6 +193,30 @@ export function ApprovalPrompt({ card, nowMs, onDecide }: ApprovalPromptProps) {
                 {card.busy === decision ? t("chat.approval.working") : t(DECISION_LABEL[decision])}
               </button>
             ))}
+            {onAllowAll && pendingCount > 1 && card.decisions.includes("allow-once") ? (
+              <button
+                type="button"
+                data-testid="chat-approval-allow-all"
+                data-pending-count={pendingCount}
+                aria-disabled={!actionable}
+                onClick={() => {
+                  if (!actionable) return;
+                  void onAllowAll();
+                }}
+                style={{
+                  padding: "6px 12px",
+                  borderRadius: 8,
+                  fontSize: 12.5,
+                  cursor: actionable ? "pointer" : "default",
+                  opacity: actionable ? 1 : 0.5,
+                  border: "1px solid rgba(249,115,22,0.5)",
+                  background: "rgba(249,115,22,0.18)",
+                  color: TITLE_FG,
+                }}
+              >
+                {t("chat.approval.allowAll").replace("{count}", String(pendingCount))}
+              </button>
+            ) : null}
           </div>
         </>
       )}
