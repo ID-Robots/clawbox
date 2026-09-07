@@ -1,7 +1,6 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { hasHermesHarness } from "@/lib/edition-source";
 import { petThumbnail, safePetSlug } from "@/lib/hermes-pets";
 
 /**
@@ -18,7 +17,6 @@ import { petThumbnail, safePetSlug } from "@/lib/hermes-pets";
  * sheet) 404s and the picker draws its name-only tile instead.
  */
 export async function GET(request: Request) {
-  if (!hasHermesHarness()) return new NextResponse(null, { status: 404 });
 
   const slug = safePetSlug(new URL(request.url).searchParams.get("slug"));
   if (!slug) return new NextResponse(null, { status: 400 });

@@ -1,10 +1,22 @@
-// ── Hermes pets, from ClawBox's side ──
+// ── The mascot's pets, from ClawBox's side ──
 //
 // Hermes ships a first-class pet subsystem: a `hermes pets` CLI, a store under
-// `$HERMES_HOME/pets/<slug>/`, and `display.pet.*` in config.yaml. ClawBox does
-// not reimplement any of it — it reads the same store and writes through the
-// same CLI, so the desktop mascot, the TUI, the `hermes pets` command and the
-// upstream Electron app always agree on which pet is active.
+// `$HERMES_HOME/pets/<slug>/`, and `display.pet.*` in config.yaml. On a box
+// with the Hermes harness ClawBox does not reimplement any of it — it reads the
+// same store and writes through the same CLI, so the desktop mascot, the TUI,
+// the `hermes pets` command and the upstream Electron app always agree on
+// which pet is active.
+//
+// On an OPENCLAW box there is no `hermes` binary and no config.yaml, and until
+// 2026-09-07 there were no pets either — the crab was the only body. The owner
+// asked for the same picker there, so the store has a second arm: the same
+// directory layout under ClawBox's own `data/pets/<slug>/`, the sheet fetched
+// by `installPetDirect` (the curated-only download the Hermes arm already
+// falls back to), and the selection in ClawBox's config store (`mascot_pet`)
+// instead of Hermes' config.yaml. Which arm is live is the edition's
+// (`hasHermesHarness`), asked per call rather than at import, so the routes
+// and the mascot follow a harness swap without a restart. With no pet picked
+// an OpenClaw box keeps the crab; a Hermes box wears the egg (see Mascot.tsx).
 //
 // Two deliberate non-choices:
 //
@@ -22,6 +34,8 @@
 import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
+import { DATA_DIR, get as getConfig, set as setConfig } from "@/lib/config-store";
+import { hasHermesHarness } from "@/lib/edition-source";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 import { PETDEX_ASSET_HOSTS, petdexSheetUrl } from "@/lib/petdex-manifest";
@@ -41,12 +55,25 @@ import {
 } from "@/lib/pet-sheet-metrics";
 
 const HOME_DIR = process.env.HOME || "/home/clawbox";
-const HERMES_HOME = process.env.HERMES_HOME || path.join(HOME_DIR, ".hermes");
+/** Read per call: the tests move it, and nothing here may pin it at import. */
+function hermesHome(): string {
+  return process.env.HERMES_HOME || path.join(HOME_DIR, ".hermes");
+}
+/** The config-store key the OpenClaw arm keeps its selection under. */
+export const MASCOT_PET_KEY = "mascot_pet";
 
-/** Mirrors `agent.pet.store.pets_dir()` — profile-scoped, not petdex's own dir. */
-export const PETS_DIR = path.join(HERMES_HOME, "pets");
+/**
+ * Where the pets live. Hermes: `$HERMES_HOME/pets`, mirroring
+ * `agent.pet.store.pets_dir()` (profile-scoped, not petdex's own dir), so the
+ * CLI and the desktop see one store. OpenClaw: ClawBox's own `data/pets`.
+ */
+export function petsDir(): string {
+  return hasHermesHarness() ? path.join(hermesHome(), "pets") : path.join(DATA_DIR, "pets");
+}
 /** ClawBox-owned scratch space. Never written into a pet's own directory. */
-const CACHE_DIR = path.join(HERMES_HOME, "cache", "clawbox-pets");
+function cacheDir(): string {
+  return hasHermesHarness() ? path.join(hermesHome(), "cache", "clawbox-pets") : path.join(DATA_DIR, "pets-cache");
+}
 
 /** `hermes pets install` downloads ~2.2 MB; the CLI default of 30 s is not enough. */
 const INSTALL_TIMEOUT_MS = 120_000;
@@ -134,7 +161,7 @@ function resolveSheet(dir: string, meta: Record<string, unknown>): string | null
 export function loadPet(rawSlug: string): InstalledPet | null {
   const slug = safePetSlug(rawSlug);
   if (!slug) return null;
-  const dir = path.join(PETS_DIR, slug);
+  const dir = path.join(petsDir(), slug);
   let meta: Record<string, unknown> = {};
   try {
     if (!fs.statSync(dir).isDirectory()) return null;
@@ -161,9 +188,9 @@ export function loadPet(rawSlug: string): InstalledPet | null {
 export function installedPets(): InstalledPet[] {
   let names: string[];
   try {
-    names = fs.readdirSync(PETS_DIR).sort();
+    names = fs.readdirSync(petsDir()).sort();
   } catch {
-    return []; // fresh box: ~/.hermes/pets does not exist yet
+    return []; // fresh box: the pets directory does not exist yet
   }
   const out: InstalledPet[] = [];
   for (const name of names) {
@@ -202,6 +229,7 @@ export interface PetConfig {
  * over a shared number.
  */
 export async function readPetConfig(): Promise<PetConfig> {
+  if (!hasHermesHarness()) return readClawboxPetConfig();
   try {
     const got = await hermesConfigGetMany(["display.pet.enabled", "display.pet.slug"]);
     return {
@@ -211,6 +239,21 @@ export async function readPetConfig(): Promise<PetConfig> {
   } catch {
     return { enabled: false, slug: "" };
   }
+}
+
+/** The OpenClaw arm's selection: `mascot_pet` in ClawBox's own config store. */
+async function readClawboxPetConfig(): Promise<PetConfig> {
+  try {
+    const raw = await getConfig(MASCOT_PET_KEY);
+    const d = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    return { enabled: d.enabled === true, slug: safePetSlug(d.slug) ?? "" };
+  } catch {
+    return { enabled: false, slug: "" };
+  }
+}
+
+async function writeClawboxPetConfig(config: PetConfig): Promise<void> {
+  await setConfig(MASCOT_PET_KEY, { enabled: config.enabled, slug: config.slug });
 }
 
 const geometryMemo = new Map<string, PetGeometry>();
@@ -277,7 +320,7 @@ export async function readPetGeometry(pet: InstalledPet): Promise<PetGeometry> {
   const memo = geometryMemo.get(key);
   if (memo) return memo;
 
-  const cacheFile = path.join(CACHE_DIR, `${pet.slug}-${pet.revision.replace(/:/g, "_")}.json`);
+  const cacheFile = path.join(cacheDir(), `${pet.slug}-${pet.revision.replace(/:/g, "_")}.json`);
   try {
     const cached = JSON.parse(await fsp.readFile(cacheFile, "utf-8")) as PetGeometry;
     // A cache file an older build wrote has no `rowMetrics`; re-derive rather
@@ -323,7 +366,7 @@ export async function readPetGeometry(pet: InstalledPet): Promise<PetGeometry> {
 
   geometryMemo.set(key, geometry);
   try {
-    await fsp.mkdir(CACHE_DIR, { recursive: true });
+    await fsp.mkdir(cacheDir(), { recursive: true });
     await fsp.writeFile(cacheFile, JSON.stringify(geometry), "utf-8");
   } catch {
     // A cache we cannot write is a slower path, not a failure.
@@ -438,7 +481,7 @@ async function installPetDirect(slug: string): Promise<boolean> {
   } catch {
     return false;
   }
-  const dir = path.join(PETS_DIR, slug);
+  const dir = path.join(petsDir(), slug);
   const sheetName = /\.png(?:[?#]|$)/i.test(url) ? "spritesheet.png" : "spritesheet.webp";
   const tmp = path.join(dir, `.${sheetName}.download`);
   const controller = new AbortController();
@@ -527,6 +570,20 @@ export async function selectPet(slug: string): Promise<PetCliOutcome> {
   const safe = safePetSlug(slug);
   if (!safe) return { ok: false, reason: "not-installed" };
 
+  if (!hasHermesHarness()) {
+    // The OpenClaw arm: the curated download straight into data/pets, then
+    // the selection into ClawBox's own store. No CLI exists to ask.
+    if (!loadPet(safe) && !(await installPetDirect(safe))) {
+      return cliFailure("install-failed", `install ${safe}`, "no spritesheet after the direct download");
+    }
+    try {
+      await writeClawboxPetConfig({ enabled: true, slug: safe });
+    } catch (err) {
+      return cliFailure("select-failed", `select ${safe}`, err instanceof Error ? err.message : String(err));
+    }
+    return { ok: true };
+  }
+
   if (!loadPet(safe)) {
     let cliDetail = "";
     try {
@@ -562,8 +619,18 @@ export async function selectPet(slug: string): Promise<PetCliOutcome> {
   return { ok: true };
 }
 
-/** `hermes pets off` — clears `display.pet.enabled`, keeps the pet on disk. */
+/** `hermes pets off` — clears `display.pet.enabled`, keeps the pet on disk. On
+ *  the OpenClaw arm the same fact goes into ClawBox's store; the crab is back. */
 export async function disablePet(): Promise<PetCliOutcome> {
+  if (!hasHermesHarness()) {
+    try {
+      const current = await readClawboxPetConfig();
+      await writeClawboxPetConfig({ enabled: false, slug: current.slug });
+      return { ok: true };
+    } catch (err) {
+      return cliFailure("select-failed", "pets off", err instanceof Error ? err.message : String(err));
+    }
+  }
   try {
     const r = await runHermesCli(["pets", "off"]);
     if (r.code !== 0) return cliFailure("select-failed", "pets off", r.stderr || r.stdout);
@@ -581,7 +648,7 @@ export async function disablePet(): Promise<PetCliOutcome> {
 // avoiding. So the server crops cell (0,0) — the idle frame — to a ~5 KB PNG
 // and caches that. Same trick as upstream's `pet.thumb` RPC.
 
-const THUMB_DIR = path.join(CACHE_DIR, "thumbs");
+const thumbDir = () => path.join(cacheDir(), "thumbs");
 const REMOTE_SHEET_TIMEOUT_MS = 20_000;
 const MAX_REMOTE_SHEET_BYTES = 8 * 1024 * 1024;
 /** A Jetson decoding several 1536x1872 webps at once is how you spike its RAM. */
@@ -627,7 +694,7 @@ export async function petThumbnail(rawSlug: string): Promise<Buffer | null> {
 
   const installed = loadPet(slug);
   const cacheKey = installed ? `${slug}-${installed.revision.replace(/:/g, "_")}` : `${slug}-remote`;
-  const cacheFile = path.join(THUMB_DIR, `${cacheKey}.png`);
+  const cacheFile = path.join(thumbDir(), `${cacheKey}.png`);
   try {
     return await fsp.readFile(cacheFile);
   } catch {
@@ -648,7 +715,7 @@ export async function petThumbnail(rawSlug: string): Promise<Buffer | null> {
   if (!png) return null;
 
   try {
-    await fsp.mkdir(THUMB_DIR, { recursive: true });
+    await fsp.mkdir(thumbDir(), { recursive: true });
     await fsp.writeFile(cacheFile, png);
   } catch {
     // Serving an uncached thumbnail is fine; it just costs the fetch again.

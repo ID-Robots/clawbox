@@ -9,6 +9,9 @@ import path from "path";
 
 let tmpHome: string;
 let petsDir: string;
+/** Which arm of the store is live — the edition's answer, mocked. */
+let hermesHarness = true;
+vi.mock("@/lib/edition-source", () => ({ hasHermesHarness: () => hermesHarness }));
 
 async function loadModule() {
   vi.resetModules();
@@ -35,11 +38,14 @@ function makePet(slug: string, opts: { sheet?: string; meta?: unknown } = {}) {
 beforeEach(() => {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-pets-"));
   process.env.HERMES_HOME = tmpHome;
+  process.env.CLAWBOX_ROOT = tmpHome;
   petsDir = path.join(tmpHome, "pets");
+  hermesHarness = true;
 });
 
 afterEach(() => {
   delete process.env.HERMES_HOME;
+  delete process.env.CLAWBOX_ROOT;
   fs.rmSync(tmpHome, { recursive: true, force: true });
   vi.restoreAllMocks();
 });
@@ -457,5 +463,72 @@ describe("selectPet", () => {
     expect(await selectPet("../../etc/passwd")).toEqual({ ok: false, reason: "not-installed" });
     expect(runHermesCli).not.toHaveBeenCalled();
     vi.doUnmock("@/lib/hermes-cli");
+  });
+});
+
+describe("the OpenClaw arm", () => {
+  // No `hermes` binary, no config.yaml: the same store layout under ClawBox's
+  // own data/pets, the sheet from the curated download, the pick in the
+  // config store. Which arm is live is asked per call, so a harness swap moves
+  // the store without a restart.
+  beforeEach(() => {
+    hermesHarness = false;
+  });
+
+  it("keeps its pets under data/pets and its pick under mascot_pet", async () => {
+    const { petsDir: dir, readPetConfig, MASCOT_PET_KEY } = await loadModule();
+    expect(dir()).toBe(path.join(tmpHome, "data", "pets"));
+    expect(MASCOT_PET_KEY).toBe("mascot_pet");
+    expect(await readPetConfig()).toEqual({ enabled: false, slug: "" });
+    hermesHarness = true;
+    expect(dir()).toBe(petsDir);
+  });
+
+  it("reads the pick from the config store and drops a slug that could escape the store", async () => {
+    fs.mkdirSync(path.join(tmpHome, "data"), { recursive: true });
+    fs.writeFileSync(path.join(tmpHome, "data", "config.json"), JSON.stringify({ mascot_pet: { enabled: true, slug: "../../etc" } }));
+    const { readPetConfig } = await loadModule();
+    expect(await readPetConfig()).toEqual({ enabled: true, slug: "" });
+    fs.writeFileSync(path.join(tmpHome, "data", "config.json"), JSON.stringify({ mascot_pet: { enabled: true, slug: "boba" } }));
+    expect(await (await loadModule()).readPetConfig()).toEqual({ enabled: true, slug: "boba" });
+  });
+
+  it("selects through the direct download and the store, never the CLI, and turns off in the store", async () => {
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set(["assets.petdex.dev"]),
+      petdexSheetUrl: async () => "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+    }));
+    const cli = vi.fn();
+    vi.doMock("@/lib/hermes-cli", () => ({ runHermesCli: cli }));
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(Buffer.from("RIFF-not-really-a-webp"), { status: 200, headers: { "content-length": "22" } }),
+    );
+    const { selectPet, disablePet, loadPet, readPetConfig } = await loadModule();
+    expect(await selectPet("boba")).toEqual({ ok: true });
+    expect(cli).not.toHaveBeenCalled();
+    expect(loadPet("boba")?.sheetPath).toBe(path.join(tmpHome, "data", "pets", "boba", "spritesheet.webp"));
+    expect(await readPetConfig()).toEqual({ enabled: true, slug: "boba" });
+    // Already on disk: no second download.
+    (globalThis.fetch as unknown as { mockClear: () => void }).mockClear();
+    expect(await selectPet("boba")).toEqual({ ok: true });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(await disablePet()).toEqual({ ok: true });
+    expect(await readPetConfig()).toEqual({ enabled: false, slug: "boba" });
+    expect(cli).not.toHaveBeenCalled();
+    vi.doUnmock("@/lib/petdex-manifest");
+    vi.doUnmock("@/lib/hermes-cli");
+  });
+
+  it("reports install-failed when the download cannot land, and writes no pick", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set(["assets.petdex.dev"]),
+      petdexSheetUrl: async () => "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+    }));
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const { selectPet, readPetConfig } = await loadModule();
+    expect(await selectPet("boba")).toEqual({ ok: false, reason: "install-failed" });
+    expect(await readPetConfig()).toEqual({ enabled: false, slug: "" });
+    vi.doUnmock("@/lib/petdex-manifest");
   });
 });

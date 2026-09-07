@@ -597,6 +597,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.mascot.pets": "Mascot Pet",
     "settings.mascot.petHint": "Pick the companion that lives on your desktop.",
     "settings.mascot.petNone": "None",
+    "settings.mascot.petCrab": "ClawBox crab",
     "settings.mascot.petBy": "by {author}",
     "settings.mascot.petCurated": "Curated",
     "settings.mascot.petInstalling": "Downloading…",

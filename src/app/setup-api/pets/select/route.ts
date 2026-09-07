@@ -1,7 +1,6 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { hasHermesHarness } from "@/lib/edition-source";
 import { curatedPet } from "@/lib/pet-curated";
 import {
   activePetDescriptor,
@@ -22,9 +21,6 @@ import {
  * would abort mid-download and leave a partial pet directory behind).
  */
 export async function POST(request: Request) {
-  if (!hasHermesHarness()) {
-    return NextResponse.json({ error: "Pets need the Hermes edition" }, { status: 404 });
-  }
 
   let body: unknown;
   try {

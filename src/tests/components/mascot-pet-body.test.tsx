@@ -115,6 +115,24 @@ describe("edition gating", () => {
     expect(container.querySelector("[data-pet]")).toBeNull();
   });
 
+  it("keeps the crab, never the egg, on an OpenClaw box with pets offered and none picked", async () => {
+    // Since 2026-09-07 the route says `supported: true` on OpenClaw too; the
+    // placeholder is what keeps the egg — a Hermes placeholder — off it.
+    stubPetsRoute({ supported: true, edition: "openclaw", placeholder: "crab", enabled: false, active: null });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
+    expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
+    expect(container.querySelector("[data-pet]")).toBeNull();
+  });
+
+  it("wears the picked pet on OpenClaw, like Hermes does", async () => {
+    stubPetsRoute({ supported: true, edition: "openclaw", placeholder: "crab", enabled: true, active: CODEX_PET });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector("[data-pet]")).toBeTruthy());
+    expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeNull();
+    expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
+  });
+
   it("keeps the crab's own CSS body animation on OpenClaw", async () => {
     stubPetsRoute({ supported: false, edition: "openclaw", enabled: false, active: null });
     const { container } = render(<Mascot />);
