@@ -30,7 +30,9 @@ test("store supports searching, viewing details, and installing an app", async (
   await page.getByRole("button", { name: "Install skill" }).click();
 
   await expect(storeWindow.getByText("Installed").first()).toBeVisible();
-  await storeWindow.getByRole("button", { name: "arrow_back" }).click();
+  // The Back button is named "Back" and its ligature is aria-hidden, so the
+  // glyph text is no longer part of the accessible name.
+  await storeWindow.getByRole("button", { name: "Back", exact: true }).click();
   await storeWindow.getByRole("button", { name: "Installed" }).click();
   await expect(storeWindow.getByText("Weather Deck")).toBeVisible();
 

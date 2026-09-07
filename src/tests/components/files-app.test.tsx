@@ -218,6 +218,45 @@ describe("FilesApp — the status line", () => {
     expect(status).toHaveTextContent("Error: Already exists");
   });
 
+  it("drops a clockless message when the owner leaves the folder it answered", async () => {
+    // Sweep FT-1: "Error: Already exists" (no clock — the one message that
+    // must outlast a success's 2 s) stayed in the bar through a double-click
+    // into another folder, over a listing it said nothing about.
+    render(<FilesApp />);
+    const status = await screen.findByTestId("files-status");
+    await waitFor(() => expect(status).toHaveTextContent(t("files.items", { count: 2 })));
+
+    fireEvent.click(screen.getByTitle(t("files.newFolder")));
+    fireEvent.change(screen.getByPlaceholderText(t("files.folderName")), { target: { value: "Projects" } });
+    nextWrite = { ok: false, status: 409, body: { error: "Already exists" } };
+    fireEvent.click(screen.getByText(t("files.ok")));
+    await waitFor(() => expect(status).toHaveTextContent("Error: Already exists"));
+
+    fireEvent.doubleClick(screen.getByTitle("Projects"));
+    await waitFor(() => expect(screen.getByTestId("files-breadcrumbs")).toHaveTextContent("Projects"));
+    await waitFor(() => expect(status).toHaveTextContent(t("files.items", { count: 2 })));
+    expect(status.textContent).not.toContain("Already exists");
+  });
+
+  it("drops a clockless message when the owner presses Refresh on the folder it answered", async () => {
+    // The same folder's reload keeps the line when an ACTION fired it; the
+    // Refresh button is the owner asking for the listing again, and the
+    // gesture a person reaches for to make a message go.
+    render(<FilesApp />);
+    const status = await screen.findByTestId("files-status");
+    await waitFor(() => expect(status).toHaveTextContent(t("files.items", { count: 2 })));
+
+    fireEvent.click(screen.getByTitle(t("files.newFolder")));
+    fireEvent.change(screen.getByPlaceholderText(t("files.folderName")), { target: { value: "Projects" } });
+    nextWrite = { ok: false, status: 409, body: { error: "Already exists" } };
+    fireEvent.click(screen.getByText(t("files.ok")));
+    await waitFor(() => expect(status).toHaveTextContent("Error: Already exists"));
+
+    fireEvent.click(screen.getByTitle(t("files.refresh")));
+    await waitFor(() => expect(status).toHaveTextContent(t("files.items", { count: 2 })));
+    expect(status.textContent).not.toContain("Already exists");
+  });
+
   it("says a search stopped early instead of calling every match it found a first page", async () => {
     render(<FilesApp />);
     await screen.findByTestId("files-app");

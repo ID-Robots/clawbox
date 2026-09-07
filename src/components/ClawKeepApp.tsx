@@ -1842,18 +1842,24 @@ function RestoreModal({
                                 </span>
                               )}
                             </div>
-                            <div className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-2">
+                            <div className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-2 min-w-0">
                               {/* When a custom label is shown above, surface the
-                                  timestamp here so the user still sees when it ran. */}
+                                  timestamp here so the user still sees when it ran.
+                                  It is the one part of this line that can be long
+                                  (a name the parser does not recognise is shown
+                                  whole), so it is the part that gives way: the
+                                  size and the age stay on one line, or "7.8 MB"
+                                  and "2d ago" break into two-line columns beside
+                                  a wrapped filename. */}
                               {s.label && s.label.trim() && (
                                 <>
-                                  <span>{timestampLabel}</span>
-                                  <span aria-hidden="true">·</span>
+                                  <span className="min-w-0 truncate" title={timestampLabel}>{timestampLabel}</span>
+                                  <span aria-hidden="true" className="shrink-0">·</span>
                                 </>
                               )}
-                              <span>{formatBytes(s.size_bytes)}</span>
-                              <span aria-hidden="true">·</span>
-                              <span>{timeAgo(s.last_modified_ms, t)}</span>
+                              <span className="shrink-0 whitespace-nowrap">{formatBytes(s.size_bytes)}</span>
+                              <span aria-hidden="true" className="shrink-0">·</span>
+                              <span className="shrink-0 whitespace-nowrap">{timeAgo(s.last_modified_ms, t)}</span>
                             </div>
                           </>
                         )}

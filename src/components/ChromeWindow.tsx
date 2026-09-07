@@ -162,7 +162,17 @@ export default function ChromeWindow({
   }, [minimized]);
 
   const handleDragStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
-    if (maximized) return;
+    if (maximized) {
+      // No drag from a maximized bar — but a mousedown's other default, moving
+      // focus, is still refused, as the drag path below refuses it: that is
+      // what keeps the keyboard in the window's content when Maximize is
+      // clicked, and the early return here let a click on Restore leave focus
+      // on the button, so a terminal swallowed every keystroke until it was
+      // clicked again (sweep FT-3). Touch is left alone: a cancelled
+      // touchstart cancels the tap it would have become.
+      if (!("touches" in e)) e.preventDefault();
+      return;
+    }
     e.preventDefault();
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
     const clientY = "touches" in e ? e.touches[0].clientY : e.clientY;

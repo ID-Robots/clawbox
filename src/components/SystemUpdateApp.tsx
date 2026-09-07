@@ -138,6 +138,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // open beside it, so the label's id has to be per-instance or the second
   // toggle would borrow the first one's name.
   const betaLabelId = useId();
+  const branchInputId = useId();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
@@ -683,12 +684,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
 
                   {/* Branch override */}
                   <div className="border-t border-[var(--border-subtle)] pt-4">
-                    <div className="text-sm text-gray-100">{tr("update.branchOverride", "Branch override")}</div>
+                    {/* A label, not a div: the input was named by its placeholder alone. */}
+                    <label htmlFor={branchInputId} className="block text-sm text-gray-100">{tr("update.branchOverride", "Branch override")}</label>
                     <p className="mt-1 text-xs text-[var(--text-muted)]">
                       {tr("update.branchOverrideHelp", "Pin updates to a specific git branch (e.g. for QA). Leave blank to follow the configured channel.")}
                     </p>
                     <div className="mt-2 flex items-center gap-2">
                       <input
+                        id={branchInputId}
                         type="text"
                         value={branchInput}
                         onChange={(e) => setBranchInput(e.target.value)}
