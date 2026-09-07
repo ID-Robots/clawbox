@@ -801,42 +801,68 @@ describe("the harness reclaims the mark when the run ends", () => {
     expect(typeof subscriptions[0]?.handle).toBe("function");
   });
 
-  it("shares ONE gate across every register() call, and names each subscription apart", () => {
+  it("releases a mark made through one registration via the OTHER registration's run-end handler", () => {
     // MEASURED ON THE BOX, not theorised: one gateway pid calls `register()`
-    // twice. That made two gates with two independent maps, and the halves
-    // landed on different ones — the tool hooks that served calls marked one
-    // gate while the terminal lifecycle event was dispatched to the other,
-    // which is why the live map was never reclaimed. Observed as
+    // twice — once per registry, and a process builds several while Node caches
+    // the module. Typed hooks live per registry; agent-event dispatch follows
+    // whichever registry is active. So the registry whose hooks serve a tool
+    // call need not be the registry whose subscription is dispatched, and with
+    // a gate per registration the two halves land on different maps: the live
+    // map is never reclaimed and grows for the life of the gateway. Observed as
     // `gid=A rememberTaint …` against `gid=B TERMINAL … hadMark=false size=0`.
     //
-    // Two properties keep that closed: ONE gate behind all registrations (so
-    // "the run ended" reaches the map that holds the marks, whichever registry
-    // the core decides is live), and a DISTINCT subscription id per
-    // registration (so the core does not refuse the later ones as duplicates).
-    const subscriptions: Array<Record<string, unknown>> = [];
-    const api = () => ({
-      on: () => {},
-      runContext: fakeRunContext(),
-      agent: {
-        events: { registerAgentEventSubscription: (sub: Record<string, unknown>) => subscriptions.push(sub) },
-      },
-    });
-    plugin.register(api());
-    plugin.register(api());
-    expect(subscriptions).toHaveLength(2);
-    expect(subscriptions[0]?.id).not.toBe(subscriptions[1]?.id);
-    for (const sub of subscriptions) {
-      expect(String(sub.id)).toContain("clawbox-web-taint-run-end-");
-      expect(sub.streams).toEqual(["lifecycle"]);
-    }
-    // The decisive half: a mark made through one registration's hooks must be
-    // released by the OTHER registration's run-end handler. Two gates cannot do
-    // this; one gate behind both can.
-    const first = subscriptions[0]?.handle as (e: unknown) => void;
-    const second = subscriptions[1]?.handle as (e: unknown) => void;
-    expect(first).not.toBe(undefined);
-    expect(second).not.toBe(undefined);
-    expect(first).toBe(second);
+    // THIS CASE DRIVES THE SPLIT DIRECTLY, because asserting that the two
+    // subscription handles are the same function proves only that ONE gate sits
+    // behind the subscriptions — it says nothing about the handlers handed to
+    // `api.on`, which is the half that actually gates. A mark is made through
+    // registration A's `before_tool_call` and released through registration B's
+    // run-end handler; only a gate shared by BOTH halves can do that.
+    const captured: Array<{
+      before?: ToolHook;
+      handle?: (event: unknown) => void;
+      subscriptionId?: string;
+    }> = [];
+    const register = () => {
+      const slot: { before?: ToolHook; handle?: (event: unknown) => void; subscriptionId?: string } = {};
+      captured.push(slot);
+      plugin.register({
+        runContext: fakeRunContext(),
+        on: (name: string, handler: ToolHook) => {
+          if (name === "before_tool_call") slot.before = handler;
+        },
+        agent: {
+          events: {
+            registerAgentEventSubscription: (sub: { id: string; handle: (event: unknown) => void }) => {
+              slot.handle = sub.handle;
+              slot.subscriptionId = sub.id;
+            },
+          },
+        },
+      });
+    };
+    register();
+    register();
+    const [a, b] = captured;
+    expect(typeof a?.before).toBe("function");
+    expect(typeof b?.handle).toBe("function");
+    // Distinct ids, or the core refuses the later registration as a duplicate
+    // of the same {pluginId, id} pair within one registry.
+    expect(a?.subscriptionId).not.toBe(b?.subscriptionId);
+
+    const splitRun = "run-split";
+    const splitCtx = ctx({ runId: splitRun });
+    // A: the web read is dispatched through the FIRST registration's hook.
+    a?.before?.({ toolName: "web_fetch", params: {} }, splitCtx);
+    // The mark exists — the same registration's hook gates a shell in that run.
+    expect(
+      (a?.before?.({ toolName: "exec", params: { command: "id" } }, splitCtx) as
+        | { requireApproval?: unknown }
+        | undefined)?.requireApproval,
+    ).toBeTruthy();
+    // B: the run ends, and the core dispatches that to the SECOND registration.
+    b?.handle?.({ stream: "lifecycle", runId: splitRun, data: { phase: "end" } });
+    // The mark must be gone — for A's hook, which is the one that holds it.
+    expect(a?.before?.({ toolName: "exec", params: { command: "id" } }, splitCtx)).toBeUndefined();
   });
 
   it("still installs the gate on a core with no agent-event feed", () => {

@@ -252,8 +252,10 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
   /**
    * A taint with NO RUN TO KEY ON — the only case where there is nothing to
    * scope to, so the window has to be process-wide. It is armed by a web tool
-   * call that carried no run id, and by an eviction, and by nothing else, so a
-   * box that never reads the web never sees it.
+   * call that carried no run id, and by NOTHING else: an eviction deliberately
+   * arms nothing (see `rememberTaint`, where arming from the bound is the
+   * failure that would have this gate asking about every shell on the box for
+   * ever). So a box that never reads the web never sees it.
    */
   let unscopedTaintUntilMs = 0;
 
@@ -540,7 +542,13 @@ function warnNoReclamation(why) {
  * The first registration's `api.runContext` is the one kept. That costs
  * nothing: the mirror is best effort, no decision depends on it, and on this
  * core the write is refused either way (`setRunContext … returned=false
- * readBack=undefined`, observed).
+ * readBack=undefined`, observed) — the first registration is the one whose
+ * registry is not live, and the loader gates both accessors on exactly that.
+ *
+ * A reload that RE-IMPORTS the module gets a fresh `null` here and so a fresh
+ * gate, losing the marks of any run in flight at that instant. That is not new
+ * — before this, every `register()` made a new gate, so a reload lost them too
+ * — and it is not worth carrying state across module instances to close.
  */
 let sharedGate = null;
 
