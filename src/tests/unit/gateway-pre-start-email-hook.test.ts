@@ -133,17 +133,19 @@ function readConfig(): OpenclawConfig {
 }
 
 /**
- * The stderr lines about the EMAIL: plugin, dropping the path guard's.
+ * The stderr lines about the EMAIL: plugin, dropping the other plugins'.
  *
- * `block()` extracts the shared installer and BOTH plugins it installs, so the
- * path guard's own lines ride along in every run here. They are another
- * suite's subject; an assertion about "did this block stay quiet" has to be
- * about this block.
+ * `block()` extracts the shared installer and EVERY plugin it installs, so the
+ * path guard's and the web-taint gate's own lines ride along in every run here.
+ * They are other suites' subjects; an assertion about "did this block stay
+ * quiet" has to be about this block.
  */
+const OTHER_HOOK_PLUGIN_IDS = ["clawbox-path-guard", "clawbox-web-taint"];
+
 function emailHookLines(stderr: string): string {
   return stderr
     .split("\n")
-    .filter((line) => !line.includes("clawbox-path-guard"))
+    .filter((line) => !OTHER_HOOK_PLUGIN_IDS.some((id) => line.includes(id)))
     .join("\n");
 }
 
@@ -329,9 +331,11 @@ d("gateway-pre-start.sh — the outbound EMAIL: directive hook plugin", () => {
     run();
     expect(existsSync(verifiedStamp())).toBe(true);
     // The plugins ClawBox ships and NOTHING else — no stamp, no marker file.
-    // The path guard is here because the shared installer copies both.
+    // The others are here because the extracted block installs every one of
+    // them; they are named from one list so a new hook plugin lands in a single
+    // place rather than in this expectation as a surprise.
     expect(readdirSync(path.join(openclawHome, "extensions")).sort())
-      .toEqual([PLUGIN_ID, "clawbox-path-guard"].sort());
+      .toEqual([PLUGIN_ID, ...OTHER_HOOK_PLUGIN_IDS].sort());
   });
 
   it("re-verifies after a factory reset empties ~/.openclaw", () => {
