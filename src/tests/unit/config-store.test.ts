@@ -368,6 +368,55 @@ describe("config-store", () => {
     });
   });
 
+  describe("a value `toJSON` has already turned into null", () => {
+    it("refuses an invalid Date in every writer, bare and nested", async () => {
+      // `JSON.stringify` calls a value's own `toJSON` BEFORE the replacer, so
+      // the guard is handed `null` and never sees the Date at all: the store
+      // then holds `null` under a key the caller believes holds a time, and
+      // every reader sees "unset" over a write that answered success.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
+
+      await expect(configStore.set("clawai_credential_refused_at", new Date(NaN))).rejects.toThrow(TypeError);
+      await expect(configStore.set("plan", { renewsAt: new Date(NaN) })).rejects.toThrow(TypeError);
+      await expect(configStore.swap("clawai_credential_refused_at", new Date(NaN))).rejects.toThrow(TypeError);
+      await expect(configStore.setMany({ clawai_credential_refused_at: new Date(NaN) })).rejects.toThrow(TypeError);
+
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+
+    it("still stores a VALID Date as the string JSON makes of it, and a real null as null", async () => {
+      // The guard is about a value that comes back as something ELSE. A date
+      // that serialises is exactly what the caller asked to store, and `null`
+      // itself is a value this store has always held.
+      await configStore.set("password_configured_at", new Date("2026-09-07T12:00:00.000Z"));
+      await configStore.set("clawai_plan_tier", null);
+      expect(await configStore.get("password_configured_at")).toBe("2026-09-07T12:00:00.000Z");
+      expect(await configStore.get("clawai_plan_tier")).toBeNull();
+    });
+
+    it("refuses any toJSON that answers null, not just Date's", async () => {
+      // The class, not the corner: nothing about the failure is specific to
+      // dates — any value whose `toJSON` answers null is written as null.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
+      await expect(configStore.set("plan", { toJSON: () => null })).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+
+    it("refuses a value JSON omits entirely, whatever shape it arrives in", async () => {
+      // The catch-all behind the named guards: a `toJSON` that answers
+      // `undefined` drops the whole key, with none of the shapes the guards
+      // recognise. `swap` said "use set()" for this, which stopped being advice
+      // the moment `set` refused it too.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "hermes" }), "utf-8");
+      await expect(configStore.swap("active_harness", { toJSON: () => undefined })).rejects.toThrow(
+        /cannot hold a value JSON omits entirely/,
+      );
+      // And `undefined` itself still gets the advice that IS true for it.
+      await expect(configStore.swap("active_harness", undefined)).rejects.toThrow(/use set\(\)/);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ active_harness: "hermes" });
+    });
+  });
+
   describe("getAll", () => {
     it("returns full config object", async () => {
       await fs.writeFile(CONFIG_PATH, JSON.stringify({ a: 1, b: "two", c: true }), "utf-8");

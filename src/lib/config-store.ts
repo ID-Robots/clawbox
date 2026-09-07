@@ -128,7 +128,7 @@ function assertStorableValue(key: string, value: unknown): void {
   // ARRAY becomes a `null` MEMBER, at any depth: the list still has its length
   // and one entry is now nothing, which is the same false success as the
   // numbers below.
-  JSON.stringify(value, function (this: unknown, _field: string, held: unknown) {
+  JSON.stringify(value, function (this: unknown, field: string, held: unknown) {
     // `held instanceof Number` as well as the primitive: a boxed non-finite
     // number reaches the replacer as an OBJECT and is written as `null` just
     // the same, so the "at any depth" claim above would be half true without
@@ -136,6 +136,20 @@ function assertStorableValue(key: string, value: unknown): void {
     const asNumber = typeof held === "number" ? held : held instanceof Number ? held.valueOf() : null;
     if (asNumber !== null && !Number.isFinite(asNumber)) {
       throw new TypeError(`config-store: ${key} cannot hold ${String(asNumber)} — JSON writes it as null`);
+    }
+    // WHAT `toJSON` ALREADY TURNED INTO NULL. `JSON.stringify` calls a value's
+    // own `toJSON` BEFORE the replacer, so the replacer is handed the result,
+    // not the value: `new Date(NaN)` arrives here as `null` and every check
+    // above looks straight through it. The holder still has the original —
+    // `this[field]` is the pre-`toJSON` value at every depth, the top level
+    // included (there the holder is JSON's own wrapper and `field` is "") — so
+    // one lookup closes the whole class rather than only `Date`'s corner of it.
+    // A value that really IS null is stored as null, which is what the caller
+    // asked for.
+    const raw = (this as Record<string, unknown> | null)?.[field];
+    if (held === null && raw !== null && raw !== undefined) {
+      const what = raw instanceof Date ? "an invalid Date" : "a value whose toJSON answers null";
+      throw new TypeError(`config-store: ${key} cannot hold ${what} — JSON writes it as null`);
     }
     if (Array.isArray(this) && (held === undefined || typeof held === "function" || typeof held === "symbol")) {
       throw new TypeError(`config-store: ${key} cannot hold a list with a member JSON writes as null`);
@@ -257,11 +271,20 @@ export async function swap(key: string, value: unknown): Promise<unknown> {
   // Ahead of the read, so a value that cannot be stored costs no file access.
   // `JSON.stringify` throws on a BigInt or a cycle, which `writeConfig` would
   // have done anyway — here it happens before anything is opened.
-  if (JSON.stringify(value) === undefined) {
+  if (value === undefined) {
     throw new TypeError(`config-store: swap(${key}) replaces, it cannot delete — use set()`);
   }
   assertStorableKey(key);
   assertStorableValue(key, value);
+  // The catch-all behind the named guards, and the reason it comes AFTER them:
+  // they say what is wrong ("cannot hold a function", "an invalid Date"), while
+  // this only knows that nothing would be written. It still has to be here —
+  // a `toJSON` that answers `undefined` drops the whole key with none of the
+  // shapes above — and "use set()" is deliberately not its advice, since `set`
+  // refuses every one of these too.
+  if (JSON.stringify(value) === undefined) {
+    throw new TypeError(`config-store: ${key} cannot hold a value JSON omits entirely`);
+  }
   const config = readConfigStrict();
   const previous = held(config, key);
   config[key] = value;
