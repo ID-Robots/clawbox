@@ -43,7 +43,7 @@ import { ensureHermesGateway, retireHermesUserGateway, setHermesTelegramToken } 
 import { memAvailableMb } from "@/lib/mem-available";
 import { findOpenclawBin, readConfig, restartGateway, setTelegramToken } from "@/lib/openclaw-config";
 import { freeBytes } from "@/lib/project-import";
-import { rootStepUnit } from "@/lib/root-step-follow";
+import { rootStepUnit } from "@/lib/root-step-journal";
 import { isUpdateLocked } from "@/lib/update-lock";
 
 const execFile = promisify(execFileCb);

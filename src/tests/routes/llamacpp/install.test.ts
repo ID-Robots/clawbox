@@ -374,6 +374,64 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it("never reports the PREVIOUS install attempt's line as this run's", async () => {
+    // The unit is `clawbox-root-update@llamacpp_install.service` and the
+    // journal on this box is persistent, so an unbounded read answers with
+    // whatever the last attempt left behind — and the first poll happens
+    // before this run's unit has written anything. The owner was shown the
+    // previous failure as live progress and then handed it as this run's
+    // reason. The read is bounded to this run now; the mock is the OS.
+    mockFs.stat.mockImplementation((async () => {
+      throw new Error("ENOENT");
+    }) as typeof fsp.stat);
+
+    const journalReads: string[] = [];
+    // The dispatch takes a moment, as starting a root unit does, so a capture
+    // that slid BELOW `startRootStep` is visible here instead of landing in
+    // the same instant and looking correct.
+    let dispatchedAt = 0;
+    vi.mocked(startRootStep).mockImplementation(async () => {
+      dispatchedAt = Date.now();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+    mockExecFile.mockImplementation(((
+      cmd: string,
+      args: string[],
+      optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+      const key = `${cmd} ${args.join(" ")}`;
+      let stdout = "";
+      if (key.includes("systemctl show")) {
+        stdout = "ActiveState=failed\nResult=exit-code\n";
+      } else if (key.includes("journalctl")) {
+        journalReads.push(key);
+        const since = Number(/--since @([\d.]+)/.exec(key)?.[1] ?? NaN);
+        stdout = since * 1000 <= dispatchedAt
+          ? ""
+          : "Error: yesterday's attempt could not reach huggingface.co\n";
+      }
+      callback?.(null, { stdout, stderr: "" });
+      return {} as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [] }),
+    }));
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const text = await readStream(res);
+
+    expect(text).not.toContain("yesterday's attempt");
+    expect(journalReads.length).toBeGreaterThan(0);
+    for (const read of journalReads) {
+      expect(read).toContain("-u clawbox-root-update@llamacpp_install.service");
+      expect(read).toMatch(/--since @\d+\.\d{3}/);
+    }
+  });
+
   it("repairs the llama.cpp runtime and retries when hf is missing", async () => {
     const runtimeError = "[llamacpp] Missing Hugging Face CLI at /home/clawbox/.local/bin/hf. Run the llama.cpp install step to repair the local runtime.\n";
     const mockFetch = vi.fn()
