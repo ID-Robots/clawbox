@@ -1110,8 +1110,13 @@ export function reconcileDriftWarnings(
     const substitute = live.get(warning.code)
       ?? (isBuildAxisCode(warning.code) ? liveBuildAxis : undefined);
     // A warning list restored from a box that predates this fix can carry two
-    // build codes (it was written from two samples), and the codes key the
-    // rendered list — so a substitution that would double one is not made.
+    // build codes: it was written from two samples. They are one condition, so
+    // once the measurement has spoken for that axis a second warning about it
+    // can only be the superseded one — dropped, rather than shown beside the
+    // sentence that replaced it or doubling its code in a list the codes key.
+    if (isBuildAxisCode(warning.code) && liveBuildAxis && emitted.has(liveBuildAxis.code)) {
+      continue;
+    }
     const current = substitute && !emitted.has(substitute.code) ? substitute : warning;
     emitted.add(current.code);
     next.push(current);

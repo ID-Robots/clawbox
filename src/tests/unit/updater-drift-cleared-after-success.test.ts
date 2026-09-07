@@ -315,6 +315,30 @@ describe("reconcileDriftWarnings", () => {
     expect(after[0].message).toContain("carries no build record");
   });
 
+  it("does not keep a second, superseded build sentence beside the measured one", () => {
+    // A warning list restored from a box that predates this fix was written
+    // from two samples and can carry two build codes. They are one condition,
+    // so showing the measured sentence AND a stale sibling is the two
+    // contradictory warnings this card exists to remove, from a third side.
+    const predates: UpdateWarning = {
+      code: "build-predates-checkout",
+      message: "The code on disk is newer than the deployed build — run Update to rebuild.",
+    };
+    const measured: DriftMeasurement = {
+      drift: computeDrift(driftInputs({
+        build: null,
+        deployedBuildId: "the-deployed-build",
+        stamperInCheckout: true,
+      })),
+      pinned: true,
+      dirty: false,
+    };
+
+    const after = reconcileDriftWarnings([otherCommit, predates], measured);
+
+    expect(after.map((w) => w.code)).toEqual(["build-unstamped"]);
+  });
+
   it("retires nothing when the read itself threw", () => {
     expect(reconcileDriftWarnings([behindPin, otherCommit], null)).toEqual([behindPin, otherCommit]);
   });
