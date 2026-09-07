@@ -63,6 +63,15 @@
 // `PluginHookBeforeToolCallEvent` or `PluginHookToolContext` — and the core's
 // one batch-level admission hook, `beforeToolBatch`, is host-private (a WeakMap
 // keyed by the Agent, reserved for tool-loop detection) with no `api.*` surface.
+// AND THE PRICE OF MARKING EARLY, also on the record: a read that is PREPARED
+// need not happen. The core runs every before hook and then checks steering, so
+// an interrupted, aborted or refused batch can be marked and then skipped
+// without fetching a byte — and every shell call for the rest of that run then
+// raises a card naming a source that never returned. It fails closed, so it is
+// an annoyance and not a hole, and it is why the card says the turn STARTED
+// reading rather than that it read. Narrowing it would mean waiting for the
+// result, which is the defect this whole change exists to fix.
+//
 // The one native lever that WOULD serialise a batch is
 // `ToolDefinition.executionMode: "sequential"`, which promotes the whole batch
 // to the sequential path — but only when the model calls that particular tool,
@@ -144,13 +153,18 @@ const UNSCOPED_TAINT_WINDOW_MS = 5 * 60_000;
 const MAX_SOURCES = 4;
 
 /**
- * How many runs may hold a mark at once — the ONLY bound on the mark map, and
- * deliberately a count rather than a time (see `rememberTaint`). A gateway runs
- * for weeks, but only a turn that READ THE WEB is marked, and a run id is
- * unique per turn, so nothing here can leak into another turn however long it
- * is kept. Evicting the least-recently-marked run loses a taint, so an eviction
- * arms the process-wide window — the bound is generous enough that a real box
- * cannot reach it.
+ * A BACKSTOP bound on the mark map, not the mechanism that keeps it small.
+ *
+ * What keeps it small is the harness: the gate subscribes to the core's
+ * `lifecycle` agent-event stream and drops a run's mark when the core says that
+ * run ended — the same event, in the same dispatcher, at which the core clears
+ * its OWN per-run plugin context. So the map holds live runs that read the web,
+ * which on a box is a handful.
+ *
+ * This bound only matters on a core that offers no such subscription, where
+ * marks would otherwise accumulate for the process lifetime. Eviction is
+ * least-recently-marked and SILENT — see `rememberTaint` for why arming the
+ * process-wide window here would be far worse than the taint it protects.
  */
 const MAX_TRACKED_RUNS = 1024;
 
@@ -185,32 +199,35 @@ const GATE_PRIORITY = -10;
  */
 export function createWebTaintGate({ runContext, now = Date.now } = {}) {
   /**
-   * THE MARK, held here: `runId` → `{ sources, expiresAt }`.
+   * THE MARK, held here: `runId` → `{ sources }`.
    *
    * WHY THIS EXISTS BESIDE THE HARNESS'S OWN STORE, which is the thing a
    * ClawBox plugin is supposed to use rather than reinvent. `api.runContext` IS
-   * the right mechanism and it is still written and read below. But on the
-   * pinned 2026.8.1 core it does not keep this plugin's mark: every approval
-   * the device lane raised on the box carried the "could not be kept" wording
-   * and named no source, because the write was refused and the gate had nowhere
-   * else to put what it had learned.
+   * the right mechanism and it is still written and read below.
    *
-   * The refusal is ordinary rather than exotic, and the core has several ways
-   * to produce it (`loader`'s side-effect predicate, a retired registry, and —
-   * measured — a run already in `closedRunIds`, which `after_tool_call` can
-   * reach because the core fires that hook UNAWAITED and it can land after the
-   * run's terminal lifecycle event). What matters here is that the same loader
-   * predicate shuts `setRunContext` and `getRunContext` together:
+   * WHAT WAS OBSERVED, and only that: under PR #775's design — where the mark
+   * was written from `after_tool_call` — every approval the device lane raised
+   * on the box carried the "could not be kept" wording and named no source, so
+   * the write was refused and the gate had nowhere else to put what it had
+   * learned. WHICH refusal fired was NOT determined. The likeliest candidate is
+   * the core's own `if (!allowClosedRun && isPluginRunClosed(runId)) return
+   * false`, reachable precisely because the core fires `after_tool_call`
+   * UNAWAITED so it can land after the run's terminal lifecycle event — a race
+   * this file's before-hook write may well win. The loader also gates the store
+   * behind a side-effect predicate, but that predicate is true for a normally
+   * loaded, enabled plugin, so it is not the explanation.
    *
-   *     setRunContext: (patch) => …predicate… ? setPluginRunContext({…}) : false,
-   *     getRunContext: (get)   => …same predicate… : void 0,
-   *
-   * so a refused write is not a mark that can be recovered by reading harder.
-   * The gate therefore keeps the mark itself and MIRRORS it into
-   * `api.runContext`: the card can name what tainted the turn on the core we
-   * actually ship, the harness still clears its own copy at run end, and the
-   * day that store answers for a hook plugin this map is a redundant cache
-   * rather than a design to unwind.
+   * SO WHY KEEP A MARK HERE AT ALL, if the store may now accept the write.
+   * Because the two stores answer different questions. When the loader's
+   * predicate DOES shut, it shuts `setRunContext` and `getRunContext` together
+   * (`… ? setPluginRunContext({…}) : false` / `… : void 0`), so a refused write
+   * is not a mark that can be recovered by reading harder — the gate would be
+   * silently blind, which for a security gate is the one outcome worth paying a
+   * map for. The mark is therefore kept here and MIRRORED into `api.runContext`,
+   * the harness reclaims it at run end through the subscription in `register`,
+   * and no decision depends on whether the core took the copy. If a later
+   * measurement shows the store accepts reliably, this map becomes a redundant
+   * cache to delete rather than a design to unwind.
    *
    * It cannot leak across turns: a run id belongs to exactly one run, so a mark
    * is only ever read back by the turn that wrote it.
@@ -228,13 +245,25 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
   /**
    * Records `toolName` against `runId`, newest sources kept, oldest RUN evicted.
    *
-   * THERE IS DELIBERATELY NO TIME LIMIT ON A MARK. A TTL here would be a second
-   * way for the gate to fail: a turn that outlived it would have its own mark
-   * expire underneath it and the shell would go unasked mid-turn — the state
-   * this codebase calls probe-once, arrived at from the other side. The map is
-   * bounded by COUNT instead, which cannot expire under a live run, and a mark
-   * that is never reclaimed is harmless: a run id belongs to exactly one run,
-   * so a kept mark can only ever be read back by the turn that wrote it.
+   * THERE IS DELIBERATELY NO TIME LIMIT ON A MARK. A TTL would be a second way
+   * for the gate to fail: a turn that outlived it would have its own mark
+   * expire underneath it and the shell would go unasked mid-turn — probe-once,
+   * arrived at from the other side. A mark is dropped when its RUN ENDS
+   * instead, on the core's own signal (`forgetRun` below).
+   *
+   * THE EVICTION IS SILENT, and that is the careful part. An earlier draft
+   * armed the process-wide window here, on the reasoning that a lost mark is a
+   * taint the gate can no longer prove. That reasoning only holds if reaching
+   * the bound means something is wrong — and on a core with no run-end signal
+   * it does not: marks accumulate for the process lifetime, so a box that
+   * browses reaches 1024 in the ordinary course of weeks, and from then on
+   * EVERY web read would evict one and re-arm a process-wide gate that never
+   * drains. The gate would degrade, silently and permanently, into asking about
+   * every shell command in every session and every cron — which is precisely
+   * the "a gate that fires on ordinary work is worse than no gate" failure this
+   * plugin's ruling forbids. Losing the least-recently-marked run, which is
+   * either long finished or the quietest of 1024 concurrent live ones, is much
+   * the smaller harm.
    */
   const rememberTaint = (runId, toolName) => {
     const sources = marksByRun.get(runId)?.sources ?? [];
@@ -247,12 +276,49 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
       const oldest = marksByRun.keys().next().value;
       if (oldest === undefined) break;
       marksByRun.delete(oldest);
-      // An evicted mark is a taint this gate can no longer prove, so it falls
-      // back to the window rather than forgetting it. The bound is high enough
-      // that reaching it means something is wrong, and this fails safe.
-      unscopedTaintUntilMs = now() + UNSCOPED_TAINT_WINDOW_MS;
     }
   };
+
+  /**
+   * Drops a run's mark, for the core's run-end signal to call.
+   *
+   * THIS IS THE HARNESS DOING THE RECLAIMING, which is the point: the core
+   * dispatches plugin agent-event subscriptions and, on a terminal `lifecycle`
+   * event, marks the run closed and clears its own per-run plugin context in
+   * the same place (`dispatchPluginAgentEventSubscriptions`). Hooking the same
+   * event keeps this gate's copy in step with the core's instead of inventing a
+   * lifetime of our own.
+   */
+  const forgetRun = (runId) => {
+    if (typeof runId !== "string" || !runId) return;
+    marksByRun.delete(runId);
+    // BOTH copies, or the mirror outlives the mark it mirrors. The core clears
+    // its own store for the run moments later anyway, but only for stores the
+    // core owns — asking explicitly makes the gate right against any of them,
+    // and makes "the run ended" mean one thing here rather than two.
+    try {
+      runContext?.clearRunContext?.({ runId, namespace: TAINT_NAMESPACE });
+    } catch {
+      // A store that refuses to forget is the harness's business, not the
+      // gate's: the mark this gate reads is already gone.
+    }
+  };
+
+  /**
+   * The core's `AgentEventPayload`, filtered to the run's end.
+   *
+   * `isTerminalAgentRunEvent` in the core is `stream === "lifecycle" && (phase
+   * === "end" || phase === "error")`, and this matches it exactly so the mark
+   * goes at the same moment the core drops its own.
+   *
+   * @param {{ stream?: unknown, runId?: unknown, data?: { phase?: unknown } }} event
+   */
+  function onAgentEvent(event) {
+    if (event?.stream !== "lifecycle") return;
+    const phase = event?.data?.phase;
+    if (phase !== "end" && phase !== "error") return;
+    forgetRun(event.runId);
+  }
 
   const localSources = (runId) => marksByRun.get(runId)?.sources ?? [];
 
@@ -389,7 +455,7 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
     };
   }
 
-  return { onAfterToolCall, onBeforeToolCall };
+  return { onAfterToolCall, onBeforeToolCall, onAgentEvent };
 }
 
 const clawboxWebTaintPlugin = {
@@ -401,6 +467,22 @@ const clawboxWebTaintPlugin = {
     const gate = createWebTaintGate({ runContext: api?.runContext });
     api.on("after_tool_call", gate.onAfterToolCall);
     api.on("before_tool_call", gate.onBeforeToolCall, { priority: GATE_PRIORITY });
+    // THE HARNESS RECLAIMS THE MARK. `registerAgentEventSubscription` is the
+    // core's sanitised event feed — no `allowConversationAccess` to pay for,
+    // unlike the typed `agent_end` hook, which is why it is this one — and on a
+    // terminal `lifecycle` event the core clears its own per-run plugin context
+    // in the very same dispatcher. Wrapped and optional because a core without
+    // the surface must still get the gate: it falls back to the bounded map.
+    try {
+      api?.agent?.events?.registerAgentEventSubscription?.({
+        id: `${PLUGIN_ID}-run-end`,
+        description: "Drops this run's web-taint mark when the run ends.",
+        streams: ["lifecycle"],
+        handle: gate.onAgentEvent,
+      });
+    } catch {
+      // A registration the core refused costs the reclamation, not the gate.
+    }
   },
 };
 

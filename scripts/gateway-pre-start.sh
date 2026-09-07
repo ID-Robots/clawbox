@@ -5440,11 +5440,15 @@ else
     // `register` that read the wrong property (`api.run_context`, the
     // deprecated flat `api.getRunContext`) and ship one that arms its
     // fail-closed window on every web read.
-    const store = new Map();
     const handlers = {};
     let reachedRunContext = false;
+    let runEndSubscription = null;
     mod.default.register({
       on: (name, handler) => { handlers[name] = handler; },
+      // The core'"'"'s sanitised agent-event feed, which is how the gate learns a
+      // run ended and drops its mark. Without it the mark map would grow for
+      // the whole process lifetime, so the boot proves the plugin asks for it.
+      agent: { events: { registerAgentEventSubscription: (sub) => { runEndSubscription = sub; } } },
       // SHAPED LIKE THE CORE THAT ACTUALLY SHIPS, which is the point of the
       // probe. On the pinned 2026.8.1 core the loader shuts `setRunContext` and
       // `getRunContext` together behind one side-effect predicate, so the write
@@ -5454,7 +5458,7 @@ else
       // the stand-in refuses exactly as the box does, and the assertions below
       // demand the source anyway.
       runContext: {
-        setRunContext: ({ runId }) => (reachedRunContext = true, store.set(runId, true), false),
+        setRunContext: () => (reachedRunContext = true, false),
         getRunContext: () => undefined,
         clearRunContext: () => {},
       },
@@ -5485,6 +5489,12 @@ else
     if (handlers.before_tool_call(shell, { runId: "boot-probe-clean" }) !== undefined) {
       throw new Error("asks about a turn that read nothing");
     }
+    // THE MARK IS THE HARNESS'"'"'S TO RECLAIM. Without this subscription the map
+    // grows for the life of the gateway, so the boot checks the plugin asked
+    // for it AND that the handler really drops the run it is told about.
+    if (typeof runEndSubscription?.handle !== "function") throw new Error("no run-end subscription");
+    runEndSubscription.handle({ stream: "lifecycle", runId: "boot-probe-batched", data: { phase: "end" } });
+    if (handlers.before_tool_call(shell, batched) !== undefined) throw new Error("keeps the mark after the run ended");
   ' 2>&1; then
     echo "  WARNING: the installed $CLAWBOX_WEB_TAINT_ID plugin did not load, or answered the wrong way about a tainted turn or a clean one — either a shell command in a turn that just read a web page runs WITHOUT asking the owner, or the owner is asked about commands in turns that read nothing" >&2
   fi

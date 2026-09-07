@@ -636,17 +636,17 @@ describe("the core's setRunContext does not return true, and the card still name
     g.onAfterToolCall({ toolName: "web_fetch", params: {}, result: "<html>" }, ctx());
     const asked = g.onBeforeToolCall({ toolName: "exec", params: { command: "id" } }, ctx());
     expect(asked?.requireApproval).toBeTruthy();
-    expect(asked?.requireApproval?.description).toContain("This turn already read outside content");
+    expect(asked?.requireApproval?.description).toContain("This turn started reading outside content");
     expect(asked?.requireApproval?.description).toContain("web_fetch");
     expect(asked?.requireApproval?.description).not.toContain("could not be kept");
   });
 
   it("does not arm the process-wide fallback when the write really landed", () => {
     // The cost of reading the return value wrongly was not only the wording: a
-    // write believed refused arms a five-minute window against that run, and
-    // 64 of them arm it against the WHOLE PROCESS — so on a box that browses,
-    // every other session and every cron would start asking. That is the
-    // "fires on ordinary work" failure, reached by a false failure.
+    // write believed refused armed a five-minute fail-closed window against
+    // that run, on EVERY web read — so a box that browses spent its life in the
+    // fail-closed path, and the card could never name a source. That is a false
+    // failure, and the "fires on ordinary work" failure is one step behind it.
     const g = gate({ writeReturnsVoid: true });
     for (let i = 0; i < 200; i += 1) {
       g.onAfterToolCall({ toolName: "web_fetch", params: {}, result: "…" }, ctx({ runId: `run-${i}` }));
@@ -724,6 +724,77 @@ describe("a taint the gate could not keep fails closed", () => {
   });
 });
 
+describe("the harness reclaims the mark when the run ends", () => {
+  // TASK-768 review, S1. The mark has no TTL — a TTL could expire under a long
+  // turn — so something has to reclaim it, and that something is the core: on a
+  // terminal `lifecycle` agent event it marks the run closed and clears its own
+  // per-run plugin context in the same dispatcher. The gate subscribes to that
+  // event and drops its copy there. Without it the map grows for the life of
+  // the gateway, which is the defect these cases exist for.
+
+  it("drops the mark on the run's terminal lifecycle event", () => {
+    const g = gate();
+    g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx());
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx())?.requireApproval).toBeTruthy();
+    g.onAgentEvent({ stream: "lifecycle", runId: RUN, data: { phase: "end" } });
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx())).toBeUndefined();
+  });
+
+  it("drops it on an errored run too, and on no other event", () => {
+    const g = gate();
+    g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx());
+    // Not a lifecycle stream, not a terminal phase, not this run — none of
+    // these may drop a mark, or a tainted turn walks free mid-run.
+    g.onAgentEvent({ stream: "tool", runId: RUN, data: { phase: "end" } });
+    g.onAgentEvent({ stream: "lifecycle", runId: RUN, data: { phase: "start" } });
+    g.onAgentEvent({ stream: "lifecycle", runId: OTHER_RUN, data: { phase: "end" } });
+    g.onAgentEvent({ stream: "lifecycle", data: { phase: "end" } });
+    g.onAgentEvent({});
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx())?.requireApproval).toBeTruthy();
+    g.onAgentEvent({ stream: "lifecycle", runId: RUN, data: { phase: "error" } });
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx())).toBeUndefined();
+  });
+
+  it("registers the subscription on the core's own agent-event feed", () => {
+    const subscriptions: Array<Record<string, unknown>> = [];
+    plugin.register({
+      on: () => {},
+      runContext: fakeRunContext(),
+      agent: { events: { registerAgentEventSubscription: (sub: Record<string, unknown>) => subscriptions.push(sub) } },
+    });
+    expect(subscriptions).toHaveLength(1);
+    // The stream filter matters: subscribing to everything would hand this
+    // plugin every tool argument on the box for no reason.
+    expect(subscriptions[0]?.streams).toEqual(["lifecycle"]);
+    expect(typeof subscriptions[0]?.handle).toBe("function");
+  });
+
+  it("still installs the gate on a core with no agent-event feed", () => {
+    // The reclamation is the harness's; the gate is not. A core without the
+    // surface must still get both tool hooks rather than a failed registration
+    // that takes the whole plugin off the box.
+    const hooks: string[] = [];
+    plugin.register({ on: (name: string) => hooks.push(name), runContext: fakeRunContext() });
+    expect(hooks).toEqual(["after_tool_call", "before_tool_call"]);
+  });
+
+  it("never arms the process-wide window from an eviction, however long it runs", () => {
+    // THE S1 CASE. With the mark reclaimed at run end the bound is unreachable;
+    // this drives past it anyway, because the bound is the fallback for a core
+    // with no run-end signal and THAT is where the old code failed: every web
+    // read past the bound evicted a long-finished run and re-armed a
+    // process-wide five-minute gate that never drained, so an entirely clean
+    // cron `uptime` was asked about, for ever.
+    const g = gate();
+    for (let i = 0; i < 1_100; i += 1) {
+      g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx({ runId: `run-${i}` }));
+    }
+    expect(g.onBeforeToolCall({ toolName: "exec", params: { command: "uptime" } }, ctx({ runId: "clean-run" }))).toBeUndefined();
+    // The recent runs keep their marks; only the quietest are evicted.
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx({ runId: "run-1099" }))?.requireApproval).toBeTruthy();
+  });
+});
+
 describe("the plugin registration", () => {
   it("registers exactly the two tool hooks, and only those", () => {
     const hooks: string[] = [];
@@ -733,10 +804,11 @@ describe("the plugin registration", () => {
 
   it("still registers when the core hands it no run-context surface", () => {
     const hooks: string[] = [];
-    // A core without `api.runContext` cannot scope a taint to a run, so every
-    // web result becomes one the gate could not record — the fail-closed path
-    // above, not a registration failure that would take the whole plugin off
-    // the box.
+    // A core without `api.runContext` still gets the gate: the mark is this
+    // plugin's own, so the taint is still scoped to its run (pinned above by
+    // "scopes the taint to its run even with no run-context surface at all").
+    // What must not happen is a registration failure that takes the whole
+    // plugin off the box.
     plugin.register({ on: (name: string) => hooks.push(name) });
     expect(hooks).toEqual(["after_tool_call", "before_tool_call"]);
   });

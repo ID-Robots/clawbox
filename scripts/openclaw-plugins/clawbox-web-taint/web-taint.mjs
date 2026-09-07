@@ -283,8 +283,13 @@ function clamp(text, max) {
  * @param {{ pluginId: string, toolName: unknown, sources?: readonly string[], params?: unknown }} request
  */
 export function taintApprovalRequest({ pluginId, toolName, sources = [], params }) {
+  // "STARTED READING", not "read": the gate marks a run when a web tool call is
+  // DISPATCHED, because in a batch the shell is asked about before any sibling
+  // returns. Saying "already read" would overstate what the turn has seen on
+  // exactly the path this card exists for — and would be plainly false for a
+  // read that is later blocked or skipped and never returns a byte.
   const why = sources.length
-    ? `This turn already read outside content (${clamp(sources.join(", "), SOURCE_LIST_MAX)}).`
+    ? `This turn started reading outside content (${clamp(sources.join(", "), SOURCE_LIST_MAX)}).`
     : "This turn's record of what it read could not be kept, so the box cannot show that it read nothing.";
   const advice =
     "A web page, a search result or an email can carry instructions the assistant " +
