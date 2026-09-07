@@ -195,7 +195,13 @@ function commandPreview(params, maxChars) {
   for (const name of COMMAND_PARAMS) {
     const value = params[name];
     if (typeof value !== "string" || !value.trim()) continue;
-    return clamp(value.replace(/\s+/g, " ").trim(), maxChars);
+    // Invisibles first: they survive the whitespace collapse, they would be
+    // ESCAPED into nine characters each by the Gateway's own sanitiser after
+    // this bound was measured, and one of them inside the preview would show
+    // the owner a different command from the one that would run.
+    const visible = value.replace(GATEWAY_INVISIBLE_CHARS, "").replace(/\s+/g, " ").trim();
+    if (!visible) continue;
+    return clamp(visible, maxChars);
   }
   return "";
 }
@@ -228,9 +234,38 @@ const PREVIEW_MAX = 180;
 const SOURCE_LIST_MAX = 160;
 const TOOL_NAME_SHOWN_MAX = 64;
 
-/** `text` cut to `max` characters, with an ellipsis when anything was cut. */
+/**
+ * The Gateway's OWN invisible-character class, copied byte for byte from the
+ * pinned core's `EXEC_APPROVAL_INVISIBLE_CHAR_REGEX`
+ * (`src/infra/exec-approval-text-sanitize.ts`).
+ *
+ * WHY THE PLUGIN HAS TO KNOW ABOUT IT. The Gateway sanitises `description`
+ * BEFORE it length-checks it, and the sanitiser ESCAPES each of these to
+ * `\u{XXXX}` — one character becomes up to nine. So a bound measured on the
+ * raw string is not the bound that is enforced: a command carrying forty bidi
+ * overrides fits in 362 here and arrives as 642 there, the request is rejected,
+ * and the owner gets a hard refusal instead of the card. Fail-closed, but it
+ * turns the gate from "ask" into "silently refuse" for exactly the adversarial
+ * command it exists for.
+ *
+ * STRIPPED RATHER THAN BUDGETED FOR, and that is the sharper half: a bidi
+ * override inside the previewed command means the owner READS A DIFFERENT
+ * COMMAND FROM THE ONE THAT WOULD RUN. `\s` does not cover any of this —
+ * neither `\p{Cf}` (zero-width joiner, `U+202A`–`U+202E`, `U+2060`) nor most of
+ * `\p{Cc}` — so the whitespace collapse below is no defence.
+ */
+const GATEWAY_INVISIBLE_CHARS =
+  /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\u115F\u1160\u3164\uFFA0]/gu;
+
+/**
+ * `text` cut to `max` CODE POINTS, with an ellipsis when anything was cut.
+ *
+ * Code points because that is what the Gateway counts (`Array.from(text).length`),
+ * and because slicing UTF-16 units can cut a surrogate pair in half.
+ */
 function clamp(text, max) {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  const points = Array.from(text);
+  return points.length > max ? `${points.slice(0, max - 1).join("")}…` : text;
 }
 
 /**
