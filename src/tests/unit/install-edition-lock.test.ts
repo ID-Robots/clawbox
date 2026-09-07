@@ -219,13 +219,18 @@ describe("edition persistence (H7 / H9)", () => {
       expect(out).not.toContain("GATEWAY_STATE");
     });
 
-    it("never publishes the drop-in, and fails the step", () => {
+    it("publishes NEITHER record when the drop-in cannot be staged", () => {
+      // Both records are staged before either is committed, so a staging
+      // failure on the second leaves the box with its previous edition in BOTH
+      // places rather than a new lock beside a stale systemd drop-in — readers
+      // of the two disagreeing about the SKU is the state this step exists to
+      // prevent, and staging is where the ordinary failure lives (a full /tmp).
       const { out, rc } = runStep("dropin");
       expect(rc, out).not.toBe("0");
       expect(out).toMatch(/could not stage the edition drop-in/);
-      // The lock itself did land — it is staged and installed first.
-      expect(out).toContain("INSTALL_ROOT_FILE");
-      expect(out).not.toMatch(/INSTALL_ROOT_FILE.*edition\.conf/);
+      expect(out, "nothing may be committed once either staging write failed").not.toContain(
+        "INSTALL_ROOT_FILE",
+      );
       expect(out).not.toContain("GATEWAY_STATE");
     });
   });

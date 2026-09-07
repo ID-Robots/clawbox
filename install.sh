@@ -4020,6 +4020,24 @@ step_edition_lock() {
     echo "  Error: could not stage the edition lock for $CLAWBOX_EDITION_FILE" >&2
     return 1
   fi
+  # BOTH RECORDS ARE STAGED BEFORE EITHER IS COMMITTED. They are two files and
+  # no rename can cover both, but staging is where the ordinary failure lives
+  # (a full /tmp, an EIO) — and committing the lock and then failing to stage
+  # the drop-in would leave the two naming DIFFERENT editions until a later
+  # update: readers of the lock and readers of the systemd unit disagreeing
+  # about the SKU, which is the state this step exists to prevent. What is left
+  # after this is a failing rename of the second file, immediately after a
+  # successful copy of it into the same directory; the step answers non-zero,
+  # so the update reports it and the next run rewrites both from the top.
+  mkdir -p /etc/systemd/system/clawbox-setup.service.d
+  local _dropin_tmp
+  _dropin_tmp="$(mktemp)"
+  if ! printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"; then
+    rm -f "$_edition_tmp" "$_dropin_tmp"
+    echo "  Error: could not stage the edition drop-in for $LEGACY_EDITION_DROPIN" >&2
+    return 1
+  fi
+
   # The return value is CHECKED, and it has to be on this step specifically.
   # `install_root_file` answers 1 when the copy or the rename did not land, and
   # the update path calls this step from an OR-list — for the whole body of
@@ -4029,23 +4047,21 @@ step_edition_lock() {
   # printed, and the update reported success over a lock that still names the
   # previous SKU — with the two records free to disagree.
   if ! install_root_file "$_edition_tmp" "$CLAWBOX_EDITION_FILE" 0644; then
-    rm -f "$_edition_tmp"
+    rm -f "$_edition_tmp" "$_dropin_tmp"
     echo "  Error: could not write the edition lock at $CLAWBOX_EDITION_FILE" >&2
     return 1
   fi
   rm -f "$_edition_tmp"
 
-  mkdir -p /etc/systemd/system/clawbox-setup.service.d
-  local _dropin_tmp
-  _dropin_tmp="$(mktemp)"
-  if ! printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"; then
-    rm -f "$_dropin_tmp"
-    echo "  Error: could not stage the edition drop-in for $LEGACY_EDITION_DROPIN" >&2
-    return 1
-  fi
   if ! install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644; then
     rm -f "$_dropin_tmp"
-    echo "  Error: could not write the edition drop-in at $LEGACY_EDITION_DROPIN" >&2
+    # The lock landed and this one did not, so the two records name different
+    # editions until the next run. Said in those words rather than as a generic
+    # write failure: /etc/clawbox/edition.env is the AUTHORITY (every reader in
+    # src/ and the updater unit take the SKU from it) and this drop-in is the
+    # mirror kept for tooling that still reads it, so the box behaves as the
+    # lock says while an operator reading the unit would be told otherwise.
+    echo "  Error: the edition lock now says $CLAWBOX_EDITION but the drop-in at $LEGACY_EDITION_DROPIN could not be rewritten — the two records disagree until the next update" >&2
     return 1
   fi
   rm -f "$_dropin_tmp"
