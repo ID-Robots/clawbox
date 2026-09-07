@@ -549,6 +549,21 @@ describe("the model batches the web read and the shell into ONE dispatch", () =>
     expect(g.onBeforeToolCall({ toolName: "exec", params: { command: "uptime" } }, ctx())).toBeUndefined();
   });
 
+  it("does not let the mark expire under a long turn", () => {
+    // The mark is bounded by COUNT, never by time. A TTL would be a second way
+    // to fail: a turn that outlived it would have its own mark expire
+    // underneath it and the shell would go unasked mid-turn. An agent run can
+    // last hours, so the clock is moved a long way here on purpose.
+    let clock = 1_000;
+    const runContext = fakeRunContext();
+    const g = createWebTaintGate({ runContext, now: () => clock });
+    g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx());
+    clock += 24 * 60 * 60_000;
+    const asked = g.onBeforeToolCall({ toolName: "exec", params: { command: "id" } }, ctx());
+    expect(asked?.requireApproval).toBeTruthy();
+    expect(asked?.requireApproval?.description).toContain("web_fetch");
+  });
+
   it("keeps the mark to the run that started the read", () => {
     const g = gate();
     g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx());

@@ -144,23 +144,15 @@ const UNSCOPED_TAINT_WINDOW_MS = 5 * 60_000;
 const MAX_SOURCES = 4;
 
 /**
- * How many runs may hold a mark at once. A memory bound, not a policy: a
- * gateway runs for weeks, and a run id is unique per turn, so nothing here can
- * leak into another turn however long it is kept. Evicting the oldest loses a
- * taint, so an eviction arms the process-wide window — it is generous enough
- * that a real box cannot reach it.
+ * How many runs may hold a mark at once — the ONLY bound on the mark map, and
+ * deliberately a count rather than a time (see `rememberTaint`). A gateway runs
+ * for weeks, but only a turn that READ THE WEB is marked, and a run id is
+ * unique per turn, so nothing here can leak into another turn however long it
+ * is kept. Evicting the least-recently-marked run loses a taint, so an eviction
+ * arms the process-wide window — the bound is generous enough that a real box
+ * cannot reach it.
  */
 const MAX_TRACKED_RUNS = 1024;
-
-/**
- * How long a run's mark is kept before the sweep may reclaim it.
- *
- * It is NOT a gating window — the mark is keyed by run id, and a run id belongs
- * to exactly one turn — so this only decides when the memory goes back. It is
- * far longer than any turn so that a long agent run cannot have its own mark
- * expire underneath it, which would reopen the gate mid-turn.
- */
-const RUN_MARK_TTL_MS = 60 * 60_000;
 
 /** Lower than the path guard's default 0, so its silent deny is answered first. */
 const GATE_PRIORITY = -10;
@@ -233,36 +225,36 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
    */
   let unscopedTaintUntilMs = 0;
 
-  const sweep = () => {
-    for (const [key, mark] of marksByRun) if (mark.expiresAt <= now()) marksByRun.delete(key);
-  };
-
-  /** Records `toolName` against `runId`, newest kept, oldest evicted. */
+  /**
+   * Records `toolName` against `runId`, newest sources kept, oldest RUN evicted.
+   *
+   * THERE IS DELIBERATELY NO TIME LIMIT ON A MARK. A TTL here would be a second
+   * way for the gate to fail: a turn that outlived it would have its own mark
+   * expire underneath it and the shell would go unasked mid-turn — the state
+   * this codebase calls probe-once, arrived at from the other side. The map is
+   * bounded by COUNT instead, which cannot expire under a live run, and a mark
+   * that is never reclaimed is harmless: a run id belongs to exactly one run,
+   * so a kept mark can only ever be read back by the turn that wrote it.
+   */
   const rememberTaint = (runId, toolName) => {
-    sweep();
     const sources = marksByRun.get(runId)?.sources ?? [];
     const next = sources.includes(toolName) ? sources : [...sources, toolName].slice(-MAX_SOURCES);
     // Delete before set so insertion order stays recency order and the eviction
     // below drops the run that has been quiet longest.
     marksByRun.delete(runId);
-    marksByRun.set(runId, { sources: next, expiresAt: now() + RUN_MARK_TTL_MS });
+    marksByRun.set(runId, { sources: next });
     while (marksByRun.size > MAX_TRACKED_RUNS) {
       const oldest = marksByRun.keys().next().value;
       if (oldest === undefined) break;
       marksByRun.delete(oldest);
       // An evicted mark is a taint this gate can no longer prove, so it falls
-      // back to the window rather than forgetting it.
+      // back to the window rather than forgetting it. The bound is high enough
+      // that reaching it means something is wrong, and this fails safe.
       unscopedTaintUntilMs = now() + UNSCOPED_TAINT_WINDOW_MS;
     }
   };
 
-  const localSources = (runId) => {
-    const mark = marksByRun.get(runId);
-    if (!mark) return [];
-    if (mark.expiresAt > now()) return mark.sources;
-    marksByRun.delete(runId);
-    return [];
-  };
+  const localSources = (runId) => marksByRun.get(runId)?.sources ?? [];
 
   const runIdOf = (event, ctx) => {
     const runId = event?.runId ?? ctx?.runId;
