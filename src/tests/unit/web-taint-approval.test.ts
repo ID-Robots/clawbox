@@ -450,7 +450,7 @@ describe("the question fits the Gateway's own bounds", () => {
   });
 });
 
-describe("the taint is per turn, and cleared by the harness rather than by us", () => {
+describe("the taint is per turn, because a run id belongs to exactly one run", () => {
   it("does not leak into another run of the same session", () => {
     const g = gate();
     g.onAfterToolCall({ toolName: "web_fetch", params: {}, result: "…" }, ctx());
