@@ -23,6 +23,12 @@ import { promisify } from "util";
 import { readFile, stat } from "fs/promises";
 import path from "path";
 import { isSafeBranch } from "./update-branch";
+import {
+  DRIFT_ACTION_REALIGN,
+  DRIFT_ACTION_REBUILD,
+  DRIFT_ACTION_REBUILD_FROM_CHECKOUT,
+  type DriftCode,
+} from "./drift-codes";
 
 const execFile = promisify(execFileCb);
 
@@ -91,48 +97,7 @@ export interface DriftReport {
   codes: DriftCode[];
 }
 
-/**
- * Every drift code, as a value — so a caller holding an arbitrary warning code
- * can ask whether it is one of these. The union below is DERIVED from it,
- * which is what stops the two from disagreeing: a code added to the type has
- * to be added here, and `RESOLVED_DRIFT_PHRASE` then fails to typecheck until
- * it is given its past-tense wording too.
- */
-export const DRIFT_CODES = [
-  "build-from-other-commit",
-  "build-info-not-for-deployed-assets",
-  "build-predates-checkout",
-  "build-unstamped",
-  "checkout-dirty",
-  "checkout-behind-pin",
-  "no-pin",
-] as const;
-
-export type DriftCode = (typeof DRIFT_CODES)[number];
-
-/** Is this warning code one of the drift diagnoses, rather than some other update warning? */
-export function isDriftCode(code: string): code is DriftCode {
-  return (DRIFT_CODES as readonly string[]).includes(code);
-}
-
-/**
- * How each diagnosis reads once an update has RESOLVED it.
- *
- * Past tense, and no imperative: the live `reasons` in `computeDrift` end in
- * "run Update to realign", which is the wrong thing to say to an owner whose
- * update has just realigned the box (TASK-757). Kept in this file, beside the
- * sentences they replace, so the two cannot drift apart — each phrase
- * completes "When this update started, …".
- */
-export const RESOLVED_DRIFT_PHRASE: Record<DriftCode, string> = {
-  "build-from-other-commit": "it was serving a build made from a different commit than the code on disk",
-  "build-info-not-for-deployed-assets": "the build it was serving could not be identified",
-  "build-predates-checkout": "the build it was serving was older than the code on disk",
-  "build-unstamped": "the build it was serving carried no build record",
-  "checkout-dirty": "the code on disk had uncommitted changes",
-  "checkout-behind-pin": "the code on disk was not the tested commit for its branch",
-  "no-pin": "it recorded no tested branch to update to",
-};
+export type { DriftCode } from "./drift-codes";
 
 export interface DriftInputs {
   build: BuildInfo | null;
@@ -190,7 +155,7 @@ export function computeDrift(input: DriftInputs): DriftReport {
       buildVsCheckout = "drift";
       codes.push("build-from-other-commit");
       reasons.push(
-        `This box is running a build made from ${short(build.commit)} but the code on disk is ${short(checkout.commit)} — run Update to realign.`,
+        `This box is running a build made from ${short(build.commit)} but the code on disk is ${short(checkout.commit)}${DRIFT_ACTION_REALIGN}`,
       );
     }
   } else if (!build?.commit) {
@@ -198,7 +163,7 @@ export function computeDrift(input: DriftInputs): DriftReport {
       buildVsCheckout = "drift";
       codes.push("build-unstamped");
       reasons.push(
-        "The deployed build carries no build record, so it was made before the code now on disk — run Update to rebuild from this checkout.",
+        `The deployed build carries no build record, so it was made before the code now on disk${DRIFT_ACTION_REBUILD_FROM_CHECKOUT}`,
       );
     } else if (
       buildTimestampMs !== null
@@ -208,7 +173,7 @@ export function computeDrift(input: DriftInputs): DriftReport {
       buildVsCheckout = "drift";
       codes.push("build-predates-checkout");
       reasons.push(
-        "The code on disk is newer than the deployed build — run Update to rebuild.",
+        `The code on disk is newer than the deployed build${DRIFT_ACTION_REBUILD}`,
       );
     }
   }

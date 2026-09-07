@@ -7,6 +7,7 @@ import { useTr } from "@/lib/i18n-floor";
 import { useBuildIdentity } from "@/components/BuildIdentityPanel";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
+import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
 
 export interface ComponentVersion {
@@ -1078,15 +1079,33 @@ function UpdateProgressCard({
 
       {warnings.length > 0 && (
         <ul className="mt-4 space-y-2">
-          {warnings.map((w) => (
-            <li
-              key={w.code}
-              className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
-            >
-              <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 16 }}>warning</span>
-              <span>{w.message}</span>
-            </li>
-          ))}
+          {warnings.map((w) => {
+            // The line a finished run leaves behind about drift it RESOLVED is
+            // history, not a problem. Drawn amber with a warning triangle it
+            // alarmed the owner exactly as the stale imperative did, which is
+            // the thing the completion card is meant to stop doing.
+            const resolved = w.code === DRIFT_RESOLVED_CODE;
+            return (
+              <li
+                key={w.code}
+                data-testid={`update-warning-${w.code}`}
+                data-tone={resolved ? "info" : "warning"}
+                className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${
+                  resolved
+                    ? "border-[var(--border-subtle)] bg-white/5 text-[var(--text-muted)]"
+                    : "border-amber-500/20 bg-amber-500/10 text-amber-100"
+                }`}
+              >
+                <span
+                  className={`material-symbols-rounded shrink-0 ${resolved ? "text-gray-400" : "text-amber-300"}`}
+                  style={{ fontSize: 16 }}
+                >
+                  {resolved ? "history" : "warning"}
+                </span>
+                <span>{w.message}</span>
+              </li>
+            );
+          })}
         </ul>
       )}
 

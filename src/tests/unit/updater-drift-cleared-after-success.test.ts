@@ -21,22 +21,33 @@ import { describe, expect, it } from "vitest";
  * put the box exactly where it belongs.
  *
  * They are also stale in two DIFFERENT ways, which is why they contradict each
- * other about which sha is the code on disk: `captureDriftBaseline()` samples
- * before step 1 and `updateClawBoxAndReboot` samples again after it, and
+ * other about which sha is the code on disk: `captureDriftBaseline()` sampled
+ * before step 1 and `updateClawBoxAndReboot` sampled again after it, and
  * `warnUpdate` de-duplicates by code with the first observation winning. So the
- * list the owner reads mixes two samples of a tree that moved between them,
- * and neither is re-asked when the run succeeds.
+ * list the owner read mixed two samples of a tree that moved between them, and
+ * neither was re-asked when the run succeeded.
  *
  * The fix keeps #737's rule — the pre-run diagnosis is the customer's real
- * state and must not be thrown away — and settles what happens to it once the
- * run has finished: a successful run re-measures, keeps every code the box is
- * STILL drifted by (with the shas as they are now, not as they were), and
- * retires the rest into one past-tense history line with no imperative. A run
- * that failed realigned nothing, so it keeps its warnings exactly as captured.
+ * state and must not be thrown away — and settles both ends: the second sample
+ * is gone (it only ever described the sync), and a successful run re-measures,
+ * keeps every code the box is STILL drifted by, and retires the rest into one
+ * past-tense history line with no imperative. A run that failed realigned
+ * nothing, so it keeps its warnings exactly as captured.
+ *
+ * The retirement needs a POSITIVE verdict, per axis. `collectBuildIdentity`
+ * never throws: a `git rev-parse origin/<branch>` that timed out comes back as
+ * `checkoutVsPin: "unknown"` with no code at all — and "no code was emitted"
+ * read as "the run fixed it" would be the false-success class, over the very
+ * warning that says the box is broken.
  */
 
-import { computeDrift, type DriftInputs } from "@/lib/build-identity";
-import { reconcileDriftWarnings, type UpdateWarning } from "@/lib/updater";
+import { computeDrift, type DriftInputs, type DriftReport } from "@/lib/build-identity";
+import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
+import {
+  reconcileDriftWarnings,
+  type DriftMeasurement,
+  type UpdateWarning,
+} from "@/lib/updater";
 
 const BUILD_SHA = "673817a8e0a1b2c3d4e5f60718293a4b5c6d7e8f";
 const DISK_SHA = "21539548c554b30799ad6e19a94213e26eb23f2f";
@@ -129,50 +140,125 @@ describe("reconcileDriftWarnings", () => {
     code: "build-from-other-commit",
     message: `This box is running a build made from ${BUILD_SHA.slice(0, 7)} but the code on disk is ${DISK_SHA.slice(0, 7)} — run Update to realign.`,
   };
+  const dirty: UpdateWarning = {
+    code: "checkout-dirty",
+    message: "The code on disk has uncommitted changes, so it no longer matches any commit.",
+  };
   const repinned: UpdateWarning = {
     code: "repinned",
     message: 'This box carried no update pin — pinned to the tested branch "beta" so future updates are repeatable.',
   };
 
-  it("retires the drift the run resolved into one past-tense line", () => {
-    const after = reconcileDriftWarnings([behindPin, otherCommit], []);
+  /** A box measured healthy on every axis — what a finished update leaves behind. */
+  function measuredClean(over: Partial<DriftMeasurement> = {}): DriftMeasurement {
+    return {
+      drift: computeDrift(driftInputs({
+        build: { ...driftInputs().build!, commit: DISK_SHA, shortCommit: DISK_SHA.slice(0, 7) },
+        pin: { branch: "beta", source: "pin-file", commit: DISK_SHA, pinned: true },
+      })),
+      pinned: true,
+      dirty: false,
+      ...over,
+    };
+  }
 
-    expect(after.map((w) => w.code)).toEqual(["drift-resolved"]);
+  /** A report with the given axes and no codes — what an unreadable box produces. */
+  function measuredUnknown(over: Partial<DriftMeasurement> = {}): DriftMeasurement {
+    const drift: DriftReport = {
+      buildVsCheckout: "unknown",
+      checkoutVsPin: "unknown",
+      detected: false,
+      reasons: [],
+      codes: [],
+    };
+    return { drift, pinned: true, dirty: null, ...over };
+  }
+
+  it("retires the drift the run resolved into one past-tense line", () => {
+    const after = reconcileDriftWarnings([behindPin, otherCommit], measuredClean());
+
+    expect(after.map((w) => w.code)).toEqual([DRIFT_RESOLVED_CODE]);
     const line = after[0].message;
     // The exact sentence the owner acted on, gone.
     expect(line).not.toContain("run Update");
-    expect(line).toMatch(/^When this update started, /);
-    expect(line).toContain("was not the tested commit");
-    expect(line).toContain("a different commit than the code on disk");
+    expect(line).toMatch(/^When this update started: /);
+    expect(line).toContain("nothing further is needed");
+  });
+
+  it("keeps the shas the box was actually on, so support can still read them", () => {
+    // #737's rule is that the customer's REAL pre-run state reaches a human; a
+    // generic phrase cannot tell a box one commit behind from one 71 behind.
+    const line = reconcileDriftWarnings([behindPin, otherCommit], measuredClean())[0].message;
+
+    expect(line).toContain(BUILD_SHA.slice(0, 7));
+    expect(line).toContain(DISK_SHA.slice(0, 7));
+    expect(line).toContain("is not the tested commit for beta");
+    // …with the call to action taken off the sentence that carried one.
+    expect(line).toContain(`the code on disk is ${DISK_SHA.slice(0, 7)}.`);
   });
 
   it("keeps a code the box is STILL drifted by, with the sha measured now", () => {
     // The false-success half: a run that did not realign the box must not be
     // allowed to clear the warning that says so.
-    const live: UpdateWarning = {
-      code: "build-from-other-commit",
-      message: `This box is running a build made from ${PIN_SHA.slice(0, 7)} but the code on disk is ${DISK_SHA.slice(0, 7)} — run Update to realign.`,
-    };
+    const stillDrifted = computeDrift(driftInputs({
+      build: { ...driftInputs().build!, commit: PIN_SHA, shortCommit: PIN_SHA.slice(0, 7) },
+      pin: { branch: "beta", source: "pin-file", commit: DISK_SHA, pinned: true },
+    }));
+    const measured: DriftMeasurement = { drift: stillDrifted, pinned: true, dirty: false };
 
-    const after = reconcileDriftWarnings([behindPin, otherCommit], [live]);
+    const after = reconcileDriftWarnings([behindPin, otherCommit], measured);
 
-    expect(after.map((w) => w.code)).toEqual(["build-from-other-commit", "drift-resolved"]);
+    expect(after.map((w) => w.code)).toEqual(["build-from-other-commit", DRIFT_RESOLVED_CODE]);
     // Measured after the run, not the pre-run text.
-    expect(after[0].message).toBe(live.message);
+    expect(after[0].message).toContain(`build made from ${PIN_SHA.slice(0, 7)}`);
+    // And the history line does not claim the box is finished with.
+    expect(after[1].message).not.toContain("nothing further is needed");
+    expect(after[1].message).toContain("That much the update resolved.");
   });
 
-  it("retires nothing when the box could not be measured", () => {
-    // A git shell-out that timed out is not evidence that the box is healthy.
+  it("keeps checkout-behind-pin when the PIN could not be resolved", () => {
+    // `collectBuildIdentity` never throws: a `git rev-parse origin/<branch>`
+    // that failed or timed out comes back as `checkoutVsPin: "unknown"` with no
+    // code — and an absent code is not evidence that the run fixed anything.
+    const after = reconcileDriftWarnings([behindPin], measuredUnknown());
+
+    expect(after.map((w) => w.code)).toEqual(["checkout-behind-pin"]);
+    expect(after[0].message, "the pre-run sentence, unchanged").toBe(behindPin.message);
+  });
+
+  it("keeps checkout-dirty when git status could not be read", () => {
+    // `dirty: null` is "we could not look", and it is falsy — so a test for the
+    // absence of the code would have retired this one too.
+    const after = reconcileDriftWarnings([dirty], measuredUnknown({ dirty: null }));
+
+    expect(after.map((w) => w.code)).toEqual(["checkout-dirty"]);
+  });
+
+  it("retires no-pin once the box carries a pin, whatever the pin axis says", () => {
+    // The repin is what resolves it, and `pin.pinned` is the exact negation of
+    // the condition — the axis stays "unknown" on a box whose origin ref this
+    // checkout cannot resolve, and that must not keep the warning alive.
+    const noPin: UpdateWarning = {
+      code: "no-pin",
+      message: "This box records no tested branch to update to — the next update will pin it automatically.",
+    };
+
+    const after = reconcileDriftWarnings([noPin], measuredUnknown({ pinned: true }));
+
+    expect(after.map((w) => w.code)).toEqual([DRIFT_RESOLVED_CODE]);
+  });
+
+  it("retires nothing when the read itself threw", () => {
     expect(reconcileDriftWarnings([behindPin, otherCommit], null)).toEqual([behindPin, otherCommit]);
   });
 
   it("leaves warnings that are not about drift exactly where they were", () => {
-    const after = reconcileDriftWarnings([repinned, behindPin], []);
-    expect(after.map((w) => w.code)).toEqual(["repinned", "drift-resolved"]);
+    const after = reconcileDriftWarnings([repinned, behindPin], measuredClean());
+    expect(after.map((w) => w.code)).toEqual(["repinned", DRIFT_RESOLVED_CODE]);
     expect(after[0]).toEqual(repinned);
   });
 
   it("does not invent a history line when there was no drift to resolve", () => {
-    expect(reconcileDriftWarnings([repinned], [])).toEqual([repinned]);
+    expect(reconcileDriftWarnings([repinned], measuredClean())).toEqual([repinned]);
   });
 });
