@@ -133,6 +133,27 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     expect(selectProviderMock).toHaveBeenCalledWith("cloud");
   });
 
+  it("leaves the voice untouched when the caller asked it to", async () => {
+    // The dual SKU's configure arm. Picking a voice for a box that has none is
+    // right when the box's OWN harness is being linked — it is how a hermes box
+    // gets one — and it is not this save's decision to make on `dual`, where
+    // the cloud-voice question is open with the owner. Before that arm existed
+    // a dual box could not reach this writer from the configure route at all,
+    // and a credential save must not settle a voice question as a side effect.
+    readVoiceMock.mockResolvedValue(voice(null));
+
+    await applyClawaiToHermes(TOKEN, ENTITLED, { selectCloudVoice: false });
+
+    expect(selectProviderMock).not.toHaveBeenCalled();
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    // Nothing under `tts.` reached the CLI either — the option suppresses the
+    // whole leg, not just the selection at the end of it.
+    const ttsWrites = cliMock.mock.calls
+      .map((c) => c[0] as string[])
+      .filter((a) => a[1] === "set" && typeof a[2] === "string" && a[2].startsWith("tts."));
+    expect(ttsWrites).toEqual([]);
+  });
+
   it("replaces Hermes' factory cloud rather than speaking through Microsoft", async () => {
     // `edge` is Hermes' own default and a third cloud the customer never
     // chose; hermes-tts.ts treats it as factory-unset for exactly this reason.

@@ -843,12 +843,20 @@ def clawai_credential_refused():
     does not decay — a TTL here would re-arm a path the proxy still refuses,
     which is the storm the stand-down exists to end.
 
-    An absent store and a store that CANNOT BE READ collapse to the same answer
-    on purpose (the sibling script does the same, and this one runs as clawbox
-    where that one runs as root, so a root-owned `data/config.json` lands
-    here), but they are not the same event: the unreadable one is said out
-    loud, or the log would report "re-armed image_gen.provider" as though all
-    five conditions had been weighed.
+    THREE answers, not two: True (refused), False (nothing recorded), and None
+    (this script could not look). Absent and unreadable are different events —
+    this script runs as clawbox where the sibling runs as root, so a root-owned
+    `data/config.json` lands in the second — and the caller DECLINES the re-arm
+    on None, exactly as condition 4 declines over a `plugins.disabled` it cannot
+    read. The cost of declining is one Settings → Save; the cost of guessing is
+    the refused-call storm the stand-down exists to end.
+
+    The number rule is `_clawai_credential_refused`'s, line for line: floats are
+    tested with `math.isfinite`, integers are never converted (an int past
+    Number.MAX_VALUE raises OverflowError from `isfinite` and would otherwise be
+    reported as an unreadable store), and the range is bounded by
+    Number.MAX_VALUE so both languages answer the same over every value either
+    can parse.
 
     `except Exception` and it has to be that broad: this runs inside the big
     heredoc, and anything that escapes takes the whole MCP registration with
@@ -867,17 +875,21 @@ def clawai_credential_refused():
         at = store.get("clawai_credential_refused_at")
         if isinstance(at, bool) or not isinstance(at, (int, float)):
             return False
-        return math.isfinite(at) and at > 0
+        if isinstance(at, float) and not math.isfinite(at):
+            return False
+        return 0 < at <= 1.7976931348623157e308
     except FileNotFoundError:
         # Nothing has ever been recorded on this box. Genuinely absent.
         return False
     except Exception:
         print("[register-mcp] WARNING: could not read the device store at "
-              f"{store_path}; treating the ClawBox AI credential as not refused.",
-              file=sys.stderr)
-        return False
+              f"{store_path}; not re-arming the image backend over a credential "
+              "this script cannot check.", file=sys.stderr)
+        return None
 
 
+# Asked ONCE, ahead of the chain: three answers, and two of them decline.
+_clawai_refusal = clawai_credential_refused()
 image_plugin = os.environ.get("CLAWBOX_IMAGE_PLUGIN") or ""
 image_plugin_key = os.environ.get("CLAWBOX_IMAGE_PLUGIN_KEY") or ""
 image_entry = os.environ.get("CLAWBOX_IMAGE_PLUGIN_ENTRY") or ""
@@ -910,7 +922,11 @@ if repaired_enabled and image_plugin and image_plugin in (names or []):
     #      by every path that writes a DIFFERENT credential — and only those, so
     #      a re-paste of the refused bytes is not a re-link — which means a real
     #      re-link re-arms on the next boot without anyone doing anything.
-    elif clawai_credential_refused():
+    elif _clawai_refusal is None:
+        print("[register-mcp] the device store could not be read, so whether this "
+              "box's ClawBox AI credential was refused is unknown; leaving "
+              "image_gen.provider unset")
+    elif _clawai_refusal:
         print("[register-mcp] the ClawBox AI credential was refused; leaving "
               "image_gen.provider unset until a new one is linked")
     else:

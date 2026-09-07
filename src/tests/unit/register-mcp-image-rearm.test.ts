@@ -156,19 +156,41 @@ d("the ClawAI image backend is not re-armed over a refused credential", () => {
     expect((readConfig().image_gen as Record<string, unknown>).provider).toBe("clawai");
   });
 
-  it("says so out loud when the store cannot be READ, and still leaves the box alone", () => {
-    // Absent and unreadable collapse to the same answer on purpose — the
-    // sibling gate in gateway-pre-start.sh does the same, and this script runs
-    // as clawbox where that one runs as root, so a root-owned config.json lands
-    // here — but they are not the same event. Silence would let the log print
-    // "re-armed image_gen.provider" as though all five conditions had been
-    // weighed.
+  it("declines the re-arm when the store cannot be READ, and says why", () => {
+    // Absent and unreadable are NOT the same event. This script runs as the
+    // clawbox user where its sibling gateway-pre-start.sh runs as root, so a
+    // root-owned data/config.json lands here — and arming over a credential it
+    // cannot check is the one thing the gate exists to stop. Condition 4 takes
+    // exactly this line for a `plugins.disabled` it cannot read: the cost of
+    // declining is one Settings → Save.
     fs.mkdirSync(path.join(root, "data", "config.json"), { recursive: true });
 
     const res = run();
 
     expect(res.status).toBe(0);
     expect(`${res.stdout}${res.stderr}`).toMatch(/could not read the device store/);
+    expect(
+      (readConfig().image_gen as Record<string, unknown> | undefined)?.provider,
+      "an unreadable store must not arm the image backend",
+    ).toBeUndefined();
+  });
+
+  it("a refusal stamp too large for a double is not a refusal, and not an unreadable store either", () => {
+    // `math.isfinite()` on an int past Number.MAX_VALUE raises OverflowError,
+    // which would have been reported as "could not read the device store" over
+    // a store that read perfectly. The sibling reader bounds the range instead
+    // of converting, and this one now says the same thing over every value
+    // either language can parse.
+    fs.mkdirSync(path.join(root, "data"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "data", "config.json"),
+      `{"clawai_credential_refused_at": ${"9".repeat(320)}}`,
+    );
+
+    const res = run();
+
+    expect(res.status).toBe(0);
+    expect(`${res.stdout}${res.stderr}`).not.toMatch(/could not read the device store/);
     expect((readConfig().image_gen as Record<string, unknown>).provider).toBe("clawai");
   });
 

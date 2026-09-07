@@ -391,6 +391,12 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     // and no account change on a real re-link.
     expect(options).toMatchObject({ codingAgentReadyBefore: false });
     expect(options).toHaveProperty("previousClawaiToken");
+    // And NOT the voice. The apply picks Hermes' cloud voice for a box that
+    // has none, which is right when the box's own harness is being linked and
+    // is not this save's decision to make on `dual`, where the cloud-voice
+    // question is open with the owner. Before this arm existed the route could
+    // not reach that writer on a dual box at all.
+    expect(options).toMatchObject({ selectCloudVoice: false });
   });
 
   it("asks for ONE reload, not two, when it hands the save to Hermes", async () => {

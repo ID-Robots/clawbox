@@ -34,6 +34,7 @@ import {
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
+import { clawaiCredentialRefusalOnRecord } from "@/lib/clawai-credential-refusal";
 // The PLAN this box's account pays for, and the badge behind it — the one rule
 // the panel and both boot scripts read for "may this box have the cloud voice"
 // (TASK-744). Written into the store by this module, read back below.
@@ -154,6 +155,17 @@ export interface ApplyClawaiOptions {
    * (TASK-481) and must never be recorded as a plan.
    */
   portalPlan?: ClawaiPortalPlan;
+  /**
+   * Whether this call may pick Hermes' CLOUD VOICE when the box has none.
+   *
+   * True everywhere except the dual SKU's configure arm. Selecting a voice is
+   * the right thing to do when linking the box's own harness — it is how a
+   * hermes box gets one — but on `dual` the cloud-voice behaviour is an open
+   * question with the owner, and a save made for the credential must not settle
+   * it as a side effect. The call site that has to answer "not now" says so
+   * here rather than the writer guessing from the edition.
+   */
+  selectCloudVoice?: boolean;
 }
 
 /**
@@ -498,10 +510,12 @@ export async function applyClawaiToHermes(
   // portal answered (when this caller asked it) with the badge behind it, which
   // is `clawaiEntitlementTier` exactly. A function that re-read its own write
   // would also be one a fixture could satisfy without the write ever landing.
-  await selectHermesCloudVoiceIfUnvoiced(
-    trimmed,
-    clawaiEntitlementTier(clawaiPlanTierForStore(options.portalPlan), tier),
-  );
+  if (options.selectCloudVoice !== false) {
+    await selectHermesCloudVoiceIfUnvoiced(
+      trimmed,
+      clawaiEntitlementTier(clawaiPlanTierForStore(options.portalPlan), tier),
+    );
+  }
 
   // Everything above wrote to DISK. The agent that will serve the next turn is
   // a process that has been running since long before any of it, and two of the
@@ -1285,6 +1299,26 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // customer's chosen model on every AI-Models save — including on the paths
   // that then make no claim at all — which is the mirror of the care
   // `withdrawImageProviderClaim` takes not to remove somebody else's provider.
+  // NOT OVER A CREDENTIAL THE PROXY HAS REFUSED. This is the write the
+  // stand-down is about: `gateway-pre-start.sh` and `scripts/register-mcp.sh`
+  // both decline to arm the image path while that record stands, but the boot
+  // gate is only REACHED while `image_gen.provider` is unset — so a Settings
+  // save that armed it here made every later boot short-circuit on "somebody
+  // already chose a backend" and the stand-down inert for good, while the
+  // plugin went on spending refused calls for as long as the box was on. The
+  // mark is retired above by any save carrying a DIFFERENT credential, so a
+  // genuine re-link still arms in the same request; a re-save of the refused
+  // bytes leaves the box exactly as it is.
+  //
+  // The DESCRIBING writes above are deliberately not gated: naming our model
+  // and proxy address keeps the config true for the moment the credential is
+  // replaced, and neither turns anything on.
+  if (await clawaiCredentialRefusalOnRecord()) {
+    console.log(
+      "[hermes/clawai] the proxy has refused this box's ClawBox AI credential — leaving image_gen.provider alone",
+    );
+    return;
+  }
   // Before `image_gen.provider`, so the ordering rule below still holds.
   await runOrThrow(["config", "set", "image_gen.model", CLAWBOX_AI_IMAGE_MODEL_ID]);
   await runOrThrow(["config", "set", "image_gen.provider", HERMES_IMAGE_PLUGIN_NAME]);

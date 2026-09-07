@@ -3280,6 +3280,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
               // The PORTAL's answer, which only this route has; the plan is
               // written beside the tier and deleted with it.
               portalPlan,
+              // NOT the voice. `applyClawaiToHermes` picks Hermes' cloud voice
+              // for a box that has none, which is right when the box's own
+              // harness is being linked — it is how a hermes box gets one — and
+              // wrong to decide HERE: on the dual SKU the cloud-voice question
+              // is open with the owner, and a save made for the credential must
+              // not settle it as a side effect. Before this arm existed a dual
+              // box could not reach that writer from this route at all, and it
+              // still cannot.
+              selectCloudVoice: false,
             },
           );
           // The apply performs the coding-agent, provider and image refreshes
