@@ -66,10 +66,35 @@ describe("resolveHarnessProbe", () => {
   it("reports every answer as it lands, so a caller can paint the honest one", async () => {
     fetchMock.mockResolvedValueOnce(UNSETTLED).mockResolvedValue(SETTLED);
     const seen: string[] = [];
-    const probe = resolveHarnessProbe({ onAnswer: (info) => seen.push(`${info.active}:${info.activeKnown}`) });
+    const probe = resolveHarnessProbe({
+      onAnswer: (info) => seen.push(info ? `${info.active}:${info.activeKnown}` : "nothing"),
+    });
     await vi.advanceTimersByTimeAsync(500);
     await probe;
     expect(seen).toEqual(["openclaw:false", "hermes:true"]);
+  });
+
+  it("reports an attempt that answered nothing, rather than leaving a caller waiting", async () => {
+    // `/app/<id>` shows its own "unknown" on this — a spinner for the whole
+    // 1.5 s budget is what the old single probe never did.
+    fetchMock.mockResolvedValueOnce(null).mockResolvedValue(SETTLED);
+    const seen: (string | null)[] = [];
+    const probe = resolveHarnessProbe({ onAnswer: (info) => seen.push(info?.active ?? null) });
+    await vi.advanceTimersByTimeAsync(500);
+    await probe;
+    expect(seen).toEqual([null, "hermes"]);
+  });
+
+  it("does not settle on a harness name this build does not know", async () => {
+    // `activeKnown` alone is not the test the desktop used to make: it stopped
+    // only for a name it could brand, and a future or malformed value must not
+    // end the asking early.
+    fetchMock.mockResolvedValueOnce({ active: "dual", edition: "dual", activeKnown: true })
+      .mockResolvedValue(SETTLED);
+    const probe = resolveHarnessProbe();
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(probe).resolves.toEqual(SETTLED);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("stops when the caller goes away, rather than waking a dead page", async () => {

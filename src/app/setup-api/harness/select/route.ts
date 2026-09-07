@@ -4,7 +4,9 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import path from "path";
-import { setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition, type Harness } from "@/lib/harness";
+import {
+  getEditionSource, setActiveHarness, isHarness, harnessHealthy, isSingleHarnessEdition, type Harness,
+} from "@/lib/harness";
 import { refreshHarnessToolsIfSwitched } from "@/lib/harness-mcp-refresh";
 import { CONFIG_ROOT } from "@/lib/config-store";
 
@@ -15,7 +17,12 @@ const exec = promisify(execFile);
 export async function POST(request: Request) {
   // Locked device (single-harness edition, or dual without a valid premium
   // license): switching is disabled at the API too, not just hidden in the UI.
-  if (isSingleHarnessEdition()) {
+  // Read ONCE and threaded into the persist below: between this gate and that
+  // write the route runs a 60-second identity sync, and a second read landing
+  // in `install.sh`'s rewrite of the edition lock would refuse a switch this
+  // gate has already allowed — after the sync had run.
+  const { edition } = getEditionSource();
+  if (isSingleHarnessEdition(edition)) {
     return NextResponse.json(
       { error: "Harness switching is not available on this device." },
       { status: 403 },
@@ -83,7 +90,7 @@ export async function POST(request: Request) {
   // one harness with the agent's whole tool list built for the other.
   let previous: Harness;
   try {
-    previous = await setActiveHarness(harness);
+    previous = await setActiveHarness(harness, edition);
   } catch (err) {
     console.error("[harness/select] failed to persist active harness:", err instanceof Error ? err.message : err);
     return NextResponse.json(

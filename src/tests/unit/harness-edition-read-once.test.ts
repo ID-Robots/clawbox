@@ -29,7 +29,8 @@ vi.mock("@/lib/edition-source", () => ({
   readEdition: () => reads().edition,
   hasHermesHarness: () => reads().edition !== "openclaw",
 }));
-vi.mock("@/lib/edition-license", () => ({ verifyDualLicense: () => true }));
+const licenseVerifies = vi.hoisted(() => vi.fn(() => true));
+vi.mock("@/lib/edition-license", () => ({ verifyDualLicense: licenseVerifies }));
 vi.mock("@/lib/config-store", () => ({
   getKnown: async () => ({ value: "hermes", known: true }),
   swap: vi.fn(),
@@ -39,6 +40,7 @@ import { getActiveHarnessSource } from "@/lib/harness";
 
 beforeEach(() => {
   reads.mockReset();
+  licenseVerifies.mockClear();
 });
 
 describe("getActiveHarnessSource", () => {
@@ -67,6 +69,7 @@ describe("getActiveHarnessSource", () => {
       active: "hermes",
       defaulted: false,
       edition: "hermes",
+      locked: true,
     });
   });
 
@@ -82,7 +85,19 @@ describe("getActiveHarnessSource", () => {
       active: "openclaw",
       defaulted: true,
       edition: "openclaw",
+      locked: true,
     });
+  });
+
+  it("answers the switcher question from the SAME resolution, not a second licence verify", async () => {
+    // `locked` used to be re-derived by the caller, which re-ran
+    // `verifyDualLicense()` — a file read and an ed25519 verify — across the
+    // caller's own await: a licence replaced or expired in between answered
+    // `edition: "dual"` beside `locked: true`, hiding the switcher on a box
+    // that has it.
+    reads.mockReturnValue({ edition: "dual", defaulted: false });
+    expect((await getActiveHarnessSource()).locked).toBe(false);
+    expect(licenseVerifies).toHaveBeenCalledTimes(1);
   });
 
   it("reads the store for a licensed dual, still from one edition read", async () => {
@@ -92,6 +107,7 @@ describe("getActiveHarnessSource", () => {
       active: "hermes",
       defaulted: false,
       edition: "dual",
+      locked: false,
     });
     expect(reads).toHaveBeenCalledTimes(1);
   });

@@ -29,7 +29,7 @@
 // allowed to make a save gate refuse.
 
 import { get as configGet } from "@/lib/config-store";
-import { getActiveHarness, getEdition, getEditionSource, type Harness } from "@/lib/harness";
+import { getActiveHarnessSource, getEdition, getEditionSource, type Harness } from "@/lib/harness";
 import { readHermesTelegramToken } from "@/lib/hermes-telegram";
 import { readConfigStrict, type OpenClawConfig } from "@/lib/openclaw-config";
 
@@ -186,7 +186,14 @@ export async function readActiveTelegramBot(
   harness?: Harness,
   clawboxConfig?: Record<string, unknown>,
 ): Promise<ActiveTelegramBot> {
-  const active = harness ?? (await getActiveHarness());
+  // ONE resolution when this call has to make it: the edition below is read
+  // from the same one. `install.sh` rewrites the edition lock on every update,
+  // and a second read landing in that window answers "openclaw" — the dual
+  // guard is then skipped and the mirror is returned as the ACTIVE harness's
+  // bot, which is the exact "report a working bot on a harness that has none"
+  // the guard exists to stop.
+  const source = harness ? null : await getActiveHarnessSource();
+  const active = harness ?? source!.active;
   const stored = await storeFor(active)();
   if (stored.token) return stored;
   // The mirror is one value for the whole box, and on `dual` the configure
@@ -195,7 +202,7 @@ export async function readActiveTelegramBot(
   // with it would report a working bot on a harness that has none. There is no
   // legacy box to protect on that SKU, which is where the fallback earns its
   // place: an OpenClaw box configured before the channel block existed.
-  if (getEdition() === "dual") return stored;
+  if ((source ? source.edition : getEdition()) === "dual") return stored;
   return { token: await clawboxMirror(clawboxConfig), known: stored.known };
 }
 

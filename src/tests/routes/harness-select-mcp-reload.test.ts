@@ -13,11 +13,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const getActiveHarness = vi.fn(async () => "openclaw" as string);
-const setActiveHarness = vi.fn(async (_harness: string) => "openclaw" as string);
+const setActiveHarness = vi.fn(async (_harness: string, _edition?: string) => "openclaw" as string);
 const harnessHealthy = vi.fn(async () => true);
 vi.mock("@/lib/harness", () => ({
   getActiveHarness: () => getActiveHarness(),
-  setActiveHarness: (h: string) => setActiveHarness(h),
+  // The route reads the edition ONCE at the top and threads it into the
+  // persist: between the two it runs a 60-second identity sync, and a second
+  // read landing in install.sh's rewrite of the lock would refuse a switch the
+  // gate had already allowed.
+  getEditionSource: () => ({ edition: "dual", defaulted: false }),
+  setActiveHarness: (h: string, edition?: string) => setActiveHarness(h, edition),
   harnessHealthy: () => harnessHealthy(),
   isHarness: (h: unknown) => h === "openclaw" || h === "hermes",
   isSingleHarnessEdition: () => false,
@@ -77,7 +82,9 @@ describe("POST /setup-api/harness/select", () => {
     const res = await post("hermes");
 
     expect(res.status).toBe(200);
-    expect(setActiveHarness).toHaveBeenCalledWith("hermes");
+    // With the edition the route read for its own gate: one read, threaded, so
+    // the persist cannot refuse a switch the gate allowed.
+    expect(setActiveHarness).toHaveBeenCalledWith("hermes", "dual");
     expect(dashboardRpc).toHaveBeenCalledWith("reload.mcp", { confirm: true });
   });
 

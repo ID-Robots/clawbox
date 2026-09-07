@@ -12,25 +12,37 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const getActiveHarness = vi.fn(async () => "hermes");
+/** What the one resolution answers — the whole of what the route may use. */
+const harnessSource = vi.fn(async () => ({
+  active: await getActiveHarness(),
+  defaulted: false,
+  edition: "hermes" as string,
+  locked: true,
+}));
 /** Every harness these tests name is up; health is not what they are about. */
 const harnessHealthy = vi.fn(async (harness: string) => Boolean(harness));
 vi.mock("@/lib/harness", () => ({
-  // The route reads the harness AND the edition from one call now, so the
-  // response cannot be half about one edition and half about another.
-  getActiveHarnessSource: async () => ({
-    active: await getActiveHarness(),
-    defaulted: false,
-    edition: "hermes",
-  }),
+  // ONE call answers the harness, the edition AND the switcher state now, so
+  // the response cannot be half about one edition and half about another —
+  // and `locked` cannot cost a second licence verify across the awaits below.
+  getActiveHarnessSource: async () => harnessSource(),
   getActiveHarness: () => getActiveHarness(),
   harnessHealthy: (h: string) => harnessHealthy(h),
-  getEdition: () => "hermes",
-  isSingleHarnessEdition: () => true,
   HARNESSES: {
     openclaw: { id: "openclaw", label: "OpenClaw" },
     hermes: { id: "hermes", label: "Hermes" },
   },
 }));
+
+/**
+ * The response must be about ONE edition.
+ *
+ * `active`, `edition` and `locked` used to come from three reads of a file
+ * `install.sh` rewrites on every update, taken across the health probes'
+ * awaits: the route could answer `active: "hermes"` beside `edition: "openclaw"`
+ * — a pair no real SKU can be in, since the openclaw edition is locked to its
+ * own harness — and the Settings picker draws its badge from exactly that.
+ */
 
 interface ScanShape {
   state: string;
@@ -52,7 +64,13 @@ vi.mock("@/lib/hermes-shell-scan", () => ({
   readShellScanStatus: () => readShellScanStatus(),
 }));
 
-async function get() {
+async function get(): Promise<{
+  active: string;
+  edition: string;
+  locked: boolean;
+  harnesses: { id: string }[];
+  shellScan: { state: string; reason: string; scannerPath: string | null } | null;
+}> {
   vi.resetModules();
   const mod = await import("@/app/setup-api/harness/status/route");
   return (await mod.GET()).json();
@@ -79,7 +97,7 @@ describe("GET /setup-api/harness/status — shell scanning posture", () => {
       retrySuppressedUntil: null,
     });
 
-    expect((await get()).shellScan.state).toBe("on");
+    expect((await get()).shellScan?.state).toBe("on");
   });
 
   it("says nothing about scanning on the OpenClaw harness, which has no scanner", async () => {
@@ -89,5 +107,40 @@ describe("GET /setup-api/harness/status — shell scanning posture", () => {
 
     expect(body.shellScan).toBeNull();
     expect(readShellScanStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /setup-api/harness/status — one edition per response", () => {
+  it("reports the edition and the lock the harness was resolved WITH", async () => {
+    // A licensed dual: unlocked, so both harnesses are probed and offered.
+    harnessSource.mockResolvedValueOnce({
+      active: "hermes",
+      defaulted: false,
+      edition: "dual",
+      locked: false,
+    });
+
+    const body = await get();
+
+    expect(body.edition).toBe("dual");
+    expect(body.locked).toBe(false);
+    expect(body.active).toBe("hermes");
+    expect(body.harnesses.map((h: { id: string }) => h.id)).toEqual(["openclaw", "hermes"]);
+  });
+
+  it("probes only the active harness when that one resolution says locked", async () => {
+    // The other half: on a locked device the other harness's runtime is not
+    // installed, so probing it would report a missing gateway as a fault.
+    harnessSource.mockResolvedValueOnce({
+      active: "hermes",
+      defaulted: false,
+      edition: "hermes",
+      locked: true,
+    });
+
+    const body = await get();
+
+    expect(body.locked).toBe(true);
+    expect(body.harnesses.map((h: { id: string }) => h.id)).toEqual(["hermes"]);
   });
 });

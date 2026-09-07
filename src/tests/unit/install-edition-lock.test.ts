@@ -104,10 +104,31 @@ describe("edition persistence (H7 / H9)", () => {
   it("is written to a root-owned file, for all three editions", () => {
     const fn = extractShellFunction("step_edition_lock");
     expect(fn).toContain('install -d -o root -g root -m 0755 /etc/clawbox');
-    expect(fn).toContain('chown root:root "$CLAWBOX_EDITION_FILE"');
+    // Root ownership and the mode now come from `install_root_file` — the same
+    // atomic writer every other root-owned file goes through — rather than a
+    // chown after a truncating redirect.
+    expect(fn).toContain('install_root_file "$_edition_tmp" "$CLAWBOX_EDITION_FILE" 0644');
     // No `case … dual) return 0`: dual used to bake nothing at all, so the
     // premium SKU silently ran as openclaw and could not be provisioned.
     expect(fn).not.toMatch(/case "\$CLAWBOX_EDITION"/);
+  });
+
+  it("is never observable half-written, in either record", () => {
+    // `> file` is open(O_TRUNC) + write + close, and this step runs on EVERY
+    // in-app update while the middleware, `openclawIsAbsent()`, the updater's
+    // own `hasHermesHarness()` and the MCP server are reading the lock: a
+    // reader that lands inside the write gets a zero-length file, which
+    // `readEditionSource()` answers as `{edition: "openclaw", defaulted: true}`
+    // — a Hermes box briefly reporting itself as the flagship SKU. A rename
+    // within a directory cannot be observed half-done, and the repo already
+    // ships that writer (TASK-584).
+    const fn = extractShellFunction("step_edition_lock");
+    expect(fn).not.toMatch(/>\s*"\$CLAWBOX_EDITION_FILE"/);
+    expect(fn).not.toMatch(/>\s*"\$LEGACY_EDITION_DROPIN"/);
+    expect(fn).toContain('install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644');
+    // And the writer it uses really is the atomic one.
+    const writer = extractShellFunction("install_root_file");
+    expect(writer).toContain('mv -f "$dst.new" "$dst"');
   });
 
   it("clawbox-setup.service loads it AFTER the clawbox-writable .env", () => {

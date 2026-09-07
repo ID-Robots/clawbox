@@ -398,6 +398,9 @@ function ChromeDesktopInner() {
     void resolveHarnessProbe({
       signal: probe.signal,
       onAnswer: (d) => {
+        // An attempt that answered NOTHING leaves the desktop unresolved, which
+        // hides both harnesses' apps — safe either way, and what it did before.
+        if (!d) return;
         setActiveHarness(d.active);
         const branding = brandingHarness(d);
         setWallpaperHarness(branding);

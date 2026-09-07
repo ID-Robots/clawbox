@@ -3993,16 +3993,31 @@ step_edition_foreign_teardown() {
 # stale hermes lock forever, because this step only ever wrote and never
 # reconciled. All three editions are baked now; "dual" used to return early
 # here, which is why the premium SKU could not be provisioned at all.
+# BOTH RECORDS ARE WRITTEN ATOMICALLY, through the same `install_root_file`
+# every other root-owned file goes through (TASK-584). `> file` is
+# open(O_TRUNC) + write + close, so for the length of the write every reader on
+# the box sees a zero-length or half-written lock — and `readEditionSource()`
+# turns that into `{edition: "openclaw", defaulted: true}`. This step runs on
+# EVERY in-app update, while the middleware, `openclawIsAbsent()`, the updater's
+# own `hasHermesHarness()`, the gateway catch-all and the MCP server are all
+# reading that file: a Hermes box briefly answers as an OpenClaw one, which is
+# how the flagship SKU's gateway-only paths stop 404-ing and the updater skips
+# `--step hermes_edition`. A rename cannot be observed half-done.
 step_edition_lock() {
   install -d -o root -g root -m 0755 /etc/clawbox
+  local _edition_tmp
+  _edition_tmp="$(mktemp)"
   printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
-    "$CLAWBOX_EDITION" > "$CLAWBOX_EDITION_FILE"
-  chown root:root "$CLAWBOX_EDITION_FILE"
-  chmod 0644 "$CLAWBOX_EDITION_FILE"
+    "$CLAWBOX_EDITION" > "$_edition_tmp"
+  install_root_file "$_edition_tmp" "$CLAWBOX_EDITION_FILE" 0644
+  rm -f "$_edition_tmp"
 
   mkdir -p /etc/systemd/system/clawbox-setup.service.d
-  printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" \
-    > "$LEGACY_EDITION_DROPIN"
+  local _dropin_tmp
+  _dropin_tmp="$(mktemp)"
+  printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"
+  install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644
+  rm -f "$_dropin_tmp"
   systemctl daemon-reload 2>/dev/null || true
 
   step_edition_gateway_state

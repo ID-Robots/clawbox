@@ -56,7 +56,28 @@ describe("client harness cache", () => {
       edition: "openclaw",
       activeKnown: false,
     });
+    // ASKED AGAIN, deliberately. The edition is cached for the lifetime of the
+    // document on the premise that it cannot change under a live page — true of
+    // the edition, false of the ANSWER: while `install.sh` rewrites the
+    // root-owned lock this route answers `openclaw, and that was a guess` for
+    // any box, and a page that pinned it wore the wrong product until it was
+    // reloaded. A guess is served once and asked again.
     expect(await fetchHarness()).toMatchObject({ activeKnown: false });
+    expect(calls).toBe(2);
+  });
+
+  it("stops asking once the device answers for itself", async () => {
+    // The other half: a settled answer IS pinned, so a box that can name
+    // itself pays one request per document, as before.
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls++;
+      return {
+        ok: true,
+        json: async () => ({ active: "hermes", edition: "hermes", activeKnown: true }),
+      } as Response;
+    }));
+    expect(await fetchHarness()).toMatchObject({ activeKnown: true });
+    expect(await fetchHarness()).toMatchObject({ activeKnown: true });
     expect(calls).toBe(1);
   });
 

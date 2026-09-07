@@ -24,22 +24,33 @@ const BACKOFF_MS = 500;
 /** Extra asks after the first. The desktop's number, now everyone's. */
 const DEFAULT_RETRIES = 2;
 
-/** Did the DEVICE answer this, or is it the fallback nothing could improve on? */
+/**
+ * Did the DEVICE answer this, or is it the fallback nothing could improve on?
+ *
+ * The same test `brandingHarness` makes (`src/lib/builtin-wallpapers.ts`), and
+ * deliberately as narrow: `activeKnown` alone would settle on a harness name
+ * this build does not know, where the desktop's old loop asked again.
+ */
 export function harnessProbeSettled(info: HarnessInfo | null): boolean {
-  return info?.activeKnown === true && typeof info.active === "string" && info.active.length > 0;
+  if (info?.activeKnown !== true) return false;
+  return info.active === "openclaw" || info.active === "hermes";
 }
 
 export interface HarnessProbeOptions {
   /** Aborts the in-flight request AND cancels any pending retry. */
   signal?: AbortSignal;
-  /** Extra attempts after the first (default 2). */
-  retries?: number;
   /**
-   * Called for every answer that named a harness, settled or not — so a caller
-   * can paint the honest answer at once and let the retry improve it, which is
-   * what the desktop does with its wallpaper.
+   * Called after EVERY attempt with what it got — an answer that named a
+   * harness, or `null` when nothing answered at all.
+   *
+   * Both matter, and the two surfaces want opposite things from the null: the
+   * desktop stays unresolved (which hides both harnesses' apps — safe either
+   * way), while `/app/<id>` shows its own "unknown" at once rather than a
+   * spinner for the whole retry budget. Waiting for the settled answer to tell
+   * either of them anything would have made a mid-update mount sit on
+   * "Loading…" for a second and a half.
    */
-  onAnswer?: (info: HarnessInfo) => void;
+  onAnswer?: (info: HarnessInfo | null) => void;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -58,20 +69,19 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export async function resolveHarnessProbe(options: HarnessProbeOptions = {}): Promise<HarnessInfo | null> {
-  const retries = options.retries ?? DEFAULT_RETRIES;
   let last: HarnessInfo | null = null;
-  for (let attempt = 0; attempt <= retries; attempt++) {
+  for (let attempt = 0; attempt <= DEFAULT_RETRIES; attempt++) {
     if (options.signal?.aborted) return last;
     // `force` from the second attempt on: the client cache would otherwise hand
-    // back the very answer we are asking again about.
-    const info = await fetchHarness({ signal: options.signal, force: attempt > 0 }).catch(() => null);
+    // back the very answer we are asking again about. `fetchHarness` answers
+    // null rather than rejecting, so there is nothing to catch here.
+    const info = await fetchHarness({ signal: options.signal, force: attempt > 0 });
     if (options.signal?.aborted) return last ?? info;
-    if (info?.active) {
-      last = info;
-      options.onAnswer?.(info);
-      if (harnessProbeSettled(info)) return info;
-    }
-    if (attempt < retries) await sleep(BACKOFF_MS * (attempt + 1), options.signal);
+    const answered = info?.active ? info : null;
+    if (answered) last = answered;
+    options.onAnswer?.(answered);
+    if (harnessProbeSettled(answered)) return answered;
+    if (attempt < DEFAULT_RETRIES) await sleep(BACKOFF_MS * (attempt + 1), options.signal);
   }
   return last;
 }

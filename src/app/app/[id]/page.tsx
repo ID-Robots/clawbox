@@ -338,14 +338,14 @@ export default function StandaloneAppPage() {
     // desktop has always retried; this is the same helper, not a second copy.
     void resolveHarnessProbe({
       signal: probe.signal,
+      // Every attempt, including one that answered nothing: this page shows its
+      // own "unknown" at once — which hides BOTH harnesses' apps, the same
+      // fail-closed answer as before — rather than sitting on "Loading…" for
+      // the whole retry budget. A later, settled answer replaces it.
       onAnswer: (d) => {
-        setHarness(d.active || "unknown");
+        setHarness(d?.active || "unknown");
         setWallpaperHarness(brandingHarness(d));
       },
-    }).then((d) => {
-      if (probe.signal.aborted) return;
-      // Nothing named a harness at all: still not a guess.
-      if (!d?.active) setHarness("unknown");
     });
     return () => { probe.abort(); };
   }, []);
