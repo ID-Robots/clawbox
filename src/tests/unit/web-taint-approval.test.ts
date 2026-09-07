@@ -268,6 +268,17 @@ describe("what the plugin calls web content and what it calls dangerous", () => 
     }
   });
 
+  it("keeps the two sets disjoint, because the web branch now returns early", () => {
+    // After TASK-768 `onBeforeToolCall` marks a web tool and returns
+    // `undefined` BEFORE it reaches the shell check. So a tool id landing in
+    // both sets would be marked and then never gated — a shell with a door in
+    // it, opened by an edit to a list rather than to the gate. There is no
+    // overlap today; this is what keeps it that way.
+    for (const name of WEB_CONTENT_TOOLS) {
+      expect(DANGEROUS_TOOLS.has(name), `${name} is in both sets`).toBe(false);
+    }
+  });
+
   it("never knows fewer shells than the path guard's deny rule", () => {
     // The floor, asserted against the IMPORTED set rather than a copy of it: a
     // shell the deny rule knows about and this gate does not would be gated by
