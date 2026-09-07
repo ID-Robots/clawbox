@@ -4007,8 +4007,19 @@ step_edition_lock() {
   install -d -o root -g root -m 0755 /etc/clawbox
   local _edition_tmp
   _edition_tmp="$(mktemp)"
-  printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
-    "$CLAWBOX_EDITION" > "$_edition_tmp"
+  # The STAGING write is checked too. `install_root_file` copies whatever is in
+  # the temp and answers 0 for a copy that worked, so a `printf` that failed
+  # after writing a prefix — a full /tmp is the ordinary way — would be
+  # published atomically as a TRUNCATED lock, which `readEditionSource()` reads
+  # as `{edition: "openclaw", defaulted: true}`: the exact answer this step
+  # exists to stop the box giving. Errexit is off for this whole function on
+  # the update path, so nothing else would have caught it.
+  if ! printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
+    "$CLAWBOX_EDITION" > "$_edition_tmp"; then
+    rm -f "$_edition_tmp"
+    echo "  Error: could not stage the edition lock for $CLAWBOX_EDITION_FILE" >&2
+    return 1
+  fi
   # The return value is CHECKED, and it has to be on this step specifically.
   # `install_root_file` answers 1 when the copy or the rename did not land, and
   # the update path calls this step from an OR-list — for the whole body of
@@ -4027,7 +4038,11 @@ step_edition_lock() {
   mkdir -p /etc/systemd/system/clawbox-setup.service.d
   local _dropin_tmp
   _dropin_tmp="$(mktemp)"
-  printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"
+  if ! printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"; then
+    rm -f "$_dropin_tmp"
+    echo "  Error: could not stage the edition drop-in for $LEGACY_EDITION_DROPIN" >&2
+    return 1
+  fi
   if ! install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644; then
     rm -f "$_dropin_tmp"
     echo "  Error: could not write the edition drop-in at $LEGACY_EDITION_DROPIN" >&2
