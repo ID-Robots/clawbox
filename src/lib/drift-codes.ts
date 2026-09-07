@@ -31,6 +31,25 @@ export function isDriftCode(code: string): code is DriftCode {
   return (DRIFT_CODES as readonly string[]).includes(code);
 }
 
+/**
+ * The codes the build-versus-checkout comparison produces.
+ *
+ * They are ALTERNATIVES in one if/else chain, not independent facts: one
+ * underlying "the build is not the code on disk" can surface as any of them,
+ * and can move between them as the box changes. So they are resolved and
+ * restated together, never one by one.
+ */
+export const BUILD_AXIS_CODES: readonly DriftCode[] = [
+  "build-from-other-commit",
+  "build-info-not-for-deployed-assets",
+  "build-predates-checkout",
+  "build-unstamped",
+];
+
+export function isBuildAxisCode(code: string): boolean {
+  return (BUILD_AXIS_CODES as readonly string[]).includes(code);
+}
+
 /** The one line a finished run leaves behind about drift it resolved. */
 export const DRIFT_RESOLVED_CODE = "drift-resolved";
 

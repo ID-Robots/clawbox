@@ -84,6 +84,18 @@ export type DriftState = "match" | "drift" | "unknown";
 export interface DriftReport {
   /** Is the served build reproducible from the code on disk? */
   buildVsCheckout: DriftState;
+  /**
+   * The build-versus-checkout comparison ALONE, before an uncommitted change
+   * is folded into it.
+   *
+   * `buildVsCheckout` is deliberately downgraded to "drift" by a dirty tree —
+   * right for the banner, which asks "can this box be trusted to be running
+   * its own code?" — and that makes it unusable for the different question
+   * "is the deployed build the commit on disk?". A completed update has to ask
+   * the second one about its own build warnings: a stray untracked file would
+   * otherwise keep a build warning the rebuild HAS resolved alive for ever.
+   */
+  buildIsCheckout: DriftState;
   /** Is the code on disk the tested commit the fleet is pinned to? */
   checkoutVsPin: DriftState;
   /** True when either comparison came back "drift". Drives the UI banner and the updater warning. */
@@ -178,6 +190,9 @@ export function computeDrift(input: DriftInputs): DriftReport {
     }
   }
 
+  // Recorded before the override below, which answers a different question.
+  const buildIsCheckout: DriftState = buildVsCheckout;
+
   // A dirty tree is drift on an appliance: an untracked file under src/app/ is
   // a route the next build would serve and this one does not. Reported
   // separately so a matching commit is not quietly downgraded by it.
@@ -213,6 +228,7 @@ export function computeDrift(input: DriftInputs): DriftReport {
 
   return {
     buildVsCheckout,
+    buildIsCheckout,
     checkoutVsPin,
     detected: buildVsCheckout === "drift" || checkoutVsPin === "drift",
     reasons,

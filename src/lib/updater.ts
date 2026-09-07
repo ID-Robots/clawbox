@@ -42,7 +42,13 @@ export { INTERRUPTED_MESSAGE } from "./update-constants";
 import { INTERRUPTED_MESSAGE } from "./update-constants";
 import { collectBuildIdentity, resolveBuildDir, type DriftReport } from "./build-identity";
 export { DRIFT_RESOLVED_CODE } from "./drift-codes";
-import { driftFact, DRIFT_RESOLVED_CODE, isDriftCode, type DriftCode } from "./drift-codes";
+import {
+  driftFact,
+  DRIFT_RESOLVED_CODE,
+  isBuildAxisCode,
+  isDriftCode,
+  type DriftCode,
+} from "./drift-codes";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
 import {
@@ -1020,9 +1026,14 @@ function measuredResolved(code: DriftCode, measured: DriftMeasurement): boolean 
     case "build-info-not-for-deployed-assets":
     case "build-predates-checkout":
     case "build-unstamped":
-      // "match" means the deployed build IS the commit on disk, over a tree
-      // git called clean — the one verdict under which none of these applies.
-      return measured.drift.buildVsCheckout === "match";
+      // The comparison ALONE, never the aggregate `buildVsCheckout`: that one
+      // is downgraded to "drift" by an uncommitted change, so a stray
+      // untracked file after `post_update` would keep a build warning the
+      // rebuild HAS resolved alive for ever — and it is promoted OUT of
+      // "unknown" by the same override, which would retire one the comparison
+      // never made. The four codes resolve together because they are
+      // alternatives for one condition, which `buildIsCheckout` answers.
+      return measured.drift.buildIsCheckout === "match";
     default: {
       // A code added to DRIFT_CODES without a rule here fails to typecheck, and
       // at runtime keeps its warning: a condition nobody answered is not one
@@ -1074,9 +1085,15 @@ export function reconcileDriftWarnings(
   if (measured === null) return previous;
   if (!hasDriftWarning(previous)) return previous;
 
-  const live = new Map(driftWarnings(measured.drift).map((w) => [w.code, w]));
+  const measuredNow = driftWarnings(measured.drift);
+  const live = new Map(measuredNow.map((w) => [w.code, w]));
+  // The build codes are alternatives for one condition, so a box still drifted
+  // under a DIFFERENT one of them is described by the sentence measured now —
+  // otherwise a migration between them would keep the pre-run text on screen.
+  const liveBuildAxis = measuredNow.find((w) => isBuildAxisCode(w.code));
   const resolved: UpdateWarning[] = [];
   const next: UpdateWarning[] = [];
+  const emitted = new Set<string>();
 
   for (const warning of previous) {
     if (!isDriftCode(warning.code)) {
@@ -1088,8 +1105,16 @@ export function reconcileDriftWarnings(
       continue;
     }
     // Still drifted, or the axis could not be read: keep it. The freshly
-    // measured sentence when there is one, the captured one otherwise.
-    next.push(live.get(warning.code) ?? warning);
+    // measured sentence when there is one, the captured one otherwise — the
+    // last thing the box could actually be seen to say.
+    const substitute = live.get(warning.code)
+      ?? (isBuildAxisCode(warning.code) ? liveBuildAxis : undefined);
+    // A warning list restored from a box that predates this fix can carry two
+    // build codes (it was written from two samples), and the codes key the
+    // rendered list — so a substitution that would double one is not made.
+    const current = substitute && !emitted.has(substitute.code) ? substitute : warning;
+    emitted.add(current.code);
+    next.push(current);
   }
 
   if (resolved.length > 0) {

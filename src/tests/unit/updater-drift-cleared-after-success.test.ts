@@ -166,6 +166,7 @@ describe("reconcileDriftWarnings", () => {
   function measuredUnknown(over: Partial<DriftMeasurement> = {}): DriftMeasurement {
     const drift: DriftReport = {
       buildVsCheckout: "unknown",
+      buildIsCheckout: "unknown",
       checkoutVsPin: "unknown",
       detected: false,
       reasons: [],
@@ -246,6 +247,72 @@ describe("reconcileDriftWarnings", () => {
     const after = reconcileDriftWarnings([noPin], measuredUnknown({ pinned: true }));
 
     expect(after.map((w) => w.code)).toEqual([DRIFT_RESOLVED_CODE]);
+  });
+
+  it("retires a build code the rebuild fixed even when the tree came back dirty", () => {
+    // `computeDrift` downgrades the AGGREGATE buildVsCheckout to "drift" for an
+    // uncommitted change — right for the banner, and unusable here: a stray
+    // untracked file after post_update would otherwise keep "run Update to
+    // realign" on the card of a box whose build IS the code on disk.
+    const measured: DriftMeasurement = {
+      drift: computeDrift(driftInputs({
+        build: { ...driftInputs().build!, commit: DISK_SHA, shortCommit: DISK_SHA.slice(0, 7) },
+        pin: { branch: "beta", source: "pin-file", commit: DISK_SHA, pinned: true },
+        checkout: { ...driftInputs().checkout, dirty: true },
+      })),
+      pinned: true,
+      dirty: true,
+    };
+    expect(measured.drift.buildVsCheckout, "the aggregate is dragged down by the dirty tree").toBe("drift");
+    expect(measured.drift.buildIsCheckout, "the comparison itself still matches").toBe("match");
+
+    const after = reconcileDriftWarnings([otherCommit], measured);
+
+    expect(after.map((w) => w.code)).toEqual([DRIFT_RESOLVED_CODE]);
+  });
+
+  it("does NOT retire a build code when the comparison was never made", () => {
+    // The same override promotes an UNMEASURABLE comparison out of "unknown":
+    // a dirty tree sets the aggregate to "drift" whatever the build said. Only
+    // `buildIsCheckout` can tell "the build matches" from "we could not look".
+    const measured: DriftMeasurement = {
+      drift: computeDrift(driftInputs({
+        build: null,
+        deployedBuildId: null,
+        buildTimestampMs: null,
+        stamperInCheckout: false,
+        checkout: { ...driftInputs().checkout, commit: null, shortCommit: null, dirty: true },
+      })),
+      pinned: true,
+      dirty: true,
+    };
+    expect(measured.drift.buildIsCheckout).toBe("unknown");
+
+    const after = reconcileDriftWarnings([otherCommit], measured);
+
+    expect(after.map((w) => w.code)).toEqual(["build-from-other-commit"]);
+    expect(after[0].message).toBe(otherCommit.message);
+  });
+
+  it("restates a build code that moved to another build code, rather than repeating the old text", () => {
+    // The four are alternatives in one if/else chain, so one condition can
+    // surface under a different code after the run. Neither retiring it nor
+    // showing the pre-run sentence would be true of the box.
+    const measured: DriftMeasurement = {
+      drift: computeDrift(driftInputs({
+        build: null,
+        deployedBuildId: "the-deployed-build",
+        stamperInCheckout: true,
+      })),
+      pinned: true,
+      dirty: false,
+    };
+    expect(measured.drift.codes).toContain("build-unstamped");
+
+    const after = reconcileDriftWarnings([otherCommit], measured);
+
+    expect(after.map((w) => w.code)).toEqual(["build-unstamped"]);
+    expect(after[0].message).toContain("carries no build record");
   });
 
   it("retires nothing when the read itself threw", () => {
