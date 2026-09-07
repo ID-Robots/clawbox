@@ -14,6 +14,18 @@
 set -euo pipefail
 
 PROJECT_DIR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
+# Where ROOT reads the code and unit files it installs, as opposed to where the
+# box lives. install.sh passes the root-owned mirror it was itself started from
+# (see $SRC_DIR there and docs/root-exec-mirror.md); everything else — an
+# operator running this by hand — gets $PROJECT_DIR and behaves as before.
+#
+# It matters for exactly one thing here: section 3 installs unit files into
+# /etc/systemd/system as root. `hermes_edition` is on WEB_ROOT_STEPS and runs on
+# every in-app update, so reading those from the clawbox-writable tree let the
+# account the web server runs as hand root a unit with no User= and an ExecStart
+# of its choosing. The three scripts below are dropped to $CLAWBOX_USER with
+# runuser and stay on $PROJECT_DIR: that is clawbox running clawbox's own files.
+SRC_DIR="${CLAWBOX_SRC_DIR:-$PROJECT_DIR}"
 CLAWBOX_USER="${CLAWBOX_USER:-clawbox}"
 CLAWBOX_HOME="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
 CLAWBOX_HOME="${CLAWBOX_HOME:-/home/$CLAWBOX_USER}"
@@ -199,7 +211,7 @@ fi
 
 # ── 3. Install + enable the Hermes dashboard + auth-proxy services. ─────────
 for unit in clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy; do
-  src="$PROJECT_DIR/config/$unit.service"
+  src="$SRC_DIR/config/$unit.service"
   if [ -f "$src" ]; then
     install -m 644 -o root -g root "$src" "/etc/systemd/system/$unit.service"
     log "installed $unit.service"

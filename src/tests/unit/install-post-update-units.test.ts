@@ -204,7 +204,7 @@ describe("gateway restart breaker", () => {
 
   it("is regenerated on both fresh install and update from the canonical unit", () => {
     expect(extractShellFunction("step_gateway_setup")).toContain(
-      'cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/',
+      'cp "$SRC_DIR/config/clawbox-gateway.service" /etc/systemd/system/',
     );
     expect(extractShellFunction("step_post_update")).toContain("step_systemd_services");
   });

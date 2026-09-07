@@ -359,6 +359,7 @@ function runStep(voiceExit: number, verdict?: string) {
   const program = [
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
+    'SRC_DIR="$PROJECT_DIR"',
     `OPENCLAW_BIN="${openclaw}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',
@@ -457,6 +458,7 @@ function runValidator(contents: string | null): { status: number; out: string } 
     "CLAWBOX_EDITION=openclaw",
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/home/clawbox/clawbox",
+    'SRC_DIR="$PROJECT_DIR"',
     'IFACE_ENV="/nonexistent/network.env"',
     "EXPECTED_ACTIVE_SERVICES=()",
     "EXPECTED_INSTALLED_SERVICES=()",
@@ -661,6 +663,7 @@ function runDispatch(
   const program = [
     "set -euo pipefail",
     'PROJECT_DIR="/home/clawbox/clawbox"',
+    'SRC_DIR="$PROJECT_DIR"',
     "PROVISION_FAILURES=()",
     'PROVISION_RUN_ID="test-run"',
     'record_provision_failure() { PROVISION_FAILURES+=("$1"); }',

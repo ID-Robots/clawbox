@@ -294,6 +294,7 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
   const program = [
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
+    'SRC_DIR="$PROJECT_DIR"',
     `OPENCLAW_BIN="${openclaw}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',
@@ -1060,6 +1061,7 @@ function runValidator(ttsStatusContents: string | null, extraEnv: Record<string,
     "CLAWBOX_EDITION=openclaw",
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/home/clawbox/clawbox",
+    'SRC_DIR="$PROJECT_DIR"',
     'IFACE_ENV="/nonexistent/network.env"',
     // The unit registry is another file's subject; empty lists keep this test
     // about the one probe it is here to pin.
@@ -1212,6 +1214,7 @@ function runOpenclawSetup(ttsExit: number): { status: number; out: string } {
   const program = [
     "set -euo pipefail",
     "PROJECT_DIR=/nonexistent",
+    'SRC_DIR="$PROJECT_DIR"',
     "is_hermes_edition() { return 1; }",
     "step_openclaw_install() { :; }",
     "step_openclaw_patch() { :; }",

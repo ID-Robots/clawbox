@@ -145,7 +145,7 @@ describe("the wrapper lands where the desktop expects it", () => {
   const fn = extractShellFunction("install_claude_ds_wrapper");
 
   it("installs the repo's own script to the path the icon's command resolves to", () => {
-    expect(fn).toContain(`$PROJECT_DIR/scripts/${CODING_HARNESS_COMMAND}`);
+    expect(fn).toContain(`$SRC_DIR/scripts/${CODING_HARNESS_COMMAND}`);
     expect(fn).toContain(`$CLAWBOX_HOME/${CODING_HARNESS_WRAPPER_PATH}`);
   });
 

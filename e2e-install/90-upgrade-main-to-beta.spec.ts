@@ -134,6 +134,125 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(branch).toBe(UPGRADE_BRANCH);
   });
 
+  test("the update leaves a root-owned mirror, and root runs out of it", async () => {
+    // TASK-733. This is the one test that exercises the ROLLOUT rather than the
+    // mechanism: the container has just come across the transition described in
+    // docs/root-exec-mirror.md — an old build, whose dispatcher runs the tree,
+    // updating to a build whose dispatcher will not. If the mirror were staged
+    // after the new dispatcher rather than before it, every root step here would
+    // already be failing; if it lived on /run it would be gone, because
+    // rebuild_reboot restarts the box between the two halves of the update.
+    const mirror = (await dockerExec(
+      ["/usr/local/libexec/clawbox/clawbox-root-manifest.sh", "--mirror-path"],
+      { user: "root" },
+    )).trim();
+    expect(mirror).toBe("/var/lib/clawbox/root-exec-mirror");
+
+    const listing = await dockerExec([
+      "bash", "-lc",
+      `stat -c '%U %G %a' ${mirror} && ls ${mirror} | sort | tr '\\n' ' '`,
+    ], { user: "root" });
+    const [ownership, contents] = listing.trim().split("\n");
+    expect(ownership, "the mirror must be root-owned or it is decorative").toBe("root root 755");
+    expect(contents.trim()).toBe("config install.sh scripts");
+
+    // The account the web server runs as must not be able to write it — that IS
+    // the property, and it is worth asserting rather than inferring from a mode.
+    const writable = await dockerExec([
+      "bash", "-lc",
+      `if echo x > ${mirror}/install.sh 2>/dev/null; then echo WRITABLE; else echo refused; fi`,
+    ], { user: "clawbox" });
+    expect(writable.trim()).toBe("refused");
+
+    // ...and the record still describes the tree, which is what lets the next
+    // dispatch restage the mirror at all.
+    const verified = await dockerExec([
+      "bash", "-lc",
+      "/usr/local/libexec/clawbox/clawbox-root-manifest.sh --verify && echo recorded",
+    ], { user: "root" });
+    expect(verified.trim()).toBe("recorded");
+
+    // Nothing root ran during the update came out of the clawbox-writable tree.
+    // post_update is an EXEMPT step and the last one this update dispatched, so
+    // its own journal is the honest place to look.
+    const journal = await dockerExec([
+      "bash", "-lc",
+      "journalctl -u 'clawbox-root-update@post_update.service' --no-pager -o cat | tail -n 400 || true",
+    ], { user: "root" });
+    // Anchored so an EMPTY journal cannot pass it. The assertion below is an
+    // absence, and `|| true` above means a renamed unit, a rotated journal or a
+    // container without a persistent one yields "" — which satisfies any
+    // absence check and proves nothing. That is the false-success class this PR
+    // is about, in the test that guards it.
+    //
+    // The positive form is deliberately NOT asserted here: measured on a real
+    // box, the clawbox-root-update@ units log no exec path at all, mirror or
+    // tree, so requiring the mirror path would fail for the wrong reason. What
+    // proves root ran the mirror is the case below, which drives the real
+    // `sudo clawbox-run-root-step.sh` grant and watches the copy follow.
+    expect(journal.trim(), "no journal for post_update — the absence check below would pass vacuously").not.toBe("");
+    expect(journal).not.toMatch(/Starting.*\/home\/clawbox\/clawbox\/install\.sh/);
+  });
+
+  test("the mirror follows the tree on every dispatch, not once at install time", async () => {
+    // Probe-once is one of the three defects this codebase keeps producing, and
+    // a mirror staged at install time and trusted for ever would be exactly
+    // that: the box would keep running the build before the update. So: change
+    // a covered file, re-record it as root the way an update does, then take the
+    // REAL granted path from the account the web server runs as — `sudo
+    // clawbox-run-root-step.sh` — and see whether the copy root holds followed.
+    //
+    // `fix_git_perms` is the cheap step for this (one chown) and is on
+    // WEB_ROOT_STEPS, so it goes through the same sudoers grant, launcher and
+    // dispatcher an in-app update uses.
+    const covered = "/home/clawbox/clawbox/config/clawbox-resource-limits.env";
+    const mirrored = "/var/lib/clawbox/root-exec-mirror/config/clawbox-resource-limits.env";
+    const marker = "# e2e-733-mirror-follows-the-tree";
+
+    const before = await dockerExec([
+      "bash", "-lc", `grep -c '${marker}' ${mirrored} || true`,
+    ], { user: "root" });
+    expect(before.trim(), "the marker must not be there before the test writes it").toBe("0");
+
+    // The backup is taken on its own, BEFORE anything is mutated: a failure
+    // here leaves the checkout untouched and there is nothing to restore. Every
+    // mutation is inside the try, so a throw from the record write — which
+    // happens after the file has already changed — still runs the finally. This
+    // suite is `mode: "serial"`, so a checkout left modified poisons the cases
+    // after it rather than failing this one.
+    await dockerExec([
+      "bash", "-lc", `cp ${covered} /tmp/e2e-733-covered.bak`,
+    ], { user: "root" });
+
+    try {
+      await dockerExec([
+        "bash", "-lc",
+        `printf '\\n${marker}\\n' >> ${covered}`
+        + " && /usr/local/libexec/clawbox/clawbox-root-manifest.sh --write",
+      ], { user: "root" });
+
+      const dispatched = await dockerExec([
+        "bash", "-lc",
+        "sudo -n /usr/local/libexec/clawbox/clawbox-run-root-step.sh fix_git_perms 2>&1"
+        + " && echo DISPATCHED",
+      ], { user: "clawbox" });
+      expect(dispatched, dispatched).toContain("DISPATCHED");
+
+      const after = await dockerExec([
+        "bash", "-lc", `grep -c '${marker}' ${mirrored} || true`,
+      ], { user: "root" });
+      expect(after.trim(), "the mirror still holds the previous build's copy").toBe("1");
+    } finally {
+      await dockerExec([
+        "bash", "-lc",
+        `cp /tmp/e2e-733-covered.bak ${covered} && rm -f /tmp/e2e-733-covered.bak`
+        + " && chown clawbox:clawbox " + covered
+        + " && /usr/local/libexec/clawbox/clawbox-root-manifest.sh --write"
+        + " && /usr/local/libexec/clawbox/clawbox-root-manifest.sh --mirror",
+      ], { user: "root" });
+    }
+  });
+
   test("setup state preserved across upgrade", async () => {
     // The upgrade must not wipe prior setup flags (wifi/password/ai).
     const res = await fetch(`${BASE_URL}/setup-api/setup/status`);

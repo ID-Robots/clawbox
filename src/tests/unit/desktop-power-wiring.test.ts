@@ -137,7 +137,7 @@ describe("install.sh", () => {
     // under a temp name and renames rather than writing the live destination —
     // an `install` killed part way through used to leave an executable PREFIX of
     // a root-invoked script behind (TASK-584).
-    expect(install).toContain('install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"');
+    expect(install).toContain('install_root_file "$SRC_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"');
     expect(install).toContain('install -o root -g root -m "$mode" "$src" "$dst.new"');
   });
 

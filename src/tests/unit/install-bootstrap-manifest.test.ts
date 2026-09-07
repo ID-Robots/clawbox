@@ -163,6 +163,17 @@ function runBootstrap(opts: {
    * replaced nor reported.
    */
   installed?: "healthy" | "empty" | "truncated" | "legacy";
+  /**
+   * Where root is running install.sh FROM.
+   *
+   * false (the default) is the operator / flash-host / one-time-transition
+   * shape: `$_self` is the checkout, so root already executes those bytes.
+   * true is the shape every DISPATCHED step has after TASK-733 — root came out
+   * of the root-owned mirror, and `$_b` is only the clawbox-owned checkout it
+   * is refreshing. Taking a helper out of `$_b` and running it as root there is
+   * the very primitive this change removes.
+   */
+  selfIsMirror?: boolean;
 }): Bootstrap {
   const helper = path.join(root, "libexec", "clawbox-root-manifest.sh");
   const project = path.join(root, "project");
@@ -238,9 +249,21 @@ function runBootstrap(opts: {
   );
   chmodSync(path.join(project, "install.sh"), 0o755);
 
+  // The copy root is running out of when the test asks for the dispatched
+  // shape. It needs its own install.sh, because that is what the block re-execs.
+  const self = opts.selfIsMirror ? path.join(root, "mirror") : project;
+  if (opts.selfIsMirror) {
+    mkdirSync(self, { recursive: true });
+    writeFileSync(path.join(self, "install.sh"), readFileSync(path.join(project, "install.sh"), "utf-8"));
+    chmodSync(path.join(self, "install.sh"), 0o755);
+  }
+
   const block = shipped(
     "      _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh",
-    'bash "$_b/install.sh" "$@"',
+    // $_self, not $_b: the block re-execs the copy root HOLDS (the root-owned
+    // mirror on a dispatched step, the tree everywhere else), never the
+    // clawbox-writable checkout it just reset. TASK-733.
+    'bash "$_self/install.sh" "$@"',
     { helper, project, inclusive: true },
   );
 
@@ -250,6 +273,10 @@ function runBootstrap(opts: {
     // 8 blocks, and no core file: the copy below is killed part way through.
     ...(opts.stagingFails === "truncates" ? ["ulimit -c 0", "ulimit -f 8"] : []),
     `_b=${JSON.stringify(project)}`,
+    // Which copy root is running: the checkout it is refreshing (the operator
+    // and flash-host shape, and the one this block's re-exec has always had),
+    // or the root-owned mirror every dispatched step comes out of. TASK-733.
+    `_self=${JSON.stringify(self)}`,
     block,
     // Never reached: the block above ends in `exec`.
     'echo "MARKER=exec-did-not-happen"',
@@ -342,7 +369,18 @@ function runVerdict(opts: {
     if (end < 0) throw new Error(`${name} has no closing brace`);
     return INSTALL_SH.slice(start, end + 2);
   };
-  const writer = `${fn("write_root_exec_manifest")}\n${fn("refresh_root_exec_manifest")}`;
+  // root_exec_may_anchor gates the re-record; lifted rather than stubbed so
+  // these tests keep exercising the real gate. TASK-733.
+  const writer = [
+    fn("root_exec_may_anchor"),
+    // Lifted too, not stubbed: write_root_exec_manifest calls it, and an
+    // UNDEFINED function inside an `if` condition does not trip `set -e` — the
+    // fixture would silently take the else branch, report WRITE=ok and never
+    // reach `--mirror`, i.e. pass for its own shape rather than the code's.
+    fn("root_exec_helper_knows_mirror"),
+    fn("write_root_exec_manifest"),
+    fn("refresh_root_exec_manifest"),
+  ].join("\n");
 
   const program = [
     "#!/usr/bin/env bash",
@@ -351,6 +389,11 @@ function runVerdict(opts: {
     `CLAWBOX_ROOT_MANIFEST_STALE=${JSON.stringify(opts.marker)}`,
     `ROOT_EXEC_MANIFEST_HELPER=${JSON.stringify(helper)}`,
     `PROJECT_DIR=${JSON.stringify(path.join(root, "project"))}`,
+    // install.sh running out of the tree, which is the shape the bootstrap and
+    // an operator's run both have — and the one under which root may re-anchor
+    // the record on the tree at all. See root_exec_may_anchor.
+    `SRC_DIR=${JSON.stringify(path.join(root, "project"))}`,
+    "ROOT_EXEC_TREE_RESYNCED=0",
     block,
     writer,
     // `if`, not a bare call: write_root_exec_manifest returns non-zero on a
@@ -399,6 +442,43 @@ describe.runIf(canRun)("the bootstrap's root-exec manifest re-record", () => {
       "refreshed --verify",
     ]);
     expect(run.marker, "a manifest that was repaired must not be carried forward").toBe("0");
+  });
+
+  it("will not take a fresh helper out of the tree when root is running from the mirror", () => {
+    // TASK-733 H-1. The repair above copies $_b/config/clawbox-root-manifest.sh
+    // into /usr/local/libexec/clawbox root-owned 0755 and then RUNS it as root —
+    // read-then-run-as-root over a path the account the web server runs as owns.
+    // That is fine on the paths where root is ALREADY executing that checkout
+    // (an operator's `sudo bash install.sh`, the flash host, the one-time
+    // transition): reading it grants nothing root does not already have, which
+    // is root_exec_may_anchor's own first clause.
+    //
+    // It is not fine on a DISPATCHED step. There root came out of the root-owned
+    // mirror, `bootstrap_updater`/`post_update`/`rebuild_reboot` are startable
+    // by the web server through the NOPASSWD launcher, and the payload does not
+    // merely run once: it BECOMES the installed helper, so it owns the record
+    // and the mirror — i.e. which bytes root executes — from then on.
+    const run = runBootstrap({ failWrites: 1, selfIsMirror: true });
+    expect(run.status).toBe(0);
+    expect(
+      run.calls.filter((c) => c.startsWith("refreshed")),
+      "root ran a helper it had just taken out of the clawbox-writable tree",
+    ).toEqual([]);
+    expect(run.helperAfter, "the tree's helper was installed into libexec").toBe(run.helperBefore);
+  });
+
+  it("fails closed rather than restage from the tree when the installed helper is dead", () => {
+    // The other call site of the same restage, and the dangerous one: here the
+    // installed helper is not answering at all, so the tree's copy would be
+    // installed and executed with nothing checked. Root has to do without —
+    // install_root_libexec re-installs the helper later in the same run out of
+    // $SRC_DIR, which is the copy root vouched for — and carry the failure
+    // forward so the update reports it. One pass later, not one root implant.
+    const run = runBootstrap({ failWrites: 0, installed: "empty", selfIsMirror: true });
+    expect(run.status).toBe(0);
+    expect(run.helperAfter, "the tree's helper was installed into libexec").toBe("");
+    expect(run.marker, "a manifest that could not be recorded must be carried forward").toBe("1");
+    expect(run.out).toContain("REACHED_EXEC=1");
   });
 
   it("carries the failure into the re-exec when the retry fails too", () => {

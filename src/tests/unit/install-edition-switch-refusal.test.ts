@@ -115,6 +115,7 @@ function runRefusal(env: Record<string, string> = {}): {
   const script = [
     "set -euo pipefail",
     `PROJECT_DIR=${JSON.stringify(projectDir)}`,
+    'SRC_DIR="$PROJECT_DIR"',
     REFUSAL_BLOCK.replace('"/etc/clawbox/edition.env"', JSON.stringify(lockPath)).replace(
       '"/etc/systemd/system/clawbox-setup.service.d/edition.conf"',
       JSON.stringify(dropinPath),
@@ -414,6 +415,7 @@ function runValidator(
     `CLAWBOX_EDITION=${edition}`,
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/nonexistent",
+    'SRC_DIR="$PROJECT_DIR"',
     "CLAWBOX_HOME=/nonexistent",
     'IFACE_ENV="/nonexistent/network.env"',
     SERVICE_REGISTRY,
