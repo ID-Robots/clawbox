@@ -58,6 +58,7 @@ export const WEB_CONTENT_TOOLS = new Set([
   "web_search",
   "x_search",
   "browser",
+  "view_image",
   // The ClawBox MCP server's browser family, whole (mcp/tools/browser.ts).
   "browser_open",
   "browser_navigate",
@@ -69,9 +70,34 @@ export const WEB_CONTENT_TOOLS = new Set([
   "browser_keypress",
   "browser_scroll",
   "browser_close",
+  // A vision model's reading of an arbitrary image, which is how a picture of a
+  // page — or a picture with words painted on it — becomes text in the turn.
+  "describe_image",
+  // Text from a REMOTE catalogue, written by whoever published the entry.
+  "app_search",
+  "skill_search",
+  "skill_info",
   // ClawBox MCP server (mcp/tools/email.ts).
   "email_list",
   "email_read",
+]);
+
+/**
+ * Tools that reach outside and still do NOT taint, each with its reason — so
+ * the drift test below can demand that every outward-facing tool is CLASSIFIED
+ * rather than merely absent, and a new one has to be triaged instead of
+ * silently uncovered.
+ *
+ * `conversations_list` / `sessions_history` / `sessions_search` are the
+ * deliberate omission from both sets: they surface the box's OWN conversations,
+ * which are the owner's, and gating them would fire on ordinary work. A
+ * stranger writing into a session is the inbound seam (`message_received`), not
+ * a tool result.
+ */
+export const NOT_TAINT_BY_DECISION = new Map([
+  ["email_send", "outbound only — it carries nothing back into the turn"],
+  ["update_check", "our own release metadata, a version string from ClawBox's own endpoint"],
+  ["generate_image", "the box's own image model drawing to a file; no third party writes the prompt"],
 ]);
 
 /**
@@ -83,6 +109,11 @@ export const WEB_CONTENT_TOOLS = new Set([
  * covers two surfaces at once — the core's documented alias of `exec`, and the
  * ClawBox MCP server's own tool, which the core shows the model as
  * `clawbox__bash`.
+ *
+ * The two lists MATCH DIFFERENTLY, which the word "superset" alone would hide:
+ * the path guard tests the raw name (`COMMAND_TOOLS.has(toolName)`), so it does
+ * not see `clawbox__bash`; this gate normalises the MCP qualifier off first. The
+ * containment is of the SETS, not of the behaviour.
  *
  * THE SPAWNS ARE HERE FOR THE SAME REASON, and they are the subtle half. A
  * spawned run gets its own `runId`, so the core clears the parent's mark for it
@@ -104,6 +135,11 @@ export const DANGEROUS_TOOLS = new Set([
   "code_execution",
   "process",
   "terminal",
+  // Driving the desktop GUI to a terminal window is arbitrary execution by a
+  // longer route. The path guard's COMMAND_TOOLS does not carry it either, so
+  // the containment test below pins this list to the CORE'S catalogue as well
+  // as to that list.
+  "computer",
   // The shell one hop out: a delegated run with a shell of its own.
   "coding_agent_run",
   "coding_team_run",
