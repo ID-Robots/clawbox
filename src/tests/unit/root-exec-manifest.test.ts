@@ -87,6 +87,7 @@ let etc: string;
 let manifest: string;
 let helper: string;
 let dispatcher: string;
+let mirror: string;
 let marker: string;
 
 /**
@@ -120,6 +121,7 @@ beforeEach(() => {
   manifest = path.join(etc, "root-exec.manifest");
   helper = path.join(libexec, "clawbox-root-manifest.sh");
   dispatcher = path.join(libexec, "clawbox-root-step.sh");
+  mirror = path.join(tmp, "mirror");
   marker = path.join(tmp, "ran");
 
   fs.mkdirSync(path.join(project, "scripts"), { recursive: true });
@@ -141,11 +143,12 @@ beforeEach(() => {
     [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
     [/^MANIFEST_DIR=.*$/m, `MANIFEST_DIR="${etc}"`],
     [/^MANIFEST_FILE=.*$/m, `MANIFEST_FILE="${manifest}"`],
+    [/^MIRROR_DIR=.*$/m, `MIRROR_DIR="${mirror}"`],
   ]);
   retarget(DISPATCHER_SRC, dispatcher, [
     [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
     [/^MANIFEST_HELPER=.*$/m, `MANIFEST_HELPER="${helper}"`],
-    [/^RUN_DIR=.*$/m, `RUN_DIR="${path.join(tmp, "run")}"`],
+    [/^MIRROR_DIR=.*$/m, `MIRROR_DIR="${mirror}"`],
   ]);
 });
 
@@ -301,13 +304,16 @@ d("clawbox-root-step.sh — the gate in front of the exec", () => {
 
   it("execs a copy it holds, not the path it checked", () => {
     // Verifying $ENTRYPOINT and then exec'ing $ENTRYPOINT is a race: bash opens
-    // the file after the check returns. The dispatcher copies it into a
-    // root-only directory, hashes the copy, and runs that.
+    // the file after the check returns. The dispatcher restages the root-owned
+    // mirror, hashes the copy of install.sh in it, and runs that. Since
+    // TASK-733 the copy is the whole covered tree rather than one file, so the
+    // scripts install.sh goes on to run as root come out of it too.
     sh(`"${helper}" --write`);
     expect(sh(`"${dispatcher}" chpasswd`).status).toBe(0);
-    const staged = path.join(tmp, "run", "root-step-install.sh");
+    const staged = path.join(mirror, "install.sh");
     expect(fs.existsSync(staged), "the dispatcher did not stage the entrypoint").toBe(true);
     expect(fs.readFileSync(staged, "utf-8")).toBe(fs.readFileSync(path.join(project, "install.sh"), "utf-8"));
+    expect(fs.existsSync(path.join(mirror, "scripts", "start-ap.sh"))).toBe(true);
     expect(ran()).toContain("--step chpasswd");
   });
 
@@ -339,13 +345,19 @@ d("clawbox-root-step.sh — the gate in front of the exec", () => {
   it("lets an update step through a stale record, because an update is what makes it stale", () => {
     // src/lib/updater.ts does its own fetch/reset/clean as the clawbox user
     // before it starts the rebuild step, and scripts/force-update.sh does the
-    // same by hand. Verifying here would fail those flows at their next step and
+    // same by hand. Refusing here would fail those flows at their next step and
     // leave the device refusing every root step afterwards. The update family
     // re-records instead, as its first action, which is also what heals a tree
     // replaced from the outside. This is not a hole in the allow-list: TASK-445
     // removed every sudo grant for a self-updating instance.
+    //
+    // Since TASK-733 it goes through the root-owned mirror rather than the
+    // tree, so what it runs is the last build root vouched for — which is what
+    // the healthy dispatch below establishes, exactly as a provisioned box has.
     sh(`"${helper}" --write`);
+    expect(sh(`"${dispatcher}" git_pull`).status, "the healthy dispatch failed").toBe(0);
     fs.appendFileSync(path.join(project, "install.sh"), "\n# replaced by an update\n");
+    fs.rmSync(marker, { force: true });
     expect(sh(`"${dispatcher}" git_pull`).status).toBe(0);
     expect(ran()).toContain("allow=[1]");
   });
@@ -388,6 +400,7 @@ d("clawbox-root-step.sh — the gate in front of the exec", () => {
         [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
         [/^MANIFEST_DIR=.*$/m, `MANIFEST_DIR="${etc}"`],
         [/^MANIFEST_FILE=.*$/m, `MANIFEST_FILE="${manifest}"`],
+        [/^MIRROR_DIR=.*$/m, `MIRROR_DIR="${mirror}"`],
       ]);
     }
   });
@@ -454,6 +467,10 @@ d("install.sh::install_root_libexec", () => {
     return sh([
       "set -uo pipefail",
       `PROJECT_DIR="${project}"`,
+      // Root reading the code it installs out of the tree it is running from:
+      // the operator/full-install shape, and the one under which root may
+      // re-anchor the record on the tree at all (root_exec_may_anchor).
+      `SRC_DIR="${project}"`,
       'record_provision_failure() { PROVISION_FAILURES+=("$1"); echo "provision-failure:$1"; }',
       // write_root_exec_manifest now CLEARS what it repaired (TASK-584): a
       // manifest the bootstrap could not write and a later step did is not a
@@ -485,10 +502,12 @@ d("install.sh::install_root_libexec", () => {
       [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
       [/^MANIFEST_DIR=.*$/m, `MANIFEST_DIR="${etc}"`],
       [/^MANIFEST_FILE=.*$/m, `MANIFEST_FILE="${manifest}"`],
+      [/^MIRROR_DIR=.*$/m, `MIRROR_DIR="${mirror}"`],
     ]);
     retarget(DISPATCHER_SRC, path.join(project, "config", "clawbox-root-step.sh"), [
       [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
       [/^MANIFEST_HELPER=.*$/m, `MANIFEST_HELPER="${helper}"`],
+      [/^MIRROR_DIR=.*$/m, `MIRROR_DIR="${mirror}"`],
     ]);
   });
 

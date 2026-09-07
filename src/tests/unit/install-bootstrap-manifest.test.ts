@@ -342,7 +342,13 @@ function runVerdict(opts: {
     if (end < 0) throw new Error(`${name} has no closing brace`);
     return INSTALL_SH.slice(start, end + 2);
   };
-  const writer = `${fn("write_root_exec_manifest")}\n${fn("refresh_root_exec_manifest")}`;
+  // root_exec_may_anchor gates the re-record; lifted rather than stubbed so
+  // these tests keep exercising the real gate. TASK-733.
+  const writer = [
+    fn("root_exec_may_anchor"),
+    fn("write_root_exec_manifest"),
+    fn("refresh_root_exec_manifest"),
+  ].join("\n");
 
   const program = [
     "#!/usr/bin/env bash",
@@ -351,6 +357,11 @@ function runVerdict(opts: {
     `CLAWBOX_ROOT_MANIFEST_STALE=${JSON.stringify(opts.marker)}`,
     `ROOT_EXEC_MANIFEST_HELPER=${JSON.stringify(helper)}`,
     `PROJECT_DIR=${JSON.stringify(path.join(root, "project"))}`,
+    // install.sh running out of the tree, which is the shape the bootstrap and
+    // an operator's run both have — and the one under which root may re-anchor
+    // the record on the tree at all. See root_exec_may_anchor.
+    `SRC_DIR=${JSON.stringify(path.join(root, "project"))}`,
+    "ROOT_EXEC_TREE_RESYNCED=0",
     block,
     writer,
     // `if`, not a bare call: write_root_exec_manifest returns non-zero on a

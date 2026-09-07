@@ -122,6 +122,7 @@ function runStep(voiceExit: number, verdicts: Record<string, string> | null) {
   const program = [
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
+    'SRC_DIR="$PROJECT_DIR"',
     `OPENCLAW_BIN="${openclaw}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',

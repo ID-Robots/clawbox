@@ -356,6 +356,7 @@ function runEnsure(opts: {
     'CLAWBOX_USER="$(id -un)"',
     `NPM_PREFIX=${JSON.stringify(npmPrefix)}`,
     `PROJECT_DIR=${JSON.stringify(projectDir)}`,
+    'SRC_DIR="$PROJECT_DIR"',
     `CODEX_NATIVE_BIN=${JSON.stringify(nativeBin)}`,
     'CODEX_PACKAGE_HOME="$CLAWBOX_HOME/.local/share/codex"',
     `CALLS=${JSON.stringify(calls)}`,

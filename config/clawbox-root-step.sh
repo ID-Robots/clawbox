@@ -20,17 +20,33 @@
 #      `clawbox-root-update@anything.service`, so without this the step name is
 #      unvalidated input on the root side of the boundary.
 #
-#   2. Refuses to exec a tree it did not record — for every step that is NOT an
-#      update. install.sh writes a root-owned sha256 manifest of everything root
-#      runs on clawbox's behalf (install.sh, scripts/, config/) at the end of
-#      every install and immediately after every successful `git reset --hard` to
-#      the update branch; this script verifies it before the exec below. Without
-#      that check, "clawbox may start clawbox-root-update@chpasswd.service" also
-#      means "clawbox may choose the program root runs", because install.sh is
+#   2. Never execs the tree. install.sh writes a root-owned sha256 manifest of
+#      everything root runs on clawbox's behalf (install.sh, scripts/, config/)
+#      at the end of every install and immediately after every successful `git
+#      reset --hard` to the update branch, and keeps a root-owned MIRROR of the
+#      same paths beside it. This script verifies the record and then execs the
+#      MIRROR — so the file root opens is one the clawbox user cannot write, and
+#      cannot swap between the check and the exec. Without that,
+#      "clawbox may start clawbox-root-update@chpasswd.service" also means
+#      "clawbox may choose the program root runs", because install.sh is
 #      clawbox:clawbox 0755 inside a clawbox-writable directory — a one-step
-#      local root. See clawbox-root-manifest.sh for what the record does and does
-#      not cover, and the comment on the check below for why the update family is
-#      excluded.
+#      local root.
+#
+#      The mirror is what closed TASK-733. The record alone could only ever
+#      cover the PINNED steps: an update legitimately rewrites the recorded
+#      files, so `bootstrap_updater`, `post_update` and `rebuild_reboot` were
+#      exempt from the check and exec'd $PROJECT_DIR/install.sh with nothing
+#      verified at all — while all three are startable by the web server
+#      through config/clawbox-run-root-step.sh. Write install.sh, start the
+#      step, and the payload ran as root in one move.
+#
+#      What makes the exemption safe now is WHEN the mirror is restaged: only
+#      from a tree that still matches the record. A tree that changed because an
+#      update replaced it is re-recorded by install.sh at that moment, so it
+#      mirrors on the next dispatch; a tree that changed because something
+#      rewrote install.sh matches nothing, is never copied, and root runs the
+#      previous root-owned build. Both answers are "run the mirror". See
+#      clawbox-root-manifest.sh for what the record and the mirror cover.
 #
 #   3. Decides whether this step may self-update. install.sh's bootstrap block
 #      does `git fetch` + `git reset --hard origin/<branch>` + re-exec, and it
@@ -41,13 +57,19 @@
 #
 # Keep the two lists below in step with src/lib/root-steps.ts and install.sh's
 # DISPATCH_STEPS — src/tests/unit/root-steps.test.ts fails the build otherwise.
+# src/tests/unit/root-exec-mirror.test.ts fails if a step joins the exempt family
+# without going through the mirror.
 
 set -euo pipefail
 
 PROJECT_DIR="/home/clawbox/clawbox"
-ENTRYPOINT="$PROJECT_DIR/install.sh"
+TREE_ENTRYPOINT="$PROJECT_DIR/install.sh"
 MANIFEST_HELPER="/usr/local/libexec/clawbox/clawbox-root-manifest.sh"
-RUN_DIR="/run/clawbox"
+# Kept in step with MIRROR_DIR in clawbox-root-manifest.sh. The two files are
+# installed separately and cannot share a constant — the same reason
+# SELFTEST_TOKEN is repeated as a literal — so a test pins them together.
+MIRROR_DIR="/var/lib/clawbox/root-exec-mirror"
+ENTRYPOINT="$MIRROR_DIR/install.sh"
 
 step="${1:-}"
 
@@ -126,9 +148,36 @@ if ! contains "$step" "$ALLOWED_STEPS"; then
   exit 64
 fi
 
-if [ ! -f "$ENTRYPOINT" ]; then
-  echo "clawbox-root-step: $ENTRYPOINT is missing" >&2
+if [ ! -f "$TREE_ENTRYPOINT" ]; then
+  echo "clawbox-root-step: $TREE_ENTRYPOINT is missing" >&2
   exit 66
+fi
+
+# The verifier has to work before ANY step, not just the pinned ones.
+#
+# It used to be probed only inside the pinned branch, because only that branch
+# read an exit status from it. The mirror gives the update family a stake in it
+# too: `--mirror` is the verb that decides which bytes root executes, and a
+# 0-byte or half-copied helper answers it with a clean 0 without copying
+# anything (see SELFTEST_TOKEN in clawbox-root-manifest.sh). Reading that 0
+# would leave root exec'ing whatever happens to sit at the mirror path on the
+# word of a program that copied nothing.
+if [ ! -x "$MANIFEST_HELPER" ]; then
+  echo "clawbox-root-step: $MANIFEST_HELPER is missing — cannot tell what root is about to run" >&2
+  echo "clawbox-root-step: recover with: sudo bash $TREE_ENTRYPOINT --step systemd_services" >&2
+  exit 65
+fi
+if ! manifest_helper_alive; then
+  echo "clawbox-root-step: $MANIFEST_HELPER is installed but does nothing — it cannot tell what root is about to run" >&2
+  echo "clawbox-root-step: recover with: sudo bash $TREE_ENTRYPOINT --step systemd_services" >&2
+  exit 65
+fi
+
+# Does $PROJECT_DIR still hold exactly what root recorded? Asked ONCE, and both
+# branches below turn on the answer.
+tree_matches_record=0
+if "$MANIFEST_HELPER" --verify >/dev/null 2>&1; then
+  tree_matches_record=1
 fi
 
 if contains "$step" "$SELF_UPDATING_STEPS"; then
@@ -138,80 +187,76 @@ else
   export CLAWBOX_INSTALL_BOOTSTRAPPED=1
 
   # ...and, because it is pinned, root must be able to say what "the on-disk
-  # copy" is. Verify the record before the exec below.
+  # copy" is. A mismatch here is tampering: these are the steps a foothold can
+  # reach and repeat — chpasswd, set_hostname, restart_ap, llamacpp_install are
+  # the four instances config/clawbox-sudoers grants — and nothing about them is
+  # supposed to change the covered files. So root refuses, loudly, with the
+  # command that re-records the tree as the operator.
   #
-  # ONLY for the pinned steps, and that asymmetry is the whole design:
-  #
-  #   * These are the steps a foothold can reach and repeat — chpasswd,
-  #     set_hostname, restart_ap, llamacpp_install are the four instances
-  #     config/clawbox-sudoers grants. Nothing about them is supposed to change
-  #     the covered files, so a mismatch is tampering and root refuses.
-  #   * The update family is excluded because an update IS a legitimate rewrite
-  #     of exactly these files, and it is not always install.sh that performs it:
-  #     src/lib/updater.ts does its own fetch/reset/clean as the clawbox user
-  #     before it starts the rebuild step, and scripts/force-update.sh does the
-  #     same by hand. Verifying here would fail those flows at their next step
-  #     and leave the device refusing every root step afterwards. Instead the
-  #     update family re-records as its first action (install.sh's bootstrap
-  #     block does it right after `git reset --hard`), which is also what heals
-  #     a device whose tree was replaced from the outside.
-  #   * That is not a hole the allow-list leaves open: TASK-445 removed every
-  #     sudo grant for a self-updating instance, so `sudo systemctl start
-  #     clawbox-root-update@git_pull.service` is denied. What can still reach
-  #     them is the unscoped polkit `manage-units` grant, tracked as TASK-539 —
-  #     and when that goes, the update path must NOT simply be re-granted
-  #     through sudo without moving the git work itself to the root side.
-  if [ ! -x "$MANIFEST_HELPER" ]; then
-    echo "clawbox-root-step: $MANIFEST_HELPER is missing — cannot tell what root is about to run" >&2
-    echo "clawbox-root-step: recover with: sudo bash $ENTRYPOINT --step systemd_services" >&2
-    exit 65
-  fi
-  if ! manifest_helper_alive; then
-    echo "clawbox-root-step: $MANIFEST_HELPER is installed but does nothing — it cannot tell what root is about to run" >&2
-    echo "clawbox-root-step: recover with: sudo bash $ENTRYPOINT --step systemd_services" >&2
-    exit 65
-  fi
-  if ! "$MANIFEST_HELPER" --verify; then
+  # The update family does NOT refuse here, and that asymmetry is still the
+  # design: an update IS a legitimate rewrite of exactly these files, and it is
+  # not always install.sh that performs it (src/lib/updater.ts does its own
+  # fetch/reset/clean as the clawbox user before the rebuild step, and
+  # scripts/force-update.sh does the same by hand). Refusing would fail those
+  # flows at their next step and leave the device refusing every root step
+  # afterwards. What the family gets instead is the mirror below — the previous
+  # root-established build — rather than the tree.
+  if [ "$tree_matches_record" -ne 1 ]; then
     echo "clawbox-root-step: refusing '$step' — $PROJECT_DIR does not match the root-exec manifest." >&2
     echo "clawbox-root-step: root will not run code it did not record. If this is a deliberate" >&2
-    echo "clawbox-root-step: local change, re-record it as the operator: sudo bash $ENTRYPOINT --step systemd_services" >&2
+    echo "clawbox-root-step: local change, re-record it as the operator: sudo bash $TREE_ENTRYPOINT --step systemd_services" >&2
     exit 65
   fi
+fi
 
-  # COPY, then check the copy, then run the copy.
-  #
-  # Verifying $ENTRYPOINT and then exec'ing $ENTRYPOINT is a race: bash opens
-  # the file after the check returns, and the clawbox user can replace it in
-  # between — a rewrite loop wins that window easily. Hashing a copy that
-  # clawbox cannot reach removes the window for the one file this script
-  # executes directly.
-  #
-  # /run is tmpfs and root-owned, so the copy cannot survive a reboot and cannot
-  # be touched by clawbox. The name is fixed rather than mktemp'd because `exec`
-  # replaces this shell and no EXIT trap would ever fire to clean it up.
-  STAGED_ENTRYPOINT="$RUN_DIR/root-step-install.sh"
-  if ! install -d -o root -g root -m 0700 "$RUN_DIR"; then
-    echo "clawbox-root-step: cannot create $RUN_DIR" >&2
-    exit 66
+# Restage the mirror from the tree — but only while the tree is still what root
+# recorded, whichever family this step belongs to.
+#
+# EVERY dispatch, not once at install time: the mirror has to follow the tree
+# through an update or `post_update` would keep applying the fixups of the build
+# before it, and a mirror written once and trusted forever is the probe-once
+# defect wearing a different hat. It is also idempotent — the same walk over the
+# same bytes — so the healthy path costs one directory copy and changes nothing.
+#
+# A failure is NOT fatal on its own. The mirror already on disk is a previous
+# root-established build, which is a worse answer than the current one and a far
+# better answer than the tree; the pinned branch catches a stale copy one check
+# below, and an update that ran the previous install.sh converges on its next
+# pass. Refusing here instead would turn a full /var into an appliance that
+# cannot update itself out of it.
+if [ "$tree_matches_record" -eq 1 ]; then
+  if ! "$MANIFEST_HELPER" --mirror; then
+    echo "clawbox-root-step: WARNING: could not restage $MIRROR_DIR — running the copy already there" >&2
   fi
-  rm -f "$STAGED_ENTRYPOINT"
-  if ! install -o root -g root -m 0500 "$ENTRYPOINT" "$STAGED_ENTRYPOINT"; then
-    echo "clawbox-root-step: cannot stage $ENTRYPOINT for execution" >&2
-    exit 66
-  fi
-  if ! "$MANIFEST_HELPER" --verify-file install.sh "$STAGED_ENTRYPOINT"; then
-    rm -f "$STAGED_ENTRYPOINT"
-    echo "clawbox-root-step: refusing '$step' — install.sh changed between the check and the copy." >&2
+fi
+
+if [ ! -f "$ENTRYPOINT" ]; then
+  echo "clawbox-root-step: refusing '$step' — there is no root-owned copy of install.sh at $MIRROR_DIR." >&2
+  echo "clawbox-root-step: root will not fall back to $PROJECT_DIR: that tree is writable by the" >&2
+  echo "clawbox-root-step: unprivileged user the web server runs as, which is the whole point of the mirror." >&2
+  echo "clawbox-root-step: recover with: sudo bash $TREE_ENTRYPOINT --step systemd_services" >&2
+  exit 65
+fi
+
+if [ "$tree_matches_record" -eq 1 ] && ! contains "$step" "$SELF_UPDATING_STEPS"; then
+  # Check the copy root is about to run, not the path it verified.
+  #
+  # `--verify` answers a question about $PROJECT_DIR and the answer is stale the
+  # moment it returns — the clawbox user can replace a file between the check
+  # and the exec, and a rewrite loop wins that window easily. Hashing the MIRROR
+  # closes it for good: those bytes are root-owned, so nothing can change them
+  # after the check, and they are the bytes that run.
+  #
+  # This also covers what the old single-file staging under /run left as a
+  # recorded residual: the scripts install.sh goes on to hand to bash as root
+  # (start-ap.sh, launch-browser.sh, setup-hermes-edition.sh, …) are opened
+  # LATER, by install.sh itself. They now come out of the mirror too — install.sh
+  # resolves scripts/ and config/ relative to the directory it was started from.
+  if ! "$MANIFEST_HELPER" --verify-file install.sh "$ENTRYPOINT"; then
+    echo "clawbox-root-step: refusing '$step' — $MIRROR_DIR does not hold the install.sh that was recorded." >&2
+    echo "clawbox-root-step: recover with: sudo bash $TREE_ENTRYPOINT --step systemd_services" >&2
     exit 65
   fi
-  ENTRYPOINT="$STAGED_ENTRYPOINT"
-
-  # Residual, recorded rather than implied: the scripts install.sh goes on to run
-  # as root (scripts/start-ap.sh, launch-browser.sh, setup-hermes-edition.sh, …)
-  # are covered by the --verify above but are opened LATER, by install.sh itself,
-  # so the same window exists for them. Closing it means the tree install.sh
-  # reads from being root-owned too — the follow-up this design is pointed at,
-  # and a bigger change than a copy of one file. TASK-445.
 fi
 
 exec /bin/bash "$ENTRYPOINT" --step "$step"

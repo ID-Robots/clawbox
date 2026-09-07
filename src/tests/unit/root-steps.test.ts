@@ -318,8 +318,10 @@ describe("root-executed paths are outside clawbox's write access", () => {
     const stepRecover = sh.slice(sh.indexOf("step_recover() {"));
     const recoverBody = stepRecover.slice(0, stepRecover.indexOf("\n}"));
     expect(recoverBody).toContain('"$ROOT_LIBEXEC_DIR/start-ap.sh"');
+    // $SRC_DIR, not $PROJECT_DIR: the fallback reads from wherever root started
+    // install.sh, which on a dispatched step is the root-owned mirror. TASK-733.
     expect(recoverBody.indexOf("$ROOT_LIBEXEC_DIR/start-ap.sh"))
-      .toBeLessThan(recoverBody.indexOf("$PROJECT_DIR/scripts/start-ap.sh"));
+      .toBeLessThan(recoverBody.indexOf("$SRC_DIR/scripts/start-ap.sh"));
   });
 
   it("writes the first-boot VNC unit against the root-owned copy, not the tree", () => {
@@ -387,6 +389,9 @@ describe("install_root_libexec: a copy that did not land is never a success", ()
     const script = [
       "set -euo pipefail",
       `PROJECT_DIR=${JSON.stringify(project)}`,
+      // Root reads the code it installs from $SRC_DIR — the same directory as
+      // $PROJECT_DIR on every path but a dispatched step. See TASK-733.
+      `SRC_DIR=${JSON.stringify(project)}`,
       `ROOT_LIBEXEC_DIR=${JSON.stringify(libexec)}`,
       `FAIL_ON=${JSON.stringify(failOn)}`,
       // `install -d -o root` cannot run unprivileged; the directories are the

@@ -60,6 +60,53 @@ git_retryable_failure() {
   return 1
 }
 
+# ── Who runs git over the checkout ───────────────────────────────────────────
+#
+# Not root, when root does not own the checkout.
+#
+# `git fetch` honours `remote.<name>.uploadpack` and `url.*.insteadOf` (an
+# `ext::` URL is a command line), `git checkout` runs `.git/hooks/post-checkout`,
+# and any checkout — `reset --hard` included — runs `filter.*.smudge`. Every one
+# of those names a program chosen by `.git/config` or by a file under
+# `.git/hooks`, and both live inside /home/clawbox/clawbox, which is
+# clawbox-owned and is deliberately NOT covered by the root-exec manifest: it is
+# runtime state, except that git executes parts of it. So `git` as root over that
+# tree is a second one-step local root beside the one the mirror closes, and it
+# is reachable from `bootstrap_updater`, which the web server can start.
+#
+# Dropping to the account that OWNS the checkout costs nothing — that account
+# could run those hooks itself, so running them as it is no privilege at all —
+# and scripts/force-update.sh has done exactly this since it was written
+# (`run_as_clawbox`). This is install.sh catching up. TASK-733.
+#
+# An operator who cloned the tree as root keeps root's git: it is root's own
+# tree and there is no boundary to cross.
+GIT_RUNNER=()
+
+use_tree_owner_for_git() {
+  local dir="$1" owner=""
+  GIT_RUNNER=()
+  # Takes the directory rather than reading $PROJECT_DIR: this is also called
+  # from the bootstrap block, before the constants are parsed.
+  owner="$(stat -c %U "$dir" 2>/dev/null || true)"
+  # `id -u` because `stat` prints the raw uid for an account that no longer
+  # exists, and `runuser -u 1001` on a box whose clawbox user was removed would
+  # fail every git call rather than fall back to the caller.
+  [ -n "$owner" ] && [ "$owner" != "root" ] && id -u "$owner" >/dev/null 2>&1 || return 0
+
+  # `env` carries GIT_TERMINAL_PROMPT into the child: `runuser` does not pass a
+  # VAR=… prefix on, and a git with a tty that cannot prompt is the whole point
+  # of that variable (TASK-655). It is part of the PREFIX rather than of every
+  # call site, so an empty runner leaves each call exactly as it was.
+  GIT_RUNNER=(runuser -u "$owner" -- env GIT_TERMINAL_PROMPT=0)
+
+  # ...and make the drop possible. Earlier root steps leave root-owned objects
+  # in .git — FETCH_HEAD above all — which is precisely what makes an
+  # unprivileged fetch fail; step_fix_git_perms and scripts/force-update.sh both
+  # open by repairing it. Best-effort: git says what it could not open.
+  chown -R "$owner":"$(stat -c %G "$dir" 2>/dev/null || echo "$owner")" "$dir/.git" 2>/dev/null || true
+}
+
 git_with_retry() {
   local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-3}"
   local out rc=0 verb
@@ -87,7 +134,7 @@ git_with_retry() {
     # Output is CAPTURED so the classification below has the text to read, then
     # re-emitted on stderr — where git puts it — so a caller that captures this
     # function's stdout cannot mistake git's progress for a result.
-    if out="$(GIT_TERMINAL_PROMPT=0 git "$@" 2>&1)"; then
+    if out="$(GIT_TERMINAL_PROMPT=0 ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git "$@" 2>&1)"; then
       [ -z "$out" ] || printf '%s\n' "$out" >&2
       return 0
     else
@@ -182,6 +229,8 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
     echo "[bootstrap] WARN: cannot tell which branch this checkout belongs to; running the on-disk copy."
   else
     echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
+    # git runs as whoever owns this checkout — see use_tree_owner_for_git.
+    use_tree_owner_for_git "$_b"
     # Fetch #1 of the three an update needs, and the one that decides which
     # install.sh the rest of the run uses — so it retries like the others.
     # Still tolerated: the reset below uses whatever refs are on disk. But no
@@ -193,7 +242,7 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
       printf '%s\n' "$_fetchout" | tail -n 3
     fi
     unset _fetchout
-    if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
+    if ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
       chown -R clawbox:clawbox "$_b" 2>/dev/null || true
       # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
       # reset just replaced install.sh, scripts/ and config/ wholesale, so the
@@ -287,6 +336,12 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
   fi
 fi
 
+# Back to "run git as this process" for everything after the bootstrap. The
+# block above sets it for ONE checkout and normally re-execs, but the path where
+# the reset failed falls through to here — and step_git_pull's `clone` creates
+# $PROJECT_DIR, which is root's to make.
+GIT_RUNNER=()
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 REPO_URL="https://github.com/ID-Robots/clawbox.git"
@@ -294,6 +349,38 @@ REPO_BRANCH="${CLAWBOX_BRANCH:-main}"
 PROJECT_DIR="/home/clawbox/clawbox"
 CLAWBOX_USER="clawbox"
 CLAWBOX_HOME="/home/clawbox"
+
+# ── Where root READS the code it runs, as opposed to where the box lives ─────
+#
+# $PROJECT_DIR is the checkout: git works on it, the app builds in it, and it is
+# clawbox:clawbox because it has to be. $SRC_DIR is the copy of install.sh,
+# scripts/ and config/ that THIS process was started from — and on the path that
+# matters it is the root-owned mirror
+# (/var/lib/clawbox/root-exec-mirror), because
+# /usr/local/libexec/clawbox/clawbox-root-step.sh execs install.sh out of there
+# rather than out of the tree.
+#
+# Both halves are needed. Moving only install.sh to a root-owned copy would move
+# the hole one file along: this script goes on to `bash` scripts/start-ap.sh,
+# scripts/setup-hermes-edition.sh, scripts/install-voice.sh and friends AS ROOT,
+# and to install config/*.service into /etc/systemd/system and
+# config/clawbox-sudoers into /etc/sudoers.d. Every one of those is a file the
+# clawbox user could rewrite between the manifest check and the open. Reading
+# them from $SRC_DIR means root only ever opens the copy it holds. TASK-733.
+#
+# On every other path — an operator's `sudo bash install.sh`, the flash host's
+# provisioning run, the one-time transition update described in
+# docs/root-exec-mirror.md — $SRC_DIR IS $PROJECT_DIR and nothing changes.
+# The fallback is deliberate rather than defensive: install.sh is also run as
+# `bash <(curl …)`, where BASH_SOURCE is /dev/fd/63 and there is no scripts/
+# next to it.
+_clawbox_src="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P || true)"
+if [ -n "$_clawbox_src" ] && [ -d "$_clawbox_src/scripts" ] && [ -d "$_clawbox_src/config" ]; then
+  SRC_DIR="$_clawbox_src"
+else
+  SRC_DIR="$PROJECT_DIR"
+fi
+unset _clawbox_src
 
 # ── Provisioning-status signal (read by the flash host) ──────────────────────
 # A full install keeps some steps NON-FATAL on purpose — a half-provisioned box
@@ -555,8 +642,8 @@ CLAWBOX_EDITION_RAW="${CLAWBOX_EDITION:-}"
 if [ -z "$CLAWBOX_EDITION_RAW" ]; then
   CLAWBOX_EDITION_RAW="$CLAWBOX_RECORDED_EDITION_RAW"
 fi
-if [ -z "$CLAWBOX_EDITION_RAW" ] && [ -f "$PROJECT_DIR/config/edition.txt" ]; then
-  CLAWBOX_EDITION_RAW="$(tr -d '[:space:]' < "$PROJECT_DIR/config/edition.txt" 2>/dev/null || true)"
+if [ -z "$CLAWBOX_EDITION_RAW" ] && [ -f "$SRC_DIR/config/edition.txt" ]; then
+  CLAWBOX_EDITION_RAW="$(tr -d '[:space:]' < "$SRC_DIR/config/edition.txt" 2>/dev/null || true)"
 fi
 # Lower-case to match the TypeScript side (src/lib/edition-source.ts), which has
 # always normalised case — otherwise "Hermes" in edition.txt silently installs
@@ -786,8 +873,8 @@ openclaw_is_v2() {
   if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
     v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
   fi
-  if [ -z "$v" ] && [ -f "$PROJECT_DIR/config/openclaw-target.txt" ]; then
-    v=$(head -1 "$PROJECT_DIR/config/openclaw-target.txt" | awk '{print $1}')
+  if [ -z "$v" ] && [ -f "$SRC_DIR/config/openclaw-target.txt" ]; then
+    v=$(head -1 "$SRC_DIR/config/openclaw-target.txt" | awk '{print $1}')
   fi
   [ -z "$v" ] && v="$OPENCLAW_VERSION"
   openclaw_version_is_v2 "$v"
@@ -2581,7 +2668,7 @@ apply_hostname() {
   # fresh-install path where the network setup step runs before `git pull`
   # has populated $PROJECT_DIR — the installer is being executed straight
   # out of the cloned tarball at that moment.
-  local clawbox_avahi_src="$PROJECT_DIR/config/avahi-daemon.conf"
+  local clawbox_avahi_src="$SRC_DIR/config/avahi-daemon.conf"
   if [ ! -f "$clawbox_avahi_src" ] && [ -f "$(dirname "$0")/config/avahi-daemon.conf" ]; then
     clawbox_avahi_src="$(dirname "$0")/config/avahi-daemon.conf"
   fi
@@ -2612,7 +2699,7 @@ apply_hostname() {
   # Install the NetworkManager dispatcher hook that reloads avahi on
   # every interface state change, so clients' negative caches flush.
   local dispatcher_dir="/etc/NetworkManager/dispatcher.d"
-  local dispatcher_src="$PROJECT_DIR/config/99-clawbox-avahi-reload"
+  local dispatcher_src="$SRC_DIR/config/99-clawbox-avahi-reload"
   if [ ! -f "$dispatcher_src" ] && [ -f "$(dirname "$0")/config/99-clawbox-avahi-reload" ]; then
     dispatcher_src="$(dirname "$0")/config/99-clawbox-avahi-reload"
   fi
@@ -3099,24 +3186,40 @@ sync_repo_to_update_target() {
     exit 1
   fi
 
+  # Every git below runs as the account that owns the checkout, never as root:
+  # `fetch` honours remote/url config, `checkout` runs .git/hooks/post-checkout,
+  # and any checkout runs filter.*.smudge — all named by files inside the
+  # clawbox-writable tree. See use_tree_owner_for_git.
+  use_tree_owner_for_git "$PROJECT_DIR"
+  local run_git=(${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} \
+    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+
   git_with_retry -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" fetch origin
   # Discard local working-tree changes before switching branches. The later
   # `reset --hard` would blow them away anyway; doing it up-front avoids
   # `git checkout` aborting with "local changes would be overwritten" when
   # the user (or test seeding) has uncommitted edits. This is by design —
   # the updater's whole purpose is to align the device with upstream.
-  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard HEAD 2>/dev/null || true
-  if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout "$target_branch" 2>/dev/null; then
-    if ! git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
+  "${run_git[@]}" reset --hard HEAD 2>/dev/null || true
+  if ! "${run_git[@]}" checkout "$target_branch" 2>/dev/null; then
+    if ! "${run_git[@]}" checkout -b "$target_branch" "$upstream_branch" 2>/dev/null; then
       echo "Error: failed to checkout branch '$target_branch'" >&2
+      GIT_RUNNER=()
       exit 1
     fi
   fi
-  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard "$upstream_branch"
+  "${run_git[@]}" reset --hard "$upstream_branch"
+  GIT_RUNNER=()
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+  # This run has just put the code in $PROJECT_DIR there itself. That is one of
+  # the two moments root may re-anchor the record and the mirror on the tree —
+  # see root_exec_may_anchor — and it is the "after the fetch, before any root
+  # exec" point the mirror design names.
+  ROOT_EXEC_TREE_RESYNCED=1
   # The tree root is allowed to execute just changed. Re-record it here, in the
   # same function that changed it, so no later step of this update runs against
-  # a manifest describing the previous checkout.
+  # a manifest describing the previous checkout — or, since TASK-733, out of a
+  # mirror holding the previous checkout.
   refresh_root_exec_manifest
 }
 
@@ -3825,11 +3928,11 @@ step_edition_lock() {
 # Hermes appliance.
 step_hermes_edition() {
   has_hermes_harness || return 0
-  if [ ! -f "$PROJECT_DIR/scripts/setup-hermes-edition.sh" ]; then
+  if [ ! -f "$SRC_DIR/scripts/setup-hermes-edition.sh" ]; then
     echo "  Warning: scripts/setup-hermes-edition.sh missing — Hermes not provisioned"
     return 1
   fi
-  CLAWBOX_EDITION="$CLAWBOX_EDITION" bash "$PROJECT_DIR/scripts/setup-hermes-edition.sh"
+  CLAWBOX_EDITION="$CLAWBOX_EDITION" bash "$SRC_DIR/scripts/setup-hermes-edition.sh"
 }
 
 step_openclaw_install() {
@@ -3854,7 +3957,7 @@ step_openclaw_install() {
   # pin file (e.g. `OPENCLAW_PIN_VERSION=2026.5.24-beta.2 sudo bash install.sh`).
   # Falls back to the hardcoded $OPENCLAW_VERSION if the pin file is missing,
   # so a corrupted/partial install still has something to install.
-  local PIN_FILE="$PROJECT_DIR/config/openclaw-target.txt"
+  local PIN_FILE="$SRC_DIR/config/openclaw-target.txt"
   local PINNED=""
   if [ -n "${OPENCLAW_PIN_VERSION:-}" ]; then
     PINNED="${OPENCLAW_PIN_VERSION}"
@@ -4625,7 +4728,7 @@ step_openclaw_tts() {
   # tell the truth instead of asserting it.
   local VOICE_RC=0
   CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
-    bash "$PROJECT_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
+    bash "$SRC_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
 
   # WHETHER this box has its engine is a fact the run just PUBLISHED; $VOICE_RC
   # only says how far it got. Reading the first off the second is the defect
@@ -5205,7 +5308,7 @@ step_captive_portal_dns() {
   # Remove old captive portal DNS hijack (breaks internet for hotspot clients)
   rm -f "$DNSMASQ_DIR/captive-portal.conf"
   # Install upstream DNS forwarding for hotspot clients
-  cp "$PROJECT_DIR/config/dnsmasq-upstream.conf" "$DNSMASQ_DIR/upstream-dns.conf"
+  cp "$SRC_DIR/config/dnsmasq-upstream.conf" "$DNSMASQ_DIR/upstream-dns.conf"
   echo "  Removed captive portal DNS, installed upstream DNS forwarding"
 }
 
@@ -5418,7 +5521,7 @@ step_persistent_journal() {
   # Idempotent: cp + mkdir + a journald restart that flushes /run into /var.
   local drop_in_dir="/etc/systemd/journald.conf.d"
   local drop_in="$drop_in_dir/10-clawbox.conf"
-  local src="$PROJECT_DIR/config/journald-clawbox.conf"
+  local src="$SRC_DIR/config/journald-clawbox.conf"
 
   if [ ! -f "$src" ]; then
     echo "  Warning: $src missing, skipping persistent journal setup"
@@ -5471,10 +5574,48 @@ ROOT_LIBEXEC_DIR="/usr/local/libexec/clawbox"
 
 ROOT_EXEC_MANIFEST_HELPER="$ROOT_LIBEXEC_DIR/clawbox-root-manifest.sh"
 
-# Record the tree root is allowed to execute. Strict: a non-zero return means
-# the record is NOT current, and the caller must treat that as a failure.
+# Set once this run has hard-reset $PROJECT_DIR to the update branch. See
+# root_exec_may_anchor below: that reset is one of the two moments at which
+# "the tree" and "the code this device is supposed to run" are the same thing.
+ROOT_EXEC_TREE_RESYNCED=0
+
+# May this run RE-ANCHOR the root-exec record and mirror on the current tree?
+#
+# Re-anchoring is the one operation here that can hand root a file the clawbox
+# user wrote, so it is not something every caller may do. It is legitimate at
+# exactly two moments:
+#
+#   * install.sh is itself running OUT of the tree ($SRC_DIR = $PROJECT_DIR) —
+#     an operator's `sudo bash install.sh`, the flash host's provisioning run,
+#     the one-time transition update. Root is already executing that tree, so
+#     recording it grants nothing root does not already have. This is also what
+#     makes `sudo bash install.sh --step systemd_services` the documented repair
+#     for a stale manifest.
+#   * this run has just hard-reset the tree to the update branch, which is the
+#     moment the update mechanism defines as "this is the new code".
+#
+# Anywhere else — step_systemd_services reached through `post_update`, above all,
+# because that step is web-startable and runs install.sh out of the ROOT-OWNED
+# mirror — a re-anchor over an unverified tree would take a rewritten install.sh,
+# copy it into the mirror, and hand it to root on the next step: the whole of
+# TASK-733, restored through the back door. So outside those two moments the
+# record is only ever re-written over a tree that still MATCHES it, which is a
+# no-op on a healthy box and a refusal on a tampered one.
+root_exec_may_anchor() {
+  [ "$SRC_DIR" = "$PROJECT_DIR" ] && return 0
+  [ "$ROOT_EXEC_TREE_RESYNCED" = "1" ] && return 0
+  "$ROOT_EXEC_MANIFEST_HELPER" --verify >/dev/null 2>&1
+}
+
+# Record the tree root is allowed to execute, and restage the root-owned copy it
+# executes. Strict: a non-zero return means the record is NOT current, and the
+# caller must treat that as a failure.
 write_root_exec_manifest() {
   root_exec_manifest_helper_alive "$ROOT_EXEC_MANIFEST_HELPER" || return 1
+  if ! root_exec_may_anchor; then
+    echo "  Error: refusing to re-record the root-exec manifest — $PROJECT_DIR does not match what root recorded, and this run did not put it there" >&2
+    return 1
+  fi
   "$ROOT_EXEC_MANIFEST_HELPER" --write || return 1
   # VERIFY, then clear — never the other way round. `--write` returning 0 says
   # the helper believes it wrote a manifest, not that the record now matches the
@@ -5484,6 +5625,21 @@ write_root_exec_manifest() {
   # it, and that dispatcher refuses every pinned root step while the manifest
   # does not verify. So prove the record before dropping the failure. TASK-584.
   "$ROOT_EXEC_MANIFEST_HELPER" --verify >/dev/null || return 1
+  # ...and the copy root actually runs, from the tree that was just verified.
+  #
+  # Part of the SAME success, deliberately, because install_root_libexec installs
+  # the new dispatcher only when this function returns 0 and that dispatcher will
+  # not fall back to the tree: a box that got the dispatcher without a mirror
+  # would refuse every root step it has no console to repair. Ordering the fleet
+  # transition is exactly this line — mirror first, dispatcher second, never the
+  # other way round. See docs/root-exec-mirror.md. TASK-733.
+  #
+  # A helper from BEFORE this release does not know `--mirror` and answers 64.
+  # That is not a failure of the box: refresh_root_exec_manifest restages the
+  # helper from the tree before it calls this, and install_root_libexec installs
+  # it at the top of the function, so by the time either gets here the helper is
+  # the current one. Any other 64 is a genuinely broken helper and fails.
+  "$ROOT_EXEC_MANIFEST_HELPER" --mirror || return 1
   # This is exactly the repair for what the bootstrap could not do, so the run's
   # verdict must stop reporting it. TASK-584.
   clear_provision_failure root_exec_manifest
@@ -5496,6 +5652,21 @@ write_root_exec_manifest() {
 # is current again.
 refresh_root_exec_manifest() {
   [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 0
+  # The tree under us has just been replaced wholesale, so the helper installed
+  # in libexec can be the PREVIOUS release's and can be missing a verb this one
+  # needs — `--mirror` is the first, and on the transition update it is missing
+  # on every box in the field. Restage it from the tree the reset just produced,
+  # BEFORE asking it anything: the same move the bootstrap block makes with
+  # _mf_restage, for the same reason, and safe for the same reason the mirror
+  # refresh below it is (this runs immediately after root's own hard reset).
+  #
+  # Best-effort: a copy that fails leaves the working helper untouched
+  # (install_root_file is rename-based), and the write below reports honestly
+  # either way.
+  if [ -f "$PROJECT_DIR/config/clawbox-root-manifest.sh" ]; then
+    install_root_file "$PROJECT_DIR/config/clawbox-root-manifest.sh" "$ROOT_EXEC_MANIFEST_HELPER" \
+      || echo "  Warning: could not refresh the root-exec manifest helper from the new tree" >&2
+  fi
   # RECORDED, not just warned. This is the second place install.sh re-records the
   # manifest after a `git reset --hard` (sync_repo_to_update_target), and it had
   # the same defect the bootstrap did: a failure here left the step exiting 0
@@ -5557,8 +5728,8 @@ install_root_libexec() {
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
   for src in clawbox-root-manifest.sh clawbox-run-root-step.sh; do
-    if [ -f "$PROJECT_DIR/config/$src" ]; then
-      install_root_file "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
+    if [ -f "$SRC_DIR/config/$src" ]; then
+      install_root_file "$SRC_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
         failed=1
       }
@@ -5591,8 +5762,8 @@ install_root_libexec() {
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
              clawbox-resource-limits.sh gateway-restart-when-online.sh \
              start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
-    if [ -f "$PROJECT_DIR/scripts/$src" ]; then
-      install_root_file "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
+    if [ -f "$SRC_DIR/scripts/$src" ]; then
+      install_root_file "$SRC_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
         failed=1
       }
@@ -5600,8 +5771,8 @@ install_root_libexec() {
   done
   # The limits the scripts above read. Root-owned for the same reason they are.
   install -d -o root -g root -m 0755 /etc/clawbox
-  if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
-    install_root_file "$PROJECT_DIR/config/clawbox-resource-limits.env" \
+  if [ -f "$SRC_DIR/config/clawbox-resource-limits.env" ]; then
+    install_root_file "$SRC_DIR/config/clawbox-resource-limits.env" \
       /etc/clawbox/resource-limits.env 0644 || {
       echo "  Error: could not install /etc/clawbox/resource-limits.env (the copy already there, if any, is untouched)" >&2
       failed=1
@@ -5616,8 +5787,8 @@ install_root_libexec() {
   # keep whatever dispatcher is already installed and say so — the same rule
   # install_sudoers_dropin follows for the allow-list. TASK-445.
   if write_root_exec_manifest; then
-    if [ -f "$PROJECT_DIR/config/clawbox-root-step.sh" ]; then
-      install_root_file "$PROJECT_DIR/config/clawbox-root-step.sh" \
+    if [ -f "$SRC_DIR/config/clawbox-root-step.sh" ]; then
+      install_root_file "$SRC_DIR/config/clawbox-root-step.sh" \
         "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/clawbox-root-step.sh (the dispatcher already there, if any, is untouched)" >&2
         failed=1
@@ -5910,7 +6081,7 @@ step_systemd_services() {
   # ClawBox — the in-Next.js scheduler in src/lib/clawkeep-scheduler.ts
   # drives backups on this device.)
   local found_unit
-  for found_unit in "$PROJECT_DIR/config"/*.service "$PROJECT_DIR/config"/*.timer; do
+  for found_unit in "$SRC_DIR/config"/*.service "$SRC_DIR/config"/*.timer; do
     [ -f "$found_unit" ] || continue
     local basename
     basename="$(basename "$found_unit")"
@@ -5950,7 +6121,7 @@ step_systemd_services() {
 
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
-    local src="$PROJECT_DIR/config/$svc"
+    local src="$SRC_DIR/config/$svc"
     if [ ! -f "$src" ]; then
       echo "Error: Service file not found: $src"
       exit 1
@@ -6032,7 +6203,7 @@ step_systemd_services() {
   # comes back through an explicit variable.
   local sudoers_status=0
   set +e
-  install_sudoers_dropin "$PROJECT_DIR/config/clawbox-sudoers" clawbox
+  install_sudoers_dropin "$SRC_DIR/config/clawbox-sudoers" clawbox
   sudoers_status=$?
   set -e
 
@@ -6042,7 +6213,7 @@ step_systemd_services() {
   # about a code path, and it is what makes "installed the narrow rules" a
   # precondition of "removed the wide ones" instead of an assumption.
   if [ "$sudoers_status" -eq 0 ] \
-    && cmp -s "$PROJECT_DIR/config/clawbox-sudoers" "$SUDOERS_DIR/clawbox"; then
+    && cmp -s "$SRC_DIR/config/clawbox-sudoers" "$SUDOERS_DIR/clawbox"; then
     echo "  Sudoers rules installed"
     # Gated on the PRIMARY allow-list only. That file is what keeps the box
     # operable (wizard, updater, power, hotspot); the ollama grant is one
@@ -6053,7 +6224,7 @@ step_systemd_services() {
   else
     echo "  Warning: sudoers rules NOT updated; leaving the existing grants alone" >&2
   fi
-  install_sudoers_dropin "$PROJECT_DIR/config/sudoers-clawbox-ollama" clawbox-ollama || \
+  install_sudoers_dropin "$SRC_DIR/config/sudoers-clawbox-ollama" clawbox-ollama || \
     echo "  Warning: clawbox-ollama sudoers rules NOT updated; leaving the existing grant alone" >&2
   echo "  Services installed and enabled"
 }
@@ -6082,7 +6253,7 @@ step_firewall() {
   # (in-app updates), because a box already in the field is exactly the box the
   # 2026-07-28 review was written about — a fresh-install-only firewall would
   # leave every shipped device exactly as exposed as it is today.
-  local SRC="$PROJECT_DIR/scripts/clawbox-firewall.sh"
+  local SRC="$SRC_DIR/scripts/clawbox-firewall.sh"
   if [ ! -f "$SRC" ]; then
     echo "  Skipping firewall: $SRC missing"
     return 0
@@ -6115,7 +6286,7 @@ step_firewall() {
 
 step_nm_dispatcher() {
   local DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
-  local SRC="$PROJECT_DIR/scripts/nm-dispatcher-failover.sh"
+  local SRC="$SRC_DIR/scripts/nm-dispatcher-failover.sh"
   local DEST="$DISPATCHER_DIR/90-clawbox-failover"
   if [ ! -f "$SRC" ]; then
     echo "  Skipping NM dispatcher: $SRC missing"
@@ -6151,7 +6322,7 @@ step_nm_dispatcher() {
   # here as well as in install_root_libexec so an in-app UPDATE, which runs
   # step_nm_dispatcher from step_post_update, gets both halves together rather
   # than a new dispatcher pointing at nothing.
-  local WAITER_SRC="$PROJECT_DIR/scripts/gateway-restart-when-online.sh"
+  local WAITER_SRC="$SRC_DIR/scripts/gateway-restart-when-online.sh"
   if [ -f "$WAITER_SRC" ]; then
     # install_root_file returns 1 on both its failure paths and leaves the
     # PREVIOUS copy in place, so an unreported failure is not "no waiter" but a
@@ -6615,7 +6786,7 @@ except Exception: print("")' 2>/dev/null || echo "")
 step_polkit_rules() {
   local POLKIT_PKLA_DIR="/etc/polkit-1/localauthority/50-local.d"
   mkdir -p "$POLKIT_PKLA_DIR"
-  cp "$PROJECT_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
+  cp "$SRC_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
   # Remove the manage-units authorisation from devices that already have it.
   # The .pkla shipped above no longer contains that stanza, but `cp` only
   # replaces the file — a box provisioned before TASK-539 keeps whatever polkit
@@ -6626,8 +6797,8 @@ step_polkit_rules() {
   # documentation; on polkit >= 0.106 it is the correct narrow grant. Deleting
   # it was how the unscoped .pkla ended up as the only authority.
   local POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
-  if [ -d "$POLKIT_RULES_DIR" ] && [ -f "$PROJECT_DIR/config/49-clawbox-updates.rules" ]; then
-    install_root_file "$PROJECT_DIR/config/49-clawbox-updates.rules" \
+  if [ -d "$POLKIT_RULES_DIR" ] && [ -f "$SRC_DIR/config/49-clawbox-updates.rules" ]; then
+    install_root_file "$SRC_DIR/config/49-clawbox-updates.rules" \
       "$POLKIT_RULES_DIR/49-clawbox-updates.rules" 0644
   fi
   echo "  Polkit rules installed (NetworkManager only; root steps go through sudo)"
@@ -6673,11 +6844,11 @@ step_cloudflared_install() {
     echo "  CLAWBOX_TEST_MODE=1, skipping cloudflared install"
     return 0
   fi
-  if [ ! -f "$PROJECT_DIR/scripts/setup-tunnel.sh" ]; then
+  if [ ! -f "$SRC_DIR/scripts/setup-tunnel.sh" ]; then
     echo "  setup-tunnel.sh missing — skipping cloudflared install"
     return 0
   fi
-  bash "$PROJECT_DIR/scripts/setup-tunnel.sh" || {
+  bash "$SRC_DIR/scripts/setup-tunnel.sh" || {
     echo "  WARNING: cloudflared install failed; remote control will be unavailable until reinstalled"
     return 0
   }
@@ -6716,8 +6887,8 @@ step_performance_mode() {
   "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --apply || \
     echo "  Warning: power profile apply failed (non-fatal)"
   # Ensure persistent service is installed and enabled for next boot
-  if [ -f "$PROJECT_DIR/config/clawbox-performance.service" ]; then
-    cp "$PROJECT_DIR/config/clawbox-performance.service" /etc/systemd/system/
+  if [ -f "$SRC_DIR/config/clawbox-performance.service" ]; then
+    cp "$SRC_DIR/config/clawbox-performance.service" /etc/systemd/system/
     systemctl daemon-reload
     systemctl enable clawbox-performance.service
   fi
@@ -6750,8 +6921,8 @@ step_resource_limits() {
   # the repo copy is only a fallback, because /home/clawbox/clawbox is
   # clawbox-writable and this runs as root.
   install -d -o root -g root -m 0755 /etc/clawbox
-  if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
-    install_root_file "$PROJECT_DIR/config/clawbox-resource-limits.env" \
+  if [ -f "$SRC_DIR/config/clawbox-resource-limits.env" ]; then
+    install_root_file "$SRC_DIR/config/clawbox-resource-limits.env" \
       /etc/clawbox/resource-limits.env 0644
   fi
   install_root_libexec
@@ -7321,7 +7492,7 @@ step_recover() {
   local start_ap="$ROOT_LIBEXEC_DIR/start-ap.sh"
   if [ ! -x "$start_ap" ]; then
     echo "  $start_ap missing — falling back to the tree copy (run --step systemd_services to install it)"
-    start_ap="$PROJECT_DIR/scripts/start-ap.sh"
+    start_ap="$SRC_DIR/scripts/start-ap.sh"
   fi
   bash "$start_ap"
   systemctl restart clawbox-setup.service
@@ -7341,7 +7512,7 @@ step_gateway_setup() {
   # The same applies to the guards in step_openclaw_install / step_openclaw_patch
   # and to `install.sh --step <name>`, which can be run by hand on any edition.
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw gateway setup"; return 0; }
-  cp "$PROJECT_DIR/config/clawbox-gateway.service" /etc/systemd/system/
+  cp "$SRC_DIR/config/clawbox-gateway.service" /etc/systemd/system/
 
   # Mask any leftover user-level openclaw-gateway.service. Standalone
   # OpenClaw (and some older `openclaw gateway install` paths) dropped a
@@ -7518,7 +7689,7 @@ ensure_claude_code() {
 # harness for as long as any update leaves the repo mid-checkout, and the copy
 # is refreshed on every install and every in-app update, so it cannot drift.
 install_claude_ds_wrapper() {
-  local src="$PROJECT_DIR/scripts/claude-ds"
+  local src="$SRC_DIR/scripts/claude-ds"
   local dest="$CLAWBOX_HOME/.local/bin/claude-ds"
 
   if [ ! -f "$src" ]; then
@@ -7673,7 +7844,7 @@ step_coding_harness() {
 # carries no `<version> <sha256>` line answers nothing — which every caller
 # treats as "install nothing", never as a default.
 codex_pin_field() {
-  local file="${CODEX_PIN_FILE:-$PROJECT_DIR/config/codex-target.txt}"
+  local file="${CODEX_PIN_FILE:-$SRC_DIR/config/codex-target.txt}"
   [ -f "$file" ] || return 1
   awk -v n="$1" '
     /^[[:space:]]*#/ { next }
@@ -8027,7 +8198,7 @@ FIRSTBOOTVNC
 
   # Browser CDP service (launched on demand, not auto-started)
   chmod +x "$PROJECT_DIR/scripts/launch-browser.sh"
-  cp "$PROJECT_DIR/config/clawbox-browser.service" /etc/systemd/system/
+  cp "$SRC_DIR/config/clawbox-browser.service" /etc/systemd/system/
 
   systemctl daemon-reload
   systemctl enable clawbox-vnc.service clawbox-websockify.service clawbox-firstboot-vnc.service
@@ -8242,7 +8413,7 @@ step_rebuild_reboot() {
 
 step_browser_launch() {
   # Launch Chromium with CDP remote debugging — runs as root then drops to clawbox via runuser
-  DISPLAY=:99 bash "$PROJECT_DIR/scripts/launch-browser.sh"
+  DISPLAY=:99 bash "$SRC_DIR/scripts/launch-browser.sh"
 }
 
 step_validate_services() {
@@ -8477,7 +8648,7 @@ step_validate_services() {
     # ExecStartPre re-mints a coherent pair within this loop's retry window)
     # passes honestly, because by then the invariant genuinely holds.
     if has_hermes_harness; then
-      local auth_script="$PROJECT_DIR/scripts/setup-hermes-dashboard-auth.sh"
+      local auth_script="$SRC_DIR/scripts/setup-hermes-dashboard-auth.sh"
       local auth_rc=0
       if [ -f "$auth_script" ]; then
         HERMES_CONFIG="$CLAWBOX_HOME/.hermes/config.yaml" CLAWBOX_ROOT="$PROJECT_DIR" \

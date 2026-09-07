@@ -90,6 +90,7 @@ function runStep(env: Record<string, string> = {}) {
   const program = [
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
+    'SRC_DIR="$PROJECT_DIR"',
     `OPENCLAW_BIN="${path.join(dir, "openclaw")}"`,
     "CLAWBOX_USER=clawbox",
     // Where install-voice.sh publishes its Kokoro verdict. This file's subject

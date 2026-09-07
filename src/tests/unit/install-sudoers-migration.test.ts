@@ -275,7 +275,7 @@ d("step_systemd_services' sudoers gate", () => {
   function gateBlock(): string {
     const start = INSTALL_SH.indexOf("  local sudoers_status=0");
     const end = INSTALL_SH.indexOf(
-      '  install_sudoers_dropin "$PROJECT_DIR/config/sudoers-clawbox-ollama"',
+      '  install_sudoers_dropin "$SRC_DIR/config/sudoers-clawbox-ollama"',
     );
     if (start < 0 || end < 0) throw new Error("sudoers gate markers not found in install.sh");
     return INSTALL_SH.slice(start, end);
@@ -284,7 +284,7 @@ d("step_systemd_services' sudoers gate", () => {
   /** Run the extracted gate with PROJECT_DIR pointed at the real repo. */
   function runGate(env: Record<string, string> = {}) {
     return runShell(
-      `PROJECT_DIR="$REPO"\nrun_gate() {\n${gateBlock()}\n}\nrun_gate`,
+      `PROJECT_DIR="$REPO"\nSRC_DIR="$REPO"\nrun_gate() {\n${gateBlock()}\n}\nrun_gate`,
       env,
     );
   }
@@ -412,7 +412,7 @@ describe("install.sh wiring", () => {
 
   it("installs the allow-list before quarantining the blanket grant", () => {
     const body = fn("step_systemd_services");
-    const install = body.indexOf('install_sudoers_dropin "$PROJECT_DIR/config/clawbox-sudoers" clawbox');
+    const install = body.indexOf('install_sudoers_dropin "$SRC_DIR/config/clawbox-sudoers" clawbox');
     const quarantine = body.indexOf("quarantine_overbroad_sudoers");
     expect(install).toBeGreaterThan(-1);
     expect(quarantine).toBeGreaterThan(install);
@@ -433,7 +433,7 @@ describe("install.sh wiring", () => {
   it("does not call install_sudoers_dropin from a condition context", () => {
     const body = fn("step_systemd_services");
     expect(body).not.toMatch(/if\s+install_sudoers_dropin/);
-    expect(body).toMatch(/^\s*install_sudoers_dropin "\$PROJECT_DIR\/config\/clawbox-sudoers" clawbox$/m);
+    expect(body).toMatch(/^\s*install_sudoers_dropin "\$SRC_DIR\/config\/clawbox-sudoers" clawbox$/m);
     expect(body).toMatch(/^\s*sudoers_status=\$\?$/m);
   });
 
@@ -442,7 +442,7 @@ describe("install.sh wiring", () => {
   // allow-list we shipped before the blanket grant is taken away.
   it("proves the allow-list landed byte-for-byte before quarantining", () => {
     expect(fn("step_systemd_services")).toMatch(
-      /cmp -s "\$PROJECT_DIR\/config\/clawbox-sudoers" "\$SUDOERS_DIR\/clawbox"[\s\S]*?quarantine_overbroad_sudoers/,
+      /cmp -s "\$SRC_DIR\/config\/clawbox-sudoers" "\$SUDOERS_DIR\/clawbox"[\s\S]*?quarantine_overbroad_sudoers/,
     );
   });
 
@@ -469,7 +469,7 @@ describe("install.sh wiring", () => {
   // "save a local Ollama model" hit a password prompt nobody can answer.
   it("installs the ollama drop-in through the same validating helper", () => {
     expect(fn("step_systemd_services")).toMatch(
-      /install_sudoers_dropin "\$PROJECT_DIR\/config\/sudoers-clawbox-ollama" clawbox-ollama/,
+      /install_sudoers_dropin "\$SRC_DIR\/config\/sudoers-clawbox-ollama" clawbox-ollama/,
     );
   });
 
@@ -477,7 +477,7 @@ describe("install.sh wiring", () => {
     const body = fn("step_systemd_services");
     for (const name of ["clawbox-sudoers", "sudoers-clawbox-ollama"]) {
       expect(body, `${name} must be installed from step_systemd_services`).toContain(
-        `install_sudoers_dropin "$PROJECT_DIR/config/${name}"`,
+        `install_sudoers_dropin "$SRC_DIR/config/${name}"`,
       );
     }
     // Nowhere else may call it — a drop-in installed from a conditional step is
@@ -545,7 +545,7 @@ describe("the root-owned helper scripts the grants point at", () => {
     // clawbox-root-manifest.sh exits 0 for --verify without looking, and a
     // truncated clawbox-root-step.sh exits 0 without exec'ing the step at all.
     // TASK-584.
-    expect(libexec).toMatch(/install_root_file "\$PROJECT_DIR\/scripts\/\$src" "\$ROOT_LIBEXEC_DIR\/\$src"/);
+    expect(libexec).toMatch(/install_root_file "\$SRC_DIR\/scripts\/\$src" "\$ROOT_LIBEXEC_DIR\/\$src"/);
     const installer = (() => {
       const start = INSTALL_SH.indexOf("install_root_file() {");
       expect(start, "install_root_file is gone from install.sh").toBeGreaterThan(-1);
@@ -570,7 +570,7 @@ describe("the root-owned helper scripts the grants point at", () => {
     // install.sh runs as root throughout, so the repo copy — which lives under
     // clawbox-writable /home/clawbox/clawbox/scripts — must not be executed
     // from anywhere in it.
-    expect(INSTALL_SH).not.toMatch(/^[ \t]*(bash |sh )?"?\$PROJECT_DIR\/scripts\/optimize-ollama\.sh"?/m);
+    expect(INSTALL_SH).not.toMatch(/^[ \t]*(bash |sh )?"?\$(PROJECT|SRC)_DIR\/scripts\/optimize-ollama\.sh"?/m);
   });
 
   it("never grants a path inside the clawbox-writable project tree", () => {

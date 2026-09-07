@@ -1075,6 +1075,7 @@ describe("the installer reports what it actually installed", () => {
       // install.sh's own options, which are half of what this is about.
       "set -euo pipefail",
       `PROJECT_DIR=${JSON.stringify(project)}`,
+      'SRC_DIR="$PROJECT_DIR"',
       `ROOT_LIBEXEC_DIR=${JSON.stringify(libexec)}`,
       // The step's only `install` call is `install -d … "$ROOT_LIBEXEC_DIR"`.
       "install() { for a; do :; done; mkdir -p \"$a\"; }",

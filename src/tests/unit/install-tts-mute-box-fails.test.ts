@@ -382,6 +382,7 @@ function runStep(voiceExit: number, statusFileContents: string | null = null) {
   const program = [
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
+    'SRC_DIR="$PROJECT_DIR"',
     `OPENCLAW_BIN="${openclaw}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',
@@ -485,6 +486,7 @@ function runValidator(contents: string | null): { status: number; out: string } 
     "CLAWBOX_EDITION=openclaw",
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/home/clawbox/clawbox",
+    'SRC_DIR="$PROJECT_DIR"',
     'IFACE_ENV="/nonexistent/network.env"',
     "EXPECTED_ACTIVE_SERVICES=()",
     "EXPECTED_INSTALLED_SERVICES=()",

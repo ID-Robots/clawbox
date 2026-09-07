@@ -187,6 +187,7 @@ function runStep(edition: string, opts: StepOpts = {}) {
   const program = [
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
+    'SRC_DIR="$PROJECT_DIR"',
     `CLAWBOX_HOME="${clawboxHome}"`,
     `OPENCLAW_BIN="${openclaw}"`,
     `CLAWBOX_EDITION="${edition}"`,
@@ -788,6 +789,7 @@ function runValidator(edition: string, ttsStatusContents: string | null) {
     `CLAWBOX_EDITION="${edition}"`,
     "CLAWBOX_TEST_MODE=1",
     `PROJECT_DIR="${projectDir}"`,
+    'SRC_DIR="$PROJECT_DIR"',
     `CLAWBOX_HOME="${path.join(root, "validator-home")}"`,
     'IFACE_ENV="/nonexistent/network.env"',
     "EXPECTED_ACTIVE_SERVICES=()",
