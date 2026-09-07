@@ -578,9 +578,8 @@ describe("updater", () => {
       // is the window being opened after the dispatch instead of before it:
       // every argv assertion still passes and no marker is ever raised again.
       // So the mock is the OS here — it serves the marker only to a window
-      // that opened at or before the dispatch — and the dispatch takes time,
-      // because a window floored to the second cannot tell before from after
-      // when the step returns instantly.
+      // that opened at or before the dispatch — and the dispatch takes a
+      // moment, which the millisecond bound is enough to see.
       const runStartedAtSeconds = Math.floor(Date.now() / 1000);
       let dispatchedAt = 0;
       setupExecFileMock({
@@ -614,12 +613,14 @@ describe("updater", () => {
 
         if (key.includes("clawbox-run-root-step.sh apt_update")) {
           dispatchedAt = Date.now();
-          return answer("", 1_100);
+          return answer("", 25);
         }
         if (key.includes("journalctl") && key.includes("clawbox-root-update@apt_update.service")) {
-          const since = Number(/--since @(\d+)/.exec(key)?.[1] ?? NaN);
+          const since = Number(/--since @([\d.]+)/.exec(key)?.[1] ?? NaN);
           // The journal answers a window that opened after the step wrote with
-          // nothing at all — which is what a box would do.
+          // nothing at all — which is what a box would do. The bound carries
+          // milliseconds, so the dispatch only has to take a moment for this
+          // to tell a capture before it from one after it.
           return answer(since * 1000 <= dispatchedAt ? marker : "");
         }
         return (fallback as unknown as (
@@ -655,7 +656,7 @@ describe("updater", () => {
       // By unit NAME, which outlives the unit systemd has already collected,
       // and never earlier than this run.
       expect(journalRead).toContain("-u clawbox-root-update@apt_update.service");
-      const since = /--since @(\d+)/.exec(journalRead ?? "")?.[1];
+      const since = /--since @([\d.]+)/.exec(journalRead ?? "")?.[1];
       expect(since, "the read is not bounded to this run").toBeDefined();
       expect(Number(since)).toBeGreaterThanOrEqual(runStartedAtSeconds);
     });

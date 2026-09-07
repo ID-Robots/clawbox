@@ -419,7 +419,7 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(journalReads.length).toBeGreaterThan(0);
     for (const read of journalReads) {
       expect(read).toContain("-u clawbox-root-update@llamacpp_install.service");
-      expect(read).toMatch(/--since @\d+/);
+      expect(read).toMatch(/--since @\d+\.\d{3}/);
     }
   });
 

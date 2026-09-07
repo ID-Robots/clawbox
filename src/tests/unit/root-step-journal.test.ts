@@ -35,13 +35,19 @@ describe("rootStepJournalArgs", () => {
     const args = rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_500, lines: 500 });
     const since = args[args.indexOf("--since") + 1];
 
-    expect(since).toBe("@1700000000");
+    expect(since).toBe("@1700000000.500");
   });
 
-  it("floors the window, so a line written in the dispatch's own second is inside it", () => {
-    const args = rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_999, lines: 40 });
+  it("keeps the millisecond, so a retry in the same second excludes the previous attempt", () => {
+    // The one case a window floored to the second gets wrong: the failed
+    // attempt's last line at .100 and this dispatch at .900 share a second, so
+    // a floored bound opens BEFORE the line it exists to exclude. systemd.time
+    // takes fractions to 1 us and journalctl really filters on them.
+    const previousAttemptWroteAt = 1_700_000_000_100;
+    const args = rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_900, lines: 40 });
+    const since = Number(args[args.indexOf("--since") + 1].slice(1));
 
-    expect(args[args.indexOf("--since") + 1]).toBe("@1700000000");
+    expect(since * 1000).toBeGreaterThan(previousAttemptWroteAt);
     expect(args[args.indexOf("-n") + 1]).toBe("40");
   });
 });
@@ -109,7 +115,7 @@ describe("followRootStep", () => {
     expect(journalReads.length).toBeGreaterThan(0);
     for (const read of journalReads) {
       expect(read).toContain(`-u ${rootStepUnit("embed_model")}`);
-      expect(read).toMatch(/--since @\d+/);
+      expect(read).toMatch(/--since @\d+\.\d{3}/);
     }
   });
 });

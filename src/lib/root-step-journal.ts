@@ -74,10 +74,14 @@ export function rootStepJournalArgs(
     "-u",
     rootStepUnit(step),
     // systemd's own seconds-since-the-epoch form (systemd.time(7)), so the
-    // bound carries no timezone and no locale. FLOORED, so an entry written in
-    // the same second as the dispatch is inside the window.
+    // bound carries no timezone and no locale — and to the MILLISECOND, not
+    // floored to the second: a retry dispatched in the same second as the
+    // previous attempt's last line would otherwise open its window before it.
+    // systemd.time takes fractions down to 1 us, and the deployed journalctl
+    // (systemd 249) really filters on them — measured on the box, a window
+    // 1 ms after a marker excludes it and 1 ms before includes it.
     "--since",
-    `@${Math.floor(sinceMs / 1000)}`,
+    `@${(sinceMs / 1000).toFixed(3)}`,
     "-n",
     String(lines),
     "--no-pager",
