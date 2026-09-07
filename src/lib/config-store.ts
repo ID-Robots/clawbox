@@ -53,13 +53,149 @@ function readConfigStrict(): Record<string, unknown> {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("data/config.json does not hold a JSON object");
   }
+  // A `"__proto__"` the FILE carries — a hand-edit, a restored backup of an
+  // older data/ — is an own property here, because `JSON.parse` creates it as
+  // one. Dropped on the way in, so the read side answers `undefined` for it
+  // like any other absent key (`config[key]` would otherwise reach
+  // `Object.prototype`'s getter and hand a caller the prototype object), and so
+  // the next write does not re-emit it: `assertStorableKey` refuses to CREATE
+  // one, and a store that already holds one must have a way back out.
+  Reflect.deleteProperty(parsed, "__proto__");
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * The one STORE key a plain object cannot hold, and the values JSON cannot
+ * write faithfully.
+ *
+ * Both are the same failure the value guard on `swap` was added for — a write
+ * that reports success over a store that did not change the way the caller
+ * believes — reached by two other routes:
+ *
+ *  - `config["__proto__"] = value` never creates a property. It reaches
+ *    `Object.prototype`'s own accessor, which sets the object's PROTOTYPE for
+ *    an object value and does nothing at all for a primitive; either way the
+ *    key is absent from `JSON.stringify`'s output, so `writeConfig` renames a
+ *    config without it over the one that had it and the caller is told the
+ *    write landed. `swap` compounds it by reading the same accessor for its
+ *    `previous`, handing the caller `Object.prototype` as the value it
+ *    replaced. Refused rather than written as an own property, because a
+ *    `"__proto__"` key inside data/config.json is a loaded gun for every OTHER
+ *    reader of that file: `Object.assign({}, JSON.parse(raw))` and every
+ *    read-modify-write built on it would take the parsed own property through
+ *    a plain object's inherited setter and change that object's prototype.
+ *    Nothing on the box stores a key it does not spell out as a constant, so
+ *    the refusal costs no caller anything.
+ *
+ *  - `JSON.stringify(NaN)` is the string `"null"`, and so are `Infinity` and
+ *    `-Infinity`, so a non-finite number passes the `=== undefined` test and
+ *    the file ends up holding `null` under a key the caller believes holds a
+ *    figure. Every reader then sees "unset" over a write that answered success
+ *    — `session_generation` back to 0 invalidates every live cookie,
+ *    `clawai_credential_refused_at` back to "never refused" re-arms the write
+ *    the refusal exists to stop, `setup_progress_step` reopens the wizard.
+ *    Checked at any depth, through `JSON.stringify`'s own walk rather than a
+ *    hand-rolled one, so a cycle is reported by the serialiser that would have
+ *    hit it anyway.
+ *
+ * The KEY half is the STORE's own key, not every key in the value: a nested
+ * `"__proto__"` is part of an object the caller built and is written as it
+ * stands (`JSON.parse` reads it back as an own property, so a ClawBox reader
+ * sees what was stored). Only the top-level key can silently fail to land here.
+ */
+export function assertStorableKey(key: string): void {
+  if (key === "__proto__") {
+    throw new TypeError(`config-store: "${key}" cannot be a key — the object backing the store cannot hold it`);
+  }
+}
+
+function assertStorableValue(key: string, value: unknown): string {
+  // The WHOLE value first, because the walk below cannot see it: JSON drops a
+  // top-level function or symbol entirely, and the write then RENAMES a config
+  // without the key over the one that had it — `set("active_harness", () => …)`
+  // deletes the harness and answers success. `swap` was saved from this only by
+  // its own `JSON.stringify(value) === undefined` test, so without this the
+  // three writers were not the same guard. `undefined` cannot arrive here: it
+  // is the documented delete and both callers filter it out first.
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+    throw new TypeError(`config-store: ${key} cannot hold a ${typeof value} — JSON omits it`);
+  }
+  // Not an arrow: the replacer's `this` is the object or array HOLDING the
+  // value, and that is what separates the two ways JSON writes `null`. An
+  // OBJECT property whose value is `undefined`, a function or a symbol is
+  // omitted from the file, and a reader then sees `undefined` — which is what
+  // the caller stored, so nothing is misreported. The same value inside an
+  // ARRAY becomes a `null` MEMBER, at any depth: the list still has its length
+  // and one entry is now nothing, which is the same false success as the
+  // numbers below.
+  const json = JSON.stringify(value, function (this: unknown, field: string, held: unknown) {
+    // `held instanceof Number` as well as the primitive: a boxed non-finite
+    // number reaches the replacer as an OBJECT and is written as `null` just
+    // the same, so the "at any depth" claim above would be half true without
+    // it.
+    const asNumber = typeof held === "number" ? held : held instanceof Number ? held.valueOf() : null;
+    if (asNumber !== null && !Number.isFinite(asNumber)) {
+      throw new TypeError(`config-store: ${key} cannot hold ${String(asNumber)} — JSON writes it as null`);
+    }
+    // WHAT `toJSON` ALREADY TURNED INTO NULL. `JSON.stringify` calls a value's
+    // own `toJSON` BEFORE the replacer, so the replacer is handed the result,
+    // not the value: `new Date(NaN)` arrives here as `null` and every check
+    // above looks straight through it. The holder still has the original —
+    // `this[field]` is the pre-`toJSON` value at every depth, the top level
+    // included (there the holder is JSON's own wrapper and `field` is "") — so
+    // one lookup closes the whole class rather than only `Date`'s corner of it.
+    // A value that really IS null is stored as null, which is what the caller
+    // asked for.
+    const raw = (this as Record<string, unknown> | null)?.[field];
+    if (held === null && raw !== null && raw !== undefined) {
+      const what = raw instanceof Date ? "an invalid Date" : "a value whose toJSON answers null";
+      throw new TypeError(`config-store: ${key} cannot hold ${what} — JSON writes it as null`);
+    }
+    if (Array.isArray(this) && (held === undefined || typeof held === "function" || typeof held === "symbol")) {
+      throw new TypeError(`config-store: ${key} cannot hold a list with a member JSON writes as null`);
+    }
+    return held;
+  });
+  // The catch-all behind the named guards, shared by all three writers: a
+  // `toJSON` that answers `undefined` drops the whole key with none of the
+  // shapes above, and the rename then lands a config WITHOUT it.
+  if (json === undefined) {
+    throw new TypeError(`config-store: ${key} cannot hold a value JSON omits entirely`);
+  }
+  return json;
+}
+
+/**
+ * The value as the guard SAW it — the bytes it approved, parsed back.
+ *
+ * The walk above already serialised the value, and `writeConfig` serialised it
+ * a second time: two answers from one value, and a `toJSON` that does not give
+ * the same answer twice slipped between them. A counter returning a number on
+ * the first call and `NaN` on the second passed every check and left the store
+ * holding `null` under a key the write had reported success for — the same
+ * false success, through the guard itself. What is stored is now what was
+ * checked, so there is no second answer to differ.
+ */
+function storableValue(key: string, value: unknown): unknown {
+  return JSON.parse(assertStorableValue(key, value)) as unknown;
+}
+
+/**
+ * The value the store HOLDS under `key`, never one it inherits.
+ *
+ * `config[key]` walks the prototype chain, so `"__proto__"` answers
+ * `Object.prototype` and `"constructor"` the `Object` function — objects, under
+ * a signature that says "whatever was stored", for keys the store holds
+ * nothing under. Every reader here goes through this.
+ */
+function held(config: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(config, key) ? config[key] : undefined;
 }
 
 /** One key, tri-state: `known: false` when the store could not be read. */
 export async function getKnown(key: string): Promise<{ value: unknown; known: boolean }> {
   try {
-    return { value: readConfigStrict()[key], known: true };
+    return { value: held(readConfigStrict(), key), known: true };
   } catch (err) {
     // The message only: a JSON parse error quotes a window of the INPUT, and
     // this file holds the mailbox password and both bot tokens.
@@ -90,8 +226,7 @@ function writeConfig(data: Record<string, unknown>): void {
 }
 
 export async function get(key: string): Promise<unknown> {
-  const config = readConfig();
-  return config[key];
+  return held(readConfig(), key);
 }
 
 /**
@@ -110,11 +245,20 @@ export async function get(key: string): Promise<unknown> {
  * that has never saved anything is the ordinary first write.
  */
 export async function set(key: string, value: unknown): Promise<void> {
+  // Ahead of the read, so a write that could never land costs no file access —
+  // and on the WRITE branch only, because `delete config["__proto__"]` does
+  // remove an own property and is the way a store that already holds one is
+  // cleaned.
+  let storable: unknown;
+  if (value !== undefined) {
+    assertStorableKey(key);
+    storable = storableValue(key, value);
+  }
   const config = readConfigStrict();
   if (value === undefined) {
     delete config[key];
   } else {
-    config[key] = value;
+    config[key] = storable;
   }
   writeConfig(config);
 }
@@ -138,12 +282,10 @@ export async function set(key: string, value: unknown): Promise<void> {
  * actually matters, rather than an enumeration of the values that have it. To
  * delete a key, `set` it to `undefined`.
  *
- * The VALUE half only. A `__proto__` KEY produces the same outcome by a
- * different mechanism — `config[key] = value` hits `Object.prototype`'s setter,
- * so the key never lands — and is NOT covered here, because it is identical in
- * `set` and `setMany` and belongs with a store-wide fix rather than a third
- * copy of one. Unreachable from the only caller, which passes a module
- * constant.
+ * The KEY half is `assertStorableKey`, shared with `set` and `setMany` because
+ * `__proto__` fails identically in all three, and the non-finite numbers
+ * `JSON.stringify` writes as `null` are `assertStorableValue`, shared for the
+ * same reason.
  *
  * Same strict read as `set`, for the same reason: a write over a store nobody
  * can read must throw rather than replace it with the one key being saved.
@@ -152,23 +294,33 @@ export async function swap(key: string, value: unknown): Promise<unknown> {
   // Ahead of the read, so a value that cannot be stored costs no file access.
   // `JSON.stringify` throws on a BigInt or a cycle, which `writeConfig` would
   // have done anyway — here it happens before anything is opened.
-  if (JSON.stringify(value) === undefined) {
+  if (value === undefined) {
     throw new TypeError(`config-store: swap(${key}) replaces, it cannot delete — use set()`);
   }
+  assertStorableKey(key);
+  const storable = storableValue(key, value);
   const config = readConfigStrict();
-  const previous = config[key];
-  config[key] = value;
+  const previous = held(config, key);
+  config[key] = storable;
   writeConfig(config);
   return previous;
 }
 
 export async function setMany(entries: Record<string, unknown>): Promise<void> {
+  // The WHOLE batch, before the read: a caller handed a refusal must not find
+  // half its entries applied around the one that could never land.
+  const storable = new Map<string, unknown>();
+  for (const [key, value] of Object.entries(entries)) {
+    if (value === undefined) continue;
+    assertStorableKey(key);
+    storable.set(key, storableValue(key, value));
+  }
   const config = readConfigStrict();
   for (const [key, value] of Object.entries(entries)) {
     if (value === undefined) {
       delete config[key];
     } else {
-      config[key] = value;
+      config[key] = storable.get(key);
     }
   }
   writeConfig(config);
