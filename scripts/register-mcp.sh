@@ -328,6 +328,13 @@ export CLAWBOX_IMAGE_PLUGIN="clawai"
 # Mirrors HERMES_IMAGE_PLUGIN_KEY in src/lib/hermes-image-plugin.ts.
 export CLAWBOX_IMAGE_PLUGIN_KEY="image_gen/clawai"
 export CLAWBOX_IMAGE_PLUGIN_ENTRY="$HERMES_PLUGINS_DIR/image_gen/clawai/__init__.py"
+# The device store, for the ONE thing the re-arm below has to ask it: has the
+# proxy refused this box's ClawBox AI credential? The stand-down is written on
+# BOTH editions (`recordClawaiCredentialRefusal`) and, until now, read only by
+# the OpenClaw boot script — so on Hermes the image backend was armed again on
+# the next boot that repaired the plugin list, and the agent went back to
+# spending refused calls (6,554 in twelve hours from one box, TASK-727).
+export CLAWBOX_DEVICE_STORE="$PROJECT_DIR/data/config.json"
 # The protected-path table (TASK-605). The same file the OpenClaw hook plugin
 # reads; see the block that renders approvals.deny from it below.
 export CLAWBOX_PROTECTED_PATHS="$PROJECT_DIR/config/protected-paths.json"
@@ -824,6 +831,38 @@ elif isinstance(plugins_cfg, dict):
 #      reader as the allow-list, and a
 #      deny-list this script cannot read declines the re-arm rather than
 #      guessing: the cost is one Settings → Save, which asks Hermes itself.
+def clawai_credential_refused():
+    """Has the proxy refused this box's ClawBox AI credential?
+
+    The same key, the same reader and the same collapse as
+    `_clawai_credential_refused` in gateway-pre-start.sh: unreadable, absent,
+    malformed and non-numeric all mean "nobody has told us this credential is
+    dead", and a box we have not been told about is left as it is. The fact
+    does not decay — a TTL here would re-arm a path the proxy still refuses,
+    which is the storm the stand-down exists to end.
+
+    `except Exception` and it has to be that broad: this runs inside the big
+    heredoc, and anything that escapes takes the whole MCP registration with
+    it.
+    """
+    import math
+
+    store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not store_path:
+        return False
+    try:
+        with open(store_path) as fh:
+            store = json.load(fh)
+        if not isinstance(store, dict):
+            return False
+        at = store.get("clawai_credential_refused_at")
+        if isinstance(at, bool) or not isinstance(at, (int, float)):
+            return False
+        return math.isfinite(at) and at > 0
+    except Exception:
+        return False
+
+
 image_plugin = os.environ.get("CLAWBOX_IMAGE_PLUGIN") or ""
 image_plugin_key = os.environ.get("CLAWBOX_IMAGE_PLUGIN_KEY") or ""
 image_entry = os.environ.get("CLAWBOX_IMAGE_PLUGIN_ENTRY") or ""
@@ -848,6 +887,16 @@ if repaired_enabled and image_plugin and image_plugin in (names or []):
     elif not (image_entry and os.path.isfile(image_entry)):
         print("[register-mcp] the ClawAI image backend is not installed; "
               "leaving image_gen.provider unset")
+    #   5. the proxy has not REFUSED this box's credential. The stand-down is
+    #      written on both editions and was read on neither this side of the
+    #      house: re-arming over it puts back, unattended, exactly the path the
+    #      refusal took away, and there is no back-off downstream — the plugin
+    #      spends refused calls for as long as the box is switched on. Cleared
+    #      by every path that writes a new credential, so a re-link re-arms on
+    #      the next boot without anyone doing anything.
+    elif clawai_credential_refused():
+        print("[register-mcp] the ClawBox AI credential was refused; leaving "
+              "image_gen.provider unset until a new one is linked")
     else:
         image_cfg["provider"] = image_plugin
         cfg["image_gen"] = image_cfg

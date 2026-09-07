@@ -182,6 +182,14 @@ vi.mock("@/lib/harness", async (importOriginal) => ({
 
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn() }));
 
+// The Hermes apply, which on this SKU is what tells the agent anything at all.
+// Partial, so `ClawaiApplyError` stays the real class the route catches.
+const applyClawaiToHermesMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/hermes-clawai", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-clawai")>()),
+  applyClawaiToHermes: applyClawaiToHermesMock,
+}));
+
 // The transport the refresh ends at. Mocked HERE rather than mocking
 // `refreshCodingAgentToolsIfReadinessChanged` itself, so the real guard runs and
 // the assertion is about the agent being asked, not about a call being made.
@@ -318,6 +326,23 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     mockGetCodingAgentStatus = vi.mocked(codingMod.getCodingAgentStatus);
     mockGetCodingAgentStatus.mockImplementation(readyFromStore);
 
+    // The stand-in does the ONE thing the cases below pin about the real apply:
+    // it performs the coding-agent refresh from the snapshot it is handed
+    // (`hermes-clawai.ts` does that and the provider and image refreshes too;
+    // its own suites pin those). Without this the route's cases would be
+    // asserting over a helper that does nothing.
+    applyClawaiToHermesMock.mockReset();
+    applyClawaiToHermesMock.mockImplementation(
+      async (_token: string, _tier: string, options?: { codingAgentReadyBefore?: boolean }) => {
+        const { refreshCodingAgentToolsIfReadinessChanged } = await import("@/lib/coding-agent-mcp-refresh");
+        if (options?.codingAgentReadyBefore !== undefined) {
+          const after = (await mockGetCodingAgentStatus()).ready;
+          await refreshCodingAgentToolsIfReadinessChanged(options.codingAgentReadyBefore, after);
+        }
+        return { provider: "clawai", model: "deepseek-v4-flash", tier: "free", explicitPickKept: false };
+      },
+    );
+
     const reloadMod = await import("@/lib/hermes-mcp-reload");
     mockReloadMcpServers = vi.mocked(reloadMod.reloadMcpServers);
     mockReloadMcpServers.mockResolvedValue(true);
@@ -345,6 +370,57 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     // mock could be trimmed back to `getAll`/`setMany` and every case here
     // would go on passing over an image-ops gate that never ran (TASK-727).
     expect(vi.mocked(configGet)).toHaveBeenCalledWith("clawai_credential_refused_at");
+  });
+
+  it("hands the credential to HERMES, which is the agent answering on this box", async () => {
+    // The defect: everything the route does above configures OpenClaw, and on
+    // the dual SKU Hermes is what the owner is talking to. It keeps its own
+    // provider catalogue, image backend and speech slot, so
+    // `ai_set_provider("clawai")` went on answering "That provider is not set
+    // up on this device" over a token that had just been pasted and stored.
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+
+    expect(res.status).toBe(200);
+    expect(applyClawaiToHermesMock).toHaveBeenCalledTimes(1);
+    const [token, tier, options] = applyClawaiToHermesMock.mock.calls[0];
+    expect(token).toBe(CLAWAI_TOKEN);
+    expect(typeof tier).toBe("string");
+    // The two snapshots the route holds and the apply cannot take for itself:
+    // the token is already in the store by then, so its own reads would answer
+    // about THIS save — ready true whatever the box looked like a moment ago,
+    // and no account change on a real re-link.
+    expect(options).toMatchObject({ codingAgentReadyBefore: false });
+    expect(options).toHaveProperty("previousClawaiToken");
+  });
+
+  it("asks for ONE reload, not two, when it hands the save to Hermes", async () => {
+    // The apply performs the coding-agent, provider and image refreshes from
+    // its own before/after pair. A second global reload from this route would
+    // respawn every MCP child again and invalidate the model's prompt cache a
+    // second time for one save.
+    await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+
+    expect(applyClawaiToHermesMock).toHaveBeenCalledTimes(1);
+    expect(mockReloadMcpServers).toHaveBeenCalledTimes(1);
+  });
+
+  it("still answers 200 when Hermes will not take the credential", async () => {
+    // OpenClaw is configured and the token is on disk by then: a Hermes write
+    // that fails must not turn a save that landed into an error. It is logged,
+    // loudly, because the agent's own view is what the owner judges it by.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    applyClawaiToHermesMock.mockRejectedValue(new Error("hermes config set failed"));
+
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+
+    expect(res.status).toBe(200);
+    expect(store.clawai_token).toBe(CLAWAI_TOKEN);
+    expect(err.mock.calls.flat().join(" ")).toMatch(/Hermes did not take it/);
+  });
+
+  it("does not touch Hermes for a save that is not ClawBox AI", async () => {
+    await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-test" }));
+    expect(applyClawaiToHermesMock).not.toHaveBeenCalled();
   });
 
   it("does not charge a reload for a save that changed nothing about readiness", async () => {
@@ -416,29 +492,31 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
 
   it("still answers 200 when the probe throws AFTER the credential is written", async () => {
     // The other half, and the one that matters more: by then the token IS on
-    // disk. The save has landed and must be reported as landed; the tool list
-    // catches up at the next respawn, which is what every box did before this
-    // helper existed.
-    mockGetCodingAgentStatus
-      .mockImplementationOnce(readyFromStore)
-      .mockImplementationOnce(async () => {
-        // Asserted INSIDE the second probe, so the ordering is pinned and not
-        // just the count: a regression that took both readings before the write
-        // would still be called twice, still answer 200 and still buy no
-        // reload — and would be exactly the bug this whole change is about.
-        expect(store.clawai_token).toBe(CLAWAI_TOKEN);
-        throw new Error("cannot read the store");
-      });
+    // disk. The save has landed and must be reported as landed.
+    //
+    // On this SKU the post-write probe is the APPLY's — the route hands it the
+    // before-snapshot and the apply reads `ready` again for itself — so a probe
+    // that throws is a Hermes hand-off that failed, and the route's own refresh
+    // is the backstop: the credential changed, the tool list has to be asked
+    // for either way. The one thing that must NOT happen is a 500 over a save
+    // that landed.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    applyClawaiToHermesMock.mockImplementation(async () => {
+      // Asserted INSIDE the apply, so the ordering is pinned and not just the
+      // count: a regression that handed Hermes the credential BEFORE storing it
+      // would still answer 200 and still refresh.
+      expect(store.clawai_token).toBe(CLAWAI_TOKEN);
+      throw new Error("cannot read the store");
+    });
 
     const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
 
     expect(res.status).toBe(200);
     expect(store.clawai_token).toBe(CLAWAI_TOKEN);
-    expect(mockReloadMcpServers).not.toHaveBeenCalled();
-    // And the post-write probe was actually REACHED. Without this the case
-    // would pass over a route that skipped the second read entirely — 200, the
-    // token stored and no reload are all true of that route too.
-    expect(mockGetCodingAgentStatus).toHaveBeenCalledTimes(2);
+    // The apply was reached, and the route still asked for the rebuild the save
+    // earned.
+    expect(applyClawaiToHermesMock).toHaveBeenCalledTimes(1);
+    expect(mockReloadMcpServers).toHaveBeenCalledTimes(1);
   });
 
   /*
