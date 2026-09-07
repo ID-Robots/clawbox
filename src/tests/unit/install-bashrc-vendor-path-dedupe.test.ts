@@ -122,13 +122,19 @@ let bashrc: string;
  * does — through `ensure_clawbox_bashrc_path`, which `step_coding_harness`
  * calls and `step_post_update` reaches on BOTH editions.
  */
-function runBashrcHygiene(home: string = sandbox): { status: number | null; stdout: string; stderr: string } {
+function runBashrcHygiene(
+  home: string = sandbox,
+  /** Shell injected before the function runs — used to stage a concurrent writer. */
+  prelude = "",
+): { status: number | null; stdout: string; stderr: string } {
   const script = [
     "set -euo pipefail",
     `CLAWBOX_HOME=${JSON.stringify(home)}`,
     'CLAWBOX_USER="$(id -un)"',
     "",
     shellConstants(),
+    "",
+    prelude,
     "",
     extractShellFunction("dedupe_vendor_bashrc_path_blocks"),
     "",
@@ -311,6 +317,30 @@ d("~/.bashrc keeps ONE vendor PATH block, however often the vendor appends", () 
 
     expect(fs.lstatSync(bashrc).isSymbolicLink()).toBe(true);
     expect(fs.readFileSync(real, "utf-8")).toBe(bashrcFixture(23));
+  });
+
+  it("leaves the file alone when something wrote to it mid-collapse", () => {
+    // The `mv` is an atomic rename, so no reader sees half a file — but a
+    // rename replaces the INODE, and an append that lands between the read and
+    // the swap would go with the old one. The vendor's installer runs on the
+    // box's own schedule, so it can be alive during an update.
+    fs.writeFileSync(bashrc, bashrcFixture(23), "utf-8");
+
+    // A writer that appends the moment the transform has read the file.
+    const concurrent = [
+      "awk() {",
+      '  command awk "$@"',
+      `  printf '\\n%s\\n%s\\n' ${JSON.stringify(VENDOR_MARKER)} ${JSON.stringify(VENDOR_EXPORT)} >> ${JSON.stringify(bashrc)}`,
+      "}",
+    ].join("\n");
+
+    const run = runBashrcHygiene(sandbox, concurrent);
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).toContain("changed while it was being collapsed");
+    expect(run.stdout).not.toContain("Collapsed");
+    // The concurrent append survives — it was not swapped away with the inode.
+    expect(countOf(read(), VENDOR_MARKER)).toBe(24);
   });
 
   // root ignores the directory mode, so the case cannot be staged there.

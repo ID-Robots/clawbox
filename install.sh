@@ -991,6 +991,15 @@ dedupe_vendor_bashrc_path_blocks() {
   copies=$(grep -cF "$CUA_BASHRC_MARKER" "$BASHRC" 2>/dev/null) || copies=0
   [ "$copies" -gt 1 ] 2>/dev/null || return 0
 
+  # The file as it is about to be read. The `mv` below is an atomic rename, so
+  # no reader ever sees half a file — but a rename replaces the INODE, so an
+  # append that lands between the read and the swap is dropped with the old one.
+  # The known concurrent writer is the vendor's installer appending exactly the
+  # block being deleted, so nothing is lost today; this exists so that stays
+  # true when something else writes here.
+  local snapshot=""
+  snapshot=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || snapshot=""
+
   local tmp=""
   tmp=$(mktemp "$BASHRC.clawbox.XXXXXX" 2>/dev/null) || {
     echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (mktemp failed)"
@@ -1039,6 +1048,15 @@ dedupe_vendor_bashrc_path_blocks() {
     # bound silently gone. An empty result means the rewrite lost the file.
     local collapsed=0
     collapsed=$(grep -cF "$CUA_BASHRC_MARKER" "$tmp" 2>/dev/null) || collapsed=0
+    local now=""
+    now=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || now=""
+    if [ -z "$snapshot" ] || [ "$now" != "$snapshot" ]; then
+      # Somebody wrote to .bashrc while it was being collapsed. The rewrite
+      # describes a file that no longer exists; the next update collapses it.
+      rm -f "$tmp"
+      echo "  Warning: .bashrc changed while it was being collapsed — left untouched"
+      return 0
+    fi
     if [ "$collapsed" -eq 1 ] 2>/dev/null && [ -s "$tmp" ]; then
       chown --reference="$BASHRC" "$tmp" 2>/dev/null \
         || chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp" 2>/dev/null || true
