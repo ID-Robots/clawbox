@@ -43,6 +43,24 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   "ffmpeg_install",
   "fix_git_perms",
   "gateway_setup",
+  // The owner's harness swap (Settings → Harness, 2026-09-07): OpenClaw ↔
+  // Hermes on a provisioned box, started by /setup-api/harness/swap.
+  //
+  // The same privilege decision as set_timezone, with the same shape: the
+  // launcher is granted with no argument spec, so this is a capability of the
+  // clawbox ACCOUNT — the agent's shell, the Terminal app and a coding run can
+  // all write `data/harness-swap.env` and start the step. The VALUE gate is
+  // the boundary: install.sh's `read_configured_harness_swap` parses that file
+  // (never sources it), refuses anything but the plain file the route writes,
+  // takes exactly `openclaw` or `hermes` as the target, and refuses a request
+  // older than an hour. The worst outcome is a swap the owner did not ask for
+  // — loud in the journal and on the desktop, and reversible with the same
+  // button — and the harness being swapped to is installed and proved to run
+  // BEFORE the edition lock flips, so a failed install changes nothing.
+  //
+  // Off UI_ROOT_STEPS, like set_timezone: `install/run-step` is reachable by
+  // the MCP bearer, and a harness swap is the person's decision.
+  "harness_swap",
   "hermes_edition",
   "llamacpp_install",
   "nvidia_jetpack",
