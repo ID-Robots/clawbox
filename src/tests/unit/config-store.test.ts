@@ -226,6 +226,65 @@ describe("config-store", () => {
     });
   });
 
+  describe("a key the object backing the store cannot hold", () => {
+    // `config[key] = value` for `__proto__` reaches Object.prototype's own
+    // setter instead of creating a property: nothing is stored, nothing
+    // throws, and `writeConfig` renames a config WITHOUT the key over the one
+    // that had it. The caller is told the write succeeded — `swap` even hands
+    // back a "previous" value it read through the same accessor — which is the
+    // false-success shape the value guard was added to remove, arriving on the
+    // key side instead.
+    it("swap refuses it rather than reporting a write that never happened", async () => {
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
+      await expect(configStore.swap("__proto__", { polluted: true })).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+
+    it("set refuses it", async () => {
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
+      await expect(configStore.set("__proto__", { polluted: true })).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+
+    it("setMany refuses the whole batch rather than landing half of it", async () => {
+      // Refused before anything is written, so the caller's other entries are
+      // not silently applied around the one that could never land.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
+      // A COMPUTED key, deliberately: `{ __proto__: … }` in an object literal
+      // sets the literal's prototype and creates no entry at all, so a batch
+      // written that way would never reach the store's key guard and the case
+      // would pass by testing nothing.
+      await expect(
+        configStore.setMany({ telegram_bot_token: "111:x", ["__proto__"]: { polluted: true } }),
+      ).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+  });
+
+  describe("a number JSON cannot write", () => {
+    // `JSON.stringify(NaN)` is the string "null", so a non-finite number walks
+    // straight through the `=== undefined` guard and the file ends up holding
+    // `null` under a key the caller believes holds a number. Every reader then
+    // sees "unset" where the caller stored a figure, and the write reported
+    // success — the same false success, one type further in.
+    it("swap refuses NaN and Infinity instead of storing null", async () => {
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ clawkeep_last_backup_ms: 5 }), "utf-8");
+      await expect(configStore.swap("clawkeep_last_backup_ms", NaN)).rejects.toThrow(TypeError);
+      await expect(configStore.swap("clawkeep_last_backup_ms", Infinity)).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ clawkeep_last_backup_ms: 5 });
+    });
+
+    it("set and setMany refuse it too, nested as well as bare", async () => {
+      // Nested because that is how the store actually holds figures — the
+      // schedule objects, the plan tiers, the updater's step records — and a
+      // NaN one field deep is written as `null` just as quietly.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
+      await expect(configStore.set("clawkeep_schedule", { hour: NaN })).rejects.toThrow(TypeError);
+      await expect(configStore.setMany({ update_started_at: -Infinity })).rejects.toThrow(TypeError);
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept" });
+    });
+  });
+
   describe("getAll", () => {
     it("returns full config object", async () => {
       await fs.writeFile(CONFIG_PATH, JSON.stringify({ a: 1, b: "two", c: true }), "utf-8");

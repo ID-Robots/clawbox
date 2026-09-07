@@ -56,6 +56,53 @@ function readConfigStrict(): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
+/**
+ * The one key a plain object cannot hold, and the numbers JSON cannot write.
+ *
+ * Both are the same failure the value guard on `swap` was added for — a write
+ * that reports success over a store that did not change the way the caller
+ * believes — reached by two other routes:
+ *
+ *  - `config["__proto__"] = value` never creates a property. It reaches
+ *    `Object.prototype`'s own accessor, which sets the object's PROTOTYPE for
+ *    an object value and does nothing at all for a primitive; either way the
+ *    key is absent from `JSON.stringify`'s output, so `writeConfig` renames a
+ *    config without it over the one that had it and the caller is told the
+ *    write landed. `swap` compounds it by reading the same accessor for its
+ *    `previous`, handing the caller `Object.prototype` as the value it
+ *    replaced. Refused rather than written as an own property, because a
+ *    `"__proto__"` key inside data/config.json is a loaded gun for every OTHER
+ *    reader of that file: `Object.assign({}, JSON.parse(raw))` and every
+ *    read-modify-write built on it would take the parsed own property through
+ *    a plain object's inherited setter and change that object's prototype.
+ *    Nothing on the box stores a key it does not spell out as a constant, so
+ *    the refusal costs no caller anything.
+ *
+ *  - `JSON.stringify(NaN)` is the string `"null"`, and so are `Infinity` and
+ *    `-Infinity`, so a non-finite number passes the `=== undefined` test and
+ *    the file ends up holding `null` under a key the caller believes holds a
+ *    figure. Every reader then sees "unset" — the schedules, the plan tier,
+ *    the updater's timestamps all read a missing number as "never" — over a
+ *    write that answered success. Checked at any depth, because that is how
+ *    the store actually holds figures, and through `JSON.stringify`'s own walk
+ *    rather than a hand-rolled one so a cycle is reported by the serialiser
+ *    that would have hit it anyway.
+ */
+function assertStorableKey(key: string): void {
+  if (key === "__proto__") {
+    throw new TypeError(`config-store: "${key}" cannot be a key — the object backing the store cannot hold it`);
+  }
+}
+
+function assertStorableValue(key: string, value: unknown): void {
+  JSON.stringify(value, (_field, held: unknown) => {
+    if (typeof held === "number" && !Number.isFinite(held)) {
+      throw new TypeError(`config-store: ${key} cannot hold ${held} — JSON writes it as null`);
+    }
+    return held;
+  });
+}
+
 /** One key, tri-state: `known: false` when the store could not be read. */
 export async function getKnown(key: string): Promise<{ value: unknown; known: boolean }> {
   try {
@@ -110,6 +157,9 @@ export async function get(key: string): Promise<unknown> {
  * that has never saved anything is the ordinary first write.
  */
 export async function set(key: string, value: unknown): Promise<void> {
+  // Ahead of the read, so a write that could never land costs no file access.
+  assertStorableKey(key);
+  if (value !== undefined) assertStorableValue(key, value);
   const config = readConfigStrict();
   if (value === undefined) {
     delete config[key];
@@ -138,12 +188,10 @@ export async function set(key: string, value: unknown): Promise<void> {
  * actually matters, rather than an enumeration of the values that have it. To
  * delete a key, `set` it to `undefined`.
  *
- * The VALUE half only. A `__proto__` KEY produces the same outcome by a
- * different mechanism — `config[key] = value` hits `Object.prototype`'s setter,
- * so the key never lands — and is NOT covered here, because it is identical in
- * `set` and `setMany` and belongs with a store-wide fix rather than a third
- * copy of one. Unreachable from the only caller, which passes a module
- * constant.
+ * The KEY half is `assertStorableKey`, shared with `set` and `setMany` because
+ * `__proto__` fails identically in all three, and the non-finite numbers
+ * `JSON.stringify` writes as `null` are `assertStorableValue`, shared for the
+ * same reason.
  *
  * Same strict read as `set`, for the same reason: a write over a store nobody
  * can read must throw rather than replace it with the one key being saved.
@@ -155,6 +203,8 @@ export async function swap(key: string, value: unknown): Promise<unknown> {
   if (JSON.stringify(value) === undefined) {
     throw new TypeError(`config-store: swap(${key}) replaces, it cannot delete — use set()`);
   }
+  assertStorableKey(key);
+  assertStorableValue(key, value);
   const config = readConfigStrict();
   const previous = config[key];
   config[key] = value;
@@ -163,6 +213,12 @@ export async function swap(key: string, value: unknown): Promise<unknown> {
 }
 
 export async function setMany(entries: Record<string, unknown>): Promise<void> {
+  // The WHOLE batch, before the read: a caller handed a refusal must not find
+  // half its entries applied around the one that could never land.
+  for (const [key, value] of Object.entries(entries)) {
+    assertStorableKey(key);
+    if (value !== undefined) assertStorableValue(key, value);
+  }
   const config = readConfigStrict();
   for (const [key, value] of Object.entries(entries)) {
     if (value === undefined) {
