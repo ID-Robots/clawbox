@@ -1,8 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import fs from "fs";
-import os from "os";
-import path from "path";
 import { CATALOG_PROVIDERS, PROVIDER_CATALOGS } from "@/lib/provider-models";
+import { createManifestFixture, loadLifecycle, type ManifestFixture } from "@/tests/helpers/core-model-manifests";
 
 /**
  * A cold-start default the picker would refuse to show is a picker with nothing
@@ -53,12 +51,6 @@ vi.mock("@/lib/openclaw-config", async (importActual) => {
   return { ...actual, findOpenclawBin: () => bin.override ?? actual.findOpenclawBin() };
 });
 
-async function lifecycle() {
-  const mod = await import("@/lib/core-model-lifecycle");
-  mod.resetCoreModelLifecycle();
-  return mod;
-}
-
 describe("every catalog provider's cold-start default is one the picker will show", () => {
   for (const provider of CATALOG_PROVIDERS) {
     const catalog = PROVIDER_CATALOGS[provider];
@@ -70,54 +62,37 @@ describe("every catalog provider's cold-start default is one the picker will sho
     });
 
     it(`${provider}: the installed core has not retired the default`, async () => {
-      const { coreRetiredModels } = await lifecycle();
+      const { coreRetiredModels } = await loadLifecycle();
       expect(coreRetiredModels(provider).has(defaultId)).toBe(false);
     });
   }
 });
 
 describe("against a manifest the module itself resolves", () => {
-  let tmpHome: string;
-  const ENV = ["HOME", "OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME"] as const;
-  const saved: Record<string, string | undefined> = {};
+  let fixture: ManifestFixture;
 
   beforeEach(() => {
-    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "curated-defaults-"));
-    for (const key of ENV) saved[key] = process.env[key];
-    process.env.HOME = tmpHome;
-    // Both spellings, at the same fixture. `manifestPaths` reads
-    // `CLAWBOX_OPENCLAW_HOME` FIRST, so pointing only `OPENCLAW_HOME` would
-    // leave the lookup wherever the surrounding environment aimed it.
-    process.env.OPENCLAW_HOME = path.join(tmpHome, ".openclaw");
-    process.env.CLAWBOX_OPENCLAW_HOME = path.join(tmpHome, ".openclaw");
+    // The fixture aims all three home variables at itself; `bin.override`
+    // neutralises the core's bundled candidate, which on a machine with a core
+    // installed holds a REAL openai manifest and is tried first.
+    fixture = createManifestFixture("curated-defaults-");
     bin.override = "openclaw";
   });
 
   afterEach(() => {
     bin.override = null;
-    for (const key of ENV) {
-      if (saved[key] === undefined) delete process.env[key];
-      else process.env[key] = saved[key];
-    }
-    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fixture.cleanup();
   });
-
-  /** Where OpenClaw 2 puts an unbundled provider's manifest: beside the config. */
-  function writeManifest(provider: string, body: unknown): void {
-    const dir = path.join(tmpHome, ".openclaw", "extensions", provider);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "openclaw.plugin.json"), JSON.stringify(body));
-  }
 
   it("the codex default survives the openai manifest that retires the same id", async () => {
     const codexDefault = PROVIDER_CATALOGS.codex.defaultModelId;
     // The shape the pinned core actually ships: the ChatGPT picker's cold-start
     // default is the same upstream id the openai extension marks deprecated.
-    writeManifest("openai", { models: [
+    fixture.writeManifest("openai", { models: [
       { id: codexDefault, status: "deprecated", replacedBy: "gpt-5.6-sol" },
       { id: "gpt-5.6-sol" },
     ] });
-    const { coreRetiredModels } = await lifecycle();
+    const { coreRetiredModels } = await loadLifecycle();
     expect(coreRetiredModels("openai").has(codexDefault)).toBe(true);
     // Keyed on the CATALOGUE provider, and the core ships no `codex` extension
     // — so the ChatGPT picker keeps a default a Free account can actually run.
@@ -134,16 +109,11 @@ describe("against a manifest the module itself resolves", () => {
     // renamed and the whole suite would stay green while a box quietly stopped
     // filtering. Both candidates are written, with DIFFERENT answers, so the
     // order is pinned rather than assumed.
-    const dist = path.join(
-      tmpHome, "lib", "node_modules", "openclaw",
-      "dist", "extensions", "anthropic", "openclaw.plugin.json",
-    );
-    fs.mkdirSync(path.dirname(dist), { recursive: true });
-    fs.writeFileSync(dist, JSON.stringify({ models: [{ id: "claude-opus-4-8", status: "deprecated" }] }));
-    writeManifest("anthropic", { models: [{ id: "claude-opus-4-7", status: "deprecated" }] });
-    bin.override = path.join(tmpHome, "bin", "openclaw");
+    fixture.writeBundledManifest("anthropic", { models: [{ id: "claude-opus-4-8", status: "deprecated" }] });
+    fixture.writeManifest("anthropic", { models: [{ id: "claude-opus-4-7", status: "deprecated" }] });
+    bin.override = fixture.bin;
 
-    const { coreRetiredModels } = await lifecycle();
+    const { coreRetiredModels } = await loadLifecycle();
     const retired = coreRetiredModels("anthropic");
     expect(retired.has("claude-opus-4-8")).toBe(true);
     expect(retired.has("claude-opus-4-7")).toBe(false);
@@ -153,11 +123,11 @@ describe("against a manifest the module itself resolves", () => {
     // The guard the file exists for, proven capable of failing — for every
     // catalogue provider, everywhere, and not only where a core happens to be
     // installed. Without this the cases above pass by reading nothing.
-    const { coreRetiredModels, resetCoreModelLifecycle } = await lifecycle();
+    const { coreRetiredModels, resetCoreModelLifecycle } = await loadLifecycle();
     for (const provider of CATALOG_PROVIDERS) {
       const defaultId = PROVIDER_CATALOGS[provider]?.defaultModelId;
       if (!defaultId) continue;
-      writeManifest(provider, { models: [{ id: defaultId, status: "deprecated" }] });
+      fixture.writeManifest(provider, { models: [{ id: defaultId, status: "deprecated" }] });
       resetCoreModelLifecycle();
       expect(coreRetiredModels(provider).has(defaultId), provider).toBe(true);
     }

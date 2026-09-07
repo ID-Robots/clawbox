@@ -39,6 +39,18 @@ import { findOpenclawBin } from "@/lib/openclaw-config";
  * that ships none, a shape this does not recognise — all answer "not retired",
  * so the picker keeps offering exactly what it offers today. The failure this
  * must never have is the other one: a parse slip that empties a model list.
+ *
+ * KEYED ON THE CATALOGUE PROVIDER, with no inverse mapping, and that is a
+ * decision rather than an oversight. ClawBox's own `clawai` catalogue is served
+ * by deepseek models (`deepseek-v4-flash` and its siblings in
+ * `provider-models.ts`) through the ClawBox AI proxy, and the core ships the
+ * manifest under `deepseek` — so a `clawai` lookup finds no manifest and every
+ * clawai row is answered "not retired". Adding the mapping would let a
+ * lifecycle the core publishes about the DIRECT deepseek route decide what our
+ * proxied plan offers, and those are not the same surface: what the proxy
+ * accepts is our contract with the customer, not the upstream provider's. The
+ * same asymmetry, for the same reason, is documented at `withoutRetiredModels`
+ * for `codex` vs `openai` and pinned by `curated-defaults-offerable.test.ts`.
  */
 
 /** What the harness treats as "do not offer this any more". */
@@ -71,11 +83,6 @@ interface CachedManifest {
 const cache = new Map<string, CachedManifest>();
 
 /**
- * The two places the manifest lives, in the order `gateway-pre-start.sh` tries
- * them: bundled in the core's `dist/extensions`, or beside the config once
- * OpenClaw 2 unbundled the provider into its own installed plugin.
- */
-/**
  * A provider id that can only ever name a directory, never traverse out of one.
  *
  * The id reaches this module from a request query string by way of the catalogue
@@ -85,6 +92,14 @@ const cache = new Map<string, CachedManifest>();
  */
 const SAFE_PROVIDER_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 
+/**
+ * The two places the manifest lives, in the order `gateway-pre-start.sh`
+ * resolves them: bundled in the core's `dist/extensions`, or beside the config
+ * once OpenClaw 2 unbundled the provider into its own installed plugin. The
+ * PATHS are that script's; the fallback RULE is not the same one — it falls
+ * back on existence alone (`[ ! -f … ]`) and gives up outright on a manifest it
+ * cannot parse, while this reads on to the next candidate.
+ */
 function manifestPaths(provider: string): string[] {
   const bin = findOpenclawBin();
   const paths: string[] = [];
@@ -178,6 +193,16 @@ function retiredFor(provider: string): Set<string> {
     }
     cache.delete(provider);
   }
+  // Set when a candidate EXISTED and could not be used — it would not open, or
+  // would not read, or would not parse. The
+  // answer that follows then comes from a lower-priority file, and caching it
+  // would key the staleness check on that file alone (`cached.file` is the only
+  // path re-stat'ed above), so the moment the better manifest became readable
+  // again nothing would look at it: one bad read would pin the wrong source for
+  // the life of the process. A candidate that is simply ABSENT is not that —
+  // that is the ordinary shape of an OpenClaw 2 box, where the bundled path
+  // never exists and the beside-config answer is the right one to cache.
+  let degraded = false;
   for (const file of manifestPaths(provider)) {
     // Opened ONCE and both stat and read taken from the descriptor. A
     // `statSync` followed by a `readFileSync` of the same path is two lookups
@@ -189,7 +214,14 @@ function retiredFor(provider: string): Set<string> {
     let fd: number;
     try {
       fd = fsSync.openSync(file, "r");
-    } catch {
+    } catch (err) {
+      // ENOENT is genuine ABSENCE — the ordinary OpenClaw 2 layout, where the
+      // provider is unbundled and only the copy beside the config exists.
+      // Anything else (EACCES after a bad chown, EIO on a failing eMMC, EMFILE
+      // under load, ENOTDIR mid-upgrade) is a candidate that IS there and could
+      // not be used, and treating it as absence caches the lower-priority
+      // answer under a re-stat that only ever watches that lower-priority file.
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") degraded = true;
       continue;
     }
     let stat: fsSync.Stats;
@@ -198,6 +230,7 @@ function retiredFor(provider: string): Set<string> {
       stat = fsSync.fstatSync(fd);
       raw = fsSync.readFileSync(fd, "utf-8");
     } catch {
+      degraded = true;
       continue;
     } finally {
       try {
@@ -210,11 +243,24 @@ function retiredFor(provider: string): Set<string> {
     try {
       collect(catalogueFor(JSON.parse(raw), provider), retired);
     } catch {
-      // A manifest we cannot parse is a manifest we know nothing from — and it
-      // is NOT cached, so a half-written file is re-read rather than believed.
-      return new Set();
+      // A manifest we cannot parse is a manifest we know nothing from — but the
+      // NEXT candidate may still be readable, and giving up on the lookup threw
+      // that away. What actually produces unparsable bytes here is a write in
+      // PLACE: `gateway-pre-start.sh` rewrites this very file with python on
+      // every gateway start to declare deepseek's xhigh effort, and a truncated
+      // write (a full disk, a killed process) leaves the remains behind.
+      // `npm install -g`'s rename is not one of those cases — a rename is
+      // atomic, so a reader sees the whole old file or ENOENT, which the
+      // `openSync` catch above has always carried to the next candidate.
+      //
+      // Nothing is cached: neither this file (the next boot may repair it) nor
+      // the answer read past it (see `degraded`).
+      degraded = true;
+      continue;
     }
-    cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
+    if (!degraded) {
+      cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
+    }
     return retired;
   }
   // Nothing found. Deliberately NOT cached: on a box with no core yet, or one
@@ -228,6 +274,15 @@ function retiredFor(provider: string): Set<string> {
  *
  * `id` may be the bare id (`claude-opus-4-8`) or the fully-qualified one
  * (`z-ai/glm-5.1`); both forms are indexed.
+ *
+ * NO PRODUCTION CALLER TODAY, deliberately: the only consumer, the catalogue
+ * route, holds a LIST and goes through `coreRetiredModels` so a payload of
+ * hundreds of rows costs one lookup rather than hundreds. This is the
+ * single-row form — what the cases in `core-model-lifecycle.test.ts` are
+ * written against. It is not exactly the set test: it TRIMS the id first, while
+ * `withoutRetiredModels` asks the set for the id its catalogue holds. So a
+ * per-row caller may use either, but converting a loop from one to the other
+ * changes the answer for a padded id.
  */
 export function coreModelRetired(provider: string, id: string): boolean {
   if (!provider || !id) return false;
