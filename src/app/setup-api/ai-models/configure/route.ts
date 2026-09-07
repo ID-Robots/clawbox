@@ -125,6 +125,7 @@ import {
 import { logSafe } from "@/lib/log-safe";
 import { installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
 import { clawboxDisabledEntryId, clearPluginRepair } from "@/lib/plugin-repair";
+import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -1116,10 +1117,13 @@ function foreignOpenAiRoute(provider: OpenAiProviderConfig | undefined, proxyHos
 /**
  * True when an `agents.defaults.<tool>Model` slot already names a model.
  *
- * Byte-for-byte the same test OpenClaw applies in `hasToolModelConfig`
- * (`dist/model-config.helpers-BS3FWcoO.js:25` on 2026.7.1-2):
- * `primary?.trim() || (fallbacks ?? []).some(entry => entry.trim().length > 0)`.
- * Fallbacks count. A box carrying only
+ * The same test OpenClaw applies, through the same two steps it applies it in:
+ * `hasExplicitToolModelConfig` COERCES the value first
+ * (`coerceFactoryToolModelConfig` → `resolvePrimaryStringValue`, which answers a
+ * bare string with itself) and then asks `hasToolModelConfig`
+ * (`primary?.trim() || (fallbacks ?? []).some(entry => entry.trim().length > 0)`).
+ * So fallbacks count, and so does a bare string — this file used to test only
+ * the dict half, which is TASK-755. A box carrying only
  * `{ fallbacks: ["replicate/flux-pro"] }` has a working image setup its owner
  * chose, and since the write below replaces the whole object, testing
  * `primary` alone would delete those fallbacks.
@@ -1136,6 +1140,15 @@ function foreignOpenAiRoute(provider: OpenAiProviderConfig | undefined, proxyHos
  * don't-clobber rule, and OpenClaw reads both through the same helper.
  */
 function hasToolModelConfig(existing: unknown): boolean {
+  // A BARE STRING IS A MODEL (TASK-755). The core reaches these slots through
+  // `hasExplicitToolModelConfig` → `coerceFactoryToolModelConfig` →
+  // `resolvePrimaryStringValue`, which returns the string ITSELF when the value
+  // is one — so `mediaModels.image: "replicate/flux-pro"` is a configured model
+  // and `openclaw config validate` answers `valid:true` with no warnings
+  // (measured on 2026.8.1, for this slot and for `imageModel`). Reading it as an
+  // empty slot is how an owner-authored model was replaced, silently, on a save
+  // about some other provider entirely.
+  if (typeof existing === "string") return existing.trim().length > 0;
   if (typeof existing !== "object" || existing === null) return false;
   const cfg = existing as { primary?: unknown; fallbacks?: unknown };
   if (typeof cfg.primary === "string" && cfg.primary.trim()) return true;
@@ -1171,10 +1184,10 @@ function hasToolModelConfig(existing: unknown): boolean {
  * the image *understanding* (vision) model and is what `openclaw models
  * set-image` writes, which is why that CLI command is not used here.
  */
-function buildClawboxAiImageOps(
+async function buildClawboxAiImageOps(
   clawboxAiToken: string,
   snapshot: OpenClawConfig | null,
-): OpenclawConfigSetArgs[] {
+): Promise<OpenclawConfigSetArgs[]> {
   let existingOpenAiProvider: OpenAiProviderConfig | undefined =
     snapshot?.models?.providers?.[CLAWBOX_AI_IMAGE_PROVIDER];
   // OpenClaw 2 home first (agents.defaults.mediaModels.image); the legacy
@@ -1225,9 +1238,9 @@ function buildClawboxAiImageOps(
     return ops;
   }
   // STAND DOWN while a legacy `agents.defaults.imageGenerationModel` is still
-  // on the box (TASK-743) — the same guard `scripts/gateway-pre-start.sh` now
-  // carries, and this is the half an owner reaches by pressing Save rather than
-  // by rebooting.
+  // on the box (TASK-743) — the same guard `scripts/gateway-pre-start.sh`
+  // carries, gate and all, and this is the half an owner reaches by pressing
+  // Save rather than by rebooting.
   //
   // WHAT IT BUYS, measured against 2026.8.1 rather than assumed: the core's own
   // `migrateFinalLayoutRenames` moves the legacy value into `mediaModels.image`
@@ -1250,19 +1263,47 @@ function buildClawboxAiImageOps(
   // core's `doctor --fix` over a config it refuses and the save after that
   // writes the slot as usual — EXCEPT on a box whose doctor is itself blocked,
   // which stays refused with this guard and without it.
-  if (defaults != null && Object.hasOwn(defaults, "imageGenerationModel")) {
+  //
+  // AND ONLY ON A v2 CORE (TASK-755). The whole justification above is a
+  // migration that only OpenClaw 2 performs; on a v1 core
+  // `agents.defaults.imageGenerationModel` is not a legacy key at all, it is
+  // the slot's ONLY home, and standing down over it means the box never gets
+  // an image path while the boot script — whose sibling guard is gated
+  // (`_image_move_in_flight = _clawbox_v2 and …`) — writes it at the next
+  // start. Two writers disagreeing about one config is the thing this card
+  // exists to stop, so the generation is asked BEFORE this arm, not after it.
+  const generation = await installedOpenclawCoreGeneration();
+  if (generation === "v2" && defaults != null && Object.hasOwn(defaults, "imageGenerationModel")) {
     console.log(
       "[AI Config] Left the image-generation model alone: a legacy agents.defaults.imageGenerationModel key is still waiting for the core's own migration",
     );
     return ops;
   }
+  // WHICH HOME, decided by the INSTALLED core (TASK-755). This function wrote
+  // OpenClaw 2's home on every core while its sibling in
+  // `scripts/gateway-pre-start.sh` has carried a `_clawbox_v2` arm all along —
+  // harmless while the pin is 2026.8.x and wrong the day a box mid-update saves
+  // against a v1 core, which `src/lib/subscription-surface.ts` and the boot
+  // script's own warning both say exists. `agents.defaults` is `.strict()` on
+  // both generations, so the wrong name is `Unrecognized key` and gateway exit
+  // 78 — not a key that is quietly ignored.
+  //
+  // Asked above rather than at the top, so the ordinary save pays nothing for
+  // it: a slot that is already configured and a foreign route have both
+  // returned already.
+  if (generation === "unknown") {
+    // The boot script's rule, in the other language: a core that cannot be
+    // identified is not a licence to guess, because the state that hides it —
+    // a half-finished update — is the state in which the guess is wrong. The
+    // provider and the model row are still written; the next boot, or the next
+    // save once the update has finished, claims the slot.
+    console.warn(
+      "[AI Config] Left the image-generation slot alone: the installed OpenClaw core could not be identified, and each of its two homes is refused by the other generation",
+    );
+    return ops;
+  }
   ops.push([
-    // OpenClaw 2's home for the image-generation model, and this route writes it
-    // on every core: unlike the boot script, which has a `_clawbox_v2` arm, this
-    // function has no version gate and never had one. Fine while the pin is
-    // 2026.8.x, wrong the day a v1 box saves — its own card, named here so the
-    // next reader does not read the sibling's gate as parity.
-    "agents.defaults.mediaModels.image",
+    generation === "v2" ? "agents.defaults.mediaModels.image" : "agents.defaults.imageGenerationModel",
     JSON.stringify({ primary: CLAWBOX_AI_IMAGE_MODEL }),
     "--json",
   ]);
@@ -1351,8 +1392,24 @@ async function configureClawboxAi(
   // OUR ids the box already runs: a bad network moment must not downgrade a
   // box the proxy already upgraded.
   const vision = await resolveVisionModelId({ token: clawboxAiToken });
-  const currentImageModel = snapshot?.agents?.defaults?.imageModel as { primary?: unknown; fallbacks?: unknown } | undefined;
-  const currentPrimary = typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
+  // NARROWED, not cast (TASK-755). The slot can hold a bare string — the core
+  // coerces one — and the MOVE arm below spreads this value into a new object,
+  // which over a string would build `{0:"o",1:"p",…}` and hand the gateway
+  // nonsense. The `typeof` here is what keeps that arm unreachable for a
+  // string, and it is stated rather than left two derivations away.
+  const currentImageModelSlot = snapshot?.agents?.defaults?.imageModel;
+  const currentImageModel = typeof currentImageModelSlot === "object" && currentImageModelSlot !== null
+    ? currentImageModelSlot
+    : undefined;
+  // COERCED the way the core coerces it, so the managed-slot move below can see
+  // a bare string. Leaving a string alone is right when it names the OWNER's
+  // model; it is wrong when it names one of OURS, because that arm exists to
+  // carry our own previous vision id to the resolved one in both directions,
+  // and a slot it cannot read keeps pointing at an id the provider block no
+  // longer defines. `currentImageModel` stays object-only: the move spreads it.
+  const currentPrimary = typeof currentImageModelSlot === "string"
+    ? currentImageModelSlot.trim()
+    : typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
   const currentBareId = currentPrimary.startsWith(`${CLAWBOX_AI_PROVIDER}/`)
     ? currentPrimary.slice(CLAWBOX_AI_PROVIDER.length + 1)
     : currentPrimary;
@@ -1406,7 +1463,11 @@ async function configureClawboxAi(
     console.log(`[AI Config] Moving agents.defaults.imageModel ${currentPrimary} -> ${visionRef}`);
     visionOps.push([
       "agents.defaults.imageModel",
-      JSON.stringify({ ...(currentImageModel as object), primary: visionRef }),
+      // `...currentImageModel` is `undefined` for a bare string, which spreads
+      // nothing — the fallbacks a string cannot carry are not lost, because
+      // there were none. Never `...currentImageModelSlot`: spreading a string
+      // builds `{0:"d",1:"e",…}`.
+      JSON.stringify({ ...currentImageModel, primary: visionRef }),
       "--json",
     ]);
   } else {
@@ -1434,7 +1495,7 @@ async function configureClawboxAi(
     );
   } else {
     try {
-      imageOps = buildClawboxAiImageOps(clawboxAiToken, snapshot);
+      imageOps = await buildClawboxAiImageOps(clawboxAiToken, snapshot);
     } catch (err) {
       console.warn(
         "[AI Config] Failed to configure ClawBox AI image provider:",

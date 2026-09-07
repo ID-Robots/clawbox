@@ -731,9 +731,36 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
       expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
     });
 
-    it("claims the slot when it is not an object at all", () => {
+    it("leaves a BARE STRING alone — the core resolves one as a model (TASK-755)", () => {
+      // Measured on 2026.8.1: `resolvePrimaryStringValue` returns the string
+      // itself, so `hasExplicitToolModelConfig` answers true and
+      // `{"agents":{"defaults":{"mediaModels":{"image":"openai/gpt-image-1"}}}}`
+      // is `valid:true` with no warnings. The dict-only test below reads that
+      // as an empty slot and replaces it — an owner-authored model, gone,
+      // silently, on a save that had nothing to do with image generation.
+      const { cfg } = migrate(pairedBox({
+        agents: { defaults: { imageGenerationModel: "replicate/flux-pro" } },
+      }));
+
+      expect(imageGenerationModel(cfg)).toBe("replicate/flux-pro");
+    });
+
+    it("leaves a bare string naming OUR own model alone too", () => {
+      // Ours by value, but not ours to rewrite: the owner may have typed it,
+      // and the shape already resolves to the model we would have written.
       const { cfg } = migrate(pairedBox({
         agents: { defaults: { imageGenerationModel: "openai/gpt-image-1-mini" } },
+      }));
+
+      expect(imageGenerationModel(cfg)).toBe("openai/gpt-image-1-mini");
+    });
+
+    it.each([
+      ["a blank string", "   "],
+      ["an empty string", ""],
+    ])("still claims the slot when it holds %s — the core resolves no model from it", (_label, existing) => {
+      const { cfg } = migrate(pairedBox({
+        agents: { defaults: { imageGenerationModel: existing } },
       }));
 
       expect(imageGenerationModel(cfg)).toEqual({ primary: CLAWBOX_AI_IMAGE_MODEL });
@@ -765,6 +792,14 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
     expect(twice.cfg).toEqual(once.cfg);
   });
 
+  it("leaves a bare string in the v2 home alone (TASK-755)", () => {
+    const { cfg } = migrate(pairedBox({
+      agents: { defaults: { mediaModels: { image: "replicate/flux-pro" } } },
+    }), true);
+
+    expect(mediaImage(cfg)).toBe("replicate/flux-pro");
+  });
+
   it("leaves an owner's mediaModels.image alone", () => {
     const { cfg } = migrate(
       pairedBox({ agents: { defaults: { mediaModels: { image: { primary: "openai/their-pick" } } } } }),
@@ -791,13 +826,13 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
    * the key HELD would go on writing the second home beside every shape that
    * holds nothing.
    *
-   * "Holds nothing" here means `_has_image_model`'s rule, NOT the core's. The
-   * core coerces a bare string (`hasExplicitToolModelConfig` ->
-   * `resolveAgentModelPrimaryValue`, measured on 2026.8.1), so the scalar case
-   * below is a configured model this block reads as an empty slot — which is a
-   * separate defect, out of this card and recorded in the run queue. It is
-   * listed here because the guard covers it either way, not because the core
-   * agrees that it is empty.
+   * "Holds nothing" here means `_has_image_model`'s rule, which since TASK-755
+   * is the CORE's: a bare string is coerced (`hasExplicitToolModelConfig` ->
+   * `coerceFactoryToolModelConfig` -> `resolvePrimaryStringValue`, measured on
+   * 2026.8.1) and so is a configured model. It is therefore no longer one of
+   * the empty shapes below — it never reaches this guard at all, because the
+   * block leaves a configured slot alone one branch earlier. Its own case
+   * follows the loop.
    */
   describe("a legacy image key the core has not migrated yet", () => {
     const EMPTY_LEGACY_SHAPES: Array<[string, unknown]> = [
@@ -806,7 +841,7 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
       ["a whitespace primary", { primary: "   " }],
       ["an empty fallbacks list", { fallbacks: [] }],
       ["a null", null],
-      ["a scalar", "openai/gpt-image-1"],
+      ["a blank scalar", "   "],
       ["a list", []],
     ];
 
@@ -826,6 +861,22 @@ describe.skipIf(!hasPython3)("the image-generation home on OpenClaw 2", () => {
         expect(log).toContain("Skipped the ClawBox AI image model");
       });
     }
+
+    it("does not even reach the stand-down when the legacy key names a model as a bare string", () => {
+      // TASK-755. The stand-down exists for a key that holds NOTHING the core
+      // can resolve; a bare string is not that. The block leaves the slot alone
+      // one branch earlier, for the ordinary reason — it is configured — and
+      // the outcome the owner cares about is the same either way: the v2 home
+      // is not claimed and his value is still there for the core to move.
+      const { cfg, log } = migrate(
+        pairedBox({ agents: { defaults: { imageGenerationModel: "replicate/flux-pro" } } }),
+        true,
+      );
+
+      expect(mediaImage(cfg)).toBeUndefined();
+      expect(imageGenerationModel(cfg)).toBe("replicate/flux-pro");
+      expect(log).not.toContain("Skipped the ClawBox AI image model");
+    });
 
     it("still writes the provider and the model row, so the next boot has nothing left to do", () => {
       // Narrower than #751's stand-down on purpose: the `models[]` row has ONE

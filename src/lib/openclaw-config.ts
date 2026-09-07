@@ -177,6 +177,18 @@ async function withConfigMutationRetry(
   throw lastError ?? new Error(`${label} exhausted retries`);
 }
 
+/**
+ * What may stand in an `agents.defaults.<tool>Model` slot.
+ *
+ * A BARE STRING is one of them, and the type used to say otherwise (TASK-755):
+ * the core coerces it (`hasExplicitToolModelConfig` →
+ * `coerceFactoryToolModelConfig` → `resolvePrimaryStringValue`, which answers a
+ * string with itself), `openclaw config validate` accepts it, and a reader
+ * typed to the object form is a reader that believes an owner-authored model is
+ * an empty slot. Every caller has to narrow before reading `primary`.
+ */
+export type ToolModelSlot = string | { primary?: string; fallbacks?: string[] };
+
 export interface SpawnOpenclawOptions {
   /** Per-call timeout in ms. Default {@link DEFAULT_SPAWN_TIMEOUT_MS}. */
   timeoutMs?: number;
@@ -1167,18 +1179,22 @@ export interface OpenClawConfig {
   };
   agents?: {
     defaults?: {
+      // NOT widened to `ToolModelSlot`, deliberately: the core coerces a bare
+      // string here too, but every reader of the CHAT model slot is outside
+      // TASK-755 and none of them was measured, so widening the type would only
+      // scatter narrowing over code this card did not test. Its own card.
       model?: { primary?: string; fallbacks?: string[] };
       // Which model the `image_generate` tool draws with. Same shape as
       // `model`, entirely separate key — and distinct again from `imageModel`,
       // which selects the vision (image *understanding*) model.
-      imageGenerationModel?: { primary?: string; fallbacks?: string[] };
+      imageGenerationModel?: ToolModelSlot;
       /** OpenClaw 2's home for the same choice: mediaModels.image. */
-      mediaModels?: { image?: { primary?: string; fallbacks?: string[] }; [key: string]: unknown };
+      mediaModels?: { image?: ToolModelSlot; [key: string]: unknown };
       // Which model *looks at* an image — the vision model OpenClaw resolves
       // when a text-only session model is handed a picture and the `image`
       // tool has to describe it. Same shape, separate key from
       // `imageGenerationModel`; nothing aliases the two.
-      imageModel?: { primary?: string; fallbacks?: string[] };
+      imageModel?: ToolModelSlot;
       workspace?: string;
       compaction?: { reserveTokensFloor?: number };
     };

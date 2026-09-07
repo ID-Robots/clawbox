@@ -2048,15 +2048,38 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
     _vision_fallbacks = (
         _vision_model_cfg.get("fallbacks") if isinstance(_vision_model_cfg, dict) else None
     )
-    _has_vision_model = isinstance(_vision_model_cfg, dict) and bool(
-        (isinstance(_vision_model_cfg.get("primary"), str) and _vision_model_cfg.get("primary").strip())
+    # A BARE STRING IS A MODEL HERE TOO (TASK-755) — the sibling of the image
+    # slot below, read by the same core helper: `hasExplicitToolModelConfig`
+    # coerces the value (`resolvePrimaryStringValue` answers a string with
+    # itself) before the primary/fallbacks test. Measured on 2026.8.1:
+    # `{"agents":{"defaults":{"imageModel":"openai/gpt-4o"}}}` is `valid:true`.
+    # Reading it as empty replaces the model the owner chose for LOOKING at the
+    # pictures he sends.
+    _has_vision_model = bool(
+        (isinstance(_vision_model_cfg, str) and _vision_model_cfg.strip())
         or (
-            isinstance(_vision_fallbacks, list)
-            and any(isinstance(ref, str) and ref.strip() for ref in _vision_fallbacks)
+            isinstance(_vision_model_cfg, dict)
+            and (
+                (isinstance(_vision_model_cfg.get("primary"), str) and _vision_model_cfg.get("primary").strip())
+                or (
+                    isinstance(_vision_fallbacks, list)
+                    and any(isinstance(ref, str) and ref.strip() for ref in _vision_fallbacks)
+                )
+            )
         )
     )
+    # COERCED the way the core coerces it, so the MOVE arm below can see a bare
+    # string. Leaving a string alone is right when it names the OWNER's model;
+    # it is wrong when it names one of OURS, because that arm exists to carry
+    # our own previous vision id to the resolved one in both directions, and a
+    # slot it cannot read keeps pointing at an id this block's provider entry no
+    # longer defines. The move itself is written per shape below: a dict is
+    # mutated in place so the owner's fallbacks ride along, a string has none to
+    # carry and is replaced outright.
     _vision_primary = (
-        _vision_model_cfg.get("primary") if isinstance(_vision_model_cfg, dict) else None
+        _vision_model_cfg
+        if isinstance(_vision_model_cfg, str)
+        else _vision_model_cfg.get("primary") if isinstance(_vision_model_cfg, dict) else None
     )
     _vision_primary = _vision_primary.strip() if isinstance(_vision_primary, str) else ""
     if not _has_vision_model:
@@ -2068,9 +2091,14 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
     ):
         # The slot names one of OUR vision ids — the previous default is ours
         # to move to the resolved one, both directions. Anything else in the
-        # slot is the owner's choice and stays — and the move changes ONLY
-        # `primary`, so fallbacks the owner added ride along.
-        _vision_model_cfg["primary"] = CLAWBOX_VISION_MODEL_REF
+        # slot is the owner's choice and stays — and over a dict the move
+        # changes ONLY `primary`, so fallbacks the owner added ride along. A
+        # bare string carries none, so it is replaced with the shape this block
+        # writes everywhere else.
+        if isinstance(_vision_model_cfg, dict):
+            _vision_model_cfg["primary"] = CLAWBOX_VISION_MODEL_REF
+        else:
+            agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
         changed = True
 
 # Set by the image-generation migration below, on the one path where it decides
@@ -2403,11 +2431,27 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         _image_model_fallbacks = (
             _image_model_cfg.get("fallbacks") if isinstance(_image_model_cfg, dict) else None
         )
-        _has_image_model = isinstance(_image_model_cfg, dict) and bool(
-            (isinstance(_image_model_cfg.get("primary"), str) and _image_model_cfg.get("primary").strip())
+        # A BARE STRING IS A MODEL (TASK-755). The core reaches this slot through
+        # `hasExplicitToolModelConfig`, which COERCES the value first
+        # (`coerceFactoryToolModelConfig` -> `resolvePrimaryStringValue`, which
+        # answers a bare string with itself) and only then applies the
+        # primary/fallbacks test mirrored below. Measured on 2026.8.1:
+        # `mediaModels.image: "replicate/flux-pro"` is `valid:true` with no
+        # warnings. Reading it as an empty slot is how an owner-authored model
+        # was replaced on a boot that had nothing to do with image generation —
+        # and it is the rule the take-back arm below already applies to a
+        # string, so the two halves now agree about what a string means.
+        _has_image_model = bool(
+            (isinstance(_image_model_cfg, str) and _image_model_cfg.strip())
             or (
-                isinstance(_image_model_fallbacks, list)
-                and any(isinstance(ref, str) and ref.strip() for ref in _image_model_fallbacks)
+                isinstance(_image_model_cfg, dict)
+                and (
+                    (isinstance(_image_model_cfg.get("primary"), str) and _image_model_cfg.get("primary").strip())
+                    or (
+                        isinstance(_image_model_fallbacks, list)
+                        and any(isinstance(ref, str) and ref.strip() for ref in _image_model_fallbacks)
+                    )
+                )
             )
         )
         # STAND DOWN on the image SLOT while the core's own migration still owes
@@ -2522,11 +2566,12 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             def _slot_holds_a_decision(_cfg):
                 """Has the owner put something here the CORE would resolve?
 
-                WIDER than `_has_image_model` on purpose, and the asymmetry is
-                the file's own rule: claiming a slot is recoverable, deleting
-                the row a slot points at is not. So this accepts a bare string
-                too — `hasExplicitToolModelConfig` coerces one — where the
-                upsert's test does not.
+                THE SAME RULE `_has_image_model` now applies, and it was not
+                always: this arm accepted a bare string — the core coerces one —
+                while the upsert read it as an empty slot and overwrote it. That
+                asymmetry was the defect, not the design (TASK-755), and both
+                now answer the core's own question: a non-blank string, or a
+                dict with a non-blank primary or fallback.
 
                 NARROWER than `is not None`, which is what it replaces. That
                 test read `{}`, `{"primary": ""}`, `{"fallbacks": []}` and `[]`

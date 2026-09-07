@@ -174,6 +174,14 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
 }));
 
+// The INSTALLED core decides which of the two image-model homes is written
+// (TASK-755), and on a machine with no core the honest answer is `unknown`,
+// which writes neither. Every case here is about a box that HAS one, so the
+// generation is stated rather than inherited from wherever the suite runs.
+vi.mock("@/lib/openclaw-core-generation", () => ({
+  installedOpenclawCoreGeneration: vi.fn(async () => "v2"),
+}));
+
 vi.mock("@/lib/local-ai-token", () => ({
   // Stable 64-char hex value so tests can assert on shape without depending
   // on filesystem state. Real impl reads/writes data/.local-ai-token.
