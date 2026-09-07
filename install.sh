@@ -9150,7 +9150,19 @@ step_build
 # has_hermes_harness (a no-op on openclaw), needs nothing OpenClaw provides, and
 # is idempotent, so moving it up costs nothing on any other SKU.
 log "Installing Hermes (on the hermes and dual editions)..."
-step_hermes_install
+# NOT BARE. This step answers non-zero now — for an agent it could not make
+# runnable, and for an upgrade that landed off the pin — and errexit is live at
+# this call site (`set -euo pipefail`, line 22, with no EXIT trap armed on the
+# full-install path: the only `trap dispatch_provision_verdict EXIT` is inside
+# the `--step` block, which exits before this line is ever reached). Bare, a
+# fresh hermes or dual box whose Hermes fetch failed — a region block, a network
+# flake, the population this step's guard exists for — would abort the whole
+# installer here, before the services, VNC and the provisioning verdict: no
+# PROVISIONING INCOMPLETE banner and no [provision-status] sentinel, with the
+# marker already invalidated, so the flash host would see no verdict at all.
+# The step prints its own reason; on this path that report is the outcome, and a
+# box that is otherwise fully provisioned is worth more than an aborted install.
+step_hermes_install || echo "  Warning: Hermes is not runnable after this step — install it manually, then re-run install.sh (non-fatal)" >&2
 
 log "Installing and configuring OpenClaw..."
 step_openclaw_setup

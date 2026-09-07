@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +40,14 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = process.cwd();
 const INSTALL_SH_PATH = path.join(REPO, "install.sh");
 const INSTALL_SH = readFileSync(INSTALL_SH_PATH, "utf-8");
+
+/** The call-site cases below start a real bash; skip where there is none. */
+let hasBash = true;
+try {
+  execFileSync("/bin/bash", ["-c", "true"], { stdio: "ignore" });
+} catch {
+  hasBash = false;
+}
 const UPDATER_TS = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
 
 const NL = String.fromCharCode(10);
@@ -1002,5 +1010,65 @@ describe("setup-hermes-edition.sh does not repeat the shim-only check", () => {
     const guard = SETUP_HERMES.split(NL).find((l) => l.includes('[ ! -x "$HERMES_BIN" ]'));
     expect(guard).toBeDefined();
     expect(guard).toContain('[ ! -x "$HERMES_VENV_PYTHON" ]');
+  });
+});
+
+/**
+ * The step answers non-zero now — for an agent it could not make runnable, and
+ * for an upgrade that landed off the pin. That is what `optional_step` reads on
+ * the UPDATE path. On the FULL-INSTALL path there is no wrapper: install.sh
+ * runs under `set -euo pipefail` and the only `trap … EXIT` is armed inside the
+ * `--step` block, which exits long before. A bare call there would abort the
+ * whole installer at that line — before the services, VNC and the provisioning
+ * verdict — so a fresh hermes or dual box whose Hermes fetch failed would leave
+ * the flash host with no PROVISIONING INCOMPLETE banner and no
+ * `[provision-status]` sentinel at all, with the marker already invalidated.
+ */
+describe.skipIf(!hasBash)("its call sites, where errexit is live", () => {
+  /** The one top-level call: column 0, not the definition. */
+  const topLevelCall = INSTALL_SH.split(NL).find(
+    (l) => /^step_hermes_install\b/.test(l) && !l.includes("() {"),
+  );
+
+  it("is guarded on the full-install path", () => {
+    expect(topLevelCall, "the top-level call has moved or vanished").toBeDefined();
+    expect(topLevelCall).toMatch(/^step_hermes_install\s*\|\|/);
+  });
+
+  /** Run one line under install.sh's own shell options with the step failing. */
+  function afterFailedStep(callLine: string): { out: string; code: number } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-hermes-callsite-"));
+    try {
+      const script = path.join(dir, "run.sh");
+      fs.writeFileSync(
+        script,
+        [
+          // install.sh:22, verbatim — the condition that makes this matter.
+          "set -euo pipefail",
+          "step_hermes_install() { echo STEP_FAILED >&2; return 1; }",
+          callLine,
+          // Everything the installer still has to do: the services, VNC, and
+          // the verdict banner the flash host reads.
+          'echo "PROVISIONING VERDICT REACHED"',
+        ].join(NL),
+      );
+      const r = spawnSync("/bin/bash", [script], { encoding: "utf-8", timeout: 20_000 });
+      return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, code: r.status ?? -1 };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("lets the installer reach its verdict when Hermes could not be installed", () => {
+    const r = afterFailedStep(topLevelCall!);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("STEP_FAILED");
+    expect(r.out).toContain("PROVISIONING VERDICT REACHED");
+  });
+
+  it("…which a bare call would not, so the case above is not vacuous", () => {
+    const r = afterFailedStep("step_hermes_install");
+    expect(r.code).not.toBe(0);
+    expect(r.out).not.toContain("PROVISIONING VERDICT REACHED");
   });
 });
