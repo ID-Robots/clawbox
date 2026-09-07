@@ -116,10 +116,11 @@ export interface ApplyClawaiOptions {
    * and that third fact IS the stored token — so a snapshot taken in here, after
    * such a caller has already written it, reads true no matter what the box
    * looked like a moment earlier. The guard then sees before === after and the
-   * reload silently never happens. `/setup-api/hermes/clawai` persists a PASTED
-   * token before it applies it and is the one caller that needs this; the two
-   * others (the configure route and the device-code finaliser) write nothing
-   * first, so they leave it unset and the snapshot below is honest.
+   * reload silently never happens. The two callers that write the token FIRST
+   * pass this — `/setup-api/hermes/clawai` (a pasted token) and
+   * `POST /setup-api/ai-models/configure` on the dual SKU, whose ClawBox AI
+   * batch lands before it tells Hermes; the device-code finaliser writes
+   * nothing first, so it leaves this unset and the snapshot below is honest.
    */
   codingAgentReadyBefore?: boolean;
   /**
@@ -131,9 +132,11 @@ export interface ApplyClawaiOptions {
    * the store if the caller has already written the new token there: the read
    * would answer with the token it is being asked about, `accountChanged` would
    * be false on every real link, and account A's Max choice would be applied to
-   * account B's Pro plan. `/setup-api/hermes/clawai` persists a PASTED token
-   * before it applies it and is the one caller that needs this; the configure
-   * route and the device-code finaliser write nothing first, so they leave it
+   * account B's Pro plan — and `credentialChanged`, which decides whether the
+   * proxy's refusal of the replaced token still applies, would be false with
+   * it. The same two callers that write the token first pass this:
+   * `/setup-api/hermes/clawai` and `POST /setup-api/ai-models/configure` on the
+   * dual SKU; the device-code finaliser writes nothing first, so it leaves this
    * unset and the read below is honest.
    */
   previousClawaiToken?: string;
@@ -199,6 +202,12 @@ export async function applyClawaiToHermes(
   // function samples.
   const previousToken = options.previousClawaiToken?.trim() ?? await getStoredClawaiToken();
   const accountChanged = Boolean(previousToken && previousToken !== trimmed);
+  // The narrower question `accountChanged` does not answer: is the credential
+  // about to be written a DIFFERENT one? It is on a first link too (no previous
+  // token), where `accountChanged` is deliberately false because there are no
+  // previous owner's picks to drop. The refusal mark below is about the
+  // CREDENTIAL, so this is the fact that decides whether it still applies.
+  const credentialChanged = previousToken !== trimmed;
   const storedPicks = await readExplicitModelPicks();
   // Null whenever there is nothing to drop — including when the CALLER has
   // already dropped it, which `/setup-api/hermes/clawai` does in the same write
@@ -367,7 +376,14 @@ export async function applyClawaiToHermes(
     // the safe moment: that mark asserts something WORKED, so losing it early
     // costs nothing; this one asserts something FAILED, so dropping it early
     // costs traffic.
-    if (r.code === 0 && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
+    //
+    // And ONLY when the credential actually changed, which is the same rule
+    // `configureClawboxAi` states on the OpenClaw side: re-pasting the refused
+    // bytes is not a re-link. Without it a tier-pill press — or, since this
+    // function is now called for a ClawBox AI save on the dual SKU, any such
+    // save — would retire the stand-down both boot scripts read, and the box
+    // would re-arm the image path against a token the proxy has refused.
+    if (r.code === 0 && credentialChanged && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
       await forgetClawaiCredentialRefusal();
     }
     // `unset` of an absent key is a no-op; only a failing `set` is fatal.

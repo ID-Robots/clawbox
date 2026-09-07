@@ -8,9 +8,11 @@ import { testEnv } from "@/tests/helpers/env";
 /**
  * The Hermes side of the ClawBox AI credential stand-down (TASK-727).
  *
- * When the proxy REFUSES this box's credential, ClawBox records the fact once
- * (`clawai_credential_refused_at` in the device store) and stands the image
- * path down, because there is no back-off anywhere downstream: the plugin
+ * When the proxy REFUSES this box's credential, ClawBox records the fact
+ * (`clawai_credential_refused_at` in the device store — refreshed on every
+ * refusal, never write-once, so the stamp always belongs to the credential the
+ * box holds now) and stands the image path down, because there is no back-off
+ * anywhere downstream: the plugin
  * spends refused calls for as long as the box is switched on — 6,554 in twelve
  * hours from one box. `gateway-pre-start.sh` has read that record since the fix
  * landed; this script never did, and it is the one that puts the image backend
@@ -151,6 +153,22 @@ d("the ClawAI image backend is not re-armed over a refused credential", () => {
     const res = run();
 
     expect(res.status).toBe(0);
+    expect((readConfig().image_gen as Record<string, unknown>).provider).toBe("clawai");
+  });
+
+  it("says so out loud when the store cannot be READ, and still leaves the box alone", () => {
+    // Absent and unreadable collapse to the same answer on purpose — the
+    // sibling gate in gateway-pre-start.sh does the same, and this script runs
+    // as clawbox where that one runs as root, so a root-owned config.json lands
+    // here — but they are not the same event. Silence would let the log print
+    // "re-armed image_gen.provider" as though all five conditions had been
+    // weighed.
+    fs.mkdirSync(path.join(root, "data", "config.json"), { recursive: true });
+
+    const res = run();
+
+    expect(res.status).toBe(0);
+    expect(`${res.stdout}${res.stderr}`).toMatch(/could not read the device store/);
     expect((readConfig().image_gen as Record<string, unknown>).provider).toBe("clawai");
   });
 

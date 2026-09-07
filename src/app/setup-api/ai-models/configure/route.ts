@@ -3157,6 +3157,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // Set when the dual arm below has already told Hermes — and with it, done
     // every refresh this route would otherwise ask for.
     let appliedToHermes = false;
+    // What the owner is told when that arm did NOT land. The apply is a
+    // sequence of independent `hermes config set` calls that throws on the
+    // first failing one, so it can stop with Hermes pointed at the clawai
+    // provider and the previous provider's `model.default` still in place —
+    // every turn then fails with "Model not allowed" while this route answers
+    // 200. The save itself did land (OpenClaw is configured, the credential is
+    // on disk), so this is a warning and not an error, but silence over it is
+    // the false-success shape: an outcome reported before it happened.
+    let hermesWarning: string | undefined;
     if (isLocalScope) {
       await setMany({
         local_ai_configured: true,
@@ -3283,6 +3292,8 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             "[ai-models/configure] ClawBox AI is configured for OpenClaw but Hermes did not take it:",
             err instanceof ClawaiApplyError ? err.message : err,
           );
+          hermesWarning =
+            "Saved, but the on-device agent has not taken the credential yet — open Settings → AI Models and save again.";
         }
       }
     }
@@ -3309,7 +3320,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // chat to something the provider list still shows as switched off.
     // Non-fatal — the switch is bookkeeping, the credential write is the save.
     try {
-      await setProviderEnabled(ocProvider, true);
+      // It ANSWERS rather than throwing when the provider list has no such row
+      // (`readProviderStatus` on Hermes asks the dashboard, which the apply
+      // above may have just restarted), so the result has to be read or a
+      // provider the owner just connected stays on the disabled list in
+      // silence.
+      const reEnabled = await setProviderEnabled(ocProvider, true);
+      if (!reEnabled.ok) {
+        console.error(`[ai-models/configure] could not re-enable ${ocProvider}: ${reEnabled.kind}`);
+      }
     } catch (err) {
       console.error("[ai-models/configure] could not re-enable the provider:", err instanceof Error ? err.message : err);
     }
@@ -3693,7 +3712,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, gatewayWarning]
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, gatewayWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({

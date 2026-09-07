@@ -330,7 +330,9 @@ export CLAWBOX_IMAGE_PLUGIN_KEY="image_gen/clawai"
 export CLAWBOX_IMAGE_PLUGIN_ENTRY="$HERMES_PLUGINS_DIR/image_gen/clawai/__init__.py"
 # The device store, for the ONE thing the re-arm below has to ask it: has the
 # proxy refused this box's ClawBox AI credential? The stand-down is written on
-# BOTH editions (`recordClawaiCredentialRefusal`) and, until now, read only by
+# BOTH editions (`persistClawaiCredentialRefusal`, and
+# `noteClawaiCredentialRefused` for the once-per-window arming) and, until now,
+# read only by
 # the OpenClaw boot script — so on Hermes the image backend was armed again on
 # the next boot that repaired the plugin list, and the agent went back to
 # spending refused calls (6,554 in twelve hours from one box, TASK-727).
@@ -841,6 +843,13 @@ def clawai_credential_refused():
     does not decay — a TTL here would re-arm a path the proxy still refuses,
     which is the storm the stand-down exists to end.
 
+    An absent store and a store that CANNOT BE READ collapse to the same answer
+    on purpose (the sibling script does the same, and this one runs as clawbox
+    where that one runs as root, so a root-owned `data/config.json` lands
+    here), but they are not the same event: the unreadable one is said out
+    loud, or the log would report "re-armed image_gen.provider" as though all
+    five conditions had been weighed.
+
     `except Exception` and it has to be that broad: this runs inside the big
     heredoc, and anything that escapes takes the whole MCP registration with
     it.
@@ -859,7 +868,13 @@ def clawai_credential_refused():
         if isinstance(at, bool) or not isinstance(at, (int, float)):
             return False
         return math.isfinite(at) and at > 0
+    except FileNotFoundError:
+        # Nothing has ever been recorded on this box. Genuinely absent.
+        return False
     except Exception:
+        print("[register-mcp] WARNING: could not read the device store at "
+              f"{store_path}; treating the ClawBox AI credential as not refused.",
+              file=sys.stderr)
         return False
 
 
@@ -892,8 +907,9 @@ if repaired_enabled and image_plugin and image_plugin in (names or []):
     #      house: re-arming over it puts back, unattended, exactly the path the
     #      refusal took away, and there is no back-off downstream — the plugin
     #      spends refused calls for as long as the box is switched on. Cleared
-    #      by every path that writes a new credential, so a re-link re-arms on
-    #      the next boot without anyone doing anything.
+    #      by every path that writes a DIFFERENT credential — and only those, so
+    #      a re-paste of the refused bytes is not a re-link — which means a real
+    #      re-link re-arms on the next boot without anyone doing anything.
     elif clawai_credential_refused():
         print("[register-mcp] the ClawBox AI credential was refused; leaving "
               "image_gen.provider unset until a new one is linked")

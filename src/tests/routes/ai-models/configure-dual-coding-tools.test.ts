@@ -339,7 +339,7 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
           const after = (await mockGetCodingAgentStatus()).ready;
           await refreshCodingAgentToolsIfReadinessChanged(options.codingAgentReadyBefore, after);
         }
-        return { provider: "clawai", model: "deepseek-v4-flash", tier: "free", explicitPickKept: false };
+        return { provider: "clawai", model: "deepseek-v4-flash", tier: "flash", explicitPickKept: false };
       },
     );
 
@@ -517,6 +517,35 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     // earned.
     expect(applyClawaiToHermesMock).toHaveBeenCalledTimes(1);
     expect(mockReloadMcpServers).toHaveBeenCalledTimes(1);
+    // And the owner is TOLD. The apply is a sequence of independent
+    // `hermes config set` calls that throws on the first failing one, so it can
+    // stop with Hermes pointed at the clawai provider and the previous
+    // provider's model still named — every turn then fails while this route
+    // answers 200. Saying nothing here is the false-success shape; the journal
+    // line is not a surface the owner has.
+    expect((await res.json()).warning).toMatch(/on-device agent has not taken the credential/);
+  });
+
+  it("does not ask for a reload when the route's own backstop probe throws too", async () => {
+    // Both probes gone: the apply failed and the route's own post-write read of
+    // `getCodingAgentStatus` throws as well. A reload respawns every MCP child
+    // and invalidates the model's prompt cache, so an UNKNOWN verdict must not
+    // buy one — and the save still has to be reported as landed.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    applyClawaiToHermesMock.mockImplementation(async () => {
+      throw new Error("hermes did not take it");
+    });
+    // Ready BEFORE (the route's own snapshot, taken ahead of the write), then
+    // unreadable afterwards.
+    mockGetCodingAgentStatus
+      .mockImplementationOnce(readyFromStore)
+      .mockRejectedValue(new Error("cannot read the store"));
+
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+
+    expect(res.status).toBe(200);
+    expect(store.clawai_token).toBe(CLAWAI_TOKEN);
+    expect(mockReloadMcpServers).not.toHaveBeenCalled();
   });
 
   /*

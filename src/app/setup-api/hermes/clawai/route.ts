@@ -182,8 +182,12 @@ export async function POST(request: Request) {
     });
     // A refusal the proxy gave the token being replaced is about that token,
     // not this one. Dropped here as well as in `applyClawaiToHermes`, because a
-    // paste that never reaches the apply still changed the credential.
-    await forgetClawaiCredentialRefusal();
+    // paste that never reaches the apply still changed the credential — and
+    // under the same condition the apply uses, because a re-paste of the very
+    // bytes the proxy refused replaces nothing: the mark is about the
+    // CREDENTIAL, and retiring it here would re-arm the boot scripts' image
+    // path against a token that is still dead.
+    if (previousClawaiToken !== suppliedToken) await forgetClawaiCredentialRefusal();
   }
 
   const token = suppliedToken || (await readToken());
