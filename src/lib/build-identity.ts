@@ -23,6 +23,12 @@ import { promisify } from "util";
 import { readFile, stat } from "fs/promises";
 import path from "path";
 import { isSafeBranch } from "./update-branch";
+import {
+  DRIFT_ACTION_REALIGN,
+  DRIFT_ACTION_REBUILD,
+  DRIFT_ACTION_REBUILD_FROM_CHECKOUT,
+  type DriftCode,
+} from "./drift-codes";
 
 const execFile = promisify(execFileCb);
 
@@ -78,6 +84,18 @@ export type DriftState = "match" | "drift" | "unknown";
 export interface DriftReport {
   /** Is the served build reproducible from the code on disk? */
   buildVsCheckout: DriftState;
+  /**
+   * The build-versus-checkout comparison ALONE, before an uncommitted change
+   * is folded into it.
+   *
+   * `buildVsCheckout` is deliberately downgraded to "drift" by a dirty tree —
+   * right for the banner, which asks "can this box be trusted to be running
+   * its own code?" — and that makes it unusable for the different question
+   * "is the deployed build the commit on disk?". A completed update has to ask
+   * the second one about its own build warnings: a stray untracked file would
+   * otherwise keep a build warning the rebuild HAS resolved alive for ever.
+   */
+  buildIsCheckout: DriftState;
   /** Is the code on disk the tested commit the fleet is pinned to? */
   checkoutVsPin: DriftState;
   /** True when either comparison came back "drift". Drives the UI banner and the updater warning. */
@@ -91,14 +109,7 @@ export interface DriftReport {
   codes: DriftCode[];
 }
 
-export type DriftCode =
-  | "build-from-other-commit"
-  | "build-info-not-for-deployed-assets"
-  | "build-predates-checkout"
-  | "build-unstamped"
-  | "checkout-dirty"
-  | "checkout-behind-pin"
-  | "no-pin";
+export type { DriftCode } from "./drift-codes";
 
 export interface DriftInputs {
   build: BuildInfo | null;
@@ -156,7 +167,7 @@ export function computeDrift(input: DriftInputs): DriftReport {
       buildVsCheckout = "drift";
       codes.push("build-from-other-commit");
       reasons.push(
-        `This box is running a build made from ${short(build.commit)} but the code on disk is ${short(checkout.commit)} — run Update to realign.`,
+        `This box is running a build made from ${short(build.commit)} but the code on disk is ${short(checkout.commit)}${DRIFT_ACTION_REALIGN}`,
       );
     }
   } else if (!build?.commit) {
@@ -164,7 +175,7 @@ export function computeDrift(input: DriftInputs): DriftReport {
       buildVsCheckout = "drift";
       codes.push("build-unstamped");
       reasons.push(
-        "The deployed build carries no build record, so it was made before the code now on disk — run Update to rebuild from this checkout.",
+        `The deployed build carries no build record, so it was made before the code now on disk${DRIFT_ACTION_REBUILD_FROM_CHECKOUT}`,
       );
     } else if (
       buildTimestampMs !== null
@@ -174,10 +185,13 @@ export function computeDrift(input: DriftInputs): DriftReport {
       buildVsCheckout = "drift";
       codes.push("build-predates-checkout");
       reasons.push(
-        "The code on disk is newer than the deployed build — run Update to rebuild.",
+        `The code on disk is newer than the deployed build${DRIFT_ACTION_REBUILD}`,
       );
     }
   }
+
+  // Recorded before the override below, which answers a different question.
+  const buildIsCheckout: DriftState = buildVsCheckout;
 
   // A dirty tree is drift on an appliance: an untracked file under src/app/ is
   // a route the next build would serve and this one does not. Reported
@@ -214,6 +228,7 @@ export function computeDrift(input: DriftInputs): DriftReport {
 
   return {
     buildVsCheckout,
+    buildIsCheckout,
     checkoutVsPin,
     detected: buildVsCheckout === "drift" || checkoutVsPin === "drift",
     reasons,

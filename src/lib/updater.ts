@@ -40,7 +40,15 @@ const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
 // to be able to name it without pulling this file's Node built-ins in with it.
 export { INTERRUPTED_MESSAGE } from "./update-constants";
 import { INTERRUPTED_MESSAGE } from "./update-constants";
-import { collectBuildIdentity, resolveBuildDir } from "./build-identity";
+import { collectBuildIdentity, resolveBuildDir, type DriftReport } from "./build-identity";
+export { DRIFT_RESOLVED_CODE } from "./drift-codes";
+import {
+  driftFact,
+  DRIFT_RESOLVED_CODE,
+  isBuildAxisCode,
+  isDriftCode,
+  type DriftCode,
+} from "./drift-codes";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
 import {
@@ -941,21 +949,191 @@ export async function repinUpdateBranch(
  * The condition this exists for: a device serving assets built from one commit
  * while its source tree sits on another. Two features 404'd on such a box for
  * a fortnight and nothing anywhere said why. Returns one warning per problem,
- * and an empty list for a healthy box.
+ * and an empty list for a healthy box — and for a box it could not read, since
+ * a diagnosis must never be what fails an update. A caller that has to tell
+ * "no drift" from "could not look" takes `measureDrift` below instead.
  */
 export async function collectDriftWarnings(
   projectDir: string = PROJECT_DIR,
 ): Promise<UpdateWarning[]> {
+  const measured = await measureDrift(projectDir);
+  return measured ? driftWarnings(measured.drift) : [];
+}
+
+/** The report's own `codes`/`reasons`, paired, as update warnings. */
+function driftWarnings(drift: DriftReport): UpdateWarning[] {
+  return drift.codes
+    .map((code, i) => ({ code: code as string, message: drift.reasons[i] as string | undefined }))
+    .filter((w): w is UpdateWarning => !!w.message);
+}
+
+/**
+ * What a fresh drift measurement says, keeping the facts a warning list drops.
+ *
+ * `codes` alone cannot answer "is this condition GONE?", because
+ * `collectBuildIdentity` never throws: every reader inside it swallows its own
+ * failure, so a `git rev-parse origin/<branch>` that timed out arrives as
+ * `checkoutVsPin: "unknown"` with NO code — indistinguishable, in a flattened
+ * list, from a box measured to be on its tested commit. Retiring a warning on
+ * that is the false-success class over the very warning that says the box is
+ * broken, so the tri-state travels with the codes and every retirement below
+ * needs a POSITIVE verdict.
+ */
+export interface DriftMeasurement {
+  drift: DriftReport;
+  /** `.update-branch` carries a usable branch — the exact negation of `no-pin`. */
+  pinned: boolean;
+  /** `null` when `git status` could not be read, which is not "clean". */
+  dirty: boolean | null;
+}
+
+/**
+ * The drift diagnosis, or null when the read itself threw.
+ *
+ * Same reader as the status route and the About panel (`collectBuildIdentity`
+ * — disk sha, BUILD_ID and the pin), so this adds no probe of its own.
+ */
+async function measureDrift(
+  projectDir: string = PROJECT_DIR,
+): Promise<DriftMeasurement | null> {
   try {
-    const { drift } = await collectBuildIdentity(projectDir);
-    return drift.codes
-      .map((code, i) => ({ code: code as string, message: drift.reasons[i] as string | undefined }))
-      .filter((w): w is UpdateWarning => !!w.message);
+    const identity = await collectBuildIdentity(projectDir);
+    return { drift: identity.drift, pinned: identity.pin.pinned, dirty: identity.checkout.dirty };
   } catch (err) {
-    // Never fail an update because the diagnosis failed.
-    console.warn("[Updater] Could not read build identity before sync:", err);
-    return [];
+    // Documented never to happen — kept because a diagnosis must never be what
+    // fails an update, and because "we could not look" must never read as "it
+    // is fixed".
+    console.warn("[Updater] Could not read build identity:", err);
+    return null;
   }
+}
+
+/**
+ * Has this condition been measured GONE? Never "no code was emitted".
+ *
+ * Each code is answered by the fact that raised it, on the axis it belongs to:
+ * an axis that came back `"unknown"` retires nothing.
+ */
+function measuredResolved(code: DriftCode, measured: DriftMeasurement): boolean {
+  switch (code) {
+    case "checkout-dirty":
+      return measured.dirty === false;
+    case "no-pin":
+      return measured.pinned;
+    case "checkout-behind-pin":
+      return measured.drift.checkoutVsPin === "match";
+    case "build-from-other-commit":
+    case "build-info-not-for-deployed-assets":
+    case "build-predates-checkout":
+    case "build-unstamped":
+      // The comparison ALONE, never the aggregate `buildVsCheckout`: that one
+      // is downgraded to "drift" by an uncommitted change, so a stray
+      // untracked file after `post_update` would keep a build warning the
+      // rebuild HAS resolved alive for ever — and it is promoted OUT of
+      // "unknown" by the same override, which would retire one the comparison
+      // never made. The four codes resolve together because they are
+      // alternatives for one condition, which `buildIsCheckout` answers.
+      return measured.drift.buildIsCheckout === "match";
+    default: {
+      // A code added to DRIFT_CODES without a rule here fails to typecheck, and
+      // at runtime keeps its warning: a condition nobody answered is not one
+      // this run resolved.
+      const unanswered: never = code;
+      void unanswered;
+      return false;
+    }
+  }
+}
+
+function resolvedDriftMessage(observed: UpdateWarning[], anyDriftLeft: boolean): string {
+  const facts = observed.map((w) => driftFact(w.message)).join(" ");
+  return anyDriftLeft
+    ? `When this update started: ${facts} That much the update resolved.`
+    : `When this update started: ${facts} The update resolved that — nothing further is needed.`;
+}
+
+/**
+ * What a FINISHED run should say about the drift it was diagnosed with.
+ *
+ * The diagnosis is deliberately taken before step 1 and kept across the reboot
+ * (see `captureDriftBaseline`) — that part stays: a box 71 commits behind its
+ * own pin must not update in silence. What was missing is the other end. The
+ * warnings describe a tree the run has since moved, and they were still being
+ * shown, present tense, beside `phase: "completed"`: measured on the OpenClaw
+ * box on 2026-09-07, an owner whose update had just put the box on the tested
+ * commit was told "run Update to realign" by it.
+ *
+ * Pure, so every combination is testable without a device: `previous` is what
+ * the run collected, `measured` is the box as it is NOW — or `null` when the
+ * read threw, in which case nothing is retired.
+ *
+ * A code stays live unless it was MEASURED gone, and then carries the sentence
+ * from that measurement rather than the pre-run one. What was resolved is kept
+ * as one past-tense line quoting what the box actually looked like, minus the
+ * call to action — the shas survive, so a support engineer can still tell a box
+ * one commit behind from one 71 behind.
+ *
+ * One-directional on purpose: codes the fresh sample raises that the run never
+ * saw are NOT added here — the status route and the About panel already read
+ * live drift off an idle box, and a completion is not the place to invent a new
+ * warning.
+ */
+export function reconcileDriftWarnings(
+  previous: UpdateWarning[],
+  measured: DriftMeasurement | null,
+): UpdateWarning[] {
+  if (measured === null) return previous;
+  if (!hasDriftWarning(previous)) return previous;
+
+  const measuredNow = driftWarnings(measured.drift);
+  const live = new Map(measuredNow.map((w) => [w.code, w]));
+  // The build codes are alternatives for one condition, so a box still drifted
+  // under a DIFFERENT one of them is described by the sentence measured now —
+  // otherwise a migration between them would keep the pre-run text on screen.
+  const liveBuildAxis = measuredNow.find((w) => isBuildAxisCode(w.code));
+  const resolved: UpdateWarning[] = [];
+  const next: UpdateWarning[] = [];
+  const emitted = new Set<string>();
+
+  for (const warning of previous) {
+    if (!isDriftCode(warning.code)) {
+      next.push(warning);
+      continue;
+    }
+    if (measuredResolved(warning.code, measured)) {
+      resolved.push(warning);
+      continue;
+    }
+    // Still drifted, or the axis could not be read: keep it. The freshly
+    // measured sentence when there is one, the captured one otherwise — the
+    // last thing the box could actually be seen to say.
+    const substitute = live.get(warning.code)
+      ?? (isBuildAxisCode(warning.code) ? liveBuildAxis : undefined);
+    // A warning list restored from a box that predates this fix can carry two
+    // build codes: it was written from two samples. They are one condition, so
+    // once the measurement has spoken for that axis a second warning about it
+    // can only be the superseded one — dropped, rather than shown beside the
+    // sentence that replaced it or doubling its code in a list the codes key.
+    if (isBuildAxisCode(warning.code) && liveBuildAxis && emitted.has(liveBuildAxis.code)) {
+      continue;
+    }
+    const current = substitute && !emitted.has(substitute.code) ? substitute : warning;
+    emitted.add(current.code);
+    next.push(current);
+  }
+
+  if (resolved.length > 0) {
+    next.push({
+      code: DRIFT_RESOLVED_CODE,
+      message: resolvedDriftMessage(resolved, next.some((w) => isDriftCode(w.code))),
+    });
+  }
+  return next;
+}
+
+/** Is there anything here for a finished run to re-measure? */
+function hasDriftWarning(warnings: UpdateWarning[]): boolean {
+  return warnings.some((w) => isDriftCode(w.code));
 }
 
 /**
@@ -973,10 +1151,12 @@ export async function collectDriftWarnings(
  * (hwtest-round1, 2026-08-24).
  *
  * So the diagnosis is taken here, first, and persisted immediately — the run
- * reboots halfway through and only persisted warnings survive it. The step-7
- * collection stays as a second sample; `warnUpdate` de-duplicates by code, so
- * the FIRST observation — this one, the customer's actual state — is the one
- * that reaches the log.
+ * reboots halfway through and only persisted warnings survive it. It is now
+ * the ONLY sample taken during the run: the step-7 one described the sync
+ * rather than the box, and mixing the two under `warnUpdate`'s first-wins
+ * de-duplication is what put two contradictory sentences in front of an owner
+ * (TASK-757). A run that FINISHES re-measures once, at the end, where the
+ * answer is about the box as it then is.
  */
 async function captureDriftBaseline(): Promise<void> {
   for (const w of await collectDriftWarnings()) warnUpdate(w.code, w.message);
@@ -1075,11 +1255,18 @@ async function updateClawBoxAndReboot(): Promise<void> {
 
   console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream}, resolved from: ${source})`);
 
-  // WARN + AUTO-REPIN, in that order. The WARN is a SECOND sample — the one
-  // that carries the diagnosis was taken by captureDriftBaseline() before step
-  // 1 moved the tree, and warnUpdate keeps the first observation of each code.
-  // Neither step can stop the update.
-  for (const w of await collectDriftWarnings()) warnUpdate(w.code, w.message);
+  // AUTO-REPIN. The drift WARN that used to sit here was a SECOND sample, and
+  // it is gone: step 1 has already moved the tree by now, so every code it
+  // could still raise describes the sync rather than the box the owner has —
+  // `build-from-other-commit` fires on EVERY run here, the build being the old
+  // one until the rebuild replaces it. `warnUpdate` de-duplicates by code with
+  // the first observation winning, so its only effect was to add those to a
+  // list captured before step 1, and the owner was handed two present-tense
+  // sentences disagreeing about which sha was the code on disk (measured on
+  // the OpenClaw box, 2026-09-07). The baseline is the diagnosis, and a run
+  // that finishes re-measures; one sample each, at the two moments that mean
+  // something. Neither step can stop the update.
+  //
   // Only pin what the device can prove about itself — see repinUpdateBranch.
   for (const w of await repinUpdateBranch(local, PROJECT_DIR, source)) warnUpdate(w.code, w.message);
   await persistWarnings();
@@ -3939,6 +4126,28 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         break;
       }
     }
+  }
+
+  // The drift diagnosis was taken before step 1 and carried across the reboot,
+  // so on a run that WORKED it now describes a tree that no longer exists —
+  // and it was reaching the owner as a live instruction to update a box the
+  // update had just realigned. Re-measure and retire what this run resolved;
+  // anything the box is still drifted by stays, restated from the measurement
+  // taken now. A run that FAILED realigned nothing, so it keeps every warning
+  // exactly as captured — that is the state the owner has to act on.
+  //
+  // BEFORE the phase is published, and this order is load-bearing: the status
+  // route answers with this very object for any non-idle phase, and the panel
+  // stops polling on the first answer that is not `running`. A poll landing
+  // between a `completed` written here and this measurement — several git
+  // shell-outs, up to their 15 s timeout — would latch the pre-run warnings on
+  // the completion card until the owner reloaded the page, which is the exact
+  // defect this fix is for.
+  //
+  // Measured only when there IS a drift warning to settle, so a healthy box
+  // does not pay a git shell-out at the end of every run.
+  if (!failed && hasDriftWarning(state.warnings ?? [])) {
+    state.warnings = reconcileDriftWarnings(state.warnings ?? [], await measureDrift());
   }
 
   state.currentStepIndex = -1;

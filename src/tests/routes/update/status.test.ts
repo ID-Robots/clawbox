@@ -42,6 +42,7 @@ const mockIsInterruptedVerdict = vi.mocked(isInterruptedVerdict);
  */
 const NO_DRIFT = {
   buildVsCheckout: "match" as const,
+  buildIsCheckout: "match" as const,
   checkoutVsPin: "match" as const,
   detected: false,
   reasons: [],
@@ -50,6 +51,7 @@ const NO_DRIFT = {
 
 const DRIFTED = {
   buildVsCheckout: "drift" as const,
+  buildIsCheckout: "drift" as const,
   checkoutVsPin: "drift" as const,
   detected: true,
   reasons: ["This box is running a build made from 1dc29ef but the code on disk is d285cfd — run Update to realign."],
