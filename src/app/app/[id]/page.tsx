@@ -5,7 +5,7 @@ import { useParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
-import { fetchHarness } from "@/lib/client-harness";
+import { resolveHarnessProbe } from "@/lib/harness-probe";
 import { customWallpaperId, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import {
   brandingHarness,
@@ -326,16 +326,28 @@ export default function StandaloneAppPage() {
   const appearance = useAppearance(id === "settings", wallpaperHarness);
 
   useEffect(() => {
-    let alive = true;
+    const probe = new AbortController();
     // "unknown" rather than a guess: this route is reachable directly (a
     // bookmark, "Open in new tab"), so falling back to "openclaw" rendered the
     // whole OpenClaw App Store on a Hermes box whenever the probe failed.
-    void fetchHarness().then((d) => {
-      if (!alive) return;
-      setHarness(d?.active || "unknown");
-      setWallpaperHarness(brandingHarness(d));
+    //
+    // Through the SHARED probe, which asks again when the device could not name
+    // its harness — `install.sh` rewrites the edition lock on every update and
+    // the browser reloads right after it, so a page that mounted inside that
+    // window used to wear the wrong product for the life of the tab. The
+    // desktop has always retried; this is the same helper, not a second copy.
+    void resolveHarnessProbe({
+      signal: probe.signal,
+      // Every attempt, including one that answered nothing: this page shows its
+      // own "unknown" at once — which hides BOTH harnesses' apps, the same
+      // fail-closed answer as before — rather than sitting on "Loading…" for
+      // the whole retry budget. A later, settled answer replaces it.
+      onAnswer: (d) => {
+        setHarness(d?.active || "unknown");
+        setWallpaperHarness(brandingHarness(d));
+      },
     });
-    return () => { alive = false; };
+    return () => { probe.abort(); };
   }, []);
 
   // `/app/settings?section=…` opens Settings on that section. There is no

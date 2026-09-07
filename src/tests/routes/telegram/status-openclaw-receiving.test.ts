@@ -21,7 +21,22 @@
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+// `getActiveHarnessSource` answers from the same mock this suite drives, so the
+// routes' one resolution says what these cases set. The single-read contract
+// itself is pinned in harness-edition-read-once / harness-status, not here.
+vi.mock("@/lib/harness", () => {
+  const getActiveHarness = vi.fn();
+  return {
+    getActiveHarness,
+    getEdition: () => "openclaw",
+    getActiveHarnessSource: async () => ({
+      active: await getActiveHarness(),
+      defaulted: false,
+      edition: "openclaw",
+      locked: true,
+    }),
+  };
+});
 vi.mock("@/lib/openclaw-channels", () => ({ readCachedChannelStatus: vi.fn() }));
 vi.mock("@/lib/telegram-bot-identity", () => ({ readActiveTelegramBot: vi.fn() }));
 vi.mock("@/lib/hermes-telegram", () => ({

@@ -93,7 +93,15 @@ export function fetchHarness(options?: {
     .then((r) => (r.ok ? r.json() : null))
     .then((d: unknown) => {
       const data = (d ?? {}) as { active?: unknown; edition?: unknown; activeKnown?: unknown };
-      if (typeof data.edition === "string") editionCache = data.edition;
+      // NEVER PIN A GUESS. `edition` is cached for the lifetime of the document
+      // on the premise that it cannot change under a live page — true of the
+      // edition itself, false of the ANSWER: while `install.sh` rewrites the
+      // root-owned lock the route answers `{edition:"openclaw", activeKnown:false}`
+      // for any box, and a page that mounted in that window wore the wrong
+      // product until it was reloaded (the OpenClaw provider picker on a Hermes
+      // box). An answer the device did not stand behind is served once and
+      // asked again next time.
+      if (typeof data.edition === "string" && data.activeKnown === true) editionCache = data.edition;
       if (typeof data.active === "string") {
         activeCache = { value: data.active, at: Date.now() };
         // Cached beside `active`, not beside `edition`: it certifies THAT
@@ -113,7 +121,12 @@ export function fetchHarness(options?: {
       if (inFlight === request) inFlight = null;
     });
 
-  if (!options?.force) inFlight = request;
+  // A SIGNALLED request is never the shared one. `inFlight` is handed to every
+  // concurrent caller, and one caller's abort rejects the fetch for all of them
+  // — a chat window closing used to make the desktop's and the AI panel's
+  // probes answer null. The signal still cancels the request its own caller
+  // made.
+  if (!options?.force && !options?.signal) inFlight = request;
   return request;
 }
 

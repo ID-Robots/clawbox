@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getActiveHarness } from "@/lib/harness";
+import { getActiveHarnessSource } from "@/lib/harness";
 import { hermesGatewayStatus, hermesTelegramRegistered } from "@/lib/hermes-telegram";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { readCachedChannelStatus } from "@/lib/openclaw-channels";
@@ -134,10 +134,11 @@ export async function GET() {
     // so a box paired with `hermes config set` — or restored with ~/.hermes
     // intact but no ClawBox config.json — answered `configured: false` and the
     // owner was invited to set up the bot he was already chatting with.
-    const harness = await getActiveHarness();
+    const harnessSource = await getActiveHarnessSource();
+    const harness = harnessSource.active;
 
     if (harness === "hermes") {
-      const { token, known } = await readActiveTelegramBot(harness);
+      const { token, known } = await readActiveTelegramBot(harnessSource);
       // `unknown` carries the third state out instead of collapsing it: a store
       // this box could not read must not render as a box with no bot, which is
       // the false failure the whole module exists to remove. Nothing draws it
@@ -176,7 +177,7 @@ export async function GET() {
     // only a side effect of the configure route. A box paired with `openclaw
     // config set`, or restored with ~/.openclaw intact and a fresh
     // data/config.json, was told to set up the bot it already answers on.
-    const { token, known } = await readActiveTelegramBot(harness);
+    const { token, known } = await readActiveTelegramBot(harnessSource);
     if (!token) return NextResponse.json({ configured: false, unknown: !known });
     // Whether anything is LISTENING, asked of the harness's own answer rather
     // than inferred: `openclaw channels status --json` through the ONE shared

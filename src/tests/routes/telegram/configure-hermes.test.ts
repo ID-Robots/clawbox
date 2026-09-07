@@ -9,7 +9,23 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  */
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn(), set: vi.fn() }));
-vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(), getEdition: vi.fn(() => "hermes") }));
+// `getActiveHarnessSource` answers from the same mock this suite drives, so the
+// routes' one resolution says what these cases set. The single-read contract
+// itself is pinned in harness-edition-read-once / harness-status, not here.
+vi.mock("@/lib/harness", () => {
+  const getActiveHarness = vi.fn();
+  const getEdition = vi.fn(() => "hermes");
+  return {
+    getActiveHarness,
+    getEdition,
+    getActiveHarnessSource: async () => ({
+      active: await getActiveHarness(),
+      defaulted: false,
+      edition: getEdition(),
+      locked: true,
+    }),
+  };
+});
 // The route also refuses the approvals bot's own token; mocked at the reader so
 // this suite does not drag in the email-approval module's config-store surface.
 vi.mock("@/lib/email-approval", () => ({

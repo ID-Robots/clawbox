@@ -4031,16 +4031,85 @@ step_edition_foreign_teardown() {
 # stale hermes lock forever, because this step only ever wrote and never
 # reconciled. All three editions are baked now; "dual" used to return early
 # here, which is why the premium SKU could not be provisioned at all.
+# BOTH RECORDS ARE WRITTEN ATOMICALLY, through the same `install_root_file`
+# every other root-owned file goes through (TASK-584). `> file` is
+# open(O_TRUNC) + write + close, so for the length of the write every reader on
+# the box sees a zero-length or half-written lock — and `readEditionSource()`
+# turns that into `{edition: "openclaw", defaulted: true}`. This step runs on
+# EVERY in-app update, while the middleware, `openclawIsAbsent()`, the updater's
+# own `hasHermesHarness()`, the gateway catch-all and the MCP server are all
+# reading that file: a Hermes box briefly answers as an OpenClaw one, which is
+# how the flagship SKU's gateway-only paths stop 404-ing and the updater skips
+# `--step hermes_edition`. A rename cannot be observed half-done.
 step_edition_lock() {
   install -d -o root -g root -m 0755 /etc/clawbox
-  printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
-    "$CLAWBOX_EDITION" > "$CLAWBOX_EDITION_FILE"
-  chown root:root "$CLAWBOX_EDITION_FILE"
-  chmod 0644 "$CLAWBOX_EDITION_FILE"
+  local _edition_tmp
+  _edition_tmp="$(mktemp)"
+  # The STAGING write is checked too. `install_root_file` copies whatever is in
+  # the temp and answers 0 for a copy that worked, so a `printf` that failed
+  # after writing a prefix — a full /tmp is the ordinary way — would be
+  # published atomically as a TRUNCATED lock, which `readEditionSource()` reads
+  # as `{edition: "openclaw", defaulted: true}`: the exact answer this step
+  # exists to stop the box giving. Errexit is off for this whole function on
+  # the update path, so nothing else would have caught it.
+  if ! printf '# ClawBox edition lock — written by install.sh (step_edition_lock).\n# Root-owned on purpose: this is the authority for the device SKU.\nCLAWBOX_EDITION=%s\n' \
+    "$CLAWBOX_EDITION" > "$_edition_tmp"; then
+    rm -f "$_edition_tmp"
+    echo "  Error: could not stage the edition lock for $CLAWBOX_EDITION_FILE" >&2
+    return 1
+  fi
+  # BOTH RECORDS ARE STAGED BEFORE EITHER IS COMMITTED. They are two files and
+  # no rename can cover both, but staging is where the ordinary failure lives
+  # (a full /tmp, an EIO) — and committing the lock and then failing to stage
+  # the drop-in would leave the two naming DIFFERENT editions until a later
+  # update: readers of the lock and readers of the systemd unit disagreeing
+  # about the SKU, which is the state this step exists to prevent. What is left
+  # after this is a failing rename of the second file, immediately after a
+  # successful copy of it into the same directory; the step answers non-zero,
+  # so the update reports it and the next run rewrites both from the top.
+  # The drop-in's DIRECTORY counts as part of staging it: created after the
+  # lock was committed, a failure here would leave the same split the ordering
+  # above exists to prevent.
+  if ! mkdir -p /etc/systemd/system/clawbox-setup.service.d; then
+    rm -f "$_edition_tmp"
+    echo "  Error: could not create the drop-in directory for $LEGACY_EDITION_DROPIN" >&2
+    return 1
+  fi
+  local _dropin_tmp
+  _dropin_tmp="$(mktemp)"
+  if ! printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" > "$_dropin_tmp"; then
+    rm -f "$_edition_tmp" "$_dropin_tmp"
+    echo "  Error: could not stage the edition drop-in for $LEGACY_EDITION_DROPIN" >&2
+    return 1
+  fi
 
-  mkdir -p /etc/systemd/system/clawbox-setup.service.d
-  printf '[Service]\nEnvironment=CLAWBOX_EDITION=%s\n' "$CLAWBOX_EDITION" \
-    > "$LEGACY_EDITION_DROPIN"
+  # The return value is CHECKED, and it has to be on this step specifically.
+  # `install_root_file` answers 1 when the copy or the rename did not land, and
+  # the update path calls this step from an OR-list — for the whole body of
+  # which bash switches errexit OFF (the same trap `install_root_libexec`
+  # records above). Dropped, a failed write was followed by successful commands,
+  # the function returned the LAST step's status, the non-fatal warning never
+  # printed, and the update reported success over a lock that still names the
+  # previous SKU — with the two records free to disagree.
+  if ! install_root_file "$_edition_tmp" "$CLAWBOX_EDITION_FILE" 0644; then
+    rm -f "$_edition_tmp" "$_dropin_tmp"
+    echo "  Error: could not write the edition lock at $CLAWBOX_EDITION_FILE" >&2
+    return 1
+  fi
+  rm -f "$_edition_tmp"
+
+  if ! install_root_file "$_dropin_tmp" "$LEGACY_EDITION_DROPIN" 0644; then
+    rm -f "$_dropin_tmp"
+    # The lock landed and this one did not, so the two records name different
+    # editions until the next run. Said in those words rather than as a generic
+    # write failure: /etc/clawbox/edition.env is the AUTHORITY (every reader in
+    # src/ and the updater unit take the SKU from it) and this drop-in is the
+    # mirror kept for tooling that still reads it, so the box behaves as the
+    # lock says while an operator reading the unit would be told otherwise.
+    echo "  Error: the edition lock now says $CLAWBOX_EDITION but the drop-in at $LEGACY_EDITION_DROPIN could not be rewritten — the two records disagree until the next update" >&2
+    return 1
+  fi
+  rm -f "$_dropin_tmp"
   systemctl daemon-reload 2>/dev/null || true
 
   step_edition_gateway_state

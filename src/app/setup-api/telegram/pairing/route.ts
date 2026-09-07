@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
-import { getActiveHarness, type Harness } from "@/lib/harness";
+import {
+  getActiveHarness,
+  getActiveHarnessSource,
+  type ActiveHarnessSource,
+  type Harness,
+} from "@/lib/harness";
 import {
   readTelegramAllowFrom,
   listTelegramPairingRequests,
@@ -52,8 +57,13 @@ const APPROVED_NOTICE = "You're approved — send me a message and I'll answer."
  * A plain file read, no CLI: this route is on a 20 s desktop poll, which is why
  * its Hermes paths are deliberately CLI-free.
  */
-async function isConfigured(harness: Harness): Promise<{ configured: boolean; unknown: boolean }> {
-  const { token, known } = await readActiveTelegramBot(harness);
+async function isConfigured(
+  source: ActiveHarnessSource,
+): Promise<{ configured: boolean; unknown: boolean }> {
+  // The resolved source, not the bare harness: the reader takes the edition
+  // from the same read that named the harness, so an update rewriting the lock
+  // between the two cannot make this route answer about the wrong SKU.
+  const { token, known } = await readActiveTelegramBot(source);
   // The third state is carried out rather than collapsed. "This box has no bot"
   // and "we could not read this device's Telegram configuration" have different
   // fixes, and this route's empty answer is what the desktop polls for the
@@ -98,8 +108,9 @@ async function buildApproved(
 // status refresh.
 export async function GET(request: Request) {
   try {
-    const harness = await getActiveHarness();
-    const state = await isConfigured(harness);
+    const harnessSource = await getActiveHarnessSource();
+    const harness = harnessSource.active;
+    const state = await isConfigured(harnessSource);
     // Only a CONFIDENT "this box has no bot" short-circuits. An `unknown` used
     // to take this branch too, and the desktop's 20 s poller reads an empty
     // `pending` as "nothing is waiting" and clears the pairing popup — so an

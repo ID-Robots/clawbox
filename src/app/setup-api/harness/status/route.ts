@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import {
-  getActiveHarness, harnessHealthy, HARNESSES, getEdition, isSingleHarnessEdition, type Harness,
+  getActiveHarnessSource, harnessHealthy, HARNESSES, type Harness,
 } from "@/lib/harness";
 import { readShellScanStatus } from "@/lib/hermes-shell-scan";
 
@@ -11,8 +11,14 @@ import { readShellScanStatus } from "@/lib/hermes-shell-scan";
 // device), whether each harness's local server is up, and — on Hermes — whether
 // the agent is scanning shell commands before it runs them.
 export async function GET() {
-  const active = await getActiveHarness();
-  const locked = isSingleHarnessEdition();
+  // ONE resolution for the whole response, like `/harness/active`: `active`,
+  // `locked` and `edition` are three answers about the same edition, and taken
+  // from separate reads across the awaits below they can be answers about two —
+  // `install.sh` rewrites the lock on every update, and this route is what the
+  // Settings picker draws its badge from. `locked` comes back with them rather
+  // than being re-derived, which also spares a second ed25519 licence verify
+  // per poll.
+  const { active, edition, locked } = await getActiveHarnessSource();
   // On a locked device only the active harness's runtime is installed, so don't
   // probe (or advertise) the other one — just report the single active harness.
   const ids = locked ? [active] : (Object.keys(HARNESSES) as Harness[]);
@@ -28,7 +34,7 @@ export async function GET() {
   const healthById = new Map(health);
   return NextResponse.json({
     active,
-    edition: getEdition(),
+    edition,
     locked,
     shellScan,
     harnesses: ids.map((id) => ({

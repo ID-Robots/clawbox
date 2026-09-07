@@ -56,7 +56,28 @@ describe("client harness cache", () => {
       edition: "openclaw",
       activeKnown: false,
     });
+    // ASKED AGAIN, deliberately. The edition is cached for the lifetime of the
+    // document on the premise that it cannot change under a live page — true of
+    // the edition, false of the ANSWER: while `install.sh` rewrites the
+    // root-owned lock this route answers `openclaw, and that was a guess` for
+    // any box, and a page that pinned it wore the wrong product until it was
+    // reloaded. A guess is served once and asked again.
     expect(await fetchHarness()).toMatchObject({ activeKnown: false });
+    expect(calls).toBe(2);
+  });
+
+  it("stops asking once the device answers for itself", async () => {
+    // The other half: a settled answer IS pinned, so a box that can name
+    // itself pays one request per document, as before.
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls++;
+      return {
+        ok: true,
+        json: async () => ({ active: "hermes", edition: "hermes", activeKnown: true }),
+      } as Response;
+    }));
+    expect(await fetchHarness()).toMatchObject({ activeKnown: true });
+    expect(await fetchHarness()).toMatchObject({ activeKnown: true });
     expect(calls).toBe(1);
   });
 
@@ -65,6 +86,35 @@ describe("client harness cache", () => {
     expect(calls).toBe(1);
     expect(a).toEqual(b);
     expect(b).toEqual(c);
+  });
+
+  it("one caller's abort does not answer null for every other caller", async () => {
+    // Both surfaces that probe the harness pass a signal now (the shared retry
+    // helper aborts its attempts), and `inFlight` is handed to every concurrent
+    // caller — so a signalled request stored there let a closing chat window
+    // reject the desktop's and the standalone page's probes too. Each of those
+    // reads null as "the device did not answer" and stops branding the box,
+    // which is the false failure this guard removes. The signal still cancels
+    // the request its OWN caller made.
+    const answered = { active: "hermes", edition: "hermes", activeKnown: true };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init?: { signal?: AbortSignal }) =>
+          new Promise<Response>((resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+            setTimeout(() => resolve({ ok: true, json: async () => answered } as Response), 5);
+          }),
+      ),
+    );
+
+    const controller = new AbortController();
+    const signalled = fetchHarness({ signal: controller.signal });
+    const bystander = fetchHarness();
+    controller.abort();
+
+    expect(await signalled, "the aborting caller gets its own cancellation").toBeNull();
+    expect(await bystander, "and nobody else pays for it").toEqual(answered);
   });
 
   it("exposes the resolved values synchronously afterwards", async () => {
