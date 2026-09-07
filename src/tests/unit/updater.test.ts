@@ -464,6 +464,93 @@ describe("updater", () => {
       expect(aptStep?.error).toBe("E: Could not get lock /var/lib/dpkg/lock-frontend");
     });
 
+    it("reports THIS attempt's reason, not the one the owner already retried", async () => {
+      // The other half of the same defect: the failure reader tails the same
+      // persistent journal, and a FAILED unit stays loaded, so its tail runs
+      // back through the previous attempt. A retried step killed by its
+      // timeout before install.sh printed an error of its own was reported
+      // with the FIRST attempt's `Error:` line — getStepFailureLine takes the
+      // newest error line in what it is handed, and unbounded that is not
+      // necessarily this run's.
+      //
+      // The mock is the OS: the window this run opened sees only this run.
+      let dispatchedAt = 0;
+      const previousAttempt = "Error: apt-get update failed (exit 100)";
+      const thisAttempt = ["Fetching package lists...", "Killed"].join(String.fromCharCode(10));
+      setupExecFileMock({
+        "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+      const fallback = mockExecFile.getMockImplementation()!;
+      mockExecFile.mockImplementation(((
+        cmd: string,
+        args: string[],
+        optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
+        maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+      ) => {
+        const key = `${cmd} ${args.join(" ")}`;
+        const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
+        const answer = (result: { stdout: string; stderr: string } | Error, delayMs = 0) => {
+          const settle = () => {
+            if (result instanceof Error) callback?.(result, { stdout: "", stderr: "" });
+            else callback?.(null, result);
+          };
+          if (delayMs > 0) setTimeout(settle, delayMs); else settle();
+          const thenable = {
+            then: (
+              resolve: (value: { stdout: string; stderr: string }) => void,
+              reject: (err: Error) => void,
+            ) => {
+              const finish = () => (result instanceof Error ? reject(result) : resolve(result));
+              if (delayMs > 0) setTimeout(finish, delayMs); else finish();
+              return thenable;
+            },
+            catch: () => thenable,
+          };
+          return thenable as unknown as ReturnType<typeof childProcess.execFile>;
+        };
+
+        if (key.includes("clawbox-run-root-step.sh apt_update")) {
+          dispatchedAt = Date.now();
+          return answer(new Error("systemctl failed"), 25);
+        }
+        if (key.includes("journalctl") && key.includes("clawbox-root-update@apt_update.service")) {
+          const since = Number(/--since @([\d.]+)/.exec(key)?.[1] ?? NaN);
+          const bounded = since * 1000 <= dispatchedAt;
+          return answer({
+            stdout: bounded ? thisAttempt : [previousAttempt, thisAttempt].join(String.fromCharCode(10)),
+            stderr: "",
+          });
+        }
+        return (fallback as unknown as (
+          cmd: string,
+          args: string[],
+          optsOrCallback?: unknown,
+          maybeCallback?: unknown,
+        ) => ReturnType<typeof childProcess.execFile>)(cmd, args, optsOrCallback, maybeCallback);
+      }) as unknown as typeof childProcess.execFile);
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        const aptStep = updater.getUpdateState().steps.find((step) => step.id === "apt_update");
+        expect(aptStep?.status).toBe("failed");
+      }, { timeout: 4_000, interval: 25 });
+
+      const aptStep = updater.getUpdateState().steps.find((step) => step.id === "apt_update");
+      expect(aptStep?.error).not.toContain("apt-get update failed (exit 100)");
+      expect(aptStep?.error).toBe("Killed");
+    });
+
     /**
      * 2026-09-05, on the box: the rebuild was OOM-killed and the failed step
      * recorded "clawbox-root-update@rebuild_reboot.service: Consumed 8.523s CPU

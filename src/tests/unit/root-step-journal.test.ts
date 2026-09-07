@@ -4,7 +4,19 @@ import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 vi.mock("child_process", () => ({ execFile: vi.fn() }));
 
-const { mockStartRootStep } = vi.hoisted(() => ({ mockStartRootStep: vi.fn(async () => {}) }));
+const { mockStartRootStep, dispatch } = vi.hoisted(() => {
+  const dispatch = { at: 0 };
+  return {
+    dispatch,
+    // A root step takes a moment to start, as one does on a box: without that
+    // a capture moved BELOW `startRootStep` still lands in the same instant
+    // and the window looks correctly opened when it is not.
+    mockStartRootStep: vi.fn(async () => {
+      dispatch.at = Date.now();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }),
+  };
+});
 vi.mock("@/lib/root-step-runner", () => ({ startRootStep: mockStartRootStep }));
 
 const mockExecFile = vi.mocked(childProcess.execFile);
@@ -57,10 +69,16 @@ describe("rootStepJournalArgs", () => {
  * poll happens before the unit has written anything, so what came back was the
  * PREVIOUS attempt's last line — shown to the owner as this install's live
  * progress, and taken as this install's failure reason.
+ *
+ * Two properties, because the bound has two halves: the read carries a window,
+ * and that window opens BEFORE the step is started. A capture that slid below
+ * `startRootStep` would keep every argv assertion green while reading the
+ * previous attempt again.
  */
 describe("followRootStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    dispatch.at = 0;
     mockExecFile.mockImplementation(((
       cmd: string,
       args: string[],
@@ -73,10 +91,12 @@ describe("followRootStep", () => {
       if (cmd.includes("systemctl")) {
         stdout = "ActiveState=failed\nResult=exit-code\n";
       } else if (cmd.includes("journalctl")) {
-        // The OS, modelled: a bounded read sees only what THIS run wrote —
-        // nothing yet — while an unbounded one still answers with the line the
+        // The OS, modelled: a window opened at or before this dispatch sees
+        // only what THIS run wrote — nothing yet — while an unbounded read, or
+        // one opened after the step started, still answers with the line the
         // last attempt left behind.
-        stdout = args.includes("--since") ? "" : "ERROR: kokoro model download failed";
+        const since = Number(/--since @([\d.]+)/.exec(args.join(" "))?.[1] ?? NaN);
+        stdout = since * 1000 <= dispatch.at ? "" : "ERROR: kokoro model download failed";
       }
       callback?.(null, { stdout, stderr: "" });
       return undefined as unknown as ReturnType<typeof childProcess.execFile>;

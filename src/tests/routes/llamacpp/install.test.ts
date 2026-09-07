@@ -386,6 +386,14 @@ describe("POST /setup-api/llamacpp/install", () => {
     }) as typeof fsp.stat);
 
     const journalReads: string[] = [];
+    // The dispatch takes a moment, as starting a root unit does, so a capture
+    // that slid BELOW `startRootStep` is visible here instead of landing in
+    // the same instant and looking correct.
+    let dispatchedAt = 0;
+    vi.mocked(startRootStep).mockImplementation(async () => {
+      dispatchedAt = Date.now();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
     mockExecFile.mockImplementation(((
       cmd: string,
       args: string[],
@@ -399,7 +407,8 @@ describe("POST /setup-api/llamacpp/install", () => {
         stdout = "ActiveState=failed\nResult=exit-code\n";
       } else if (key.includes("journalctl")) {
         journalReads.push(key);
-        stdout = args.includes("--since")
+        const since = Number(/--since @([\d.]+)/.exec(key)?.[1] ?? NaN);
+        stdout = since * 1000 <= dispatchedAt
           ? ""
           : "Error: yesterday's attempt could not reach huggingface.co\n";
       }
