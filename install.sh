@@ -980,6 +980,12 @@ CUA_BASHRC_FENCE_CLOSE='# <<< ClawBox: cua-driver-rs PATH (collapsed) <<<'
 dedupe_vendor_bashrc_path_blocks() {
   local BASHRC="$1"
   [ -f "$BASHRC" ] || return 0
+  # A symlinked ~/.bashrc — a dotfiles checkout — would be read THROUGH the
+  # link as root and then replaced by the `mv` below with a regular file,
+  # silently breaking the owner's link. Not ours to convert.
+  if [ -L "$BASHRC" ]; then
+    return 0
+  fi
 
   local copies=0
   copies=$(grep -cF "$CUA_BASHRC_MARKER" "$BASHRC" 2>/dev/null) || copies=0
@@ -1024,8 +1030,16 @@ dedupe_vendor_bashrc_path_blocks() {
       { flush(); print }
       END { flush() }
     ' "$BASHRC" > "$tmp"; then
-    # An empty result means the rewrite lost the file; keep what is on disk.
-    if [ -s "$tmp" ]; then
+    # Judge the OUTCOME, never the attempt. The premise of this whole function
+    # is that the writer is a third party ClawBox does not own and cannot pin,
+    # so the shape it appends WILL change — one extra line between the marker
+    # and the export is enough for every block to fall through the transform.
+    # Reporting a collapse off `mv`'s exit code would then rewrite the file
+    # byte-identical and log a success on every update, for ever, with the
+    # bound silently gone. An empty result means the rewrite lost the file.
+    local collapsed=0
+    collapsed=$(grep -cF "$CUA_BASHRC_MARKER" "$tmp" 2>/dev/null) || collapsed=0
+    if [ "$collapsed" -eq 1 ] 2>/dev/null && [ -s "$tmp" ]; then
       chown --reference="$BASHRC" "$tmp" 2>/dev/null \
         || chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp" 2>/dev/null || true
       chmod --reference="$BASHRC" "$tmp" 2>/dev/null || chmod 0644 "$tmp" 2>/dev/null || true
@@ -1036,6 +1050,13 @@ dedupe_vendor_bashrc_path_blocks() {
         echo "  Collapsed $copies duplicate cua-driver-rs PATH blocks in .bashrc to one"
         return 0
       fi
+    else
+      # The live file is left exactly as it is: a copy of itself is not an
+      # improvement, and this line is the only signal anyone gets.
+      rm -f "$tmp"
+      echo "  Warning: .bashrc carries $copies cua-driver-rs PATH blocks and the collapse"
+      echo "           left $collapsed — the vendor's block shape has changed; file untouched"
+      return 0
     fi
   fi
 
@@ -3791,10 +3812,15 @@ step_hermes_edition() {
 
 step_openclaw_install() {
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
-  # Always re-assert the .bashrc PATH stanza before any early-return. The
+  # Re-assert the .bashrc PATH stanza before the early-returns BELOW. The
   # function is idempotent (greps before appending), and skipping it here
   # was the root cause of the recurring `bash: openclaw: command not found`
   # regression in the in-UI terminal after update runs.
+  #
+  # NOT before the Hermes return on the line above — that SKU never reaches
+  # this line. Both the stanza and the `.bashrc` collapse reach a Hermes box
+  # through step_post_update -> step_coding_harness, which is why that chain is
+  # pinned by src/tests/unit/install-bashrc-vendor-path-dedupe.test.ts.
   ensure_clawbox_bashrc_path
 
   # Pinned OpenClaw version comes from config/openclaw-target.txt — ClawBox

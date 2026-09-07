@@ -122,10 +122,10 @@ let bashrc: string;
  * does — through `ensure_clawbox_bashrc_path`, which `step_coding_harness`
  * calls and `step_post_update` reaches on BOTH editions.
  */
-function runBashrcHygiene(): { status: number | null; stderr: string } {
+function runBashrcHygiene(home: string = sandbox): { status: number | null; stdout: string; stderr: string } {
   const script = [
     "set -euo pipefail",
-    `CLAWBOX_HOME=${JSON.stringify(sandbox)}`,
+    `CLAWBOX_HOME=${JSON.stringify(home)}`,
     'CLAWBOX_USER="$(id -un)"',
     "",
     shellConstants(),
@@ -140,7 +140,7 @@ function runBashrcHygiene(): { status: number | null; stderr: string } {
   const runner = path.join(sandbox, "run.sh");
   fs.writeFileSync(runner, script, "utf-8");
   const result = spawnSync("bash", [runner], { encoding: "utf-8", cwd: REPO });
-  return { status: result.status, stderr: result.stderr ?? "" };
+  return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
 const read = () => fs.readFileSync(bashrc, "utf-8");
@@ -265,6 +265,77 @@ d("~/.bashrc keeps ONE vendor PATH block, however often the vendor appends", () 
     expect(fs.statSync(bashrc).mode & 0o777).toBe(0o640);
   });
 
+  it("says so, and changes nothing, when the vendor's block shape has moved", () => {
+    // The premise of the whole function is that the writer is a third party
+    // ClawBox does not own and cannot pin, so its shape WILL change — one extra
+    // line between the marker and the export is enough for every block to fall
+    // through the transform. Reporting the collapse off `mv`'s exit code would
+    // then rewrite the file byte-identical and log a success on every update,
+    // for ever, with the bound silently gone: the false-success class, on the
+    // one path whose stated design assumption is "the vendor will change".
+    const moved = ["", VENDOR_MARKER, "# a line the vendor did not use to write", VENDOR_EXPORT];
+    const before = [
+      "# ~/.bashrc",
+      'export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"',
+      ...moved,
+      ...moved,
+      ...moved,
+      "",
+    ].join("\n");
+    fs.writeFileSync(bashrc, before, "utf-8");
+
+    const run = runBashrcHygiene();
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(read(), "a file the transform could not improve is not replaced").toBe(before);
+    expect(run.stdout).toContain("the vendor's block shape has changed");
+    expect(run.stdout, "and no collapse may be claimed").not.toContain("Collapsed");
+  });
+
+  it("says what it did, with the number it actually removed", () => {
+    fs.writeFileSync(bashrc, bashrcFixture(23), "utf-8");
+
+    const run = runBashrcHygiene();
+
+    expect(run.stdout).toContain("Collapsed 23 duplicate cua-driver-rs PATH blocks");
+  });
+
+  it("leaves a symlinked .bashrc alone rather than replacing the link", () => {
+    // Read THROUGH the link as root and then replaced by the `mv` with a
+    // regular file — a dotfiles checkout would quietly lose its link.
+    const real = path.join(sandbox, "dotfiles-bashrc");
+    fs.writeFileSync(real, bashrcFixture(23), "utf-8");
+    fs.symlinkSync(real, bashrc);
+
+    expect(runBashrcHygiene().status).toBe(0);
+
+    expect(fs.lstatSync(bashrc).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(real, "utf-8")).toBe(bashrcFixture(23));
+  });
+
+  // root ignores the directory mode, so the case cannot be staged there.
+  const asUser = process.getuid?.() === 0 ? it.skip : it;
+  asUser("warns rather than ending the update when the file cannot be replaced", () => {
+    // `--step post_update` runs the step body with errexit ON and the
+    // dispatcher calls the step plainly, so an unguarded failure here would end
+    // the update at this line with none of the steps below it running.
+    const locked = path.join(sandbox, "locked");
+    fs.mkdirSync(locked);
+    const lockedBashrc = path.join(locked, ".bashrc");
+    fs.writeFileSync(lockedBashrc, bashrcFixture(23), "utf-8");
+    const before = fs.readFileSync(lockedBashrc, "utf-8");
+    fs.chmodSync(locked, 0o555); // no new file in the directory: mktemp fails
+
+    try {
+      const run = runBashrcHygiene(locked);
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout).toContain("Warning");
+      expect(fs.readFileSync(lockedBashrc, "utf-8")).toBe(before);
+    } finally {
+      fs.chmodSync(locked, 0o755);
+    }
+  });
+
   it("still writes the ClawBox PATH stanza into a .bashrc that has none", () => {
     // The function's own job must survive the addition.
     fs.writeFileSync(bashrc, "# empty\n", "utf-8");
@@ -286,5 +357,13 @@ d("the collapse reaches an already-shipped box", () => {
 
     const harness = extractShellFunction("step_coding_harness");
     expect(harness).toContain("ensure_clawbox_bashrc_path");
+
+    // The link that makes the claim true for an already-flashed device, and
+    // the one nothing else pins: step_openclaw_install returns on the Hermes
+    // SKU before its own call, and the bottom-of-file call runs on the full
+    // install only. Drop step_coding_harness from this list — it is edited
+    // constantly — and the collapse silently becomes fresh-install-only, which
+    // is the regression the comment above that call says already happened once.
+    expect(extractShellFunction("step_post_update")).toContain("step_coding_harness");
   });
 });
