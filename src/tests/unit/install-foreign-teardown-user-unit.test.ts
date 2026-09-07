@@ -50,6 +50,7 @@ afterEach(() => {
 interface Run {
   status: number;
   stdout: string;
+  stderr: string;
   calls: string[];
 }
 
@@ -88,6 +89,7 @@ function run(edition: string, env: Record<string, string> = {}): Run {
     '  case "$*" in',
     '    "systemctl --user cat"*) [ "${USER_UNIT_PRESENT:-0}" = 1 ] ;;',
     '    "systemctl --user is-active"*) echo "${USER_UNIT_STATE:-active}"; [ "${USER_UNIT_STATE:-active}" = active ] ;;',
+    '    "systemctl --user disable"*) [ "${USER_UNIT_DISABLE_FAILS:-0}" != 1 ] ;;',
     "    *) return 0 ;;",
     "  esac",
     "}",
@@ -102,6 +104,7 @@ function run(edition: string, env: Record<string, string> = {}): Run {
   return {
     status: r.status ?? -1,
     stdout: r.stdout ?? "",
+    stderr: r.stderr ?? "",
     calls: fs.readFileSync(calls, "utf-8").split("\n").filter(Boolean),
   };
 }
@@ -141,6 +144,17 @@ d("step_edition_foreign_teardown and the user-scope hermes gateway", () => {
     const r = run("openclaw", { CLAWBOX_KEEP_FOREIGN_UNITS: "1" });
     expect(r.status).toBe(0);
     expect(r.calls.filter((c) => c.startsWith("sudo"))).toEqual([]);
+  });
+
+  it("never reports a unit the user's manager would not disable as brought down — it names the command instead", () => {
+    // CodeRabbit on #781: a `|| true` here reported the second poller as gone
+    // while it went on polling the bot beside the OpenClaw gateway.
+    const r = run("openclaw", { USER_UNIT_DISABLE_FAILS: "1" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toMatch(/hermes-gateway\.service \(the clawbox user's unit/);
+    expect(r.stdout).not.toMatch(/Brought down/);
+    expect(r.stderr).toMatch(/could not disable the clawbox user's hermes-gateway\.service \(was active=active\)/);
+    expect(r.stderr).toMatch(/sudo -u clawbox XDG_RUNTIME_DIR=\/run\/user\/1000 systemctl --user disable --now hermes-gateway\.service/);
   });
 
   it("reports a unit that was already stopped as such and still disables it", () => {

@@ -3982,9 +3982,18 @@ step_edition_foreign_teardown() {
     if [ -n "$hg_uid" ] && sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" \
         systemctl --user cat hermes-gateway.service >/dev/null 2>&1; then
       hg_state="$(sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" systemctl --user is-active hermes-gateway.service 2>/dev/null || true)"
-      sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" \
-        systemctl --user disable --now hermes-gateway.service >/dev/null 2>&1 || true
-      brought_down+=("hermes-gateway.service (the clawbox user's unit; was active=${hg_state:-unknown})")
+      # Never reported as brought down on faith: a unit the user's manager
+      # would not disable is still the second poller, and the owner has to be
+      # told so with the command that finishes the job (step_validate_services
+      # reports the state too; this is where it is named).
+      if sudo -u "$CLAWBOX_USER" XDG_RUNTIME_DIR="/run/user/$hg_uid" \
+          systemctl --user disable --now hermes-gateway.service >/dev/null 2>&1; then
+        brought_down+=("hermes-gateway.service (the clawbox user's unit; was active=${hg_state:-unknown})")
+      else
+        echo "  Warning: could not disable the clawbox user's hermes-gateway.service (was active=${hg_state:-unknown});" >&2
+        echo "    it goes on polling the Telegram bot beside the OpenClaw gateway until it is stopped:" >&2
+        echo "    sudo -u $CLAWBOX_USER XDG_RUNTIME_DIR=/run/user/$hg_uid systemctl --user disable --now hermes-gateway.service" >&2
+      fi
     fi
   fi
 
