@@ -687,6 +687,18 @@ describe("a taint the gate could not keep fails closed", () => {
     ).toBeUndefined();
   });
 
+  it("scopes the taint to its run even with no run-context surface at all", () => {
+    // A core that hands the plugin no `api.runContext` used to arm the
+    // PROCESS-WIDE window on every web read, so one browsing turn made every
+    // other session and every cron ask for five minutes. The gate now has its
+    // own place to put the mark, so the taint stays with its run.
+    const g = createWebTaintGate({ now: () => 1_000 });
+    g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx());
+    const asked = g.onBeforeToolCall({ toolName: "exec", params: { command: "id" } }, ctx());
+    expect(asked?.requireApproval?.description).toContain("web_fetch");
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx({ runId: OTHER_RUN }))).toBeUndefined();
+  });
+
   it("asks when the turn carries no run identity to scope a taint to", () => {
     const g = gate();
     g.onAfterToolCall({ toolName: "web_fetch", params: {}, result: "…" }, { sessionKey: SESSION });
