@@ -8,6 +8,7 @@
  * away. One prop separates them, so neither host has to re-implement it.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import NewAppWizardCard, { lastRunLabel, lastRunSummary } from "@/components/NewAppWizardCard";
 import { translations } from "@/lib/translations";
@@ -50,6 +51,49 @@ describe("NewAppWizardCard", () => {
     render(<NewAppWizardCard onClose={onClose} closeOnOutsideClick />);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops the Escape at the document, so the chat's own Escape never sees it", () => {
+    // The chat closes on Escape from a WINDOW listener. A guard there on "is
+    // the card open" cannot hold in a browser, which flushes this close between
+    // the two listeners; the key has to stop here (the UI sweep of 2026-09-07).
+    const onClose = vi.fn();
+    const reachedWindow = vi.fn();
+    window.addEventListener("keydown", reachedWindow);
+    try {
+      render(<NewAppWizardCard onClose={onClose} closeOnOutsideClick />);
+      fireEvent.keyDown(document.body, { key: "Escape" });
+    } finally {
+      window.removeEventListener("keydown", reachedWindow);
+    }
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(reachedWindow).not.toHaveBeenCalled();
+  });
+
+  it("hands focus back to what opened it when Escape closes it", async () => {
+    // The card takes focus for itself (the name input's autoFocus) and
+    // unmounts on close; without this a keyboard user landed on <body>, with
+    // the composer and the + button behind Tab from the top of the document.
+    function Host() {
+      const [open, setOpen] = useState(false);
+      return (
+        <div>
+          <button type="button" data-testid="opener" onClick={() => setOpen(true)}>+</button>
+          {open && <NewAppWizardCard onClose={() => setOpen(false)} closeOnOutsideClick />}
+        </div>
+      );
+    }
+    render(<Host />);
+    const opener = screen.getByTestId("opener");
+    opener.focus();
+    fireEvent.click(opener);
+    const name = await screen.findByTestId("coding-agent-new-name");
+    expect(document.activeElement).toBe(name);
+
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    await waitFor(() => expect(screen.queryByTestId("coding-agent-new-name")).toBeNull());
+    expect(document.activeElement).toBe(opener);
   });
 
   it("stops listening once unmounted", () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 
 vi.mock("child_process", () => ({
@@ -77,11 +77,21 @@ vi.mock("@/lib/provider-runnable", () => ({
   readProviderRunnable: vi.fn(async () => new Map<string, string>()),
 }));
 
+// Whether an Ollama-backed local model can chat at all
+// (src/lib/ollama-capabilities.ts). The real module would knock on the box's
+// own port 11434 from the test; its capability-first, name-second rule is
+// pinned in src/tests/unit/ollama-capabilities.test.ts, and the route's part
+// is only to ask and to drop the row on a "no".
+vi.mock("@/lib/ollama-capabilities", () => ({
+  ollamaModelCanChat: vi.fn(async () => true),
+}));
+
 import { getAll } from "@/lib/config-store";
 import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
+import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import { setMany } from "@/lib/config-store";
 import { promisify } from "util";
 
@@ -993,6 +1003,54 @@ describe("/setup-api/chat/model", () => {
     expect((await response.json()).error).toContain("not a chat model");
     expect(runOpenclawConfigSet).not.toHaveBeenCalled();
     expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  // The UI sweep of 2026-09-07: the picker offered "Ollama Local" backed by
+  // qwen3-embedding:0.6b — the retired ollama-hosted embedder the llama.cpp
+  // migration left declared under `models.providers.ollama.models`. A pick
+  // would have pointed the chat at a model that cannot generate. The inference
+  // now refuses that one by name; this is the route's own half — asking about
+  // a `local_ai_model` the store names, or a tag with no "embed" in it.
+  describe("an Ollama model that can only embed", () => {
+    const EMBEDDER = "ollama/qwen3-embedding:0.6b";
+    const localPlaceholder = expect.objectContaining({ id: "__setup_local__", available: false, model: null });
+
+    beforeEach(() => {
+      vi.mocked(getAll).mockResolvedValue({ ai_model_provider: "clawai", local_ai_model: null });
+      vi.mocked(inferConfiguredLocalModel).mockReturnValue({ provider: "ollama", model: EMBEDDER });
+    });
+    afterEach(() => {
+      vi.mocked(ollamaModelCanChat).mockResolvedValue(true);
+    });
+
+    it("is not offered as a chat provider", async () => {
+      vi.mocked(ollamaModelCanChat).mockResolvedValue(false);
+
+      const body = await (await GET()).json();
+
+      // Asked by its bare tag, the name Ollama itself knows it by.
+      expect(ollamaModelCanChat).toHaveBeenCalledWith("qwen3-embedding:0.6b");
+      expect(body.options.map((o: { model: string | null }) => o.model)).not.toContain(EMBEDDER);
+      expect(body.options).toContainEqual(localPlaceholder);
+      expect(body.local).toEqual({ available: false, label: null, model: null });
+    });
+
+    it("stays the local row when the check says it can chat", async () => {
+      vi.mocked(ollamaModelCanChat).mockResolvedValue(true);
+
+      const body = await (await GET()).json();
+
+      expect(body.options).toContainEqual(expect.objectContaining({ model: EMBEDDER, label: "Ollama Local", available: true, isLocal: true }));
+    });
+
+    it("is a question for Ollama models only — a llama.cpp model is never asked", async () => {
+      vi.mocked(inferConfiguredLocalModel).mockReturnValue({ provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" });
+
+      const body = await (await GET()).json();
+
+      expect(ollamaModelCanChat).not.toHaveBeenCalled();
+      expect(body.options).toContainEqual(expect.objectContaining({ model: "llamacpp/gemma4-e2b-it-q4_0", available: true, isLocal: true }));
+    });
   });
 
   describe("the owner's per-provider switch", () => {

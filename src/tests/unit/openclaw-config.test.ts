@@ -775,6 +775,49 @@ describe("openclaw-config", () => {
         model: "llamacpp/gemma4-e2b-it-q4_0",
       });
     });
+
+    // The UI sweep of 2026-09-07: the llama.cpp migration leaves the retired
+    // ollama-hosted embedder declared under `models.providers.ollama.models`,
+    // and the first entry of that list was the box's local model for every
+    // reader — the picker, setup/status, and the fallback writer, which then
+    // put a model that cannot produce a word into the chat's fallbacks.
+    it("does not take an Ollama model that can only embed as the box's local model", () => {
+      const result = openclawConfig.inferConfiguredLocalModel({
+        models: { providers: { ollama: { models: [{ id: "qwen3-embedding:0.6b" }] } } },
+      });
+
+      expect(result).toBeNull();
+    });
+
+    it("takes the first Ollama model that can chat, past an embedder declared ahead of it", () => {
+      const result = openclawConfig.inferConfiguredLocalModel({
+        models: { providers: { ollama: { models: [{ id: "qwen3-embedding:0.6b" }, { id: "qwen2.5:0.5b" }] } } },
+      });
+
+      expect(result).toEqual({ provider: "ollama", model: "ollama/qwen2.5:0.5b" });
+    });
+
+    it("skips an embedder a box has already written into its fallbacks", () => {
+      // Once there, it would otherwise have been found FIRST on every read.
+      const config = {
+        agents: { defaults: { model: { primary: "deepseek/deepseek-chat", fallbacks: ["ollama/qwen3-embedding:0.6b"] } } },
+        models: { providers: { ollama: { models: [{ id: "qwen3-embedding:0.6b" }] } } },
+      };
+
+      expect(openclawConfig.inferConfiguredLocalModel(config)).toBeNull();
+      expect(openclawConfig.inferConfiguredLocalModel({
+        ...config,
+        models: { providers: { ...config.models.providers, llamacpp: { models: [{ id: "gemma4-e2b-it-q4_0" }] } } },
+      })).toEqual({ provider: "llamacpp", model: "llamacpp/gemma4-e2b-it-q4_0" });
+    });
+
+    it("leaves the name rule to Ollama models — a llama.cpp model is never judged by its name", () => {
+      const result = openclawConfig.inferConfiguredLocalModel({
+        models: { providers: { llamacpp: { models: [{ id: "embed-gemma-q4_0" }] } } },
+      });
+
+      expect(result).toEqual({ provider: "llamacpp", model: "llamacpp/embed-gemma-q4_0" });
+    });
   });
 
   describe("ensureLocalAiProxyUrls", () => {

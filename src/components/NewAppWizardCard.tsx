@@ -204,6 +204,14 @@ export default function NewAppWizardCard({
    * common ancestor for exactly that gesture. Escape closes it too, which is
    * the other half of what a popover owes the keyboard.
    */
+  // Where focus was when the card opened, so Escape can put it back. The card
+  // takes focus for itself (the name input's autoFocus) and unmounts on close,
+  // which left a keyboard user on <body> with the composer and the + button
+  // that opened this behind Tab from the top of the document. Read at the
+  // first render, before that autoFocus moves it. A click away needs nothing
+  // here: the click decides where focus goes.
+  const [opener] = useState<Element | null>(() => (typeof document === "undefined" ? null : document.activeElement));
+
   useEffect(() => {
     if (!closeOnOutsideClick || !onClose) return;
     const onPointerDown = (event: PointerEvent) => {
@@ -213,7 +221,16 @@ export default function NewAppWizardCard({
       if (target && !card.contains(target)) onClose();
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      // Stopped here so the chat's own Escape — a window listener — never
+      // sees it. A guard there on "is the card open" cannot hold: the browser
+      // runs a microtask checkpoint between the two listeners, React flushes
+      // this close in it, and the chat's listener is re-registered with the
+      // card already gone before the key reaches the window (the UI sweep of
+      // 2026-09-07: one Escape took the card AND the whole conversation).
+      event.stopPropagation();
+      onClose();
+      if (opener instanceof HTMLElement && opener.isConnected && opener !== document.body) opener.focus();
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("keydown", onKeyDown);
@@ -221,7 +238,7 @@ export default function NewAppWizardCard({
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("keydown", onKeyDown);
     };
-  }, [closeOnOutsideClick, onClose]);
+  }, [closeOnOutsideClick, onClose, opener]);
 
   /**
    * Create: check what the assistant would refuse, compose the one message,
