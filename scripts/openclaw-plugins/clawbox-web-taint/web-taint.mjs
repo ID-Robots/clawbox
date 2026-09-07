@@ -85,22 +85,53 @@ export function isDangerousTool(toolName) {
 const COMMAND_PARAMS = ["command", "cmd", "script", "code", "data", "input"];
 
 /**
- * A single-line, bounded preview of what the call would run.
+ * A single-line preview of what the call would run, within `maxChars`.
  *
- * Without it "Allow once" is a question nobody can answer. Bounded because the
- * Gateway caps `description` at 512 characters and drops the whole scope rather
- * than truncating, and single-line because the card renders the description as
- * flowing text.
+ * Without it "Allow once" is a question nobody can answer. Single-line because
+ * the card renders the description as flowing text; the caller owns the budget,
+ * because the description's own bound is what has to be met.
  */
-function commandPreview(params, maxChars = 180) {
+function commandPreview(params, maxChars) {
   if (!params || typeof params !== "object") return "";
   for (const name of COMMAND_PARAMS) {
     const value = params[name];
     if (typeof value !== "string" || !value.trim()) continue;
-    const flat = value.replace(/\s+/g, " ").trim();
-    return flat.length > maxChars ? `${flat.slice(0, maxChars)}…` : flat;
+    return clamp(value.replace(/\s+/g, " ").trim(), maxChars);
   }
   return "";
+}
+
+/**
+ * The two bounds the Gateway's own schema puts on a plugin approval
+ * (`PLUGIN_APPROVAL_TITLE_MAX_LENGTH` / `..._DESCRIPTION_MAX_LENGTH` in the
+ * pinned core's `src/schema/plugin-approvals.ts`, "part of the public gateway
+ * contract").
+ *
+ * A description over the bound is a SCHEMA VIOLATION, not a truncation: the
+ * `plugin.approval.request` is refused, the core gets no approval id back and
+ * blocks the call with "Plugin approval request failed". That is fail-closed
+ * but it is also a question the owner never sees, so the text is fitted here
+ * rather than hoped to fit — a 4,000-character `curl … | sh` is exactly the
+ * call this gate exists for.
+ */
+const DESCRIPTION_MAX = 512;
+
+/** How much of the command the description shows, budget permitting. */
+const PREVIEW_MAX = 180;
+
+/**
+ * How much of the "what tainted this" list the description shows, and how much
+ * of the tool id asking. Both bounded so the sentence that makes the question
+ * answerable — the reason and the advice — always fits inside
+ * `DESCRIPTION_MAX` and it is the COMMAND that gives way when space is tight.
+ * The core caps a model-facing tool name at 64 characters (`TOOL_NAME_MAX_TOTAL`).
+ */
+const SOURCE_LIST_MAX = 160;
+const TOOL_NAME_SHOWN_MAX = 64;
+
+/** `text` cut to `max` characters, with an ellipsis when anything was cut. */
+function clamp(text, max) {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 /**
@@ -114,18 +145,29 @@ function commandPreview(params, maxChars = 180) {
  *
  * `severity: "critical"` because the wrong answer runs an arbitrary command as
  * the device user.
+ *
+ * @param {{ pluginId: string, toolName: unknown, sources?: readonly string[], params?: unknown }} request
  */
 export function taintApprovalRequest({ pluginId, toolName, sources = [], params }) {
-  const preview = commandPreview(params);
-  const asks = preview ? `${toolName} wants to run: ${preview}` : `${toolName} wants to run a command.`;
   const why = sources.length
-    ? `This turn already read outside content (${sources.join(", ")}).`
+    ? `This turn already read outside content (${clamp(sources.join(", "), SOURCE_LIST_MAX)}).`
     : "This turn's record of what it read could not be kept, so the box cannot show that it read nothing.";
+  const advice =
+    "A web page, a search result or an email can carry instructions the assistant " +
+    "cannot tell apart from yours. Allow only if you asked for this command yourself.";
+  // The reason and the advice are what make the question answerable, so the
+  // COMMAND is what gives way when the budget is tight. The budget is measured
+  // against the sentence WITHOUT the preview but WITH both of its separators
+  // (`: ` and the space before the tail), so `clamp` — which never lengthens
+  // what it is given — cannot take the ending off.
+  const tail = `${why} ${advice}`;
+  const lead = `${clamp(String(toolName), TOOL_NAME_SHOWN_MAX)} wants to run`;
+  const budget = Math.min(PREVIEW_MAX, DESCRIPTION_MAX - `${lead}:  ${tail}`.length);
+  const preview = budget >= 20 ? commandPreview(params, budget) : "";
+  const asks = preview ? `${lead}: ${preview}` : `${lead} a command.`;
   return {
     title: "Shell command in a turn that read the web",
-    description:
-      `${asks} ${why} A web page, a search result or an email can carry instructions ` +
-      "the assistant cannot tell apart from yours. Allow only if you asked for this command yourself.",
+    description: clamp(`${asks} ${tail}`, DESCRIPTION_MAX),
     severity: "critical",
     allowedDecisions: ["allow-once", "deny"],
     pluginId,
