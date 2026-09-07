@@ -228,6 +228,29 @@ fi
 # below, and an update that ran the previous install.sh converges on its next
 # pass. Refusing here instead would turn a full /var into an appliance that
 # cannot update itself out of it.
+#
+# An interrupted restage is put back FIRST, before any of that. mirror_tree swaps
+# the staging directory in with two renames, and a process killed between them —
+# a power cut, an OOM kill, the reboot `rebuild_reboot` performs on purpose —
+# leaves $MIRROR_DIR absent with the only root-established build in
+# $MIRROR_DIR.old. mirror_tree recovers that itself, but only when something asks
+# it to restage, and the dispatch that meets this state is exactly the one whose
+# tree does NOT verify (src/lib/updater.ts resets and cleans the tree as clawbox
+# before it is re-recorded) — the branch below that never calls `--mirror`.
+# Without this the box refuses EVERY root step, including `post_update` and
+# `bootstrap_updater`, the two that would let it finish the update and heal
+# itself, on an appliance with no console.
+#
+# Not a trust decision: both names are root-owned directories under a root-owned
+# /var/lib/clawbox, so this moves bytes root staged and vouched for itself. A
+# recovered copy that is a PREVIOUS build is still checked against the record for
+# the pinned family below, exactly as any other mirror is.
+if [ ! -d "$MIRROR_DIR" ] && [ -d "$MIRROR_DIR.old" ]; then
+  if mv -T "$MIRROR_DIR.old" "$MIRROR_DIR" 2>/dev/null; then
+    echo "clawbox-root-step: recovered $MIRROR_DIR from a restage that was interrupted part way through" >&2
+  fi
+fi
+
 if [ "$tree_matches_record" -eq 1 ]; then
   if ! "$MANIFEST_HELPER" --mirror; then
     echo "clawbox-root-step: WARNING: could not restage $MIRROR_DIR — running the copy already there" >&2

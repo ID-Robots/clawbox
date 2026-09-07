@@ -157,15 +157,24 @@ Nothing strands.
   dispatcher itself on the next dispatch, from a tree that verifies. The refresh
   is idempotent — the same walk over the same bytes — so it is safe to repeat and
   is repeated on **every** dispatch rather than once at install time.
-* An **interrupted swap** is recovered. The swap is two renames, and a kill
-  between them — a power cut, an OOM kill, the reboot `rebuild_reboot` performs
-  — leaves `$MIRROR_DIR` absent with the only root-established build sitting in
-  `$MIRROR_DIR.old`. `mirror_tree` puts it back before it clears its staging
-  area, so a restage that then refuses (the tree stopped matching, which is what
-  an update in flight looks like) leaves the box running the previous build.
-  Without that the next restage deleted the copy and the box refused every root
-  step — including `post_update` and `bootstrap_updater`, the two that would let
+* An **interrupted swap** is recovered, in both places that can meet one. The
+  swap is two renames, and a kill between them — a power cut, an OOM kill, the
+  reboot `rebuild_reboot` performs on purpose — leaves `$MIRROR_DIR` absent with
+  the only root-established build sitting in `$MIRROR_DIR.old`. Without a
+  recovery the next restage DELETED that copy and the box refused every root
+  step, including `post_update` and `bootstrap_updater`, the two that would let
   it finish the update and heal itself.
+
+  `mirror_tree` puts the aside copy back before it clears its staging area, so a
+  restage that then refuses leaves the box on the previous build. That covers
+  every caller of `--mirror`. The **dispatcher** does the same check itself
+  before it decides there is nothing to run, because the dispatch that actually
+  meets this state is the one whose tree does not verify — an update in flight —
+  and that is the branch which never calls `--mirror` at all. Both names are
+  root-owned directories under a root-owned `/var/lib/clawbox`, so neither
+  recovery is a trust decision: it moves bytes root staged and vouched for. A
+  recovered copy from a previous build is still checked against the record for
+  the pinned family, exactly as any other mirror is.
 * A box with no mirror AND a tree that does not verify refuses the step (exit 65)
   and prints the repair, which is the one an operator already knows:
   `sudo bash /home/clawbox/clawbox/install.sh --step systemd_services`.

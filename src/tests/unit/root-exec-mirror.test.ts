@@ -225,6 +225,31 @@ d("the root-owned mirror", () => {
     expect(ran()).toBe(`tree from=${path.join(mirror, "install.sh")} args=--step post_update`);
   });
 
+  it("recovers an interrupted swap on the dispatch path too, where nothing calls --mirror", () => {
+    // The sibling of the case above, and the one that actually strands a box.
+    // The helper only recovers $MIRROR_DIR.old when something asks it to restage
+    // — and the dispatch that meets an interrupted swap is precisely the one
+    // whose tree does NOT verify (an update in flight resets and cleans the tree
+    // before it is re-recorded), which is the branch that never calls `--mirror`
+    // at all. So the dispatcher has to put the copy back itself, before it
+    // decides there is nothing to run. Both directories are root-owned under
+    // root-owned directories, so this moves bytes root already vouched for.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
+    const good = fs.readFileSync(path.join(mirror, "install.sh"), "utf-8");
+
+    fs.renameSync(mirror, `${mirror}.old`);          // killed between the renames
+    fs.writeFileSync(path.join(project, "install.sh"), stubInstall("PAYLOAD"), { mode: 0o755 });
+    fs.rmSync(marker, { force: true });
+
+    const r = sh(`"${dispatcher}" post_update`);
+    expect(r.status, `the box refused every root step: ${r.stderr}`).toBe(0);
+    expect(ran(), "root did not run the recovered mirror").toBe(
+      `tree from=${path.join(mirror, "install.sh")} args=--step post_update`,
+    );
+    expect(fs.readFileSync(path.join(mirror, "install.sh"), "utf-8")).toBe(good);
+  });
+
   it("replaces the previous mirror rather than merging into it", () => {
     // Not probe-once, and not additive: a file dropped from the tree has to
     // disappear from the copy root runs, or root keeps executing code that no
