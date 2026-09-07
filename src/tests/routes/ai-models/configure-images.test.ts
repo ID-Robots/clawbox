@@ -882,6 +882,40 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       expect(callFor("models.providers.openai.models")).toBeDefined();
     });
 
+    it("writes the legacy home on a v1 core whose legacy key is present but empty", async () => {
+      // The stand-down above this is about a migration only OpenClaw 2
+      // performs. On a v1 core that key is not legacy at all — it is the slot's
+      // ONLY home — so standing down over it leaves the box with no image path
+      // while the boot script, whose sibling guard IS generation-gated, writes
+      // it at the next start. Two writers disagreeing about one config is the
+      // thing this card exists to stop.
+      vi.mocked(installedOpenclawCoreGeneration).mockResolvedValue("v1");
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { imageGenerationModel: { primary: "" } } },
+      } as never);
+
+      await connectClawai();
+
+      expect(callFor("agents.defaults.imageGenerationModel")?.[1])
+        .toBe(JSON.stringify({ primary: CLAWBOX_AI_IMAGE_MODEL }));
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+    });
+
+    it("still stands down on a v2 core whose legacy key is present but empty", async () => {
+      // The invariant #761 established, unchanged: on the generation that DOES
+      // have the migration, the key's presence is what matters and its contents
+      // are not read.
+      vi.mocked(installedOpenclawCoreGeneration).mockResolvedValue("v2");
+      mockReadConfig.mockResolvedValue({
+        agents: { defaults: { imageGenerationModel: { primary: "" } } },
+      } as never);
+
+      await connectClawai();
+
+      expect(callFor("agents.defaults.mediaModels.image")).toBeUndefined();
+      expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+    });
+
     it("does not ask the core at all when the slot is already configured", async () => {
       // The probe sits below every early return on purpose: the ordinary save
       // must not pay a file read for a decision it never reaches.

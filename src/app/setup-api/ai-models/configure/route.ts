@@ -1238,9 +1238,9 @@ async function buildClawboxAiImageOps(
     return ops;
   }
   // STAND DOWN while a legacy `agents.defaults.imageGenerationModel` is still
-  // on the box (TASK-743) — the same guard `scripts/gateway-pre-start.sh` now
-  // carries, and this is the half an owner reaches by pressing Save rather than
-  // by rebooting.
+  // on the box (TASK-743) — the same guard `scripts/gateway-pre-start.sh`
+  // carries, gate and all, and this is the half an owner reaches by pressing
+  // Save rather than by rebooting.
   //
   // WHAT IT BUYS, measured against 2026.8.1 rather than assumed: the core's own
   // `migrateFinalLayoutRenames` moves the legacy value into `mediaModels.image`
@@ -1263,7 +1263,17 @@ async function buildClawboxAiImageOps(
   // core's `doctor --fix` over a config it refuses and the save after that
   // writes the slot as usual — EXCEPT on a box whose doctor is itself blocked,
   // which stays refused with this guard and without it.
-  if (defaults != null && Object.hasOwn(defaults, "imageGenerationModel")) {
+  //
+  // AND ONLY ON A v2 CORE (TASK-755). The whole justification above is a
+  // migration that only OpenClaw 2 performs; on a v1 core
+  // `agents.defaults.imageGenerationModel` is not a legacy key at all, it is
+  // the slot's ONLY home, and standing down over it means the box never gets
+  // an image path while the boot script — whose sibling guard is gated
+  // (`_image_move_in_flight = _clawbox_v2 and …`) — writes it at the next
+  // start. Two writers disagreeing about one config is the thing this card
+  // exists to stop, so the generation is asked BEFORE this arm, not after it.
+  const generation = await installedOpenclawCoreGeneration();
+  if (generation === "v2" && defaults != null && Object.hasOwn(defaults, "imageGenerationModel")) {
     console.log(
       "[AI Config] Left the image-generation model alone: a legacy agents.defaults.imageGenerationModel key is still waiting for the core's own migration",
     );
@@ -1278,10 +1288,9 @@ async function buildClawboxAiImageOps(
   // both generations, so the wrong name is `Unrecognized key` and gateway exit
   // 78 — not a key that is quietly ignored.
   //
-  // Asked HERE rather than at the top, so the ordinary save pays nothing for
-  // it: a slot that is already configured, a foreign route and a legacy key
-  // still in flight have all returned already.
-  const generation = await installedOpenclawCoreGeneration();
+  // Asked above rather than at the top, so the ordinary save pays nothing for
+  // it: a slot that is already configured and a foreign route have both
+  // returned already.
   if (generation === "unknown") {
     // The boot script's rule, in the other language: a core that cannot be
     // identified is not a licence to guess, because the state that hides it —
@@ -1383,7 +1392,15 @@ async function configureClawboxAi(
   // OUR ids the box already runs: a bad network moment must not downgrade a
   // box the proxy already upgraded.
   const vision = await resolveVisionModelId({ token: clawboxAiToken });
-  const currentImageModel = snapshot?.agents?.defaults?.imageModel as { primary?: unknown; fallbacks?: unknown } | undefined;
+  // NARROWED, not cast (TASK-755). The slot can hold a bare string — the core
+  // coerces one — and the MOVE arm below spreads this value into a new object,
+  // which over a string would build `{0:"o",1:"p",…}` and hand the gateway
+  // nonsense. The `typeof` here is what keeps that arm unreachable for a
+  // string, and it is stated rather than left two derivations away.
+  const currentImageModelSlot = snapshot?.agents?.defaults?.imageModel;
+  const currentImageModel = typeof currentImageModelSlot === "object" && currentImageModelSlot !== null
+    ? currentImageModelSlot
+    : undefined;
   const currentPrimary = typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
   const currentBareId = currentPrimary.startsWith(`${CLAWBOX_AI_PROVIDER}/`)
     ? currentPrimary.slice(CLAWBOX_AI_PROVIDER.length + 1)
@@ -1438,7 +1455,7 @@ async function configureClawboxAi(
     console.log(`[AI Config] Moving agents.defaults.imageModel ${currentPrimary} -> ${visionRef}`);
     visionOps.push([
       "agents.defaults.imageModel",
-      JSON.stringify({ ...(currentImageModel as object), primary: visionRef }),
+      JSON.stringify({ ...currentImageModel, primary: visionRef }),
       "--json",
     ]);
   } else {

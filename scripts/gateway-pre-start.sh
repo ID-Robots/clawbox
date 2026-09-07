@@ -2554,11 +2554,12 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
             def _slot_holds_a_decision(_cfg):
                 """Has the owner put something here the CORE would resolve?
 
-                WIDER than `_has_image_model` on purpose, and the asymmetry is
-                the file's own rule: claiming a slot is recoverable, deleting
-                the row a slot points at is not. So this accepts a bare string
-                too — `hasExplicitToolModelConfig` coerces one — where the
-                upsert's test does not.
+                THE SAME RULE `_has_image_model` now applies, and it was not
+                always: this arm accepted a bare string — the core coerces one —
+                while the upsert read it as an empty slot and overwrote it. That
+                asymmetry was the defect, not the design (TASK-755), and both
+                now answer the core's own question: a non-blank string, or a
+                dict with a non-blank primary or fallback.
 
                 NARROWER than `is not None`, which is what it replaces. That
                 test read `{}`, `{"primary": ""}`, `{"fallbacks": []}` and `[]`

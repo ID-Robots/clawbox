@@ -1,6 +1,8 @@
 import { readFile } from "fs/promises";
 import path from "path";
 
+import { findOpenclawBin } from "@/lib/openclaw-config";
+
 /**
  * Which generation of the OpenClaw core is INSTALLED on this box.
  *
@@ -26,34 +28,40 @@ const V2_MONTH = 8;
 /**
  * The package.json of the installed core, not `openclaw --version`.
  *
- * The same choice `scripts/gateway-pre-start.sh` makes and for the reason it
- * measured: `openclaw --version` costs ~8 s on a shipped Orin and the manifest
- * read is ~53 ms, and this is asked on the owner's Save path. Resolved from
- * `OPENCLAW_BIN` when it is set (the boot script exports it) and otherwise from
- * the canonical install, deliberately WITHOUT importing `findOpenclawBin`:
- * fifty-nine suites replace `@/lib/openclaw-config` with a hand-written
- * factory, and a helper that resolved to `undefined` under one of them would
- * answer `unknown` for every box.
+ * The same file `scripts/gateway-pre-start.sh` reads first, for the reason it
+ * measured: `openclaw --version` costs ~8 s on a shipped Orin against ~53 ms
+ * for the manifest, and this is asked on the owner's Save path.
+ *
+ * THROUGH `findOpenclawBin()`, and that matters more than the read itself.
+ * `src/lib/memory-shard.ts` already reads THIS file for THIS boundary, and its
+ * own docblock states the invariant: "the two writers read one file and cannot
+ * disagree about the generation". A private path here would have broken it —
+ * `findOpenclawBin` searches the node dir, `$HOME/.npm-global/bin`,
+ * `/usr/local/bin`, `/usr/bin` and every nvm version, so a box whose core is
+ * anywhere but the first of those would be identified by one reader and called
+ * unknown by the other, permanently. Consolidating the three readers of this
+ * one fact — here, `memory-shard.ts`, and `installedOpenclawUsesSqliteAuthStore`
+ * by CLI spawn — is recorded as a follow-up.
  */
 function coreManifestPath(): string {
-  const bin = process.env.OPENCLAW_BIN
-    || path.join(
-      process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox",
-      ".npm-global",
-      "bin",
-      "openclaw",
-    );
+  const bin = process.env.OPENCLAW_BIN || findOpenclawBin();
   return path.join(path.dirname(bin), "..", "lib", "node_modules", "openclaw", "package.json");
 }
 
 /**
- * ANCHORED, like the boot script's manifest read and for the same reason: this
- * is a version FIELD, so the whole string has to be the version. A dev build, a
- * fork or an `npm i -g <git url>` install yields something that is not a date,
- * which says nothing about the generation and must read as `unknown` rather
- * than sail past as v1.
+ * The boot script's own regex (`gateway-pre-start.sh`: `grep -oE
+ * '^20[0-9]{2}\.[0-9]+\.[0-9]+'`), anchored at the START only and deliberately
+ * so: a prerelease core is `2026.8.1-dev.3`, and the two writers have to put
+ * that box in the same generation or one of them writes a key the other's
+ * gateway refuses. Something that does not BEGIN with a date says nothing about
+ * the generation and reads as `unknown`.
+ *
+ * ONE SOURCE, unlike the boot script, which falls back to a bounded `openclaw
+ * --version` when the manifest cannot be read. That fallback costs ~8 s and
+ * this is the Save path, so an unreadable manifest here means neither home is
+ * written and the boot script claims the slot at the next start instead.
  */
-const CORE_VERSION_RE = /^(20\d{2})\.(\d+)\.(\d+)$/;
+const CORE_VERSION_RE = /^(20\d{2})\.(\d+)\.(\d+)/;
 
 /** Never throws: an unreadable manifest is `unknown`, which is an answer. */
 export async function installedOpenclawCoreGeneration(): Promise<OpenclawCoreGeneration> {

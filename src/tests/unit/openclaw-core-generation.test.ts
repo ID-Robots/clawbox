@@ -1,9 +1,17 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { findOpenclawBin } from "@/lib/openclaw-config";
 import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
+
+// Only the resolver, so the real module's own reading of the manifest is what
+// is under test here.
+vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
+  findOpenclawBin: vi.fn(() => "/nonexistent/bin/openclaw"),
+}));
 
 /**
  * TASK-755. Which home the image-model slot is written to depends on this
@@ -52,15 +60,28 @@ describe("which OpenClaw core generation is installed", () => {
   });
 
   it.each([
-    ["a dev build", "2026.8.1-dev.3"],
+    ["a prerelease", "2026.8.1-dev.3", "v2"],
+    ["a v1 prerelease", "2026.7.1-rc.1", "v1"],
+  ])("puts %s in the same generation the boot script does", async (_label, version, expected) => {
+    // The boot script reads the same field with `grep -oE
+    // '^20[0-9]{2}\.[0-9]+\.[0-9]+'` — anchored at the START only. Measured:
+    // it calls `2026.8.1-dev.3` v2. If this reader called it unknown, the boot
+    // script would write `mediaModels.image` on that box and this route would
+    // write nothing, which is the writer disagreement this card exists to close.
+    installCore(version);
+
+    await expect(installedOpenclawCoreGeneration()).resolves.toBe(expected);
+  });
+
+  it.each([
     ["a git install", "0.0.0-development"],
+    ["a version that does not begin with a date", "v2026.8.1"],
     ["not a string", 20268],
     ["absent", undefined],
   ])("answers unknown for %s rather than guessing a generation", async (_label, version) => {
-    // ANCHORED, like the boot script's manifest read: this is a version FIELD,
-    // so the whole string has to be the version. A build whose version is not a
-    // date says nothing about which config homes it accepts, and guessing v1
-    // there would write a key a v2 gateway refuses outright.
+    // A build whose version does not BEGIN with a date says nothing about which
+    // config homes it accepts, and guessing v1 there would write a key a v2
+    // gateway refuses outright.
     installCore(version);
 
     await expect(installedOpenclawCoreGeneration()).resolves.toBe("unknown");
@@ -74,6 +95,19 @@ describe("which OpenClaw core generation is installed", () => {
     installCore(" 2026.8.1 ");
 
     return expect(installedOpenclawCoreGeneration()).resolves.toBe("v2");
+  });
+
+  it("finds the core through findOpenclawBin when nothing overrides it", async () => {
+    // THE BRANCH EVERY BOX TAKES. Nothing sets `OPENCLAW_BIN` in the web
+    // server's unit, so this is the production path and it was the one with no
+    // case: a typo in the join would answer `unknown` on every box and leave
+    // the suite green. `findOpenclawBin` is the same resolver `memory-shard.ts`
+    // uses to read this very file, which is what stops the two disagreeing.
+    delete process.env.OPENCLAW_BIN;
+    installCore("2026.8.1");
+    vi.mocked(findOpenclawBin).mockReturnValue(path.join(root, "bin", "openclaw"));
+
+    await expect(installedOpenclawCoreGeneration()).resolves.toBe("v2");
   });
 
   it("answers unknown, not a throw, when there is no core at all", async () => {
@@ -91,9 +125,9 @@ describe("which OpenClaw core generation is installed", () => {
   });
 
   it("reads the manifest beside the binary, not a fixed path", async () => {
-    // `OPENCLAW_BIN` is what `scripts/gateway-pre-start.sh` exports and what an
-    // installer override sets; a hard-coded path would answer about a different
-    // core than the one that will parse what this box writes.
+    // `OPENCLAW_BIN` is an installer or operator override; a hard-coded path
+    // would answer about a different core than the one that will parse what
+    // this box writes.
     installCore("2026.7.1");
     const other = mkdtempSync(path.join(tmpdir(), "clawbox-core-gen-other-"));
     try {
