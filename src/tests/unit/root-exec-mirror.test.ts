@@ -167,6 +167,33 @@ d("the root-owned mirror", () => {
     expect(mirrored.some((f) => f.includes("__pycache__"))).toBe(false);
   });
 
+  it("refuses to install a copy the tree changed under it", () => {
+    // The window the post-copy check closes, and the reason the mirror is not
+    // simply "cp the tree": `--verify` is asked about $PROJECT_DIR and the
+    // answer is stale the instant it returns. The staging directory appearing
+    // under a world-readable /var/lib/clawbox is itself the starting gun — a
+    // poller that renames a payload over install.sh once it sees
+    // $MIRROR_DIR.new lands those bytes in the root-owned copy the dispatcher
+    // then execs for three NOPASSWD-startable steps.
+    //
+    // Simulated the way the sibling suite simulates the same race: the copy is
+    // let through and the RECORD is what disagrees with it, which is the
+    // identical mismatch a mid-copy swap produces.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${helper}" --mirror`).status, "the healthy stage failed").toBe(0);
+    const before = fs.readFileSync(path.join(mirror, "install.sh"), "utf-8");
+
+    fs.writeFileSync(path.join(project, "install.sh"), stubInstall("PAYLOAD"), { mode: 0o755 });
+    const r = sh(`"${helper}" --mirror`);
+    expect(r.status, "a tree that no longer matches the record was mirrored anyway").not.toBe(0);
+    expect(r.stderr).toMatch(/changed while it was being mirrored/);
+    // The PREVIOUS mirror is left standing — a previous root-established build
+    // is the right answer, and refusing outright would strand the box.
+    expect(fs.readFileSync(path.join(mirror, "install.sh"), "utf-8")).toBe(before);
+    // ...and nothing half-built is left where the dispatcher could find it.
+    expect(fs.existsSync(`${mirror}.new`), "staging litter survived the refusal").toBe(false);
+  });
+
   it("replaces the previous mirror rather than merging into it", () => {
     // Not probe-once, and not additive: a file dropped from the tree has to
     // disappear from the copy root runs, or root keeps executing code that no
@@ -184,6 +211,22 @@ d("the root-owned mirror", () => {
     const r = sh(`"${helper}" --mirror-path`);
     expect(r.status).toBe(0);
     expect(r.stdout.trim()).toBe(mirror);
+  });
+
+  it("is the same path in every file that names it", () => {
+    // Three separately installed root-owned files carry it as a literal — the
+    // helper, the dispatcher, and install.sh's bootstrap block, which runs
+    // before its own constants are parsed. Same reason SELFTEST_TOKEN is
+    // repeated, same pin.
+    const literal = (file: string, re: RegExp) => {
+      const m = re.exec(fs.readFileSync(path.join(REPO, file), "utf-8"));
+      if (!m) throw new Error(`mirror path not found in ${file}`);
+      return m[1];
+    };
+    const fromHelper = literal("config/clawbox-root-manifest.sh", /^MIRROR_DIR="([^"]+)"/m);
+    expect(fromHelper).toBe("/var/lib/clawbox/root-exec-mirror");
+    expect(literal("config/clawbox-root-step.sh", /^MIRROR_DIR="([^"]+)"/m)).toBe(fromHelper);
+    expect(literal("install.sh", /\[ "\$_self" = "([^"]+)" \]/)).toBe(fromHelper);
   });
 });
 
@@ -269,6 +312,61 @@ d("clawbox-root-step.sh — the exempt family", () => {
     const r = sh(`"${dispatcher}" post_update`);
     expect(r.status, "a stub verifier let an exempt step through").toBe(65);
     expect(ran()).toBe("");
+  });
+});
+
+d("install.sh::root_exec_may_anchor — who may re-record what root runs", () => {
+  /** Lift one function out of install.sh, so the gate under test is the real one. */
+  function shellFn(name: string): string {
+    const text = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
+    const start = text.indexOf(`${name}() {`);
+    if (start < 0) throw new Error(`${name} not found in install.sh`);
+    const end = text.indexOf("\n}", start);
+    if (end < 0) throw new Error(`${name} has no closing brace`);
+    return text.slice(start, end + 2);
+  }
+
+  /** Whether the tree still matches the record is set up by each test. */
+  function anchor(opts: { fromTree: boolean; resynced: boolean }) {
+    return sh([
+      "set -uo pipefail",
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      `SRC_DIR=${JSON.stringify(opts.fromTree ? project : mirror)}`,
+      `ROOT_EXEC_TREE_RESYNCED=${opts.resynced ? 1 : 0}`,
+      `ROOT_EXEC_MANIFEST_HELPER=${JSON.stringify(helper)}`,
+      shellFn("root_exec_may_anchor"),
+      'if root_exec_may_anchor; then echo ANCHOR-ALLOWED; else echo ANCHOR-REFUSED; fi',
+    ].join("\n")).stdout.trim();
+  }
+
+  it("refuses to re-anchor on a tree nobody can vouch for", () => {
+    // THE gate. install.sh running out of the root-owned mirror is the shape
+    // every dispatched step has, and `post_update` -> step_systemd_services ->
+    // install_root_libexec is web-startable: without this, a foothold rewrites
+    // the tree, starts post_update, and root records AND MIRRORS its file —
+    // TASK-733 restored through the back door.
+    sh(`"${helper}" --write`);
+    fs.writeFileSync(path.join(project, "install.sh"), stubInstall("PAYLOAD"), { mode: 0o755 });
+    expect(anchor({ fromTree: false, resynced: false })).toBe("ANCHOR-REFUSED");
+  });
+
+  it("allows it when this run put the code there itself", () => {
+    sh(`"${helper}" --write`);
+    fs.writeFileSync(path.join(project, "install.sh"), stubInstall("PAYLOAD"), { mode: 0o755 });
+    expect(anchor({ fromTree: false, resynced: true })).toBe("ANCHOR-ALLOWED");
+  });
+
+  it("allows it when install.sh is itself running out of the tree", () => {
+    // An operator's `sudo bash install.sh`, the flash host, the one-time
+    // transition: root already execs that tree, so recording it grants nothing.
+    sh(`"${helper}" --write`);
+    fs.writeFileSync(path.join(project, "install.sh"), stubInstall("PAYLOAD"), { mode: 0o755 });
+    expect(anchor({ fromTree: true, resynced: false })).toBe("ANCHOR-ALLOWED");
+  });
+
+  it("allows a no-op re-record over a tree that still matches", () => {
+    sh(`"${helper}" --write`);
+    expect(anchor({ fromTree: false, resynced: false })).toBe("ANCHOR-ALLOWED");
   });
 });
 

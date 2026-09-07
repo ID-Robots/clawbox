@@ -240,7 +240,10 @@ function runBootstrap(opts: {
 
   const block = shipped(
     "      _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh",
-    'bash "$_b/install.sh" "$@"',
+    // $_self, not $_b: the block re-execs the copy root HOLDS (the root-owned
+    // mirror on a dispatched step, the tree everywhere else), never the
+    // clawbox-writable checkout it just reset. TASK-733.
+    'bash "$_self/install.sh" "$@"',
     { helper, project, inclusive: true },
   );
 
@@ -250,6 +253,11 @@ function runBootstrap(opts: {
     // 8 blocks, and no core file: the copy below is killed part way through.
     ...(opts.stagingFails === "truncates" ? ["ulimit -c 0", "ulimit -f 8"] : []),
     `_b=${JSON.stringify(project)}`,
+    // install.sh read out of the checkout it is refreshing — the operator and
+    // flash-host shape, and the one this block's re-exec has always had. The
+    // dispatched shape ($_self = the root-owned mirror) is covered in
+    // root-exec-mirror.test.ts. TASK-733.
+    `_self=${JSON.stringify(project)}`,
     block,
     // Never reached: the block above ends in `exec`.
     'echo "MARKER=exec-did-not-happen"',

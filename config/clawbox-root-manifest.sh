@@ -263,6 +263,9 @@ verify_file() {
 # operator, and immediately after its own `git reset --hard` to the update
 # branch). Adding a third caller is a privilege decision.
 mirror_tree() {
+  # The record is what the staged copy is checked against below, so there is
+  # nothing to stage without one.
+  [ -f "$MANIFEST_FILE" ] || die "no manifest at $MANIFEST_FILE"
   cd "$PROJECT_DIR" || die "$PROJECT_DIR is missing" 66
 
   # Deterministic modes regardless of the caller's umask: the dispatcher execs
@@ -272,15 +275,24 @@ mirror_tree() {
 
   local staging="$MIRROR_DIR.new" previous="$MIRROR_DIR.old" parent f mode
   parent="$(dirname "$MIRROR_DIR")"
-  rm -rf "$staging" "$previous" || die "cannot clear the mirror staging area" 66
-  # Created, never re-moded. /var/lib/clawbox is shared — the sudoers quarantine
-  # and staging dirs, clawbox-power-mode's clock snapshot, the first-boot VNC
-  # marker all live in it — and install.sh's own comment on SUDOERS_STAGING_DIR
-  # says why nothing may narrow it: a 0700 parent stops every non-root reader
-  # from traversing to its own file.
   if [ ! -d "$parent" ]; then
     install -d -o root -g root -m 0755 "$parent" || die "cannot create $parent" 66
   fi
+
+  # ONE restage at a time, fleet-wide-fixed names and all.
+  #
+  # Concurrent dispatches are ordinary here: the updater fires steps while the
+  # UI can start `restart_ap` or `vnc_refresh`, and every dispatch restages.
+  # Without this, one instance's opening `rm -rf` destroys the other's half-built
+  # staging directory — and worse, B's `rm -rf "$previous"` can delete the
+  # directory A moved aside a microsecond earlier, so A's failed rename finds
+  # nothing to put back and $MIRROR_DIR is left ABSENT. Every root step then
+  # exits 65 until a dispatch whose tree verifies rebuilds it. The lock is what
+  # makes the fixed names below safe.
+  exec 9>"$MIRROR_DIR.lock" || die "cannot open the mirror lock" 66
+  flock -w 120 9 || die "another root step is restaging $MIRROR_DIR" 66
+
+  rm -rf "$staging" "$previous" || die "cannot clear the mirror staging area" 66
   install -d -o root -g root -m 0755 "$staging" || die "cannot create $staging" 66
 
   # ONE walk, for the same reason write_manifest takes one: the names that are
@@ -299,6 +311,34 @@ mirror_tree() {
     install -o root -g root -D -m "$mode" "$f" "$staging/$f" \
       || die "cannot mirror $f" 66
   done
+
+  # CHECK THE COPY, and only then let anything run it.
+  #
+  # Without this the mirror is a copy of the tree at COPY time, not of the tree
+  # the caller's `--verify` vouched for a moment earlier — and $PROJECT_DIR
+  # belongs to the unprivileged account the whole boundary is about. The walk
+  # above is byte-sorted, so `config/*` lands before `install.sh` and `scripts/*`
+  # after it, and the staging directory appearing under a 0755 /var/lib/clawbox
+  # is itself the starting gun: a poller that renames a payload over
+  # $PROJECT_DIR/install.sh once it sees $MIRROR_DIR.new gets those bytes into
+  # the root-owned copy the dispatcher then execs for three NOPASSWD-startable
+  # steps. Reproduced against this function before the check existed.
+  #
+  # `sha256sum -c` over the STAGED tree answers it in one pass, because the
+  # manifest's paths are relative and the mirror has the same layout — the same
+  # property --verify-file gives for one file, applied to all of them. A file
+  # ADDED under a covered path is not an error here for the same reason it is
+  # not in verify_manifest: root only ever runs files install.sh names, and every
+  # one of those is recorded.
+  #
+  # On a mismatch the staging is thrown away and the PREVIOUS mirror is left
+  # standing. That is not a stranding path: the dispatcher already treats a
+  # failed restage as "run the copy already there", which is a previous
+  # root-established build.
+  if ! ( cd "$staging" && sha256sum --status --strict -c "$MANIFEST_FILE" ); then
+    rm -rf "$staging"
+    die "$PROJECT_DIR changed while it was being mirrored — refusing to install a copy root did not vouch for"
+  fi
 
   # Swap whole directories rather than copying over the live one. A copy in
   # place is visible half-finished, and the thing reading it is root about to

@@ -148,10 +148,14 @@ if ! contains "$step" "$ALLOWED_STEPS"; then
   exit 64
 fi
 
-if [ ! -f "$TREE_ENTRYPOINT" ]; then
-  echo "clawbox-root-step: $TREE_ENTRYPOINT is missing" >&2
-  exit 66
-fi
+# There is deliberately NO check that $TREE_ENTRYPOINT exists.
+#
+# It used to be a hard exit 66, from when this script exec'd it. Root does not
+# read it any more — it is only quoted in the repair hints below — and keeping
+# the check would leave a box whose install.sh was lost (a power cut mid-checkout,
+# a botched manual restore) unable to run `git_pull` or `bootstrap_updater` to
+# restore itself, even though the mirror holds an install.sh whose step_git_pull
+# would re-clone. The mirror exists to remove root's dependence on that tree.
 
 # The verifier has to work before ANY step, not just the pinned ones.
 #
@@ -228,6 +232,15 @@ if [ "$tree_matches_record" -eq 1 ]; then
   if ! "$MANIFEST_HELPER" --mirror; then
     echo "clawbox-root-step: WARNING: could not restage $MIRROR_DIR — running the copy already there" >&2
   fi
+elif [ -f "$ENTRYPOINT" ]; then
+  # SAID, not inferred from silence. Running the previous build's install.sh —
+  # and the previous build's units, sudoers and scripts with it — is the right
+  # answer here, but a box can sit in this state for a whole update while the
+  # updater reports success, so the journal has to carry the reason. The two
+  # ordinary causes are an update in flight (src/lib/updater.ts hard-resets and
+  # cleans the tree as clawbox before rebuild_reboot, and scripts/force-update.sh
+  # does the same by hand) and a tree something rewrote.
+  echo "clawbox-root-step: $PROJECT_DIR does not match the root-exec manifest — running the mirror staged $(date -u -r "$ENTRYPOINT" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo 'at an unknown time')" >&2
 fi
 
 if [ ! -f "$ENTRYPOINT" ]; then

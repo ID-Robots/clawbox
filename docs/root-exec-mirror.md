@@ -57,13 +57,32 @@ moment and mirrors on the next dispatch; a tree that changed because something
 rewrote `install.sh` matches nothing, is never copied, and root runs the previous
 root-established build. Both answers are "run the mirror".
 
+The copy itself is then **checked before it is installed**. `--verify` answers a
+question about `$PROJECT_DIR` and the answer is stale the instant it returns, so
+`mirror_tree` builds a staging directory and runs `sha256sum -c` over it against
+the record before the swap — the property `--verify-file` gave for one file,
+applied to all of them. Without it the mirror held the tree as it was during the
+*copy*: the walk is byte-sorted, so `config/*` lands before `install.sh`, and the
+staging directory appearing under a world-readable `/var/lib/clawbox` is itself
+the starting gun for a poller. A mismatch throws the staging away and leaves the
+previous mirror standing. One restage runs at a time (`flock`), because
+concurrent dispatches are ordinary and two of them sharing fixed staging names
+could between them leave `$MIRROR_DIR` absent.
+
+`install.sh`'s own self-update bootstrap still runs on a dispatched step: it
+finds the checkout at `/home/clawbox/clawbox` rather than beside itself, and
+re-execs the **mirror** copy it restages from the tree it just reset — never the
+tree. Keying that block on "is there a `.git` next to me" would have switched the
+whole thing off for every dispatched step, and with it the fleet's ability to
+deliver a fix to the updater *in* the update that carries it.
+
 `git` over the checkout stopped running as root at the same time, because it is
 the same class of hole by another route: `fetch` honours `remote.<name>.uploadpack`
 and `url.*.insteadOf`, `checkout` runs `.git/hooks/post-checkout`, and any
 checkout runs `filter.*.smudge` — all named by `.git/config` or by files under
 `.git/hooks`, inside the clawbox-writable tree and deliberately outside the
 record. `install.sh` now runs git as whoever owns the checkout
-(`set_git_runner_for_tree`), which is what `scripts/force-update.sh` has always
+(`use_tree_owner_for_git`), which is what `scripts/force-update.sh` has always
 done.
 
 ## Rollout ordering — read this before shipping
@@ -118,6 +137,18 @@ Nothing strands.
 * A box with no mirror AND a tree that does not verify refuses the step (exit 65)
   and prints the repair, which is the one an operator already knows:
   `sudo bash /home/clawbox/clawbox/install.sh --step systemd_services`.
+* A box **rolled back** to a build from before this change converges too: the
+  older helper has no `--mirror` verb and says so (exit 64 is "I do not know that
+  word"), `write_root_exec_manifest` treats that as "nothing to stage" rather
+  than a failure — asking the helper with `--mirror-path` rather than reading an
+  exit status — and `post_update` reinstalls a coherent helper, dispatcher and
+  mirror. Reporting it as a provisioning failure would be a false failure over a
+  rollback that is fine.
+* A dispatch that lands while the tree does not verify runs the previous build's
+  mirror and **says so** in the journal, with the time that copy was staged. It
+  is the right answer — an update in flight is exactly this state — but a box can
+  sit in it for a whole update while the updater reports success, so it is
+  recorded rather than inferred from silence.
 * If `install_root_libexec` cannot write the manifest or the mirror, it leaves
   whatever dispatcher is already installed, records `root_exec_manifest` against
   the run's verdict, and the update finishes. A box that could not take the new
@@ -152,12 +183,30 @@ root `bash` target.
   refuses (exit 65) rather than running anything. A retry, not a root exec.
 * **Paths deliberately left on the tree.** `install.sh` still names
   `$PROJECT_DIR/scripts/...` where it `chmod`s or `chown`s the tree copy, where a
-  `User=clawbox` unit's `ExecStart` points at it (`start-vnc.sh`), where a script
-  is run unprivileged (`ensure-local-embeddings.sh`, `apply-desktop-theme.sh` —
-  which is chowned to `clawbox`, so mirroring it would make the mirror writable),
-  and in `step_vnc_install`'s migration of the old first-boot unit, which has to
-  recognise the tree path in order to rewrite it. None of those is root executing
-  a file the account can rewrite.
+  `User=clawbox` unit's `ExecStart` points at it (`start-vnc.sh` and
+  `launch-browser.sh` — `clawbox-browser.service` runs the tree copy, so the
+  `chmod +x` on it is load-bearing), where a script is run unprivileged
+  (`ensure-local-embeddings.sh`, `apply-desktop-theme.sh` — which is chowned to
+  `clawbox`, so mirroring it would make the mirror writable), and in
+  `step_vnc_install`'s migration of the old first-boot unit, which has to
+  recognise the tree path in order to rewrite it. `clawbox-tts.sh` is named
+  twice on purpose: the tree path is what gets REGISTERED with the harness (the
+  mirror is torn down and rebuilt on every dispatch, so a provider pointing into
+  it would find nothing mid-restage) while the timeout probe root executes reads
+  the mirror. `scripts/recover.sh` keeps its loud tree fallback for
+  `start-ap.sh`: it is an operator path run by hand as root, already root by
+  choice. None of those is root executing a file the account can rewrite.
+* **The helper and dispatcher copies in `install_root_libexec`.** They are taken
+  from `$SRC_DIR`, so on a provisioned box they come out of the mirror — but on a
+  full install and on the transition update `$SRC_DIR` IS the tree, and there is
+  no record yet to check them against. Root already execs that tree on both of
+  those paths, so this grants nothing it does not have; it is the same shape as
+  the accepted last run above.
+* **A root-owned tracked file in the working tree.** `use_tree_owner_for_git`
+  hands `.git` back to the checkout's owner before dropping, but not the tree.
+  Nothing in `install.sh` writes a tracked file as root today (only `.env`, which
+  is gitignored), so this is latent; if one ever appears, the unprivileged reset
+  fails where the root one succeeded.
 * **`install-x64.sh`** is untouched: the x86 installer ships no
   `clawbox-root-update@` template, no root-step dispatcher and no launcher grant,
   so the escalation chain this is about does not exist there.
