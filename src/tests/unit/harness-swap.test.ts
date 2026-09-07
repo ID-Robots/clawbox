@@ -91,6 +91,7 @@ import {
   _resetHarnessSwapForTests,
   carryOverAfterSwap,
   claimSwap,
+  harnessSwapUnitActive,
   latestSwapPhase,
   parseSwapPhase,
   preflightSwap,
@@ -433,34 +434,49 @@ describe("one swap at a time", () => {
   });
 
   it("reports this process's claim, and releases it", async () => {
-    expect(await claimSwap("hermes")).toBe(true);
+    expect(await claimSwap("hermes")).toBe("claimed");
     expect(await swapInProgress()).toEqual({ inProgress: true, target: "hermes" });
-    expect(await claimSwap("hermes")).toBe(false);
+    expect(await claimSwap("hermes")).toBe("busy");
     releaseSwap();
     expect(await swapInProgress()).toEqual({ inProgress: false, target: null });
   });
 
   it("refuses two claims racing through the same tick", async () => {
     const [first, second] = await Promise.all([claimSwap("hermes"), claimSwap("hermes")]);
-    expect([first, second].sort()).toEqual([false, true]);
+    expect([first, second].sort()).toEqual(["busy", "claimed"]);
   });
 
   it("sees a unit another process started, naming the target from the request file", async () => {
     h.unitState = "ActiveState=active\n";
     await writeSwapRequest("openclaw");
     expect(await swapInProgress()).toEqual({ inProgress: true, target: "openclaw" });
-    expect(await claimSwap("openclaw")).toBe(false);
+    expect(await claimSwap("openclaw")).toBe("busy");
     // The refused claim must not stick.
     h.unitState = "ActiveState=inactive\n";
-    expect(await claimSwap("openclaw")).toBe(true);
+    expect(await claimSwap("openclaw")).toBe("claimed");
   });
 
-  it("reads `activating` as running too, and a systemctl that fails as idle", async () => {
+  it("reads `activating` as running too", async () => {
     h.unitState = "ActiveState=activating\n";
     expect((await swapInProgress()).inProgress).toBe(true);
+    expect(await claimSwap("hermes")).toBe("busy");
+  });
+
+  it("never reads a systemctl that could not be asked as an idle unit", async () => {
+    // "Could not look" is not "nothing is running": a probe read as false
+    // handed a second swap the slot over a live one (CodeRabbit on #781).
     h.unitError = new Error("no systemd");
-    expect((await swapInProgress()).inProgress).toBe(false);
-    expect(await claimSwap("hermes")).toBe(true);
+    expect(await harnessSwapUnitActive()).toBeNull();
+    expect(await swapInProgress()).toEqual({ inProgress: false, target: null, unknown: true });
+    expect(await claimSwap("hermes")).toBe("unknown");
+    // The refused claim must not stick once systemd answers again.
+    h.unitError = null;
+    expect(await claimSwap("hermes")).toBe("claimed");
+    releaseSwap();
+    // An answer with no ActiveState line is not an answer either.
+    h.unitState = "";
+    expect(await harnessSwapUnitActive()).toBeNull();
+    expect(await claimSwap("hermes")).toBe("unknown");
   });
 });
 

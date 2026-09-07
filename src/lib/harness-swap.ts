@@ -431,30 +431,44 @@ let claimed: Harness | null = null;
  * systemd the way `followRootStep` asks, because the module flag above knows
  * only about THIS process: a web server restarted under a swap, or a step
  * started from a root shell, is invisible to it.
+ *
+ * Tri-state: `null` when systemd could not be asked (a timeout, a missing
+ * binary, an answer with no ActiveState). "Could not look" is not "nothing is
+ * running" — read as false it let a second swap start over a live one and
+ * let the route delete the request the step was still reading — so every
+ * decision that would ACT on "inactive" treats null as "maybe running", and
+ * only the reporting GET says it plainly.
  */
-export async function harnessSwapUnitActive(): Promise<boolean> {
+export type UnitProbe = () => Promise<boolean | null>;
+
+export async function harnessSwapUnitActive(): Promise<boolean | null> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/systemctl",
       ["show", rootStepUnit(HARNESS_SWAP_STEP), "-p", "ActiveState"],
       { timeout: 15_000 },
     );
-    const state = /^ActiveState=(.*)$/m.exec(stdout)?.[1]?.trim() ?? "";
+    const state = /^ActiveState=(.*)$/m.exec(stdout)?.[1]?.trim();
+    if (!state) return null;
     return state === "activating" || state === "active" || state === "reloading";
   } catch {
-    return false;
+    return null;
   }
 }
 
 export interface SwapProgress {
   inProgress: boolean;
   target: Harness | null;
+  /** True when systemd could not be asked and `inProgress` is a guess, not a fact. */
+  unknown?: true;
 }
 
 /** What GET reports: this process's claim first, else the unit's own state with the request file's target. */
-export async function swapInProgress(unitActive: () => Promise<boolean> = harnessSwapUnitActive): Promise<SwapProgress> {
+export async function swapInProgress(unitActive: UnitProbe = harnessSwapUnitActive): Promise<SwapProgress> {
   if (claimed) return { inProgress: true, target: claimed };
-  if (!(await unitActive())) return { inProgress: false, target: null };
+  const active = await unitActive();
+  if (active === null) return { inProgress: false, target: null, unknown: true };
+  if (!active) return { inProgress: false, target: null };
   return { inProgress: true, target: (await readSwapRequest())?.target ?? null };
 }
 
@@ -466,17 +480,21 @@ export async function swapInProgress(unitActive: () => Promise<boolean> = harnes
  * probe comes after, and a unit already running releases the claim again —
  * that swap belongs to whoever started it, and its end is theirs to follow.
  */
+export type SwapClaim = "claimed" | "busy" | "unknown";
+
 export async function claimSwap(
   target: Harness,
-  unitActive: () => Promise<boolean> = harnessSwapUnitActive,
-): Promise<boolean> {
-  if (claimed) return false;
+  unitActive: UnitProbe = harnessSwapUnitActive,
+): Promise<SwapClaim> {
+  if (claimed) return "busy";
   claimed = target;
-  if (await unitActive()) {
+  const active = await unitActive();
+  if (active !== false) {
+    // Running, or systemd could not say: neither is a slot to hand out.
     claimed = null;
-    return false;
+    return active ? "busy" : "unknown";
   }
-  return true;
+  return "claimed";
 }
 
 export function releaseSwap(): void {

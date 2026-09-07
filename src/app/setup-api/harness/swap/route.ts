@@ -73,6 +73,7 @@ export async function GET() {
     swappable: target !== null,
     inProgress: progress.inProgress,
     inProgressTarget: progress.target,
+    ...(progress.unknown ? { inProgressUnknown: true } : {}),
     plan,
     businessPlanRequired: HARNESS_SWAP_BUSINESS_PLAN_REQUIRED,
     allowed: swapAllowed(plan),
@@ -122,11 +123,27 @@ export async function POST(req: Request) {
     return refuse(409, "plan_required", "Changing the harness is part of the Business plan.");
   }
 
-  if (!(await claimSwap(target))) {
+  const claim = await claimSwap(target);
+  if (claim === "unknown") {
+    return refuse(503, "unit_unknown", "Could not ask systemd whether a harness swap is already running. Try again in a moment.");
+  }
+  if (claim === "busy") {
     return refuse(409, "busy", "A harness swap is already in progress.");
   }
 
   const name = HARNESSES[target].label;
+
+  // The follow gave up, or threw, on a unit that is still going — or on one
+
+  // systemd could not be asked about, which the sentence says as such.
+
+  const stillRunning = (unit: boolean | null) =>
+
+    unit === null
+
+      ? `Could not tell whether the swap to ${name} is still running on this box. Settings → Harness shows it as in progress while it is; the desktop reloads onto ${name} once it has ended.`
+
+      : `The swap to ${name} is still running on this box. Settings → Harness shows it as in progress until it ends; the desktop reloads onto ${name} once it has.`;
   let previous: Harness;
   try {
     const refusal = await preflightSwap(target);
@@ -176,11 +193,11 @@ export async function POST(req: Request) {
           // that is still active is the follow giving up, not the step: the
           // request stays for the step to read, and GET keeps reporting the
           // swap from the unit's state.
-          if (await harnessSwapUnitActive()) {
-            emit(controller, {
-              error: `The swap to ${name} is still running on this box. Settings → Harness shows it as in progress until it ends; the desktop reloads onto ${name} once it has.`,
-              code: "still_running",
-            });
+          const unit = await harnessSwapUnitActive();
+          if (unit !== false) {
+            // Running — or systemd could not say, which is not "stopped":
+            // the request stays for the step (its hour is the safety net).
+            emit(controller, { error: stillRunning(unit), code: "still_running" });
             return;
           }
           const after = getEditionSource();
@@ -228,11 +245,9 @@ export async function POST(req: Request) {
         // The unit outlives a follow that threw: the request the step still
         // reads must not be pulled out from under it, and GET keeps reporting
         // the swap from the unit's state until it ends.
-        if (await harnessSwapUnitActive().catch(() => false)) {
-          emit(controller, {
-            error: `The swap to ${name} is still running on this box. Settings → Harness shows it as in progress until it ends; the desktop reloads onto ${name} once it has.`,
-            code: "still_running",
-          });
+        const unit = await harnessSwapUnitActive();
+        if (unit !== false) {
+          emit(controller, { error: stillRunning(unit), code: "still_running" });
         } else {
           await removeSwapRequest();
           const after = getEditionSource();

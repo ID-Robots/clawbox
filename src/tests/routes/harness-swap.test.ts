@@ -50,6 +50,8 @@ const h = vi.hoisted(() => ({
   /** The Business-plan gate, flipped by one test without touching the constant. */
   planGateOn: false,
   unitState: "ActiveState=inactive\n",
+  /** A systemctl that cannot be asked at all; null lets the probe answer. */
+  unitError: null as Error | null,
   /** The unit's current invocation, as `systemctl show -p InvocationID` answers; empty before it starts. */
   invocationId: "",
   /** What `journalctl` answers for the invocation — the marker lines, the way `--grep` filters them. */
@@ -108,7 +110,10 @@ vi.mock("child_process", async (orig) => {
     h.execCalls.push([cmd, ...args]);
     if (cmd.endsWith("journalctl")) return { stdout: `${h.journal.join("\n")}\n`, stderr: "" };
     if (args.includes("InvocationID")) return { stdout: `InvocationID=${h.invocationId}\n`, stderr: "" };
-    if (args.includes("ActiveState")) return { stdout: h.unitState, stderr: "" };
+    if (args.includes("ActiveState")) {
+      if (h.unitError) throw h.unitError;
+      return { stdout: h.unitState, stderr: "" };
+    }
     return { stdout: "", stderr: "" };
   };
   return { ...actual, execFile: Object.assign(vi.fn(), { [promisify.custom]: run }) };
@@ -143,6 +148,7 @@ beforeEach(() => {
   h.edition = { edition: "openclaw", defaulted: false };
   h.planGateOn = false;
   h.unitState = "ActiveState=inactive\n";
+  h.unitError = null;
   h.invocationId = "";
   h.journal = [];
   h.execCalls.length = 0;
@@ -582,6 +588,32 @@ describe("POST /setup-api/harness/swap — the stream", () => {
     expect(out[out.length - 1]).toEqual({ error: "sudo: a password is required", code: "swap_failed" });
     await expect(fs.access(REQUEST_PATH)).rejects.toThrow();
     expect(await (await GET()).json()).toMatchObject({ inProgress: false });
+  });
+
+  it("refuses to start, 503 unit_unknown, while systemd cannot say whether a swap is running", async () => {
+    h.unitError = new Error("Failed to connect to bus");
+    const res = await POST(post({ harness: "hermes" }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: "unit_unknown" });
+    await expect(fs.access(REQUEST_PATH)).rejects.toThrow();
+    expect(await (await GET()).json()).toMatchObject({ inProgress: false, inProgressUnknown: true });
+    // The slot is free again the moment systemd answers.
+    h.unitError = null;
+    h.follow.mockImplementation(async () => { h.edition = { edition: "hermes", defaulted: false }; return { ok: true }; });
+    const out = await lines(await POST(post({ harness: "hermes" })));
+    expect(out[out.length - 1]).toMatchObject({ success: true });
+  });
+
+  it("keeps the request when the follow gave up and systemd could not be asked whether the unit still runs", async () => {
+    h.follow.mockImplementation(async () => {
+      h.unitError = new Error("Failed to connect to bus");
+      return { ok: false, error: "follow timed out" };
+    });
+    const out = await lines(await POST(post({ harness: "hermes" })));
+    const last = out[out.length - 1];
+    expect(last).toMatchObject({ code: "still_running" });
+    expect(String(last.error)).toMatch(/Could not tell/);
+    expect(await fs.readFile(REQUEST_PATH, "utf8")).toMatch(/^TARGET_EDITION=hermes\n/);
   });
 
   it("keeps the request and closes still_running when the follow threw while the unit is still working", async () => {
