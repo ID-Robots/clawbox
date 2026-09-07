@@ -125,15 +125,6 @@ export default function ChromeWindow({
   const currentPosRef = useRef(position);
   const prevMinimizedRef = useRef(minimized);
   const rightInsetRef = useRef(rightInset);
-  // Whether the OWNER has resized this window — the one size worth remembering
-  // for the app. The close used to save whatever the window measured at that
-  // moment, and since a window opened beside a docked chat is fitted to the
-  // strip, Files fitted from 1090 to 564px and closed with the X came up 564
-  // wide on every open after — with the chat undocked too — until the owner
-  // resized it by hand: a placement-time courtesy had become the app's default
-  // size. The viewport fit shares the path and is left as it was — a screen is
-  // a fixed constraint of the device, the docked strip is transient.
-  const ownerResizedRef = useRef(false);
 
   useLayoutEffect(() => {
     rightInsetRef.current = rightInset;
@@ -328,7 +319,6 @@ export default function ChromeWindow({
         const pos = currentPosRef.current;
         setSize({ width: cur.width, height: cur.height });
         setPosition({ x: pos.x, y: pos.y });
-        ownerResizedRef.current = true;
         // Save resized size per app
         if (appId) {
           kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
@@ -375,13 +365,11 @@ export default function ChromeWindow({
   }, [appId, onGeometryChange]);
 
   const handleClose = useCallback(() => {
-    // Save window size per app — only once the owner has resized it (see
-    // `ownerResizedRef`): a window that was only ever fitted to the strip
-    // beside the chat, or snapped, has no size of its own to remember.
-    if (appId && ownerResizedRef.current) {
-      const cur = currentSizeRef.current;
-      kv.setJSON(`clawbox-winsize-${appId}`, { width: cur.width, height: cur.height });
-    }
+    // No size write here: the resize-end path saves what the owner chose the
+    // moment they let go, and a close-time write of `currentSizeRef` saved
+    // whatever geometry the window ended in — the strip beside a docked chat
+    // it was fitted to, or a snap after the owner's own resize — as the
+    // app's remembered size (the sweep of 2026-09-07 and its review).
     setClosing(true);
     setTimeout(() => onClose(), 150);
   }, [onClose, appId]);
