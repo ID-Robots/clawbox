@@ -3570,6 +3570,12 @@ step_hermes_install() {
     echo "  Hermes runs but is not on the pinned commit — upgrading"
     echo "    have: ${at_commit:-unknown (not a git checkout)}"
     echo "    want: $pin"
+    # The box is off the pin from here until the post-install check says
+    # otherwise. Set BEFORE the attempt rather than after a failed one, because
+    # the interesting failure restores the old off-pin agent and never reaches
+    # the post-install branch at all — the upgrade did not happen and the step
+    # would have answered success over it.
+    _hermes_off_pin=1
   fi
 
   # NOTHING above this line has modified the disk, and nothing below it does
@@ -3685,6 +3691,9 @@ step_hermes_install() {
     at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
       git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
     if [ "$at_commit" = "$pin" ]; then
+      # The upgrade landed. Whatever this step found on arrival, the box is on
+      # the build we ship.
+      _hermes_off_pin=0
       echo "  Hermes installed ($installed) at the pinned commit"
     else
       # An upgrade that did not reach the pin is a fixup that did not do its

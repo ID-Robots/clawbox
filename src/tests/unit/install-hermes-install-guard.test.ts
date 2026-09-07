@@ -820,7 +820,12 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
     const r = run({ installOk: false });
 
-    expect(r.code).toBe(0);
+    // The box still RUNS, so nothing is broken and nothing is rolled forward —
+    // but the upgrade did not happen and the device is still on a build we do
+    // not ship, which is what the step now answers. This is the failure that
+    // never reaches the post-install check at all (the old agent is restored
+    // first), so the fact has to be recorded when the attempt STARTS.
+    expect(r.code).toBe(1);
     expect(r.out).toMatch(/Restored the previous agent/);
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
     expect(headOf(agentDir())).toBe(OTHER_COMMIT);
