@@ -25,7 +25,7 @@
  */
 import { execFile as execFileCb } from "child_process";
 import { randomUUID } from "crypto";
-import fs from "fs/promises";
+import fs, { constants, type FileHandle } from "fs/promises";
 import path from "path";
 import { promisify } from "util";
 import { readClawaiEntitlementTier } from "@/lib/clawai-plan-tier";
@@ -193,6 +193,9 @@ export function swapRequestPath(): string {
  * hour: a file left behind by a swap nobody followed to the end must not be a
  * standing instruction to the next root step that happens to start.
  */
+/** The request is two short lines; a bigger file is not one this box wrote. */
+const SWAP_REQUEST_MAX_BYTES = 256;
+
 export async function writeSwapRequest(target: Harness, now: number = Date.now()): Promise<void> {
   const envPath = swapRequestPath();
   const tmpPath = path.join(path.dirname(envPath), `.${path.basename(envPath)}.${randomUUID()}.tmp`);
@@ -224,9 +227,20 @@ export interface SwapRequest {
  */
 export async function readSwapRequest(): Promise<SwapRequest | null> {
   const envPath = swapRequestPath();
+  // One O_NOFOLLOW handle, judged and read through the same descriptor: a
+  // path-level stat followed by readFile lets the file be swapped for a link
+  // between the two calls (CodeQL js/file-system-race) — the root reader
+  // refuses a link the same way, so the two can never disagree about it.
+  let handle: FileHandle;
   try {
-    if (!(await fs.lstat(envPath)).isFile()) return null;
-    const raw = await fs.readFile(envPath, "utf8");
+    handle = await fs.open(envPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return null;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > SWAP_REQUEST_MAX_BYTES) return null;
+    const raw = (await handle.readFile("utf8")) as string;
     const target = /^TARGET_EDITION=(.*)$/m.exec(raw)?.[1]?.trim();
     const at = /^REQUESTED_AT=(.*)$/m.exec(raw)?.[1]?.trim();
     if (target !== "openclaw" && target !== "hermes") return null;
@@ -234,6 +248,8 @@ export async function readSwapRequest(): Promise<SwapRequest | null> {
     return { target, requestedAt: Number(at) };
   } catch {
     return null;
+  } finally {
+    await handle.close().catch(() => {});
   }
 }
 

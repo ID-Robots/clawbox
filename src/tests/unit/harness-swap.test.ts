@@ -266,6 +266,34 @@ describe("the request file the root step reads", () => {
     await removeSwapRequest();
   });
 
+  it("refuses a link and a directory at the path, and never follows the link", async () => {
+    // Read through one O_NOFOLLOW handle (CodeQL js/file-system-race): a link
+    // planted at the path is refused by the open itself, not by a stat the
+    // file could change under. The root reader refuses the same shapes.
+    const real = path.join(path.dirname(REQUEST_PATH), "real-request.env");
+    await fs.writeFile(real, "TARGET_EDITION=hermes\nREQUESTED_AT=1\n");
+    await fs.symlink(real, REQUEST_PATH);
+    try {
+      expect(await readSwapRequest()).toBeNull();
+    } finally {
+      await fs.rm(REQUEST_PATH, { force: true });
+      await fs.rm(real, { force: true });
+    }
+    await fs.mkdir(REQUEST_PATH);
+    try {
+      expect(await readSwapRequest()).toBeNull();
+    } finally {
+      await fs.rm(REQUEST_PATH, { recursive: true, force: true });
+    }
+    // A file too big to be ours is not parsed either.
+    await fs.writeFile(REQUEST_PATH, `TARGET_EDITION=hermes\nREQUESTED_AT=1\n# ${"x".repeat(300)}\n`);
+    try {
+      expect(await readSwapRequest()).toBeNull();
+    } finally {
+      await removeSwapRequest();
+    }
+  });
+
   it("lives under data/ of CLAWBOX_ROOT, where the root step looks", () => {
     expect(swapRequestPath()).toBe(REQUEST_PATH);
   });
