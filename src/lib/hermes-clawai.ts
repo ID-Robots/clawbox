@@ -34,6 +34,7 @@ import {
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { forgetProviderVerified } from "@/lib/provider-verified";
 import { forgetClawaiCredentialRefusal } from "@/lib/harness/credentials";
+import { clawaiRefusalState } from "@/lib/clawai-credential-refusal";
 // The PLAN this box's account pays for, and the badge behind it — the one rule
 // the panel and both boot scripts read for "may this box have the cloud voice"
 // (TASK-744). Written into the store by this module, read back below.
@@ -116,10 +117,11 @@ export interface ApplyClawaiOptions {
    * and that third fact IS the stored token — so a snapshot taken in here, after
    * such a caller has already written it, reads true no matter what the box
    * looked like a moment earlier. The guard then sees before === after and the
-   * reload silently never happens. `/setup-api/hermes/clawai` persists a PASTED
-   * token before it applies it and is the one caller that needs this; the two
-   * others (the configure route and the device-code finaliser) write nothing
-   * first, so they leave it unset and the snapshot below is honest.
+   * reload silently never happens. The two callers that write the token FIRST
+   * pass this — `/setup-api/hermes/clawai` (a pasted token) and
+   * `POST /setup-api/ai-models/configure` on the dual SKU, whose ClawBox AI
+   * batch lands before it tells Hermes; the device-code finaliser writes
+   * nothing first, so it leaves this unset and the snapshot below is honest.
    */
   codingAgentReadyBefore?: boolean;
   /**
@@ -131,9 +133,11 @@ export interface ApplyClawaiOptions {
    * the store if the caller has already written the new token there: the read
    * would answer with the token it is being asked about, `accountChanged` would
    * be false on every real link, and account A's Max choice would be applied to
-   * account B's Pro plan. `/setup-api/hermes/clawai` persists a PASTED token
-   * before it applies it and is the one caller that needs this; the configure
-   * route and the device-code finaliser write nothing first, so they leave it
+   * account B's Pro plan — and `credentialChanged`, which decides whether the
+   * proxy's refusal of the replaced token still applies, would be false with
+   * it. The same two callers that write the token first pass this:
+   * `/setup-api/hermes/clawai` and `POST /setup-api/ai-models/configure` on the
+   * dual SKU; the device-code finaliser writes nothing first, so it leaves this
    * unset and the read below is honest.
    */
   previousClawaiToken?: string;
@@ -151,6 +155,17 @@ export interface ApplyClawaiOptions {
    * (TASK-481) and must never be recorded as a plan.
    */
   portalPlan?: ClawaiPortalPlan;
+  /**
+   * Whether this call may pick Hermes' CLOUD VOICE when the box has none.
+   *
+   * True everywhere except the dual SKU's configure arm. Selecting a voice is
+   * the right thing to do when linking the box's own harness — it is how a
+   * hermes box gets one — but on `dual` the cloud-voice behaviour is an open
+   * question with the owner, and a save made for the credential must not settle
+   * it as a side effect. The call site that has to answer "not now" says so
+   * here rather than the writer guessing from the edition.
+   */
+  selectCloudVoice?: boolean;
 }
 
 /**
@@ -199,6 +214,12 @@ export async function applyClawaiToHermes(
   // function samples.
   const previousToken = options.previousClawaiToken?.trim() ?? await getStoredClawaiToken();
   const accountChanged = Boolean(previousToken && previousToken !== trimmed);
+  // The narrower question `accountChanged` does not answer: is the credential
+  // about to be written a DIFFERENT one? It is on a first link too (no previous
+  // token), where `accountChanged` is deliberately false because there are no
+  // previous owner's picks to drop. The refusal mark below is about the
+  // CREDENTIAL, so this is the fact that decides whether it still applies.
+  const credentialChanged = previousToken !== trimmed;
   const storedPicks = await readExplicitModelPicks();
   // Null whenever there is nothing to drop — including when the CALLER has
   // already dropped it, which `/setup-api/hermes/clawai` does in the same write
@@ -367,7 +388,14 @@ export async function applyClawaiToHermes(
     // the safe moment: that mark asserts something WORKED, so losing it early
     // costs nothing; this one asserts something FAILED, so dropping it early
     // costs traffic.
-    if (r.code === 0 && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
+    //
+    // And ONLY when the credential actually changed, which is the same rule
+    // `configureClawboxAi` states on the OpenClaw side: re-pasting the refused
+    // bytes is not a re-link. Without it a tier-pill press — or, since this
+    // function is now called for a ClawBox AI save on the dual SKU, any such
+    // save — would retire the stand-down both boot scripts read, and the box
+    // would re-arm the image path against a token the proxy has refused.
+    if (r.code === 0 && credentialChanged && args[2] === `providers.${CLAWAI_PROVIDER}.api_key`) {
       await forgetClawaiCredentialRefusal();
     }
     // `unset` of an absent key is a no-op; only a failing `set` is fatal.
@@ -482,10 +510,12 @@ export async function applyClawaiToHermes(
   // portal answered (when this caller asked it) with the badge behind it, which
   // is `clawaiEntitlementTier` exactly. A function that re-read its own write
   // would also be one a fixture could satisfy without the write ever landing.
-  await selectHermesCloudVoiceIfUnvoiced(
-    trimmed,
-    clawaiEntitlementTier(clawaiPlanTierForStore(options.portalPlan), tier),
-  );
+  if (options.selectCloudVoice !== false) {
+    await selectHermesCloudVoiceIfUnvoiced(
+      trimmed,
+      clawaiEntitlementTier(clawaiPlanTierForStore(options.portalPlan), tier),
+    );
+  }
 
   // Everything above wrote to DISK. The agent that will serve the next turn is
   // a process that has been running since long before any of it, and two of the
@@ -1269,6 +1299,36 @@ async function enableHermesImageGeneration(token: string): Promise<void> {
   // customer's chosen model on every AI-Models save — including on the paths
   // that then make no claim at all — which is the mirror of the care
   // `withdrawImageProviderClaim` takes not to remove somebody else's provider.
+  // NOT OVER A CREDENTIAL THE PROXY HAS REFUSED. This is the write the
+  // stand-down is about: `gateway-pre-start.sh` and `scripts/register-mcp.sh`
+  // both decline to arm the image path while that record stands, but the boot
+  // gate is only REACHED while `image_gen.provider` is unset — so a Settings
+  // save that armed it here made every later boot short-circuit on "somebody
+  // already chose a backend" and the stand-down inert for good, while the
+  // plugin went on spending refused calls for as long as the box was on. The
+  // mark is retired above by any save carrying a DIFFERENT credential, so a
+  // genuine re-link still arms in the same request; a re-save of the refused
+  // bytes leaves the box exactly as it is.
+  //
+  // The DESCRIBING writes above are deliberately not gated: naming our model
+  // and proxy address keeps the config true for the moment the credential is
+  // replaced, and neither turns anything on.
+  //
+  // FAIL CLOSED on a store that could not be READ, which is the third answer
+  // `clawaiRefusalState` exists to give: `readConfig` flattens EACCES, EIO and
+  // invalid JSON to `{}`, so the plain reader would have called an unreadable
+  // store "no refusal" and armed anyway — the one direction that cannot be
+  // taken back, since the key it writes is what makes both boot gates
+  // short-circuit ever after.
+  const refusal = await clawaiRefusalState();
+  if (refusal !== "clear") {
+    console.log(
+      refusal === "refused"
+        ? "[hermes/clawai] the proxy has refused this box's ClawBox AI credential — leaving image_gen.provider alone"
+        : "[hermes/clawai] the device store could not be read, so whether this box's credential was refused is unknown — leaving image_gen.provider alone",
+    );
+    return;
+  }
   // Before `image_gen.provider`, so the ordering rule below still holds.
   await runOrThrow(["config", "set", "image_gen.model", CLAWBOX_AI_IMAGE_MODEL_ID]);
   await runOrThrow(["config", "set", "image_gen.provider", HERMES_IMAGE_PLUGIN_NAME]);

@@ -3154,6 +3154,18 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // reads — and `undefined` again on a probe that threw, which must not turn
     // a save into a 500 or buy a reload nobody asked for.
     const codingAgentReadyBefore = isClawAI ? await codingAgentReady() : undefined;
+    // Set when the dual arm below has already told Hermes — and with it, done
+    // every refresh this route would otherwise ask for.
+    let appliedToHermes = false;
+    // What the owner is told when that arm did NOT land. The apply is a
+    // sequence of independent `hermes config set` calls that throws on the
+    // first failing one, so it can stop with Hermes pointed at the clawai
+    // provider and the previous provider's `model.default` still in place —
+    // every turn then fails with "Model not allowed" while this route answers
+    // 200. The save itself did land (OpenClaw is configured, the credential is
+    // on disk), so this is a warning and not an error, but silence over it is
+    // the false-success shape: an outcome reported before it happened.
+    let hermesWarning: string | undefined;
     if (isLocalScope) {
       await setMany({
         local_ai_configured: true,
@@ -3233,6 +3245,66 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();
+      // THE DUAL SKU, where OpenClaw exists and HERMES is the harness actually
+      // answering. Everything above configured OpenClaw, exactly as it does on
+      // the flagship box — and on this one that left the credential invisible
+      // to the agent the owner is talking to: Hermes keeps its own provider
+      // catalogue, its own image backend and its own speech slot, so
+      // `ai_set_provider("clawai")` went on answering "That provider is not set
+      // up on this device" over a token the owner had just pasted. The Hermes
+      // branch above cannot cover it — `openclawIsAbsent()` is
+      // `readEdition() === "hermes"`, so a dual box never reaches it (TASK-577)
+      // — and this is the same shape the LOCAL model case above already carries
+      // through `applyLocalAiToHermes`, for the same SKU and the same reason.
+      //
+      // Non-fatal: OpenClaw is configured either way and the credential is on
+      // disk, so a Hermes write that fails must not turn a save that landed
+      // into an error. It is LOUD, though — the agent's own view is what the
+      // owner will judge the save by.
+      if (isClawAI && (await getActiveHarness()) === "hermes") {
+        try {
+          await applyClawaiToHermes(
+            clawboxAiToken,
+            resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
+            {
+              // The token was written in the batch above, so the apply's own
+              // reads of both facts would answer about THIS save rather than
+              // the state before it: `ready` would be true whatever the box
+              // looked like a moment ago (no reload), and `accountChanged`
+              // false on every real link (the previous owner's model pick
+              // applied to the new account). Both are the snapshots this route
+              // already holds — the same pair `/setup-api/hermes/clawai`
+              // passes, for the same reason.
+              codingAgentReadyBefore,
+              previousClawaiToken,
+              // The PORTAL's answer, which only this route has; the plan is
+              // written beside the tier and deleted with it.
+              portalPlan,
+              // NOT the voice. `applyClawaiToHermes` picks Hermes' cloud voice
+              // for a box that has none, which is right when the box's own
+              // harness is being linked — it is how a hermes box gets one — and
+              // wrong to decide HERE: on the dual SKU the cloud-voice question
+              // is open with the owner, and a save made for the credential must
+              // not settle it as a side effect. Before this arm existed a dual
+              // box could not reach that writer from this route at all, and it
+              // still cannot.
+              selectCloudVoice: false,
+            },
+          );
+          // The apply performs the coding-agent, provider and image refreshes
+          // itself, from ITS before/after pair — so the block below must not
+          // ask for a second global reload, which respawns every MCP child and
+          // invalidates the model's prompt cache again.
+          appliedToHermes = true;
+        } catch (err) {
+          console.error(
+            "[ai-models/configure] ClawBox AI is configured for OpenClaw but Hermes did not take it:",
+            err instanceof ClawaiApplyError ? err.message : err,
+          );
+          hermesWarning =
+            "Saved, but the on-device agent has not taken the credential yet — open Settings → AI Models and save again.";
+        }
+      }
     }
 
     // The credential is on disk, so ask the agent to rebuild its tool list if
@@ -3245,7 +3317,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // token the box already held must not buy one. Best effort by design; the
     // owner's save has already landed and an edition with no dashboard to ask
     // re-probes at the next respawn on its own.
-    if (codingAgentReadyBefore !== undefined) {
+    if (codingAgentReadyBefore !== undefined && !appliedToHermes) {
       const readyAfter = await codingAgentReady();
       if (readyAfter !== undefined) {
         await refreshCodingAgentToolsIfReadinessChanged(codingAgentReadyBefore, readyAfter);
@@ -3257,7 +3329,15 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // chat to something the provider list still shows as switched off.
     // Non-fatal — the switch is bookkeeping, the credential write is the save.
     try {
-      await setProviderEnabled(ocProvider, true);
+      // It ANSWERS rather than throwing when the provider list has no such row
+      // (`readProviderStatus` on Hermes asks the dashboard, which the apply
+      // above may have just restarted), so the result has to be read or a
+      // provider the owner just connected stays on the disabled list in
+      // silence.
+      const reEnabled = await setProviderEnabled(ocProvider, true);
+      if (!reEnabled.ok) {
+        console.error(`[ai-models/configure] could not re-enable ${ocProvider}: ${reEnabled.kind}`);
+      }
     } catch (err) {
       console.error("[ai-models/configure] could not re-enable the provider:", err instanceof Error ? err.message : err);
     }
@@ -3641,7 +3721,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await fs.unlink(pendingHandoffTokensPath).catch(() => {});
     }
 
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, gatewayWarning]
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, gatewayWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({

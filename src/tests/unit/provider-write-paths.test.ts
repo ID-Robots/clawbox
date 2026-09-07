@@ -34,7 +34,16 @@ vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 const storeGetMock = vi.hoisted(() => vi.fn<(key: string) => Promise<unknown>>(async () => null));
-vi.mock("@/lib/config-store", () => ({ get: storeGetMock, setMany: vi.fn() }));
+vi.mock("@/lib/config-store", () => ({
+  get: storeGetMock,
+  setMany: vi.fn(),
+  // `get`/`set` are how the link reads and clears the persisted ClawBox AI
+  // credential refusal — the record that decides whether the image slot may be
+  // armed. Both calls sit inside a catch that answers a DEFAULT, so omitting
+  // them would silently put every case here on the "no refusal" branch
+  // (openclaw-config-mock-completeness.test.ts).
+  set: vi.fn(),
+}));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: patchMock,
   readHermesConfigValue: readConfigMock,

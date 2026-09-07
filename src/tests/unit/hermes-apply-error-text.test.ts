@@ -36,6 +36,12 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
   get: vi.fn(async () => null),
+  // `get`/`set` are how the link reads and clears the persisted ClawBox AI
+  // credential refusal — the record that decides whether the image slot may be
+  // armed. Both calls sit inside a catch that answers a DEFAULT, so omitting
+  // them would silently put every case here on the "no refusal" branch
+  // (openclaw-config-mock-completeness.test.ts).
+  set: vi.fn(),
   // Read before the first write, to spot an account switch and the owner's
   // explicit model pick (TASK-713).
   getKnown: vi.fn(async () => ({ value: undefined, known: true })),
