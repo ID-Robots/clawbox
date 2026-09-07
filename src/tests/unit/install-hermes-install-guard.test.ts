@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -40,6 +40,14 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = process.cwd();
 const INSTALL_SH_PATH = path.join(REPO, "install.sh");
 const INSTALL_SH = readFileSync(INSTALL_SH_PATH, "utf-8");
+
+/** The call-site cases below start a real bash; skip where there is none. */
+let hasBash = true;
+try {
+  execFileSync("/bin/bash", ["-c", "true"], { stdio: "ignore" });
+} catch {
+  hasBash = false;
+}
 const UPDATER_TS = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
 
 const NL = String.fromCharCode(10);
@@ -299,19 +307,29 @@ describe("an in-app update can heal a device a factory reset broke", () => {
     // Without this the ONLY repair path was SSH. The in-app updater runs
     // post_update and rebuild_reboot; neither reached step_hermes_install, so
     // clicking UPDATE on a bricked box did nothing for it.
-    expect(POST_UPDATE).toMatch(/^\s*step_hermes_install\b/m);
+    expect(POST_UPDATE).toMatch(/^\s*optional_step \S+ step_hermes_install\b/m);
   });
 
   it("post_update re-caches the offline model", () => {
-    expect(POST_UPDATE).toMatch(/^\s*step_llamacpp_model\b/m);
+    expect(POST_UPDATE).toMatch(/^\s*optional_step \S+ step_llamacpp_model\b/m);
   });
 
-  it("both are non-fatal, in the surrounding style", () => {
+  it("both are non-fatal, in the surrounding style — and their failure is REPORTED", () => {
+    // `optional_step` is that style now: it never fails the step (an update
+    // must not be refused because a VNC unit refresh failed) and it records the
+    // name, which `report_optional_step_failures` re-states on the
+    // `CLAWBOX-WARN:` line the updater turns into a warning on the update's own
+    // status. `|| echo` reached the journal and nothing else, so the run was
+    // reported as having worked in full when part of it had not.
     for (const step of ["step_hermes_install", "step_llamacpp_model"]) {
-      const line = POST_UPDATE.split(NL).find((l) => l.trim().startsWith(step));
+      const line = POST_UPDATE.split(NL).find((l) => l.trim().endsWith(` ${step}`));
       expect(line, `${step} must be called in post_update`).toBeDefined();
-      expect(line, `${step} must not be able to fail the update`).toContain("|| echo");
+      expect(line, `${step} must not be able to fail the update`).toContain("optional_step ");
     }
+    const wrapper = shellCode(extractShellFunction("optional_step"));
+    expect(wrapper).toContain("POST_UPDATE_FAILED_STEPS=");
+    expect(wrapper).toContain("return 0");
+    expect(POST_UPDATE).toContain("report_optional_step_failures");
   });
 
   it("repairs the agent BEFORE the updater's hermes_edition step runs", () => {
@@ -722,8 +740,11 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
     const r = run({ installOk: false });
 
-    // step_post_update's `|| echo` depends on this not being a hard failure.
-    expect(r.code).toBe(0);
+    // The step now ANSWERS whether the agent runs: the restore put back the
+    // same unrunnable checkout, so this is a repair that did not work and the
+    // step says so. `optional_step` in step_post_update records that as a
+    // warning without failing the update, which is what keeps it non-fatal.
+    expect(r.code).toBe(1);
     expect(r.out).toMatch(/Warning: Hermes still does not run/);
     expect(r.out).toMatch(/Restored the previous agent/);
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
@@ -763,7 +784,8 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     run({ installOk: false });
     const r = run({ installOk: false });
 
-    expect(r.code).toBe(0);
+    // Still not runnable after round 2, so still reported as a failed repair.
+    expect(r.code).toBe(1);
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
     expect(fs.readdirSync(path.join(tmp, ".hermes")).filter((e) => e.includes(".broken"))).toEqual(
       [],
@@ -798,7 +820,12 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
     const r = run({ installOk: false });
 
-    expect(r.code).toBe(0);
+    // The box still RUNS, so nothing is broken and nothing is rolled forward —
+    // but the upgrade did not happen and the device is still on a build we do
+    // not ship, which is what the step now answers. This is the failure that
+    // never reaches the post-install check at all (the old agent is restored
+    // first), so the fact has to be recorded when the attempt STARTS.
+    expect(r.code).toBe(1);
     expect(r.out).toMatch(/Restored the previous agent/);
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
     expect(headOf(agentDir())).toBe(OTHER_COMMIT);
@@ -831,7 +858,11 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
     const r = run({ installHead: OTHER_COMMIT });
 
-    expect(r.code).toBe(0);
+    // Reported through the RETURN as well as the warning: the box works, but
+    // it is not on the build we ship, and `optional_step` in step_post_update
+    // is what carries that to the update's own status — a stderr line reaches
+    // the journal and nobody. It is still not fatal and still not rolled back.
+    expect(r.code).toBe(1);
     expect(r.out).toMatch(/but HEAD is/);
     expect(r.out).not.toMatch(/Restored the previous agent/);
     expect(exists(path.join(agentDir(), "venv", "bin", "python"))).toBe(true);
@@ -877,7 +908,9 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
     const r = run({ fetchOk: false });
 
-    expect(r.code).toBe(0);
+    // A download that never arrived leaves the same unrunnable agent behind,
+    // so the step reports the failed repair rather than answering 0.
+    expect(r.code).toBe(1);
     expect(r.out).toMatch(/Hermes install failed \(non-fatal\)/);
     // …and the box is still whole.
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
@@ -982,5 +1015,76 @@ describe("setup-hermes-edition.sh does not repeat the shim-only check", () => {
     const guard = SETUP_HERMES.split(NL).find((l) => l.includes('[ ! -x "$HERMES_BIN" ]'));
     expect(guard).toBeDefined();
     expect(guard).toContain('[ ! -x "$HERMES_VENV_PYTHON" ]');
+  });
+});
+
+/**
+ * The step answers non-zero now — for an agent it could not make runnable, and
+ * for an upgrade that landed off the pin. That is what `optional_step` reads on
+ * the UPDATE path. On the FULL-INSTALL path there is no wrapper: install.sh
+ * runs under `set -euo pipefail` and the only `trap … EXIT` is armed inside the
+ * `--step` block, which exits long before. A bare call there would abort the
+ * whole installer at that line — before the services, VNC and the provisioning
+ * verdict — so a fresh hermes or dual box whose Hermes fetch failed would leave
+ * the flash host with no PROVISIONING INCOMPLETE banner and no
+ * `[provision-status]` sentinel at all, with the marker already invalidated.
+ */
+describe.skipIf(!hasBash)("its call sites, where errexit is live", () => {
+  /** The top-level call and its guard: from `if ! step_hermes_install` to `fi`. */
+  const topLevelCall = (() => {
+    const lines = INSTALL_SH.split(NL);
+    const start = lines.findIndex((l) => /^if ! step_hermes_install; then$/.test(l));
+    if (start < 0) return undefined;
+    const end = lines.indexOf("fi", start);
+    return end < 0 ? undefined : lines.slice(start, end + 1).join(NL);
+  })();
+
+  it("is guarded on the full-install path", () => {
+    expect(topLevelCall, "the top-level call is bare, or has moved").toBeDefined();
+    // And the failure is RECORDED, not only printed: on hermes and dual the
+    // agent is the product, so a box provisioned without a runnable one is not
+    // a complete install and the flash host's marker has to say so.
+    expect(topLevelCall).toContain("record_provision_failure hermes_install");
+  });
+
+  /** Run one line under install.sh's own shell options with the step failing. */
+  function afterFailedStep(callLine: string): { out: string; code: number } {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-hermes-callsite-"));
+    try {
+      const script = path.join(dir, "run.sh");
+      fs.writeFileSync(
+        script,
+        [
+          // install.sh:22, verbatim — the condition that makes this matter.
+          "set -euo pipefail",
+          "step_hermes_install() { echo STEP_FAILED >&2; return 1; }",
+          'record_provision_failure() { echo "RECORDED $1"; }',
+          callLine,
+          // Everything the installer still has to do: the services, VNC, and
+          // the verdict banner the flash host reads.
+          'echo "PROVISIONING VERDICT REACHED"',
+        ].join(NL),
+      );
+      const r = spawnSync("/bin/bash", [script], { encoding: "utf-8", timeout: 20_000 });
+      return { out: `${r.stdout ?? ""}${r.stderr ?? ""}`, code: r.status ?? -1 };
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("lets the installer reach its verdict when Hermes could not be installed", () => {
+    const r = afterFailedStep(topLevelCall!);
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain("STEP_FAILED");
+    // …and the verdict it reaches names the failure rather than reporting a
+    // complete provision over a box with no agent.
+    expect(r.out).toContain("RECORDED hermes_install");
+    expect(r.out).toContain("PROVISIONING VERDICT REACHED");
+  });
+
+  it("…which a bare call would not, so the case above is not vacuous", () => {
+    const r = afterFailedStep("step_hermes_install");
+    expect(r.code).not.toBe(0);
+    expect(r.out).not.toContain("PROVISIONING VERDICT REACHED");
   });
 });

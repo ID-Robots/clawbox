@@ -364,7 +364,8 @@ describe("a step that can now fail must not abort the install", () => {
   it.each(callSites.map((c) => [c.line, c.text] as const))(
     "install.sh:%s guards the call",
     (_line, text) => {
-      expect(text).toMatch(/\|\|\s*echo/);
+      // `optional_step` is the guard in post_update now: it cannot fail the step and it records the name, so a skipped repair reaches the update's own status rather than only the journal.
+      expect(text).toMatch(/(\|\|\s*echo)|(^\s*optional_step \S+ )/);
     },
   );
 });

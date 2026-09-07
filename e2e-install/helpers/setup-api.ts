@@ -422,11 +422,24 @@ async function diagnoseLostUpdate(): Promise<string> {
     "systemctl", "show", "clawbox-setup.service",
     "-p", "NRestarts", "-p", "ActiveEnterTimestamp", "-p", "ExecMainStartTimestamp", "-p", "Result",
   ]);
+  // `update_lock_holder` is REDUCED, not printed: what a failure needs from it
+  // is whether a holder was recorded and how old its heartbeat is, and this
+  // message is uploaded as a CI artifact on a PUBLIC repository — the boot id
+  // it carries is ephemeral and not a secret, but it identifies the machine and
+  // this file's own rule below is that nothing goes down that does not have to.
   await ask("the updater's own keys on disk", [
     "bash", "-lc",
     "python3 -c \"import json;d=json.load(open('/home/clawbox/clawbox/data/config.json'));"
+    + "h=d.get('update_lock_holder');"
+    + "a=(h.get('at') if isinstance(h,dict) else None);"
+    // EVERY shape is reduced, not just the dict: a string, a list or a number
+    // under that key would otherwise have gone down verbatim, and `at` is only
+    // repeated when it looks like the timestamp this code writes.
+    + "h=({'recorded':False} if h is None else "
+    + "{'recorded':True,'at':(a if isinstance(a,str) and len(a)<40 else None),'pid_present':bool(h.get('pid'))} "
+    + "if isinstance(h,dict) else {'recorded':True,'shape':type(h).__name__});"
     + "print({k:d.get(k) for k in ('update_in_progress','update_needs_continuation',"
-    + "'update_interrupted_at','update_completed','update_completed_at')})\" 2>&1 || true",
+    + "'update_interrupted_at','update_completed','update_completed_at')}, 'holder=', h)\" 2>&1 || true",
   ]);
   // REDACTED, and only the web server's own unit. This message becomes a
   // Playwright error and is uploaded as a CI artifact on a PUBLIC repository,

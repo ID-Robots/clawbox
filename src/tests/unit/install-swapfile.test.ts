@@ -176,7 +176,18 @@ describe("step_swapfile runs on both flows and never fails them", () => {
     for (const caller of ["step_system_config", "step_post_update"]) {
       const body = shellCode(extractShellFunction(caller));
       expect(body, `${caller} must call step_swapfile`).toContain("step_swapfile");
-      expect(body).toMatch(/step_swapfile \|\| echo/);
+      // Non-fatal in each flow's own idiom: the fresh install tolerates the
+      // failure inline, and post_update runs every fixup through
+      // `optional_step`, which cannot fail the step and RECORDS the name for
+      // the `CLAWBOX-WARN:` line the updater turns into a warning.
+      // The two flows are asserted APART: an alternation would accept a
+      // post_update that had drifted back to the bare `|| echo`, which is the
+      // regression this whole change removes.
+      expect(body).toMatch(
+        caller === "step_post_update"
+          ? /optional_step \S+ step_swapfile\b/
+          : /step_swapfile \|\| echo/,
+      );
     }
   });
 

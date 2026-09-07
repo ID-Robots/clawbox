@@ -1,4 +1,5 @@
-import { get, set } from "./config-store";
+import fs from "fs";
+import { get, set, setMany } from "./config-store";
 
 /**
  * "An update owns this box right now" — persisted, so a surface that is NOT the
@@ -24,6 +25,99 @@ import { get, set } from "./config-store";
  */
 export const UPDATE_LOCK_KEY = "update_in_progress";
 
+/**
+ * WHO holds the lock, so a second process can tell a running update from a dead
+ * one.
+ *
+ * The flag alone says "an update owns this box", and a web server that starts
+ * WHILE one is running reads exactly what a web server that starts after a
+ * crashed one reads. The updater's continuation check treated both as the
+ * crash: it released the lock and stamped `update_interrupted_at`, so a run
+ * whose last two steps were still landing in the old process was reported
+ * `failed` with every step pending — on a box whose journal shows every step
+ * completing and BUILD IDENTITY OK (observed on the OpenClaw box, 2026-09-07).
+ * A false failure over an update that worked.
+ *
+ * The pid is meaningless on its own — pids are reused, and this flag
+ * deliberately outlives the reboot the update performs — so the BOOT ID is
+ * recorded with it. A record from another boot proves nothing and is ignored,
+ * which is exactly today's behaviour.
+ */
+export const UPDATE_LOCK_HOLDER_KEY = "update_lock_holder";
+
+interface UpdateLockHolder {
+  pid: number;
+  /** `/proc/sys/kernel/random/boot_id`, or null where it cannot be read. */
+  bootId: string | null;
+  /**
+   * Field 22 of `/proc/<pid>/stat` — when the process started, in clock ticks
+   * since boot. A pid is not an identity: the kernel wraps `pid_max` and an
+   * update spawns thousands of processes through install.sh, so on a long
+   * uptime a later, unrelated process can land on the dead holder's pid. Then
+   * `kill(pid, 0)` succeeds, the lock is never released and the owner is
+   * redirected to /updating until the box reboots — strictly worse than the
+   * behaviour this record exists to improve. (pid, start time) is unique within
+   * a boot, and the boot id makes it unique across them.
+   */
+  startedTicks: string | null;
+  /**
+   * When this record was written. `setUpdateLock` is called at EVERY step
+   * boundary, so it is a heartbeat: a lock whose `at` is younger than the
+   * longest step's budget belongs to a run that is still moving, whichever
+   * process is moving it.
+   */
+  at: string;
+}
+
+function currentBootId(): string | null {
+  try {
+    return fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function parseHolder(value: unknown): UpdateLockHolder | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as { pid?: unknown; bootId?: unknown; startedTicks?: unknown; at?: unknown };
+  if (typeof raw.pid !== "number" || !Number.isInteger(raw.pid) || raw.pid <= 0) return null;
+  return {
+    pid: raw.pid,
+    bootId: typeof raw.bootId === "string" ? raw.bootId : null,
+    startedTicks: typeof raw.startedTicks === "string" ? raw.startedTicks : null,
+    at: typeof raw.at === "string" ? raw.at : "",
+  };
+}
+
+/**
+ * When a process started, from `/proc/<pid>/stat` field 22.
+ *
+ * Read by the string rather than parsed: it is only ever compared with itself.
+ * The executable name in field 2 can contain spaces and brackets, so the fields
+ * are counted from the closing parenthesis, which is what `proc(5)` says to do.
+ */
+function processStartTicks(pid: number): string | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const after = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+    // field 3 is the first after the name, so field 22 is index 19 here.
+    return after[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How long a lock may go unrefreshed before it stops counting as a live run.
+ *
+ * `setUpdateLock` is re-called at every step boundary, and the longest step
+ * (`post_update`) is budgeted at 15 minutes, so 20 gives the slowest healthy
+ * run room without holding a crashed one's lock for long. The boot-time check
+ * that releases an abandoned lock still runs; this only decides whether the
+ * release happens now or at the next boot.
+ */
+const HOLDER_HEARTBEAT_MS = 20 * 60 * 1000;
+
 /** Where the owner is sent while the box updates. */
 export const UPDATING_PAGE = "/updating";
 
@@ -40,7 +134,20 @@ export const UPDATING_PAGE = "/updating";
  */
 export async function setUpdateLock(): Promise<boolean> {
   try {
-    await set(UPDATE_LOCK_KEY, true);
+    // The holder rides with the flag, in one read-modify-write — of THIS
+    // process. install.sh and gateway-pre-start.sh write the same file
+    // unlocked, so the pair can still be split by a cross-process interleave;
+    // when it is, the reader finds no holder and falls back to the behaviour it
+    // had before this record existed, which is the safe direction.
+    await setMany({
+      [UPDATE_LOCK_KEY]: true,
+      [UPDATE_LOCK_HOLDER_KEY]: {
+        pid: process.pid,
+        bootId: currentBootId(),
+        startedTicks: processStartTicks(process.pid),
+        at: new Date().toISOString(),
+      },
+    });
     return true;
   } catch (err) {
     console.warn(
@@ -59,7 +166,7 @@ export async function setUpdateLock(): Promise<boolean> {
  */
 export async function clearUpdateLock(): Promise<boolean> {
   try {
-    await set(UPDATE_LOCK_KEY, undefined);
+    await setMany({ [UPDATE_LOCK_KEY]: undefined, [UPDATE_LOCK_HOLDER_KEY]: undefined });
     return true;
   } catch (err) {
     console.warn(
@@ -76,4 +183,51 @@ export async function isUpdateLocked(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Is the lock held by an update that is STILL RUNNING, in another process on
+ * this boot?
+ *
+ * False for everything it cannot prove: no holder recorded (a lock taken by a
+ * build that predates this record), a holder from another boot (pids are reused
+ * and this flag outlives a reboot), this very process (it is the reader, not a
+ * second one), or a pid that is gone. Each of those falls back to exactly the
+ * behaviour before the record existed.
+ *
+ * `process.kill(pid, 0)` sends no signal; `EPERM` means the process is there
+ * and belongs to somebody else, which is still ALIVE.
+ */
+export async function updateLockHeldByLiveProcess(): Promise<boolean> {
+  let holder: UpdateLockHolder | null = null;
+  try {
+    holder = parseHolder(await get(UPDATE_LOCK_HOLDER_KEY));
+  } catch {
+    return false;
+  }
+  if (!holder || holder.pid === process.pid) return false;
+  const boot = currentBootId();
+  if (!boot || !holder.bootId || boot !== holder.bootId) return false;
+  // THE HEARTBEAT FIRST, because it is the half that survives the holder's
+  // death. Every replacement path in this repo kills the old web server before
+  // the new one starts — `do_rebuild` stops the unit, and systemd's restart
+  // waits for the cgroup to empty — so by the time the successor asks, the
+  // process that was mid-update is usually gone while its RUN is not: the root
+  // step it dispatched is still working, and `update_needs_continuation` has
+  // not been written yet. A record refreshed at the last step boundary is what
+  // says so.
+  const at = Date.parse(holder.at);
+  if (Number.isFinite(at) && Date.now() - at < HOLDER_HEARTBEAT_MS && Date.now() >= at) return true;
+  // …and the live process, for the case the two really do overlap. (pid, start
+  // time) rather than the pid alone: see `startedTicks`.
+  try {
+    process.kill(holder.pid, 0);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "EPERM") return false;
+  }
+  const ticks = processStartTicks(holder.pid);
+  // A recorded start time that cannot be compared proves nothing, and a pid
+  // whose process started at a different time is a different process.
+  if (!holder.startedTicks || !ticks) return false;
+  return holder.startedTicks === ticks;
 }

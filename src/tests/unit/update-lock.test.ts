@@ -102,8 +102,26 @@ describe("the lock is written where a run starts and released where one ends", (
     const resume = fn("resumeContinuation");
     const noContinuation = resume.indexOf("if (!needsContinuation)");
     expect(noContinuation).toBeGreaterThan(-1);
-    const branch = resume.slice(noContinuation, resume.indexOf("return false", noContinuation));
+    // The whole branch, not up to its first `return false`: it now returns
+    // early for an update that is STILL RUNNING in another process, and the
+    // release lives past that.
+    const branch = resume.slice(noContinuation, resume.indexOf("// The restart this is resuming", noContinuation));
     expect(branch, "the nothing-to-resume branch must clear the lock").toContain("clearUpdateLock()");
+  });
+
+  it("does NOT release a lock another process is still updating under", () => {
+    // The same evidence — lock held, nothing to resume — is what a second web
+    // server sees while the FIRST one is still working through the steps: an
+    // update restarts this process by design and the old one keeps going. Read
+    // as a crash, the new process released the lock and stamped an
+    // interruption, so a run whose journal shows every step completing was
+    // reported failed with every step pending.
+    const resume = fn("resumeContinuation");
+    const noContinuation = resume.indexOf("if (!needsContinuation)");
+    const branch = resume.slice(noContinuation, resume.indexOf("// The restart this is resuming", noContinuation));
+    const guard = branch.indexOf("updateLockHeldByLiveProcess()");
+    expect(guard, "the branch must ask whether the update is still running").toBeGreaterThan(-1);
+    expect(guard, "and it must ask BEFORE releasing the lock").toBeLessThan(branch.indexOf("clearUpdateLock()"));
   });
 
   it("is released when the rebuild produced no new build", () => {

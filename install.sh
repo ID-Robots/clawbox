@@ -1697,12 +1697,13 @@ case "$ENGINE_SETTLE_S" in ''|*[!0-9]*) ENGINE_SETTLE_S=3 ;; esac
 # not restart is the false-success class (TASK-724).
 #
 # Never fails the update: refusing an otherwise-good update over one engine
-# would strand the box on the old build, which is strictly worse. What a failed
-# restart gets is a named [WARN] line on this step's stderr — the step's journal
-# — and nothing else. It deliberately does NOT go through
-# record_provision_failure: that channel turns the step's exit code non-zero,
-# which would paint a whole good update red over a voice engine, and there is no
-# quieter surface for it today. Whoever adds one should start here.
+# would strand the box on the old build, which is strictly worse. It
+# deliberately does NOT go through record_provision_failure: that channel turns
+# the step's exit code non-zero, which would paint a whole good update red over
+# a voice engine. The quieter surface this block asked for now exists — a
+# `CLAWBOX-WARN[...]` line, which the updater reads out of the step's journal
+# and raises on the update's own status — so a named [WARN] line here carries
+# the marker beside it and the owner is told, without the update turning red.
 #
 # RESIDUAL, stated rather than hidden: a shell SIGKILLed between the pause and
 # this call resumes nothing. That is not hypothetical — run_next_build's own
@@ -1750,6 +1751,7 @@ resume_paused_engines() {
         echo "    [ok] $unit is back"
       else
         echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+        echo "CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
       fi
     done
   fi
@@ -1773,6 +1775,7 @@ resume_paused_engines() {
           echo "    [ok] $unit is back"
         else
           echo "    [WARN] $unit did not come back — it was running before this update and is not now" >&2
+          echo "CLAWBOX-WARN[engine-not-resumed]: $unit was running before this update and did not come back; it starts again on the next request that needs it"
         fi
       done
     fi
@@ -3460,6 +3463,10 @@ step_hermes_install() {
   local venv_python="$agent_dir/venv/bin/python"
   local installed=""
   local pin="$HERMES_PIN_COMMIT"
+  # Whether an upgrade this step performed landed somewhere other than the pin.
+  # `local`, so a second call in one shell cannot inherit the first one's
+  # answer.
+  local _hermes_off_pin=0
 
   # The pin is spliced into a URL below and the file that URL returns is piped
   # into bash, so it is validated before it is used. A malformed value — a tag
@@ -3563,6 +3570,12 @@ step_hermes_install() {
     echo "  Hermes runs but is not on the pinned commit — upgrading"
     echo "    have: ${at_commit:-unknown (not a git checkout)}"
     echo "    want: $pin"
+    # The box is off the pin from here until the post-install check says
+    # otherwise. Set BEFORE the attempt rather than after a failed one, because
+    # the interesting failure restores the old off-pin agent and never reaches
+    # the post-install branch at all — the upgrade did not happen and the step
+    # would have answered success over it.
+    _hermes_off_pin=1
   fi
 
   # NOTHING above this line has modified the disk, and nothing below it does
@@ -3678,8 +3691,17 @@ step_hermes_install() {
     at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
       git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
     if [ "$at_commit" = "$pin" ]; then
+      # The upgrade landed. Whatever this step found on arrival, the box is on
+      # the build we ship.
+      _hermes_off_pin=0
       echo "  Hermes installed ($installed) at the pinned commit"
     else
+      # An upgrade that did not reach the pin is a fixup that did not do its
+      # job, and the warning below is stderr — which reaches the journal and
+      # nothing else. `optional_step` reads the RETURN, so record it there too
+      # and let the update's own status carry it. Not a rollback and not fatal:
+      # the agent RUNS, and the copy moved aside was unpinned as well.
+      _hermes_off_pin=1
       # The agent RUNS, so it is NOT rolled back: a working unpinned agent is
       # worth more than the copy moved aside, which was unpinned too. Loud,
       # because it means the pin did not take — upstream dropping
@@ -3752,9 +3774,25 @@ step_hermes_install() {
       fi
     fi
   fi
-  # Explicit: the last command above is a test that is FALSE on the happy path,
-  # and step_post_update reports any non-zero return as a failed step.
-  return 0
+  # THE OUTCOME, not the last test's exit code. The line above is a test that is
+  # FALSE on the happy path, so this used to be an unconditional `return 0` —
+  # and `step_post_update` then reported "completed" over a box whose agent
+  # repair had failed, which is the exact population this call was added for
+  # (the pre-fix factory reset). `optional_step` records a non-zero return as a
+  # skipped fixup and cannot fail the update with it, so the honest answer is
+  # now safe to give: the shim has to be runnable.
+  # The same two-part test the step's own probe makes (a shim alone is a
+  # four-line wrapper and proves nothing about the agent under ~/.hermes).
+  if [ -x "$shim" ] && [ -x "$venv_python" ]; then
+    # Runnable — and `$_hermes_off_pin` is the second half of the answer: an
+    # install that landed off the pin leaves the box working on a build we do
+    # not ship, which the fleet has to hear about even though nothing here is
+    # broken. Default 0, so every path that never attempted an upgrade returns
+    # 0 exactly as before.
+    return "$_hermes_off_pin"
+  fi
+  echo "  Warning: the Hermes agent is still not runnable after this step" >&2
+  return 1
 }
 
 # Re-cache ONLY the offline Gemma GGUF.
@@ -4146,10 +4184,15 @@ step_openclaw_install() {
     local _oc_doctor_out
     if ! _oc_doctor_out="$(as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)"; then
       printf '%s\n' "$_oc_doctor_out"
+      # `CLAWBOX-WARN:` rather than a plain WARN line: the updater reads this
+      # prefix back out of the step's journal and puts it on the update's own
+      # status. A doctor that migrated nothing is exactly the case an owner
+      # needs told — the gateway can refuse readiness for it — and a line only
+      # in the journal is a line nobody on the box will read.
       if printf '%s\n' "$_oc_doctor_out" | grep -q 'Legacy exec approvals exist at'; then
-        echo "  WARN: openclaw doctor --fix migrated NOTHING — a legacy exec-approvals file blocks it. The gateway's pre-start moves an empty one aside and re-runs the migration on the next start."
+        echo "CLAWBOX-WARN[openclaw-doctor-fix-failed]: openclaw doctor --fix migrated NOTHING — a legacy exec-approvals file blocks it. The gateway's pre-start moves an empty one aside and re-runs the migration on the next start."
       else
-        echo "  WARN: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
+        echo "CLAWBOX-WARN[openclaw-doctor-fix-failed]: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
       fi
     else
       printf '%s\n' "$_oc_doctor_out"
@@ -5859,8 +5902,9 @@ install_root_file() {
 # refuses every pinned root step: a wider outage than one missing copy.
 #
 # The check matters on the update path specifically. step_post_update runs its
-# fixups as `step_x || echo "(non-fatal)"`, and bash switches errexit OFF for
-# the whole body of a function called in an OR-list, so without it a copy that
+# fixups through `optional_step`, whose `if "$@"` switches errexit OFF for the
+# whole body of the function it calls exactly as the `|| echo` before it did —
+# so without this check a copy that
 # failed here was followed by successful commands, the function returned 0, and
 # the units and grants installed after it pointed at a copy that was not there
 # (a fresh libexec on the first update carrying it) or was stale.
@@ -6487,7 +6531,48 @@ step_nm_dispatcher() {
   echo "  NetworkManager failover dispatcher installed"
 }
 
+# NON-FATAL, BUT NOT SILENT.
+#
+# Every fixup in `step_post_update` is deliberately non-fatal — refusing to
+# finish an update because a VNC unit refresh failed would be the worse outcome
+# — and each one used to say so with `|| echo "  Warning: … (non-fatal)"`,
+# which reaches the journal and nothing else. The step still exits 0, so the
+# updater reports "Applying system fixups" as completed and the owner is told
+# an update worked in full when part of it did not: the false-success shape,
+# spelled nineteen times in one function.
+#
+# So the failures are COLLECTED and re-stated at the end in a line the updater
+# parses (`CLAWBOX-WARN:`), which turns them into a warning on the update's own
+# status — where the owner reads it — while the step still exits 0.
+POST_UPDATE_FAILED_STEPS=""
+
+# Run one fixup. Never fails the step; always records.
+optional_step() {
+  local name="$1"
+  shift
+  if "$@"; then
+    return 0
+  fi
+  echo "  Warning: $name step failed (non-fatal)"
+  POST_UPDATE_FAILED_STEPS="$POST_UPDATE_FAILED_STEPS $name"
+  return 0
+}
+
+# The one line the updater reads back out of the journal. Printed only when
+# something failed, so a healthy update stays silent.
+report_optional_step_failures() {
+  [ -n "$POST_UPDATE_FAILED_STEPS" ] || return 0
+  # The CODE is stable across runs and does not name the failing set: the
+  # updater de-duplicates by it, and a key that changed with the list would be
+  # a new card every time one more fixup failed.
+  echo "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped:$POST_UPDATE_FAILED_STEPS"
+}
+
 step_post_update() {
+  # Reset per RUN, not per shell: the file-scope initialiser above is for
+  # `set -u`, and a second call in one shell would otherwise re-report the
+  # first call's failures.
+  POST_UPDATE_FAILED_STEPS=""
   # Re-apply system-level fixups that aren't covered by `git pull && build`.
   # Triggered by the in-app updater so existing devices pick up new dispatcher
   # scripts, sysctls, etc. without a full reinstall. Keep this list small and
@@ -6503,31 +6588,31 @@ step_post_update() {
   # LATER updater step (and the web server, and the next update) resolves the
   # SKU correctly instead of silently defaulting to openclaw. It also re-asserts
   # the Hermes gateway removal, which an older update could have undone.
-  step_edition_lock || echo "  Warning: edition_lock step failed (non-fatal)"
-  step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
-  step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
-  step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
+  optional_step edition_lock step_edition_lock
+  optional_step set_hostname step_set_hostname
+  optional_step nm_dispatcher step_nm_dispatcher
+  optional_step sysctl_linkdown step_sysctl_linkdown
   # Without this call the swapfile would be fresh-install-only, and every box
   # already in the field would keep facing a rebuild with zram alone — which is
   # the box the 2026-09-05 OOM happened on.
-  step_swapfile || echo "  Warning: swapfile step failed (non-fatal)"
+  optional_step swapfile step_swapfile
   # Without this call the firewall would be fresh-install-only and every box
   # already in the field would keep its wide-open INPUT policy — which is the
   # entire finding. Idempotent: the script converges its own rules on each run.
-  step_firewall || echo "  Warning: firewall step failed (non-fatal)"
+  optional_step firewall step_firewall
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
-  step_persistent_journal || echo "  Warning: persistent_journal step failed (non-fatal)"
+  optional_step persistent_journal step_persistent_journal
   # Re-assert the cgroup memory guards and re-sync /etc/clawbox/resource-limits.env
   # from the repo. Without this the guards would be fresh-install-only and every
   # already-shipped box would keep running an unbounded ollama. Idempotent.
   # NOTE: there is deliberately no step_desktop_mode call here — the desktop
   # toggle is the owner's decision and an update must never flip it.
-  step_resource_limits || echo "  Warning: resource_limits step failed (non-fatal)"
+  optional_step resource_limits step_resource_limits
   # step_vnc_refresh is a tiny idempotent refresh of the clawbox-vnc.service
   # unit + autocutsel package. Devices installed before the display-:99 move
   # and the clipboard-sync addition get both here without needing a reinstall.
-  step_vnc_refresh || echo "  Warning: vnc_refresh step failed (non-fatal)"
+  optional_step vnc_refresh step_vnc_refresh
   # Reinstall the unit files from config/ + daemon-reload. Without this, unit
   # changes only ever reached FRESH installs: the in-app update runs
   # bootstrap_updater -> ... -> post_update and never re-copies
@@ -6537,23 +6622,23 @@ step_post_update() {
   # Gemma 4" from being killed mid-build, and would swallow any future unit or
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
-  step_systemd_services || echo "  Warning: systemd_services step failed (non-fatal)"
+  optional_step systemd_services step_systemd_services
   # Refresh the device-side ClawKeep CLI from the repo. The Python package
   # has the same version string ("0.1.0") across releases, so a plain
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
   # we have to force-reinstall.
-  step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
+  optional_step clawkeep_install step_clawkeep_install
   # The coding harness. WITHOUT this call TASK-378 would be fresh-install-only:
   # step_post_update never ran step_ai_tools_install, which is exactly why no
   # already-shipped box has `claude` on it today. Idempotent — a present
   # `claude` short-circuits after one `command -v`, and the wrapper is a copy.
-  step_coding_harness || echo "  Warning: coding_harness step failed (non-fatal)"
+  optional_step coding_harness step_coding_harness
   # The Codex CLI. Without this call the pinned native binary would be
   # fresh-install-only — step_post_update does not run step_ai_tools_install —
   # and every box in the field would keep the unpinned, unverified npm copy for
   # good. Idempotent: a box already on the pin does one `codex --version` and
   # stops.
-  step_codex_cli || echo "  Warning: codex_cli step failed (non-fatal)"
+  optional_step codex_cli step_codex_cli
   # On-device TTS: installs/refreshes Kokoro and the voice scripts, and seeds
   # the tts-local-cli provider. Without this call the whole of TASK-383 would
   # be fresh-install-only, and every already-shipped box would keep answering
@@ -6561,7 +6646,7 @@ step_post_update() {
   # The SAME tolerance table step_openclaw_setup applies to this step, and for
   # the same reason: 12, 13 and 14 are three different facts about a box's
   # speech and the update path has to keep them apart too. A single
-  # `|| echo "(non-fatal)"` — indistinguishable from the fourteen lines around
+  # one generic wrapper line — indistinguishable from the fixups around
   # it — reported "this box has no working TTS engine" in the same words as a
   # skipped VNC refresh, on the very path that reaches ALREADY-SHIPPED boxes.
   # ── The Hermes agent FIRST, for the same reason the fresh-install path was
@@ -6578,7 +6663,7 @@ step_post_update() {
   #
   # Idempotent and self-gated on has_hermes_harness (a no-op on openclaw), so
   # moving it up costs nothing on any other SKU.
-  step_hermes_install || echo "  Warning: hermes_install step failed (non-fatal)"
+  optional_step hermes_install step_hermes_install
 
   local TTS_UPDATE_RC=0
   step_openclaw_tts || TTS_UPDATE_RC=$?
@@ -6595,8 +6680,8 @@ step_post_update() {
   # service/drop-in state or is simply down from the reboot handoff. Run the
   # same idempotent setup used by fresh installs so a completed update leaves
   # clawbox-gateway as the active single source of truth.
-  step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
-  step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
+  optional_step gateway_setup step_gateway_setup
+  optional_step gateway_legacy_state_recovery step_gateway_legacy_state_recovery
   # Repair the two assets a factory reset performed by a pre-fix build deleted:
   # the Hermes agent install (~/.hermes/hermes-agent) and the offline Gemma
   # GGUF (data/llamacpp). Neither `git pull && build` nor any fixup above put
@@ -6627,7 +6712,7 @@ step_post_update() {
   # After step_systemd_services and step_resource_limits above: the helper
   # reaches the embedder through the proxy, which starts clawbox-embed.service
   # through a sudoers grant those two steps install.
-  ensure_local_embeddings || echo "  Warning: local embeddings check failed (non-fatal)"
+  optional_step local_embeddings_check ensure_local_embeddings
   # The embedder used to live inside ollama, which may still be holding the
   # old copy (2.8 GB). `stop`, never `disable`: the runtime's own standby
   # convention, and the chat path can still wake it on demand. After the
@@ -6639,10 +6724,10 @@ step_post_update() {
   # missing start left local AI dead under a `completed` update, because
   # nothing runs after post_update that would have woken it.
   pause_engine_unit ollama.service
-  step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
+  optional_step llamacpp_model step_llamacpp_model
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a
-  # failure is reported instead of swallowed by `|| echo "(non-fatal)"`.
+  # failure fails the STEP rather than being recorded as a skipped fixup.
   # Ordering is unchanged (still after step_systemd_services). Fresh installs
   # call step_hermes_edition directly and are unaffected.
   # Deliberately NO `systemctl restart clawbox-setup` here. The web server reads
@@ -6650,13 +6735,16 @@ step_post_update() {
   # (src/lib/edition-source.ts stats the file per call and caches by mtime), so
   # the re-baked lock above is live immediately — while restarting the server
   # mid-update would kill the very process the updater is polling for progress.
-  step_update_smoke || echo "  Warning: update_smoke reported issues (non-fatal)"
+  optional_step update_smoke step_update_smoke
   # LAST, and after the smokes: ollama was stopped above to make it drop the
   # stale embedder copy, and the memory stays free for step_llamacpp_model's
   # download until here. A stopped-then-started ollama holds no model, so the
   # 2.8 GB the stop was for is still released — what comes back is the idle
   # server the box had before the update, which is the whole point of the pair.
   resume_paused_engines
+  # LAST WORD: the failures collected above, in the line the updater turns into
+  # a warning on the update's status. Silent on a healthy run.
+  report_optional_step_failures
 }
 
 gateway_port_listening() {
@@ -6764,10 +6852,11 @@ step_gateway_legacy_state_recovery() {
       return 0
     fi
     # The same observable state as the tail of this function — alive and not
-    # listening — so the same status. `step_post_update` calls this step as
-    # `… || echo "Warning: …"`, so a non-zero return is a warning in the update
-    # log and not a failed update; returning 0 here made a gateway that never
-    # binds its port produce a clean step.
+    # listening — so the same status. `step_post_update` calls this step through
+    # `optional_step`, so a non-zero return is a RECORDED warning — on the
+    # update's own status, not only in the log — and never a failed update;
+    # returning 0 here made a gateway that never binds its port produce a clean
+    # step.
     echo "  Warning: the gateway holds its state directory but is not listening on ${gw_port}; not restarting over a live gateway" >&2
     return 1
   fi
@@ -6830,6 +6919,16 @@ step_gateway_legacy_state_recovery() {
 }
 
 step_update_smoke() {
+  # WHAT THE SMOKES FOUND, in a return code the caller can report.
+  #
+  # Every finding below is a `[WARN]` line and the step returned 0 either way,
+  # so a gateway that was not reachable after an update, or an auth token the
+  # update left weak, reached the journal and nothing else — while the run said
+  # "Applying system fixups: completed". `optional_step` records a non-zero
+  # return as a skipped fixup and re-states it on the marker line the updater
+  # turns into a warning; it still cannot fail the update, which is what
+  # "ALWAYS non-fatal" meant and still means.
+  local SMOKE_FINDINGS=0
   # Advisory post-update smokes (#151). The rest of post_update only confirms
   # services are *running* — these confirm two flows that can silently break
   # across an update while health still looks green: gateway auth continuity
@@ -6849,6 +6948,7 @@ step_update_smoke() {
     echo "    [ok] gateway reachable"
   else
     echo "    [WARN] gateway not reachable (HTTP $gw_code) — Control UI/chat may be down"
+    SMOKE_FINDINGS=1
   fi
   local tok_state
   tok_state=$(as_clawbox python3 -c '
@@ -6878,7 +6978,7 @@ else:
 ' "$OPENCLAW_CONFIG" 2>/dev/null || echo "missing")
   case "$tok_state" in
     strong|secretref|interp) echo "    [ok] gateway auth token is strong ($tok_state)" ;;
-    *) echo "    [WARN] gateway auth token is weak/missing ($tok_state) — LAN auth may be bypassable" ;;
+    *) echo "    [WARN] gateway auth token is weak/missing ($tok_state) — LAN auth may be bypassable"; SMOKE_FINDINGS=1 ;;
   esac
 
   # 2) Telegram bot identity (getMe) — only when a bot token is configured.
@@ -6893,7 +6993,9 @@ except Exception:
 ' "$OPENCLAW_CONFIG" 2>/dev/null || echo "")
   if [ -z "$TG_TOKEN" ]; then
     echo "    [skip] no Telegram bot configured"
-    return 0
+    # A box with no bot is not a finding, but the gateway smokes above may
+    # already have made one.
+    return "$SMOKE_FINDINGS"
   fi
   local getme
   getme=$(curl -s -m 8 "https://api.telegram.org/bot${TG_TOKEN}/getMe" 2>/dev/null \
@@ -6904,6 +7006,7 @@ except Exception: print("no")' 2>/dev/null || echo "no")
     echo "    [ok] Telegram bot identity verified (getMe)"
   else
     echo "    [WARN] Telegram getMe failed — bot token may be invalid/revoked, or network unavailable"
+    SMOKE_FINDINGS=1
   fi
 
   # 3) Real delivery smoke — QA only, gated behind a chat id so production
@@ -6921,9 +7024,10 @@ except Exception: print("")' 2>/dev/null || echo "")
       echo "    [ok] Telegram delivery smoke sent (message_id=$msg_id)"
     else
       echo "    [WARN] Telegram delivery smoke failed to send"
+      SMOKE_FINDINGS=1
     fi
   fi
-  return 0
+  return "$SMOKE_FINDINGS"
 }
 
 step_polkit_rules() {
@@ -7144,7 +7248,11 @@ ensure_local_embeddings() {
   fi
   if [ ! -x "$helper" ]; then
     echo "  Warning: $helper is missing or not executable - semantic memory stays on lexical FTS" >&2
-    return 0
+    # Non-zero, and `optional_step` is what makes that safe: the helper being
+    # absent from the checkout is this installer's own gap, not a state of the
+    # box, and reporting it as a completed fixup is the false success this
+    # whole change removes.
+    return 1
   fi
   step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
   as_clawbox_login "timeout -k 10 600 $helper" || true
@@ -7219,8 +7327,17 @@ else:
 PY
 )"
   fi
+  # Which of the states below are FINDINGS — something this run could not do or
+  # could not read — as opposed to facts about a box that is configured the way
+  # its owner configured it. Only the findings answer non-zero, because
+  # `optional_step` renders a non-zero return as "this fixup failed and was
+  # skipped": saying that over a deliberate cloud embedder, or over memory
+  # search the owner switched off, would be a false failure in place of the
+  # false success.
+  local EMBED_FINDINGS=0
   case "$EMBED_STATE" in
     unknown)
+      EMBED_FINDINGS=1
       echo "  WARN: memory search is on an OpenAI-compatible embedder with no address recorded, so this run cannot say whether it is on this box; the Memory Shard app shows the real state"
       ;;
     local:qwen3-embedding-0.6b)
@@ -7243,6 +7360,7 @@ PY
       ;;
     noparser)
       # Named as the installer's own gap, not the core's.
+      EMBED_FINDINGS=1
       echo "  WARN: python3 is not installed on this box, so this run cannot read the embedder answer the core gave; the Memory Shard app shows the real state"
       ;;
     disabled)
@@ -7253,10 +7371,15 @@ PY
       # answer": the CLI was missing, failed or timed out; its output could
       # not be parsed; or the core answered and named no provider at all --
       # providerLocation()'s own "unknown".
+      EMBED_FINDINGS=1
       echo "  WARN: could not read an embedder from the core (openclaw memory status did not answer, or named no provider), so this run puts no verdict on semantic memory; the Memory Shard app shows the real state"
       ;;
   esac
-  return 0
+  # A cloud embedder and a switched-off memory search are deliberately NOT
+  # findings: both are states an owner chose and the Memory Shard app can
+  # change, and an update that called them failed fixups would cry wolf on
+  # every run.
+  return "$EMBED_FINDINGS"
 }
 
 step_ollama_install() {
@@ -9036,7 +9159,30 @@ step_build
 # has_hermes_harness (a no-op on openclaw), needs nothing OpenClaw provides, and
 # is idempotent, so moving it up costs nothing on any other SKU.
 log "Installing Hermes (on the hermes and dual editions)..."
-step_hermes_install
+# NOT BARE. This step answers non-zero now — for an agent it could not make
+# runnable, and for an upgrade that landed off the pin — and errexit is live at
+# this call site (`set -euo pipefail`, line 22, with no EXIT trap armed on the
+# full-install path: the only `trap dispatch_provision_verdict EXIT` is inside
+# the `--step` block, which exits before this line is ever reached). Bare, a
+# fresh hermes or dual box whose Hermes fetch failed — a region block, a network
+# flake, the population this step's guard exists for — would abort the whole
+# installer here, before the services, VNC and the provisioning verdict: no
+# PROVISIONING INCOMPLETE banner and no [provision-status] sentinel, with the
+# marker already invalidated, so the flash host would see no verdict at all.
+# The step prints its own reason; on this path that report is the outcome, and a
+# box that is otherwise fully provisioned is worth more than an aborted install.
+# RECORDED, not only printed: on the hermes and dual SKUs the agent IS the
+# product, so a box that finished provisioning without a runnable one — or on a
+# build we do not ship — is not a complete install, and `record_provision_failure`
+# is the channel this file already has for saying so. It reaches the operator's
+# "Steps that failed:" line and the `[provision-status]` marker the flash host
+# parses, which is exactly what the bare call was destroying by aborting before
+# either could be written. Idempotent, and never reached on openclaw (the step
+# returns 0 immediately where there is no Hermes harness).
+if ! step_hermes_install; then
+  record_provision_failure hermes_install
+  echo "  Warning: Hermes is not runnable after this step — install it manually, then re-run install.sh (non-fatal)" >&2
+fi
 
 log "Installing and configuring OpenClaw..."
 step_openclaw_setup

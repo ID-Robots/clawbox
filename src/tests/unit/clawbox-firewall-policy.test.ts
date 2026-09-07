@@ -407,7 +407,8 @@ describe("the installer wiring", () => {
       install.indexOf("step_post_update() {"),
       install.indexOf("gateway_port_listening()"),
     );
-    expect(postUpdate).toMatch(/step_firewall \|\| echo/);
+    // `optional_step` is what makes it non-fatal now: it cannot fail the step and it RECORDS the name, so a skipped fixup reaches the update's own status through the `CLAWBOX-WARN:` line instead of only the journal.
+    expect(postUpdate).toMatch(/optional_step \S+ step_firewall\b/);
   });
 
   it("runs it on a fresh install too", () => {

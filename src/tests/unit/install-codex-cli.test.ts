@@ -233,11 +233,14 @@ describe("delivery to devices already in the field", () => {
     expect(extractShellFunction("step_post_update")).toContain("step_codex_cli");
   });
 
-  it("post_update cannot be aborted by it", () => {
+  it("post_update cannot be aborted by it, and says so when it fails", () => {
+    // `optional_step` is what makes it non-fatal now, and unlike the bare
+    // `|| echo` it left behind it records the name — so a skipped install
+    // reaches the update's own status instead of only the journal.
     const line = extractShellFunction("step_post_update")
       .split("\n")
       .find((l) => l.includes("step_codex_cli"));
-    expect(line).toMatch(/\|\|\s*echo/);
+    expect(line).toMatch(/^\s*optional_step \S+ step_codex_cli\b/);
   });
 
   it("a fresh install ships it too", () => {

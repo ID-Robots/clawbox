@@ -70,14 +70,32 @@ function diskState({
   continuation,
   completed = false,
   interruptedAt,
-}: { locked: boolean; continuation?: string; completed?: boolean; interruptedAt?: string }) {
+  holder,
+}: {
+  locked: boolean;
+  continuation?: string;
+  completed?: boolean;
+  interruptedAt?: string;
+  /** Who took the lock, as `setUpdateLock` records it. */
+  holder?: { pid: number; bootId: string | null; startedTicks?: string | null; at?: string };
+}) {
   mockGet.mockImplementation(async (key: string) => {
     if (key === "update_in_progress") return locked ? true : undefined;
     if (key === "update_needs_continuation") return continuation;
     if (key === "update_completed") return completed ? true : undefined;
     if (key === "update_interrupted_at") return interruptedAt;
+    if (key === "update_lock_holder") return holder;
     return undefined;
   });
+}
+
+/** This boot, as `update-lock.ts` reads it. A box without one is not Linux. */
+function thisBootId(): string | null {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 beforeEach(() => {
@@ -122,7 +140,102 @@ describe("an update whose process was replaced is reported, not forgotten", () =
 
     await updater.checkContinuation();
 
-    expect(mockSet).toHaveBeenCalledWith("update_in_progress", undefined);
+    // Through `setMany` now: the flag and the record of WHO held it are
+    // cleared together, or a released lock could keep a stale owner.
+    expect(mockSetMany).toHaveBeenCalledWith(
+      expect.objectContaining({ update_in_progress: undefined, update_lock_holder: undefined }),
+    );
+  });
+
+  it.skipIf(!thisBootId())("leaves a lock alone while the update is STILL RUNNING in another process", async () => {
+    // The false failure this branch produced on the box (2026-09-07): an update
+    // restarts the web server by design, and the old process keeps working
+    // through its last steps. The new one saw the same evidence a crash leaves
+    // — lock held, nothing to resume — released the lock and stamped an
+    // interruption, so a run whose journal shows every step completing and
+    // BUILD IDENTITY OK was reported failed with every step pending.
+    const boot = thisBootId()!;
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    // A record refreshed at the last step boundary — the heartbeat every step
+    // rewrites — over a pid that is gone. This is the SHAPE the box produced:
+    // the old web server was killed by `do_rebuild`, and the root step it
+    // dispatched was still working when the new one booted and looked.
+    diskState({
+      locked: true,
+      holder: { pid: 0x7ffffff0, bootId: boot, startedTicks: "1", at: new Date().toISOString() },
+    });
+
+    const resumed = await updater.checkContinuation();
+
+    expect(resumed).toBe(false);
+    expect(updater.getUpdateState().phase, "an update in flight is not a failed one").toBe("idle");
+    expect(mockSet).not.toHaveBeenCalledWith("update_interrupted_at", expect.anything());
+    expect(mockSetMany, "the lock belongs to the run that is still using it").not.toHaveBeenCalled();
+    expect(err).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(!thisBootId())("still reports the interruption when the process that held it is gone", async () => {
+    // The other half, and the one the branch exists for: a pid that is not
+    // there any more is a run that died.
+    const boot = thisBootId()!;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // Gone, and its heartbeat is an hour old: the run is not moving.
+    diskState({
+      locked: true,
+      holder: {
+        pid: 0x7ffffff0,
+        bootId: boot,
+        startedTicks: "1",
+        at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    });
+
+    await updater.checkContinuation();
+
+    expect(updater.getUpdateState().phase).toBe("failed");
+  });
+
+  it("ignores a holder recorded on ANOTHER boot, where a pid proves nothing", async () => {
+    // The lock deliberately outlives the reboot the update performs, so a
+    // record from before it names a pid this boot may have reused for anything.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({
+      locked: true,
+      holder: {
+        pid: process.ppid,
+        bootId: "a-previous-boot",
+        startedTicks: "1",
+        at: new Date().toISOString(),
+      },
+    });
+
+    await updater.checkContinuation();
+
+    expect(updater.getUpdateState().phase).toBe("failed");
+  });
+
+  it.skipIf(!thisBootId())("does not take a REUSED pid for the process that took the lock", async () => {
+    // A pid is not an identity: the kernel wraps `pid_max`, and an update
+    // spawns thousands of processes through install.sh. Without the start time
+    // beside it, a later unrelated process landing on the dead holder's pid
+    // would hold the lock for the rest of the boot — the owner redirected to
+    // /updating with nothing left to release it, which is worse than the false
+    // failure this record is here to stop.
+    const boot = thisBootId()!;
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    diskState({
+      locked: true,
+      holder: {
+        pid: process.ppid, // alive, and not this process
+        bootId: boot,
+        startedTicks: "1", // …but not when THIS process started
+        at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      },
+    });
+
+    await updater.checkContinuation();
+
+    expect(updater.getUpdateState().phase).toBe("failed");
   });
 
   it("says nothing at all on a box that simply has not updated", async () => {
