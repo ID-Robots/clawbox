@@ -23,13 +23,12 @@
 //   2. THE TAINT STORE. `api.runContext` is the core's own per-RUN plugin
 //      scratch state, namespaced per plugin and documented as "Cleared on run
 //      end/error", and it is the right mechanism — it is written and read here.
-//      But it does not work for this plugin on the pinned core, which is a
-//      finding rather than a licence: the loader shuts `setRunContext` and
-//      `getRunContext` behind ONE side-effect predicate, so the write answers
-//      `false` and the read answers `undefined` together, and on the box every
-//      card it produced named no source at all. So the gate also keeps the mark
-//      itself, keyed by run id — see `marksByRun` below for why that cannot
-//      become a TTL that outlives the turn (probe-once) or expires inside it.
+//      What was OBSERVED on the box, under PR #775's after-hook-only design, is
+//      that it did not keep this plugin's mark: the write was refused and every
+//      card named no source. WHICH refusal fired was not determined — see
+//      `marksByRun` below for the candidates and for why the gate keeps the
+//      mark itself as well, and why that mark is reclaimed at run end rather
+//      than by a TTL that could outlive the turn or expire inside it.
 //
 //   3. THE GATE. `before_tool_call` may answer `requireApproval`
 //      (`docs/plugins/plugin-permission-requests.md`, "Request approval before
@@ -168,6 +167,19 @@ const MAX_SOURCES = 4;
  */
 const MAX_TRACKED_RUNS = 1024;
 
+/**
+ * How old a mark must be before the backstop above may evict it.
+ *
+ * NOT A TTL: nothing expires, and a mark this old still gates its run for as
+ * long as that run lives. It is the floor that makes eviction SAFE — losing a
+ * live run's mark is an ungated shell, and the least-recently-marked entry is
+ * exactly the shape a long agent run has when it read a page early and reaches
+ * a shell much later. A day is far past any turn, so anything older belongs to
+ * a run that ended; if nothing is that old the map is simply allowed to grow,
+ * because bounded memory is worth less than a gate that holds.
+ */
+const EVICTABLE_AFTER_MS = 24 * 60 * 60_000;
+
 /** Lower than the path guard's default 0, so its silent deny is answered first. */
 const GATE_PRIORITY = -10;
 
@@ -199,7 +211,7 @@ const GATE_PRIORITY = -10;
  */
 export function createWebTaintGate({ runContext, now = Date.now } = {}) {
   /**
-   * THE MARK, held here: `runId` → `{ sources }`.
+   * THE MARK, held here: `runId` → `{ sources, at }`.
    *
    * WHY THIS EXISTS BESIDE THE HARNESS'S OWN STORE, which is the thing a
    * ClawBox plugin is supposed to use rather than reinvent. `api.runContext` IS
@@ -251,31 +263,41 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
    * arrived at from the other side. A mark is dropped when its RUN ENDS
    * instead, on the core's own signal (`forgetRun` below).
    *
-   * THE EVICTION IS SILENT, and that is the careful part. An earlier draft
-   * armed the process-wide window here, on the reasoning that a lost mark is a
-   * taint the gate can no longer prove. That reasoning only holds if reaching
-   * the bound means something is wrong — and on a core with no run-end signal
-   * it does not: marks accumulate for the process lifetime, so a box that
-   * browses reaches 1024 in the ordinary course of weeks, and from then on
-   * EVERY web read would evict one and re-arm a process-wide gate that never
-   * drains. The gate would degrade, silently and permanently, into asking about
-   * every shell command in every session and every cron — which is precisely
-   * the "a gate that fires on ordinary work is worse than no gate" failure this
-   * plugin's ruling forbids. Losing the least-recently-marked run, which is
-   * either long finished or the quietest of 1024 concurrent live ones, is much
-   * the smaller harm.
+   * THE EVICTION IS SILENT AND AGE-GATED, and that is the careful part. Two
+   * earlier drafts of this file got it wrong in opposite directions.
+   *
+   * The first armed the process-wide window on every eviction, reasoning that a
+   * lost mark is a taint the gate can no longer prove. That only holds if
+   * reaching the bound means something is wrong — and without run-end
+   * reclamation it does not: marks would accumulate for the process lifetime,
+   * so a box that browses reaches 1024 in the ordinary course of weeks, and
+   * from then on EVERY web read would evict one and re-arm a process-wide gate
+   * that never drains. The gate would degrade, silently and permanently, into
+   * asking about every shell in every session and every cron — the "a gate that
+   * fires on ordinary work is worse than no gate" failure this plugin forbids.
+   *
+   * The second evicted the least-recently-marked run silently, which is
+   * fail-OPEN: that entry is exactly the shape of a long agent run which read a
+   * page early and reaches a shell much later, and dropping its mark is an
+   * ungated shell with no card and no trace. So eviction now refuses to touch
+   * anything younger than `EVICTABLE_AFTER_MS`, and the map is allowed to grow
+   * rather than drop a mark that might still be live.
    */
   const rememberTaint = (runId, toolName) => {
     const sources = marksByRun.get(runId)?.sources ?? [];
     const next = sources.includes(toolName) ? sources : [...sources, toolName].slice(-MAX_SOURCES);
     // Delete before set so insertion order stays recency order and the eviction
-    // below drops the run that has been quiet longest.
+    // below considers the run that has been quiet longest first.
     marksByRun.delete(runId);
-    marksByRun.set(runId, { sources: next });
+    marksByRun.set(runId, { sources: next, at: now() });
     while (marksByRun.size > MAX_TRACKED_RUNS) {
-      const oldest = marksByRun.keys().next().value;
-      if (oldest === undefined) break;
-      marksByRun.delete(oldest);
+      const oldest = marksByRun.entries().next().value;
+      if (!oldest) break;
+      const [key, mark] = oldest;
+      // Insertion order is recency order, so once the oldest is too young to
+      // evict, every other entry is too.
+      if (now() - mark.at < EVICTABLE_AFTER_MS) break;
+      marksByRun.delete(key);
     }
   };
 
@@ -458,6 +480,22 @@ export function createWebTaintGate({ runContext, now = Date.now } = {}) {
   return { onAfterToolCall, onBeforeToolCall, onAgentEvent };
 }
 
+/**
+ * Says, once, that the run-end reclamation is not in place.
+ *
+ * The gate still works without it — marks fall back to the bounded map — but
+ * the map then grows with the gateway, so this is the difference between a
+ * known degradation and a silent one.
+ */
+function warnNoReclamation(why) {
+  // The gateway log is the only channel a hook plugin is given, and a silent
+  // loss of reclamation is exactly the failure this line exists to prevent.
+  console.warn(
+    `[${PLUGIN_ID}] run-end reclamation is not active (${why}); ` +
+      "taint marks will be released by the size backstop instead",
+  );
+}
+
 const clawboxWebTaintPlugin = {
   id: PLUGIN_ID,
   name: "ClawBox web-taint approval gate",
@@ -473,15 +511,26 @@ const clawboxWebTaintPlugin = {
     // terminal `lifecycle` event the core clears its own per-run plugin context
     // in the very same dispatcher. Wrapped and optional because a core without
     // the surface must still get the gate: it falls back to the bounded map.
-    try {
-      api?.agent?.events?.registerAgentEventSubscription?.({
-        id: `${PLUGIN_ID}-run-end`,
-        description: "Drops this run's web-taint mark when the run ends.",
-        streams: ["lifecycle"],
-        handle: gate.onAgentEvent,
-      });
-    } catch {
-      // A registration the core refused costs the reclamation, not the gate.
+    //
+    // IT SAYS SO WHEN IT CANNOT, rather than degrading quietly. The core's api
+    // builder substitutes silent no-ops for handlers it did not wire, so a dead
+    // feed returns `undefined` exactly like a live one; without this line the
+    // only symptom of losing reclamation would be a map that grows for weeks.
+    const subscribe = api?.agent?.events?.registerAgentEventSubscription;
+    if (typeof subscribe !== "function") {
+      warnNoReclamation("this core exposes no api.agent.events.registerAgentEventSubscription");
+    } else {
+      try {
+        subscribe({
+          id: `${PLUGIN_ID}-run-end`,
+          description: "Drops this run's web-taint mark when the run ends.",
+          streams: ["lifecycle"],
+          handle: gate.onAgentEvent,
+        });
+      } catch (error) {
+        // A registration the core refused costs the reclamation, not the gate.
+        warnNoReclamation(`the core refused the subscription: ${String(error)}`);
+      }
     }
   },
 };

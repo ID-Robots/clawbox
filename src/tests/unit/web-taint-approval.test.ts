@@ -778,6 +778,64 @@ describe("the harness reclaims the mark when the run ends", () => {
     expect(hooks).toEqual(["after_tool_call", "before_tool_call"]);
   });
 
+  it("never evicts a mark young enough to belong to a live run", () => {
+    // THE FAIL-OPEN THE AGE GATE EXISTS FOR. Eviction takes the
+    // least-recently-marked entry, which is exactly the shape of a long agent
+    // run that read a page early and reaches a shell much later. Dropping that
+    // mark is an ungated shell with no card and no trace — so the map is
+    // allowed to grow past its bound instead.
+    let clock = 1_000;
+    const runContext = fakeRunContext();
+    const g = createWebTaintGate({ runContext, now: () => clock });
+    // A long run reads the web, and then says nothing for hours.
+    g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx({ runId: "long-run" }));
+    clock += 6 * 60 * 60_000;
+    // Meanwhile the box does far more web-reading work than the bound allows.
+    for (let i = 0; i < 1_100; i += 1) {
+      g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx({ runId: `other-${i}` }));
+    }
+    // The long run finally reaches its shell. It must still be asked about.
+    const asked = g.onBeforeToolCall({ toolName: "exec", params: { command: "id" } }, ctx({ runId: "long-run" }));
+    expect(asked?.requireApproval).toBeTruthy();
+    expect(asked?.requireApproval?.description).toContain("web_fetch");
+  });
+
+  it("does not resurrect an unreclaimable mark when a late after hook lands", () => {
+    // The core fires `after_tool_call` UNAWAITED, so it can arrive after the
+    // run's terminal lifecycle event — after `forgetRun` has already dropped
+    // the mark. Re-creating it cannot gate anything (the run is over), but the
+    // entry must not be permanent, or it walks the map toward its bound on a
+    // busy box. The age gate makes such an entry the FIRST thing evicted.
+    let clock = 1_000;
+    const runContext = fakeRunContext();
+    const g = createWebTaintGate({ runContext, now: () => clock });
+    g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx());
+    g.onAgentEvent({ stream: "lifecycle", runId: RUN, data: { phase: "end" } });
+    // The late result for a run the core has already closed.
+    g.onAfterToolCall({ toolName: "web_fetch", params: {}, result: "…" }, ctx());
+    clock += 25 * 60 * 60_000;
+    for (let i = 0; i < 1_100; i += 1) {
+      g.onBeforeToolCall({ toolName: "web_fetch", params: {} }, ctx({ runId: `other-${i}` }));
+    }
+    // The stale entry is gone, and a fresh unrelated run is untouched by it.
+    expect(g.onBeforeToolCall({ toolName: "exec", params: {} }, ctx({ runId: "clean-run" }))).toBeUndefined();
+  });
+
+  it("warns rather than degrading silently when the core offers no run-end feed", () => {
+    // MEDIUM 3: the core substitutes silent no-ops for handlers it did not
+    // wire, so a dead feed is indistinguishable from a live one. Losing
+    // reclamation must be a known degradation, not an invisible one.
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void warnings.push(args.join(" "));
+    try {
+      plugin.register({ on: () => {}, runContext: fakeRunContext() });
+    } finally {
+      console.warn = original;
+    }
+    expect(warnings.join("\n")).toContain("run-end reclamation is not active");
+  });
+
   it("never arms the process-wide window from an eviction, however long it runs", () => {
     // THE S1 CASE. With the mark reclaimed at run end the bound is unreachable;
     // this drives past it anyway, because the bound is the fallback for a core

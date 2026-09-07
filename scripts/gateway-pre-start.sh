@@ -5450,13 +5450,12 @@ else
       // the whole process lifetime, so the boot proves the plugin asks for it.
       agent: { events: { registerAgentEventSubscription: (sub) => { runEndSubscription = sub; } } },
       // SHAPED LIKE THE CORE THAT ACTUALLY SHIPS, which is the point of the
-      // probe. On the pinned 2026.8.1 core the loader shuts `setRunContext` and
-      // `getRunContext` together behind one side-effect predicate, so the write
-      // answers `false` and the read answers `undefined` — TASK-768. A gate
-      // that leans on that store cannot name what tainted the turn, and the
-      // owner gets a card that says only that something could not be kept. So
-      // the stand-in refuses exactly as the box does, and the assertions below
-      // demand the source anyway.
+      // probe. On the box the write to `api.runContext` was refused and the
+      // read came back empty, so every card named no source — TASK-768. Which
+      // of the core'"'"'s several refusal paths fired was not determined; what
+      // matters for the boot check is that a gate leaning on that store cannot
+      // name what tainted the turn. So the stand-in refuses exactly as the box
+      // did, and the assertions below demand the source anyway.
       runContext: {
         setRunContext: () => (reachedRunContext = true, false),
         getRunContext: () => undefined,
