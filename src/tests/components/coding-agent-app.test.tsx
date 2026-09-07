@@ -850,6 +850,44 @@ describe("CodingAgentApp", () => {
       }
     });
 
+    it("shows a Pause's answer as soon as the runs read lands, without waiting for the projects read", async () => {
+      // The four reads used to be awaited as one, and the projects read is a
+      // `git log` per project — seconds on a busy box — so the page kept
+      // saying RUNNING long after Pause had answered (the sweep of 2026-09-07).
+      const live = { ...RUN, id: "run-live0001", status: "running", completedAt: null };
+      stubFetch({ enabled: true, readiness: READY }, [live], { projects: [SITE_PROJECT] });
+      const inner = globalThis.fetch;
+      let state = "running";
+      let releaseProjects: (() => void) | null = null;
+      let projectsHeld = false;
+      const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+      vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = input.toString();
+        if (url === "/setup-api/coding-agent/pause") { state = "paused"; projectsHeld = true; return json({ run: { ...live, status: state } }); }
+        if (url.startsWith("/setup-api/coding-agent/runs")) return json({ runs: [{ ...live, status: state, completedAt: state === "paused" ? 900 : null }] });
+        if (url.startsWith("/setup-api/coding-agent/projects") && projectsHeld) {
+          await new Promise<void>((resolve) => { releaseProjects = resolve; });
+        }
+        return inner(input, init);
+      }));
+      try {
+        render(<CodingAgentApp />);
+        await openRuns();
+        fireEvent.click(await screen.findByTestId("coding-agent-details-run-live0001"));
+        const page = await screen.findByTestId("coding-agent-run-page");
+        expect(within(page).getByTestId("coding-agent-run-status").textContent).toMatch(/running/i);
+
+        fireEvent.click(within(page).getByTestId("coding-agent-pause-run-live0001"));
+        // PAUSED while the projects read is still held.
+        await waitFor(() => expect(within(page).getByTestId("coding-agent-run-status").textContent).toMatch(/paused/i));
+        expect(releaseProjects).not.toBeNull();
+        (releaseProjects as unknown as () => void)();
+        await waitFor(() => expect(screen.queryByTestId("coding-agent-action-error")).toBeNull());
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
     it("draws a refused action's sentence above the run's page, and brings it on screen", async () => {
       // Drawn under the whole page, a refused Resume sat below the timeline,
       // the summary and the evidence, off the screen the owner had just
