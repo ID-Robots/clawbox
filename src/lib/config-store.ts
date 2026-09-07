@@ -110,6 +110,16 @@ export function assertStorableKey(key: string): void {
 }
 
 function assertStorableValue(key: string, value: unknown): void {
+  // The WHOLE value first, because the walk below cannot see it: JSON drops a
+  // top-level function or symbol entirely, and the write then RENAMES a config
+  // without the key over the one that had it — `set("active_harness", () => …)`
+  // deletes the harness and answers success. `swap` was saved from this only by
+  // its own `JSON.stringify(value) === undefined` test, so without this the
+  // three writers were not the same guard. `undefined` cannot arrive here: it
+  // is the documented delete and both callers filter it out first.
+  if (value === undefined || typeof value === "function" || typeof value === "symbol") {
+    throw new TypeError(`config-store: ${key} cannot hold a ${typeof value} — JSON omits it`);
+  }
   // Not an arrow: the replacer's `this` is the object or array HOLDING the
   // value, and that is what separates the two ways JSON writes `null`. An
   // OBJECT property whose value is `undefined`, a function or a symbol is
@@ -119,8 +129,13 @@ function assertStorableValue(key: string, value: unknown): void {
   // and one entry is now nothing, which is the same false success as the
   // numbers below.
   JSON.stringify(value, function (this: unknown, _field: string, held: unknown) {
-    if (typeof held === "number" && !Number.isFinite(held)) {
-      throw new TypeError(`config-store: ${key} cannot hold ${held} — JSON writes it as null`);
+    // `held instanceof Number` as well as the primitive: a boxed non-finite
+    // number reaches the replacer as an OBJECT and is written as `null` just
+    // the same, so the "at any depth" claim above would be half true without
+    // it.
+    const asNumber = typeof held === "number" ? held : held instanceof Number ? held.valueOf() : null;
+    if (asNumber !== null && !Number.isFinite(asNumber)) {
+      throw new TypeError(`config-store: ${key} cannot hold ${String(asNumber)} — JSON writes it as null`);
     }
     if (Array.isArray(this) && (held === undefined || typeof held === "function" || typeof held === "symbol")) {
       throw new TypeError(`config-store: ${key} cannot hold a list with a member JSON writes as null`);

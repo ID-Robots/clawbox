@@ -332,6 +332,42 @@ describe("config-store", () => {
     });
   });
 
+  describe("a value JSON omits altogether", () => {
+    it("is refused by all three writers, not just swap", async () => {
+      // The key half of this fix has an exact twin on the value side: a
+      // top-level function or symbol is dropped by `JSON.stringify`, so the
+      // rename lands a config WITHOUT the key — the caller's stored value is
+      // gone and the write answered success. `swap` refused it already, from
+      // its own `=== undefined` test; `set` and `setMany` did not, so the three
+      // writers were not the same guard.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ active_harness: "hermes" }), "utf-8");
+
+      await expect(configStore.set("active_harness", () => "openclaw")).rejects.toThrow(TypeError);
+      await expect(configStore.setMany({ active_harness: Symbol("openclaw") })).rejects.toThrow(TypeError);
+      await expect(configStore.swap("active_harness", () => "openclaw")).rejects.toThrow(TypeError);
+
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ active_harness: "hermes" });
+    });
+
+    it("still lets `undefined` mean delete, in both writers that take it", async () => {
+      // The one value that must NOT throw: it is the documented removal, and
+      // both writers filter it out before the guard.
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ a: 1, b: 2 }), "utf-8");
+      await configStore.set("a", undefined);
+      await configStore.setMany({ b: undefined });
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({});
+    });
+
+    it("refuses a boxed non-finite number, which stringifies to null like the bare one", async () => {
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ keep: "kept" }), "utf-8");
+      await expect(configStore.set("session_generation", new Number(NaN))).rejects.toThrow(TypeError);
+      await expect(configStore.set("plan", { limit: new Number(Infinity) })).rejects.toThrow(TypeError);
+      // A boxed FINITE number is written as the number it holds, and is fine.
+      await configStore.set("session_generation", new Number(7));
+      expect(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8"))).toEqual({ keep: "kept", session_generation: 7 });
+    });
+  });
+
   describe("getAll", () => {
     it("returns full config object", async () => {
       await fs.writeFile(CONFIG_PATH, JSON.stringify({ a: 1, b: "two", c: true }), "utf-8");

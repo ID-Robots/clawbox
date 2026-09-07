@@ -19,7 +19,14 @@ function readKV(): Record<string, string> {
   ensureDir();
   try {
     if (!fs.existsSync(KV_PATH)) return {};
-    return JSON.parse(fs.readFileSync(KV_PATH, "utf-8"));
+    const parsed = JSON.parse(fs.readFileSync(KV_PATH, "utf-8"));
+    // The same inbound rule as config-store, for the same reason: `JSON.parse`
+    // creates `"__proto__"` as an OWN property, `writeKV` would re-emit it on
+    // every later write, and a key in this file that another reader merges into
+    // a plain object with `Object.assign` changes that object's prototype.
+    // `kvDelete` could always remove one; nothing had to keep carrying it.
+    if (parsed && typeof parsed === "object") Reflect.deleteProperty(parsed, "__proto__");
+    return parsed;
   } catch {
     return {};
   }

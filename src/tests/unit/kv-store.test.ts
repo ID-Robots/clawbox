@@ -308,6 +308,14 @@ describe("kv-store", () => {
       expect(kvStore.kvGetAll()).toEqual({});
     });
 
+    it("drops a __proto__ the FILE already carries, like config-store", async () => {
+      await fs.writeFile(KV_PATH, '{"__proto__":{"polluted":true},"ui:theme":"dark"}', "utf-8");
+      expect(kvStore.kvGet("__proto__")).toBeNull();
+      expect(kvStore.kvGetAll()).toEqual({ "ui:theme": "dark" });
+      kvStore.kvSet("ui:theme", "light");
+      expect(JSON.parse(await fs.readFile(KV_PATH, "utf-8"))).toEqual({ "ui:theme": "light" });
+    });
+
     it("kvGet answers null for an inherited name, never the prototype", () => {
       expect(kvStore.kvGet("__proto__")).toBeNull();
       expect(kvStore.kvGet("constructor")).toBeNull();
