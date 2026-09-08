@@ -8,6 +8,8 @@ before clicking through the portal. We print this hint up front.
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import secrets
 import socket
@@ -90,12 +92,12 @@ class _OneShotServer(socketserver.TCPServer):
     allow_reuse_address = True
 
 
-def _exchange(server: str, code: str, state: str, device_id: str) -> str:
+def _exchange(server: str, code: str, state: str, device_id: str, code_verifier: str) -> str:
     url = f"{server}/api/portal/connect/exchange"
     try:
         resp = requests.post(
             url,
-            json={"code": code, "state": state, "device_id": device_id},
+            json={"code": code, "state": state, "device_id": device_id, "code_verifier": code_verifier},
             timeout=(5, 30),
             headers={"User-Agent": api.USER_AGENT},
         )
@@ -131,6 +133,12 @@ def run_pair(
     server = server.rstrip("/")
     device_name = device_name or socket.gethostname()
     state = secrets.token_urlsafe(24)
+    # RFC 7636: only the S256 challenge travels through the browser. A copied
+    # authorization code is unusable without this process's random verifier.
+    code_verifier = secrets.token_urlsafe(32)
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode("ascii")).digest()
+    ).rstrip(b"=").decode("ascii")
     _PairHandler.expected_state = state
     _PairHandler.received = None
 
@@ -140,6 +148,8 @@ def run_pair(
             "state": state,
             "redirect_uri": redirect_uri,
             "device_name": device_name,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
         }
     )
     auth_url = f"{server}/portal/connect?{qs}"
@@ -188,6 +198,7 @@ def run_pair(
         code=received["code"],
         state=received["state"],
         device_id=device_name,
+        code_verifier=code_verifier,
     )
 
     target = token_path or token.default_token_path()
