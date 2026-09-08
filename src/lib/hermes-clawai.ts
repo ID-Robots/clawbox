@@ -1883,6 +1883,20 @@ async function selectHermesCloudVoiceIfUnvoiced(
       );
       return;
     }
+    // Restore only the cloud selection ClawBox itself stood down. An ordinary
+    // local choice has no stamp and keeps the existing on-device preference.
+    const { readHermesVoiceStanddown, clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
+    const stoodDown = current === HERMES_LOCAL_TTS_PROVIDER ? await readHermesVoiceStanddown() : null;
+    if (stoodDown && ownRoute) {
+      await writeHermesCloudTarget(token);
+      if (stoodDown.cloudVoice) {
+        const { writeHermesCloudVoice } = await import("@/lib/hermes-tts");
+        await writeHermesCloudVoice(stoodDown.cloudVoice);
+      }
+      await selectHermesProvider("cloud");
+      await clearHermesVoiceStanddown();
+      return;
+    }
     // What this box HAS, asked in every unchosen state rather than only over a
     // `clawbox-local` selection. A working on-device engine is the answer
     // wherever there is one — an owner on it is not moved off it by linking a
