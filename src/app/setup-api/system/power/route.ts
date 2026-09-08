@@ -1,16 +1,9 @@
 import { NextResponse } from "next/server";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { requireSession } from "@/lib/route-auth";
-
-const execFileAsync = promisify(execFile);
+import { hasOwnerSession } from "@/lib/owner-session";
+import { dispatchPowerAction, isPowerAction, requestPowerApproval, PowerApprovalConflict } from "@/lib/power-approval";
 
 export const dynamic = "force-dynamic";
-
-const POWER_ACTIONS: Record<string, string> = {
-  shutdown: "poweroff",
-  restart: "reboot",
-};
 
 export async function POST(req: Request) {
   // Shutdown/reboot is only ever driven from the desktop (SettingsApp, the
@@ -22,14 +15,14 @@ export async function POST(req: Request) {
   if (unauthorized) return unauthorized;
 
   let action: unknown;
+  let reason: unknown;
   try {
-    ({ action } = await req.json());
+    ({ action, reason } = await req.json());
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const systemctlAction = typeof action === "string" ? POWER_ACTIONS[action] : undefined;
-  if (!systemctlAction) {
+  if (!isPowerAction(action)) {
     return NextResponse.json(
       { error: "Invalid action. Use 'shutdown' or 'restart'." },
       { status: 400 },
@@ -37,6 +30,11 @@ export async function POST(req: Request) {
   }
 
   try {
+    if (!(await hasOwnerSession(req))) {
+      const prompt = await requestPowerApproval(action, typeof reason === "string" ? reason : "Requested in chat");
+      return NextResponse.json({ pendingApproval: true, action, id: prompt.id,
+        expiresAt: prompt.expiresAt, telegramPromptSent: prompt.messages.length > 0 }, { status: 202 });
+    }
     // Dispatch the power command and wait for systemd to accept it BEFORE
     // responding. `systemctl poweroff|reboot` enqueues the job and returns 0
     // promptly (the actual teardown happens a moment later as units stop), so
@@ -45,13 +43,10 @@ export async function POST(req: Request) {
     // fire-and-forget path that always reported success. The response still
     // flushes to the client because the enqueue returns well before the web
     // server's own unit is torn down.
-    await execFileAsync(
-      "/usr/bin/sudo",
-      ["/usr/bin/systemctl", systemctlAction],
-      { timeout: 10_000 },
-    );
+    await dispatchPowerAction(action);
     return NextResponse.json({ ok: true, action });
   } catch (err) {
+    if (err instanceof PowerApprovalConflict) return NextResponse.json({ error: err.message }, { status: 409 });
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to execute power action" },
       { status: 500 },
