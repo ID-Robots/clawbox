@@ -14,6 +14,12 @@ concurrency:
 jobs:
   triage:
     runs-on: ubuntu-latest
+    # Same protected Environment as pr-review.yml: `clawreview`, deployment
+    # branches beta + main only. An `issues` run evaluates the default
+    # branch, so it passes; a same-repo pull_request workflow naming this
+    # Environment (run ref: refs/pull/<n>/merge) would be refused. Keep the name in sync with
+    # pr-review.yml — the policy lives in the Environment, not here.
+    environment: clawreview
     # Job-scoped (not workflow-scoped) so future jobs don't inherit write
     # access: the triage script labels + comments via GH_TOKEN.
     permissions:

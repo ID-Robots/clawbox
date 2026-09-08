@@ -676,3 +676,74 @@ describe("credentialed e2e-install runs are bound to a protected Environment", (
     expect(comment).toContain("needs.e2e-install.result");
   });
 });
+
+/**
+ * ClawReview / issue-triage credentials are bound to a protected Environment.
+ *
+ * Both jobs read paid API credentials (CLAUDE_CODE_OAUTH_TOKEN /
+ * ANTHROPIC_API_KEY / CLAWREVIEW_APP_*). pr-review.yml runs on
+ * pull_request_target and issue-triage.yml on issues — neither executes
+ * PR-controlled code, so the workflows themselves are safe. The residual
+ * risk is a same-repo pull_request editing ANY workflow to name the same
+ * credentials scope: GitHub lets any workflow reference any Environment,
+ * so the Environment's deployment-branch policy (beta + main only, set by
+ * the owner in repo settings) is the only fence. What this pins is that
+ * both jobs ASK for that Environment by its exact name — a rename in one
+ * file but not the other, or a dropped declaration, would either detach
+ * the job from the fence or fail every run.
+ */
+describe("credentialed review/triage runs are bound to the clawreview Environment", () => {
+  const files: Array<[string, string]> = [
+    [".github/workflows/pr-review.yml", "review"],
+    [".github/workflows/issue-triage.yml", "triage"],
+  ];
+
+  for (const [rel, jobName] of files) {
+    describe(rel, () => {
+      const yml = read(rel);
+      const text = yml.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+      // The one job: from its key to the end of the file (both workflows
+      // are single-job; a second job added later makes this fail loudly
+      // rather than silently testing the wrong slice).
+      const jobStart = text.indexOf(`\n  ${jobName}:\n`);
+      const job = jobStart === -1 ? "" : text.slice(jobStart);
+      // Preamble = job header before the first step; `environment:` must be
+      // the JOB's, not a step's `with:`.
+      const [preamble] = job.split(/^ *- (?=name:|uses:|run:)/m);
+
+      it("exists as a single job", () => {
+        expect(jobStart, `the ${jobName} job is gone`).toBeGreaterThan(-1);
+      });
+
+      it("declares the job-level clawreview Environment exactly once", () => {
+        const declarations = preamble.match(/^ {4}environment: (.+)$/gm) ?? [];
+        expect(declarations, `the ${jobName} job declares no job-level \`environment:\``).toHaveLength(1);
+        expect(declarations[0]).toBe("    environment: clawreview");
+      });
+
+      it("never parameterises the Environment name by event", () => {
+        // e2e-install.yml switches Environments by event because PR runs
+        // execute PR code; these two never do, so a conditional name here
+        // would only ever open a path that names a secretless twin — or
+        // worse, let an expression be coaxed into the credentialed one.
+        expect(preamble).not.toMatch(/environment:.*github\.event_name/);
+      });
+    });
+  }
+
+  it("both workflows name the same Environment (one fence, one settings page)", () => {
+    const names = files.map(([rel]) => /^ {4}environment: (.+)$/m.exec(read(rel))?.[1]);
+    expect(new Set(names).size, "the two jobs name different Environments").toBe(1);
+    expect(names[0]).toBe("clawreview");
+  });
+
+  it("the deployment-branch policy is documented where the owner creates the Environment", () => {
+    // The policy itself is a settings change no test can see; the workflow
+    // comments are where the owner learns the required restriction while
+    // creating it. Pin that both files carry the instruction.
+    for (const [rel] of files) {
+      expect(read(rel), `${rel} no longer documents the beta+main deployment-branch policy for the owner`)
+        .toMatch(/clawreview(?=[\s\S]*?\bbeta\b)(?=[\s\S]*?\bmain\b)/i);
+    }
+  });
+});
