@@ -7397,6 +7397,14 @@ step_gateway_legacy_state_recovery() {
 }
 
 step_update_smoke() {
+  # These probes read OpenClaw's gateway and Telegram configuration. Hermes-only
+  # boxes deliberately have neither; their services are checked separately by
+  # validate_services. Do not turn that absence into a failed update fixup.
+  # Dual still ships OpenClaw and must keep all of these checks.
+  if ! has_openclaw_harness; then
+    echo "    [skip] OpenClaw post-update smokes (Hermes-only edition)"
+    return 0
+  fi
   # WHAT THE SMOKES FOUND, in a return code the caller can report.
   #
   # Every finding below is a `[WARN]` line and the step returned 0 either way,
