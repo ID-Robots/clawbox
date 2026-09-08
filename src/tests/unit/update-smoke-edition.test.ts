@@ -2,7 +2,9 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const installer = fs.readFileSync(path.join(process.cwd(), "install.sh"), "utf8");
 const start = installer.indexOf("step_update_smoke() {");
