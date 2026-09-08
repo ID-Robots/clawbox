@@ -937,9 +937,9 @@ export async function resolveUpdateBranch(projectDir: string = PROJECT_DIR): Pro
  */
 function warnUpdate(code: string, message: string): void {
   console.warn(`[Updater] WARNING: ${message}`);
-  if (!state.warnings) state.warnings = [];
-  if (state.warnings.some((w) => w.code === code)) return;
-  state.warnings.push({ code, message });
+  if (!runtime.state.warnings) runtime.state.warnings = [];
+  if (runtime.state.warnings.some((w) => w.code === code)) return;
+  runtime.state.warnings.push({ code, message });
 }
 
 /**
@@ -950,7 +950,7 @@ function warnUpdate(code: string, message: string): void {
  * reboot eats.
  */
 async function persistWarnings(): Promise<void> {
-  await set("update_warnings", state.warnings?.length ? JSON.stringify(state.warnings) : undefined);
+  await set("update_warnings", runtime.state.warnings?.length ? JSON.stringify(runtime.state.warnings) : undefined);
 }
 
 async function restoreWarnings(): Promise<UpdateWarning[]> {
@@ -3604,32 +3604,41 @@ function createInitialState(steps: UpdateStepDef[]): UpdateState {
   };
 }
 
-let state: UpdateState = createInitialState(applicableSteps());
-let running = false;
-// The continuation being read, if one is. Assigned before that read's first
-// await and cleared when it settles: `running` covers a launched run, this
-// covers the reads before it, so two callers in one tick — the boot hook and
-// a status poll — share one resume instead of each running their own, and no
-// full run can start underneath it.
-let continuationInFlight: Promise<boolean> | null = null;
+// Next builds instrumentation and route handlers into independent module graphs.
+// A module-local flag therefore describes one bundle, not this server process:
+// the boot hook can be running post_update while /update/status reports idle,
+// clears its lock and permits a second update. Share the owner and its snapshot
+// across all copies in this process; disk markers still bridge actual reboots.
+interface UpdaterRuntime {
+  state: UpdateState;
+  running: boolean;
+  continuationInFlight: Promise<boolean> | null;
+}
+const runtimeKey: unique symbol = Symbol.for("clawbox.updater.runtime.v1");
+const processRuntime = globalThis as typeof globalThis & { [runtimeKey]?: UpdaterRuntime };
+const runtime = processRuntime[runtimeKey] ??= {
+  state: createInitialState(applicableSteps()),
+  running: false,
+  continuationInFlight: null,
+};
 
 /** An update owns the box: one is running, or a continuation is being read. */
 function updateOwned(): boolean {
-  return running || continuationInFlight !== null;
+  return runtime.running || runtime.continuationInFlight !== null;
 }
 
 export function getUpdateState(): UpdateState {
   return {
-    ...state,
-    steps: state.steps.map((s) => ({ ...s })),
-    warnings: (state.warnings ?? []).map((w) => ({ ...w })),
+    ...runtime.state,
+    steps: runtime.state.steps.map((s) => ({ ...s })),
+    warnings: (runtime.state.warnings ?? []).map((w) => ({ ...w })),
   };
 }
 
 export function resetUpdateState(): void {
-  state = createInitialState(applicableSteps());
-  running = false;
-  continuationInFlight = null;
+  runtime.state = createInitialState(applicableSteps());
+  runtime.running = false;
+  runtime.continuationInFlight = null;
 }
 
 export type DismissOutcome =
@@ -3659,7 +3668,7 @@ export type DismissOutcome =
  * to make something go away.
  */
 export async function dismissSettledUpdate(): Promise<DismissOutcome> {
-  if (updateOwned() || state.phase === "running") {
+  if (updateOwned() || runtime.state.phase === "running") {
     return { dismissed: false, reason: "in-progress", error: "An update is in progress" };
   }
   // The interrupted-run record is part of the result being dismissed. Without
@@ -3703,7 +3712,7 @@ export async function dismissSettledUpdate(): Promise<DismissOutcome> {
   if (updateOwned() || getUpdateState().phase === "running") {
     return { dismissed: false, reason: "in-progress", error: "An update is in progress" };
   }
-  state = createInitialState(applicableSteps());
+  runtime.state = createInitialState(applicableSteps());
   return { dismissed: true };
 }
 
@@ -3808,10 +3817,11 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
   runUpdate(steps, startFrom, options)
     .catch((err) => {
       console.error("[Updater] Unexpected error:", err);
-      state.phase = "failed";
+      runtime.state.error = err instanceof Error ? err.message : String(err);
+      runtime.state.phase = "failed";
     })
     .finally(() => {
-      running = false;
+      runtime.running = false;
       // The lock is released here and nowhere else on the success path. This
       // does NOT run when do_rebuild kills the server mid-run — the process
       // simply ends — which is exactly right: the flag stays on disk and the
@@ -3841,13 +3851,13 @@ export async function updateInFlight(): Promise<boolean> {
  * poll that lands on the boot hook's read answers "running", not "idle".
  */
 export function checkContinuation(): Promise<boolean> {
-  if (running) return Promise.resolve(false);
-  if (!continuationInFlight) {
-    continuationInFlight = resumeContinuation().finally(() => {
-      continuationInFlight = null;
+  if (runtime.running) return Promise.resolve(false);
+  if (!runtime.continuationInFlight) {
+    runtime.continuationInFlight = resumeContinuation().finally(() => {
+      runtime.continuationInFlight = null;
     });
   }
-  return continuationInFlight;
+  return runtime.continuationInFlight;
 }
 
 async function resumeContinuation(): Promise<boolean> {
@@ -3933,17 +3943,17 @@ async function resumeContinuation(): Promise<boolean> {
         // Only on the transition, so the record keeps the time it happened.
         await set(UPDATE_INTERRUPTED_KEY, new Date().toISOString());
       }
-      state = createInitialState(applicableSteps());
-      state.warnings = await restoreWarnings();
-      state.phase = "failed";
-      state.error = INTERRUPTED_MESSAGE;
+      runtime.state = createInitialState(applicableSteps());
+      runtime.state.warnings = await restoreWarnings();
+      runtime.state.phase = "failed";
+      runtime.state.error = INTERRUPTED_MESSAGE;
       console.error(`[Updater] ${INTERRUPTED_MESSAGE}`);
-    } else if (isInterruptedVerdict(state)) {
+    } else if (isInterruptedVerdict(runtime.state)) {
       // This process is still holding a verdict whose record is gone — cleared
       // by the completion above, by the next run's prologue, or by a Dismiss in
       // another copy of this module. A failure the box has no evidence for is
       // not one to keep showing.
-      state = createInitialState(applicableSteps());
+      runtime.state = createInitialState(applicableSteps());
     }
     return false;
   }
@@ -3992,30 +4002,30 @@ async function resumeContinuation(): Promise<boolean> {
       : buildMissing
         ? "The device restarted with no build at all (.next/BUILD_ID is missing) — see clawbox-root-update@rebuild_reboot logs"
         : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
-    state = createInitialState(steps);
-    state.warnings = await restoreWarnings();
-    state.phase = "failed";
+    runtime.state = createInitialState(steps);
+    runtime.state.warnings = await restoreWarnings();
+    runtime.state.phase = "failed";
     for (let i = 0; i < restartIndex; i++) {
-      state.steps[i].status = "completed";
+      runtime.state.steps[i].status = "completed";
     }
-    state.steps[restartIndex].status = "failed";
-    state.steps[restartIndex].error = message;
-    state.error = message;
+    runtime.state.steps[restartIndex].status = "failed";
+    runtime.state.steps[restartIndex].error = message;
+    runtime.state.error = message;
     await clearUpdateLock();
     return false;
   }
 
-  running = true;
-  state = createInitialState(steps);
+  runtime.running = true;
+  runtime.state = createInitialState(steps);
   // The drift warnings were raised before the rebuild, one reboot ago. Carry
   // them into the second half of the run so the owner still sees why their
   // box was repinned.
-  state.warnings = await restoreWarnings();
-  state.phase = "running";
+  runtime.state.warnings = await restoreWarnings();
+  runtime.state.phase = "running";
   for (let i = 0; i <= restartIndex; i++) {
-    state.steps[i].status = "completed";
+    runtime.state.steps[i].status = "completed";
   }
-  state.currentStepIndex = startFrom;
+  runtime.state.currentStepIndex = startFrom;
 
   launchUpdate(steps, startFrom, { markCompleted: true });
   return true;
@@ -4026,11 +4036,11 @@ export function startUpdate(): { started: boolean; error?: string } {
     return { started: false, error: "Update already in progress" };
   }
 
-  running = true;
+  runtime.running = true;
   const steps = applicableSteps();
-  state = createInitialState(steps);
-  state.phase = "running";
-  state.currentStepIndex = 0;
+  runtime.state = createInitialState(steps);
+  runtime.state.phase = "running";
+  runtime.state.currentStepIndex = 0;
 
   launchUpdate(steps, 0, { markCompleted: true });
   return { started: true };
@@ -4073,8 +4083,8 @@ export function startOpenclawUpdate(): { started: boolean; error?: string } {
     return { started: false, error: "This edition does not ship OpenClaw." };
   }
 
-  running = true;
-  state = {
+  runtime.running = true;
+  runtime.state = {
     phase: "running",
     steps: createStepStates(OPENCLAW_UPDATE_STEPS),
     currentStepIndex: 0,
@@ -4164,9 +4174,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   }
 
   if (startFrom === 0 && !(await checkInternet())) {
-    state.phase = "failed";
-    state.error = "No internet connection. Check your WiFi and try again.";
-    state.currentStepIndex = -1;
+    runtime.state.phase = "failed";
+    runtime.state.error = "No internet connection. Check your WiFi and try again.";
+    runtime.state.currentStepIndex = -1;
     await clearUpdateLock();
     return;
   }
@@ -4183,9 +4193,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
 
   for (let i = startFrom; i < steps.length; i++) {
     const step = steps[i];
-    state.currentStepIndex = i;
-    state.steps[i].status = "running";
-    state.steps[i].error = undefined;
+    runtime.state.currentStepIndex = i;
+    runtime.state.steps[i].status = "running";
+    runtime.state.steps[i].error = undefined;
 
     // Re-assert the lock at every step boundary, because another PROCESS can
     // drop it. config-store.set is an unlocked read-modify-write of the whole
@@ -4229,7 +4239,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
       // that reaches the owner instead of only the journal.
       if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
-      state.steps[i].status = "completed";
+      runtime.state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
       let message = err instanceof Error ? err.message : "Unknown error";
@@ -4242,7 +4252,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         // clone plus a 3.2 GB model fetch) — so this is the run most likely to
         // have skipped a fixup, and the one where the step is shown green.
         if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
-        state.steps[i].status = "completed";
+        runtime.state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
         continue;
       }
@@ -4258,12 +4268,12 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // step's own error, never instead of it — `state.steps[i].error` below is
       // untouched.
       if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
-      state.steps[i].status = "failed";
-      state.steps[i].error = message;
+      runtime.state.steps[i].status = "failed";
+      runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);
       failed = true;
       if (step.failFast) {
-        state.error = message;
+        runtime.state.error = message;
         break;
       }
     }
@@ -4287,12 +4297,14 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   //
   // Measured only when there IS a drift warning to settle, so a healthy box
   // does not pay a git shell-out at the end of every run.
-  if (!failed && hasDriftWarning(state.warnings ?? [])) {
-    state.warnings = reconcileDriftWarnings(state.warnings ?? [], await measureDrift());
+  if (!failed && hasDriftWarning(runtime.state.warnings ?? [])) {
+    runtime.state.warnings = reconcileDriftWarnings(runtime.state.warnings ?? [], await measureDrift());
   }
 
-  state.currentStepIndex = -1;
-  state.phase = failed ? "failed" : "completed";
+  // The warnings have been carried across the reboot and are now in the live
+  // state; drop the persisted copy so the NEXT update starts from a clean
+  // sheet rather than re-showing a condition it already fixed.
+  await set("update_warnings", undefined);
 
   if (!failed && options.markCompleted) {
     await setMany({
@@ -4306,10 +4318,10 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       [UPDATE_INTERRUPTED_KEY]: undefined,
     });
   }
-  // The warnings have been carried across the reboot and are now in the live
-  // state; drop the persisted copy so the NEXT update starts from a clean
-  // sheet rather than re-showing a condition it already fixed.
-  await set("update_warnings", undefined);
+  // A terminal phase stops UI polling. Publish only after every final write
+  // succeeds; launchUpdate reports a persistence failure through its catch.
+  runtime.state.currentStepIndex = -1;
+  runtime.state.phase = failed ? "failed" : "completed";
 
   // Force the next /update/versions poll to refetch — both the device's
   // installed versions and the desktop notification depend on it.
