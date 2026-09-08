@@ -252,6 +252,7 @@ describe("POST /setup-api/tts on a Hermes box", () => {
     // The openclaw write is what the gate was protecting. It must be SKIPPED
     // here, not attempted and swallowed.
     expect(configSetMock).not.toHaveBeenCalled();
+    expect(clearStanddownMock).toHaveBeenCalledOnce();
   });
 
   it("writes the cloud endpoint and credential BEFORE selecting the provider", async () => {

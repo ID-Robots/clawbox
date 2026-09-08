@@ -143,6 +143,17 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     expect(clearStanddownMock).toHaveBeenCalledOnce();
   });
 
+  it.each(["cloudRoute", "cloudKey"] as const)("does not restore over an unread %s", async (field) => {
+    const state = voice(HERMES_LOCAL_TTS_PROVIDER);
+    state.unread[field] = true;
+    readVoiceMock.mockResolvedValue(state);
+    standdownMock.mockResolvedValue({});
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+    expect(clearStanddownMock).not.toHaveBeenCalled();
+  });
+
   it("does not restore over a custom endpoint using a claw credential", async () => {
     readVoiceMock.mockResolvedValue({ ...voice(HERMES_LOCAL_TTS_PROVIDER), cloudBaseUrl: "https://speech.example.test/v1", cloudHasKey: true, cloudKeyIsOurs: true });
     probeEngineMock.mockResolvedValue(false);
