@@ -159,6 +159,29 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     expect(clearStanddownMock).toHaveBeenCalledTimes(2);
   });
 
+  it("finishes marker cleanup on the next link when local rollback also failed", async () => {
+    let provider = HERMES_LOCAL_TTS_PROVIDER;
+    readVoiceMock.mockImplementation(async () => ({
+      ...voice(provider),
+      cloudBaseUrl: "https://clawbox.com/api/ai",
+      cloudHasKey: true,
+      cloudKeyIsOurs: true,
+    }));
+    selectProviderMock.mockImplementation(async (engine: string) => {
+      if (engine === "local") throw new Error("provider rollback failed");
+      provider = "openai";
+    });
+    standdownMock.mockResolvedValue({});
+    clearStanddownMock.mockRejectedValueOnce(new Error("marker removal failed"));
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(provider).toBe("openai");
+    expect(selectProviderMock.mock.calls.map(call => call[0])).toEqual(["cloud", "local"]);
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(clearStanddownMock).toHaveBeenCalledTimes(2);
+    // The retry only completes cleanup; it never changes an existing selection.
+    expect(selectProviderMock).toHaveBeenCalledTimes(2);
+  });
+
   it.each(["cloudRoute", "cloudKey"] as const)("does not restore over an unread %s", async (field) => {
     const state = voice(HERMES_LOCAL_TTS_PROVIDER);
     state.unread[field] = true;

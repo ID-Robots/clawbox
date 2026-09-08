@@ -1855,6 +1855,13 @@ async function selectHermesCloudVoiceIfUnvoicedUnlocked(
       // fill.
       if (current === HERMES_CLOUD_TTS_PROVIDER && ownRoute) {
         await writeHermesCloudTarget(token);
+        // Restoration can select cloud successfully, then fail both marker
+        // cleanup and the local rollback. Finish that interrupted transition
+        // on the next entitled link without changing the current selection.
+        if (entitlementTier === CLAWBOX_AI_SPEECH_TIER) {
+          const { readHermesVoiceStanddown, clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
+          if (await readHermesVoiceStanddown()) await clearHermesVoiceStanddown();
+        }
         console.log("[hermes-clawai] refreshed the ClawBox AI speech credential");
       } else if (current === HERMES_CLOUD_TTS_PROVIDER) {
         console.log(
