@@ -92,17 +92,28 @@ class _OneShotServer(socketserver.TCPServer):
     allow_reuse_address = True
 
 
+def _validate_server(server: str) -> None:
+    parsed = urllib.parse.urlsplit(server)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise SystemExit("Pairing requires an HTTPS portal URL without credentials, query or fragment.")
+
+
 def _exchange(server: str, code: str, state: str, device_id: str, code_verifier: str) -> str:
+    _validate_server(server)
     url = f"{server}/api/portal/connect/exchange"
     try:
         resp = requests.post(
             url,
             json={"code": code, "state": state, "device_id": device_id, "code_verifier": code_verifier},
             timeout=(5, 30),
+            allow_redirects=False,
             headers={"User-Agent": api.USER_AGENT},
         )
     except requests.RequestException as e:
         raise SystemExit(f"Failed to reach {url}: {e}") from e
+
+    if 300 <= resp.status_code < 400:
+        raise SystemExit("Token exchange refused a redirect; use the canonical HTTPS portal URL.")
 
     if not resp.ok:
         try:
@@ -115,6 +126,8 @@ def _exchange(server: str, code: str, state: str, device_id: str, code_verifier:
         body = resp.json()
     except ValueError as e:
         raise SystemExit(f"Token exchange returned non-JSON: {e}") from e
+    if body.get("pkce_verified") is not True:
+        raise SystemExit("Portal did not confirm S256 PKCE protection. Update the portal before pairing.")
     access_token = body.get("access_token")
     if not isinstance(access_token, str) or not access_token.startswith("claw_"):
         raise SystemExit(f"Token exchange returned unexpected body: {json.dumps(body)[:200]}")
@@ -131,6 +144,7 @@ def run_pair(
     """Run the pairing flow. Returns the obtained token. Side effects: writes
     token file to disk."""
     server = server.rstrip("/")
+    _validate_server(server)
     device_name = device_name or socket.gethostname()
     state = secrets.token_urlsafe(24)
     # RFC 7636: only the S256 challenge travels through the browser. A copied
