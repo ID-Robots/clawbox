@@ -164,8 +164,9 @@ function catalogueFor(manifest: unknown, provider: string): unknown {
   const modelCatalog = (manifest as { modelCatalog?: unknown } | null)?.modelCatalog;
   const providers = (modelCatalog as { providers?: unknown } | null)?.providers;
   if (providers && typeof providers === "object" && !Array.isArray(providers)) {
-    const own = (providers as Record<string, unknown>)[provider];
-    if (own !== undefined) return own;
+    if (Object.prototype.hasOwnProperty.call(providers, provider)) {
+      return (providers as Record<string, unknown>)[provider];
+    }
   }
   return manifest;
 }

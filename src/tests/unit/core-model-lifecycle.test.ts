@@ -114,6 +114,49 @@ describe("coreModelRetired", () => {
     expect(coreModelRetired("anthropic", "claude-opus-4-8")).toBe(true);
   });
 
+  it("falls back to the whole manifest when the nested provider map misses", async () => {
+    fixture.writeManifest("deepseek", {
+      modelCatalog: {
+        providers: {
+          "deepseek-cli": { models: [{ id: "deepseek-local", status: "deprecated" }] },
+        },
+      },
+      providers: {
+        deepseek: { models: [{ id: "deepseek-web", status: "deprecated" }] },
+      },
+    });
+    const { coreModelRetired } = await loadLifecycle();
+    expect(coreModelRetired("deepseek", "deepseek-local")).toBe(true);
+    expect(coreModelRetired("deepseek", "deepseek-web")).toBe(true);
+  });
+
+  it("walks the whole flat manifest instead of selecting a top-level provider block", async () => {
+    fixture.writeManifest("openrouter", {
+      providers: {
+        openrouter: { models: [{ id: "glm-5.1", status: "deprecated" }] },
+      },
+      models: [{ id: "root-retired", status: "deprecated" }],
+    });
+    const { coreModelRetired } = await loadLifecycle();
+    expect(coreModelRetired("openrouter", "glm-5.1")).toBe(true);
+    expect(coreModelRetired("openrouter", "root-retired")).toBe(true);
+  });
+
+  it("ignores inherited provider names before falling back to the flat catalogue", async () => {
+    // A provider id may legally match an Object.prototype property. That must
+    // not hide the manifest's flat catalogue merely because `providers`
+    // inherits `constructor` from Object.prototype.
+    fixture.writeManifest("constructor", {
+      modelCatalog: { providers: { openrouter: { models: [{ id: "other-model" }] } } },
+      providers: {
+        openrouter: { models: [{ id: "other-model" }] },
+      },
+      models: [{ id: "root-retired", status: "deprecated" }],
+    });
+    const { coreModelRetired } = await loadLifecycle();
+    expect(coreModelRetired("constructor", "root-retired")).toBe(true);
+  });
+
   it("re-reads a manifest the core replaced under a live process", async () => {
     // The in-app OpenClaw-only update runs INSIDE this server and deliberately
     // does not restart it, so "cached for the process lifetime" would keep a
