@@ -77,6 +77,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
+import { applyPowerApprovalCallback, powerKeyboardPending } from "@/lib/power-approval";
 
 /** Config keys. Both are owner-only to write; see the chat-approval route. */
 export const CHAT_APPROVAL_ENABLED_KEY = "email_chat_approval";
@@ -120,6 +121,7 @@ const MAX_CALLBACK_DATA = 64;
 
 /** What a tap did, for the log and for the tests. Never surfaced to the agent. */
 export type CallbackOutcome =
+  | "power_handled"
   | "sent"
   | "rejected"
   | "not_owner"
@@ -394,6 +396,7 @@ function staleTapAnswer(draftId: string): string {
  *      write different records for the same decision.
  */
 export async function applyApprovalCallback(query: TelegramCallbackQuery): Promise<CallbackOutcome> {
+  if (await applyPowerApprovalCallback(query)) return "power_handled";
   const token = await approvalBotToken();
   const data = typeof query.data === "string" ? query.data : "";
   const approve = data.startsWith(APPROVE_PREFIX);
@@ -680,7 +683,7 @@ async function pollLoop(): Promise<void> {
       // exit" and "running is false", and a startApprovalPoller() landing in
       // that window declines to start — leaving a question outstanding with
       // nothing listening for its answer.
-      if (!token || !(await chatApprovalEnabled()) || countKeyboardPrompts() === 0) {
+      if (!token || !(await chatApprovalEnabled()) || (countKeyboardPrompts() === 0 && !powerKeyboardPending())) {
         running = false;
         return;
       }
