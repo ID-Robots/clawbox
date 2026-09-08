@@ -3817,6 +3817,7 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
   runUpdate(steps, startFrom, options)
     .catch((err) => {
       console.error("[Updater] Unexpected error:", err);
+      runtime.state.error = err instanceof Error ? err.message : String(err);
       runtime.state.phase = "failed";
     })
     .finally(() => {
@@ -4300,9 +4301,6 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     runtime.state.warnings = reconcileDriftWarnings(runtime.state.warnings ?? [], await measureDrift());
   }
 
-  runtime.state.currentStepIndex = -1;
-  runtime.state.phase = failed ? "failed" : "completed";
-
   if (!failed && options.markCompleted) {
     await setMany({
       update_completed: true,
@@ -4319,6 +4317,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // state; drop the persisted copy so the NEXT update starts from a clean
   // sheet rather than re-showing a condition it already fixed.
   await set("update_warnings", undefined);
+
+  // A terminal phase stops UI polling. Publish only after every final write
+  // succeeds; launchUpdate reports a persistence failure through its catch.
+  runtime.state.currentStepIndex = -1;
+  runtime.state.phase = failed ? "failed" : "completed";
 
   // Force the next /update/versions poll to refetch — both the device's
   // installed versions and the desktop notification depend on it.

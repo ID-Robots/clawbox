@@ -950,6 +950,36 @@ describe("updater", () => {
       );
     });
 
+    it.each(["completion", "warning cleanup"])("does not publish completion before %s persistence succeeds", async (stage) => {
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+      updater.resetUpdateState();
+      let rejectWrite!: (reason: Error) => void;
+      let held = false;
+      const hold = () => { held = true; return new Promise<void>((_, reject) => { rejectWrite = reject; }); };
+      if (stage === "completion") {
+        mockSetMany.mockImplementation(async (values) => {
+          if (values.update_completed === true) await hold();
+        });
+      } else {
+        mockSet.mockImplementation(async (key, value) => {
+          if (key === "update_warnings" && value === undefined) await hold();
+        });
+      }
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(held).toBe(true));
+      const phaseDuringWrite = updater.getUpdateState().phase;
+      rejectWrite(new Error("disk write failed"));
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(phaseDuringWrite).toBe("running");
+      expect(updater.getUpdateState().error).toContain("disk write failed");
+    });
+
     it("clears the interruption record in the same write that records the completion", async () => {
       // Any reader that finds "locked, nothing left to resume, not completed"
       // stamps `update_interrupted_at` — and that is exactly what the SECOND
