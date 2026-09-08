@@ -1887,7 +1887,10 @@ async function selectHermesCloudVoiceIfUnvoiced(
     // local choice has no stamp and keeps the existing on-device preference.
     const { readHermesVoiceStanddown, clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
     const stoodDown = current === HERMES_LOCAL_TTS_PROVIDER ? await readHermesVoiceStanddown() : null;
-    if (stoodDown && ownRoute) {
+    const restoreRouteIsOurs = (!voice.cloudBaseUrl && !voice.cloudHasKey)
+      || [CLAWBOX_AI_PROXY_URL, "https://clawbox.com/api/ai", "https://openclawhardware.dev/api/ai", "https://www.openclawhardware.dev/api/ai"]
+        .map(url => url.replace(/\/+$/, "")).includes((voice.cloudBaseUrl ?? "").replace(/\/+$/, ""));
+    if (stoodDown && restoreRouteIsOurs) {
       await writeHermesCloudTarget(token);
       if (stoodDown.cloudVoice) {
         const { writeHermesCloudVoice } = await import("@/lib/hermes-tts");

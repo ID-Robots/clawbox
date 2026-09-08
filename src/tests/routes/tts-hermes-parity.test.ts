@@ -34,6 +34,8 @@ const readStateMock = vi.fn();
 const writeStateMock = vi.fn();
 const writeLocalVoiceMock = vi.fn();
 const tokenMock = vi.fn();
+const clearStanddownMock = vi.fn();
+vi.mock("@/lib/hermes-voice-standdown", () => ({ clearHermesVoiceStanddown: (...a: unknown[]) => clearStanddownMock(...a) }));
 
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: (...a: unknown[]) => readConfigMock(...a),
@@ -281,6 +283,7 @@ describe("POST /setup-api/tts on a Hermes box", () => {
     expect(res.status).toBe(409);
     const selected = hermesCliMock.mock.calls.some((c) => (c[0] as string[])[2] === "tts.provider");
     expect(selected).toBe(false);
+    expect(clearStanddownMock).not.toHaveBeenCalled();
   });
 
   it("refuses the cloud voice on a box with no ClawBox AI credential", async () => {
@@ -292,6 +295,7 @@ describe("POST /setup-api/tts on a Hermes box", () => {
     expect([409, 400]).toContain(res.status);
     const selected = hermesCliMock.mock.calls.some((c) => (c[0] as string[])[2] === "tts.provider");
     expect(selected).toBe(false);
+    expect(clearStanddownMock).not.toHaveBeenCalled();
   });
 
   it("still refuses an unknown action rather than swallowing the contract", async () => {

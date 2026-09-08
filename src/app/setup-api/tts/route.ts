@@ -374,8 +374,8 @@ async function selectProvider(
     const engine = before.engines.find((e) => e.providerId === providerId)?.id;
     if (!engine) return refuse("That voice is not available on this box.", "not_available", 409);
     const { clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
-    await clearHermesVoiceStanddown();
     await selectHermesEngine(engine, await resolveClawaiToken());
+    await clearHermesVoiceStanddown();
     return null;
   }
   await runOpenclawConfigSet([`${await ttsConfigHome()}.provider`, providerId]);

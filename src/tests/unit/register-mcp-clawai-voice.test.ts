@@ -642,6 +642,25 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       expect(restored.stdout).toContain("restored the ClawBox AI cloud voice");
     });
 
+    it("preserves a custom endpoint even when it contains an old claw credential and a valid marker", () => {
+      armedWithLocalEngine(); downgraded(); run();
+      writeYaml(`${BASE_CONFIG}tts:\n  provider: clawbox-local\n  openai:\n    base_url: https://speech.example.test/v1\n    api_key: ${TOKEN}\n    model: custom-voice\n`);
+      installKokoroStamp();
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      run();
+      expect(at("tts.provider")).toBe("clawbox-local");
+      expect(at("tts.openai")).toEqual({ base_url: "https://speech.example.test/v1", api_key: TOKEN, model: "custom-voice" });
+    });
+
+    it("keeps the selected cloud voice intact if its restoration marker cannot be persisted", () => {
+      armedWithLocalEngine("    voice: shimmer\n"); downgraded();
+      fs.mkdirSync(`${configPath}.clawbox-voice-standdown.json`);
+      run();
+      expect(at("tts.provider")).toBe("openai");
+      expect(at("tts.openai.voice")).toBe("shimmer");
+      expect(configCalls()).not.toContain("config unset tts.openai");
+    });
+
     it("never restores over a different provider chosen after stand-down", () => {
       armedWithLocalEngine();
       downgraded();

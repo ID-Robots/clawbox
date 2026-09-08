@@ -1355,7 +1355,8 @@ standdown, standdown_error = load(os.environ["CLAWBOX_HERMES_CONFIG"] + ".clawbo
 restore_cloud = (
     standdown_error is None and isinstance(standdown, dict)
     and standdown.get("version") == 1 and standdown.get("provider") == LOCAL_PROVIDER
-    and provider == LOCAL_PROVIDER and route_is_ours
+    and provider == LOCAL_PROVIDER
+    and (slot_is_empty or base_url.rstrip("/") in OUR_PROXIES)
 )
 
 if token and arm_tier == ENTITLED_TIER:
@@ -1643,8 +1644,10 @@ TOKENPY
     case "$CLAWBOX_VOICE_TARGET" in
       keep) hermes_voice_stamp clear || log "could not clear the old voice restoration marker" ;;
       "$CLAWBOX_VOICE_LOCAL")
-        hermes_voice_stamp remember || log "could not remember the cloud voice for restoration after renewal"
-        if ! hermes_voice_write config set tts.provider "$CLAWBOX_VOICE_LOCAL"; then
+        if ! hermes_voice_stamp remember; then
+          log "could not remember the cloud voice — leaving its selection and definition unchanged for retry"
+          CLAWBOX_VOICE_STOOD_DOWN=false
+        elif ! hermes_voice_write config set tts.provider "$CLAWBOX_VOICE_LOCAL"; then
           hermes_voice_stamp clear || log "could not clear the failed voice restoration marker"
           log "could not move this box off the ClawBox AI cloud voice (exit $CLAWBOX_VOICE_RC) — its definition is left in place so the box keeps speaking through our own proxy rather than through a slot with nothing behind it; the next start will try again"
           CLAWBOX_VOICE_STOOD_DOWN=false

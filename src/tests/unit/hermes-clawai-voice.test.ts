@@ -143,6 +143,16 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     expect(clearStanddownMock).toHaveBeenCalledOnce();
   });
 
+  it("does not restore over a custom endpoint using a claw credential", async () => {
+    readVoiceMock.mockResolvedValue({ ...voice(HERMES_LOCAL_TTS_PROVIDER), cloudBaseUrl: "https://speech.example.test/v1", cloudHasKey: true, cloudKeyIsOurs: true });
+    probeEngineMock.mockResolvedValue(true);
+    standdownMock.mockResolvedValue({});
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+    expect(clearStanddownMock).not.toHaveBeenCalled();
+  });
+
   it("selects the cloud voice when nothing has been chosen and there is no engine", async () => {
     readVoiceMock.mockResolvedValue(voice(null));
 
