@@ -115,7 +115,7 @@ describe("coreModelRetired", () => {
   });
 
   it("falls back to the whole manifest when the nested provider map misses", async () => {
-    writeManifest("deepseek", {
+    fixture.writeManifest("deepseek", {
       modelCatalog: {
         providers: {
           "deepseek-cli": { models: [{ id: "deepseek-local", status: "deprecated" }] },
@@ -125,19 +125,19 @@ describe("coreModelRetired", () => {
         deepseek: { models: [{ id: "deepseek-web", status: "deprecated" }] },
       },
     });
-    const { coreModelRetired } = await load();
+    const { coreModelRetired } = await loadLifecycle();
     expect(coreModelRetired("deepseek", "deepseek-local")).toBe(true);
     expect(coreModelRetired("deepseek", "deepseek-web")).toBe(true);
   });
 
   it("walks the whole flat manifest instead of selecting a top-level provider block", async () => {
-    writeManifest("openrouter", {
+    fixture.writeManifest("openrouter", {
       providers: {
         openrouter: { models: [{ id: "glm-5.1", status: "deprecated" }] },
       },
       models: [{ id: "root-retired", status: "deprecated" }],
     });
-    const { coreModelRetired } = await load();
+    const { coreModelRetired } = await loadLifecycle();
     expect(coreModelRetired("openrouter", "glm-5.1")).toBe(true);
     expect(coreModelRetired("openrouter", "root-retired")).toBe(true);
   });
@@ -146,13 +146,14 @@ describe("coreModelRetired", () => {
     // A provider id may legally match an Object.prototype property. That must
     // not hide the manifest's flat catalogue merely because `providers`
     // inherits `constructor` from Object.prototype.
-    writeManifest("constructor", {
+    fixture.writeManifest("constructor", {
+      modelCatalog: { providers: { openrouter: { models: [{ id: "other-model" }] } } },
       providers: {
         openrouter: { models: [{ id: "other-model" }] },
       },
       models: [{ id: "root-retired", status: "deprecated" }],
     });
-    const { coreModelRetired } = await load();
+    const { coreModelRetired } = await loadLifecycle();
     expect(coreModelRetired("constructor", "root-retired")).toBe(true);
   });
 
