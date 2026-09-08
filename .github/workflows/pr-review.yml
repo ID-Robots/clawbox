@@ -22,6 +22,15 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Where the AI/App credentials live. The job names the protected
+    # Environment `clawreview` (deployment branches: beta + main only —
+    # created by the owner under Settings → Environments). On
+    # pull_request_target the run's ref is the BASE branch, so legitimate
+    # reviews pass the policy; a same-repo pull_request workflow that tried
+    # to name this Environment would evaluate its own PR-head ref and be
+    # refused before a step starts. The Environment is the fence — nothing
+    # in this file is, because a pull_request run does not read this file.
+    environment: clawreview
     # Job-scoped so future jobs don't inherit write access.
     permissions:
       pull-requests: write
