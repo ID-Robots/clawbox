@@ -3614,7 +3614,7 @@ interface UpdaterRuntime {
   running: boolean;
   continuationInFlight: Promise<boolean> | null;
 }
-const runtimeKey = Symbol.for("clawbox.updater.runtime.v1");
+const runtimeKey: unique symbol = Symbol.for("clawbox.updater.runtime.v1");
 const processRuntime = globalThis as typeof globalThis & { [runtimeKey]?: UpdaterRuntime };
 const runtime = processRuntime[runtimeKey] ??= {
   state: createInitialState(applicableSteps()),
