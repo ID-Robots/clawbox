@@ -27,6 +27,8 @@ describe("power confirmation boundary", () => {
     pending = (await import("@/lib/power-approval")).pendingPowerApproval;
     const old = pending();
     if (old) await (await import("@/lib/power-approval")).resolvePowerApproval(old.id, old.action, false);
+    const state = (globalThis as typeof globalThis & { [key: symbol]: { deniedAt?: number } })[Symbol.for("clawbox.power-approval")];
+    delete state.deniedAt;
   });
   afterEach(() => { vi.useRealTimers(); session.cleanup(); });
   const req = (body: unknown, cookie?: string) => new Request("http://localhost/setup-api/system/power", {
@@ -53,6 +55,17 @@ describe("power confirmation boundary", () => {
     expect(decisions.map(r => r.status).sort()).toEqual([200, 409]);
     expect(exec).toHaveBeenCalledOnce();
     expect(exec.mock.calls[0][1]).toEqual(["/usr/bin/systemctl", "reboot"]);
+  });
+  it("denial rate-limits the agent but never blocks direct owner power", async () => {
+    vi.useFakeTimers();
+    const prompt = await (await request(req({ action: "restart" }))).json();
+    expect((await decide(req({ id: prompt.id, action: "restart", approve: false }, session.cookie))).status).toBe(200);
+    expect((await request(req({ action: "restart" }))).status).toBe(409);
+    expect((await request(req({ action: "shutdown" }))).status).toBe(409);
+    expect(exec).not.toHaveBeenCalled();
+    expect((await request(req({ action: "restart" }, session.cookie))).status).toBe(200);
+    vi.advanceTimersByTime(60_001);
+    expect((await request(req({ action: "restart" }))).status).toBe(202);
   });
   it("expired requests cannot execute", async () => {
     const prompt = await (await request(req({ action: "shutdown" }))).json();

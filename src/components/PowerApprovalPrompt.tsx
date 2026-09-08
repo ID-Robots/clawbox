@@ -12,6 +12,8 @@ export default function PowerApprovalPrompt() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(false);
   const decisionPending = useRef(false);
+  const denyButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (prompt?.id) denyButton.current?.focus(); }, [prompt?.id]);
   useEffect(() => {
     let stopped = false;
     let inFlight = false;
@@ -58,7 +60,7 @@ export default function PowerApprovalPrompt() {
     {error && <p role="alert" className="mb-2 text-sm text-red-300">{t("chat.approval.failed")}</p>}
     {!prompt && error && <button onClick={() => setError(false)} className="rounded-lg border border-white/20 px-3 py-2">{t("window.close")}</button>}
     {prompt && <div className="flex gap-3">
-      <button disabled={busy || !prompt} onClick={() => void decide(false)} className="rounded-lg border border-white/20 px-3 py-2">{t("chat.approval.deny")}</button>
+      <button ref={denyButton} disabled={busy || !prompt} onClick={() => void decide(false)} className="rounded-lg border border-white/20 px-3 py-2">{t("chat.approval.deny")}</button>
       <button disabled={busy || !prompt} onClick={() => void decide(true)} className="rounded-lg bg-red-600 px-3 py-2">{t("chat.approval.allowOnce")}</button>
     </div>}
   </section>;
