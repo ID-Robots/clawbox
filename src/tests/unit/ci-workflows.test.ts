@@ -743,7 +743,7 @@ describe("credentialed review/triage runs are bound to the clawreview Environmen
     // creating it. Pin that both files carry the instruction.
     for (const [rel] of files) {
       expect(read(rel), `${rel} no longer documents the beta+main deployment-branch policy for the owner`)
-        .toMatch(/clawreview[\s\S]*?(beta|main)/i);
+        .toMatch(/clawreview(?=[\s\S]*?\bbeta\b)(?=[\s\S]*?\bmain\b)/i);
     }
   });
 });
