@@ -1906,7 +1906,14 @@ async function selectHermesCloudVoiceIfUnvoicedUnlocked(
         await writeHermesCloudVoice(stoodDown.cloudVoice);
       }
       await selectHermesProvider("cloud");
-      await clearHermesVoiceStanddown();
+      try {
+        await clearHermesVoiceStanddown();
+      } catch (error) {
+        // Keep the marker and local selection together so the next link can
+        // retry restoration. The shared transition lock excludes owner picks.
+        await selectHermesProvider("local");
+        throw error;
+      }
       return;
     }
     // What this box HAS, asked in every unchosen state rather than only over a

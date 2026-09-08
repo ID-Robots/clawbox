@@ -129,8 +129,8 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     writeCloudMock.mockResolvedValue(undefined);
     probeEngineMock.mockResolvedValue(false);
     runnableMock.mockResolvedValue(true);
-    standdownMock.mockResolvedValue(null);
-    clearStanddownMock.mockResolvedValue(undefined);
+    standdownMock.mockReset().mockResolvedValue(null);
+    clearStanddownMock.mockReset().mockResolvedValue(undefined);
   });
 
   it("restores our stood-down cloud selection on re-link without replacing an ordinary local choice", async () => {
@@ -141,6 +141,22 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     expect(writeCloudMock).toHaveBeenCalledWith(TOKEN);
     expect(selectProviderMock).toHaveBeenCalledWith("cloud");
     expect(clearStanddownMock).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back after failed marker cleanup and restores on the next link", async () => {
+    let provider = HERMES_LOCAL_TTS_PROVIDER;
+    readVoiceMock.mockImplementation(async () => voice(provider));
+    selectProviderMock.mockImplementation(async (engine: string) => {
+      provider = engine === "local" ? HERMES_LOCAL_TTS_PROVIDER : "openai";
+    });
+    standdownMock.mockResolvedValue({});
+    clearStanddownMock.mockRejectedValueOnce(new Error("marker removal failed"));
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(provider).toBe(HERMES_LOCAL_TTS_PROVIDER);
+    expect(selectProviderMock.mock.calls.map(call => call[0])).toEqual(["cloud", "local"]);
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(provider).toBe("openai");
+    expect(clearStanddownMock).toHaveBeenCalledTimes(2);
   });
 
   it.each(["cloudRoute", "cloudKey"] as const)("does not restore over an unread %s", async (field) => {
