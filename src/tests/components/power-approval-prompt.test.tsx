@@ -20,4 +20,15 @@ describe("desktop power confirmation", () => {
     const call = fetchMock.mock.calls.find(([, init]) => init?.method === "POST")!;
     expect(JSON.parse(call[1].body)).toEqual({ id: prompt.id, action: "restart", approve: true });
   });
+  it.each([409, 500])("a consumed request (%s) clears its action and leaves a dismissible error", async (status) => {
+    fetchMock.mockImplementation(async (_url, init) => new Response(JSON.stringify(init?.method === "POST" ? { error: "consumed" } : { pending: prompt }), { status: init?.method === "POST" ? status : 200 }));
+    render(<PowerApprovalPrompt />);
+    await screen.findByText(prompt.reason);
+    fireEvent.click(screen.getByRole("button", { name: "chat.approval.allowOnce" }));
+    await screen.findByRole("alert");
+    expect(screen.queryByText(prompt.reason)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "window.close" }));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
 });

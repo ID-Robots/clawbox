@@ -3,6 +3,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { TelegramCallbackQuery } from "@/lib/email-approval-telegram";
 
+export class PowerApprovalConflict extends Error {}
+
 export type PowerAction = "restart" | "shutdown";
 export interface PowerApproval {
   id: string;
@@ -40,7 +42,7 @@ export async function dispatchPowerAction(action: PowerAction): Promise<void> {
 export async function requestPowerApproval(action: PowerAction, reason: string): Promise<PowerApproval> {
   const existing = pendingPowerApproval();
   if (existing) {
-    if (existing.action !== action) throw new Error("Another power request is already awaiting confirmation");
+    if (existing.action !== action) throw new PowerApprovalConflict("Another power request is already awaiting confirmation");
     return existing;
   }
   const prompt: PowerApproval = {

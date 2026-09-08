@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { dispatchPowerAction, isPowerAction, requestPowerApproval } from "@/lib/power-approval";
+import { dispatchPowerAction, isPowerAction, requestPowerApproval, PowerApprovalConflict } from "@/lib/power-approval";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +46,7 @@ export async function POST(req: Request) {
     await dispatchPowerAction(action);
     return NextResponse.json({ ok: true, action });
   } catch (err) {
+    if (err instanceof PowerApprovalConflict) return NextResponse.json({ error: err.message }, { status: 409 });
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to execute power action" },
       { status: 500 },

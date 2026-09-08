@@ -40,6 +40,12 @@ describe("power confirmation boundary", () => {
     expect((await decide(req({ id: prompt.id, action: "restart", approve: true }))).status).toBe(403);
     expect(exec).not.toHaveBeenCalled();
   });
+  it("returns a conflict without replacing a different pending action", async () => {
+    expect((await request(req({ action: "restart" }))).status).toBe(202);
+    expect((await request(req({ action: "shutdown" }))).status).toBe(409);
+    expect(pending()?.action).toBe("restart");
+    expect(exec).not.toHaveBeenCalled();
+  });
   it("the owner can approve the exact action only once", async () => {
     const prompt = await (await request(req({ action: "restart" }))).json();
     expect((await decide(req({ id: prompt.id, action: "shutdown", approve: true }, session.cookie))).status).toBe(409);
