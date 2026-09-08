@@ -415,6 +415,14 @@ async function settleOnAuto(
 
 async function handleSelect(choice: VoiceChoice) {
   const harness = await getActiveHarness();
+  if (harness === "hermes") {
+    const { withHermesVoiceTransition } = await import("@/lib/hermes-voice-transition");
+    return withHermesVoiceTransition(() => handleSelectUnlocked(choice, harness));
+  }
+  return handleSelectUnlocked(choice, harness);
+}
+
+async function handleSelectUnlocked(choice: VoiceChoice, harness: Awaited<ReturnType<typeof getActiveHarness>>) {
   let { config, probe } = await probeBox(harness);
 
   // The box's own voice, installed but not wired: Kokoro is there (stamp,
@@ -463,12 +471,14 @@ async function handleSelect(choice: VoiceChoice) {
   // call between then and now can take 12 s, and a language picked in the
   // meantime must not be written over by the stale copy.
   await withVoiceState(async () => {
+    if (harness === "hermes") {
+      // A failed removal must not leave a persisted explicit local preference
+      // alongside a marker that tells the next relink to restore cloud voice.
+      const { clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
+      await clearHermesVoiceStanddown();
+    }
     await writeVoiceState({ ...(await readVoiceState()), choice });
   });
-  if (harness === "hermes") {
-    const { clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
-    await clearHermesVoiceStanddown();
-  }
   return NextResponse.json(await status(), { headers: NO_STORE });
 }
 

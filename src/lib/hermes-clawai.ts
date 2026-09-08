@@ -1776,6 +1776,14 @@ async function selectHermesCloudVoiceIfUnvoiced(
   token: string,
   entitlementTier: ClawaiPlanTier | null,
 ): Promise<void> {
+  const { withHermesVoiceTransition } = await import("@/lib/hermes-voice-transition");
+  await withHermesVoiceTransition(() => selectHermesCloudVoiceIfUnvoicedUnlocked(token, entitlementTier));
+}
+
+async function selectHermesCloudVoiceIfUnvoicedUnlocked(
+  token: string,
+  entitlementTier: ClawaiPlanTier | null,
+): Promise<void> {
   try {
     const [
       {

@@ -134,6 +134,7 @@ beforeEach(() => {
   writeStateMock.mockResolvedValue(undefined);
   writeLocalVoiceMock.mockResolvedValue(undefined);
   tokenMock.mockResolvedValue("claw_a_linked_hermes_box");
+  clearStanddownMock.mockReset().mockResolvedValue(undefined);
   storeValues = { clawai_tier: "pro" };
   hermesCliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   // EXACTLY what install.sh writes on a freshly provisioned Hermes box, and
@@ -271,6 +272,16 @@ describe("POST /setup-api/tts on a Hermes box", () => {
       ["config", "set", "tts.provider", "openai"],
       expect.anything(),
     );
+  });
+
+  it("does not persist an explicit choice when stand-down removal fails", async () => {
+    clearStanddownMock.mockRejectedValueOnce(new Error("marker permission denied"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "local" }));
+
+    expect(res.ok).toBe(false);
+    expect(clearStanddownMock).toHaveBeenCalledOnce();
+    expect(writeStateMock).not.toHaveBeenCalled();
   });
 
   it("does not select the cloud provider when the credential write fails", async () => {
