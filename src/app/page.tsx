@@ -36,6 +36,7 @@ import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } f
 
 /** How long a coding run's finish card stays on the desktop before it hides itself. */
 import ToastHost from "@/components/ToastHost";
+import PowerApprovalPrompt from "@/components/PowerApprovalPrompt";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
@@ -2360,6 +2361,7 @@ function ChromeDesktopInner() {
           the pairing flow dispatch. Without it ui_notify, `clawbox notify`
           and every server-side owner notice were fired and never shown. */}
       <ToastHost />
+      <PowerApprovalPrompt />
       {noticesUp && (
         <div
           className="pointer-events-none fixed top-4 flex w-[320px] flex-col gap-3"

@@ -235,9 +235,9 @@ my %DECLARED_ARGV = (
                     'EMBED_START_ARGV', 'EMBED_STOP_ARGV'],
     },
   },
-  # src/app/setup-api/system/power/route.ts — POWER_ACTIONS maps the request
+  # src/lib/power-approval.ts — POWER_ACTIONS maps the request
   # body to exactly these two; an unmapped action 400s before the call.
-  'src/app/setup-api/system/power/route.ts :: "/usr/bin/systemctl", systemctlAction' => {
+  'src/lib/power-approval.ts :: "/usr/bin/systemctl", systemctlAction' => {
     argv => [
       ['/usr/bin/systemctl', 'poweroff'],
       ['/usr/bin/systemctl', 'reboot'],
