@@ -645,7 +645,6 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     it("preserves a custom endpoint even when it contains an old claw credential and a valid marker", () => {
       armedWithLocalEngine(); downgraded(); run();
       writeYaml(`${BASE_CONFIG}tts:\n  provider: clawbox-local\n  openai:\n    base_url: https://speech.example.test/v1\n    api_key: ${TOKEN}\n    model: custom-voice\n`);
-      installKokoroStamp();
       writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
       run();
       expect(at("tts.provider")).toBe("clawbox-local");

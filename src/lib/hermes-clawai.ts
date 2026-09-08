@@ -1890,6 +1890,7 @@ async function selectHermesCloudVoiceIfUnvoiced(
     const restoreRouteIsOurs = (!voice.cloudBaseUrl && !voice.cloudHasKey)
       || [CLAWBOX_AI_PROXY_URL, "https://clawbox.com/api/ai", "https://openclawhardware.dev/api/ai", "https://www.openclawhardware.dev/api/ai"]
         .map(url => url.replace(/\/+$/, "")).includes((voice.cloudBaseUrl ?? "").replace(/\/+$/, ""));
+    if (stoodDown && !restoreRouteIsOurs) return;
     if (stoodDown && restoreRouteIsOurs) {
       await writeHermesCloudTarget(token);
       if (stoodDown.cloudVoice) {

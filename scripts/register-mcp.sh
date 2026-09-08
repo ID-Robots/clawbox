@@ -1373,6 +1373,8 @@ if token and arm_tier == ENTITLED_TIER:
         say("hold this box has already chosen how it speaks (%s)" % short(provider))
     if restore_cloud:
         say("restore")
+    if provider == LOCAL_PROVIDER and not (slot_is_empty or base_url.rstrip("/") in OUR_PROXIES):
+        say("hold the local selection has an owner-defined cloud endpoint")
     # UNCHOSEN IS ALL THREE, and the engine question is asked of all three.
     # `clawbox-local` is here because `install.sh` `step_openclaw_tts` selects it
     # on every install and every update WHATEVER the engine answered —
