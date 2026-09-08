@@ -4301,6 +4301,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     runtime.state.warnings = reconcileDriftWarnings(runtime.state.warnings ?? [], await measureDrift());
   }
 
+  // The warnings have been carried across the reboot and are now in the live
+  // state; drop the persisted copy so the NEXT update starts from a clean
+  // sheet rather than re-showing a condition it already fixed.
+  await set("update_warnings", undefined);
+
   if (!failed && options.markCompleted) {
     await setMany({
       update_completed: true,
@@ -4313,11 +4318,6 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       [UPDATE_INTERRUPTED_KEY]: undefined,
     });
   }
-  // The warnings have been carried across the reboot and are now in the live
-  // state; drop the persisted copy so the NEXT update starts from a clean
-  // sheet rather than re-showing a condition it already fixed.
-  await set("update_warnings", undefined);
-
   // A terminal phase stops UI polling. Publish only after every final write
   // succeeds; launchUpdate reports a persistence failure through its catch.
   runtime.state.currentStepIndex = -1;

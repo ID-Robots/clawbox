@@ -974,9 +974,11 @@ describe("updater", () => {
       expect(await updater.checkContinuation()).toBe(true);
       await vi.waitFor(() => expect(held).toBe(true));
       const phaseDuringWrite = updater.getUpdateState().phase;
+      const completionPublished = mockSetMany.mock.calls.some(([values]) => values.update_completed === true);
       rejectWrite(new Error("disk write failed"));
       await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
       expect(phaseDuringWrite).toBe("running");
+      if (stage === "warning cleanup") expect(completionPublished).toBe(false);
       expect(updater.getUpdateState().error).toContain("disk write failed");
     });
 
