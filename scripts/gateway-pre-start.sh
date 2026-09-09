@@ -3816,6 +3816,122 @@ clawbox_plugin_boot_without() {
   clawbox_plugin_repair_mark "$id" "$stage" "$disabled" "$reason" "$spec"
 }
 
+# The mirror of `clawbox_plugin_boot_without` for a re-attempt that did not work.
+#
+# TASK-785. `boot_without` reads the config to decide what it changed, and that
+# is exactly the wrong question after a re-attempt: the entry was ALREADY off,
+# and the `plugins enable` that has just failed may or may not have flipped it
+# back on before failing (it writes `plugins.entries.<id>.enabled` first and
+# only then loads the gateway SDK). Using `boot_without` there would write
+# `disabled: false` over a row that is ClawBox's own switch-off — which is the
+# one bit the updater reads to decide it may repair this plugin at all, and the
+# one this block reads to decide it may re-attempt it again.
+#
+# So the switch-off is asserted rather than reported: put the entry back off if
+# the failed verb turned it on, and record `disabled: true` because it is —
+# unless that write itself failed, in which case the row says so and the boot
+# log carries the warning, exactly as `boot_without` does.
+clawbox_plugin_reattempt_failed() {
+  local id="$1" stage="$2" reason="$3" spec="${4:-}" disabled=1
+  if [ "$(clawbox_plugin_entry_enabled "$id")" = "1" ]; then
+    if clawbox_plugin_disable "$id"; then
+      echo "  Switched the $id plugin off again so the gateway can start"
+    else
+      disabled=0
+      echo "  WARN: could not switch the $id plugin off again — the gateway may refuse readiness until it is repaired" >&2
+    fi
+  fi
+  clawbox_plugin_repair_mark "$id" "$stage" "$disabled" "$reason" "$spec"
+}
+
+# The npm package ClawBox itself installs for a managed plugin, pinned to the
+# core that is on the box — or NOTHING for one it does not own.
+#
+# One definition for two callers: the payload reinstall below, which needs it to
+# run the install, and the repair record, which needs the SAME string so the
+# Settings Retry re-runs what this script would have run. `plugins install
+# discord` would resolve `@latest`, drift ahead of the pinned runtime and crash
+# the channel — the bug the pin exists to prevent — so a spec is either the
+# pinned one or absent, never the bare alias.
+#
+# Empty for `deepseek` (ClawHub, its own block below) and for
+# `clawbox-email-directives` (copied out of the checkout, not a registry
+# package): an `@openclaw/<id>` guess would name a package that is not the
+# plugin. The list is the same one as OFFICIAL_CHANNEL_PLUGINS in
+# src/lib/openclaw-channels.ts, which
+# gateway-pre-start-managed-plugin-payload.test.ts holds it to. Measured against
+# the core's own answer on a box: `openclaw plugins inspect discord --json`
+# reports `install.spec: @openclaw/discord@2026.8.1` under core 2026.8.1, which
+# is the string this builds.
+clawbox_managed_plugin_spec() {
+  local key="${1#@openclaw/}"
+  key="${key#openclaw-}"
+  case "$key" in
+    discord|whatsapp) ;;
+    *) return 0 ;;
+  esac
+  if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ]; then
+    printf '@openclaw/%s@%s' "$key" "$CLAWBOX_OPENCLAW_EFFECTIVE"
+  else
+    printf '@openclaw/%s' "$key"
+  fi
+}
+
+# The core's own words about a refusal, as ONE line to append to a repair reason.
+#
+# TASK-785. A row on a box read "The plugin is installed but its capabilities
+# could not be accepted…" and nothing else — the CONSEQUENCE, with no cause —
+# for three days, over a failure that turned out to be transient. The CLI's
+# answer is the only thing on the device that can tell "the registry was locked"
+# from "the payload is gone" from "the verb was killed at its deadline", and it
+# was being thrown away (`>/dev/null 2>&1`) at every one of these call sites.
+#
+# TRIMMED HARD, because Settings renders the reason verbatim beside a Retry:
+# escape sequences and control characters out, whitespace collapsed, one line,
+# 200 characters. Emitted with a leading space so a caller can concatenate it
+# onto its own sentence, and empty output is answered with the exit code alone
+# rather than a dangling colon.
+clawbox_plugin_cli_cause() {
+  local cmd="$1" rc="$2" out="$3" script
+  script="$(cat <<'CAUSEPY'
+import os, re, sys
+
+text = sys.stdin.read()
+# ANSI first, so a colour code cannot survive as stray letters in the message.
+text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+lines = [" ".join(line.split()) for line in text.splitlines()]
+lines = [line for line in lines if line]
+
+# The LAST line that reads like a refusal, because a CLI prints progress first
+# and its verdict last; the last line of any kind when none of them do.
+picked = ""
+for line in lines:
+    if re.search(r"error|failed|cannot|not found|denied|refus|permission", line, re.I):
+        picked = line
+if not picked and lines:
+    picked = lines[-1]
+
+cmd = os.environ["CLAWBOX_CAUSE_CMD"]
+rc = os.environ["CLAWBOX_CAUSE_RC"]
+# 124 is `timeout` at the ceiling and 137 the SIGKILL `-k 5` sends after it —
+# neither is the core saying no, and the row must not read as though it were.
+head = f"{cmd} was killed at its deadline" if rc in ("124", "137") else f"{cmd} exited {rc}"
+if not picked:
+    print(f" {head} and said nothing.")
+else:
+    if len(picked) > 200:
+        picked = picked[:199].rstrip() + "\u2026"
+    print(f" {head}: {picked}")
+CAUSEPY
+)"
+  # Never fatal and never noisy: a reason that could not be enriched is still a
+  # reason, and this runs on the path where something has already gone wrong.
+  printf '%s' "$out" \
+    | CLAWBOX_CAUSE_CMD="$cmd" CLAWBOX_CAUSE_RC="$rc" python3 -c "$script" 2>/dev/null \
+    || true
+}
+
 # ── What a capability-consent attempt actually PROVED ───────────────────────
 #
 # TASK-606 follow-up. `timeout -k 5 60 openclaw plugins enable <id>
@@ -4649,7 +4765,10 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
     CLAWBOX_CONSENT_DETAIL=" (the core already reports current consent; skipped enable)"
   elif [ "$CODEX_CONSENT_VERDICT" != "2" ]; then
     CODEX_CONSENT_RC=0
-    timeout -k 5 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1 \
+    # CAPTURED, not discarded (TASK-785): the core's own refusal is the only
+    # thing that can tell the owner which failure this was, and the repair row
+    # below is where he reads it.
+    CODEX_CONSENT_OUT="$(timeout -k 5 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null 2>&1)" \
       || CODEX_CONSENT_RC=$?
     CODEX_CONSENT_VERDICT=0
     clawbox_plugin_consent_outcome codex "$CODEX_CONSENT_RC" || CODEX_CONSENT_VERDICT=$?
@@ -4667,8 +4786,17 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
     echo "  Codex runtime plugin capabilities are still unknown (the core keeps no consent record for this plugin); leaving it as it is"
   else
     echo "  WARN: could not confirm Codex plugin capabilities; booting without Codex"
+    # The spec is the PINNED one or nothing, never the bare `codex` alias the
+    # install arm above falls back to: a Retry that resolved `@latest` would
+    # drift ahead of the runtime and crash every Codex chat. Codex pins to
+    # `OPENCLAW_TARGET` (the release this box is being brought to) rather than
+    # to `CLAWBOX_OPENCLAW_EFFECTIVE`, which is why it does not share the
+    # channel plugins' spec builder.
+    CODEX_CONSENT_SPEC=""
+    [ -n "${OPENCLAW_TARGET:-}" ] && CODEX_CONSENT_SPEC="@openclaw/codex@$OPENCLAW_TARGET"
     clawbox_plugin_boot_without codex consent \
-      "The ChatGPT (Codex) plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled."
+      "The ChatGPT (Codex) plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled.$(clawbox_plugin_cli_cause "openclaw plugins enable" "${CODEX_CONSENT_RC:-}" "${CODEX_CONSENT_OUT:-}")" \
+      "$CODEX_CONSENT_SPEC"
   fi
 fi
 
@@ -4784,19 +4912,10 @@ MANAGEDPY
     case "$MANAGED_PLUGIN_OUT" in
       *"Plugin not found"*)
         # The payload is gone, and only ClawBox's own npm packages may be
-        # replaced here: deepseek comes from ClawHub and clawbox-email-directives
-        # is copied out of the checkout — both have their own block in this
-        # script, and an `@openclaw/<id>` guess would fetch a package that is not
-        # the plugin. Same list as OFFICIAL_CHANNEL_PLUGINS in
-        # src/lib/openclaw-channels.ts, which
-        # gateway-pre-start-managed-plugin-payload.test.ts holds it to.
-        MANAGED_PLUGIN_KEY="${MANAGED_PLUGIN#@openclaw/}"
-        MANAGED_PLUGIN_KEY="${MANAGED_PLUGIN_KEY#openclaw-}"
-        MANAGED_PLUGIN_PKG=""
-        case "$MANAGED_PLUGIN_KEY" in
-          discord|whatsapp) MANAGED_PLUGIN_PKG="@openclaw/$MANAGED_PLUGIN_KEY" ;;
-        esac
-        if [ -z "$MANAGED_PLUGIN_PKG" ]; then
+        # replaced here — which is the whole question `clawbox_managed_plugin_spec`
+        # answers, and where the list of them lives.
+        MANAGED_PLUGIN_SPEC="$(clawbox_managed_plugin_spec "$MANAGED_PLUGIN")"
+        if [ -z "$MANAGED_PLUGIN_SPEC" ]; then
           # NOT switched off here: the block that owns this plugin runs later in
           # this same script and installs it properly, and it has its own
           # boot-without on failure. Disabling it now would have that block
@@ -4804,22 +4923,13 @@ MANAGEDPY
           echo "  WARN: the $MANAGED_PLUGIN payload is missing and ClawBox has no npm package of its own for it; its own installer owns that repair"
           continue
         fi
-        # Pinned to the INSTALLED core, like the deepseek block below and unlike
-        # the codex one above: this script never installs the core, so on a box
-        # that pulled new ClawBox code before its core update landed the pin file
-        # names a release the running runtime cannot load.
-        # `CLAWBOX_OPENCLAW_EFFECTIVE` is already normalised to
-        # MAJOR.MINOR.PATCH above, so an npm republish (2026.7.1 -> 2026.7.1-2)
-        # cannot turn into a 404 here. The unpinned spec is the fallback for a
-        # core whose release could not be read at all, never a second attempt:
-        # this is a BLOCKING ExecStartPre, so ONE 120 s install per plugin is the
-        # whole budget — at most 6 minutes for the two ids above, and only on a
-        # box whose gateway would not come up at all.
-        if [ -n "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
-          MANAGED_PLUGIN_SPEC="$MANAGED_PLUGIN_PKG@$CLAWBOX_OPENCLAW_EFFECTIVE"
-        else
-          MANAGED_PLUGIN_SPEC="$MANAGED_PLUGIN_PKG"
-        fi
+        # `clawbox_managed_plugin_spec` pins to the INSTALLED core, like the
+        # deepseek block below and unlike the codex one above: this script never
+        # installs the core, so on a box that pulled new ClawBox code before its
+        # core update landed the pin file names a release the running runtime
+        # cannot load. This is a BLOCKING ExecStartPre, so ONE 120 s install per
+        # plugin is the whole budget — at most 6 minutes for the two ids above,
+        # and only on a box whose gateway would not come up at all.
         CLAWBOX_CONSENT_STATES=""
         CLAWBOX_CONSENT_STATES_READY=0
         CLAWBOX_CONSENT_POSTWRITE_READY=0
@@ -4854,8 +4964,158 @@ MANAGEDPY
     # The 2026-09-01 outage was this branch, on discord: readiness refused,
     # `Restart=always`, and the start limit gone in a quarter of an hour.
     echo "  WARN: could not confirm $MANAGED_PLUGIN plugin capabilities; booting without it"
+    # WITH THE CAUSE AND THE SPEC (TASK-785). The generic sentence explains the
+    # consequence and is what the owner needs first; the core's own refusal is
+    # what tells him — and the next person reading the row — whether this was a
+    # locked registry, a missing payload or a verb killed at its deadline. The
+    # spec is recorded for a consent row too: the row is the only description of
+    # this failure that survives the boot, and an empty one made the row unable
+    # to escalate to the install its own `Plugin not found` implies.
     clawbox_plugin_boot_without "$MANAGED_PLUGIN" consent \
-      "The plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled."
+      "The plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled.$(clawbox_plugin_cli_cause "openclaw plugins enable" "${MANAGED_PLUGIN_RC:-}" "${MANAGED_PLUGIN_OUT:-}")" \
+      "$(clawbox_managed_plugin_spec "$MANAGED_PLUGIN")"
+  done
+fi
+
+# ── Re-attempting a plugin a PREVIOUS boot switched off ─────────────────────
+#
+# TASK-785, and the half of TASK-606 that was missing. Every loop above visits
+# only entries openclaw.json ALREADY says to load — which is exactly what a
+# boot-without has just stopped being true. Measured on the OpenClaw box:
+# `data/plugin-repair.json` held discord at `stage: consent`, `disabled: true`,
+# written on 2026-09-06; the box was rebooted eighteen times and not one of
+# those boots re-attempted it, while every boot happily consented the plugins
+# that were still enabled. The owner's Retry then repaired it on the FIRST
+# press — so a transient failure had been showing as "Needs repair" for three
+# days, and the only thing standing between the box and its own repair was a
+# click nobody knew to make. Probe-once, over a whole plugin.
+#
+# HARNESS FIRST, and there is no harness answer to borrow: measured on the
+# pinned 2026.8.1 core, `openclaw plugins` offers `enable`, `install`,
+# `doctor`, `update` and `inspect` — `plugins enable <id> --accept-capabilities`
+# IS the consent verb ("Accept the plugin's declared capabilities") and
+# `plugins inspect <id> --json` IS the report — but nothing in the core
+# re-attempts a consent of its own accord. So the re-attempt is ClawBox's to
+# own, and it runs the CORE'S verb rather than writing consent by hand.
+#
+# ONLY WHAT CLAWBOX SWITCHED OFF, which `disabled: true` is the only record of.
+# The updater already draws this exact line (`pluginConsentRepairIsAllowed` /
+# `clawboxSwitchedPluginOff` in src/lib/updater.ts): an entry that is explicitly
+# `false` is indistinguishable from a person running `openclaw plugins disable
+# discord`, and a boot script that guessed would switch a channel on in its
+# owner's name. A row with `disabled: false` records a failure over which this
+# script changed nothing — the entry is off because he said so, and it stays off.
+#
+# BOUNDED, and deliberately smaller than the loop above. One `plugins enable`
+# per row, at most three rows (`deepseek`, `discord`, `whatsapp`), and NO
+# payload reinstall: this is a blocking ExecStartPre under TimeoutStartSec=600
+# and the enabled-entry loop above already rations 120 s installs out of it. A
+# re-attempt that hits `Plugin not found` therefore re-files the row as an
+# `install` with the pinned spec — which is the repair, and which the Retry and
+# the updater both have the budget to run — instead of doing it here.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  CLAWBOX_REPAIR_REATTEMPT="$(python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'REATTEMPTPY' || true
+import json, sys
+
+# `clawbox-email-directives` is deliberately NOT here, unlike the loop above:
+# nothing can file a repairable row for it (its own arm returns before the
+# boot-without) and the block ~450 lines below writes `enabled: true` over it
+# unconditionally, so a re-attempt would be racing this same script run.
+REATTEMPTABLE = ("deepseek", "discord", "whatsapp")
+# `not-installed` is excluded on purpose. It records an entry an older core
+# BUNDLED and this one does not, and the repair for it is installing a package
+# nothing on this box has ever installed — which means accepting a plugin's
+# declared capabilities for an owner who never chose it. That one waits for his
+# press; see src/app/setup-api/plugins/repair/route.ts.
+REATTEMPTABLE_STAGES = ("install", "consent")
+
+
+def canonical(name):
+    for prefix in ("@openclaw/", "openclaw-"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+if not isinstance(entries, dict):
+    raise SystemExit(0)
+try:
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        rows = json.load(fh)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(0)
+if not isinstance(rows, dict):
+    raise SystemExit(0)
+
+for key, row in rows.items():
+    if not isinstance(row, dict):
+        continue
+    # The RECORD's own id wins over the map key, the same rule the TypeScript
+    # reader uses: it is the spelling openclaw.json carries and the one the
+    # config writes below have to address.
+    plugin_id = row.get("id")
+    if not isinstance(plugin_id, str) or not plugin_id.strip():
+        plugin_id = key
+    if not isinstance(plugin_id, str) or canonical(plugin_id) not in REATTEMPTABLE:
+        continue
+    if row.get("disabled") is not True:
+        continue
+    if row.get("stage") not in REATTEMPTABLE_STAGES:
+        continue
+    # The entry has to BE there and BE off. A row whose entry the owner has
+    # since deleted is stale, and `plugins enable` would resurrect an entry he
+    # removed; one that is already `true` is the enabled loop's, not this one's.
+    entry = entries.get(plugin_id)
+    if not isinstance(entry, dict) or entry.get("enabled") is not False:
+        continue
+    print(plugin_id)
+REATTEMPTPY
+)"
+  for REPAIR_PLUGIN in $CLAWBOX_REPAIR_REATTEMPT; do
+    echo "  Re-attempting the $REPAIR_PLUGIN plugin a previous boot switched off…"
+    REPAIR_RC=0
+    REPAIR_OUT="$(timeout -k 5 60 "$OPENCLAW_BIN" plugins enable "$REPAIR_PLUGIN" --accept-capabilities </dev/null 2>&1)" \
+      || REPAIR_RC=$?
+    REPAIR_VERDICT=0
+    CLAWBOX_CONSENT_DETAIL=""
+    clawbox_plugin_consent_outcome "$REPAIR_PLUGIN" "$REPAIR_RC" || REPAIR_VERDICT=$?
+    if [ "$REPAIR_VERDICT" = "0" ]; then
+      # `clawbox_plugin_repair_clear` is the whole repair from here: the row says
+      # ClawBox switched this entry off, so it writes `enabled: true` back,
+      # PROVES it against the file, and only then removes the badge.
+      echo "  $REPAIR_PLUGIN plugin capabilities accepted on the re-attempt$CLAWBOX_CONSENT_DETAIL"
+      clawbox_plugin_repair_clear "$REPAIR_PLUGIN"
+      continue
+    fi
+    # It still will not consent. `plugins enable` writes
+    # `plugins.entries.<id>.enabled` BEFORE it loads the gateway SDK and can
+    # fail, so the entry may now be ON over a plugin that does not load — which
+    # is the readiness refusal the previous boot switched it off to avoid.
+    # `clawbox_plugin_reattempt_failed` puts the box back exactly where that
+    # boot left it and refreshes the row with this attempt's own cause.
+    case "$REPAIR_OUT" in
+      # The core's own wording for a payload that is not on disk. A row filed as
+      # `consent` here can never clear, because the Retry it offers runs
+      # `plugins enable` — which is the verb that has just said this. Re-filed
+      # as the install it actually needs, with the spec to run it.
+      *"Plugin not found"*)
+        echo "  WARN: the $REPAIR_PLUGIN plugin payload is missing; leaving it switched off for repair from Settings" >&2
+        clawbox_plugin_reattempt_failed "$REPAIR_PLUGIN" install \
+          "The plugin payload is not installed on this core, so the gateway would refuse to start with it enabled.$(clawbox_plugin_cli_cause "openclaw plugins enable" "$REPAIR_RC" "$REPAIR_OUT")" \
+          "$(clawbox_managed_plugin_spec "$REPAIR_PLUGIN")"
+        ;;
+      *)
+        echo "  WARN: could not confirm $REPAIR_PLUGIN plugin capabilities on the re-attempt; leaving it switched off" >&2
+        clawbox_plugin_reattempt_failed "$REPAIR_PLUGIN" consent \
+          "The plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled.$(clawbox_plugin_cli_cause "openclaw plugins enable" "$REPAIR_RC" "$REPAIR_OUT")" \
+          "$(clawbox_managed_plugin_spec "$REPAIR_PLUGIN")"
+        ;;
+    esac
   done
 fi
 

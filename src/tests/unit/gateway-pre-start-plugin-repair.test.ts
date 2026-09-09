@@ -113,7 +113,7 @@ function config(): { plugins?: { entries?: Record<string, { enabled?: boolean } 
   return JSON.parse(readFileSync(configPath, "utf-8"));
 }
 
-function marker(): Record<string, { stage?: string; reason?: string; disabled?: boolean; spec?: string }> {
+function marker(): Record<string, { stage?: string; reason?: string; disabled?: boolean; spec?: string; atMs?: number }> {
   return existsSync(markerPath) ? JSON.parse(readFileSync(markerPath, "utf-8")) : {};
 }
 
@@ -256,5 +256,178 @@ ${CONFIG_SET_STUB}`);
     expect(row.stage).toBe("install");
     expect(row.spec).toBe("@openclaw/discord@2026.8.1");
     expect(row.disabled).toBe(true);
+  });
+});
+
+// TASK-785. The two halves of the same 46-hour badge, measured on the OpenClaw
+// box: `data/plugin-repair.json` held discord at `stage: "consent"`,
+// `disabled: true`, `spec: ""`, written on 2026-09-06, and eighteen reboots
+// later it was still there. Nothing re-attempted it, because the loop above
+// only ever visits entries openclaw.json ALREADY says to load — and this row
+// describes the entry the previous boot switched OFF. The owner's Retry then
+// repaired it on the first press, so the failure had been transient for days.
+d("gateway-pre-start.sh — a plugin a PREVIOUS boot switched off", () => {
+  /** The 2026-09-06 row off the box, as the boot script wrote it. */
+  function seedStaleConsentRow() {
+    writeFileSync(
+      configPath,
+      JSON.stringify({ plugins: { entries: { discord: { enabled: false } } } }, null, 2),
+    );
+    writeFileSync(
+      markerPath,
+      JSON.stringify(
+        {
+          discord: {
+            id: "discord",
+            stage: "consent",
+            reason:
+              "The plugin is installed but its capabilities could not be accepted, "
+              + "so the gateway would refuse to start with it enabled.",
+            atMs: 1788668446552,
+            disabled: true,
+            spec: "",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+  }
+
+  it("re-attempts the consent and clears the record when it works", () => {
+    seedStaleConsentRow();
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+
+    // The entry the previous boot switched off is back on…
+    expect(config().plugins?.entries?.discord?.enabled).toBe(true);
+    // …and the badge is gone, because the thing it described is fixed.
+    expect(marker()).toEqual({});
+    // Through the core's own consent verb, run again — no Retry click.
+    expect(readFileSync(path.join(dir, "calls.log"), "utf-8"))
+      .toContain("plugins enable discord --accept-capabilities");
+  });
+
+  it("leaves it off and refreshes the record when the consent still fails", () => {
+    seedStaleConsentRow();
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", OC_ENABLE_EXIT: "1" });
+    expect(r.status).toBe(0);
+    // Still off: the gateway must still be able to start.
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+    const row = marker().discord;
+    expect(row.stage).toBe("consent");
+    expect(row.disabled).toBe(true);
+    // A fresh attempt, not the 2026-09-06 one.
+    expect(row.atMs).toBeGreaterThan(1788668446552);
+  });
+
+  it("re-files the row as the install it needs when the payload is gone", () => {
+    // A consent row over a stranded payload is a badge that can NEVER clear:
+    // the Retry it offers runs `plugins enable`, which is the verb that has
+    // just answered "Plugin not found". Re-filed as the install, with the spec.
+    seedStaleConsentRow();
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  echo "Plugin not found: $3. Run 'openclaw plugins list' to see installed plugins." >&2
+  exit 1
+fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+    const row = marker().discord;
+    expect(row.stage).toBe("install");
+    expect(row.spec).toBe("@openclaw/discord@2026.8.1");
+    expect(row.disabled).toBe(true);
+    expect(row.reason).toContain("Plugin not found");
+  });
+
+  it("puts the entry back off when the failed enable had already switched it on", () => {
+    // `plugins enable` writes `plugins.entries.<id>.enabled` FIRST and only
+    // then loads the gateway SDK, so a re-attempt that fails can leave the
+    // entry ON over a plugin that still does not load — which is the readiness
+    // refusal the previous boot switched it off to avoid. The record has to go
+    // on saying `disabled: true` too: it is the only bit that tells the updater
+    // and the next boot that this switch-off was ClawBox's own.
+    seedStaleConsentRow();
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  "$0" config set "plugins.entries[\\"$3\\"].enabled" true >/dev/null 2>&1 || true
+  echo "Error: the gateway SDK could not be loaded" >&2
+  exit 1
+fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+    expect(r.stdout).toContain("Switched the discord plugin off again");
+    const row = marker().discord;
+    expect(row.disabled).toBe(true);
+    expect(row.reason).toContain("the gateway SDK could not be loaded");
+  });
+
+  it("never turns on a disabled entry the record does not vouch for", () => {
+    // No row at all: the entry is off because somebody meant it to be, and this
+    // block must not so much as ask the CLI about it.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ plugins: { entries: { discord: { enabled: false } } } }, null, 2),
+    );
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+    expect(existsSync(path.join(dir, "calls.log"))).toBe(false);
+  });
+
+  it("never re-attempts a plugin the OWNER switched off", () => {
+    // `disabled: false` is the boot script's record of a failure over which it
+    // changed NOTHING. An entry that is off with such a row against it is off
+    // because its owner said so, and no boot may turn a channel on for him.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ plugins: { entries: { discord: { enabled: false } } } }, null, 2),
+    );
+    writeFileSync(
+      markerPath,
+      JSON.stringify(
+        {
+          discord: {
+            id: "discord",
+            stage: "consent",
+            reason: "The plugin is installed but its capabilities could not be accepted.",
+            atMs: 1788668446552,
+            disabled: false,
+            spec: "",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+    expect(marker().discord.atMs).toBe(1788668446552);
+  });
+});
+
+d("gateway-pre-start.sh — what a consent row SAYS", () => {
+  it("records the core's own refusal and the spec, not only the generic sentence", () => {
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  echo "Error: capability consent failed for discord: registry snapshot is locked" >&2
+  exit 1
+fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    const row = marker().discord;
+    // The generic sentence stays — it is the one that explains the consequence.
+    expect(row.reason).toMatch(/capabilities could not be accepted/i);
+    // …and the CAUSE joins it, so the row names why rather than only what.
+    expect(row.reason).toContain("registry snapshot is locked");
+    expect(row.reason).toContain("exited 1");
+    // The spec the repair needs, recorded for a consent row too.
+    expect(row.spec).toBe("@openclaw/discord@2026.8.1");
   });
 });

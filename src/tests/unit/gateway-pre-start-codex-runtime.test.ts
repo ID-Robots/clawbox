@@ -188,6 +188,13 @@ interface PluginFlowOptions {
    */
   consentExit?: number;
   /**
+   * What that failing `plugins enable` says on stderr.
+   *
+   * TASK-785: the repair row carries the core's own refusal, and nothing else
+   * on the box can tell a locked registry from a missing payload.
+   */
+  consentMessage?: string;
+  /**
    * `plugins inspect --all --json` stdout; omitted = the CLI cannot answer.
    *
    * The consent answer is the `diagnostics` array. `status`/`activated` are the
@@ -214,7 +221,7 @@ function runPluginFlowFull(options: PluginFlowOptions): {
   argv: string[];
   stdout: string;
   stderr: string;
-  marker: Record<string, { stage?: string; disabled?: boolean }>;
+  marker: Record<string, { stage?: string; disabled?: boolean; reason?: string; spec?: string }>;
 } {
   const pluginDir = path.join(dir, "plugin", "node_modules", "@openclaw", "codex");
   if (options.installedVersion) {
@@ -238,7 +245,11 @@ function runPluginFlowFull(options: PluginFlowOptions): {
       "#!/usr/bin/env bash",
       'printf \'%s\\n\' "$*" >> "$CODEX_TEST_LOG"',
       ...(options.consentExit
-        ? [`if [ "$2" = "enable" ]; then exit ${options.consentExit}; fi`]
+        ? [
+          `if [ "$2" = "enable" ]; then `
+          + (options.consentMessage ? `echo '${options.consentMessage}' >&2; ` : "")
+          + `exit ${options.consentExit}; fi`,
+        ]
         : []),
       'if [ "$2" = "inspect" ]; then',
       ...(options.inspectJson
@@ -271,7 +282,7 @@ function runPluginFlowFull(options: PluginFlowOptions): {
   });
   if (result.status !== 0) throw new Error(`plugin flow exited ${result.status}: ${result.stderr}`);
 
-  let marker: Record<string, { stage?: string; disabled?: boolean }> = {};
+  let marker: Record<string, { stage?: string; disabled?: boolean; reason?: string; spec?: string }> = {};
   try {
     marker = JSON.parse(readFileSync(path.join(dir, "data", "plugin-repair.json"), "utf-8"));
   } catch {
@@ -636,6 +647,25 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
     });
     expect(stdout).toContain("booting without Codex");
     expect(marker.codex?.stage).toBe("consent");
+  });
+
+  it("records the core's own refusal and the pinned spec on the consent row", () => {
+    // TASK-785, the sibling of the managed-plugin loop's row. A row that said
+    // only "its capabilities could not be accepted" stood on a box for three
+    // days over a transient failure, and nothing on the device could say which
+    // failure it had been. The spec goes on a consent row too, so the row can
+    // be re-filed as the install its own "Plugin not found" would imply — and
+    // never as the bare `codex` alias, which resolves @latest.
+    const { marker } = runPluginFlowFull({
+      ...CONSENTED,
+      consentExit: 1,
+      consentMessage: "Error: capability consent refused: registry snapshot is locked",
+    });
+    expect(marker.codex?.stage).toBe("consent");
+    expect(marker.codex?.reason).toMatch(/capabilities could not be accepted/i);
+    expect(marker.codex?.reason).toContain("registry snapshot is locked");
+    expect(marker.codex?.reason).toContain("exited 1");
+    expect(marker.codex?.spec).toBe("@openclaw/codex@2026.8.1");
   });
 
   it("still boots without Codex when the core cannot be asked at all", () => {

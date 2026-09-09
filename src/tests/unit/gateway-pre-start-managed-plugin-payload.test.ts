@@ -543,13 +543,20 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     // loses that channel — and its gateway — on the next core bump, with no
     // reboot that heals it.
     const src = readFileSync(SCRIPT, "utf-8");
-    const shellCase = /\n\s+([a-z|-]+)\)\s+MANAGED_PLUGIN_PKG="@openclaw\/\$MANAGED_PLUGIN_KEY"/.exec(src);
+    // The list lives in `clawbox_managed_plugin_spec`, which is the one place
+    // that turns a managed plugin id into the package this script installs —
+    // and, since TASK-785, into the spec a consent row records so the Retry
+    // runs the same thing.
+    const helper = /clawbox_managed_plugin_spec\(\) \{[\s\S]*?\n\}/.exec(src);
+    expect(helper, "clawbox_managed_plugin_spec was not found").not.toBeNull();
+    const shellCase = /\n\s+([a-z|-]+)\)\s*;;/.exec(helper![0]);
     expect(shellCase, "the payload-repair case arm was not found").not.toBeNull();
     expect(shellCase?.[1].split("|").sort())
       .toEqual(Object.keys(OFFICIAL_CHANNEL_PLUGINS).sort());
+    // The shell builds the spec as `@openclaw/<id>`, so a package that is not
+    // named after its plugin id would be silently mis-installed.
+    expect(helper![0]).toContain("printf '@openclaw/%s@%s'");
     for (const [id, npmPackage] of Object.entries(OFFICIAL_CHANNEL_PLUGINS)) {
-      // The shell builds the spec as `@openclaw/<id>`, so a package that is not
-      // named after its plugin id would be silently mis-installed.
       expect(npmPackage).toBe(`@openclaw/${id}`);
     }
   });
