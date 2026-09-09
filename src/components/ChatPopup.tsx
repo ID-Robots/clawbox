@@ -2835,9 +2835,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // the call. Recorded rather than acted on here because the OTHER half —
       // whether the box has an introduction waiting — may not have arrived yet,
       // and this read must not answer for it.
-      firstConversationCandidateRef.current =
+      const firstConversationCandidate =
         chatMsgs.length === 0 && sessionKeyRef.current === mainSessionKeyRef.current
-      setTranscriptReads((n) => n + 1)
+      firstConversationCandidateRef.current = firstConversationCandidate
+      // Bumped only when the bump could CHANGE something. `loadHistory` runs on
+      // every reconnect and after every ack-only turn, and the reconcile above
+      // deliberately returns `prev` when the transcript is unchanged so React
+      // skips that render — an unconditional counter would put the render back,
+      // on a list whose every assistant message is re-scanned for email refs.
+      // The effect below bails unless both of these hold, so a read that cannot
+      // reach the greet has nothing to re-trigger.
+      if (firstConversationCandidate && !greetedRef.current) {
+        setTranscriptReads((n) => n + 1)
+      }
       if (mightAutoGreet) {
         setIsBootstrappingHistory(false)
       }
@@ -5141,7 +5151,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // switched to while the facts were in flight must not be greeted into.
     if (sessionKeyRef.current !== mainSessionKeyRef.current) return
     greetedRef.current = true
-    setIsBootstrappingHistory(false)
     sendingRef.current = true
     setSending(true)
     const idempotencyKey = uuid()

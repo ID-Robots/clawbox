@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HermesAdapter, type HermesTurnContext } from "@/lib/harness/hermes-adapter";
-import { capabilitiesFor } from "@/lib/harness/capabilities";
+import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { HarnessError } from "@/lib/harness/transport";
 
 /**
@@ -19,15 +19,13 @@ import { HarnessError } from "@/lib/harness/transport";
  */
 
 const caps = capabilitiesFor("hermes", {
+  ...UNKNOWN_FACTS,
   hasClawaiToken: true,
   hermesSupportsImages: true,
   hermesHasVisionRoute: true,
-  hermesStreamsTurns: false,
   // A box that can draw: the credential plus a live image route. Both halves,
   // because `imageGenerationTrigger` is what `generateImage` checks first.
   hasClawaiImageRoute: true,
-  hermesAgentDrawsImages: false,
-  hermesSpeaksReplies: false, onboardingArmed: false,
 });
 const CONTEXT: HermesTurnContext = {
   devicePairing: { provider: "clawai", model: "deepseek" },

@@ -52,26 +52,32 @@ describe("default desktop icons", () => {
 // kept the icon for good, which is the state a v3.9.0 -> v4.0.0 box was found in.
 describe("one-time shed of apps that moved off the desktop", () => {
   it("sheds exactly the ids that moved, and only from a saved list", () => {
-    expect(src).toMatch(/const SHED_FROM_SAVED_DESKTOP = new Set\(\["system_update", "vnc"\]\)/);
-    expect(src).toMatch(
-      /saved = saved\.filter\(id => !SHED_FROM_SAVED_DESKTOP\.has\(id\)\)/
-    );
+    expect(src).toMatch(/1: \["system_update", "vnc"\]/);
+    expect(src).toMatch(/saved = saved\.filter\(id => !shed\.has\(id\)\)/);
   });
 
-  it("is gated on a persisted version, so an icon put back is not shed again", () => {
-    expect(src).toMatch(/const DESKTOP_APPS_SHED_VERSION = \d+/);
+  it("applies only the versions a box has not already had", () => {
+    // The property that makes a later bump safe. Shedding one flat set on every
+    // bump would take back an icon THIS version already shed and the owner has
+    // since restored — the exact case the version exists to prevent.
+    expect(src).toMatch(/DESKTOP_APPS_SHED_BY_VERSION: Record<number, readonly string\[\]>/);
+    expect(src).toMatch(/\.filter\(\(\[version\]\) => Number\(version\) > from\)/);
+    expect(src).toMatch(/const shedFrom = Number\(data\.desktop_apps_shed \?\? 0\)/);
+    expect(src).toMatch(/shedFrom < DESKTOP_APPS_SHED_VERSION/);
+  });
+
+  it("records the version in the SAME write as the list it changed", () => {
+    // Two writes could land apart, and a box that shed its icons without
+    // recording the version would shed them again on the next load.
     expect(src).toMatch(
-      /Number\(data\.desktop_apps_shed \?\? 0\) < DESKTOP_APPS_SHED_VERSION/
+      /\{ desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION \}/,
     );
-    // Recorded from an effect rather than from inside the load: the preference
-    // writer is gated on `prefsLoaded` and drops a write issued during it.
-    expect(src).toMatch(/savePreferences\(\{ desktop_apps_shed: DESKTOP_APPS_SHED_VERSION \}\)/);
   });
 
   it("drops the shed app's reserved grid cell where icon_grid is applied", () => {
     // Applied at the icon_grid assignment, which runs AFTER the shed and would
     // otherwise put the empty slot straight back.
-    expect(src).toMatch(/for \(const id of SHED_FROM_SAVED_DESKTOP\) delete grid\[`desktop-\$\{id\}`\]/);
+    expect(src).toMatch(/for \(const id of shedNeeded\.current \?\? \[\]\) delete grid\[`desktop-\$\{id\}`\]/);
   });
 
   it("leaves both apps installable from the launcher", () => {

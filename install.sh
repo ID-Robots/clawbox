@@ -5254,9 +5254,19 @@ tts_ensure_provider_registered() {
 #
 # `clawboxManaged` is our own stamp on the entry, not the provider's name: an
 # owner's own `openai` speech route carries no stamp and is never mistaken for
-# ours (pre-start makes the same distinction before it will touch the entry).
-# The apiKey comes back redacted from `config get`, which does not matter — the
-# flag and the key's NAME are all this needs.
+# ours. The apiKey comes back redacted from `config get`, which does not matter
+# — the flag and the key's NAME are all this needs.
+#
+# A DELIBERATELY weaker test than pre-start's `_clawai_route_is_ours`, which
+# requires the stamp AND a base URL still pointing at our proxy, because
+# `openclaw config set` edits in place and a stale stamp can outlive an entry
+# the owner has re-aimed elsewhere. The difference is safe here and is not there:
+# pre-start uses that predicate to decide whether to REWRITE or WITHDRAW an
+# entry, where being wrong edits somebody else's provider; this only decides
+# which of two already-present voices is selected FIRST on a box that has not
+# chosen, and the owner can change it in Settings → Voice. Tightening this to
+# the same predicate would mean re-deriving ownership in a second language —
+# the thing the paragraph above declines to do with the tier.
 tts_managed_cloud_provider() {
   local home="$1"
   as_clawbox "$OPENCLAW_BIN" config get "$home.providers" 2>/dev/null | python3 -c '

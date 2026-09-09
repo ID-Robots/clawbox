@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { attachmentAcceptAttribute, partitionAttachments } from "@/lib/chat-attachments";
-import { capabilitiesFor } from "@/lib/harness/capabilities";
+import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 
 /**
  * What the composer accepts, decided by what the box can pass to the model.
@@ -14,32 +14,16 @@ import { capabilitiesFor } from "@/lib/harness/capabilities";
 const file = (name: string, type: string) => new File([new Uint8Array([1])], name, { type });
 
 const HERMES_WITH_IMAGES = capabilitiesFor("hermes", {
+  ...UNKNOWN_FACTS,
   hasClawaiToken: true,
   hermesSupportsImages: true,
   // Both halves: a turn that carries the picture and somewhere that looks at
   // it. Without the second the composer offers nothing — see the capability
   // table's own tests.
   hermesHasVisionRoute: true,
-  hermesStreamsTurns: false,
-  hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
 });
-const HERMES_BARE = capabilitiesFor("hermes", {
-  hasClawaiToken: false,
-  hermesSupportsImages: false,
-  hermesHasVisionRoute: false,
-  hermesStreamsTurns: false,
-  hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
-});
-const OPENCLAW = capabilitiesFor("openclaw", {
-  hasClawaiToken: true,
-  hermesSupportsImages: false,
-  hermesHasVisionRoute: false,
-  hermesStreamsTurns: false,
-  hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
-});
+const HERMES_BARE = capabilitiesFor("hermes", { ...UNKNOWN_FACTS });
+const OPENCLAW = capabilitiesFor("openclaw", { ...UNKNOWN_FACTS, hasClawaiToken: true });
 
 describe("partitionAttachments", () => {
   it("takes everything where everything can reach the model", () => {

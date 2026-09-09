@@ -94,26 +94,42 @@ const DEFAULT_DESKTOP_APPS = BUILT_IN_APP_IDS.filter(id => !OFF_DESKTOP_BY_DEFAU
 // restores a saved list verbatim — deliberately, so an owner's own additions
 // survive. The consequence is that moving an app off the desktop reached fresh
 // boxes only: every box that had ever saved a list kept the icon for good, with
-// no way to get the new layout short of a factory reset. System Update moved
-// into Settings → System Update (and is still reached from About and the
-// new-version notice), so the icon is redundant there rather than merely
-// unfashionable.
+// no way to the new layout short of a factory reset.
 //
-// Shed ONCE, recorded by `desktop_apps_shed` below, because "the owner never
-// asked for this icon" and "the owner put this icon back" are different states
-// and only the flag can tell them apart — after the shed, Add to desktop from
-// the launcher is permanent again.
+// Shed ONCE per version, because "the owner never asked for this icon" and "the
+// owner put this icon back" are different states and only a persisted mark can
+// tell them apart — after the shed, Add to desktop is permanent again.
 //
-// Both ids stay reachable from the App Launcher; this is about the default
-// grid, not about removing the app. System Update moved into Settings → System
-// Update (and is still reached from About and the new-version notice), and
-// Remote Desktop is a diagnostic on a headless appliance — the owner's call,
-// 2026-09-09, on a box where both icons had survived the upgrade.
-const SHED_FROM_SAVED_DESKTOP = new Set(["system_update", "vnc"]);
+// Keyed BY VERSION rather than as one flat set, and that is what makes a bump
+// safe: only entries ABOVE the box's stored version are applied, so adding a
+// third id later cannot take back an icon this version already shed and the
+// owner has since restored. A flat set would re-shed the lot on every bump,
+// which is the very case the version exists to prevent.
+//
+// Deliberately NOT `OFF_DESKTOP_BY_DEFAULT`, which happens to hold the same two
+// ids today: that one is the live default set and will change, this is frozen
+// history. Both ids stay in the App Launcher — this is about the default grid,
+// not about removing the app. System Update moved into Settings → System Update
+// (still reached from About and the new-version notice) and Remote Desktop is a
+// diagnostic on a headless appliance: the owner's call, 2026-09-09, on a box
+// where both icons had survived the upgrade to v4.0.0.
+const DESKTOP_APPS_SHED_BY_VERSION: Record<number, readonly string[]> = {
+  1: ["system_update", "vnc"],
+};
 
-// Bumping this re-runs the shed for ids added to the set above. It is a
-// version, not a boolean, for exactly that reason.
-const DESKTOP_APPS_SHED_VERSION = 1;
+/** The newest shed a box can have applied — the highest key above. */
+const DESKTOP_APPS_SHED_VERSION = Math.max(
+  ...Object.keys(DESKTOP_APPS_SHED_BY_VERSION).map(Number),
+);
+
+/** The ids a box stored at `from` has not been shed yet. */
+function desktopAppsToShed(from: number): Set<string> {
+  return new Set(
+    Object.entries(DESKTOP_APPS_SHED_BY_VERSION)
+      .filter(([version]) => Number(version) > from)
+      .flatMap(([, ids]) => ids),
+  );
+}
 
 // How old an owner-notice may be and still be acted on — `PENDING_ACTION_TTL_MS`
 // in src/lib/pending-actions.ts, which is the WRITER's pruning window. Copied
@@ -528,10 +544,11 @@ function ChromeDesktopInner() {
   const [wpOpacity, setWpOpacity] = useState(50);
   // ─── Unified SQLite load on mount ───
   const prefsLoaded = useRef(false);
-  // Set while loading when a saved desktop list still carried an app that has
-  // since moved off the desktop; read by the icon-grid load below and by the
-  // effect that records the shed so it happens exactly once.
-  const shedNeeded = useRef(false);
+  // The ids a shed removed from the saved list during this load, or null when
+  // there was nothing to shed. Read by the icon-grid load below, which has to
+  // drop their cells, and by the `desktop_apps` write, which records the version
+  // so it happens exactly once.
+  const shedNeeded = useRef<Set<string> | null>(null);
   // The docked chat's width as the DEVICE remembers it — see the write below.
   // Seeded from the stored value even on a phone, which never restores the
   // panel, so opening the desktop on a phone cannot erase the layout.
@@ -568,19 +585,19 @@ function ChromeDesktopInner() {
           // owner who added Remote Desktop from the launcher keeps it.
           let saved = (data.desktop_apps as string[]).filter(id => BUILT_IN_APP_IDS.includes(id));
           // An app that MOVED off the desktop is dropped from a list that was
-          // saved before it moved — once, and only once. Without this the move
-          // reaches new boxes only (see SHED_FROM_SAVED_DESKTOP); run
-          // unconditionally, an owner who put the icon back would lose it again
-          // on every reload. Hence the persisted version rather than a re-derived
-          // comparison against the set.
+          // saved before it moved — once per shed version. Without this the move
+          // reaches new boxes only; run unconditionally, an owner who put the
+          // icon back would lose it again on every reload.
           //
           // The state set here is what reaches the disk: the effects that mirror
-          // `desktopApps` and `iconPositions` into preferences do the writing,
-          // because `savePreferences` is gated on `prefsLoaded` and would drop a
-          // write issued from inside this load.
-          if (Number(data.desktop_apps_shed ?? 0) < DESKTOP_APPS_SHED_VERSION) {
-            saved = saved.filter(id => !SHED_FROM_SAVED_DESKTOP.has(id));
-            shedNeeded.current = true;
+          // `desktopApps` and `iconPositions` into preferences do the writing.
+          // The decision travels out on a ref because this load effect has empty
+          // deps and cannot see `savePreferences`.
+          const shedFrom = Number(data.desktop_apps_shed ?? 0);
+          if (shedFrom < DESKTOP_APPS_SHED_VERSION) {
+            const shed = desktopAppsToShed(shedFrom);
+            saved = saved.filter(id => !shed.has(id));
+            shedNeeded.current = shed;
           }
           // ...but only default-set built-ins are auto-added, so an app that
           // ships off the desktop never appears on a box that never had it.
@@ -594,9 +611,7 @@ function ChromeDesktopInner() {
           // A shed app's reserved cell goes with it. This is applied HERE rather
           // than beside the shed above because this assignment runs after it and
           // would otherwise put the empty slot straight back.
-          if (shedNeeded.current) {
-            for (const id of SHED_FROM_SAVED_DESKTOP) delete grid[`desktop-${id}`];
-          }
+          for (const id of shedNeeded.current ?? []) delete grid[`desktop-${id}`];
           setIconPositions(grid);
         }
         // Open windows
@@ -908,14 +923,18 @@ function ChromeDesktopInner() {
       "appearance",
     );
   }, [wallpaperId, wpFit, wpBgColor, wpOpacity, savePreferences]);
-  useEffect(() => { savePreferences({ desktop_apps: desktopApps }); }, [desktopApps, savePreferences]);
-  // Record the one-time shed AFTER the load has released the preference writer,
-  // so the box does not re-shed an icon the owner has since put back. The two
-  // lists it affects are written by their own effects above and below.
   useEffect(() => {
-    if (!shedNeeded.current) return;
-    shedNeeded.current = false;
-    savePreferences({ desktop_apps_shed: DESKTOP_APPS_SHED_VERSION });
+    // The shed's version rides along with the list it changed, in ONE write:
+    // a second effect on the same dependency would cost a second POST on every
+    // first load that sheds, and the two must not be able to land apart — a box
+    // that shed its icons without recording the version would shed them again.
+    const shed = shedNeeded.current !== null;
+    shedNeeded.current = null;
+    savePreferences(
+      shed
+        ? { desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION }
+        : { desktop_apps: desktopApps },
+    );
   }, [desktopApps, savePreferences]);
   useEffect(() => { savePreferences({ hidden_installed: hiddenInstalledApps }); }, [hiddenInstalledApps, savePreferences]);
   useEffect(() => { savePreferences({ pinned_apps: pinnedOverrides }); }, [pinnedOverrides, savePreferences]);

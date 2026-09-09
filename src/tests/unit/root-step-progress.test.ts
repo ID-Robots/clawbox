@@ -1,3 +1,5 @@
+import { readFileSync } from "fs";
+import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -54,6 +56,42 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.clearAllMocks();
+});
+
+describe("install.sh's side of the contract", () => {
+  // The two-space indent is now a UI contract and install.sh does not say so.
+  // The fully-deep alternative — a `substep()` helper emitting an explicit
+  // marker like the existing `[provision-status]` sentinels — means touching
+  // hundreds of echo sites in the highest-risk file in the product for a
+  // cosmetic feature, so it is deliberately not done. Pinning the convention
+  // from the PRODUCER side is the cheap half: it fails if someone reformats the
+  // announcements the watcher reads, which the consumer test above cannot see.
+  it("announces sub-phases with the two-space indent the watcher matches", () => {
+    const installSh = readFileSync(path.join(process.cwd(), "install.sh"), "utf8");
+    const announcements = installSh
+      .split("\n")
+      .map((l) => /^\s*echo "( +)(Installing|Building|Checking|Refreshing) /.exec(l))
+      .filter((m): m is RegExpExecArray => m !== null);
+
+    // Twelve at the time of writing, every one of them two-space indented.
+    // The floor is what matters: enough that a reformat trips this rather than
+    // a single edit, low enough that removing one sub-phase does not.
+    expect(announcements.length).toBeGreaterThan(8);
+    for (const m of announcements) {
+      expect(m[1], `"${m[0].trim()}" must keep the two-space sub-phase indent`).toBe("  ");
+    }
+
+    // Deeper indents are a DIFFERENT thing and must stay excluded: install.sh
+    // uses four or more spaces for continuation lines under an announcement
+    // ("         Leaving messages.tts.provider unset rather than ..."), which
+    // are detail, not the headline. HEADLINE_RE matches exactly two spaces, so
+    // those are correctly ignored — this asserts they still exist rather than
+    // having been flattened into the headline space.
+    const continuations = installSh
+      .split("\n")
+      .filter((l) => /^\s*echo "    +[A-Z]/.test(l));
+    expect(continuations.length).toBeGreaterThan(0);
+  });
 });
 
 describe("watchRootStepProgress", () => {

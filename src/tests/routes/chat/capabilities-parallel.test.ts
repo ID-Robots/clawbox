@@ -30,7 +30,7 @@ vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/harness/clawai-images", () => ({ clawaiImageRouteReachable: vi.fn() }));
 vi.mock("@/lib/hermes-dashboard-turn", () => ({ hermesCanStreamTurns: vi.fn() }));
 vi.mock("@/lib/hermes-tts", () => ({
-  hermesSpeaksReplies: vi.fn(), onboardingArmed: false,
+  hermesSpeaksReplies: vi.fn(),
   // Read by `factsPending`; the memo accessor never spawns, so a plain false.
   hermesVoiceProbePending: vi.fn(() => false),
 }));
@@ -140,7 +140,8 @@ describe("GET /setup-api/chat/capabilities asks the Hermes probes together", () 
       hermesStreamsTurns: true,
       hasClawaiImageRoute: true,
       hermesAgentDrawsImages: true,
-      hermesSpeaksReplies: true, onboardingArmed: false,
+      hermesSpeaksReplies: true,
+      onboardingArmed: false,
     });
   });
 

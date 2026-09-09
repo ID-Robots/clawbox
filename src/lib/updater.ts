@@ -4242,14 +4242,12 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // them — it cannot affect how the step is started, timed, or torn down,
     // which is the whole reason it is a separate watcher rather than a change
     // to execAsRoot. `stepStartedAt` bounds it to THIS run of the step.
+    // No guard needed on the write: `watchRootStepProgress` promises no headline
+    // after its stopper runs, and the `finally` below stops it before the step
+    // is marked anything but running.
     const stopProgress = step.requiresRoot
       ? watchRootStepProgress(step.id, stepStartedAt, (headline) => {
-          // Never write onto a step that has already ended: a poll in flight
-          // when the step finished would otherwise leave its last headline
-          // sitting under a completed row.
-          if (runtime.state.steps[i].status === "running") {
-            runtime.state.steps[i].detail = headline;
-          }
+          runtime.state.steps[i].detail = headline;
         })
       : null;
 

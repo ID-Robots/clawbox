@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { HermesAdapter } from "@/lib/harness/hermes-adapter";
-import { capabilitiesFor } from "@/lib/harness/capabilities";
+import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import type { TurnEvent } from "@/lib/harness/transport";
 
 /**
@@ -19,13 +19,9 @@ import type { TurnEvent } from "@/lib/harness/transport";
  */
 
 const CAPS = capabilitiesFor("hermes", {
+  ...UNKNOWN_FACTS,
   hasClawaiToken: true,
-  hermesSupportsImages: false,
-  hermesHasVisionRoute: false,
   hermesStreamsTurns: true,
-  hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false,
-  hermesSpeaksReplies: false, onboardingArmed: false,
 });
 
 /** One SSE frame, framed the way the route frames it. */
