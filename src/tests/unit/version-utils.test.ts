@@ -38,11 +38,12 @@ describe("parseHermesVersion", () => {
   ].join("\n");
 
   // The real banner at the commit HERMES_PIN_COMMIT now installs, read off the
-  // Hermes box (TASK-784). Kept BESIDE the older one rather than replacing it:
-  // upstream has already changed the field separator from an em dash to a
-  // middle dot between these two versions, so a parser that only ever sees one
-  // of them cannot show that it does not depend on the separator — and a box
-  // mid-update still prints the older banner.
+  // Hermes box (TASK-784). Kept BESIDE the older one rather than replacing it
+  // for two reasons: a box mid-update still prints the older banner, and the
+  // two differ in their field separator, which pins that the parser does not
+  // depend on one. (Which separator belongs to which VERSION is not something
+  // this tree can say — the two v0.20.5 fixtures it carries disagree — so
+  // nothing here claims it.)
   const banner021 = [
     "Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35 (+32678 carried commits)",
     "Install directory: /home/clawbox/.hermes/hermes-agent",
@@ -58,12 +59,12 @@ describe("parseHermesVersion", () => {
     expect(parseHermesVersion(banner021)).toBe("v0.21.1");
   });
 
-  it("is not confused by the build date or the carried-commit count", () => {
-    // `(2026.9.7)` is semver-ish too and sits four tokens before `+32678`.
-    // Only the FIRST match on line one is the version, and the count must not
-    // be read as a build-metadata suffix on it.
-    expect(parseHermesVersion(banner021)).not.toContain("2026");
-    expect(parseHermesVersion(banner021)).not.toContain("32678");
+  it("takes the version, not the build date, when the tag is missing its v", () => {
+    // Both tokens on this line are semver-ish and the build date comes SECOND,
+    // so only "first match on line one" gets this right. Written without a
+    // leading `v` because that is the one shape the banner tests above cannot
+    // distinguish from a date.
+    expect(parseHermesVersion("Hermes Agent 0.21.1 (2026.9.7) · local 2237be35")).toBe("0.21.1");
   });
 
   it("returns null for empty values", () => {

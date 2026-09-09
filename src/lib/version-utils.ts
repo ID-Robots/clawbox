@@ -28,8 +28,9 @@ export function cleanVersion(v: string | null | undefined): string | null {
  *   Install directory: /home/clawbox/.hermes/hermes-agent
  *   Install method: git
  *
- * The separator between the fields is upstream's to change — it has already
- * been both an em dash and a middle dot — so nothing here may depend on it.
+ * The separator between the fields is upstream's to change — banners carrying
+ * an em dash and a middle dot have both been seen — so nothing here may depend
+ * on it: the version is the first semver-ish token on line one.
  *
  * Only the tag belongs in an About row, and `cleanVersion` cannot get it:
  * its rules are shaped for OpenClaw/git-describe output, and none of them
