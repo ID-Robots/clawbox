@@ -3894,33 +3894,20 @@ clawbox_plugin_boot_without() {
 # existing marker exactly as it found them, for the next boot or the Settings
 # Retry to resolve.
 
-# The consent question is asked at most ONCE per boot, for every id at once:
-# the CLI start is the dominant cost and this runs inside a blocking
-# ExecStartPre. Empty until the first kill asks for it.
+# Query the core BEFORE replaying an expensive, normally idempotent enable.
+# One snapshot serves all managed ids until a payload install invalidates it.
+# Only the core's positive installed-record verdict skips consent; a named
+# unindexed plugin is left untouched (not declared accepted), as above.
+# Unknown, pending and failed reports still take the existing repair path.
 #
-# ONE SNAPSHOT, TAKEN AT THE FIRST KILL OF THE BOOT, and memoised. A consent
-# recorded by a LATER killed verb is not in it, so that plugin is still named
-# and is switched off — beta's behaviour, and the reason this reads as a fix for
-# a consent that was ALREADY current before the boot (the common shape:
-# `plugins enable` is idempotent, so it is a slow no-op that gets killed) rather
-# than for one written inside the verb that was then killed. The codex verb runs
-# before the managed loop, so on a boot whose codex verb is killed the snapshot
-# predates every managed plugin's own consent write.
-#
-# STALE IN ONE DIRECTION ONLY, which is what makes it safe rather than merely
-# cautious: `plugins enable --accept-capabilities` only ever ADDS consent, so an
-# old snapshot can be wrong by naming a plugin that has since been consented — a
-# false failure, identical to beta — and a stale `consented` is unreachable.
-#
-# The memoisation is not only cost. Measured on a box, this call is ~10 s
-# against its 60 s ceiling, so re-reading it per verb would be affordable on a
-# HEALTHY box — but the box that reaches this code is one loaded enough to kill
-# `plugins enable` at 60 s, and there the inspect can reach its own deadline
-# too. Per verb that costs 5 x 65 s to produce the same refusal five times;
-# memoised it costs one 65 s attempt and every later verb reuses the answer for
-# free. Bounding the damage on that box is what this is for.
+# Consent writes only ADD consent, so reusing an earlier snapshot after enable
+# can conservatively miss a newly accepted surface, but cannot invent one.
+# A payload install CAN change a surface: invalidate the snapshot before that
+# operation so a later id never uses an answer from before the install.
+# The snapshot is in memory for this boot only, never persisted across boots.
 CLAWBOX_CONSENT_STATES=""
 CLAWBOX_CONSENT_STATES_READY=0
+CLAWBOX_CONSENT_POSTWRITE_READY=0
 
 # `@openclaw/discord`, `openclaw-discord` and `discord` are one plugin: the
 # registry answers to all three and `ensureChannelPlugin` enables whichever one
@@ -4102,6 +4089,15 @@ clawbox_plugin_consent_outcome() {
   fi
   case "$rc" in
     124|137)
+      # The preflight predates this write. Refresh once after the first killed
+      # enable, so a newly recorded consent is not mistaken for a refusal.
+      # Further killed verbs share that answer, retaining the bounded fallback
+      # cost on overloaded hardware (one preflight + one post-write report).
+      if [ "$CLAWBOX_CONSENT_POSTWRITE_READY" = "0" ]; then
+        CLAWBOX_CONSENT_STATES=""
+        CLAWBOX_CONSENT_STATES_READY=0
+        CLAWBOX_CONSENT_POSTWRITE_READY=1
+      fi
       clawbox_plugin_consent_state "$id" || state=$?
       case "$state" in
         0)
@@ -4645,11 +4641,18 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
   # SIGTERM, and an `openclaw` that ignores it keeps running past the ceiling.
   # It is also what makes 137 reachable, which the classifier below reads the
   # same way as 124.
-  CODEX_CONSENT_RC=0
-  timeout -k 5 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1 \
-    || CODEX_CONSENT_RC=$?
   CODEX_CONSENT_VERDICT=0
-  clawbox_plugin_consent_outcome codex "$CODEX_CONSENT_RC" || CODEX_CONSENT_VERDICT=$?
+  CLAWBOX_CONSENT_DETAIL=""
+  clawbox_plugin_consent_state codex || CODEX_CONSENT_VERDICT=$?
+  if [ "$CODEX_CONSENT_VERDICT" = "0" ]; then
+    CLAWBOX_CONSENT_DETAIL=" (the core already reports current consent; skipped enable)"
+  elif [ "$CODEX_CONSENT_VERDICT" != "2" ]; then
+    CODEX_CONSENT_RC=0
+    timeout -k 5 60 "$OPENCLAW_BIN" plugins enable codex --accept-capabilities </dev/null >/dev/null 2>&1 \
+      || CODEX_CONSENT_RC=$?
+    CODEX_CONSENT_VERDICT=0
+    clawbox_plugin_consent_outcome codex "$CODEX_CONSENT_RC" || CODEX_CONSENT_VERDICT=$?
+  fi
   if [ "$CODEX_CONSENT_VERDICT" = "0" ]; then
     echo "  Codex runtime plugin capabilities accepted/current$CLAWBOX_CONSENT_DETAIL"
     clawbox_plugin_repair_clear codex
@@ -4660,7 +4663,7 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$CODEX_SHOULD_LOAD" = "1" ]; then
     # it enabled safe. Nothing is switched off and nothing is cleared: an
     # existing repair row is still the truest thing on the screen, and the next
     # boot or the Retry it offers resolves this.
-    echo "  Codex runtime plugin capabilities are still unknown (the consent verb was killed at its deadline and the core keeps no consent record for this plugin); leaving it as it is"
+    echo "  Codex runtime plugin capabilities are still unknown (the core keeps no consent record for this plugin); leaving it as it is"
   else
     echo "  WARN: could not confirm Codex plugin capabilities; booting without Codex"
     clawbox_plugin_boot_without codex consent \
@@ -4730,11 +4733,18 @@ for key, entry in entries.items():
 MANAGEDPY
 )"
   for MANAGED_PLUGIN in $MANAGED_ENABLED_PLUGINS; do
-    MANAGED_PLUGIN_RC=0
-    MANAGED_PLUGIN_OUT="$(timeout -k 5 60 "$OPENCLAW_BIN" plugins enable "$MANAGED_PLUGIN" --accept-capabilities </dev/null 2>&1)" \
-      || MANAGED_PLUGIN_RC=$?
     MANAGED_PLUGIN_VERDICT=0
-    clawbox_plugin_consent_outcome "$MANAGED_PLUGIN" "$MANAGED_PLUGIN_RC" || MANAGED_PLUGIN_VERDICT=$?
+    CLAWBOX_CONSENT_DETAIL=""
+    clawbox_plugin_consent_state "$MANAGED_PLUGIN" || MANAGED_PLUGIN_VERDICT=$?
+    if [ "$MANAGED_PLUGIN_VERDICT" = "0" ]; then
+      CLAWBOX_CONSENT_DETAIL=" (the core already reports current consent; skipped enable)"
+    elif [ "$MANAGED_PLUGIN_VERDICT" != "2" ]; then
+      MANAGED_PLUGIN_RC=0
+      MANAGED_PLUGIN_OUT="$(timeout -k 5 60 "$OPENCLAW_BIN" plugins enable "$MANAGED_PLUGIN" --accept-capabilities </dev/null 2>&1)" \
+        || MANAGED_PLUGIN_RC=$?
+      MANAGED_PLUGIN_VERDICT=0
+      clawbox_plugin_consent_outcome "$MANAGED_PLUGIN" "$MANAGED_PLUGIN_RC" || MANAGED_PLUGIN_VERDICT=$?
+    fi
     if [ "$MANAGED_PLUGIN_VERDICT" = "0" ]; then
       echo "  $MANAGED_PLUGIN plugin capabilities accepted/current$CLAWBOX_CONSENT_DETAIL"
       clawbox_plugin_repair_clear "$MANAGED_PLUGIN"
@@ -4747,7 +4757,7 @@ MANAGEDPY
       # box today — so the core can neither report its consent nor refuse
       # readiness over it. Change nothing, clear nothing, say which of the two
       # it is.
-      echo "  $MANAGED_PLUGIN plugin capabilities are still unknown (the consent verb was killed at its deadline and the core keeps no consent record for this plugin); leaving it as it is"
+      echo "  $MANAGED_PLUGIN plugin capabilities are still unknown (the core keeps no consent record for this plugin); leaving it as it is"
       continue
     fi
     # The consent is not established — either `enable` refused outright, or it
@@ -4809,6 +4819,9 @@ MANAGEDPY
         else
           MANAGED_PLUGIN_SPEC="$MANAGED_PLUGIN_PKG"
         fi
+        CLAWBOX_CONSENT_STATES=""
+        CLAWBOX_CONSENT_STATES_READY=0
+        CLAWBOX_CONSENT_POSTWRITE_READY=0
         if timeout -k 5 120 "$OPENCLAW_BIN" plugins install "$MANAGED_PLUGIN_SPEC" --force --accept-capabilities </dev/null >/dev/null 2>&1; then
           echo "  $MANAGED_PLUGIN plugin payload reinstalled ($MANAGED_PLUGIN_SPEC)"
           clawbox_plugin_repair_clear "$MANAGED_PLUGIN"
