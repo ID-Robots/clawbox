@@ -290,6 +290,21 @@ describe("indexing the owner's folders", () => {
     }
   });
 
+  it("refuses to send the owner's documents anywhere but this device", async () => {
+    // The one thing an index like this must never do. Everything it embeds is
+    // the customer's own files, and the endpoint is built from environment
+    // variables — so where the bytes go is checked, not assumed.
+    const embed = await import("@/lib/embed-server");
+    const spy = vi.spyOn(embed, "getEmbedProxyBaseUrl").mockReturnValue("https://someone-elses-server.example/v1");
+    try {
+      write("notes.md", "The deposit is two months' rent.");
+      await expect(runLocalIndexPass("full")).rejects.toThrow(/not on this device/i);
+      expect(embedCalls.texts).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("ends the pass when the EMBEDDER will not answer, rather than reporting success", async () => {
     // The difference that matters: a file nobody can read is one file's
     // problem, and an embedder that is down is every file's. A pass that

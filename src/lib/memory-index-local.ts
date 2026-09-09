@@ -33,10 +33,12 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
+import { constants as fsConstants } from "fs";
 import path from "path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import { openSqlite } from "@/lib/openclaw-session-store";
 import { getEmbedProvisioningStatus, getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { EXTRACT_ROOT, extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
 import { readConfig as readOpenclawConfig } from "@/lib/openclaw-config";
@@ -429,9 +431,19 @@ async function embedBatch(
   signal: AbortSignal | undefined,
 ): Promise<Float32Array[]> {
   if (texts.length === 0) return [];
+  // The owner's document text is about to become an HTTP body, so where it is
+  // going is checked rather than assumed. `getEmbedProxyBaseUrl()` is built
+  // from `CLAWBOX_LOCAL_AI_PROXY_BASE_URL`/`PORT` and is loopback on every box;
+  // this is what keeps that true if either ever becomes settable from anywhere
+  // less trustworthy. Off-box, the index would be quietly shipping the
+  // customer's files to a third party — so it refuses instead.
+  const endpoint = getEmbedProxyBaseUrl();
+  if (!isLoopbackBaseUrl(endpoint)) {
+    throw new EmbeddingUnavailableError("the embedder endpoint is not on this device");
+  }
   let res: Response;
   try {
-    res = await fetch(`${getEmbedProxyBaseUrl()}/embeddings`, {
+    res = await fetch(`${endpoint}/embeddings`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -597,6 +609,49 @@ function displayName(source: string, file: string, origins: Record<string, strin
   return path.join(label, origin ?? path.relative(path.resolve(source), file));
 }
 
+/** A file this pass will read, held open so nothing can swap it underneath. */
+interface OpenedFile {
+  stat: { mtimeMs: number; size: number };
+  read(): Promise<string>;
+  close(): Promise<void>;
+}
+
+/**
+ * Open one candidate for indexing, or null when it is not one.
+ *
+ * `O_NOFOLLOW`: a source folder is a directory the OWNER pointed at, and
+ * anything inside it can be a symlink — including one aimed at a credential
+ * store. The index reads real files under the folder, not wherever a link says.
+ */
+async function openForIndexing(file: string): Promise<OpenedFile | null> {
+  const handle = await fs.open(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  let stat;
+  try {
+    stat = await handle.stat();
+  } catch (err) {
+    await handle.close();
+    throw err;
+  }
+  if (!stat.isFile() || stat.size > MAX_INDEXABLE_BYTES) {
+    await handle.close();
+    return null;
+  }
+  return {
+    stat: { mtimeMs: stat.mtimeMs, size: stat.size },
+    read: async () => {
+      const buffer = Buffer.alloc(stat.size);
+      let read = 0;
+      while (read < buffer.length) {
+        const result = await handle.read(buffer, read, buffer.length - read, read);
+        if (result.bytesRead === 0) break;
+        read += result.bytesRead;
+      }
+      return buffer.subarray(0, read).toString("utf8");
+    },
+    close: async () => { await handle.close().catch(() => {}); },
+  };
+}
+
 function sha256Of(text: string): string {
   return crypto.createHash("sha256").update(text).digest("hex").slice(0, 32);
 }
@@ -655,17 +710,26 @@ export async function runLocalIndexPass(
 
     for (const entry of scan.files) {
       throwIfAborted(signal);
-      let stat;
+      // ONE DESCRIPTOR for the size check, the skip decision and the read.
+      // A path-level stat followed by a path-level readFile lets the file be
+      // replaced between them, so the bytes that get embedded are not the ones
+      // the size check passed and not the ones the mtime recorded — an index
+      // that quietly disagrees with the disk. Same shape `boundedJsonFile` in
+      // chat-spoken-history.ts uses, and O_NOFOLLOW for the same reason: a
+      // link planted inside a folder the owner added must not be read through.
+      let opened: OpenedFile | null;
       try {
-        stat = await fs.stat(entry.file);
+        opened = await openForIndexing(entry.file);
       } catch {
         failures += 1;
         continue;
       }
-      if (stat.size > MAX_INDEXABLE_BYTES) {
+      if (!opened) {
+        // Not a regular file, or bigger than this pass will read.
         failures += 1;
         continue;
       }
+      const { stat } = opened;
       const row = db.prepare("SELECT mtime_ms, size, sha, source, display FROM files WHERE path = ?").get(entry.file) as
         { mtime_ms?: unknown; size?: unknown; sha?: unknown; source?: unknown; display?: unknown } | undefined;
       // The source and the display name are part of what is stored, so they are
@@ -678,14 +742,19 @@ export async function runLocalIndexPass(
         && Number(row.size) === stat.size
         && row.source === entry.source
         && row.display === entry.display;
-      if (sameFile) continue;
+      if (sameFile) {
+        await opened.close();
+        continue;
+      }
 
       let text: string;
       try {
-        text = await fs.readFile(entry.file, "utf-8");
+        text = await opened.read();
       } catch {
         failures += 1;
         continue;
+      } finally {
+        await opened.close();
       }
       const sha = sha256Of(text);
       if (row && row.sha === sha && row.source === entry.source && row.display === entry.display) {
