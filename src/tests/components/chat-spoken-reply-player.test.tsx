@@ -133,6 +133,13 @@ function installFetch() {
     // The peak reader asks for the clip itself.
     if (url.includes("/setup-api/chat/media")) {
       clipFetches.push(url);
+      // The headers arrive and the BODY does not — a connection dropped
+      // partway through the clip, which is not the same as a clip that cannot
+      // be decoded.
+      if (clipBodyFails > 0) {
+        clipBodyFails -= 1;
+        return { ok: true, status: 200, arrayBuffer: async () => { throw new TypeError("network error"); } };
+      }
       return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(64) };
     }
     return { ok: true, json: async () => ({}) };
@@ -254,6 +261,8 @@ function stubViewport() {
 
 /** Every clip body the peak reader asked the box for. */
 let clipFetches: string[] = [];
+/** How many of those reads drop mid-download before one is allowed through. */
+let clipBodyFails = 0;
 
 const playButton = () => screen.getByTestId("spoken-reply-play");
 const wave = () => screen.getByTestId("spoken-reply-wave");
@@ -265,13 +274,14 @@ async function renderReplyWithAudio() {
   // milliseconds later, and a history that had forgotten the turn would take
   // the bubble back off the screen underneath a slow assertion.
   history = [assistantMessage(SPOKEN_TEXT, 1787291821899)];
-  render(<ChatPopup isOpen onClose={() => {}} />);
+  const view = render(<ChatPopup isOpen onClose={() => {}} />);
   await waitFor(() => expect(socket()).not.toBeNull());
   await screen.findByRole("textbox");
   deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
   await screen.findByText(SPOKEN_TEXT);
   deliverSessionMessage(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));
-  return await screen.findByTestId("spoken-reply-player");
+  await screen.findByTestId("spoken-reply-player");
+  return view;
 }
 
 /**
@@ -294,6 +304,7 @@ function freshBox() {
   clipDuration = 21;
   visible = true;
   clipFetches = [];
+  clipBodyFails = 0;
   resetHarnessCache();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
@@ -477,6 +488,25 @@ describe("the ClawBox player for a spoken reply", () => {
       `chat.audioPause chat.audioReply: ${SPOKEN_TEXT}`));
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(clipFetches).toEqual([]);
+  });
+
+  it("asks again after a body that dropped mid-download", async () => {
+    // The headers arrived and the body did not. That is the MOMENT, not the
+    // clip — and a transcript keeps its media URLs across a remount, so
+    // remembering it as "cannot be drawn" leaves a bare bar for the life of
+    // the page. Only a verdict about the clip ITSELF is cached: the decoder
+    // refusing the bytes, or a 4xx.
+    clipBodyFails = 1;
+    const view = await renderReplyWithAudio();
+    await waitFor(() => expect(wave()).toHaveAttribute("data-peaks", "unavailable"));
+    expect(clipFetches).toHaveLength(1);
+
+    // The same reply, opened again: the box is asked a second time rather than
+    // handed the last failure, and this time the body arrives.
+    view.unmount();
+    await renderReplyWithAudio();
+    await waitFor(() => expect(clipFetches).toHaveLength(2));
+    await waitFor(() => expect(wave()).toHaveAttribute("data-peaks", "ready"));
   });
 
   it("gives a silent reply no player at all", async () => {
