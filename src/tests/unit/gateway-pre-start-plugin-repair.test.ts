@@ -465,6 +465,13 @@ ${CONFIG_SET_STUB}`);
     expect(row.stage).toBe("install");
     expect(row.spec).toBe("clawhub:@openclaw/deepseek-provider@2026.8.1");
     expect(row.disabled).toBe(true);
+    // AND THE SENTENCE KEEPS THE STAGE TOO. A row that stays `install` while
+    // being re-filed as "the plugin is installed but its capabilities could not
+    // be accepted" contradicts itself on the one screen the owner reads, over a
+    // Retry that is about to reinstall the payload.
+    expect(row.reason).toContain("could not be made loadable");
+    expect(row.reason).not.toContain("The plugin is installed but");
+    expect(row.reason).toContain("cannot find module");
   });
 
   it("keeps an install row's wording an install row's, when the consent cannot be confirmed", () => {
@@ -630,6 +637,49 @@ ${CONFIG_SET_STUB}`);
     expect(config().plugins?.entries?.["openclaw-discord"]?.enabled).toBe(false);
     // And no second entry invented under the row's spelling.
     expect(config().plugins?.entries?.discord).toBeUndefined();
+    expect(marker().discord.atMs).toBe(1788668446552);
+  });
+
+  it("does not retry a row THIS boot has just written", () => {
+    // The block is for what a PREVIOUS boot switched off, and nothing enforced
+    // the "previous". Every `clawbox_plugin_boot_without` runs earlier in this
+    // same script, so a plugin the managed loop had just failed and disabled
+    // was fed straight back in and its `plugins enable` re-run seconds later —
+    // learning nothing, and spending the enable, the inspect and the write-back
+    // out of a `TimeoutStartSec=600` the preceding recovery has already been
+    // drawing on.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ plugins: { entries: { discord: { enabled: true } } } }, null, 2),
+    );
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", OC_ENABLE_EXIT: "1" });
+    expect(r.status).toBe(0);
+
+    // The managed loop did its work: switched off, recorded, booted without it.
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+    expect(marker().discord.stage).toBe("consent");
+
+    // And the re-attempt left it for the NEXT boot.
+    expect(r.stdout).not.toContain("Re-attempting the discord plugin");
+    const enables = readFileSync(path.join(dir, "calls.log"), "utf-8")
+      .split("\n")
+      .filter((line) => line.startsWith("plugins enable discord"));
+    expect(enables).toHaveLength(1);
+  });
+
+  it("leaves the repair to the next boot when this startup is already late", () => {
+    // The loops above can burn minutes on a box whose plugins are failing, and
+    // this is a blocking ExecStartPre inside TimeoutStartSec=600. A recovery
+    // stacked on a startup that is already late turns a box that WOULD have
+    // come back into one systemd kills — the opposite of what this block is
+    // for. The row keeps its badge and the next boot tries.
+    seedStaleConsentRow();
+    stubRealCli();
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", CLAWBOX_REATTEMPT_BUDGET_S: "0" });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Startup has already used");
+    expect(r.stdout).not.toContain("Re-attempting the discord plugin");
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
     expect(marker().discord.atMs).toBe(1788668446552);
   });
 

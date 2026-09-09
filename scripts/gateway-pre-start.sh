@@ -3650,11 +3650,27 @@ raise SystemExit(0 if isinstance(entry, dict) and entry.get("enabled") is True e
 PY
 }
 
+# Ids this boot has already filed a repair row for.
+#
+# The re-attempt block far below is for what a PREVIOUS boot switched off, and
+# nothing enforced the "previous": every `clawbox_plugin_boot_without` in this
+# script runs earlier than that block, so a plugin the managed loop had just
+# failed and disabled was fed straight back in and its `plugins enable` re-run
+# seconds later — learning nothing, and spending an enable, an inspect and a
+# config write out of a `TimeoutStartSec=600` the failed recovery had already
+# been drawing on. Collected HERE because every writer in this script goes
+# through this one function, so no new call site can forget it.
+CLAWBOX_REPAIR_MARKED_THIS_BOOT=""
+
 # Record — or update — one plugin's repair row. Never fatal: a box that cannot
 # write this file still boots without the plugin, it just cannot explain itself
 # in Settings, and the boot log says so.
 clawbox_plugin_repair_mark() {
   local id="$1" stage="$2" disabled="$3" reason="$4" spec="${5:-}"
+  # Before the write, not after: an id whose row could not be written is still
+  # one this boot has just tried and failed, and re-attempting it here would
+  # repeat that failure inside the same startup.
+  CLAWBOX_REPAIR_MARKED_THIS_BOOT="$CLAWBOX_REPAIR_MARKED_THIS_BOOT $id"
   if ! CLAWBOX_REPAIR_ID="$id" CLAWBOX_REPAIR_STAGE="$stage" \
     CLAWBOX_REPAIR_DISABLED="$disabled" CLAWBOX_REPAIR_REASON="$reason" \
     CLAWBOX_REPAIR_SPEC="$spec" \
@@ -5107,9 +5123,26 @@ fi
 # to activate for a reason that is not consent would be re-enabled here. That
 # call costs tens of seconds on an Orin because it loads every enabled plugin,
 # which a person waiting on a button can afford and an ExecStartPre cannot.
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
-  CLAWBOX_REPAIR_REATTEMPT="$(python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'REATTEMPTPY' || true
-import json, sys
+#
+# AND HOW MUCH OF THE STARTUP IS LEFT, asked before anything is spent. The loops
+# above can burn minutes on a box whose plugins are failing — 120 s installs,
+# 60 s consents, 60 s config writes — and this is a blocking ExecStartPre inside
+# `TimeoutStartSec=600`. Adding a recovery on top of a startup that is already
+# late turns a box that WOULD have come back into one systemd kills, which is
+# the opposite of what this block is for. `SECONDS` is the shell's own count
+# since the script began; the threshold is an environment variable only so a
+# test can move it, and the default is the real one.
+CLAWBOX_REATTEMPT_BUDGET_S="${CLAWBOX_REATTEMPT_BUDGET_S:-300}"
+
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$SECONDS" -ge "$CLAWBOX_REATTEMPT_BUDGET_S" ]; then
+  # Said, not skipped in silence: a box that never reaches its own repair is
+  # exactly the shape this card is about, and the boot log is where that is
+  # looked for.
+  echo "  Startup has already used ${SECONDS}s of its budget; leaving any plugin repair to the next boot"
+elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  CLAWBOX_REPAIR_REATTEMPT="$(CLAWBOX_REPAIR_MARKED_THIS_BOOT="$CLAWBOX_REPAIR_MARKED_THIS_BOOT" \
+    python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'REATTEMPTPY' || true
+import json, os, sys
 
 # `clawbox-email-directives` is deliberately NOT here, unlike the loop above:
 # nothing can file a repairable row for it (its own arm returns before the
@@ -5147,6 +5180,14 @@ except (OSError, json.JSONDecodeError):
 if not isinstance(rows, dict):
     raise SystemExit(0)
 
+# What THIS boot has already filed a row for. Those failures are minutes old,
+# not a previous boot's, and the verb that produced them has just run.
+marked_this_boot = {
+    canonical(name)
+    for name in os.environ.get("CLAWBOX_REPAIR_MARKED_THIS_BOOT", "").split()
+    if name
+}
+
 candidates = []
 for key, row in rows.items():
     if not isinstance(row, dict):
@@ -5158,6 +5199,8 @@ for key, row in rows.items():
     if not isinstance(plugin_id, str) or not plugin_id.strip():
         plugin_id = key
     if not isinstance(plugin_id, str) or canonical(plugin_id) not in REATTEMPTABLE:
+        continue
+    if canonical(plugin_id) in marked_this_boot:
         continue
     if row.get("disabled") is not True:
         continue
@@ -5180,9 +5223,9 @@ for key, row in rows.items():
     # which is not a rule anybody chose.
     entry_key = plugin_id if plugin_id in entries else None
     if entry_key is None:
-        for key in entries:
-            if isinstance(key, str) and canonical(key) == canonical(plugin_id):
-                entry_key = key
+        for entry_name in entries:
+            if isinstance(entry_name, str) and canonical(entry_name) == canonical(plugin_id):
+                entry_key = entry_name
                 break
     if entry_key is None:
         continue
@@ -5303,7 +5346,16 @@ REATTEMPTPY
           REPAIR_DETAIL="The plugin payload is not installed on this core, so the gateway would refuse to start with it enabled."
           ;;
         *)
-          REPAIR_DETAIL="The plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled."
+          # THE SENTENCE FOLLOWS THE STAGE THE ROW KEEPS, the same rule as the
+          # verification arm above. An `install` row re-filed as "the plugin is
+          # installed but its capabilities could not be accepted" contradicts
+          # itself on the one screen the owner reads, over a Retry that is about
+          # to reinstall the payload.
+          if [ "$REPAIR_STAGE" = "install" ]; then
+            REPAIR_DETAIL="The plugin could not be made loadable, so the gateway would refuse to start with it enabled."
+          else
+            REPAIR_DETAIL="The plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled."
+          fi
           ;;
       esac
       echo "  WARN: could not confirm $REPAIR_PLUGIN plugin capabilities on the re-attempt" >&2
