@@ -39,6 +39,7 @@ const DATA_DIR = "/tmp/clawbox-catalog-live-fallback-test";
 vi.mock("@/lib/config-store", () => ({ DATA_DIR: "/tmp/clawbox-catalog-live-fallback-test" }));
 
 import { GET, refreshInBackground } from "@/app/setup-api/ai-models/catalog/route";
+import { CODEX_MODELS } from "@/lib/provider-models";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 
@@ -305,14 +306,13 @@ describe("catalog — the ChatGPT surface has no enumeration on this core", () =
     // Curated newest-first, and it stays that way: sorting by context window
     // put GPT-5.4 at the top, because only the Anthropic ids carry a real
     // window in the cold-start table.
-    expect((body.models as Array<{ id: string }>).map((m) => m.id)).toEqual([
-      "gpt-5.6-sol",
-      "gpt-5.6-terra",
-      "gpt-5.6-luna",
-      "gpt-5.5",
-      "gpt-5.4",
-      "gpt-5.4-mini",
-    ]);
+    //
+    // Read from CODEX_MODELS rather than copied out of it. A copy here is a
+    // fourth spelling of the ChatGPT list, and this route's whole defect was
+    // that the list had more than one — a row added to the catalogue would
+    // fail this test instead of proving it reaches the picker.
+    expect((body.models as Array<{ id: string }>).map((m) => m.id))
+      .toEqual(CODEX_MODELS.map((m) => m.id));
     expect(body.defaultModelId).toBe("gpt-5.5");
   });
 

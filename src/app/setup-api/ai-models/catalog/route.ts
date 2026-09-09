@@ -5,7 +5,7 @@ import { promises as fsp } from "fs";
 import path from "path";
 import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
-import { CODEX_SUPPORTED_MODEL_RE } from "@/lib/subscription-surface";
+import { isCodexSupportedModelId } from "@/lib/subscription-surface";
 import { lastModelSegment } from "@/lib/chat-header-pills";
 import {
   CATALOG_PROVIDERS,
@@ -379,6 +379,54 @@ async function writeDiskCache(provider: string, payload: CatalogResponse): Promi
   }
 }
 
+/**
+ * Drop a `<provider>.json` that no code path can rewrite, and the memory copy
+ * of it.
+ *
+ * `refreshInBackground` returns at the `hasNoEnumerationOnThisCore` branch
+ * BEFORE `writeDiskCache`, so for such a provider the file can only be a
+ * leftover from a build that predates that branch — and `GET` preferred it,
+ * with `sanitizeCachedPayload` rebuilding the payload from the DISK rows
+ * rather than from the curated list. Measured on the box, 2026-09-09:
+ * `codex.json` was stamped 2026-09-02T19:37:36Z while every other cache file
+ * was three hours old, and the picker had been served that snapshot ever
+ * since. It happened to match the curated rows that day, which is exactly why
+ * nobody saw it — and why a model added to `CODEX_MODELS` would have gone out
+ * in a release and reached no box carrying the file.
+ *
+ * Deleting is TIDYING, not the fix. What actually keeps the file out of the
+ * answer is that `GET` never reads a cache for such a provider at all (see
+ * `serveCuratedOnly` below) — because an unlink can fail, and a delete whose
+ * failure is logged and then ignored while the same file is read and served is
+ * this route's own false success. `catalog-cache/` is a public subtree, so a
+ * leftover owned by another uid, a restore that reinstated the recorded owner
+ * or a read-only remount are all real ways for it to stay put; none of them may
+ * decide whether the release applies. Asked on EVERY request rather than
+ * remembered per process — "checked once at startup and treated as fact" is the
+ * bug this file already carries scars from — and the steady-state cost is one
+ * `unlink` that answers ENOENT.
+ *
+ * `src/lib/subscription-surface.ts` reads the same file through
+ * `readCachedCatalogueIds`, so this is a cross-module delete: `readKnownModelIds`
+ * unions the cache with the curated list, which is why removing it changes
+ * nothing there — it only stops an older build's ids being added back.
+ */
+async function discardUnwritableDiskCache(provider: string): Promise<void> {
+  memCache.delete(provider);
+  try {
+    await fsp.unlink(path.join(CACHE_DIR, `${provider}.json`));
+    console.log(`[catalog] ${provider}: dropped a disk cache no refresh can rewrite`);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException | null)?.code;
+    // ENOENT is the steady state: the file only exists on a box upgraded from
+    // a build that used to write it. Anything else is reported and no more —
+    // the answer this route serves does not depend on it.
+    if (code !== "ENOENT") {
+      console.warn(`[catalog] ${provider}: could not drop the stale disk cache:`, code ?? e);
+    }
+  }
+}
+
 interface OpenclawListResponse {
   count: number;
   /**
@@ -466,44 +514,54 @@ const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
   "claude-opus-4-20250514",
 ]);
 
-// Per-provider allowlist regex. When set, only model ids matching the
-// pattern survive the catalog filter.
+// Per-provider id allowlist. When set, only model ids the predicate accepts
+// survive the catalog filter.
 //
 // ONE entry, and it is a routing fact rather than curation.
 //
-// codex (ChatGPT-account auth): 5.4, 5.4-mini, 5.5, plus the 5.6
-//   gpt-5.6-{sol,terra,luna} models — NO -pro variants. Per
-//   developers.openai.com/codex/models, the Pro models are API-key-only
-//   and the Codex/ChatGPT-account auth path 400s with "model not
-//   supported when using Codex with a ChatGPT account" if you try
-//   gpt-5.4-pro or gpt-5.5-pro. The gpt-5.6-sol/terra/luna models DO run
-//   on the ChatGPT-account path for accounts whose plan (Plus/Pro/Max)
-//   includes them — the live upstream catalog only returns them for such
-//   accounts, so this allowlist just stops us from stripping them; boxes
-//   on plans without 5.6 never see the entries (no dead buttons).
+// codex (ChatGPT-account auth): whatever the curated ChatGPT catalogue
+//   carries, asked through `isCodexSupportedModelId`. NO -pro variants — per
+//   developers.openai.com/codex/models the Pro models are API-key-only and the
+//   ChatGPT-account path 400s with "model not supported when using Codex with
+//   a ChatGPT account" — and plan gating is deliberately NOT applied: gpt-5.6
+//   access varies per account, so the pick goes through and the upstream
+//   access error is what the customer sees.
 //
-// `openai` USED to carry /^gpt-5\.[45](-pro|-mini)?$/, to keep older
-// generations out of the picker. It aged into the opposite of its purpose: on
-// OpenClaw 2026.8.1 the openai catalogue is already curated upstream — one row
-// on a stock host (`openai/gpt-5.6-sol`, tagged default), ten on a linked box —
-// and that pattern matched NONE of the 5.6 generation, so the newest models the
-// box could run were filtered out of their own catalogue and the picker fell
-// back to a hand-written list. A generation allowlist cannot know what the next
+// This entry USED to be `CODEX_SUPPORTED_MODEL_RE`, a generation regex, and
+// `openai` USED to carry /^gpt-5\.[45](-pro|-mini)?$/ for the same job. The
+// openai one aged into the opposite of its purpose: on OpenClaw 2026.8.1 the
+// openai catalogue is already curated upstream — one row on a stock host
+// (`openai/gpt-5.6-sol`, tagged default), ten on a linked box — and that
+// pattern matched NONE of the 5.6 generation, so the newest models the box
+// could run were filtered out of their own catalogue and the picker fell back
+// to a hand-written list. A generation allowlist cannot know what the next
 // generation is called; the harness's catalogue can, and the whole point of
-// this route is to ask it.
-const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
-  // IMPORTED, not spelled again. `CODEX_SUPPORTED_MODEL_RE` is the same
-  // alternation, and its own doc says it lives there so that "a second copy in
-  // the second route is a copy that can drift" — this route was that second
-  // copy. It is the rule the write path enforces, so the picker must offer
-  // exactly it: a row this list shows and that guard refuses is a dead button,
-  // and the reverse is a model the customer cannot reach.
+// this route is to ask it. The codex copy then did the same thing to
+// `gpt-5.3-codex-spark` (TASK-786) — measured 200 through
+// https://chatgpt.com/backend-api/codex/responses on the box, and unspellable
+// by that pattern.
+//
+// `codex` has no catalogue on this core to ask (see the note above
+// `NO_CLI_ENUMERATION_PROVIDERS`), so its list stays curated — but curated in
+// ONE place. `scripts/gateway-pre-start.sh` keeps a second, hand-maintained
+// mirror in `_CODEX_SUPPORTED` (it runs before node exists), pinned by
+// src/tests/unit/gateway-pre-start-codex-models.test.ts. That one cannot
+// import; this one can, and does.
+const OFFERABLE_MODEL_ID_BY_PROVIDER: Record<string, (id: string) => boolean> = {
+  // IMPORTED, not spelled again: it is the rule the write paths enforce, so
+  // the picker must offer exactly it. A row this list shows and that guard
+  // refuses is a dead button, and the reverse is a model the customer cannot
+  // reach.
   //
-  // `scripts/gateway-pre-start.sh` keeps a third, hand-maintained mirror in
-  // `_CODEX_SUPPORTED` (it runs before node exists), pinned by
-  // src/tests/unit/gateway-pre-start-codex-models.test.ts. That one cannot
-  // import; this one could, and now does.
-  codex: CODEX_SUPPORTED_MODEL_RE,
+  // Today it cannot FIRE: the only list that reaches `sanitizeCatalogModels`
+  // for codex is `staticCatalogModels("codex")`, which is the very array this
+  // predicate asks about — the disk cache that used to be the other input is
+  // dropped at the top of `GET`, and codex reaches neither `publish` nor
+  // `fetchSubscriptionSurfaceIds`. Kept because it is the entry that makes the
+  // property true BY CONSTRUCTION rather than by accident: the day this core
+  // grows a ChatGPT-surface enumeration, the rows it returns arrive here, and
+  // an unfiltered `codex` would then offer whatever upstream listed.
+  codex: isCodexSupportedModelId,
 };
 
 // Newest-first ordering: bigger context generally means newer model on
@@ -672,8 +730,8 @@ const MODALITY_REPORTING_PROVIDERS: ReadonlySet<string> = new Set(["openrouter"]
 
 function isOfferableModelId(provider: string, id: string): boolean {
   if (!id) return false;
-  const allowed = ALLOWED_MODEL_RE_BY_PROVIDER[provider];
-  if (allowed && !allowed.test(id)) return false;
+  const isOffered = OFFERABLE_MODEL_ID_BY_PROVIDER[provider];
+  if (isOffered && !isOffered(id)) return false;
   if (!MODALITY_REPORTING_PROVIDERS.has(provider) && isNonChatModelId(id)) return false;
   // Matched on the last path segment, like `isNonChatModelId`, because
   // OpenRouter ids keep their `<org>/` slug: tested against the whole id this
@@ -1566,6 +1624,18 @@ export async function GET(req: NextRequest) {
   const force = req.nextUrl.searchParams.get("refresh") === "1";
 
   bootWarmup();
+
+  // A provider this core cannot enumerate has exactly ONE possible answer — the
+  // curated list — so it is served without consulting either cache. Structural
+  // on purpose: nothing here can be reached by a file, whether or not the
+  // `unlink` beside it succeeds.
+  if (hasNoEnumerationOnThisCore(provider)) {
+    await discardUnwritableDiskCache(provider);
+    return NextResponse.json(
+      withoutRetiredModels(buildFallbackPayload(provider)),
+      { headers: noStore() },
+    );
+  }
 
   // Hot path: in-memory cache.
   let cached = memCache.get(provider);
