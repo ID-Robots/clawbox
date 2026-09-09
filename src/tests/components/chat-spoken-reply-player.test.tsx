@@ -32,6 +32,8 @@ const playerSrc = (p: string) => `/setup-api/chat/media?path=${encodeURIComponen
 let history: unknown[] = [];
 /** The answer `/setup-api/tts` gives, as the tests set it up. */
 let ttsAnswer: Record<string, unknown> = { choice: "auto", autoReply: true };
+/** ...and whether it answers at all. */
+let ttsOk = true;
 /** Every POST the component made, in order. */
 let posts: Array<{ url: string; body: unknown }> = [];
 /** What the `autoReply` POST answers with. */
@@ -100,7 +102,10 @@ function installFetch() {
     const url = String(input);
     if (init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body ?? "null")) });
-      if (url.includes("/setup-api/tts")) {
+      // The EXACT path: `/setup-api/tts/warm` and `/setup-api/tts/speak` are
+      // POSTs too, and a substring match would answer them with the switch's
+      // body and throw on them under `postThrows`.
+      if (new URL(url, "http://localhost").pathname === "/setup-api/tts") {
         if (postThrows) throw new DOMException("The operation was aborted.", "TimeoutError");
         return {
           ok: postAnswer.ok,
@@ -123,7 +128,7 @@ function installFetch() {
       return { ok: true, json: async () => ({ items: [] }) };
     }
     if (url.includes("/setup-api/tts")) {
-      return { ok: true, json: async () => ttsAnswer };
+      return { ok: ttsOk, status: ttsOk ? 200 : 403, json: async () => ttsAnswer };
     }
     // The peak reader asks for the clip itself.
     if (url.includes("/setup-api/chat/media")) {
@@ -269,37 +274,46 @@ async function renderReplyWithAudio() {
   return await screen.findByTestId("spoken-reply-player");
 }
 
-describe("the ClawBox player for a spoken reply", () => {
-  beforeEach(() => {
-    sockets.length = 0;
-    posts = [];
-    history = [];
-    // Peaks are cached per URL for the page's lifetime — which is the point of
-    // them, and would otherwise hand the next test the previous one's decode.
-    resetSpokenReplyPeakCache();
-    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
-    postAnswer = { ok: true, body: { choice: "auto", autoReply: false } };
-    postThrows = false;
-    decodeMode = "ok";
-    clipDuration = 21;
-    visible = true;
-    clipFetches = [];
-    resetHarnessCache();
-    window.localStorage.clear();
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
-    installFetch();
-    stubMediaElement();
-    stubAudioDecoder();
-    stubViewport();
-  });
+/**
+ * ONE setup for both blocks. Every knob above is module-level and is moved by
+ * the player tests; a second `beforeEach` that reset only some of them would
+ * pass exactly as long as nobody reordered or added a test.
+ */
+function freshBox() {
+  sockets.length = 0;
+  posts = [];
+  history = [];
+  // Peaks are cached per URL for the page's lifetime — which is the point of
+  // them, and would otherwise hand the next test the previous one's decode.
+  resetSpokenReplyPeakCache();
+  ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
+  postAnswer = { ok: true, body: { choice: "auto", autoReply: false } };
+  postThrows = false;
+  ttsOk = true;
+  decodeMode = "ok";
+  clipDuration = 21;
+  visible = true;
+  clipFetches = [];
+  resetHarnessCache();
+  window.localStorage.clear();
+  Element.prototype.scrollIntoView = vi.fn();
+  vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
+  installFetch();
+  stubMediaElement();
+  stubAudioDecoder();
+  stubViewport();
+}
 
-  afterEach(() => {
-    restoreMediaElement();
-    vi.unstubAllGlobals();
-    vi.clearAllMocks();
-    resetHarnessCache();
-  });
+function restoreBox() {
+  restoreMediaElement();
+  vi.unstubAllGlobals();
+  vi.clearAllMocks();
+  resetHarnessCache();
+}
+
+describe("the ClawBox player for a spoken reply", () => {
+  beforeEach(freshBox);
+  afterEach(restoreBox);
 
   it("draws its own transport instead of the browser's bar", async () => {
     await renderReplyWithAudio();
@@ -472,33 +486,8 @@ describe("the ClawBox player for a spoken reply", () => {
 });
 
 describe("the composer's spoken-replies toggle", () => {
-  beforeEach(() => {
-    sockets.length = 0;
-    posts = [];
-    history = [];
-    // Peaks are cached per URL for the page's lifetime — which is the point of
-    // them, and would otherwise hand the next test the previous one's decode.
-    resetSpokenReplyPeakCache();
-    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
-    postAnswer = { ok: true, body: { choice: "auto", autoReply: false } };
-    postThrows = false;
-    clipDuration = 21;
-    resetHarnessCache();
-    window.localStorage.clear();
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
-    installFetch();
-    stubMediaElement();
-    stubAudioDecoder();
-    stubViewport();
-  });
-
-  afterEach(() => {
-    restoreMediaElement();
-    vi.unstubAllGlobals();
-    vi.clearAllMocks();
-    resetHarnessCache();
-  });
+  beforeEach(freshBox);
+  afterEach(restoreBox);
 
   it("shows the box's own setting, and writes it through the route Settings writes", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
@@ -593,6 +582,31 @@ describe("the composer's spoken-replies toggle", () => {
     await waitFor(() => expect(screen.getByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesFailed"));
     expect(toggle).toHaveAttribute("aria-pressed", "true");
     expect(toggle).not.toBeDisabled();
+  });
+
+  it("does not read a refusal as the switch being on", async () => {
+    // The route answers an error OBJECT on a 403 or a 500, so `autoReply` is
+    // simply absent — and a `!== false` test reads that as ON. The box here
+    // has already said OFF; a later read that is refused must not turn the
+    // switch on behind the owner's back, nor make `speakReply` start
+    // synthesising for a state nothing ever confirmed.
+    ttsAnswer = { choice: "auto", autoReply: false, engines: [{ id: "local", configured: true }] };
+    const view = render(<ChatPopup isOpen onClose={() => {}} />);
+    const toggle = await screen.findByTestId("chat-speak-toggle");
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "false"));
+
+    // Closed and opened again — the read runs once per open — and this time
+    // the box refuses to answer.
+    view.rerender(<ChatPopup isOpen={false} onClose={() => {}} />);
+    ttsOk = false;
+    ttsAnswer = { error: "Not signed in", code: "owner_only" };
+    view.rerender(<ChatPopup isOpen onClose={() => {}} />);
+
+    const reopened = await screen.findByTestId("chat-speak-toggle");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(reopened).toHaveAttribute("aria-pressed", "false");
+    // And nothing was written on the strength of a state that was never read.
+    expect(posts.filter((p) => p.url.includes("/setup-api/tts"))).toEqual([]);
   });
 
   it("is not offered on a box with no voice to speak with", async () => {

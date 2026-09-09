@@ -3433,10 +3433,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // reply HERE is made by /setup-api/tts/speak, which a Hermes box answers
     // through its own harness. `autoReply` alone decides.
     fetch('/setup-api/tts', { cache: 'no-store' })
-      .then(res => res.json())
+      .then(res => (res.ok ? res.json() : null))
       .then((data: { autoReply?: unknown; engines?: unknown } | null) => {
         if (!active) return
-        setVoiceAutoReply(data?.autoReply !== false)
+        // Only a body that actually STATES the switch moves it. A refusal or a
+        // server error answers an error object, and `data?.autoReply !== false`
+        // reads that as ON — so the composer would show spoken replies on for a
+        // box that was never asked, and `speakReply` would go on to synthesise
+        // for a state nothing confirmed. "Keep the last reading" has to mean
+        // the last real one.
+        if (typeof data?.autoReply === 'boolean') setVoiceAutoReply(data.autoReply)
         setVoiceCanSpeak(speechEngineAvailable(data?.engines))
       })
       .catch(() => { /* keep the last reading */ })
