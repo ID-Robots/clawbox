@@ -145,6 +145,8 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
     // Keep the real startup deadline: the default 50 ms cap expires it
     // before this spec's asynchronous gateway handshake can complete.
     timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -185,6 +187,8 @@ test("chat popup lets you switch to Local AI when it is configured", async ({ pa
     // Keep the real startup deadline: the default 50 ms cap expires it
     // before this spec's asynchronous gateway handshake can complete.
     timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -229,6 +233,8 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
     // Keep the real startup deadline: the default 50 ms cap expires it
     // before this spec's asynchronous gateway handshake can complete.
     timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -309,6 +315,8 @@ test("chat popup opens Local AI settings when local AI is not configured", async
     // Keep the real startup deadline: the default 50 ms cap expires it
     // before this spec's asynchronous gateway handshake can complete.
     timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
