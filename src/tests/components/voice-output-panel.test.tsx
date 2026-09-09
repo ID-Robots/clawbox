@@ -222,11 +222,13 @@ describe("Voice panel", () => {
       url: "/setup-api/tts/sample",
       body: { text: "Testing, one two three.", engine: "local", voice: "bm_george" },
     }));
-    // A controls element the owner can press, not a detached Audio object the
-    // browser may refuse with nothing left to click.
+    // A player the owner can press, not a detached Audio object the browser
+    // may refuse with nothing left to click. Since TASK-782 the transport is
+    // ClawBox's own (SpokenReplyPlayer, shared with the chat), so the pressable
+    // control is its play button rather than the element's `controls`.
     const player = await screen.findByTestId("voice-sample-audio");
     expect(player).toHaveAttribute("src", "blob:sample");
-    expect(player).toHaveAttribute("controls");
+    expect(await screen.findByTestId("spoken-reply-play")).toBeInTheDocument();
   });
 
   it("drops the clip when the engine, voice or language changes", async () => {
@@ -392,7 +394,11 @@ describe("status validation", () => {
       fireEvent.click(toggle);
       await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "autoReply", enabled: false } }));
       await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
-      expect(heard).toEqual([{ autoReply: false }]);
+      // The chat is told the switch AND what the box can speak with, because it
+      // decides both whether to speak and whether to offer the button at all.
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toMatchObject({ autoReply: false });
+      expect((heard[0] as { engines?: unknown }).engines).toEqual(status().engines);
     } finally {
       window.removeEventListener("clawbox:voice-settings-changed", listener);
     }

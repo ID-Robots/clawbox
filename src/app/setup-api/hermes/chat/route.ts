@@ -57,6 +57,7 @@ import {
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { speakHermesReply } from "@/lib/harness/hermes-spoken-reply";
 import { hermesSpeaksReplies } from "@/lib/hermes-tts";
+import { getVoiceAutoReply } from "@/lib/voice-reply";
 import {
   DASHBOARD_PROVIDER_KIND,
   isQuietStreamError,
@@ -421,7 +422,31 @@ async function settleTurn(
   // The capability read is inside the try/catch of neither — `hermesSpeaksReplies`
   // fails closed and `speakHermesReply` never throws — so a box that cannot
   // answer the question simply does not speak, and the turn is unaffected.
-  const spokenClip = (await hermesSpeaksReplies()) ? await speakHermesReply(splitEmailRefs(caption).text) : null;
+  //
+  // TWO questions, and only one of them was being asked. `hermesSpeaksReplies`
+  // answers CAN this box speak; whether it SHOULD is the owner's switch,
+  // `voice_auto_reply` — the one Settings -> Voice has always written and the
+  // chat composer's toggle now writes too. On OpenClaw that write also puts
+  // the gateway's own `tts.auto` to `off`, which is what stops a reply being
+  // spoken there; on this edition ClawBox makes the clip right here, so
+  // nothing was reading the switch at all and every reply came back with a
+  // player however firmly the owner had said no. The switch first, because it
+  // is a config-store read while the capability is a `hermes config get` and a
+  // systemd probe on the chat turn.
+  //
+  // ONE HALF OF THE SWITCH, and the comment must not claim the other. OFF now
+  // means off on both editions. ON does NOT mean the same thing on both:
+  // OpenClaw writes `tts.auto: "inbound"`, so a TYPED question there gets a
+  // typed answer, while this route speaks every reply because it has no
+  // inbound-voice signal to go on — the desktop chat transcribes on the box
+  // and posts text, exactly as `voice-reply.ts` describes. That behaviour
+  // predates this line and is pinned by the test above ("hands the chat a
+  // playable clip on the reply"); making it `inbound` here means carrying a
+  // "this turn was spoken" flag from the composer into this route and is a
+  // product decision, not a rider on the switch. Named in the PR body.
+  const spokenClip = (await getVoiceAutoReply()) && (await hermesSpeaksReplies())
+    ? await speakHermesReply(splitEmailRefs(caption).text)
+    : null;
   const answer = [
     caption,
     ...drawn.map((file) => `MEDIA:${file}`),

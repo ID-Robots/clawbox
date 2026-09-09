@@ -13,6 +13,7 @@ import {
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
+import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import { useT } from '@/lib/i18n'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
@@ -844,26 +845,22 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"))}
               {audio.length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
-                  {/* The browser's own player, for the same reasons the mascot
-                      chat uses one: play, pause, scrub and duration all work
-                      and are reachable from the keyboard. Keyed by the URL —
-                      the harness names every file with a uuid, so re-rendering
-                      a transcript cannot hand one player another's audio. */}
+                  {/* The same player the mascot chat draws, from the same
+                      component: two surfaces showing the same spoken reply must
+                      not offer two different controls for it. Keyed by the URL
+                      — the harness names every file with a uuid, so
+                      re-rendering a transcript cannot hand one player
+                      another's audio. */}
                   {audio.map(src => (
-                    <audio
+                    <SpokenReplyPlayer
                       key={src}
-                      data-testid="chat-audio"
+                      src={src}
                       // `bodyText`, never `msg.text`: the stored text still
                       // carries the directives, and a screen reader would read
                       // the absolute media path and the mail ids out loud.
-                      aria-label={audioLabel(bodyText, t("chat.audioReply"))}
-                      controls
-                      preload="metadata"
-                      src={src}
-                      style={{ width: '100%', maxWidth: 280, height: 34 }}
-                    >
-                      <a href={src} download={mediaFileName(src)}>{t("chat.downloadAudio")}</a>
-                    </audio>
+                      label={audioLabel(bodyText, t("chat.audioReply"))}
+                      downloadName={mediaFileName(src)}
+                    />
                   ))}
                 </div>
               )}

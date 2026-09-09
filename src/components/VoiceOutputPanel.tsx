@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
+import SpokenReplyPlayer from "@/components/SpokenReplyPlayer";
 import type {
   VoiceChoice,
   VoiceEngine,
@@ -209,6 +210,26 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     load();
   }, [active, load]);
 
+  /**
+   * Follow the switch when it is moved somewhere else.
+   *
+   * The chat's composer now carries the same spoken-replies toggle and writes
+   * the same route, announcing the result on this event — the one this panel
+   * has always fired for the chat's benefit. Without the other half, a
+   * Settings tab left open behind the chat kept showing the old position of a
+   * switch that had already moved, and the next thing the owner pressed here
+   * would have written the stale value back.
+   */
+  useEffect(() => {
+    const onChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{ autoReply?: unknown }>).detail;
+      if (typeof detail?.autoReply !== "boolean") return;
+      setStatus((prev) => (prev ? { ...prev, autoReply: detail.autoReply as boolean } : prev));
+    };
+    window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged);
+  }, []);
+
   // Release the last clip's object URL when the panel goes away.
   useEffect(() => () => {
     if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current);
@@ -349,11 +370,14 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       }
       if (isVoiceStatus(data)) {
         setStatus(data);
-        // The open chat decides per reply whether to speak; tell it now
-        // rather than on its next open.
-        if (body.action === "autoReply") {
-          window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: data.autoReply !== false } }));
-        }
+        // The open chat decides per reply whether to speak, and whether to
+        // OFFER the switch at all — so it hears about every write, not only
+        // about `autoReply`. `select` and the ffmpeg repair are what install
+        // or retire this box's voice, and a chat docked beside this page kept
+        // showing the old answer until it was closed and reopened.
+        window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
+          detail: { autoReply: data.autoReply !== false, engines: data.engines },
+        }));
       }
       if (data && typeof data === "object" && (data as { fallback?: unknown }).fallback) {
         setNotice(t("settings.voice.fallback"));
@@ -573,16 +597,21 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             keeps the previous decode and will not start the new sound. */}
         {clipUrl && (
           <div className="space-y-1">
-            <audio
+            {/* The same player a spoken reply gets in the chat — one
+                component, so the two surfaces cannot drift into offering
+                different controls for the same sound. `autoPlay` is this
+                surface's alone: a sample is asked for, a reply is not.
+                `playerRef` still reaches the element itself, because the
+                autoplay-refused path calls play() on it directly. */}
+            <SpokenReplyPlayer
               key={clipUrl}
-              ref={playerRef}
-              data-testid="voice-sample-audio"
-              aria-label={t("settings.voice.sampleAudio")}
-              controls
-              autoPlay
               src={clipUrl}
+              audioTestId="voice-sample-audio"
+              label={t("settings.voice.sampleAudio")}
+              downloadName="voice-sample.wav"
+              autoPlay
+              onAudioElement={(element) => { playerRef.current = element; }}
               onError={() => setError(t("settings.voice.error.playerFailed"))}
-              style={{ width: "100%", height: 34 }}
             />
             {autoplayBlocked && (
               <p className={MUTED} data-testid="voice-autoplay-blocked">

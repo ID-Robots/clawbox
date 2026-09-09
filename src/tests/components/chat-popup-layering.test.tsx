@@ -203,9 +203,10 @@ describe("the composer's pill row", () => {
 
   it("lets the pills take a line of their own before their labels truncate", () => {
     const row = css.match(/\.chat-composer-row\s*\{[^}]*\}/)?.[0] ?? "";
-    // Without the wrap the pills share the line with four 36px buttons: 216px
-    // for three of them at the 420px docked default, which read "Cla…", "Ma…",
-    // "M…" — a pill that names neither the provider nor the model.
+    // Without the wrap the pills share the line with the composer's 36px
+    // buttons — five of them at the 420px docked default since the
+    // spoken-replies toggle — leaving the three pills reading "Cla…", "Ma…",
+    // "M…", which names neither the provider nor the model.
     expect(row).toMatch(/flex-wrap:\s*wrap/);
 
     const pills = css.match(/\.chat-header-pills\s*\{[^}]*\}/)?.[0] ?? "";
@@ -216,5 +217,42 @@ describe("the composer's pill row", () => {
     // …and a threshold only: on the line it lands on it may still shrink,
     // rather than pushing the send button off a 340px chat.
     expect(pills).toMatch(/min-width:\s*0/);
+  });
+
+  it("breaks in front of the pills AND the send button, never between them", () => {
+    // WHAT THIS CANNOT DO: jsdom performs no layout, so nothing here can catch
+    // an orphaned send button by looking at the rendered row — only by reading
+    // the rules that decide it. The rule is that the pills and send share ONE
+    // flex child, so the line breaks in front of the pair or not at all. With
+    // the basis on the pills alone there was a band of chat widths (484-527px
+    // at four buttons, and the floating chat's default is 520) where the pills
+    // still fitted beside the buttons and send did not, and send dropped alone
+    // to the next line. Every button added or removed slides that band by 44px.
+    const tail = css.match(/\.chat-composer-tail\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(tail).toMatch(/display:\s*flex/);
+    expect(tail).toMatch(/min-width:\s*0/);
+    const tailBasis = Number(tail.match(/flex:\s*1\s+1\s+(\d+)px/)?.[1]);
+    const pillsBasis = Number(
+      (css.match(/\.chat-header-pills\s*\{[^}]*\}/)?.[0] ?? "").match(/flex:\s*1\s+1\s+(\d+)px/)?.[1],
+    );
+    const rowGap = Number((css.match(/\.chat-composer-row\s*\{[^}]*\}/)?.[0] ?? "").match(/gap:\s*(\d+)px/)?.[1]);
+    // The pair's basis is the pills' plus the gap plus the 36px button: any
+    // less and the row could still break between them.
+    expect(tailBasis).toBe(pillsBasis + rowGap + 36);
+  });
+
+  it("keeps the send button inside that pair in the markup", async () => {
+    // The CSS above is only true of the DOM that carries it: send has to be a
+    // sibling of the pills inside `.chat-composer-tail`, not of the buttons.
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const row = await screen.findByTestId("chat-composer-row");
+    const tail = row.querySelector(".chat-composer-tail");
+    expect(tail).not.toBeNull();
+    expect(tail?.querySelector(".chat-header-pills")).not.toBeNull();
+    // The last child of the pair is the send (or stop) button, and it is not a
+    // direct child of the wrapping row.
+    const send = tail?.lastElementChild as HTMLElement | null;
+    expect(send?.tagName).toBe("BUTTON");
+    expect(send?.parentElement).toBe(tail);
   });
 });

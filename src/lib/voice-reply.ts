@@ -22,7 +22,12 @@
  * SERVER ONLY.
  */
 import { get, set } from "@/lib/config-store";
-import { openclawIsAbsent, readConfigForWrite, writeConfig, type OpenClawConfig } from "@/lib/openclaw-config";
+// TYPE ONLY at module scope. The values this module needs from openclaw-config
+// are used by the boot repair alone, and that module reaches the openclaw CLI —
+// it pulls `child_process` into the import graph of everything that reads the
+// switch, which since the Hermes chat route started reading it means every
+// Hermes chat turn. Imported inside the one function that uses them instead.
+import { type OpenClawConfig } from "@/lib/openclaw-config";
 
 /** The config-store key. */
 export const VOICE_AUTO_REPLY_KEY = "voice_auto_reply";
@@ -82,6 +87,7 @@ function ttsBlockOf(config: OpenClawConfig, home: "tts" | "messages.tts"): Recor
  * to onboarding.
  */
 export async function ensureVoiceAutoReplyMode(): Promise<boolean> {
+  const { openclawIsAbsent, readConfigForWrite, writeConfig } = await import("@/lib/openclaw-config");
   if (openclawIsAbsent()) return false;
   const config = await readConfigForWrite();
   if (Object.keys(config).length === 0) return false;

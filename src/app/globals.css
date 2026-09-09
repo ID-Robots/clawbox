@@ -398,6 +398,28 @@ h6 {
   flex-wrap: wrap;
 }
 
+/* The pills AND the send button, as one wrappable unit.
+ *
+ * The row breaks on a flex basis, and while the basis lived on the pills alone
+ * there was a band of chat widths where the pills still fitted beside the
+ * composer's buttons and the send button did not — so send dropped to a line of
+ * its own, alone at the far left under the paperclip, with the rest of the line
+ * empty. With four buttons that band was 484-527px, which contains the floating
+ * chat's own DEFAULT_SIZE width of 520; every button added or removed slides it
+ * by 44px, so no button count is safely outside it.
+ *
+ * The basis here is the pills' 280 plus the row's 8px gap plus the 36px button,
+ * so the line breaks in front of the pair or not at all — and `.chat-header-pills`
+ * keeps its own 280 basis inside this box, which is what decides how the pair
+ * shares the line it lands on. */
+.chat-composer-tail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 324px;
+  min-width: 0;
+}
+
 .chat-header-pills {
   display: flex;
   align-items: center;
@@ -425,6 +447,154 @@ h6 {
   /* No grow (keep natural width when there's room, like the wide layout),
    * shrink when the row runs out of space so all pills give ground evenly. */
   flex: 0 1 auto;
+}
+
+/* The spoken-reply player (src/components/SpokenReplyPlayer.tsx).
+ *
+ * In the stylesheet rather than inline on the elements because the three
+ * things this control needs — :hover, :focus-visible and a reduced-motion
+ * override — are exactly the three a style object cannot express, and the
+ * player is shared by the mascot chat, the chat app and the Voice tab, so a
+ * per-surface copy is three chances to drift.
+ *
+ * The waveform is the only fluid part: the button, the clock and the download
+ * keep their size down to the 340px minimum chat and the track gives up the
+ * difference — which it can, because the number of bars follows the measured
+ * width (see barsForWidth) instead of being fixed at 56. `min-width: 0` and
+ * the clip are what stop the row pushing out of the bubble while that
+ * measurement settles. */
+.spoken-reply-player {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+  max-width: 320px;
+  padding: 7px 10px 7px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.spoken-reply-play {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: rgba(249, 115, 22, 0.18);
+  color: var(--coral-bright);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.spoken-reply-play:hover:not(:disabled) {
+  background: rgba(249, 115, 22, 0.28);
+}
+
+.spoken-reply-play:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.spoken-reply-wave {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 4px;
+  cursor: pointer;
+  /* The bar is dragged to scrub; without this the gesture scrolls the
+     transcript out from under the finger instead. */
+  touch-action: none;
+}
+
+.spoken-reply-wave:focus-visible {
+  outline: 2px solid var(--coral-bright);
+  outline-offset: 2px;
+}
+
+.spoken-reply-bar {
+  flex: 1;
+  min-width: 1px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  transition: background-color 0.08s linear;
+}
+
+.spoken-reply-bar.on,
+.spoken-reply-wave:hover .spoken-reply-bar.on {
+  background: var(--coral-bright);
+}
+
+.spoken-reply-wave:hover .spoken-reply-bar {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+/* The same control with no peaks to draw — before the decode lands, and for a
+   clip the browser will not decode at all. */
+.spoken-reply-track {
+  display: block;
+  flex: 1;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.spoken-reply-track-fill {
+  display: block;
+  height: 100%;
+  background: var(--coral-bright);
+}
+
+/* A clip that could not be loaded says so where its shape would have been. */
+.spoken-reply-gone {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.spoken-reply-clock {
+  flex-shrink: 0;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.spoken-reply-download {
+  flex-shrink: 0;
+  padding: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.spoken-reply-download:hover {
+  color: var(--coral-bright);
+  background: rgba(249, 115, 22, 0.12);
+}
+
+/* Reduced motion keeps the COLOUR change — that is the information — and drops
+   only the fade into it, in line with the note on the motion tokens above. */
+@media (prefers-reduced-motion: reduce) {
+  .spoken-reply-bar {
+    transition: none;
+  }
 }
 
 /* The dropdown's accent, defined ON the two roots it has to reach: the

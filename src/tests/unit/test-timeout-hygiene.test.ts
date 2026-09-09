@@ -274,6 +274,9 @@ const ALSO_REQUIRED = [
   "src/tests/components/desktop-wallpaper-delete.test.tsx",
   "src/tests/components/hermes-oauth-inline.test.tsx",
   "src/tests/components/chat-spoken-reply.test.tsx",
+  // Same family, same mount, same reason: it drives the chat popup through a
+  // fake gateway and waits on a spoken reply landing in a bubble.
+  "src/tests/components/chat-spoken-reply-player.test.tsx",
   // Starts its processes through @/lib/coding-agent rather than importing
   // child_process itself, so the rule above cannot see it — and CI has seen it
   // both ways in one day: "pauses a live run…" timed out on one PR, and on

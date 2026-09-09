@@ -104,6 +104,18 @@ const MAX_QUEUED_SENDS = 20
 const SPOKEN_REPLIES_KEPT = 12
 /** The most one ask for a spoken reply may take, queue and cold start included. */
 const SPEAK_REPLY_TIMEOUT_MS = 150_000
+/**
+ * How long the composer's spoken-replies write may take before the button
+ * stops waiting for it.
+ *
+ * ABOVE the route's own worst case, deliberately: on OpenClaw that write is
+ * `openclaw config set`, which is 30 s per attempt and up to four attempts
+ * with backoff (`openclaw-config.ts`), so a shorter deadline would abort
+ * writes that were still landing. Its job is the OTHER failure — a request
+ * that never returns at all, which without it left the button disabled and
+ * `aria-busy` for the life of the page.
+ */
+const SPEAK_TOGGLE_TIMEOUT_MS = 150_000
 /** The longest one spoken reply holds the queue while playing (a capped reply is ~100 s of speech). */
 const PLAYBACK_MAX_MS = 150_000
 
@@ -194,6 +206,46 @@ interface ChatPopupProps {
  * column off the screen: on a desktop too narrow for both, the cards move as
  * far as they can and no further.
  */
+/**
+ * Whether this box has any voice to speak WITH, from the tts route's answer.
+ *
+ * `null` is not "no". An unreachable route, or one too old to report its
+ * engines, says nothing about them — and hiding the composer's switch on
+ * silence would take a working control off a box that speaks perfectly well.
+ * Only an answer that positively lists engines and finds none of them
+ * configured hides it, the same way the attach and microphone buttons are
+ * gated on a capability the box asserted rather than on a missing field.
+ *
+ * Deliberately NOT `channels.supportedOnEdition`: that is the gateway's half —
+ * whether a Telegram voice note can be answered — while a spoken reply HERE is
+ * made by /setup-api/tts/speak, which a Hermes box answers through its own
+ * harness. Reading it would have hidden the switch on every Hermes box.
+ *
+ * And deliberately not `caps.canSpeakReplies` either, which is the fact this
+ * SHOULD one day be: on Hermes it is honest (it follows the box's own speech
+ * config, `hermes-tts.ts`), but on OpenClaw it is hardcoded `true`
+ * (`harness/capabilities.ts`) — so gating on it would put the button on an
+ * OpenClaw box with neither Kokoro installed nor ClawBox AI linked, which is
+ * exactly the mistake that table already records for `canTranscribe`. The
+ * engines list is the box's own assertion and is right on both editions.
+ * Making `canSpeakReplies` honest on OpenClaw is the convergence point, and it
+ * is a server change of its own — named in the PR body.
+ */
+export function speechEngineAvailable(engines: unknown): boolean | null {
+  if (!Array.isArray(engines) || engines.length === 0) return null
+  // An entry that does not STATE `configured` is silence too, and the rule
+  // above is about silence: hiding the button needs every engine to have said
+  // no, not merely no engine to have said yes. A PARTIAL list — one engine
+  // reporting `false` beside one that reports nothing — is not that answer,
+  // and reading it as one would take a working control off the box on the
+  // strength of a field that never arrived. The route's own type makes
+  // `configured` a required boolean, so this is hardening rather than a live
+  // path; it is here so the code and the rule it is written under agree.
+  const configured = engines.map(engine => (engine as { configured?: unknown } | null)?.configured)
+  if (configured.some(value => value === true)) return true
+  return configured.every(value => value === false) ? false : null
+}
+
 export function noticeColumnInset(
   rect: { left: number; right: number } | null,
   viewportWidth: number,
@@ -288,6 +340,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 }
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
+import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
 import { DESKTOP_GAP, DESKTOP_LAYERS, getSnapRect, getSnapZone, type SnapZone } from '@/lib/window-snap'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
@@ -3348,6 +3401,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [voiceAutoReply, setVoiceAutoReply] = useState(true)
   const voiceAutoReplyRef = useRef(true)
   useEffect(() => { voiceAutoReplyRef.current = voiceAutoReply }, [voiceAutoReply])
+  // Whether the composer offers the switch at all, and what the box said the
+  // last time it was asked to move it. `null` while nothing is known — see
+  // speechEngineAvailable.
+  const [voiceCanSpeak, setVoiceCanSpeak] = useState<boolean | null>(null)
+  const [speakToggleBusy, setSpeakToggleBusy] = useState(false)
+  const speakToggleBusyRef = useRef(false)
+  const [spokenRepliesNotice, setSpokenRepliesNotice] = useState<'on' | 'off' | 'unconfirmed' | 'failed' | null>(null)
   // The run started by a spoken question, until its reply has been spoken.
   const voiceTurnKeyRef = useRef<string | null>(null)
   // Spoken replies are asked for one after another: the box speaks one at a
@@ -3383,15 +3443,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // reply HERE is made by /setup-api/tts/speak, which a Hermes box answers
     // through its own harness. `autoReply` alone decides.
     fetch('/setup-api/tts', { cache: 'no-store' })
-      .then(res => res.json())
-      .then((data: { autoReply?: unknown } | null) => {
+      .then(res => (res.ok ? res.json() : null))
+      .then((data: { autoReply?: unknown; engines?: unknown } | null) => {
         if (!active) return
-        setVoiceAutoReply(data?.autoReply !== false)
+        // Only a body that actually STATES the switch moves it. A refusal or a
+        // server error answers an error object, and `data?.autoReply !== false`
+        // reads that as ON — so the composer would show spoken replies on for a
+        // box that was never asked, and `speakReply` would go on to synthesise
+        // for a state nothing confirmed. "Keep the last reading" has to mean
+        // the last real one.
+        if (typeof data?.autoReply === 'boolean') setVoiceAutoReply(data.autoReply)
+        setVoiceCanSpeak(speechEngineAvailable(data?.engines))
       })
       .catch(() => { /* keep the last reading */ })
+    // Both facts follow the event, not just the switch: Settings -> Voice can
+    // INSTALL the box's voice or take it away while the chat is docked beside
+    // it, and reading only `autoReply` left the button absent on a box that
+    // had just gained a voice — and, worse, present on one that had lost it,
+    // where every press wrote a switch the box could not honour.
     const onChanged = (e: Event) => {
-      const detail = (e as CustomEvent<{ autoReply?: unknown }>).detail
+      const detail = (e as CustomEvent<{ autoReply?: unknown; engines?: unknown }>).detail
       if (typeof detail?.autoReply === 'boolean') setVoiceAutoReply(detail.autoReply)
+      if (detail && 'engines' in detail) setVoiceCanSpeak(speechEngineAvailable(detail.engines))
     }
     window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged)
     return () => { active = false; window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged) }
@@ -3529,6 +3602,95 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => { speakReplyRef.current = speakReply }, [speakReply])
   const maybeSpeakReplyRef = useRef(maybeSpeakReply)
   useEffect(() => { maybeSpeakReplyRef.current = maybeSpeakReply }, [maybeSpeakReply])
+
+  /**
+   * Turn spoken replies on or off from the composer.
+   *
+   * The SAME switch Settings -> Voice writes: `POST /setup-api/tts
+   * {action:"autoReply"}`, never a second flag beside it. That route is where
+   * the harness's own half lives — on OpenClaw it also writes the gateway's
+   * `tts.auto` mode through `openclaw config set`, which is what stops a
+   * Telegram voice note getting a spoken answer as well. A ClawBox-side
+   * boolean of our own would have moved this chat and left the channels
+   * talking.
+   *
+   * NOT optimistic, on purpose. The route is owner-only and same-origin-only,
+   * and on OpenClaw the write is a CLI call that can take seconds and fail; a
+   * button that flipped first would tell the owner the box had gone quiet
+   * while it went on speaking — the false-success shape this codebase keeps
+   * producing. It shows busy, then moves when the box has answered, with its
+   * ANSWER rather than the request as the new state.
+   */
+  const toggleSpokenReplies = useCallback(async () => {
+    if (speakToggleBusyRef.current) return
+    const next = !voiceAutoReplyRef.current
+    speakToggleBusyRef.current = true
+    setSpeakToggleBusy(true)
+    setSpokenRepliesNotice(null)
+    try {
+      const res = await fetch('/setup-api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'autoReply', enabled: next }),
+        // A deadline, so a request that never returns cannot leave this button
+        // disabled for good. See SPEAK_TOGGLE_TIMEOUT_MS for why it is this long.
+        signal: AbortSignal.timeout(SPEAK_TOGGLE_TIMEOUT_MS),
+      })
+      if (!res.ok) { setSpokenRepliesNotice('failed'); return }
+      const data = await res.json().catch(() => null) as { autoReply?: unknown; engines?: unknown } | null
+      // A 200 is not an outcome. The route always answers with the whole
+      // status, so a body with no boolean `autoReply` is a captive portal or a
+      // proxy answering for it — reporting "Replies will be spoken." over that
+      // is precisely the false success this function exists to avoid.
+      if (typeof data?.autoReply !== 'boolean') { setSpokenRepliesNotice('failed'); return }
+      const applied = data.autoReply
+      setVoiceAutoReply(applied)
+      setVoiceCanSpeak(speechEngineAvailable(data.engines))
+      setSpokenRepliesNotice(applied ? 'on' : 'off')
+      // Settings -> Voice can be open on the same switch behind the chat.
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: applied, engines: data.engines } }))
+    } catch {
+      // A throw is not a refusal, and it is not a success either: the request
+      // was aborted or the wire went away, and whether the box took the write
+      // is UNKNOWN — the CLI half can land after the deadline, so a read taken
+      // now may answer with either value. Both "Replies will be spoken." and
+      // "could not be changed" would therefore be claims this code cannot
+      // make.
+      //
+      // So: the box is still asked, because its last known answer is a better
+      // thing to draw than the value that was clicked — but it is NOT
+      // published. The line says the change was not confirmed rather than
+      // reporting an outcome, and no `VOICE_SETTINGS_CHANGED_EVENT` goes out,
+      // because a value that may be one write out of date must not be handed
+      // to Settings as this box's state with nothing to correct it later.
+      try {
+        const after = await fetch('/setup-api/tts', {
+          cache: 'no-store',
+          // The same deadline, for the same reason: a recovery read that never
+          // returns would leave this button disabled exactly as the write did.
+          signal: AbortSignal.timeout(SPEAK_TOGGLE_TIMEOUT_MS),
+        })
+        const data = await after.json().catch(() => null) as { autoReply?: unknown; engines?: unknown } | null
+        if (!after.ok || typeof data?.autoReply !== 'boolean') throw new Error('unreadable')
+        setVoiceAutoReply(data.autoReply)
+        setVoiceCanSpeak(speechEngineAvailable(data.engines))
+        setSpokenRepliesNotice('unconfirmed')
+      } catch {
+        setSpokenRepliesNotice('failed')
+      }
+    } finally {
+      speakToggleBusyRef.current = false
+      setSpeakToggleBusy(false)
+    }
+  }, [])
+
+  // The confirmation is a line, not a state: it says what just happened and
+  // then goes, so the composer is not permanently one row shorter.
+  useEffect(() => {
+    if (!spokenRepliesNotice) return
+    const timer = window.setTimeout(() => setSpokenRepliesNotice(null), 6000)
+    return () => window.clearTimeout(timer)
+  }, [spokenRepliesNotice])
 
   /**
    * Release the microphone.
@@ -5955,23 +6117,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       // not the one the owner picked, and that the browser
                       // would not start it.
                       <div key={src} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                      {/* The browser's own player, not a bespoke one: play,
-                          pause, scrub and duration are what "a normal playable
-                          message" means, and every one of them already works
-                          here and is reachable from the keyboard.
+                      {/* ClawBox's own transport, not the browser's grey bar.
+                          The customer's pick from the voice mockups (TASK-782,
+                          A2): a play button, the clip's own waveform as the
+                          scrub target, a clock and a download — because the one
+                          thing people do with a spoken reply, scrub back four
+                          seconds to catch a number, had a 3px track to aim at
+                          in a 370px panel. Play, pause, seek and duration all
+                          still work and are all still reachable from the
+                          keyboard; see SpokenReplyPlayer for how.
 
-                          `preload="metadata"` so the duration is on screen
-                          before anything is played, without pulling the whole
-                          file down for a reply nobody listens to. The src is
-                          this box's own media route, which answers Range
-                          requests — without that the scrubber does not move.
+                          `preload="metadata"` and the box's own media route,
+                          which answers Range requests, are kept inside the
+                          component: without the Range answers a custom
+                          scrubber is exactly as dead as the browser's was.
 
                           Keyed by the URL: the harness names every file with a
                           uuid, so re-rendering a transcript cannot hand one
                           player another player's audio. */}
-                      <audio
-                        key={src}
-                        data-testid="chat-audio"
+                      <SpokenReplyPlayer
+                        src={src}
                         // Markdown source must not reach an accessible name —
                         // it is read out character for character. See
                         // plainTextForLabel. `bodyText` rather than `msg.text`
@@ -5991,14 +6156,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                         // argv. Neither engine strips the id, so it is still
                         // spoken on that edition — the outbound half, TASK-697,
                         // which covers both voices at once.
-                        aria-label={audioLabel(bodyText, t("chat.audioReply"))}
-                        controls
-                        preload="metadata"
-                        src={src}
-                        style={{ width: '100%', maxWidth: 280, height: 34 }}
-                      >
-                        <a href={src} download={mediaFileName(src)}>{t("chat.downloadAudio")}</a>
-                      </audio>
+                        label={audioLabel(bodyText, t("chat.audioReply"))}
+                        downloadName={mediaFileName(src)}
+                      />
                       {cloudSpoken.includes(src) && (
                         <span data-testid="chat-audio-cloud" style={{ fontSize: 11, color: 'rgba(255,255,255,0.45)' }}>
                           {t("chat.spokenByCloud")}
@@ -6405,6 +6565,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
       )}
 
+      {/* What the switch just did, in words. A colour change is not an
+          announcement: a screen-reader user who flips the toggle has to hear
+          "Replies will be spoken.", so this is the same polite `role="status"`
+          the capture row uses, and it dismisses itself. It also carries the
+          REFUSAL — the write is owner-only, and a 403 that said nothing would
+          leave the switch looking simply unresponsive. */}
+      {spokenRepliesNotice && (
+        <div
+          data-testid="chat-speak-notice"
+          role="status"
+          aria-live="polite"
+          style={{
+            padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 8,
+            background: 'rgba(0,0,0,0.2)', fontSize: 11.5,
+            color: spokenRepliesNotice === 'failed' ? '#f87171'
+              : spokenRepliesNotice === 'unconfirmed' ? 'rgba(255,255,255,0.6)' : '#f97316',
+          }}
+        >
+          <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 15, flexShrink: 0 }}>
+            {spokenRepliesNotice === 'failed' ? 'error'
+              : spokenRepliesNotice === 'unconfirmed' ? 'help'
+                : spokenRepliesNotice === 'on' ? 'volume_up' : 'volume_off'}
+          </span>
+          <span style={{ flex: 1 }}>
+            {spokenRepliesNotice === 'failed'
+              ? t("chat.spokenRepliesFailed")
+              : spokenRepliesNotice === 'unconfirmed'
+                ? t("chat.spokenRepliesUnconfirmed")
+                : spokenRepliesNotice === 'on'
+                  ? t("chat.spokenRepliesOnNotice")
+                  : t("chat.spokenRepliesOffNotice")}
+          </span>
+        </div>
+      )}
+
       {/* The New app card, over the composer. Same ground and hairline as the
           composer so it reads as part of it, not as a dialog over the chat. */}
       {showNewApp && (
@@ -6560,6 +6755,45 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" style={{ fontSize: 22 }}>add</span>
         </button>
+        {/* Spoken replies, on and off without a trip to Settings — the owner's
+            pick from the voice mockups (TASK-782, B1). Icon-only and the same
+            36px pill as the four buttons beside it, because the composer row
+            is width-critical: a labelled switch costs ~62px of a row that
+            already truncates the model pills at 370px.
+
+            The icon carries the state; the accessible name and the tooltip
+            spell it out in words, because `aria-pressed` alone is announced as
+            "pressed" and leaves the owner to infer what that means.
+
+            HIDDEN, not disabled, where the box has no voice at all — the same
+            treatment attach and the microphone get from their capabilities. */}
+        {voiceCanSpeak !== false && (
+          <button
+            type="button"
+            onClick={() => { void toggleSpokenReplies() }}
+            disabled={speakToggleBusy}
+            aria-pressed={voiceAutoReply}
+            aria-busy={speakToggleBusy}
+            title={voiceAutoReply ? t("chat.spokenRepliesOn") : t("chat.spokenRepliesOff")}
+            aria-label={voiceAutoReply ? t("chat.spokenRepliesOn") : t("chat.spokenRepliesOff")}
+            data-testid="chat-speak-toggle"
+            style={{
+              width: 36, height: 36, borderRadius: 10, border: 'none',
+              background: voiceAutoReply ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+              color: voiceAutoReply ? '#f97316' : 'rgba(255,255,255,0.4)',
+              cursor: speakToggleBusy ? 'default' : 'pointer',
+              opacity: speakToggleBusy ? 0.6 : 1,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'all 0.15s',
+            }}
+            onMouseEnter={(e) => { if (!speakToggleBusy) { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = voiceAutoReply ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = voiceAutoReply ? '#f97316' : 'rgba(255,255,255,0.4)' }}
+          >
+            <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 20 }}>
+              {voiceAutoReply ? 'volume_up' : 'volume_off'}
+            </span>
+          </button>
+        )}
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made
@@ -6594,6 +6828,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </span>
           </button>
         )}
+          {/* The pills and Send wrap as ONE thing (.chat-composer-tail), never
+              separately. The row wraps on the pills' flex basis, and with the
+              basis on the pills alone there was a band of widths — 484-527px
+              with these four buttons, which contains the floating chat's own
+              default 520 — where the pills still fitted beside the buttons and
+              Send did not, leaving it alone on a second row under the
+              paperclip with the whole width empty beside it. Sharing one basis
+              (the pills' plus the gap plus the button) makes the break happen
+              in front of both or neither, at 3, 4 or 5 buttons. */}
+          <div className="chat-composer-tail">
           <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
@@ -6950,6 +7194,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </svg>
           </button>
         )}
+        </div>
         </div>
       </div>
 
