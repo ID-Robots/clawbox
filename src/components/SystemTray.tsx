@@ -1,8 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import Image from "next/image";
 import { useT } from "@/lib/i18n";
+import CrabWaitMark from "./CrabWaitMark";
 
 const BRAND_ORANGE = "#fe6e00";
 
@@ -184,10 +184,15 @@ export default function SystemTray({
               <span className="material-symbols-rounded text-white/60" style={{ fontSize: 32 }}>power_settings_new</span>
             </div>
           ) : (
-            <div className="relative w-32 h-32 flex items-center justify-center">
-              <div className="absolute inset-0 rounded-full border-[3px] border-white/10 animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
-              <Image src="/clawbox-crab.png" alt="ClawBox" width={50} height={50} className="w-[50px] h-[50px] object-contain animate-welcome-powerup" priority />
-            </div>
+            /* The device's own wait mark, and the crab in it is an INLINE data
+               URI. It was `next/image src="/clawbox-crab.png"`, which the
+               browser resolves to a `/_next/image?url=…` request against the
+               very server this screen exists because it is going down — so the
+               one picture on the one screen that is guaranteed to be watched
+               through an outage was a broken-image icon (seen on the box,
+               2026-09-09). Exactly the defect ReconnectStage was fixed for,
+               in the second place it lives. */
+            <CrabWaitMark size={128} />
           )}
 
           {/* Status message */}

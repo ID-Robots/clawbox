@@ -31,6 +31,23 @@ function renderOverlay(completed = false) {
   );
 }
 
+/**
+ * The rule is about the SCREEN, not about one component: anything on display
+ * while the box's own server is down must need zero network. There are two such
+ * screens and they were fixed a year apart, because the second was never
+ * looked for — the power menu's "Restarting" overlay drew the same mascot with
+ * the same `next/image`, and it is the one screen guaranteed to be watched
+ * through an outage. Read from the source so a third cannot be added quietly.
+ */
+describe("every screen that outlives the server", () => {
+  it("draws the restart overlay's mascot without asking the server for it", () => {
+    const tray = readFileSync(join(process.cwd(), "src", "components", "SystemTray.tsx"), "utf-8");
+    expect(tray).toContain("CrabWaitMark");
+    expect(tray).not.toMatch(/from "next\/image"/);
+    expect(tray).not.toMatch(/<Image[\s\S]{0,200}clawbox-crab\.png/);
+  });
+});
+
 describe("ReconnectStage offline logo", () => {
   it("renders the mascot from an inline data URI, not a server path", () => {
     renderOverlay();
