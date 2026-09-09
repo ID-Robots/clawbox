@@ -32,6 +32,7 @@ function installFetch() {
     const url = String(input);
     urls.push(url);
     const ok = (json: unknown) => ({ ok: true, status: 200, json: async () => json });
+    if (url.endsWith("/setup-api/clawkeep/snapshots")) return ok({ snapshots: [] });
     if (url.includes("/setup-api/clawkeep")) return ok({ ...status, schedule: { ...(status.schedule as object) } });
     return ok({});
   }));
@@ -99,6 +100,28 @@ describe("ClawKeep's frame", () => {
     expect(dialog.parentElement?.parentElement).toBe(document.body);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("contains restore-picker focus and Escape without closing the background chat", async () => {
+    status = { ...BASE_STATUS, paired: true, configured: true, encryptionConfigured: true, snapshotCount: 1 };
+    const backgroundEscape = vi.fn();
+    window.addEventListener("keydown", backgroundEscape);
+    try {
+      render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+      const trigger = await screen.findByRole("button", { name: "Restore from snapshot" });
+      trigger.focus();
+      fireEvent.click(trigger);
+      const dialog = screen.getByRole("dialog", { name: "Restore from cloud snapshot" });
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      expect(trigger.closest("[inert]")).not.toBeNull();
+      fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(backgroundEscape).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.closest("[inert]")).toBeNull();
+    } finally {
+      window.removeEventListener("keydown", backgroundEscape);
+    }
   });
 
   it("no longer points at Memory Shard, nor probes the memory index", async () => {

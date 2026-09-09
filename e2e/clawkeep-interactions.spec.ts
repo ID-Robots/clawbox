@@ -161,9 +161,25 @@ test("restore modal opens, fetches snapshots, and Esc dismisses it", async ({ pa
   // on mount, and a count taken before it lands is the close button alone.
   await expect.poll(() => modal.getByRole("button").count()).toBeGreaterThan(2);
 
-  // Esc closes the modal — covers the keydown useEffect cleanup path.
+  // The picker traps keyboard navigation, not just the pointer. A global
+  // listener models the open chat's Escape handler behind the modal.
+  await page.evaluate(() => {
+    (window as Window & { restoreEscapeLeaks?: number }).restoreEscapeLeaks = 0;
+    window.addEventListener("keydown", (event) => {
+      const state = window as Window & { restoreEscapeLeaks?: number };
+      if (event.key === "Escape") state.restoreEscapeLeaks = (state.restoreEscapeLeaks ?? 0) + 1;
+    });
+  });
+  const close = modal.getByRole("button", { name: "Close", exact: true });
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(modal.getByRole("button").last()).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(close).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(modal).not.toBeVisible();
+  expect(await page.evaluate(() => (window as Window & { restoreEscapeLeaks?: number }).restoreEscapeLeaks)).toBe(0);
+  await expect(clawkeep.getByRole("button", { name: "Restore from snapshot" })).toBeFocused();
 });
 
 test("unpair flow opens the confirm dialog and Esc dismisses it without unpairing", async ({ page }) => {
