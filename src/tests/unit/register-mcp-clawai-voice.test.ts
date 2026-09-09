@@ -116,6 +116,9 @@ else:
         raise SystemExit(1)
 with open(os.environ["CLAWBOX_TEST_CFG"], "w") as fh:
     yaml.safe_dump(cfg, fh, sort_keys=False)
+if os.environ.get("CLAWBOX_TEST_CORRUPT_MARKER") and os.environ["CLAWBOX_TEST_KEY"] == "tts.openai.model":
+    with open(os.environ["CLAWBOX_TEST_CFG"] + ".clawbox-voice-standdown.json", "w") as fh:
+        fh.write(os.environ["CLAWBOX_TEST_CORRUPT_MARKER"])
 EOPY
 `);
   fs.chmodSync(stub, 0o755);
@@ -623,6 +626,100 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
     function downgraded() {
       writeStore({ clawai_token: TOKEN, clawai_tier: "flash", clawai_plan_tier: "flash" });
     }
+
+    it("restores an automatically stood-down cloud voice after re-upgrade even with Kokoro installed", () => {
+      armedWithLocalEngine("    voice: shimmer\n");
+      installKokoroStamp();
+      downgraded();
+      expect(run().status).toBe(0);
+      expect(at("tts.provider")).toBe("clawbox-local");
+      const marker = `${configPath}.clawbox-voice-standdown.json`;
+      expect(fs.readFileSync(marker, "utf8")).not.toContain(TOKEN);
+      expect(fs.statSync(marker).mode & 0o777).toBe(0o600);
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      const restored = run();
+      expect(restored.status).toBe(0);
+      expect(at("tts.provider")).toBe("openai");
+      expect(at("tts.openai.voice")).toBe("shimmer");
+      expect(fs.existsSync(marker)).toBe(false);
+      expect(restored.stdout).toContain("restored the ClawBox AI cloud voice");
+    });
+
+    it.each(["not-json", "[]", '{"version":1,"provider":"clawbox-local","cloudVoice":42}'])("keeps the local selection and marker when the saved voice becomes unreadable: %s", (corrupt) => {
+      armedWithLocalEngine("    voice: shimmer\n");
+      downgraded();
+      expect(run().status).toBe(0);
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      run({ CLAWBOX_TEST_CORRUPT_MARKER: corrupt });
+      expect(at("tts.provider")).toBe("clawbox-local");
+      expect(fs.readFileSync(`${configPath}.clawbox-voice-standdown.json`, "utf8")).toBe(corrupt);
+    });
+
+    it("restores a valid marker without a saved cloud voice", () => {
+      armedWithLocalEngine(); downgraded(); run();
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      run();
+      expect(at("tts.provider")).toBe("openai");
+      expect(fs.existsSync(`${configPath}.clawbox-voice-standdown.json`)).toBe(false);
+    });
+
+    it("preserves a custom endpoint even when it contains an old claw credential and a valid marker", () => {
+      armedWithLocalEngine(); downgraded(); run();
+      writeYaml(`${BASE_CONFIG}tts:\n  provider: clawbox-local\n  openai:\n    base_url: https://speech.example.test/v1\n    api_key: ${TOKEN}\n    model: custom-voice\n`);
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      run();
+      expect(at("tts.provider")).toBe("clawbox-local");
+      expect(at("tts.openai")).toEqual({ base_url: "https://speech.example.test/v1", api_key: TOKEN, model: "custom-voice" });
+    });
+
+    it("keeps the selected cloud voice intact if its restoration marker cannot be persisted", () => {
+      armedWithLocalEngine("    voice: shimmer\n"); downgraded();
+      fs.mkdirSync(`${configPath}.clawbox-voice-standdown.json`);
+      run();
+      expect(at("tts.provider")).toBe("openai");
+      expect(at("tts.openai.voice")).toBe("shimmer");
+      expect(configCalls()).not.toContain("config unset tts.openai");
+    });
+
+    it("never restores over a different provider chosen after stand-down", () => {
+      armedWithLocalEngine();
+      downgraded();
+      run();
+      writeYaml(`${BASE_CONFIG}tts:\n  provider: elevenlabs\n`);
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      run();
+      expect(at("tts.provider")).toBe("elevenlabs");
+      expect(at("tts.openai")).toBeUndefined();
+    });
+
+    it.each(["Command", ""])("accepts the harness's command type spelling %j", (kind) => {
+      armedWithLocalEngine();
+      const yaml = fs.readFileSync(configPath, "utf8").replace("type: command", `type: ${JSON.stringify(kind)}`);
+      writeYaml(yaml);
+      downgraded();
+      run();
+      expect(at("tts.provider")).toBe("clawbox-local");
+      expect(at("tts.openai")).toBeUndefined();
+    });
+
+    it("accepts the harness's legacy direct provider definition", () => {
+      writeYaml(`${BASE_CONFIG}tts:\n  provider: openai\n  openai:\n    base_url: ${PROXY}\n    api_key: ${TOKEN}\n  clawbox-local:\n    type: command\n    command: /usr/bin/true\n`);
+      downgraded();
+      run();
+      expect(at("tts.provider")).toBe("clawbox-local");
+      expect(at("tts.openai")).toBeUndefined();
+    });
+
+    it("keeps local speech and the retry marker if cloud restoration fails", () => {
+      armedWithLocalEngine();
+      downgraded();
+      run();
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      writeHermesStub(1);
+      run();
+      expect(at("tts.provider")).toBe("clawbox-local");
+      expect(fs.existsSync(`${configPath}.clawbox-voice-standdown.json`)).toBe(true);
+    });
 
     it("selects the box's own voice instead of leaving a name over an emptied slot", () => {
       armedWithLocalEngine();

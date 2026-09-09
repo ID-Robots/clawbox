@@ -26,6 +26,7 @@ import {
 } from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_CHAT_MODEL_IDS,
+  CLAWBOX_AI_PROXY_URLS,
   CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_MODEL_ID_BY_TIER,
   CLAWBOX_AI_VISION_MODEL_ID,
@@ -1776,6 +1777,14 @@ async function selectHermesCloudVoiceIfUnvoiced(
   token: string,
   entitlementTier: ClawaiPlanTier | null,
 ): Promise<void> {
+  const { withHermesVoiceTransition } = await import("@/lib/hermes-voice-transition");
+  await withHermesVoiceTransition(() => selectHermesCloudVoiceIfUnvoicedUnlocked(token, entitlementTier));
+}
+
+async function selectHermesCloudVoiceIfUnvoicedUnlocked(
+  token: string,
+  entitlementTier: ClawaiPlanTier | null,
+): Promise<void> {
   try {
     const [
       {
@@ -1847,6 +1856,13 @@ async function selectHermesCloudVoiceIfUnvoiced(
       // fill.
       if (current === HERMES_CLOUD_TTS_PROVIDER && ownRoute) {
         await writeHermesCloudTarget(token);
+        // Restoration can select cloud successfully, then fail both marker
+        // cleanup and the local rollback. Finish that interrupted transition
+        // on the next entitled link without changing the current selection.
+        if (entitlementTier === CLAWBOX_AI_SPEECH_TIER) {
+          const { readHermesVoiceStanddown, clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
+          if (await readHermesVoiceStanddown()) await clearHermesVoiceStanddown();
+        }
         console.log("[hermes-clawai] refreshed the ClawBox AI speech credential");
       } else if (current === HERMES_CLOUD_TTS_PROVIDER) {
         console.log(
@@ -1881,6 +1897,31 @@ async function selectHermesCloudVoiceIfUnvoiced(
       console.log(
         "[hermes-clawai] this plan does not include the cloud voice — leaving tts.provider alone",
       );
+      return;
+    }
+    // Restore only the cloud selection ClawBox itself stood down. An ordinary
+    // local choice has no stamp and keeps the existing on-device preference.
+    const { readHermesVoiceStanddown, clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
+    const stoodDown = current === HERMES_LOCAL_TTS_PROVIDER ? await readHermesVoiceStanddown() : null;
+    const restoreRouteIsOurs = !voice.unread.cloudRoute && !voice.unread.cloudKey && ((!voice.cloudBaseUrl && !voice.cloudHasKey)
+      || [CLAWBOX_AI_PROXY_URL, ...CLAWBOX_AI_PROXY_URLS]
+        .map(url => url.replace(/\/+$/, "")).includes((voice.cloudBaseUrl ?? "").replace(/\/+$/, "")));
+    if (stoodDown && !restoreRouteIsOurs) return;
+    if (stoodDown && restoreRouteIsOurs) {
+      await writeHermesCloudTarget(token);
+      if (stoodDown.cloudVoice) {
+        const { writeHermesCloudVoice } = await import("@/lib/hermes-tts");
+        await writeHermesCloudVoice(stoodDown.cloudVoice);
+      }
+      await selectHermesProvider("cloud");
+      try {
+        await clearHermesVoiceStanddown();
+      } catch (error) {
+        // Keep the marker and local selection together so the next link can
+        // retry restoration. The shared transition lock excludes owner picks.
+        await selectHermesProvider("local");
+        throw error;
+      }
       return;
     }
     // What this box HAS, asked in every unchosen state rather than only over a

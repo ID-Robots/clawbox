@@ -10,6 +10,7 @@ import {
   hermesVoiceConfigView,
   readHermesVoice,
   selectHermesEngine,
+  restoreHermesProviderId,
   writeHermesCloudVoice,
   HermesTtsWriteError,
 } from "@/lib/hermes-tts";
@@ -415,6 +416,14 @@ async function settleOnAuto(
 
 async function handleSelect(choice: VoiceChoice) {
   const harness = await getActiveHarness();
+  if (harness === "hermes") {
+    const { withHermesVoiceTransition } = await import("@/lib/hermes-voice-transition");
+    return withHermesVoiceTransition(() => handleSelectUnlocked(choice, harness));
+  }
+  return handleSelectUnlocked(choice, harness);
+}
+
+async function handleSelectUnlocked(choice: VoiceChoice, harness: Awaited<ReturnType<typeof getActiveHarness>>) {
   let { config, probe } = await probeBox(harness);
 
   // The box's own voice, installed but not wired: Kokoro is there (stamp,
@@ -454,7 +463,14 @@ async function handleSelect(choice: VoiceChoice) {
     return refuse("That voice is not available on this box.", "not_available", 409);
   }
 
-  if (providerId !== before.activeProviderId) {
+  const changingProvider = providerId !== before.activeProviderId;
+  // The shared view intentionally hides custom/factory providers. Keep the
+  // native selection for rollback, rather than replacing it with that view.
+  const previousHermesVoice = harness === "hermes" && changingProvider ? await readHermesVoice() : null;
+  if (previousHermesVoice?.unread.provider) {
+    return refuse("This box could not read its current voice. Please try again.", "cannot_change", 409);
+  }
+  if (changingProvider) {
     const refused = await selectProvider(harness, before, providerId);
     if (refused) return refused;
   }
@@ -463,6 +479,17 @@ async function handleSelect(choice: VoiceChoice) {
   // call between then and now can take 12 s, and a language picked in the
   // meantime must not be written over by the stale copy.
   await withVoiceState(async () => {
+    if (harness === "hermes") {
+      // A failed removal must not leave a persisted explicit local preference
+      // alongside a marker that tells the next relink to restore cloud voice.
+      const { clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
+      try {
+        await clearHermesVoiceStanddown();
+      } catch (error) {
+        if (previousHermesVoice) await restoreHermesProviderId(previousHermesVoice.provider);
+        throw error;
+      }
+    }
     await writeVoiceState({ ...(await readVoiceState()), choice });
   });
   return NextResponse.json(await status(), { headers: NO_STORE });

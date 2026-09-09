@@ -1351,6 +1351,13 @@ model = text(slot.get("model"))
 key_is_ours = api_key.startswith("claw_")
 slot_is_empty = base_url == "" and api_key == ""
 route_is_ours = key_is_ours or slot_is_empty or base_url.rstrip("/") == PROXY
+standdown, standdown_error = load(os.environ["CLAWBOX_HERMES_CONFIG"] + ".clawbox-voice-standdown.json", json.load)
+restore_cloud = (
+    standdown_error is None and isinstance(standdown, dict)
+    and standdown.get("version") == 1 and standdown.get("provider") == LOCAL_PROVIDER
+    and provider == LOCAL_PROVIDER
+    and (slot_is_empty or base_url.rstrip("/") in OUR_PROXIES)
+)
 
 if token and arm_tier == ENTITLED_TIER:
     # ALREADY SPEAKING THROUGH US. The selection is not touched again; the
@@ -1364,6 +1371,10 @@ if token and arm_tier == ENTITLED_TIER:
         say("refresh")
     if provider not in ("", FACTORY_PROVIDER, LOCAL_PROVIDER):
         say("hold this box has already chosen how it speaks (%s)" % short(provider))
+    if restore_cloud:
+        say("restore")
+    if provider == LOCAL_PROVIDER and not (slot_is_empty or base_url.rstrip("/") in OUR_PROXIES):
+        say("hold the local selection has an owner-defined cloud endpoint")
     # UNCHOSEN IS ALL THREE, and the engine question is asked of all three.
     # `clawbox-local` is here because `install.sh` `step_openclaw_tts` selects it
     # on every install and every update WHATEVER the engine answered —
@@ -1462,13 +1473,16 @@ if plan_tier and plan_tier != ENTITLED_TIER:
     providers = tts.get("providers")
     providers = providers if isinstance(providers, dict) else {}
     local = providers.get(LOCAL_PROVIDER)
+    if not isinstance(local, dict):
+        local = tts.get(LOCAL_PROVIDER)
     local = local if isinstance(local, dict) else {}
     local_command = local.get("command")
     local_type = local.get("type")
+    local_type = local_type.strip().lower() if isinstance(local_type, str) else local_type
     if (
         isinstance(local_command, str)
         and local_command.strip()
-        and local_type in (None, "command")
+        and local_type in (None, "", "command")
     ):
         say("withdraw %s" % LOCAL_PROVIDER)
     # NOWHERE SAFE TO STAND DOWN TO, so nothing is withdrawn at all.
@@ -1496,6 +1510,47 @@ say("hold nothing to do")
 PY
 )
 CLAWBOX_VOICE_VERDICT="${CLAWBOX_VOICE_PLAN%% *}"
+
+# This history contains no credential. Only our own automatic selection is
+# remembered; the Voice panel clears it whenever the owner makes a choice.
+hermes_voice_stamp() {
+  CLAWBOX_HERMES_CONFIG="$HERMES_CONFIG" CLAWBOX_STAMP_ACTION="$1" python3 - <<'STAMPPY'
+import json, os, sys, tempfile, yaml
+cfg_path = os.environ["CLAWBOX_HERMES_CONFIG"]
+stamp_path = cfg_path + ".clawbox-voice-standdown.json"
+action = os.environ["CLAWBOX_STAMP_ACTION"]
+if action == "clear":
+    try: os.unlink(stamp_path)
+    except FileNotFoundError: pass
+elif action == "remember":
+    cfg = yaml.safe_load(open(cfg_path)) or {}
+    voice = ((cfg.get("tts") or {}).get("openai") or {}).get("voice")
+    stamp = {"version": 1, "provider": "clawbox-local"}
+    if isinstance(voice, str) and voice.strip(): stamp["cloudVoice"] = voice
+    fd, tmp = tempfile.mkstemp(prefix=".voice-standdown-", dir=os.path.dirname(cfg_path))
+    try:
+        with os.fdopen(fd, "w") as f: json.dump(stamp, f)
+        os.replace(tmp, stamp_path)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+elif action == "voice":
+    try:
+        with open(stamp_path) as f: stamp = json.load(f)
+        if not isinstance(stamp, dict) or stamp.get("version") != 1 or stamp.get("provider") != "clawbox-local":
+            raise ValueError("invalid stand-down marker")
+        voice = stamp.get("cloudVoice", "")
+        if not isinstance(voice, str): raise ValueError("invalid saved voice")
+        print(voice)
+    except (OSError, ValueError): sys.exit(1)
+STAMPPY
+}
+
+hermes_voice_restore_name() {
+  [ "$CLAWBOX_VOICE_VERDICT" = restore ] || return 0
+  local voice
+  voice=$(hermes_voice_stamp voice) || return 1
+  [ -z "$voice" ] || hermes_voice_write config set tts.openai.voice "$voice"
+}
 
 # One bounded CLI call, with the exit status kept. Braces and `-k 5` for the
 # reason §4's `tools disable` documents at length: `timeout` SIGKILLs its own
@@ -1532,7 +1587,7 @@ hermes_voice_write() {
 CLAWBOX_VOICE_DEADLINE=$(( $(date +%s) + HERMES_CLI_TIMEOUT ))
 
 case "$CLAWBOX_VOICE_VERDICT" in
-  arm|refresh)
+  arm|refresh|restore)
     # DEFINITION BEFORE SELECTION, the same order `selectHermesEngine` keeps:
     # the endpoint, credential and model land first, so a failure leaves
     # `tts.provider` untouched rather than selecting a provider with nowhere to
@@ -1565,10 +1620,18 @@ TOKENPY
       # here to keep the credential and the endpoint current, and re-selecting
       # would buy a fourth CLI spawn for nothing.
       log "refreshed the ClawBox AI speech credential"
+      hermes_voice_stamp clear || log "could not clear the old voice restoration marker"
+    elif ! hermes_voice_restore_name; then
+      log "could not restore the previous cloud voice — leaving the local voice selected for retry"
     elif ! hermes_voice_write config set tts.provider openai; then
       log "wrote the ClawBox AI speech endpoint but could not select it (exit $CLAWBOX_VOICE_RC) — the next start will try again"
     else
-      log "armed the ClawBox AI cloud voice — this box's plan includes it and nothing else had been chosen"
+      hermes_voice_stamp clear || log "could not clear the old voice restoration marker"
+      if [ "$CLAWBOX_VOICE_VERDICT" = restore ]; then
+        log "restored the ClawBox AI cloud voice after the plan was renewed"
+      else
+        log "armed the ClawBox AI cloud voice — this box's plan includes it and nothing else had been chosen"
+      fi
     fi
     ;;
   withdraw)
@@ -1585,9 +1648,13 @@ TOKENPY
     CLAWBOX_VOICE_TARGET="${CLAWBOX_VOICE_PLAN#* }"
     CLAWBOX_VOICE_STOOD_DOWN=true
     case "$CLAWBOX_VOICE_TARGET" in
-      keep) ;;
+      keep) hermes_voice_stamp clear || log "could not clear the old voice restoration marker" ;;
       "$CLAWBOX_VOICE_LOCAL")
-        if ! hermes_voice_write config set tts.provider "$CLAWBOX_VOICE_LOCAL"; then
+        if ! hermes_voice_stamp remember; then
+          log "could not remember the cloud voice — leaving its selection and definition unchanged for retry"
+          CLAWBOX_VOICE_STOOD_DOWN=false
+        elif ! hermes_voice_write config set tts.provider "$CLAWBOX_VOICE_LOCAL"; then
+          hermes_voice_stamp clear || log "could not clear the failed voice restoration marker"
           log "could not move this box off the ClawBox AI cloud voice (exit $CLAWBOX_VOICE_RC) — its definition is left in place so the box keeps speaking through our own proxy rather than through a slot with nothing behind it; the next start will try again"
           CLAWBOX_VOICE_STOOD_DOWN=false
         fi
@@ -1614,14 +1681,9 @@ TOKENPY
       # field carries `tts.openai.voice`, so unsetting it key-by-key reported a
       # failed withdrawal on every real box.
       #
-      # THE LOSS IS ONE-WAY, and worth stating: the arm writes back only
-      # `base_url`, `api_key` and `model`, so a downgrade followed by an upgrade
-      # does not restore a cloud voice the owner had picked in the Voice tab.
-      # That is the card's own instruction — a voice name for a provider this
-      # box may no longer call is residue, and it would otherwise be inherited
-      # by the next arm from the plan being withdrawn — and it is bounded by the
-      # same ownership gate as everything else here: only a slot naming an
-      # address of OURS is ever touched.
+      # The active slot is removed in full, but our non-secret stand-down
+      # marker remembers the previous voice for a later entitled restoration.
+      # An explicit owner selection clears that marker from the Voice panel.
       if hermes_voice_write config unset tts.openai; then
         if [ "$CLAWBOX_VOICE_TARGET" = keep ]; then
           log "removed the ClawBox AI cloud voice: this box's plan no longer includes it, and its speech selection was already elsewhere"

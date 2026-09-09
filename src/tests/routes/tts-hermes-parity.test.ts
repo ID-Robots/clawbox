@@ -34,6 +34,8 @@ const readStateMock = vi.fn();
 const writeStateMock = vi.fn();
 const writeLocalVoiceMock = vi.fn();
 const tokenMock = vi.fn();
+const clearStanddownMock = vi.fn();
+vi.mock("@/lib/hermes-voice-standdown", () => ({ clearHermesVoiceStanddown: (...a: unknown[]) => clearStanddownMock(...a) }));
 
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: (...a: unknown[]) => readConfigMock(...a),
@@ -132,6 +134,7 @@ beforeEach(() => {
   writeStateMock.mockResolvedValue(undefined);
   writeLocalVoiceMock.mockResolvedValue(undefined);
   tokenMock.mockResolvedValue("claw_a_linked_hermes_box");
+  clearStanddownMock.mockReset().mockResolvedValue(undefined);
   storeValues = { clawai_tier: "pro" };
   hermesCliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   // EXACTLY what install.sh writes on a freshly provisioned Hermes box, and
@@ -250,6 +253,7 @@ describe("POST /setup-api/tts on a Hermes box", () => {
     // The openclaw write is what the gate was protecting. It must be SKIPPED
     // here, not attempted and swallowed.
     expect(configSetMock).not.toHaveBeenCalled();
+    expect(clearStanddownMock).toHaveBeenCalledOnce();
   });
 
   it("writes the cloud endpoint and credential BEFORE selecting the provider", async () => {
@@ -270,6 +274,34 @@ describe("POST /setup-api/tts on a Hermes box", () => {
     );
   });
 
+  it("does not persist an explicit choice when stand-down removal fails", async () => {
+    hermesConfig["tts.provider"] = "openai";
+    hermesConfig["tts.openai.base_url"] = "https://clawbox.com/api/ai";
+    hermesConfig["tts.openai.api_key"] = "claw_a_linked_hermes_box";
+    clearStanddownMock.mockRejectedValueOnce(new Error("marker permission denied"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "local" }));
+
+    expect(res.ok).toBe(false);
+    expect(clearStanddownMock).toHaveBeenCalledOnce();
+    expect(writeStateMock).not.toHaveBeenCalled();
+    const providerWrites = hermesCliMock.mock.calls
+      .map(([args]) => args as string[]).filter(args => args[2] === "tts.provider");
+    expect(providerWrites.map(args => args[3])).toEqual(["clawbox-local", "openai"]);
+  });
+
+  it.each(["elevenlabs", "edge", null])("restores the native provider %s if marker removal fails", async (provider) => {
+    if (provider === null) delete hermesConfig["tts.provider"];
+    else hermesConfig["tts.provider"] = provider;
+    clearStanddownMock.mockRejectedValueOnce(new Error("marker permission denied"));
+    const { POST } = await route();
+    expect((await POST(post({ action: "select", choice: "local" }))).ok).toBe(false);
+    const writes = hermesCliMock.mock.calls.map(([args]) => args as string[]);
+    expect(writes.at(-1)).toEqual(provider === null
+      ? ["config", "unset", "tts.provider"] : ["config", "set", "tts.provider", provider]);
+    expect(writeStateMock).not.toHaveBeenCalled();
+  });
+
   it("does not select the cloud provider when the credential write fails", async () => {
     hermesCliMock.mockImplementation(async (args: string[]) =>
       args[2] === "tts.openai.api_key"
@@ -281,6 +313,7 @@ describe("POST /setup-api/tts on a Hermes box", () => {
     expect(res.status).toBe(409);
     const selected = hermesCliMock.mock.calls.some((c) => (c[0] as string[])[2] === "tts.provider");
     expect(selected).toBe(false);
+    expect(clearStanddownMock).not.toHaveBeenCalled();
   });
 
   it("refuses the cloud voice on a box with no ClawBox AI credential", async () => {
@@ -292,6 +325,7 @@ describe("POST /setup-api/tts on a Hermes box", () => {
     expect([409, 400]).toContain(res.status);
     const selected = hermesCliMock.mock.calls.some((c) => (c[0] as string[])[2] === "tts.provider");
     expect(selected).toBe(false);
+    expect(clearStanddownMock).not.toHaveBeenCalled();
   });
 
   it("still refuses an unknown action rather than swallowing the contract", async () => {

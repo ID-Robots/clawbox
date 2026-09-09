@@ -406,6 +406,13 @@ export async function selectHermesProvider(engine: "local" | "cloud"): Promise<v
   await set(KEYS.provider, hermesProviderFor(engine));
 }
 
+/** Roll back only the selection, without rewriting an owner's provider settings. */
+export async function restoreHermesProviderId(provider: string | null): Promise<void> {
+  if (provider !== null) return set(KEYS.provider, provider);
+  const result = await runHermesCli(["config", "unset", KEYS.provider], { timeoutMs: 15_000 });
+  if (result.code !== 0) throw new HermesTtsWriteError("Could not restore the unset voice provider.");
+}
+
 /** The voice an engine speaks with, in Hermes' own per-provider key. */
 export async function writeHermesCloudVoice(voice: string): Promise<void> {
   await set(KEYS.cloudVoice, voice);

@@ -24,6 +24,12 @@ const selectProviderMock = vi.hoisted(() => vi.fn());
 const probeEngineMock = vi.hoisted(() => vi.fn());
 const runnableMock = vi.hoisted(() => vi.fn());
 const writeCloudMock = vi.hoisted(() => vi.fn());
+const standdownMock = vi.hoisted(() => vi.fn());
+const clearStanddownMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/hermes-voice-standdown", () => ({
+  readHermesVoiceStanddown: standdownMock,
+  clearHermesVoiceStanddown: clearStanddownMock,
+}));
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: vi.fn(async () => false) }));
@@ -123,6 +129,78 @@ describe("pointing a linked Hermes box at a voice it can actually use", () => {
     writeCloudMock.mockResolvedValue(undefined);
     probeEngineMock.mockResolvedValue(false);
     runnableMock.mockResolvedValue(true);
+    standdownMock.mockReset().mockResolvedValue(null);
+    clearStanddownMock.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("restores our stood-down cloud selection on re-link without replacing an ordinary local choice", async () => {
+    readVoiceMock.mockResolvedValue(voice(HERMES_LOCAL_TTS_PROVIDER));
+    probeEngineMock.mockResolvedValue(true);
+    standdownMock.mockResolvedValue({});
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(writeCloudMock).toHaveBeenCalledWith(TOKEN);
+    expect(selectProviderMock).toHaveBeenCalledWith("cloud");
+    expect(clearStanddownMock).toHaveBeenCalledOnce();
+  });
+
+  it("rolls back after failed marker cleanup and restores on the next link", async () => {
+    let provider = HERMES_LOCAL_TTS_PROVIDER;
+    readVoiceMock.mockImplementation(async () => voice(provider));
+    selectProviderMock.mockImplementation(async (engine: string) => {
+      provider = engine === "local" ? HERMES_LOCAL_TTS_PROVIDER : "openai";
+    });
+    standdownMock.mockResolvedValue({});
+    clearStanddownMock.mockRejectedValueOnce(new Error("marker removal failed"));
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(provider).toBe(HERMES_LOCAL_TTS_PROVIDER);
+    expect(selectProviderMock.mock.calls.map(call => call[0])).toEqual(["cloud", "local"]);
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(provider).toBe("openai");
+    expect(clearStanddownMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("finishes marker cleanup on the next link when local rollback also failed", async () => {
+    let provider = HERMES_LOCAL_TTS_PROVIDER;
+    readVoiceMock.mockImplementation(async () => ({
+      ...voice(provider),
+      cloudBaseUrl: "https://clawbox.com/api/ai",
+      cloudHasKey: true,
+      cloudKeyIsOurs: true,
+    }));
+    selectProviderMock.mockImplementation(async (engine: string) => {
+      if (engine === "local") throw new Error("provider rollback failed");
+      provider = "openai";
+    });
+    standdownMock.mockResolvedValue({});
+    clearStanddownMock.mockRejectedValueOnce(new Error("marker removal failed"));
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(provider).toBe("openai");
+    expect(selectProviderMock.mock.calls.map(call => call[0])).toEqual(["cloud", "local"]);
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(clearStanddownMock).toHaveBeenCalledTimes(2);
+    // The retry only completes cleanup; it never changes an existing selection.
+    expect(selectProviderMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["cloudRoute", "cloudKey"] as const)("does not restore over an unread %s", async (field) => {
+    const state = voice(HERMES_LOCAL_TTS_PROVIDER);
+    state.unread[field] = true;
+    readVoiceMock.mockResolvedValue(state);
+    standdownMock.mockResolvedValue({});
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+    expect(clearStanddownMock).not.toHaveBeenCalled();
+  });
+
+  it("does not restore over a custom endpoint using a claw credential", async () => {
+    readVoiceMock.mockResolvedValue({ ...voice(HERMES_LOCAL_TTS_PROVIDER), cloudBaseUrl: "https://speech.example.test/v1", cloudHasKey: true, cloudKeyIsOurs: true });
+    probeEngineMock.mockResolvedValue(false);
+    standdownMock.mockResolvedValue({});
+    await applyClawaiToHermes(TOKEN, ENTITLED);
+    expect(writeCloudMock).not.toHaveBeenCalled();
+    expect(selectProviderMock).not.toHaveBeenCalled();
+    expect(clearStanddownMock).not.toHaveBeenCalled();
   });
 
   it("selects the cloud voice when nothing has been chosen and there is no engine", async () => {
