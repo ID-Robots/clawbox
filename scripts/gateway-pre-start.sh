@@ -5127,11 +5127,18 @@ fi
 # AND HOW MUCH OF THE STARTUP IS LEFT, asked before anything is spent. The loops
 # above can burn minutes on a box whose plugins are failing — 120 s installs,
 # 60 s consents, 60 s config writes — and this is a blocking ExecStartPre inside
-# `TimeoutStartSec=600`. Adding a recovery on top of a startup that is already
-# late turns a box that WOULD have come back into one systemd kills, which is
-# the opposite of what this block is for. `SECONDS` is the shell's own count
-# since the script began; the threshold is an environment variable only so a
-# test can move it, and the default is the real one.
+# `TimeoutStartSec=600`. `SECONDS` is the shell's own count since the script
+# began; the threshold is an environment variable only so a test can move it,
+# and the default is the real one.
+#
+# WHAT THIS DOES NOT DO, stated because the arithmetic has been done and does
+# not support the larger claim: it guards THIS block's own increment, not the
+# script's budget. On the worst path — a core bump that stranded both channel
+# payloads — the time boxes above this line already add up past 600 s on
+# unmodified beta, and roughly ten of them are unbudgeted. A deadline in front
+# of ~195 s does not save that boot; it only keeps this block from being the
+# thing that makes a marginal one worse. The script-wide budget is a separate
+# piece of work and is on the queue as a residual.
 CLAWBOX_REATTEMPT_BUDGET_S="${CLAWBOX_REATTEMPT_BUDGET_S:-300}"
 
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$SECONDS" -ge "$CLAWBOX_REATTEMPT_BUDGET_S" ]; then
