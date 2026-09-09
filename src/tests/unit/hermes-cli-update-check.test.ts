@@ -62,7 +62,7 @@ const VENV_PYTHON = path.join(AGENT_DIR, "venv", "bin", "python");
 
 /** The banner a silenced probe gets, verbatim from the Hermes box. */
 const SILENT_BANNER = [
-  "Hermes Agent v0.21.1 (2026.9.7) · upstream d0df3248 · local 2237be35 (+32678 carried commits)",
+  "Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35 (+32678 carried commits)",
   "Install directory: /home/clawbox/.hermes/hermes-agent",
   "Install method: git",
   "Python: 3.11.15",

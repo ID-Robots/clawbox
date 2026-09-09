@@ -24,7 +24,7 @@ export function cleanVersion(v: string | null | undefined): string | null {
  *
  * `hermes --version` is a multi-line report, not a version string:
  *
- *   Hermes Agent v0.21.1 (2026.9.7) · upstream d0df3248 · local 2237be35 (+32678 carried commits)
+ *   Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35 (+32678 carried commits)
  *   Install directory: /home/clawbox/.hermes/hermes-agent
  *   Install method: git
  *

@@ -3605,7 +3605,7 @@ describe("updater", () => {
  */
 describe("getVersionInfo harness reporting", () => {
   const HERMES_BANNER =
-    "Hermes Agent v0.21.1 (2026.9.7) · upstream d0df3248 · local 2237be35\n" +
+    "Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35\n" +
     "Install directory: /home/clawbox/.hermes/hermes-agent";
 
   beforeEach(() => {

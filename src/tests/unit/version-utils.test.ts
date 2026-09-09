@@ -44,7 +44,7 @@ describe("parseHermesVersion", () => {
   // of them cannot show that it does not depend on the separator — and a box
   // mid-update still prints the older banner.
   const banner021 = [
-    "Hermes Agent v0.21.1 (2026.9.7) · upstream d0df3248 · local 2237be35 (+32678 carried commits)",
+    "Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35 (+32678 carried commits)",
     "Install directory: /home/clawbox/.hermes/hermes-agent",
     "Install method: git",
     "Python: 3.11.15",
