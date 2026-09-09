@@ -10,7 +10,8 @@
 import { readFile } from "fs/promises";
 import path from "path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
-import { findOpenclawBin, readConfig, readConfigStrict, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { findOpenclawBin, openclawIsAbsent, readConfig, readConfigStrict, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { readLocalSources, stampLocalEmbeddingIdentity, writeLocalSources } from "@/lib/memory-index-local";
 import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import {
@@ -78,6 +79,15 @@ function extraPathsOf(config: unknown): string[] {
  * away from it.
  */
 export async function readExtraPaths(): Promise<string[]> {
+  // No OpenClaw means no `memory.search.extraPaths` and no indexer to honour
+  // it — ClawBox keeps the list, because ClawBox does the indexing there.
+  if (openclawIsAbsent()) {
+    try {
+      return await readLocalSources();
+    } catch {
+      return [];
+    }
+  }
   try {
     return extraPathsOf(await readConfig());
   } catch {
@@ -111,7 +121,9 @@ export class ExtraPathsUnreadableError extends Error {
  */
 async function readExtraPathsForWrite(): Promise<string[]> {
   try {
-    return extraPathsOf(await readConfigStrict());
+    // Same rule on both arms and for the same reason: a read that FAILED must
+    // not be written over as if it were an empty list.
+    return openclawIsAbsent() ? await readLocalSources() : extraPathsOf(await readConfigStrict());
   } catch (err) {
     throw new ExtraPathsUnreadableError(err);
   }
@@ -119,6 +131,10 @@ async function readExtraPathsForWrite(): Promise<string[]> {
 
 /** Replace the whole list. OpenClaw validates the shape on write. */
 export async function writeExtraPaths(paths: readonly string[]): Promise<void> {
+  if (openclawIsAbsent()) {
+    await writeLocalSources(paths);
+    return;
+  }
   await runOpenclawConfigSetBatch([
     [EXTRA_PATHS_CONFIG_PATH, JSON.stringify([...paths]), "--json"],
   ]);
@@ -247,6 +263,14 @@ export function embeddingConfigHome(version: string | null): "memory.search" | "
  * that can interleave.
  */
 export async function switchToLocalEmbeddings(): Promise<void> {
+  // Nothing to point on the edition where ClawBox is the client: the write
+  // that remains is recording WHICH model the vectors about to be written
+  // belong to, so a later embedder change is caught rather than silently
+  // degrading search.
+  if (openclawIsAbsent()) {
+    await stampLocalEmbeddingIdentity();
+    return;
+  }
   const home = embeddingConfigHome(await installedOpenclawVersion());
   // The embedder is reached through ClawBox's local-AI proxy — that is what
   // wakes it on the first request — with the per-install service token as the

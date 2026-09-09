@@ -1,7 +1,6 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { getEmbedProvisioningStatus, EMBED_UNIT } from "@/lib/embed-server";
 import { readUnitState } from "@/lib/local-models";
 import { LOCAL_EMBEDDING_ENGINE, LOCAL_EMBEDDING_MODEL } from "@/lib/memory-shard-state";
@@ -16,16 +15,18 @@ import { LOCAL_EMBEDDING_ENGINE, LOCAL_EMBEDDING_MODEL } from "@/lib/memory-shar
  * tell "not installed" from "could not ask".
  */
 export async function GET() {
-  const supported = !openclawIsAbsent();
-  const [provisioning, unit] = supported
-    ? await Promise.all([
-        getEmbedProvisioningStatus().catch(() => null),
-        readUnitState(EMBED_UNIT, "system").catch(() => null),
-      ])
-    : [null, null];
+  // Always measured now. This used to answer `supported: false` with every
+  // field null on the Hermes SKU, because the index the model fed was
+  // OpenClaw's; ClawBox owns one on that edition too, so the embedder is real
+  // on every box. The field stays in the shape — the wizard reads it, and an
+  // older client would take its absence for `false`.
+  const [provisioning, unit] = await Promise.all([
+    getEmbedProvisioningStatus().catch(() => null),
+    readUnitState(EMBED_UNIT, "system").catch(() => null),
+  ]);
   return NextResponse.json(
     {
-      supported,
+      supported: true,
       installed: !!provisioning?.installed,
       binaryAvailable: !!provisioning?.binaryAvailable,
       modelAvailable: !!provisioning?.modelAvailable,

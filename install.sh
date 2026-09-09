@@ -4070,13 +4070,19 @@ ensure_embed_model_cached() {
 # Gated on the OpenClaw harness, unlike step_llamacpp_model: memory search is
 # an OpenClaw feature, and a hermes box has no core to point at the 639 MB
 # this would fetch.
+# Cache the memory-search GGUF.
+#
+# NO HARNESS GATE HERE, deliberately, and the gate moved to the CALL SITES
+# rather than away: `/setup-api/embed/install` dispatches this very step as
+# `--step embed_model`, and on the SKU with no OpenClaw that is the Memory
+# Shard wizard's own provisioning click — ClawBox owns the index there
+# (src/lib/memory-index-local.ts) and the model is what it embeds with. What
+# must NOT happen is a flash spending 639 MB on a box that may never switch
+# the feature on, so the main install flow keeps asking `has_openclaw_harness`
+# before it calls this.
 step_embed_model() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping the memory-search model cache"
-    return 0
-  fi
-  if ! has_openclaw_harness; then
-    echo "  Memory search is an OpenClaw feature; this edition does not include it."
     return 0
   fi
   # `hf` is installed by step_llamacpp_install. Without it there is nothing
@@ -10044,8 +10050,14 @@ step_ollama_install
 log "Installing llama.cpp runtime..."
 step_llamacpp_install
 
-log "Caching the memory-search model..."
-step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
+# Only where the harness is going to use it unprompted. On the Hermes SKU the
+# model is fetched by the Memory Shard wizard instead (embed/install dispatches
+# --step embed_model), so a box whose owner never opens that app never spends
+# the 639 MB.
+if has_openclaw_harness; then
+  log "Caching the memory-search model..."
+  step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
+fi
 
 log "Installing Chromium..."
 step_chromium_install

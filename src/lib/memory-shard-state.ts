@@ -72,6 +72,17 @@ export const LOCAL_EMBEDDING_BYTES = 639_000_000;
 /** Where OpenClaw keeps the owner's extra folders. */
 export const EXTRA_PATHS_CONFIG_PATH = "memory.search.extraPaths";
 
+/**
+ * Where the SAME list lives on the edition that has no OpenClaw.
+ *
+ * Not a mirror of the line above — the two are never both in play. On OpenClaw
+ * the list is read and written where the indexer reads it, which is
+ * `memory.search.extraPaths`; on the Hermes SKU ClawBox is the indexer
+ * (`src/lib/memory-index-local.ts`), so its own store is what governs. One
+ * copy either way, and no box has two.
+ */
+export const MEMORY_SHARD_SOURCES_KEY = "memory_shard_sources";
+
 /** Documents ClawBox can turn into Markdown for the indexer. */
 export const EXTRACTABLE_EXTENSIONS = [".pdf", ".docx", ".odt", ".rtf", ".txt"] as const;
 

@@ -12,7 +12,6 @@ import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "@/lib/llamacpp";
 import { getLlamaCppProvisioningStatus, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
 import { getEmbedProvisioningStatus } from "@/lib/embed-server";
 import { peekMemoryStatus } from "@/lib/clawkeep-memory";
-import { openclawIsAbsent } from "@/lib/openclaw-config";
 
 /** Is llama.cpp answering right now? Same probe the llamacpp status route uses. */
 async function llamaCppRunning(baseUrl: string): Promise<string | null> {
@@ -30,17 +29,21 @@ async function llamaCppRunning(baseUrl: string): Promise<string | null> {
 async function probes(): Promise<InventoryProbes> {
   const llamaBase = getLlamaCppBaseUrl();
   const alias = getDefaultLlamaCppModel();
-  // The memory index belongs to OpenClaw and is read by spawning its CLI. On
-  // the Hermes SKU that binary does not exist, so the call could only fail —
-  // and the failure was swallowed into a probe indistinguishable from "the
-  // embedding provider is down", which is the wrong thing to tell a customer
-  // whose box was never sold with one. Don't ask; report the edition instead.
-  const embeddingsSupported = !openclawIsAbsent();
+  // Every edition has a memory index now — OpenClaw's where there is an
+  // OpenClaw, ClawBox's own where there is not (`memory-index-local.ts`) —
+  // over the same embedder, which was always installed on every SKU. This read
+  // `!openclawIsAbsent()` while the index it reported on could only be
+  // OpenClaw's: asking there could only fail, and the failure was swallowed
+  // into a probe indistinguishable from "the embedding provider is down",
+  // which is the wrong thing to tell a customer whose box never had one. The
+  // `supported: false` branch below is kept — the field is the route's
+  // contract and an older client reads it — but no shipping SKU takes it.
+  const embeddingsSupported = true;
   // Each probe is independently guarded: an engine that cannot be reached must
   // cost only its own row, never the whole inventory.
-  // The memory reading is PEEKED, never awaited: it costs an OpenClaw process
-  // boot, and this route is polled every five seconds by a panel that must
-  // open at once. A cold peek starts that probe and answers null.
+  // The memory reading is PEEKED, never awaited: on the OpenClaw arm it costs
+  // a process boot, and this route is polled every five seconds by a panel
+  // that must open at once. A cold peek starts that probe and answers null.
   const memory = embeddingsSupported ? peekMemoryStatus() : null;
   const [provisioning, servedModel, configuredAlias, embedProvisioning] = await Promise.all([
     getLlamaCppProvisioningStatus(alias).catch(() => null),
