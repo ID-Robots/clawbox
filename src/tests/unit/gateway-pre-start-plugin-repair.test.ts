@@ -467,6 +467,21 @@ ${CONFIG_SET_STUB}`);
     expect(row.disabled).toBe(true);
   });
 
+  it("keeps an install row's wording an install row's, when the consent cannot be confirmed", () => {
+    // The row keeps its stage, so the sentence has to keep it too: "the plugin
+    // is installed" over a row whose Retry is about to reinstall the payload
+    // contradicts itself on the one screen the owner reads.
+    seedRow("discord", { stage: "install", spec: "@openclaw/discord@2026.8.1" });
+    stubRealCli();
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", OC_CONSENT_PENDING: "discord" });
+    expect(r.status).toBe(0);
+    const row = marker().discord;
+    expect(row.stage).toBe("install");
+    expect(row.reason).toContain("could not be made loadable");
+    expect(row.reason).not.toContain("The plugin is installed but");
+    expect(row.spec).toBe("@openclaw/discord@2026.8.1");
+  });
+
   it("re-attempts one row per boot, the one attempted longest ago", () => {
     // The whole bound, and the anti-starvation rule in one: a blocking
     // ExecStartPre under TimeoutStartSec=600 cannot afford three of these, and

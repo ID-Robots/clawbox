@@ -5208,9 +5208,17 @@ REATTEMPTPY
         else
           REPAIR_DETAIL="The core could not confirm the consent after a fresh attempt."
         fi
+        # The row keeps its own stage, so the sentence has to match it: an
+        # `install` row re-filed with "the plugin is installed" would contradict
+        # itself, over a Retry that is about to reinstall the payload.
+        if [ "$REPAIR_STAGE" = "install" ]; then
+          REPAIR_LEAD="The plugin could not be made loadable, so the gateway would refuse to start with it enabled."
+        else
+          REPAIR_LEAD="The plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled."
+        fi
         echo "  WARN: could not confirm $REPAIR_PLUGIN plugin capabilities after the re-attempt" >&2
         clawbox_plugin_reattempt_failed "$REPAIR_PLUGIN" "$REPAIR_STAGE" \
-          "The plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled. $REPAIR_DETAIL" \
+          "$REPAIR_LEAD $REPAIR_DETAIL" \
           "$(clawbox_managed_plugin_spec "$REPAIR_PLUGIN")"
       else
         # `clawbox_plugin_repair_clear` is the whole repair from here: the row
