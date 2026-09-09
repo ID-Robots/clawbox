@@ -208,10 +208,16 @@ export default function SpokenReplyPlayer({
     return () => { current = false }
   }, [src])
 
+  // Held in a ref so the callback ref itself is STABLE: a caller that passes an
+  // inline arrow (the Voice tab does) would otherwise hand React a new
+  // function every render, and React detaches and re-attaches a ref whose
+  // identity changed — calling the caller back with null on every commit.
+  const onAudioElementRef = useRef(onAudioElement)
+  useEffect(() => { onAudioElementRef.current = onAudioElement }, [onAudioElement])
   const attach = useCallback((element: HTMLAudioElement | null) => {
     audioRef.current = element
-    onAudioElement?.(element)
-  }, [onAudioElement])
+    onAudioElementRef.current?.(element)
+  }, [])
 
   // The element is the source of truth for all four numbers on screen: it is
   // also driven from outside (the Voice tab calls play() on it, the chat
