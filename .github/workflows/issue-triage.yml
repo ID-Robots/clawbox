@@ -14,6 +14,11 @@ concurrency:
 jobs:
   triage:
     runs-on: ubuntu-latest
+    # Protected by exact branch-type main/beta deployment policies. A PR
+    # merge ref cannot enter this environment, even if its YAML names it.
+    # Populate from owned credentials and remove repo-scoped copies only
+    # after both main and beta consumers are wired and verified.
+    environment: clawreview
     # Job-scoped (not workflow-scoped) so future jobs don't inherit write
     # access: the triage script labels + comments via GH_TOKEN.
     permissions:

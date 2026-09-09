@@ -50,6 +50,10 @@ jobs:
     # Budget: native arm64 finishes in 10-15 min; qemu is 30-40 min; give
     # headroom for docker pulls on cold runners.
     timeout-minutes: 90
+    # e2e-pull-request is empty. e2e-credentials permits only branch-type
+    # main/beta, so untrusted PR merge refs cannot read provider secrets.
+    # Remove repository-level copies after migration; a step if is not a fence.
+    environment: ${{ github.event_name == 'pull_request' && 'e2e-pull-request' || 'e2e-credentials' }}
     env:
       CLAWBOX_PORT: "8080"
       # Default target for the in-app updater test. On PRs targeted at this
@@ -69,6 +73,7 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Checkout repository
         if: ${{ github.event_name != 'pull_request' }}
@@ -78,6 +83,7 @@ jobs:
           # updater can `git fetch origin <branch>`. Fetch tags too since the
           # version check polls `git ls-remote --tags`.
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Show Docker + runner info
         run: |
@@ -99,6 +105,9 @@ jobs:
       # happens to contain the EOF token or other heredoc-breaking bytes
       # can't truncate the resulting .env file.
       - name: Write .env.test
+        # Provider-free PR coverage still runs. The updater target is supplied
+        # independently by the job environment, not by this secrets file.
+        if: ${{ github.event_name != 'pull_request' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
