@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { readTunnelUrl, startTunnelService } from "@/lib/cloudflared";
 import { isInternalRequest } from "@/lib/internal-token";
 import { applyDeferredLanguagePersona } from "@/lib/language-persona";
+import { refreshCatalogIfDue } from "@/lib/hermes-model-options";
 import { pushHeartbeatTick } from "@/lib/portal-heartbeat";
 import { requireSession } from "@/lib/route-auth";
 import { checkTunnelLiveness, markRestarted, mayRestart } from "@/lib/tunnel-liveness";
@@ -62,6 +63,24 @@ export async function GET(request: Request) {
   // applyDeferredLanguagePersona), and it never throws, so it cannot turn a
   // tick into the 500 that would make the systemd unit flap.
   await applyDeferredLanguagePersona();
+
+  // Keep the model picker's list from ageing out, for the same reason and on
+  // the same ride: nothing else on the box forces the harness to go and re-read
+  // what each provider actually serves. Hermes' own caches will carry a list
+  // forward for up to seven days, and ClawBox only ever busts them when the
+  // owner clicks Refresh — so `claude-opus-5` and `claude-fable-5-1` were
+  // missing from a box whose credential listed them live (TASK-781).
+  //
+  // NOT AWAITED, deliberately, like `pushHeartbeatTick` below. This unit runs
+  // `curl --max-time 10`, and the dead-tunnel path underneath already spends up
+  // to 7.5 s of that on DNS (see tunnel-liveness.ts) — putting a dashboard
+  // round-trip in front of it would push the tunnel repair past curl's deadline
+  // on exactly the tick that performs it, and `SuccessExitStatus` would swallow
+  // the truncation. `refreshCatalogIfDue` never rejects, so there is no
+  // unhandled rejection to catch; it decides in two cheap reads on the 287
+  // ticks a day that are not the one, and no-ops on an OpenClaw box, whose
+  // catalogue route already re-enumerates by itself on the read path.
+  void refreshCatalogIfDue();
 
   const tunnelUrl = await readTunnelUrl();
   const liveness = await checkTunnelLiveness(tunnelUrl);

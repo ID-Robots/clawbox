@@ -31,7 +31,9 @@ import {
   hermesDashboardUnitState,
   type HermesDashboardUnitState,
 } from "@/lib/hermes-dashboard-control";
-import { get } from "@/lib/config-store";
+import { get, set } from "@/lib/config-store";
+import { getActiveHarness } from "@/lib/harness";
+import { createSerialLock } from "@/lib/serial-lock";
 import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
 import { pickedClawboxAiModelIdAmong, readExplicitModelPicks } from "@/lib/explicit-model-pick";
 import {
@@ -205,6 +207,16 @@ export interface ProviderScope {
 export interface ScopedModelsReply extends ProviderScope {
   reasoning: string;
   savedPair: { provider: string; model: string };
+  /**
+   * When this box last got the harness to re-read every provider's list, and
+   * whether that was over a day ago — NOT the age of this process's copy, which
+   * is what {@link ProviderScope.fetchedAt} and `stale` describe. Both are
+   * `null` where nothing has recorded a check — not checked, never "old".
+   * See {@link CatalogRefreshMark} for what a check does and does not prove.
+   * TASK-781.
+   */
+  catalogCheckedAt: number | null;
+  catalogStale: boolean | null;
 }
 
 // ── L1 cache (in-process, SWR) ───────────────────────────────────────────────
@@ -903,8 +915,7 @@ export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise
     // a click-spammer is denied the EXPENSIVE upstream sweep without also being
     // handed a placeholder the rule below would have gone back for.
     if (now - lastExplicitRefreshAt >= EXPLICIT_REFRESH_MIN_GAP_MS || !cached) {
-      lastExplicitRefreshAt = now;
-      return load(true);
+      return forceCatalogRefresh(now, { unattended: false });
     }
   }
 
@@ -977,6 +988,261 @@ export async function getModelOptions(opts: { refresh?: boolean } = {}): Promise
 export function cachedModelOptions(): ModelOptionsPayload | null {
   if (!cached) return null;
   return Date.now() - cached.fetchedAt < STALE_MS ? cached : null;
+}
+
+// ── The catalogue's own age, and who keeps it young (TASK-781) ───────────────
+//
+// NOTHING ABOVE THIS LINE EVER REFRESHES THE MODEL LIST BY ITSELF.
+//
+// `fetchedAt`/`stale` on the payload describe THIS process's 60-second L1
+// cache, not the age of the model ids in it. Behind that cache sit two more,
+// and both can carry a list forward for days:
+//   - Hermes' `provider_models_cache.json`: 1 h TTL, but a SEVEN DAY
+//     stale-serve window (`_PROVIDER_MODELS_STALE_SERVE_MAX`), and its
+//     background SWR refresh only rewrites a row when the live fetch comes
+//     back non-empty — one failed re-fetch keeps the old ids with the entry's
+//     `at` unmoved.
+//   - `load(false)` above re-asks the dashboard but carries no `refresh=true`,
+//     so it re-reads that same disk row rather than busting it.
+// Only `?refresh=1` on the models route sends `refresh=true`, and it is
+// session-gated: a human had to click Refresh. Measured on the Hermes box —
+// eleven ids from 12:14 in the picker while the same credential listed
+// thirteen live, `claude-opus-5` and `claude-fable-5-1` missing until a click.
+//
+// THE HARNESS'S OWN REFRESH is what this drives, not a re-implementation:
+// `GET /api/model/options?refresh=true` on the Hermes dashboard, which is
+// exactly what `clear_provider_models_cache` + a live per-provider `/v1/models`
+// sweep is reachable as. (`hermes model --refresh` is the same sweep, but
+// `--refresh` is a modifier on the INTERACTIVE picker — see this file's header
+// — so it cannot be driven from a server.)
+
+/** Config-store key for {@link CatalogRefreshMark}. Beside `provider_verified_at`,
+ *  and for the same reason: it has to survive a restart. */
+export const CATALOG_REFRESH_KEY = "hermes_catalog_refreshed_at";
+
+/** Past this, the model list is old enough to say so. The owner's complaint was
+ *  a list a day stale; a catalogue changes on release timescales, so a day is
+ *  both the promise ("at least daily") and the honesty bound. */
+export const CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The floor under RETRIES, which is a different question from the cadence.
+ *
+ * A refresh that fails leaves the mark where it was, so the catalogue stays
+ * due — and the driver below is called from a five-minute timer. Without this
+ * floor a box whose dashboard is down would sweep every authenticated
+ * provider's `/v1/models` 288 times a day. One attempt an hour still recovers
+ * a transient outage well inside the daily promise.
+ */
+const CATALOG_RETRY_MIN_GAP_MS = 60 * 60 * 1000;
+
+/**
+ * When this box last successfully ASKED the harness to re-read every
+ * provider's list, and when the unattended driver last tried. `null` = never.
+ *
+ * WHAT `checkedAt` DOES NOT MEAN, precisely: that every provider's upstream
+ * `/v1/models` answered. Hermes replies 200 to `?refresh=true` whether or not
+ * its own per-provider sweep succeeded — a provider whose key has expired
+ * keeps its previous ids and Hermes serves them — and the picker envelope
+ * carries NO per-provider timestamp to say otherwise (measured on v0.21.1: the
+ * row is `{slug, name, is_current, is_user_defined, models, total_models,
+ * source}`). So this is the age of the CHECK, which is what this box can
+ * honestly observe, and the fields are named for that.
+ */
+export interface CatalogRefreshMark {
+  checkedAt: number | null;
+  attemptedAt: number | null;
+}
+
+const NEVER: CatalogRefreshMark = { checkedAt: null, attemptedAt: null };
+
+/**
+ * The store's write is a read of the WHOLE config, one field changed, and a
+ * rename back — atomic for the file, not for the update. Two forced refreshes
+ * that overlap (both callers of one single-flighted `load(true)` reach the
+ * bookkeeping together) would each read the same base, and the second rename
+ * would drop whatever another writer had saved in between — a bot token, the
+ * mailbox password. The house pattern, and the one `recordProviderVerified`
+ * already wraps its own read-modify-write in.
+ */
+const markLock = createSerialLock();
+
+function normalizeMark(raw: unknown): CatalogRefreshMark {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return NEVER;
+  const rec = raw as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return { checkedAt: num(rec.checkedAt), attemptedAt: num(rec.attemptedAt) };
+}
+
+/**
+ * Never throws: a store that cannot be read means "we do not know when this
+ * list was last refreshed", which is the same answer as "never" — and the safe
+ * one, because it reads as stale rather than as fresh.
+ */
+export async function readCatalogRefreshMark(): Promise<CatalogRefreshMark> {
+  try {
+    return normalizeMark(await get(CATALOG_REFRESH_KEY));
+  } catch {
+    return NEVER;
+  }
+}
+
+/**
+ * Whether the unattended check is DUE. A box that has never recorded one is due
+ * immediately — that first sweep is what gives every later answer an anchor.
+ */
+export function catalogCheckDue(mark: CatalogRefreshMark, now = Date.now()): boolean {
+  return mark.checkedAt === null || now - mark.checkedAt >= CATALOG_MAX_AGE_MS;
+}
+
+/**
+ * How old the list is, FOR THE OWNER — and `null` where this box cannot say.
+ *
+ * NOT the same question as `catalogRefreshDue`, deliberately. "Nothing has ever
+ * recorded a refresh here" is not evidence that the list is old: on a box in
+ * its first five minutes, or one restored from a backup, Hermes' own catalogue
+ * may have been fetched moments ago. Painting that as stale is the false-
+ * failure class, and this route already refuses exactly that shape one field
+ * away — `verified` stays null for a provider nothing has exercised rather than
+ * reporting `false`, so an offline box is not shown a broken credential.
+ *
+ * COMPUTED AT READ TIME, never baked into a cached payload: a payload built at
+ * 23 h old would otherwise still call itself fresh two hours later, from the L1
+ * cache, with no one the wiser — the probe-once class.
+ */
+export function catalogStaleness(mark: CatalogRefreshMark, now = Date.now()): boolean | null {
+  if (mark.checkedAt === null) return null;
+  return now - mark.checkedAt >= CATALOG_MAX_AGE_MS;
+}
+
+/**
+ * Remember that a FORCED refresh happened, and whether it landed.
+ *
+ * THE ONLY WRITER, and it is called from `getModelOptions` rather than from the
+ * daily driver below, because the driver is not the only path that busts
+ * Hermes' disk cache: the owner's Refresh click (`?refresh=1`) and every
+ * credential write that goes through `hermes-cloud-provider` do the same work.
+ * Recording only our own would have reported a catalogue the owner had just
+ * refreshed by hand as a day stale — a false failure over an operation that
+ * succeeded.
+ *
+ * Never throws: this is bookkeeping about a refresh, not the refresh.
+ */
+async function noteForcedRefresh(
+  succeeded: boolean,
+  now: number,
+  { unattended }: { unattended: boolean },
+): Promise<void> {
+  try {
+    await markLock(async () => {
+      const mark = await readCatalogRefreshMark();
+      await set(CATALOG_REFRESH_KEY, {
+        // A failure leaves the age exactly where it was. Advancing it would hide
+        // a week-old list behind a fresh timestamp for another day.
+        checkedAt: succeeded ? now : mark.checkedAt,
+        // ONLY the driver's own attempts. `attemptedAt` exists to space out the
+        // driver's RETRIES and governs nothing else — stamping it from the
+        // owner's Refresh click would mean an owner clicking Refresh on a box
+        // with a flaky dashboard silently suppressed, for an hour, the
+        // automatic recovery they were trying to trigger.
+        attemptedAt: unattended ? now : mark.attemptedAt,
+      } satisfies CatalogRefreshMark);
+    });
+  } catch {
+    // A store we cannot write means the next tick tries again an hour early.
+    // Cheap, and the alternative — letting this reject — would take a heartbeat
+    // down with it.
+  }
+}
+
+/**
+ * Did this payload come from a live dashboard read, or is it the better copy we
+ * already had?
+ *
+ * `degraded` is the whole difference. The downgrade guard returns the KEPT
+ * payload when a refresh fails, and its `source` is still `dashboard` — reading
+ * that as a refresh is the false-success class exactly.
+ */
+function isLiveAnswer(payload: ModelOptionsPayload | null): boolean {
+  return payload !== null && payload.source === "dashboard" && !payload.degraded;
+}
+
+/**
+ * ONE forced refresh, and the bookkeeping that goes with it.
+ *
+ * Both callers land here — the owner's Refresh click through
+ * `getModelOptions({refresh:true})`, and the unattended driver below — so the
+ * age this box reports moves for whoever caused it, and the two can never
+ * record it differently. It also takes the explicit-refresh throttle out of the
+ * driver's answer: routing the driver through the public `getModelOptions`
+ * meant a click ten seconds earlier made it fall through to the plain path and
+ * still report `"refreshed"`, with nothing refreshed and the mark untouched.
+ */
+async function forceCatalogRefresh(
+  now: number,
+  opts: { unattended: boolean },
+): Promise<ModelOptionsPayload> {
+  lastExplicitRefreshAt = now;
+  const payload = await load(true);
+  await noteForcedRefresh(isLiveAnswer(payload), now, opts);
+  return payload;
+}
+
+export type CatalogRefreshOutcome =
+  /** Not a Hermes box — there is no dashboard to ask. */
+  | "skipped"
+  /** Checked less than `CATALOG_MAX_AGE_MS` ago. */
+  | "not-due"
+  /** Due, but the driver's last attempt was inside `CATALOG_RETRY_MIN_GAP_MS`. */
+  | "throttled"
+  /** The harness was asked to re-read its providers' lists and answered. */
+  | "refreshed"
+  /** Asked and did not get a live answer. The mark is NOT advanced. */
+  | "failed";
+
+/**
+ * Ask the harness to re-read every authenticated provider's model list, at most
+ * once a day, from something that runs with nobody watching.
+ *
+ * Its one caller is the five-minute heartbeat tick — the only thing on a
+ * running box that fires without anyone touching it, which is why the deferred
+ * language persona already rides it. Cheap on the 287 ticks a day that are not
+ * the one: an edition read and a config-store read decide, and both stop there.
+ *
+ * NOT AWAITED by that caller, and it must stay that way. The tick's own unit
+ * runs `curl --max-time 10`, and `checkTunnelLiveness` already documents a
+ * 7.5 s worst case inside that budget on precisely the dead-tunnel path that
+ * restarts the tunnel — so a slow dashboard added in front of it would push the
+ * repair past the deadline, where `SuccessExitStatus=0 7 22 28` would report
+ * the truncated tick as a success.
+ *
+ * NEVER THROWS and never rejects, so a bare `void` call cannot become an
+ * unhandled rejection.
+ */
+export async function refreshCatalogIfDue(now = Date.now()): Promise<CatalogRefreshOutcome> {
+  try {
+    // GATED ON THE HARNESS, and here rather than at the call site, because the
+    // caller is the edition-agnostic heartbeat and this is the one function in
+    // it that is about Hermes. On an OpenClaw box there is no Hermes dashboard
+    // to ask — and its own catalogue does not need this: that route already
+    // re-enumerates on the read path once its cache passes six hours, with no
+    // click and no session (see setup-api/ai-models/catalog/route.ts).
+    if ((await getActiveHarness()) !== "hermes") return "skipped";
+
+    const mark = await readCatalogRefreshMark();
+    if (!catalogCheckDue(mark, now)) return "not-due";
+    if (mark.attemptedAt !== null && now - mark.attemptedAt < CATALOG_RETRY_MIN_GAP_MS) {
+      return "throttled";
+    }
+
+    return isLiveAnswer(await forceCatalogRefresh(now, { unattended: true }))
+      ? "refreshed"
+      : "failed";
+  } catch {
+    // Quiet on failure, by contract. The next tick past the retry floor asks
+    // again; nothing on screen changes because nothing on screen was promised.
+    return "failed";
+  }
 }
 
 // ── Scoping (REQ 1) ──────────────────────────────────────────────────────────
