@@ -9,11 +9,13 @@ import { requireSession } from "@/lib/route-auth";
 import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import {
+  catalogStaleness,
   getModelOptions,
   invalidateModelOptions,
   isAllowedProvider,
   isPairAllowed,
   isSafeModelId,
+  readCatalogRefreshMark,
   shouldEnforcePairing,
   scopeFromPayload,
   type HermesModelOption,
@@ -100,6 +102,25 @@ export async function GET(request: Request) {
     await reconcileClawaiModelsWithHermes();
   }
 
+  // When this box last got the harness to re-read its providers' lists, as
+  // opposed to how old this process's copy of the answer is. `fetchedAt`/
+  // `stale` below answer only the second question — they are this server's
+  // 60-second L1 cache — so a list Hermes has been carrying forward for a week
+  // reports `fetchedAt` two seconds ago and `stale: false`. TASK-781.
+  //
+  // READ AFTER `getModelOptions`, never beside it. `?refresh=1` performs the
+  // check inside that call, so a mark read up here would be the PRE-refresh one
+  // and the one action that fixes staleness would answer `catalogStale: true`
+  // — a false failure over an operation that had just succeeded.
+  //
+  // Read per request rather than baked into the cached payload, for the other
+  // direction: a payload built at 23 h old would otherwise still call itself
+  // fresh two hours later, from the L1 cache.
+  const catalogAge = async () => {
+    const mark = await readCatalogRefreshMark();
+    return { catalogCheckedAt: mark.checkedAt, catalogStale: catalogStaleness(mark) };
+  };
+
   try {
     if (provider) {
       const scoped = await getModelOptions({ refresh });
@@ -115,6 +136,7 @@ export async function GET(request: Request) {
         ...(await scopeFromPayload(scoped, provider)),
         reasoning: scoped.reasoning,
         savedPair: scoped.current,
+        ...(await catalogAge()),
       };
       return NextResponse.json(reply);
     }
@@ -171,6 +193,7 @@ export async function GET(request: Request) {
       source: payload.source,
       stale: payload.stale,
       fetchedAt: payload.fetchedAt,
+      ...(await catalogAge()),
       ...(payload.degraded ? { degraded: payload.degraded } : {}),
       ...(refreshDenied ? { refreshDenied: true } : {}),
     });
