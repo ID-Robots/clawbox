@@ -561,6 +561,23 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     }
   });
 
+  it("re-attempts exactly those channel plugins, plus deepseek, at the next boot", () => {
+    // TASK-785. The boot re-attempt is what stops a transient consent failure
+    // outliving itself, and it has its own list — so a channel added to the
+    // panel and forgotten here is a channel that can be switched off by one bad
+    // morning and never switched back on without a click. `deepseek` joins the
+    // channels because ClawBox AI rides on it and the boot-without switches it
+    // off the same way; `clawbox-email-directives` is deliberately absent,
+    // because `install_clawbox_hook_plugin` re-enables it unconditionally later
+    // in the same run and a re-attempt would be racing it.
+    const src = readFileSync(SCRIPT, "utf-8");
+    const tuple = /\nREATTEMPTABLE = \(([^)]*)\)/.exec(src);
+    expect(tuple, "REATTEMPTABLE was not found").not.toBeNull();
+    const ids = [...tuple![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    expect(ids.sort()).toEqual(["deepseek", ...Object.keys(OFFICIAL_CHANNEL_PLUGINS)].sort());
+    expect(ids).not.toContain("clawbox-email-directives");
+  });
+
   it("falls back to the unpinned spec only when the installed core is unknown", () => {
     // Pinned to the INSTALLED core, not to the checkout's pin file: this script
     // never installs the core, so a box that pulled new ClawBox code before its
