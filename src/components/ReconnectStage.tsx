@@ -1,7 +1,7 @@
 "use client";
 
 import { createPortal } from "react-dom";
-import { CLAWBOX_CRAB_DATA_URI } from "@/lib/clawbox-crab-inline";
+import CrabWaitMark from "./CrabWaitMark";
 
 export interface ReconnectStageProps {
   /** Ordered step labels shown as a checklist under the animation. */
@@ -65,24 +65,11 @@ export default function ReconnectStage({
   // Palette-token cyan for the wizard's own steps, generic emerald otherwise.
   // `--cyan-bright` is the DONE colour every other wizard surface uses.
   const cyan = doneTone === "cyan";
-  const checkStroke = cyan ? "var(--cyan-bright)" : "#22c55e";
   const stepDoneBadge = cyan
     ? "bg-[var(--cyan-bright)]/20 text-[var(--cyan-bright)]"
     : "bg-emerald-500/20 text-emerald-400";
   const stepDoneText = cyan ? "text-[var(--cyan-bright)]" : "text-emerald-400";
 
-  // Ambient accent: Hermes waits in the agent's green, OpenClaw in coral.
-  // Full literal class strings on both branches so Tailwind's scanner sees
-  // them; the #4ade80 fallback mirrors --agent-live for safety only.
-  const ringOuter = hermes
-    ? "border-[var(--agent-live,#4ade80)]/20"
-    : "border-[var(--coral-bright)]/20";
-  const ringInner = hermes
-    ? "border-[var(--agent-live,#4ade80)]/10"
-    : "border-[var(--coral-bright)]/10";
-  const orbitDot = hermes
-    ? "bg-[var(--agent-live,#4ade80)]"
-    : "bg-[var(--coral-bright)]";
   const spinnerRing = hermes
     ? "border-[var(--agent-live,#4ade80)]"
     : "border-[var(--coral-bright)]";
@@ -111,50 +98,7 @@ export default function ReconnectStage({
       `}</style>
 
       <div className="flex flex-col items-center gap-7 max-w-md w-full text-center my-auto">
-        <div className="relative w-28 h-28 flex items-center justify-center">
-          <div className={`absolute inset-0 rounded-full border-2 ${ringOuter}`} style={{ animation: "reconnect-pulse-ring 2s ease-in-out infinite" }} />
-          <div className={`absolute inset-2 rounded-full border ${ringInner}`} style={{ animation: "reconnect-pulse-ring 2s ease-in-out infinite 0.45s" }} />
-
-          {!completed && [0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="absolute inset-0 flex items-center justify-center"
-              style={{ animation: `reconnect-orbit ${3 + i * 0.45}s linear infinite`, animationDelay: `${i * 0.35}s` }}
-            >
-              <div className={`w-2 h-2 rounded-full ${orbitDot}`} style={{ opacity: 0.35 + i * 0.2 }} />
-            </div>
-          ))}
-
-          {completed ? (
-            <svg width="52" height="52" viewBox="0 0 56 56" fill="none" className="reconnect-fade-in">
-              <circle cx="28" cy="28" r="25" stroke={checkStroke} strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "reconnect-check-circle 0.6s ease-out 0.1s forwards" }} />
-              <path d="M17 28l7 7 15-15" stroke={checkStroke} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "reconnect-check-draw 0.4s ease-out 0.5s forwards" }} />
-            </svg>
-          ) : (
-            <div
-              className="relative z-10 flex h-16 w-16 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] reconnect-fade-in"
-              style={{ animation: "reconnect-bob 2.4s ease-in-out infinite" }}
-            >
-              {/* Inline data URI, NOT `next/image` or `/clawbox-crab.png`.
-                  This overlay is on screen exactly while the box's server is
-                  restarting (update reboot, AP-to-LAN handoff), so any src
-                  pointing back at the server — most of all the
-                  `/_next/image?url=...` request `next/image` rewrites it to —
-                  fetches from a dead socket and leaves the browser's
-                  broken-image placeholder in the ring. See
-                  src/lib/clawbox-crab-inline.ts. */}
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={CLAWBOX_CRAB_DATA_URI}
-                alt="ClawBox"
-                width={52}
-                height={52}
-                className="h-[52px] w-[52px] object-contain"
-                data-testid="reconnect-logo"
-              />
-            </div>
-          )}
-        </div>
+        <CrabWaitMark completed={completed} hermes={hermes} doneTone={doneTone} />
 
         <div className="reconnect-fade-in" style={{ animationDelay: "0.2s" }}>
           <h2 className="text-lg font-bold text-[var(--text-primary)] mb-1">{title}</h2>

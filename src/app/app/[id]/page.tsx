@@ -22,6 +22,7 @@ import type { InstalledMeta } from "@/lib/store-categories";
 import { HARNESS_ONLY_APP_IDS, hiddenAppIdsForHarness } from "@/lib/desktop-app-editions";
 import type { StoreApp } from "@/components/AppStore";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
+import CrabWaitMark from "@/components/CrabWaitMark";
 
 const TerminalTabs = dynamic(() => import("@/components/TerminalTabs"), { ssr: false });
 const ChatApp = dynamic(() => import("@/components/ChatApp"), { ssr: false });
@@ -397,7 +398,15 @@ export default function StandaloneAppPage() {
   // Answers the KV requests a framed webapp posts — see src/lib/webapp-kv-bridge.ts.
   useEffect(() => attachWebappKvBridge(), []);
 
-  const loading = <div className="h-full flex items-center justify-center text-white/40 text-sm">Loading…</div>;
+  // The device's own wait mark, not a bare word. Same reason as OpenClawApp:
+  // ReconnectStage owns the FULL-SCREEN waits and portals to document.body,
+  // which would black out everything behind this page.
+  const loading = (
+    <div className="h-full flex flex-col items-center justify-center gap-4">
+      <CrabWaitMark size={88} />
+      <span className="text-white/40 text-sm">Loading…</span>
+    </div>
+  );
   const notFound = (
     <div className="h-full flex items-center justify-center text-white/50 text-sm">
       App not found: {id}

@@ -65,8 +65,13 @@ describe("ReconnectStage offline logo", () => {
     // crab in an 87x128 image) had inside the 64px ring.
     expect(logo).toHaveAttribute("width", "52");
     expect(logo).toHaveAttribute("height", "52");
-    expect(logo.className).toContain("h-[52px]");
-    expect(logo.className).toContain("w-[52px]");
+    // Asserted as the rendered SIZE rather than as `h-[52px] w-[52px]`: the
+    // mark scales with its `size` prop now (CrabWaitMark), so the dimensions
+    // are computed and cannot be fixed Tailwind classes. 52px is still what a
+    // default-size overlay draws — the property this test is about — and it is
+    // pinned here in the one place that survives the mark being reused smaller.
+    expect(logo.style.width).toBe("52px");
+    expect(logo.style.height).toBe("52px");
     expect(logo.className).toContain("object-contain");
   });
 
