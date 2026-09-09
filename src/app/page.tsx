@@ -55,6 +55,7 @@ import {
   renderedWallpaperId as resolveRenderedWallpaperId,
 } from "@/lib/builtin-wallpapers";
 import { TOAST_EVENT } from "@/components/ToastHost";
+import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import {
   layoutIcons,
   layoutsEqual,
@@ -1812,6 +1813,19 @@ function ChromeDesktopInner() {
       polling = true;
       try {
         const res = await fetch("/setup-api/kv?key=ui:pending-actions");
+        // An update took the box while this desktop was open. The middleware
+        // redirects NAVIGATIONS to the updating page, and an open page makes
+        // none — so without this it stayed here, kept polling, and went blank
+        // when the rebuild stopped the web server under it; only a manual
+        // reload reached the screen built for this. Read off a request the
+        // desktop was making anyway, so no interval or endpoint exists for it.
+        //
+        // `replace`, not `assign`: the desktop this leaves is a page the
+        // middleware would bounce straight back, so it must not be in history.
+        if (res.headers.get(UPDATE_LOCK_HEADER) === "1") {
+          window.location.replace(UPDATING_PAGE);
+          return;
+        }
         if (res.ok) {
           // How old an entry is, judged on the one clock both sides agree on:
           // the response's own Date header, which is the BOX's clock — the same

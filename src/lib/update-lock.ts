@@ -118,8 +118,10 @@ function processStartTicks(pid: number): string | null {
  */
 const HOLDER_HEARTBEAT_MS = 20 * 60 * 1000;
 
-/** Where the owner is sent while the box updates. */
-export const UPDATING_PAGE = "/updating";
+// Re-exported so server callers keep one import for the lock. Both live in
+// update-constants.ts because this file opens with `import fs`, and a client
+// component reading either would drag Node's fs into the browser bundle.
+export { UPDATING_PAGE, UPDATE_LOCK_HEADER } from "./update-constants";
 
 /**
  * Take the lock. Answers whether it was actually taken.

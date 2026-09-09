@@ -7,7 +7,7 @@ import { isPublicGatewayAsset } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
 import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
 import { isSetupApiPath } from "@/lib/clawbox-namespaces";
-import { UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
+import { UPDATE_LOCK_HEADER, UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
@@ -587,10 +587,23 @@ export async function middleware(request: NextRequest) {
     // API surface answering a redirect with HTML is the defect #304 fixed.
     // Placed after the session check so an unauthenticated visitor still gets
     // the login page rather than a page whose only content needs a session.
-    if (isDesktopPagePath(pathname) && readConfigCached().updateInProgress) {
+    const updateInProgress = readConfigCached().updateInProgress;
+    if (isDesktopPagePath(pathname) && updateInProgress) {
       return NextResponse.redirect(new URL(UPDATING_PAGE, request.url));
     }
-    return NextResponse.next();
+    // A desktop that was ALREADY OPEN when the update began never navigates, so
+    // the redirect above never fires for it — it sat on the desktop until the
+    // rebuild stopped the web server under it, and the owner had to reload by
+    // hand to reach the page built for this. The lock is read here anyway, so
+    // say so on the way past: /setup-api is deliberately never redirected (an
+    // API answering a navigation redirect with HTML is defect #304), but a
+    // HEADER costs nothing and carries the same fact on requests the desktop is
+    // already making. src/app/page.tsx turns it into the navigation.
+    const res = NextResponse.next();
+    if (updateInProgress && isSetupApiPath(pathname)) {
+      res.headers.set(UPDATE_LOCK_HEADER, "1");
+    }
+    return res;
   }
 
   // 4b. No session — but a webapp the owner marked public (InstalledMeta
