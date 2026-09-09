@@ -90,6 +90,47 @@ const PIN = (PIN_LINE.match(/[0-9a-f]{40}/) ?? [""])[0];
 /** A well-formed commit that is not the pin: what an unpinned box looks like. */
 const OTHER_COMMIT = "0".repeat(39) + "1";
 
+/**
+ * The restart helper's own shape. Driven for real further down; these two are
+ * text assertions because what they pin is an ARITHMETIC invariant that a
+ * behavioural test could only express as a wall-clock threshold, and a timing
+ * assertion on a loaded CI runner is a flake waiting to happen.
+ */
+describe("hermes_dashboard_restart_after_install bounds one bounce with one budget", () => {
+  // Resilient on purpose: `extractShellFunction` THROWS for a function that is
+  // not there, and at describe-body scope that fails the whole FILE to collect
+  // — so a build without the helper would report "0 tests" instead of naming
+  // the cases that care. Answer "" instead and let each case fail on its own.
+  const RESTART_CODE = (() => {
+    try {
+      return shellCode(extractShellFunction("hermes_dashboard_restart_after_install"));
+    } catch {
+      return "";
+    }
+  })();
+
+  it("draws the blocking call and the wait after it from the SAME clock", () => {
+    // The two are phases of one restart. Giving each its own `budget` doubles
+    // the worst case — a hung `try-restart` spends it, then the poll spends it
+    // again — which is exactly the arithmetic the block comment reasons about
+    // against step_post_update's 900 s budget. The clock is started once,
+    // before the blocking call, and the wait is measured against it.
+    expect(RESTART_CODE, "the restart helper is missing from install.sh").not.toBe("");
+    expect(RESTART_CODE).toMatch(/SECONDS=0[\s\S]*timeout "\$budget" systemctl try-restart/);
+    expect(RESTART_CODE).toMatch(/\[ "\$SECONDS" -lt "\$budget" \]/);
+    // …and no second counter that would restart the clock.
+    expect(RESTART_CODE).not.toMatch(/waited=0/);
+  });
+
+  it("uses a shell builtin for elapsed time, not an external command", () => {
+    // `$(date +%s || echo 0)` answers 0 when date is missing or fails, and
+    // `now - started` is then 0 for ever — a wait that never ends, inside a
+    // root step. `SECONDS` is bash's own and cannot fail.
+    expect(RESTART_CODE, "the restart helper is missing from install.sh").not.toBe("");
+    expect(RESTART_CODE).not.toContain("date +%s");
+  });
+});
+
 describe("step_hermes_install treats a shim without an agent as NOT installed", () => {
   it("does not decide from the shim alone", () => {
     // The exact shape of the defect: a bare `[ -x .local/bin/hermes ]` test

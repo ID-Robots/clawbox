@@ -3529,9 +3529,13 @@ hermes_dashboard_restart_warn() {
 # DIFFERENT process is now the unit's main one, and the socket says that
 # process is serving. Neither alone is the bounce."
 hermes_dashboard_restart_after_install() {
-  local unit state before after settled waited budget settle restart_rc
+  local unit state before after settled budget settle restart_rc
 
-  # Bounds BOTH the blocking bounce and the wait for the replacement process.
+  # ONE budget for the whole bounce of ONE unit — the blocking call and the
+  # wait after it are two phases of the same restart, so the clock is not
+  # restarted between them. Giving each phase its own `budget` would double the
+  # worst case (a hung `try-restart` spends it, then the poll spends it again),
+  # which is what makes the arithmetic below wrong at a glance.
   #
   # `systemctl try-restart` without `--no-block` waits for the job to finish,
   # and this unit declares TimeoutStartSec=300 with systemd's default 90 s stop
@@ -3540,6 +3544,9 @@ hermes_dashboard_restart_after_install() {
   # it; the poll after it is for the cases where the call did NOT block to a
   # finished restart (it timed out, or it exited 0 having done nothing because
   # the unit stopped in the gap since the is-active probe).
+  #
+  # Worst case, therefore: `budget + settle` per unit, so ~246 s for the pair on
+  # the shipped defaults, before the warm-up's own 300 s.
   budget="${HERMES_DASHBOARD_RESTART_WAIT_S:-120}"
   # Digits, at most four of them, and at least one second. The hazard is not
   # errexit — the `-lt` below is the left side of a `||`, which errexit never
@@ -3579,6 +3586,10 @@ hermes_dashboard_restart_after_install() {
     before="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
 
     restart_rc=0
+    # bash's own second counter, reset here and read below: the elapsed time has
+    # to survive a `date` that is missing or fails, and an external command that
+    # answers 0 on failure would make the deadline below never arrive.
+    SECONDS=0
     timeout "$budget" systemctl try-restart "$unit" >/dev/null 2>&1 || restart_rc=$?
     # 124 is `timeout`'s: the job outlived the budget and may still be running,
     # which the checks below can still answer. Anything else is systemd saying
@@ -3588,7 +3599,6 @@ hermes_dashboard_restart_after_install() {
       continue
     fi
 
-    waited=0
     while :; do
       after="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
       # Empty (no systemd, a failed query), 0 (stopped, or still in an
@@ -3597,9 +3607,10 @@ hermes_dashboard_restart_after_install() {
         ''|0|"$before") ;;
         *) break ;;
       esac
-      [ "$waited" -lt "$budget" ] || break
+      # Against the SAME deadline the blocking call above drew from, so a
+      # `try-restart` that already spent the budget does not get it again.
+      [ "$SECONDS" -lt "$budget" ] || break
       sleep 1
-      waited=$((waited + 1))
     done
 
     # A new main process is HALF the answer. Both units are Type=simple, so
