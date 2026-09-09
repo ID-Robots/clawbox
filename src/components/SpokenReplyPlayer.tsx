@@ -201,7 +201,15 @@ async function readPeaks(src: string): Promise<number[] | null> {
           definitive = res.status < 500
           return null
         }
-        const bytes = await res.arrayBuffer()
+        let bytes: ArrayBuffer
+        try {
+          bytes = await res.arrayBuffer()
+        } catch {
+          // The headers arrived and the body did not — a connection dropped
+          // mid-clip is the moment, not the clip, exactly like the fetch above.
+          definitive = false
+          return null
+        }
         const bucketed = bucketPeaks(await decode.decodeAudioData(bytes))
         peaks = bucketed.length > 0 ? bucketed : null
       }

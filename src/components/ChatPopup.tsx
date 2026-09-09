@@ -233,7 +233,17 @@ interface ChatPopupProps {
  */
 export function speechEngineAvailable(engines: unknown): boolean | null {
   if (!Array.isArray(engines) || engines.length === 0) return null
-  return engines.some(engine => (engine as { configured?: unknown } | null)?.configured === true)
+  // An entry that does not STATE `configured` is silence too, and the rule
+  // above is about silence: a list of entries none of which says anything
+  // would otherwise read as "none of them is configured" and hide the button.
+  // The route's own type makes `configured` a required boolean, so this is
+  // hardening rather than a live path — but the code and the rule it is
+  // written under have to agree, or the next reader gets to pick one.
+  const stated = engines.filter(
+    engine => typeof (engine as { configured?: unknown } | null)?.configured === 'boolean',
+  ) as Array<{ configured: boolean }>
+  if (stated.length === 0) return null
+  return stated.some(engine => engine.configured)
 }
 
 export function noticeColumnInset(
@@ -6818,6 +6828,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </span>
           </button>
         )}
+          {/* The pills and Send wrap as ONE thing (.chat-composer-tail), never
+              separately. The row wraps on the pills' flex basis, and with the
+              basis on the pills alone there was a band of widths — 484-527px
+              with these four buttons, which contains the floating chat's own
+              default 520 — where the pills still fitted beside the buttons and
+              Send did not, leaving it alone on a second row under the
+              paperclip with the whole width empty beside it. Sharing one basis
+              (the pills' plus the gap plus the button) makes the break happen
+              in front of both or neither, at 3, 4 or 5 buttons. */}
+          <div className="chat-composer-tail">
           <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
@@ -7174,6 +7194,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </svg>
           </button>
         )}
+        </div>
         </div>
       </div>
 

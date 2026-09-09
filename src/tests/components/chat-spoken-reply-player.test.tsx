@@ -528,6 +528,15 @@ describe("the composer's spoken-replies toggle", () => {
     expect(toggle).toHaveAttribute("aria-pressed", "true");
   });
 
+  it("stays offered when an engine list says nothing about being configured", async () => {
+    // A list of entries, none of which states `configured`, is silence about
+    // the question — not an answer of "none". Reading it as "none" would hide
+    // the button, which is what the helper's own rule forbids.
+    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local" }, { id: "cloud" }] };
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
+  });
+
   it("stays offered when the box says nothing about its engines", async () => {
     // `null` is not "no". An unreachable route, or one too old to report its
     // engines, says nothing about them — and hiding the switch on silence
