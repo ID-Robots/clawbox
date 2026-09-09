@@ -75,6 +75,83 @@ async function lastJournalLine(step: string, sinceMs: number, lines: number): Pr
   return all.length > 0 ? all[all.length - 1] : null;
 }
 
+/** How often a watched step's journal is re-read for a new headline. */
+const PROGRESS_POLL_MS = 4000;
+/** How far back each poll looks; enough to span a chatty pip install. */
+const PROGRESS_WINDOW_LINES = 60;
+
+/**
+ * install.sh's own progress lines, told apart from the noise underneath them.
+ *
+ * The installer announces each sub-phase with a two-space indent — "  Installing
+ * Kokoro TTS...", "  Building CTranslate2 with CUDA for sm_87..." — while the
+ * tools it drives write flush left ("Installing collected packages: ...",
+ * "Successfully installed av-17.1.0 ..."). That indent is the only marker there
+ * is, and it is enough: it is applied consistently by every step, and matching
+ * it means a caller shows the box's own account of what it is doing rather than
+ * pip's.
+ *
+ * Deliberately NOT the last journal line, which is what `followRootStep` streams:
+ * during the CUDA compile the last line is whatever cc1plus last said, and for
+ * six minutes there is no line at all. The headline is what stays true.
+ */
+const HEADLINE_RE = /^ {2}(?! )(\S.*?)\s*$/;
+
+/** Read a window of the step's journal WITHOUT trimming the leading indent. */
+async function indentedJournalLines(step: string, sinceMs: number, lines: number): Promise<string[]> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      rootStepJournalArgs(step, { sinceMs, lines }),
+      { timeout: 10_000 },
+    );
+    // Only the line ending is stripped: the leading two spaces ARE the signal.
+    return stdout.split(/\r?\n/).map((l) => l.replace(/\s+$/, "")).filter((l) => l.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Watch a root step that someone ELSE is running, and report what it is doing.
+ *
+ * Read-only on purpose. `followRootStep` above both STARTS a step and follows
+ * it, which suits a route that owns the install; the updater does not want that
+ * — its root steps carry their own budgets, overrun handling and gateway
+ * quiescing, and swapping how they are started to get progress out would put
+ * all of that at risk for a cosmetic gain. This only reads the journal.
+ *
+ * Returns the stopper. Safe to call after the step has ended.
+ */
+export function watchRootStepProgress(
+  step: string,
+  sinceMs: number,
+  onHeadline: (headline: string) => void,
+): () => void {
+  let stopped = false;
+  let last: string | null = null;
+
+  void (async () => {
+    while (!stopped) {
+      const lines = await indentedJournalLines(step, sinceMs, PROGRESS_WINDOW_LINES);
+      let newest: string | null = null;
+      for (const line of lines) {
+        const headline = HEADLINE_RE.exec(line)?.[1];
+        if (headline) newest = headline;
+      }
+      if (newest && newest !== last) {
+        last = newest;
+        // A throwing listener must not end the watch, nor bubble into the step.
+        try { onHeadline(newest); } catch { /* nobody listening */ }
+      }
+      if (stopped) return;
+      await new Promise((r) => setTimeout(r, PROGRESS_POLL_MS));
+    }
+  })();
+
+  return () => { stopped = true; };
+}
+
 /** install.sh's --step EXIT trap ends a failed run with these; none of them is the reason. */
 const MARKER = /^(\[provision-(status|run)\]|#{3,}|# )/;
 

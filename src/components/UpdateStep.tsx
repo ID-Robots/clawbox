@@ -605,6 +605,19 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
                   }}
                 >
                   {step.label}
+                  {/* The installer's own account of the sub-phase, on the
+                      running step only. See SystemUpdateApp for why a coarse
+                      label alone leaves the wizard silent for minutes. */}
+                  {step.status === "running" && step.detail && (
+                    <span
+                      className="block truncate"
+                      style={{ fontSize: "var(--t-5)", color: "var(--text-muted)" }}
+                      title={step.detail}
+                      data-testid="update-step-detail"
+                    >
+                      {step.detail}
+                    </span>
+                  )}
                 </span>
               </li>
             ))}
