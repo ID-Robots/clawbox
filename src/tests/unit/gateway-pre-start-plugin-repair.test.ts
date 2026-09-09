@@ -554,6 +554,45 @@ ${CONFIG_SET_STUB}`);
     expect(marker().discord.disabled).toBe(true);
   });
 
+  it("says so, rather than skipping in silence, when the row and its entry are keyed differently", () => {
+    // `plugins.entries` can be keyed `openclaw-discord` where the row says
+    // `discord`. An exact lookup answered "no entry" and skipped the row for
+    // ever without a word; the canonical one finds it. It is still not
+    // re-attempted here, and that is the honest outcome rather than a
+    // limitation: every helper downstream takes ONE id and uses it for both the
+    // config write and the record row, so enabling by the row id would write a
+    // second entry under the other spelling. The Retry canonicalises both sides
+    // and remains the way out.
+    writeFileSync(
+      configPath,
+      JSON.stringify({ plugins: { entries: { "openclaw-discord": { enabled: false } } } }, null, 2),
+    );
+    writeFileSync(
+      markerPath,
+      JSON.stringify(
+        {
+          discord: {
+            id: "discord",
+            stage: "consent",
+            reason: "The plugin is installed but its capabilities could not be accepted.",
+            atMs: 1788668446552,
+            disabled: true,
+            spec: "",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("keyed differently");
+    expect(config().plugins?.entries?.["openclaw-discord"]?.enabled).toBe(false);
+    // And no second entry invented under the row's spelling.
+    expect(config().plugins?.entries?.discord).toBeUndefined();
+    expect(marker().discord.atMs).toBe(1788668446552);
+  });
+
   it("never turns on a disabled entry the record does not vouch for", () => {
     // No row at all: the entry is off because somebody meant it to be, and this
     // block must not so much as ask the CLI about it.

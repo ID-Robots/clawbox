@@ -5146,8 +5146,37 @@ for key, row in rows.items():
     # The entry has to BE there and BE off. A row whose entry the owner has
     # since deleted is stale, and `plugins enable` would resurrect an entry he
     # removed; one that is already `true` is the enabled loop's, not this one's.
-    entry = entries.get(plugin_id)
+    #
+    # FOUND BY THE CANONICAL ID, like the allowlist above and like every other
+    # reader of this record (`clearPluginRepair`, `clawboxDisabledEntryId`,
+    # `pluginConsentRepairIsAllowed`): `plugins.entries` can be keyed
+    # `openclaw-discord` where the row says `discord`, and an exact lookup would
+    # answer "no entry" and skip the row for ever without saying why.
+    entry_key = None
+    for key in entries:
+        if isinstance(key, str) and canonical(key) == canonical(plugin_id):
+            entry_key = key
+            break
+    if entry_key is None:
+        continue
+    entry = entries[entry_key]
     if not isinstance(entry, dict) or entry.get("enabled") is not False:
+        continue
+    # AND ADDRESSABLE UNDER ONE NAME. Everything downstream takes a single id
+    # and uses it for both halves of the repair: `plugins enable` and the
+    # `config set` write-back address the CONFIGURED key (this script's own rule
+    # — "the CONFIGURED key is what `plugins enable` is given", above), while
+    # `clawbox_plugin_repair_clear` deletes the record row by its exact key. On
+    # every writer today those are the same string. If they ever diverge,
+    # enabling by the row id would write a SECOND entry under the other
+    # spelling, so this says so and leaves the row for the Retry, which
+    # canonicalises both sides itself.
+    if entry_key != plugin_id:
+        print(
+            f"  WARN: the {plugin_id} repair row and its config entry {entry_key} are keyed "
+            "differently; leaving this one to the Retry in Settings",
+            file=sys.stderr,
+        )
         continue
     at_ms = row.get("atMs")
     candidates.append(((at_ms if isinstance(at_ms, (int, float)) else 0), plugin_id, stage))
