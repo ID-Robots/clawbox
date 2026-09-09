@@ -5,7 +5,7 @@
  * not write — each task becomes a worker with a shell.
  */
 import { describe, expect, it } from "vitest";
-import { MAX_TEAM_TASKS } from "@/lib/coding-team-board";
+import { MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS } from "@/lib/coding-team-board";
 import { MAX_TASK_CHARS } from "@/lib/coding-agent";
 import { parsePlan, PLANNER_BRIEF, replanTask } from "@/lib/coding-team-planner";
 
@@ -99,4 +99,64 @@ it("accepts a full plan above the display-summary limit and names precise schema
   expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: false, reason: expect.stringMatching(/t3.*2001.*2000/) });
   expect(PLANNER_BRIEF).toContain("2000");
   expect(PLANNER_BRIEF).toContain("parallel");
+});
+
+describe("a plan whose faults must all be fixed at once", () => {
+  const over = (extra: number) => "x".repeat(MAX_TASK_DESCRIPTION_CHARS + extra);
+
+  it("names every over-long task_description in one reason, with how much each must lose", () => {
+    // Seen on two devices: the board died on t1's length alone, so the planner
+    // never learned t2 was over too and spent its one retry half-informed.
+    const out = parsePlan(JSON.stringify([
+      { task_description: over(541), files_hint: ["a.ts"] },
+      { task_description: "fine", files_hint: ["b.ts"] },
+      { task_description: over(13), files_hint: ["c.ts"] },
+    ]));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.reason).toContain("Task t1");
+    expect(out.reason).toContain("Task t3");
+    expect(out.reason).toContain("must lose at least 541");
+    expect(out.reason).toContain("must lose at least 13");
+    expect(out.reason).not.toContain("Task t2");
+  });
+
+  it("names faults of different kinds together, not just the first one it meets", () => {
+    const out = parsePlan(JSON.stringify([
+      { task_description: over(1), files_hint: ["a.ts"] },
+      { task_description: "", files_hint: ["b.ts"] },
+      { task_description: "ok", depends_on: ["t9"], files_hint: ["c.ts"] },
+      { task_description: "ok", files_hint: "not-a-list" },
+    ]));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.reason).toContain("must lose at least 1");
+    expect(out.reason).toContain("Task t2 has no task_description");
+    expect(out.reason).toContain("Task t3 depends on t9");
+    expect(out.reason).toContain("Task t4's files_hint is not a list");
+  });
+
+  it("counts the rest instead of printing an unbounded wall of faults", () => {
+    const out = parsePlan(JSON.stringify(Array.from({ length: 8 }, () => ({ task_description: over(7), files_hint: [] }))));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.reason).toContain("Task t6");
+    expect(out.reason).not.toContain("Task t7");
+    expect(out.reason).toContain("and 2 further faults");
+  });
+
+  it("still refuses the whole plan rather than dropping the tasks that were too long", () => {
+    // The parser repairs nothing: a plan with one bad task is not silently
+    // delivered as a smaller plan, because each task becomes a worker.
+    const out = parsePlan(JSON.stringify([
+      { task_description: "fine", files_hint: [] },
+      { task_description: over(1), files_hint: [] },
+    ]));
+    expect(out.ok).toBe(false);
+  });
+
+  it("accepts a description exactly at the limit", () => {
+    const out = parsePlan(JSON.stringify([{ task_description: "y".repeat(MAX_TASK_DESCRIPTION_CHARS), files_hint: [] }]));
+    expect(out.ok).toBe(true);
+  });
 });
