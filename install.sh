@@ -5243,6 +5243,36 @@ tts_ensure_provider_registered() {
   as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1
 }
 
+# The name of the ClawBox AI cloud voice entry, when this box has one.
+#
+# Its PRESENCE is the subscription test, and deliberately so rather than a
+# second read of the plan: `scripts/gateway-pre-start.sh` writes this entry only
+# on a box whose tier stamp equals CLAWBOX_SPEECH_DEVICE_TIER and withdraws it
+# again on a downgrade, so the gate has already been applied by the one place
+# that owns it. Asking the tier a second time here would be a copy of that rule
+# free to drift from it.
+#
+# `clawboxManaged` is our own stamp on the entry, not the provider's name: an
+# owner's own `openai` speech route carries no stamp and is never mistaken for
+# ours (pre-start makes the same distinction before it will touch the entry).
+# The apiKey comes back redacted from `config get`, which does not matter — the
+# flag and the key's NAME are all this needs.
+tts_managed_cloud_provider() {
+  local home="$1"
+  as_clawbox "$OPENCLAW_BIN" config get "$home.providers" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    providers = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(providers, dict):
+    for name, entry in providers.items():
+        if isinstance(entry, dict) and entry.get("clawboxManaged") is True:
+            print(name)
+            break
+' 2>/dev/null
+}
+
 # The on-device voice, for EVERY edition.
 #
 # This step used to open with
@@ -5876,9 +5906,47 @@ step_openclaw_tts() {
     return 1
   fi
 
-  if ! oc_config_set "$TTS_HOME.provider" "tts-local-cli"; then
-    echo "  ERROR: could not select the tts-local-cli provider" >&2
-    return 1
+  # WHICH voice speaks first on a box that has both.
+  #
+  # Kokoro is installed either way — that is the step above, and it stays the
+  # box's own voice, one click away in Settings → Voice. What is decided here is
+  # only the DEFAULT, and on a box with a ClawBox AI subscription the default is
+  # the cloud voice (owner's ruling, 2026-09-09): it answers immediately, while
+  # Kokoro's server stops itself after five idle minutes and the first utterance
+  # after a quiet spell pays a 13-19 s cold start on this hardware.
+  #
+  # This is not the `edge` case the Hermes arm above refuses. That refusal is
+  # about defaulting an owner's speech to MICROSOFT — a third party the box
+  # merely happens to ship a client for. This is ClawBox AI: our own service, on
+  # a plan the owner is already paying for, reached through our own proxy. The
+  # principle that a ClawBox must not hand speech to someone else's cloud is
+  # kept; what is narrowed is the assumption that every cloud is someone else's.
+  #
+  # Seed-if-unset still governs: this whole branch is only reached when
+  # `tts.provider` was unset, so an owner's explicit pick — including an
+  # explicit pick of the local voice — is never overwritten by an update.
+  local TTS_SELECTED="tts-local-cli"
+  local CLOUD_TTS
+  CLOUD_TTS=$(tts_managed_cloud_provider "$TTS_HOME")
+  if [ -n "$CLOUD_TTS" ]; then
+    TTS_SELECTED="$CLOUD_TTS"
+  fi
+
+  if ! oc_config_set "$TTS_HOME.provider" "$TTS_SELECTED"; then
+    echo "  ERROR: could not select the $TTS_SELECTED provider" >&2
+    # Falling back to the local voice rather than leaving the box mute: the
+    # tts-local-cli entry is written and its plugin verified directly above, so
+    # it is the one provider this step KNOWS can answer. A cloud entry that
+    # could not be selected leaves the box with a working engine and no
+    # selection, which is the silent failure the checks above exist to prevent.
+    if [ "$TTS_SELECTED" = "tts-local-cli" ] || ! oc_config_set "$TTS_HOME.provider" "tts-local-cli"; then
+      return 1
+    fi
+    echo "  Fell back to the on-device voice after the cloud voice could not be selected" >&2
+    TTS_SELECTED="tts-local-cli"
+  fi
+  if [ "$TTS_SELECTED" != "tts-local-cli" ]; then
+    echo "  ClawBox AI cloud voice selected ($TTS_SELECTED); Kokoro is installed and can be made primary in Settings → Voice"
   fi
   # Only claim Kokoro when Kokoro is genuinely there. This line asserting
   # "Kokoro GPU" unconditionally is what kept TASK-420 invisible: three

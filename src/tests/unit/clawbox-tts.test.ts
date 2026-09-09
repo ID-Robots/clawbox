@@ -923,6 +923,50 @@ describe("install.sh wires TTS to the on-device chain", () => {
     );
     expect(dispatch).toContain("openclaw_tts");
   });
+
+  // Which of the two voices speaks FIRST on a box that has both. Kokoro is
+  // installed either way; only the default selection is at stake, and on a
+  // subscribed box that default is the ClawBox AI cloud voice — it answers
+  // immediately, where Kokoro's server stops itself after five idle minutes and
+  // the next utterance pays a 13-19 s cold start.
+  it("defaults to the ClawBox AI cloud voice when the box has one", () => {
+    // Selected through a variable, never a second hardcoded provider name:
+    // the local id stays the floor.
+    expect(step).toMatch(/local TTS_SELECTED="tts-local-cli"/);
+    expect(step).toMatch(/CLOUD_TTS=\$\(tts_managed_cloud_provider "\$TTS_HOME"\)/);
+    expect(step).toMatch(/TTS_SELECTED="\$CLOUD_TTS"/);
+    expect(step).toContain('oc_config_set "$TTS_HOME.provider" "$TTS_SELECTED"');
+  });
+
+  it("falls back to the on-device voice rather than leaving the box mute", () => {
+    // tts-local-cli is written and its plugin verified immediately above, so it
+    // is the one provider this step KNOWS can answer. A cloud entry that could
+    // not be selected must not leave a working engine with no selection.
+    expect(step).toMatch(
+      /if \[ "\$TTS_SELECTED" = "tts-local-cli" \] \|\| ! oc_config_set "\$TTS_HOME\.provider" "tts-local-cli"; then/,
+    );
+  });
+
+  it("proves the subscription from our own stamp, not a second plan read", () => {
+    const helper = extractShellFunction(INSTALL_SH, "tts_managed_cloud_provider");
+    // gateway-pre-start.sh writes this entry only at the speech tier and
+    // withdraws it on a downgrade, so its presence IS the gate. Re-reading the
+    // tier here would be a copy of that rule, free to drift from it.
+    expect(helper).toContain("clawboxManaged");
+    expect(helper).not.toMatch(/clawai_tier|CLAWBOX_SPEECH_DEVICE_TIER/);
+    // The owner's own openai speech route carries no stamp and must never be
+    // mistaken for ours.
+    expect(helper).toMatch(/entry\.get\("clawboxManaged"\) is True/);
+  });
+
+  it("only ever decides an UNSET provider", () => {
+    // The whole branch sits after the seed-if-unset guard, so an owner's pick —
+    // including an explicit pick of the local voice — survives every update.
+    const preserved = step.indexOf("TTS provider already set");
+    const selection = step.indexOf('oc_config_set "$TTS_HOME.provider" "$TTS_SELECTED"');
+    expect(preserved).toBeGreaterThan(-1);
+    expect(selection).toBeGreaterThan(preserved);
+  });
 });
 
 describe("install-voice.sh installs no second engine", () => {
