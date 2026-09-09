@@ -79,7 +79,17 @@ export function isVisionImageMime(mime: string): mime is VisionImageMime {
   return (VISION_IMAGE_MIMES as readonly string[]).includes(mime);
 }
 
+export interface VisionAttempt {
+  requestedModel: string;
+  responseModel: string | null;
+  durationMs: number;
+  status: number | null;
+  usage: Record<string, number> | null;
+}
+
 export interface VisionDescription {
+  /** Separate auxiliary inference: do not confuse this with main-agent usage. */
+  vision?: { attempts: VisionAttempt[] };
   text: string | null;
   error: string | null;
 }
@@ -103,53 +113,69 @@ async function ask(
   imageBase64: string,
   mime: VisionImageMime,
   timeoutMs: number,
+  attempts: VisionAttempt[],
 ): Promise<Attempt> {
-  let res: Response;
+  const startedAt = Date.now();
+  const metric: VisionAttempt = { requestedModel: model, responseModel: null, durationMs: 0, status: null, usage: null };
+  attempts.push(metric);
   try {
-    res = await fetch(`${clawboxAiProxyUrl()}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: MAX_DESCRIPTION_TOKENS,
-        messages: [{
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: `data:${mime};base64,${imageBase64}` } },
-          ],
-        }],
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    if (err instanceof Error && err.name === "TimeoutError") {
-      return { text: null, error: "the vision request timed out", transient: false };
+    let res: Response;
+    try {
+      res = await fetch(`${clawboxAiProxyUrl()}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: MAX_DESCRIPTION_TOKENS,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              { type: "image_url", image_url: { url: `data:${mime};base64,${imageBase64}` } },
+            ],
+          }],
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        return { text: null, error: "the vision request timed out", transient: false };
+      }
+      return { text: null, error: "the vision request failed", transient: true };
     }
-    return { text: null, error: "the vision request failed", transient: true };
+    metric.status = res.status;
+    if (!res.ok) {
+      // 5xx and 429 are the proxy's moment, not this image's; any other status
+      // is final unless the body is one of the known flaps.
+      const body = await res.text().catch(() => "");
+      const transient = res.status >= 500 || res.status === 429 || PROXY_FLAP_RE.test(body);
+      return { text: null, error: `the vision model answered ${res.status}`, transient };
+    }
+    let data: { model?: unknown; usage?: Record<string, unknown>; choices?: { message?: { content?: unknown } }[] };
+    try {
+      data = await res.json();
+    } catch {
+      // A 200 whose body did not arrive whole is a transport failure, not an answer.
+      return { text: null, error: "the vision request failed", transient: true };
+    }
+    metric.responseModel = typeof data.model === "string" ? data.model : null;
+    if (data.usage && typeof data.usage === "object") {
+      metric.usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"].flatMap((key) => {
+        const value = data.usage![key];
+        return typeof value === "number" && Number.isFinite(value) && value >= 0 ? [[key, value]] : [];
+      }));
+    }
+    const text = data.choices?.[0]?.message?.content;
+    if (typeof text !== "string" || !text.trim()) {
+      return { text: null, error: "the vision model answered without a description", transient: false };
+    }
+    return { text: text.trim(), error: null, transient: false };
+  } finally {
+    metric.durationMs = Math.max(0, Date.now() - startedAt);
   }
-  if (!res.ok) {
-    // 5xx and 429 are the proxy's moment, not this image's; any other status
-    // is final unless the body is one of the known flaps.
-    const body = await res.text().catch(() => "");
-    const transient = res.status >= 500 || res.status === 429 || PROXY_FLAP_RE.test(body);
-    return { text: null, error: `the vision model answered ${res.status}`, transient };
-  }
-  let data: { choices?: { message?: { content?: unknown } }[] };
-  try {
-    data = await res.json();
-  } catch {
-    // A 200 whose body did not arrive whole is a transport failure, not an answer.
-    return { text: null, error: "the vision request failed", transient: true };
-  }
-  const text = data.choices?.[0]?.message?.content;
-  if (typeof text !== "string" || !text.trim()) {
-    return { text: null, error: "the vision model answered without a description", transient: false };
-  }
-  return { text: text.trim(), error: null, transient: false };
 }
 
 /** Describe a PNG through the box's vision model. */
@@ -165,13 +191,14 @@ export async function describeImage(imageBase64: string, prompt: string = DEFAUL
   } catch {
     return { text: null, error: "could not resolve a vision model" };
   }
-  const first = await ask(token.trim(), model, prompt, imageBase64, mime, DESCRIBE_TIMEOUT_MS);
+  const attempts: VisionAttempt[] = [];
+  const first = await ask(token.trim(), model, prompt, imageBase64, mime, Math.max(1, deadline - Date.now()), attempts);
   if (!first.transient || deadline - Date.now() - RETRY_DELAY_MS < MIN_RETRY_MS) {
-    return { text: first.text, error: first.error };
+    return { text: first.text, error: first.error, vision: { attempts } };
   }
   await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
   // The retry lives inside the SAME budget, so a caller sized against
   // DESCRIBE_TIMEOUT_MS never sees the two attempts as one long hang.
-  const second = await ask(token.trim(), model, prompt, imageBase64, mime, deadline - Date.now());
-  return { text: second.text, error: second.error };
+  const second = await ask(token.trim(), model, prompt, imageBase64, mime, deadline - Date.now(), attempts);
+  return { text: second.text, error: second.error, vision: { attempts } };
 }

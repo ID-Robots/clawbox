@@ -36,6 +36,7 @@ interface BrowserReply {
   error?: string;
   description?: string | null;
   descriptionError?: string | null;
+  vision?: unknown;
   /** Which Chromium answered — see statedBrowser. Absent from a server that predates the field. */
   browser?: "desktop" | "headless";
 }
@@ -216,7 +217,7 @@ async function browserCall(
   rules?: ErrorRule[],
 ): Promise<BrowserReply> {
   const timeoutMs = params.describe === true ? DESCRIBE_CALL_TIMEOUT_MS : ACTION_TIMEOUT_MS;
-  return apiPost<BrowserReply>("/setup-api/browser", { action, ...params }, { timeoutMs, rules });
+  return apiPost<BrowserReply>("/setup-api/browser", { action, ...params, ...(runContext() && /^run-[a-z0-9]{8}$/.test(path.basename(runContext()!.artifactsDir)) ? { codingRunId: path.basename(runContext()!.artifactsDir) } : {}) }, { timeoutMs, rules });
 }
 
 /** Attach to the live window, reusing the session when it is still alive. */
@@ -298,6 +299,7 @@ function pageResult(message: string, reply: BrowserReply): ToolResult {
     // the owner will never find.
     lines.push("Screenshot not archived: this run's evidence folder is full or cannot be written.");
   }
+  if (reply.vision) lines.push(`Vision inference: ${JSON.stringify(reply.vision)}`);
   if (reply.description) {
     lines.push(`What the page shows: ${reply.description}`);
   } else {
@@ -374,15 +376,15 @@ export function registerBrowserTools(reg: Registrar): void {
       // ONE call: the backend already retries a flap of the vision proxy
       // inside its own budget (src/lib/vision-describe.ts), so a client-side
       // retry on top would only re-pay for an answer that was on its way.
-      const reply = await apiPost<{ description?: string | null; error?: string | null }>(
+      const reply = await apiPost<{ description?: string | null; error?: string | null; vision?: unknown }>(
         "/setup-api/vision/describe",
-        prompt ? { path: abs, prompt } : { path: abs },
+        { path: abs, ...(prompt ? { prompt } : {}), ...(ctx && /^run-[a-z0-9]{8}$/.test(path.basename(ctx.artifactsDir)) ? { codingRunId: path.basename(ctx.artifactsDir) } : {}) },
         { timeoutMs: DESCRIBE_CALL_TIMEOUT_MS, rules: DESCRIBE_RULES },
       );
-      if (typeof reply.description === "string" && reply.description) return text(reply.description);
+      if (typeof reply.description === "string" && reply.description) return text(reply.description + (reply.vision ? `\nVision inference: ${JSON.stringify(reply.vision)}` : ""));
       throw new ToolError(
         "ENDPOINT_DOWN",
-        reply.error || "The vision model did not answer.",
+        (reply.error || "The vision model did not answer.") + (reply.vision ? ` Vision inference: ${JSON.stringify(reply.vision)}` : ""),
         "The image exists but could not be described right now. Try again, or report what you can without it.",
       );
     },

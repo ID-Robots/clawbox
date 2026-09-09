@@ -4,7 +4,7 @@ import path from "path";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
-import { activeRunDirectory, activeRunId } from "@/lib/coding-agent";
+import { activeRunDirectory, activeRunId, getRun } from "@/lib/coding-agent";
 import { artifactsDir, INLINE_IMAGE_MIME } from "@/lib/coding-agent-artifacts";
 import { describeImage, isVisionImageMime, type VisionImageMime } from "@/lib/vision-describe";
 
@@ -38,10 +38,10 @@ const ACCEPTED_EXTENSIONS = Object.keys(MIME_FOR).join(", ").replace(/, ([^,]+)$
  * symlinked root grants exactly what it points at; one that does not exist
  * grants nothing.
  */
-async function allowedRoots(request: Request): Promise<{ roots: string[]; refusal: string }> {
+async function allowedRoots(request: Request, requestedRunId?: string): Promise<{ roots: string[]; refusal: string }> {
   const owner = await hasOwnerSession(request);
-  const runId = owner ? null : activeRunId();
-  const runDir = owner ? null : activeRunDirectory();
+  const runId = owner ? null : (requestedRunId ?? activeRunId());
+  const runDir = owner ? null : (requestedRunId ? getRun(requestedRunId)?.directory : activeRunDirectory());
   const wanted = runId && runDir ? [runDir, artifactsDir(runId)] : [filesBrowseRoot()];
   const roots: string[] = [];
   for (const root of wanted) {
@@ -72,11 +72,15 @@ export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
 
-  let body: { path?: unknown; prompt?: unknown };
+  let body: { path?: unknown; prompt?: unknown; codingRunId?: unknown };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+  const requestedRunId = body.codingRunId;
+  if (requestedRunId !== undefined && (typeof requestedRunId !== "string" || !/^run-[a-z0-9]{8}$/.test(requestedRunId) || getRun(requestedRunId)?.status !== "running")) {
+    return NextResponse.json({ error: "Coding run is not active" }, { status: 400 });
   }
   const given = typeof body.path === "string" ? body.path.trim() : "";
   if (!given || !path.isAbsolute(given)) {
@@ -92,7 +96,7 @@ export async function POST(request: Request) {
   // as typed, before anything touches the disk; the second is on the real
   // file after symlinks are resolved, so a link planted under a root cannot
   // lead out of it. A root itself is a folder, never an image.
-  const { roots, refusal } = await allowedRoots(request);
+  const { roots, refusal } = await allowedRoots(request, requestedRunId as string | undefined);
   const resolved = path.resolve(given);
   let typed: string | null = null;
   for (const root of roots) {
@@ -156,5 +160,5 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "The file could not be read." }, { status: 400 });
   }
   const described = await describeImage(data.toString("base64"), prompt, mime);
-  return NextResponse.json({ description: described.text, error: described.error });
+  return NextResponse.json({ description: described.text, error: described.error, vision: described.vision });
 }

@@ -274,7 +274,7 @@ describe("coding_agent_status", () => {
     const STATUS_OUTPUT_CHARS = 12_000; // mirrors the tool's declared maxChars
     const progress = Array.from({ length: 60 }, (_, i) => `line ${i} ${"x".repeat(150)}`);
     const summary = `THE-SUMMARY-STARTS-HERE ${"s".repeat(5_900)} THE-SUMMARY-ENDS-HERE`;
-    apiGet.mockResolvedValue({ run: { ...RUN, progress, summary, error: "something went wrong" } });
+    apiGet.mockResolvedValue({ run: { ...RUN, progress, summary, error: "something went wrong", workflowTelemetry: { childrenTotal: 300, childrenActive: 0, complete: true, workflows: Array.from({ length: 100 }, (_, i) => ({ id: `wf_${i}_${"x".repeat(220)}`, peakActive: 3 })) } } });
 
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab", tail: 60 });
     expect(out.isError).toBe(false);
@@ -283,6 +283,8 @@ describe("coding_agent_status", () => {
 
     const capped = capText(out.text, STATUS_OUTPUT_CHARS);
     expect(capped).toContain("THE-SUMMARY-STARTS-HERE");
+    expect(capped).toContain("THE-SUMMARY-ENDS-HERE");
+    expect(capped).toContain("and 90 more workflows not listed");
     expect(capped).toContain("[error]\nsomething went wrong");
     // The activity log is the long, low-value part, so it is what the cut eats.
     expect(capped).toContain("…[truncated");

@@ -21,10 +21,11 @@ export interface PlannedTask {
 }
 
 export const PLANNER_BRIEF = [
-  "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out one after another, each in its own fresh session with no memory of yours.",
+  "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out in parallel when independent, each in its own fresh session with no memory of yours.",
   "Read the folder first — map what exists, what the goal touches and what a worker would need to know — but change NOTHING: you may not edit, create, delete or run anything that writes.",
   `Answer with ONLY a JSON array, no prose before or after, of at most ${MAX_TEAM_TASKS} objects: {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}.`,
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names earlier tasks a task must wait for. Each task_description must stand on its own: say what to build or change, in which files, and how the worker verifies it — it is the whole brief that worker gets. Prefer 2–5 tasks; one task is fine for a small goal.",
+  `Each task_description must be at most ${MAX_TASK_DESCRIPTION_CHARS} characters. Keep shared context concise; describe disjoint file ownership for parallel work and add an integration task depending on the workers when needed.`,
   "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
 ].join(" ");
 
@@ -79,7 +80,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
     if (!item || typeof item !== "object") return { ok: false, reason: `Task ${id} is not an object.` };
     const description = typeof item.task_description === "string" ? item.task_description.trim() : "";
     if (!description) return { ok: false, reason: `Task ${id} has no task_description.` };
-    if (description.length > MAX_TASK_DESCRIPTION_CHARS) return { ok: false, reason: `Task ${id}'s description is too long.` };
+    if (description.length > MAX_TASK_DESCRIPTION_CHARS) return { ok: false, reason: `Task ${id}'s task_description has ${description.length} characters; the maximum is ${MAX_TASK_DESCRIPTION_CHARS}. Shorten this field without dropping its verification requirements.` };
     const depends = item.depends_on === undefined ? [] : item.depends_on;
     if (!Array.isArray(depends) || !depends.every((d) => typeof d === "string")) return { ok: false, reason: `Task ${id}'s depends_on is not a list of task ids.` };
     const depends_on = [...new Set(depends as string[])];
@@ -171,7 +172,7 @@ function bracketPairs(text: string): Array<[number, number]> {
       const top = open.pop();
       if (!top) continue;
       if ((ch === "]") !== (top.ch === "[")) { open.length = 0; continue; }
-      if (ch === "]") pairs.push([top.at, i]);
+      if (ch === "]" && open.length === 0) pairs.push([top.at, i]);
     }
   }
   pairs.sort((x, y) => x[0] - y[0]);

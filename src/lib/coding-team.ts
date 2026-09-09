@@ -227,14 +227,14 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     saveBoard(board);
     return;
   }
-  let plan = parsePlan(planned.summary);
+  let plan = parsePlan(planned.resultText ?? planned.summary);
   if (!plan.ok) {
     // Once more, and for the array alone: a planner that wrote its plan as
     // prose is asked to say it as the JSON the team reads. On the record as
     // an alert, so a team that needed the second ask says so.
     bus.send(SYSTEM, { type: "alert", reason: `The planner's answer was not a plan (${plan.reason}); asking once more for the JSON array.` });
     const again = await startRun({
-      task: replanTask(board.goal, planned.summary, plan.reason),
+      task: replanTask(board.goal, planned.resultText ?? planned.summary, plan.reason),
       projectId: board.projectId,
       directory: board.directory,
       source,
@@ -247,7 +247,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     const replanned = await settle(team, again.id);
     if (team.stopRequested) return;
     plan = replanned?.status === "completed"
-      ? parsePlan(replanned.summary)
+      ? parsePlan(replanned.resultText ?? replanned.summary)
       : { ok: false, reason: `The planner did not finish its second answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` };
     if (!plan.ok) {
       setTeamStatus(board, SYSTEM, "failed", plan.reason);
@@ -487,7 +487,7 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The reviewer of ${task.task_id} (${run.id}) ended ${settled?.status ?? "without a record"}.` });
     return { verdict: "accepted", notes: "Accepted by rule: the reviewer did not finish." };
   }
-  const parsed = parseVerdict(settled.summary);
+  const parsed = parseVerdict(settled.resultText ?? settled.summary);
   if (!parsed.ok) {
     bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The reviewer of ${task.task_id} gave no verdict: ${parsed.reason}` });
     return { verdict: "accepted", notes: `Accepted by rule: ${parsed.reason}` };

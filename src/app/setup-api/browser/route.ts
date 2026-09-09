@@ -1,3 +1,4 @@
+import { ownsLocalPreview } from "@/lib/coding-local-preview";
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
@@ -9,7 +10,7 @@ import net from "net";
 import fs from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
 import { lookup as dnsLookup } from "dns/promises";
-import { activeRunDirectory, activeRunId, getRealBrowser } from "@/lib/coding-agent";
+import { activeRunDirectory, activeRunId, getRun, getRealBrowser } from "@/lib/coding-agent";
 import type { BrowserKind } from "@/lib/browser-sessions";
 import { closeSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
 import { getBrowserStartUrl, writeBrowserLaunchEnv } from "@/lib/browser-setup";
@@ -104,8 +105,8 @@ async function lookupWithTimeout(host: string): Promise<{ address: string }[]> {
  */
 type NavDecision = { ok: true; url: string } | { ok: false; error: string };
 
-function resolveFileNavUrl(parsed: URL): NavDecision {
-  const activeDir = activeRunDirectory();
+function resolveFileNavUrl(parsed: URL, runId?: string | null): NavDecision {
+  const activeDir = runId ? liveBrowserRun(runId)?.directory : activeRunDirectory();
   if (!activeDir) return { ok: false, error: "Blocked URL scheme: file: (no coding run is active)" };
   let real: string;
   let realDir: string;
@@ -126,7 +127,12 @@ function resolveFileNavUrl(parsed: URL): NavDecision {
 }
 
 /** The address the browser may be sent to for `url`, or why it may not. */
-async function resolveNavUrl(url: string): Promise<NavDecision> {
+function liveBrowserRun(id: string) {
+  const run = getRun(id);
+  return run?.status === "running" ? run : null;
+}
+
+async function resolveNavUrl(url: string, runId?: string | null): Promise<NavDecision> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -134,11 +140,12 @@ async function resolveNavUrl(url: string): Promise<NavDecision> {
     return { ok: false, error: "Invalid URL" };
   }
   if (parsed.protocol === "file:") {
-    return resolveFileNavUrl(parsed);
+    return resolveFileNavUrl(parsed, runId);
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { ok: false, error: `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)` };
   }
+  if (runId && await ownsLocalPreview(parsed, liveBrowserRun(runId))) return { ok: true, url };
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost")) return { ok: false, error: "Blocked internal host" };
   if (net.isIP(host)) {
@@ -154,8 +161,8 @@ async function resolveNavUrl(url: string): Promise<NavDecision> {
 }
 
 /** Returns an error message if the URL is not safe to navigate to, else null. */
-async function validateNavUrl(url: string): Promise<string | null> {
-  const nav = await resolveNavUrl(url);
+async function validateNavUrl(url: string, runId?: string | null): Promise<string | null> {
+  const nav = await resolveNavUrl(url, runId);
   return nav.ok ? null : nav.error;
 }
 
@@ -173,19 +180,40 @@ type GuardablePage = {
   }) => void | Promise<void>) => Promise<void>;
   __navGuardInstalled?: boolean;
 };
-async function installNavGuard(page: GuardablePage): Promise<void> {
+async function installNavGuard(page: GuardablePage, runId?: string | null): Promise<void> {
   if (page.__navGuardInstalled) return;
   page.__navGuardInstalled = true;
+  // Page-local and run-bound. Coalesce parallel asset requests as well as reuse
+  // recent validations, without carrying an origin grant to a different page.
+  const origins = new Map<string, { at: number; check: Promise<string | null> }>();
   await page.route("**/*", async (route) => {
     const req = route.request();
-    // Only pay the DNS-resolution cost on top-level navigations — the requests
-    // whose rendered result gets screenshot and where redirect/rebind SSRF
-    // lands. Subresources continue unblocked.
-    if (!req.isNavigationRequest()) {
+    const navigation = req.isNavigationRequest();
+    // Legacy unowned pages retain their navigation-only policy. Owned pages
+    // also vet asset origins, with a short cache to avoid DNS/ss work per asset.
+    if (!navigation && !runId) {
       await route.continue();
       return;
     }
-    const err = await validateNavUrl(req.url());
+    if (runId && !liveBrowserRun(runId)) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    let origin: string | null = null;
+    try {
+      const url = new URL(req.url());
+      // File containment and credential-bearing URLs must always be checked.
+      if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password) origin = url.origin;
+    } catch { /* Invalid URLs are rejected by validateNavUrl below. */ }
+    const cached = origin ? origins.get(origin) : undefined;
+    // Navigations (including redirect hops) ALWAYS revalidate ownership/DNS.
+    const reuse = !navigation && cached && Date.now() - cached.at < 5000;
+    const check = reuse ? cached.check : validateNavUrl(req.url(), runId);
+    if (origin && !reuse) {
+      if (origins.size >= 128) origins.delete(origins.keys().next().value!);
+      origins.set(origin, { at: Date.now(), check });
+    }
+    const err = await check;
     if (err) {
       await route.abort("blockedbyclient");
       return;
@@ -492,11 +520,11 @@ let downloadCounter = 0;
  * export something the run (and the owner) can open. No run active: the
  * download is left to the browser as before.
  */
-function installDownloadCapture(page: DownloadablePage): void {
+function installDownloadCapture(page: DownloadablePage, ownerRunId?: string | null): void {
   if (typeof page.on !== "function" || downloadHooked.has(page)) return;
   downloadHooked.add(page);
   page.on("download", (download) => {
-    const runId = activeRunId();
+    const runId = ownerRunId ?? activeRunId();
     if (!runId) return;
     const safe = download.suggestedFilename().replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80) || "download";
     downloadCounter += 1;
@@ -511,6 +539,10 @@ export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { action, sessionId } = body;
+    const requestedRunId = body.codingRunId;
+    if (requestedRunId !== undefined && (typeof requestedRunId !== "string" || !/^run-[a-z0-9]{8}$/.test(requestedRunId) || !liveBrowserRun(requestedRunId))) {
+      return NextResponse.json({ error: "Coding run is not active" }, { status: 400 });
+    }
 
     if (action === "launch") {
       const { browser, kind } = await acquireBrowser();
@@ -523,15 +555,15 @@ export async function POST(req: Request) {
       // delegated run drove whatever the owner was reading and the idle sweep
       // then closed that tab; with a page per run, closeSessionsForRun ends
       // exactly what the run opened and never the owner's.
-      const runId = activeRunId();
+      const runId = requestedRunId ?? activeRunId();
       const page = runId ? await context.newPage() : (context.pages().at(-1) ?? await context.newPage());
-      await installNavGuard(page as unknown as GuardablePage);
-      installDownloadCapture(page as unknown as DownloadablePage);
+      await installNavGuard(page as unknown as GuardablePage, runId);
+      installDownloadCapture(page as unknown as DownloadablePage, runId);
       await page.bringToFront().catch(() => {});
 
       const { url } = body;
       if (url) {
-        const nav = await resolveNavUrl(url);
+        const nav = await resolveNavUrl(url, runId);
         if (!nav.ok) {
           // A page opened for this run and never registered is a tab nothing
           // would ever close — the sweep only knows sessions.
@@ -563,6 +595,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "No active browser session" }, { status: 400 });
     }
 
+    if (requestedRunId !== undefined && session.runId !== requestedRunId) {
+      return NextResponse.json({ error: "Browser session belongs to another run" }, { status: 403 });
+    }
     touchSession(sessionId as string);
     const { page } = session;
 
@@ -597,7 +632,7 @@ export async function POST(req: Request) {
       const described = jpeg
         ? await describeImage(jpeg.toString("base64"), undefined, "image/jpeg")
         : await describeImage(reply.screenshot);
-      return { ...reply, description: described.text, descriptionError: described.error };
+      return { ...reply, description: described.text, descriptionError: described.error, vision: described.vision };
     };
     const finish = async () => {
       const reply = await respond();
@@ -610,8 +645,8 @@ export async function POST(req: Request) {
       case "navigate": {
         const { url } = body;
         if (!url) return NextResponse.json({ error: "URL required" }, { status: 400 });
-        await installNavGuard(page as unknown as GuardablePage);
-        const nav = await resolveNavUrl(url);
+        await installNavGuard(page as unknown as GuardablePage, session.runId);
+        const nav = await resolveNavUrl(url, session.runId);
         if (!nav.ok) return NextResponse.json({ error: nav.error }, { status: 400 });
         await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
         return NextResponse.json(await finish());

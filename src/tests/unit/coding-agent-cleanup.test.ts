@@ -265,3 +265,16 @@ describe("the group check itself", () => {
     expect(lib.killRunGroup(null)).toBe(false);
   });
 });
+
+
+it("ends successful Team worker test processes without keeping a worktree server alive", async () => {
+  readyDevice(LEAVES_A_SERVER);
+  makeProject("site");
+  const run = await lib.startRun({ task: "Test it", projectId: "site", source: "agent", team: { id: "team-abc12345", role: "worker", taskId: "t1" } });
+  const pgid = lib.getRun(run.id)?.pgid;
+  const done = await finished(run.id);
+  expect(done.status).toBe("completed");
+  expect(done.leftover).toBe(false);
+  expect(done.pgid).toBeNull();
+  await vi.waitFor(() => expect(groupAlive(pgid as number)).toBe(false), { timeout: 8000 });
+});

@@ -1,3 +1,4 @@
+import { cachedWorkflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-workflow-telemetry";
 /**
  * The Coding Agent — a headless Claude Code session the assistant delegates
  * coding work to.
@@ -713,6 +714,10 @@ export interface CodingRun {
   model: string | null;
   /** The run's final message: what changed, how to verify, what is left. */
   summary: string | null;
+  /** Full final result for machine consumers; never parse the clipped display summary. */
+  resultText?: string | null;
+  /** Actual Workflow children; legacy subagent counters count containers. */
+  workflowTelemetry?: WorkflowTelemetry;
   error: string | null;
   numTurns: number;
   filesTouched: string[];
@@ -1145,7 +1150,7 @@ function isEffort(value: unknown): value is CodingEffort {
 /**
  * Where Claude Code keeps this run's transcript.
  *
- * It encodes the working folder by replacing every slash with a dash, so
+ * It encodes the working folder by replacing every non-ASCII-alphanumeric character with a dash, so
  * /home/clawbox/x becomes -home-clawbox-x. Returns null until the run has a
  * session id, which arrives with the first stream event.
  *
@@ -1155,7 +1160,7 @@ function isEffort(value: unknown): value is CodingEffort {
 export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory">): string | null {
   if (!run.sessionId) return null;
   const configDir = process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
-  return path.join(configDir, "projects", run.directory.replace(/\//g, "-"), `${run.sessionId}.jsonl`);
+  return path.join(configDir, "projects", run.directory.replace(/[^a-zA-Z0-9]/g, "-"), `${run.sessionId}.jsonl`);
 }
 
 /** The owner's effort level. Anything unrecognised reads as the default. */
@@ -1888,6 +1893,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     sessionId: typeof raw.sessionId === "string" ? raw.sessionId : null,
     model: typeof raw.model === "string" ? raw.model : null,
     summary: typeof raw.summary === "string" ? raw.summary : null,
+    resultText: typeof raw.resultText === "string" ? raw.resultText : null,
     error: typeof raw.error === "string" ? raw.error : null,
     numTurns: typeof raw.numTurns === "number" ? raw.numTurns : 0,
     filesTouched: Array.isArray(raw.filesTouched) ? raw.filesTouched.filter((f) => typeof f === "string") : [],
@@ -2176,6 +2182,7 @@ function persist(immediate = false): void {
 function cloneRun(run: CodingRun): CodingRun {
   return {
     ...run,
+    workflowTelemetry: cachedWorkflowTelemetry(transcriptPath(run), run.startedAt, run.completedAt),
     filesTouched: [...run.filesTouched],
     progress: [...run.progress],
     progressAt: [...run.progressAt],
@@ -2556,7 +2563,8 @@ const HEADLESS_BRIEF_TEMPLATE = [
   // itself how to wait.
   "Sub-agents and workflows run in the background: launch independent ones together and keep working while they run; when nothing is left but waiting, end your turn with one line saying what is still out — you are restarted with each result as it arrives. Never poll for them, and never read their transcripts or session files.",
   "Verify your work where you can (run the build or the tests you have).",
-  "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open it with browser_view_local (it takes a file path in your folder) and read the description of what actually renders before you report done.",
+  "For live web verification, start your app as a background child in this working folder and use browser_open on http://127.0.0.1:PORT (an unprivileged port). Only a listener owned by this run is allowed; other local services stay blocked. Verify the real API-backed UI, not a static shim. Stop test servers when finished; Team workers have their remaining process group cleaned up automatically.",
+  "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open its live app with browser_open, or use browser_view_local for a standalone HTML file and read the description of what actually renders before you report done.",
   "Verify deliberately, not exhaustively: take a described screenshot at each state that matters and move on — never one per keystroke, and never watch a timer or animation run its course when a short interval proves the logic. A handful of screenshots is a verified app; fifty is a stalled one.",
   "You have a limited number of steps and every tool call spends one. Driving a page key by key through the browser is the fastest way to run out mid-task (measured: one run spent 103 steps on single keypresses and was cut off) — prove logic with a small script run by node instead, and spend the browser on ONE visual pass of the states that matter.",
   // Bench run run-droy3ws4 (2026-09-03) COPIED its checker into the evidence
@@ -2987,12 +2995,13 @@ export function killRunGroup(pgid: number | null): boolean {
  * opened, its timers, and whatever it left running.
  *
  * The process group is the one decision here that is not obvious. On a NATURAL
- * completion it is deliberately left alone: the orientation guide tells a run
+ * standalone completion it is deliberately left alone: the orientation guide tells a run
  * to leave its server listening so the app it built can be reached from the
  * desktop, and a settle that killed the group would break exactly the pattern
  * the device documents. So a finished run RECORDS what survived and the run's
  * page offers to end it; only an outcome where nothing the run left is wanted —
- * stopped, failed, timed out — escalates to the kill.
+ * stopped, failed, timed out — escalates to the kill. Team roles also end
+ * their owned group on success: no per-worker preview may outlive integration.
  */
 function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   if (state) {
@@ -3002,7 +3011,7 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   // The run's own tab, never the owner's: browser sessions are tagged with the
   // run that opened them and a run always gets a new page (browser-sessions.ts).
   void closeSessionsForRun(run.id).catch(() => {});
-  if (run.status === "completed" || run.status === "paused") {
+  if ((run.status === "completed" && !run.team) || run.status === "paused") {
     run.leftover = groupAlive(run.pgid);
     if (run.leftover) {
       pushProgress(run, RUNNER_STEP.leftoverRunning);
@@ -3717,7 +3726,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       run.deniedActions = (continuation ? [...run.deniedActions, ...described] : described).slice(0, MAX_DENIALS_KEPT);
     }
     const text = typeof event.result === "string" ? event.result.trim() : "";
-    if (text) run.summary = text.slice(0, MAX_SUMMARY_CHARS);
+    if (text) {
+      run.summary = text.slice(0, MAX_SUMMARY_CHARS);
+      run.resultText = text;
+    }
     switch (event.subtype) {
       case "success":
         state.outcome = {
@@ -4470,6 +4482,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // once the run settles. Left in place, a second attempt that dies
       // without a result would file the first one's error as its report.
       run.summary = null;
+      run.resultText = null;
       run.sessionId = null;
       run.numTurns = 0;
       run.subagentsTotal = 0;
@@ -4494,7 +4507,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // account is what the owner reads before deciding whether to resume. After
   // the retry decision above, so a restarted run never files its first
   // attempt's words; never throwing, so the record settles regardless.
-  if (run.summary) writeRunReport(run.id, run.summary);
+  if (run.resultText || run.summary) writeRunReport(run.id, run.resultText || run.summary!);
 
   // The COMMIT before anyone is told. Waiters — the team orchestrator above
   // all — act on "finished" at once: a worker's worktree was merged and

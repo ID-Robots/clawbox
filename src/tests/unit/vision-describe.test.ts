@@ -56,13 +56,13 @@ describe("what is retried", () => {
     ["the proxy's known flap body on a 4xx", () => status(401, '{"error":"failed to authenticate"}')],
   ])("asks once more after %s", async (_name, first) => {
     fetchMock.mockImplementationOnce(async () => first()).mockResolvedValueOnce(answer("a red square"));
-    expect(await describeNow()).toEqual({ text: "a red square", error: null });
+    expect(await describeNow()).toMatchObject({ text: "a red square", error: null });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("asks once more, never twice more: the second failure is the answer", async () => {
     fetchMock.mockResolvedValueOnce(status(502)).mockResolvedValueOnce(status(502));
-    expect(await describeNow()).toEqual({ text: null, error: "the vision model answered 502" });
+    expect(await describeNow()).toMatchObject({ text: null, error: "the vision model answered 502" });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
@@ -78,7 +78,7 @@ describe("the remaining budget", () => {
     fetchMock
       .mockImplementationOnce(slowFirst(DESCRIBE_TIMEOUT_MS - RETRY_DELAY_MS - MIN_RETRY_MS + 1, () => status(503)))
       .mockResolvedValueOnce(answer("too late to be asked"));
-    expect(await describeNow()).toEqual({ text: null, error: "the vision model answered 503" });
+    expect(await describeNow()).toMatchObject({ text: null, error: "the vision model answered 503" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -86,7 +86,7 @@ describe("the remaining budget", () => {
     fetchMock
       .mockImplementationOnce(slowFirst(DESCRIBE_TIMEOUT_MS - RETRY_DELAY_MS - MIN_RETRY_MS, () => status(503)))
       .mockResolvedValueOnce(answer("just in time"));
-    expect(await describeNow()).toEqual({ text: "just in time", error: null });
+    expect(await describeNow()).toMatchObject({ text: "just in time", error: null });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
@@ -94,25 +94,40 @@ describe("the remaining budget", () => {
 describe("what is not", () => {
   it("a deterministic refusal — the proxy does not serve the model", async () => {
     fetchMock.mockResolvedValueOnce(status(400, '{"error":"model_not_allowed"}'));
-    expect(await describeNow()).toEqual({ text: null, error: "the vision model answered 400" });
+    expect(await describeNow()).toMatchObject({ text: null, error: "the vision model answered 400" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("a timeout — the budget is already spent", async () => {
     fetchMock.mockRejectedValueOnce(timeoutError());
-    expect(await describeNow()).toEqual({ text: null, error: "the vision request timed out" });
+    expect(await describeNow()).toMatchObject({ text: null, error: "the vision request timed out" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("an answer without a description", async () => {
     fetchMock.mockResolvedValueOnce(answer("   "));
-    expect(await describeNow()).toEqual({ text: null, error: "the vision model answered without a description" });
+    expect(await describeNow()).toMatchObject({ text: null, error: "the vision model answered without a description" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("an unlinked account never reaches the proxy at all", async () => {
     mocks.configGet.mockResolvedValue(undefined);
-    expect(await describeNow()).toEqual({ text: null, error: "ClawBox AI is not connected on this device" });
+    expect(await describeNow()).toMatchObject({ text: null, error: "ClawBox AI is not connected on this device" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+});
+
+
+it("records requested and actual vision model plus usage separately for every attempt", async () => {
+  fetchMock.mockResolvedValueOnce(status(503)).mockResolvedValueOnce(new Response(JSON.stringify({
+    model: "deepseek-v4-flash-vision-exp", usage: { prompt_tokens: 123, completion_tokens: 7, total_tokens: 130 },
+    choices: [{ message: { content: "A dashboard" } }],
+  })));
+  const pending = describeImage("aGk=");
+  await vi.runAllTimersAsync();
+  const result = await pending;
+  expect(result.vision?.attempts).toHaveLength(2);
+  expect(result.vision?.attempts[0]).toMatchObject({ status: 503, usage: null, responseModel: null });
+  expect(result.vision?.attempts[1]).toMatchObject({ requestedModel: "vision-x", responseModel: "deepseek-v4-flash-vision-exp", usage: { total_tokens: 130 } });
+  expect(JSON.stringify(result)).not.toContain("tok-1234567890");
 });
