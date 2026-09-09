@@ -918,8 +918,8 @@ OPENCLAW_VERSION="2026.8.1"
 # Bump the default in a PR, ship it through beta -> main, and the fleet
 # follows on its next update.
 #
-# Current pin: upstream tag v2026.8.19 == "Hermes Agent v0.20.5".
-HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-fcbd1076a93841fa88855acce810e342a5b78101}"
+# Current pin: upstream tag v2026.9.7 == "Hermes Agent v0.21.1" (TASK-784).
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-2237be355906fbe6065ce1815711eee52b2d646e}"
 
 # The OpenAI Codex CLI (TASK-439). The pinned version and the digest that
 # authorises it live in config/codex-target.txt; these two are only WHERE the
@@ -3472,6 +3472,177 @@ step_openclaw_setup() {
   esac
 }
 
+# One [WARN] line plus the marker the updater raises on the update's own status.
+#
+# Deliberately NOT the step's exit code. `resume_paused_engines` above records
+# the rule for exactly this class (install.sh:1720-1728): `record_provision_failure`
+# and a non-zero return paint a whole good update red, and `optional_step` would
+# report `hermes_install` as "failed and were skipped" over an install that ran
+# and succeeded. The quieter surface exists for this — `CLAWBOX-WARN[<code>]:`,
+# which src/lib/updater.ts (STEP_WARNING_LINE) reads out of the step's journal —
+# so the owner is told without the update turning red, and the agent install's
+# own answer (`_hermes_off_pin`) stays the step's return contract.
+hermes_dashboard_restart_warn() {
+  echo "    [WARN] $1 $2" >&2
+  echo "CLAWBOX-WARN[hermes-dashboard-not-restarted]: $1 $2 — it may still be serving the Hermes agent this step replaced; 'sudo systemctl restart $1' puts it on the new one"
+}
+
+# Put the Hermes dashboard back onto the agent the step above just replaced.
+#
+# A pinned upgrade is a move-aside plus a FRESH CLONE, and the tree it moved
+# aside is deleted a few lines later — while clawbox-hermes-dashboard is a
+# long-lived Python process holding the OLD files open. Measured on the Hermes
+# box (TASK-784) right after an upgrade from v0.20.5 to v0.21.1: the dashboard
+# was still the pid it had been more than two hours earlier, `grep -c
+# "(deleted)" /proc/<pid>/maps` returned 83, and `journalctl -u clawbox-hermes-dashboard`
+# had NO entries — nothing had signalled it at all. Python imports lazily, so
+# such a process keeps answering until it reaches a module it had not yet
+# imported, which is now unreachable. A full chat battery PASSED on that box in
+# that state — three turns, correct answers, all of it served by an agent that
+# no longer existed on disk. That is the false green this exists to close.
+#
+# `Restart=always` is not a mechanism here: nothing stops the process, so
+# nothing restarts it, and neither unit has an ExecStop.
+#
+# `try-restart`, never `restart`: `restart` STARTS a stopped unit, and a box
+# whose Hermes units are stopped and disabled — the openclaw direction of
+# step_edition_foreign_teardown, or a fresh install where step_hermes_edition
+# has not installed them yet — must never have them resurrected by an agent
+# upgrade. Same invariant src/lib/hermes-dashboard-control.ts is built around
+# and the same call refresh_agent_coding_tools makes, for the same reason.
+#
+# HARNESS-FIRST. Hermes owns a STOP — `hermes dashboard --stop`, its own
+# SIGTERM-grace-SIGKILL path, which this unit already runs as an ExecStartPre —
+# but `hermes dashboard --help` at this pin offers only `--stop` and `--status`
+# and no restart, and Hermes supervises nothing. The only thing upstream offers
+# around an upgrade is `hermes update`, which reattaches a detached checkout to
+# main (hermes_cli/update_cmd.py), the exact outcome the pin exists to prevent.
+# The proxy is not Hermes's at all: scripts/hermes-dashboard-proxy.js is our
+# node process. systemd owns both units here, so systemd is what gets asked.
+#
+# What DOES already exist in this tree is `bounceHermesDashboard()`
+# (src/lib/hermes-dashboard-control.ts) — but it is shaped for the WEB SERVER,
+# which has no root: it asks Hermes to stop itself and lets `Restart=always`
+# do the rest, precisely because a `systemctl restart` grant would let an
+# openclaw box resurrect a torn-down dashboard. Root here needs no such
+# indirection. Its VERDICT rule is borrowed wholesale, though: "systemd says a
+# DIFFERENT process is now the unit's main one, and the socket says that
+# process is serving. Neither alone is the bounce."
+hermes_dashboard_restart_after_install() {
+  local unit state before after settled budget settle restart_rc
+
+  # ONE budget for the whole bounce of ONE unit — the blocking call and the
+  # wait after it are two phases of the same restart, so the clock is not
+  # restarted between them. Giving each phase its own `budget` would double the
+  # worst case (a hung `try-restart` spends it, then the poll spends it again),
+  # which is what makes the arithmetic below wrong at a glance.
+  #
+  # `systemctl try-restart` without `--no-block` waits for the job to finish,
+  # and this unit declares TimeoutStartSec=300 with systemd's default 90 s stop
+  # — so an unbounded call is a ~390 s term inside step_post_update's 900 s
+  # budget, next to the 300 s WhatsApp warm-up below. `timeout` is what bounds
+  # it; the poll after it is for the cases where the call did NOT block to a
+  # finished restart (it timed out, or it exited 0 having done nothing because
+  # the unit stopped in the gap since the is-active probe).
+  #
+  # Worst case, therefore: `budget + settle` per unit, so ~246 s for the pair on
+  # the shipped defaults, before the warm-up's own 300 s.
+  budget="${HERMES_DASHBOARD_RESTART_WAIT_S:-120}"
+  # Digits, at most four of them, and at least one second. The hazard is not
+  # errexit — the `-lt` below is the left side of a `||`, which errexit never
+  # sees — it is the two values that make the wait meaningless: a 20-digit
+  # number, which `[` rejects with "integer expression expected" once per probe
+  # and which is then printed back at the owner as a budget, and 0, which asks
+  # for the proof without waiting for it. read_configured_harness_swap caps a
+  # length for the same reason.
+  case "$budget" in ''|*[!0-9]*) budget=120 ;; esac
+  { [ "${#budget}" -le 4 ] && [ "$budget" -ge 1 ]; } || budget=120
+  # The same settle resume_paused_engines uses, and for the same reason.
+  settle="${CLAWBOX_ENGINE_SETTLE_S:-3}"
+  case "$settle" in ''|*[!0-9]*) settle=3 ;; esac
+  { [ "${#settle}" -le 3 ] && [ "$settle" -ge 1 ]; } || settle=3
+
+  # The dashboard first, then the proxy that fronts it — never the other way
+  # round: the proxy brokers a session AGAINST the dashboard, so bouncing it
+  # while the replacement dashboard is still coming up would have it fail a
+  # login and sit out LOGIN_RETRY_COOLDOWN_MS (scripts/hermes-dashboard-proxy.js).
+  # The proxy holds no deleted files of its own — it is our node process, not
+  # Hermes's — and it does recover a rejected session by itself on a 401. It is
+  # bounced anyway because the pair is provisioned and restarted together
+  # everywhere else (scripts/setup-hermes-edition.sh), and a node start is
+  # sub-second; the ordering is what makes that free.
+  for unit in clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service; do
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    if [ "$state" != "active" ]; then
+      # SAY the state rather than promise a restart. `Restart=always` brings
+      # back `inactive` and `activating`; it does not promise anything for
+      # `failed`, and there is nothing at all behind an absent unit — which is
+      # the ordinary fresh-install case, before step_hermes_edition has
+      # installed either of them.
+      echo "  $unit is ${state:-not installed} — nothing to bounce here"
+      continue
+    fi
+
+    before="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+
+    restart_rc=0
+    # bash's own second counter, reset here and read below: the elapsed time has
+    # to survive a `date` that is missing or fails, and an external command that
+    # answers 0 on failure would make the deadline below never arrive.
+    SECONDS=0
+    timeout "$budget" systemctl try-restart "$unit" >/dev/null 2>&1 || restart_rc=$?
+    # 124 is `timeout`'s: the job outlived the budget and may still be running,
+    # which the checks below can still answer. Anything else is systemd saying
+    # no, and there is nothing left to verify.
+    if [ "$restart_rc" -ne 0 ] && [ "$restart_rc" -ne 124 ]; then
+      hermes_dashboard_restart_warn "$unit" "could not be restarted (systemctl exit $restart_rc)"
+      continue
+    fi
+
+    while :; do
+      after="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+      # Empty (no systemd, a failed query), 0 (stopped, or still in an
+      # ExecStartPre) and the pid we started with are all "not yet".
+      case "$after" in
+        ''|0|"$before") ;;
+        *) break ;;
+      esac
+      # Against the SAME deadline the blocking call above drew from, so a
+      # `try-restart` that already spent the budget does not get it again.
+      [ "$SECONDS" -lt "$budget" ] || break
+      sleep 1
+    done
+
+    # A new main process is HALF the answer. Both units are Type=simple, so
+    # systemd calls them active the instant ExecStart forks — before the
+    # dashboard binds its socket, and long before a fresh clone finishes the
+    # web-dist build it forces (60-90 s measured, which is why the unit allows
+    # itself TimeoutStartSec=300). A clone that cannot start hands over a new
+    # pid and then dies into `Restart=always`, so claiming the bounce on the
+    # pid alone would be this step's own false success moved one notch down.
+    # Ask again after a settle: a server that came up and one that exited two
+    # seconds later look identical until then.
+    sleep "$settle"
+    state="$(systemctl is-active "$unit" 2>/dev/null || true)"
+    settled="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+
+    if [ "$state" = "active" ] && [ -n "$after" ] && [ "$after" != "0" ] \
+      && [ "$after" != "$before" ] && [ "$settled" = "$after" ]; then
+      echo "  Restarted $unit on the new agent (main pid ${before:-unknown} -> $after, still up ${settle}s later)"
+    else
+      # One sentence carrying what was actually observed, rather than a single
+      # asserted diagnosis: `inactive` means somebody stopped it and it is
+      # serving nothing, `activating` means it is still coming, a pid that
+      # moved again means it is crash-looping. They are different problems and
+      # the owner is told which.
+      hermes_dashboard_restart_warn "$unit" \
+        "did not settle on a new main process (systemd says ${state:-unknown}, main pid ${settled:-unknown}, was ${before:-unknown})"
+    fi
+  done
+  # ALWAYS 0 — see hermes_dashboard_restart_warn.
+  return 0
+}
+
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every
 # edition that runs Hermes — the hermes SKU and the premium dual SKU (which was
 # previously skipped here, so a dual box got the switcher but no second
@@ -3536,9 +3707,11 @@ step_hermes_install() {
     # Runnability stays THE SHIM'S to prove, and is asked first. `--help` goes
     # through the same shim -> `<agent_dir>/hermes` -> `hermes_cli.main` path
     # `--version` does, so a shim whose interpreter or entry script is gone
-    # still fails it — but unlike `--version` it runs no update check
-    # (`banner.check_for_updates()` has two call sites in 0.20.5:
-    # `print_fast_version_info` and the interactive welcome banner). Asking the
+    # still fails it — but unlike `--version` it runs no update check. Still
+    # true at the v0.21.1 pin, re-read at 2237be35 rather than assumed:
+    # `_startup_fast.py` calls `check_for_updates(passive=True)` from
+    # `print_fast_version_info`, and the interactive welcome banner is the
+    # other caller. (On 0.20.5 the same two, without the passive flag.) Asking the
     # venv interpreter directly instead would only prove the PACKAGE IMPORTS,
     # which is not the question this guard exists to answer: a box whose
     # `hermes` command is dead would read as "already installed" and the
@@ -3567,7 +3740,7 @@ step_hermes_install() {
   fi
 
   # A version string cannot answer "is this the pinned build?": upstream prints
-  # the same `v0.20.5` for the tag and for every untagged commit after it, and
+  # the same `v0.21.1` for the tag and for every untagged commit after it, and
   # there are hundreds of those a week. The checkout's HEAD is the only proof,
   # so HEAD is what decides. Read as the clawbox user for the same reason the
   # probe is: git refuses to operate on a repository owned by somebody else
@@ -3734,6 +3907,19 @@ step_hermes_install() {
     # directory a later factory reset has to be able to delete.
     rm -rf "$agent_dir.broken"
 
+    # BEFORE the bridge warm-up below, not after it. The tree the dashboard is
+    # executing has just been deleted; the warm-up is allowed 300 s and has
+    # nothing to do with the dashboard, so running it first would hold the
+    # box's chat backend on files that are gone for five more minutes.
+    #
+    # The cost of that order, stated rather than discovered: the replacement
+    # dashboard does its post-clone web-dist build while the warm-up's npm
+    # install runs, so two heavy jobs now overlap on a device this file already
+    # documents as an OOM-kill target during updates (run_next_build). The
+    # settle inside the restart serialises the first seconds of it, and serving
+    # deleted code for five more minutes is the worse trade.
+    hermes_dashboard_restart_after_install
+
     # The upgrade above is a move-aside plus a FRESH clone, and the bridge's
     # ~80 MB node_modules is untracked — so every pinned upgrade deletes it.
     # Nothing is broken by that: the pairing manager runs this same `npm
@@ -3809,6 +3995,10 @@ step_hermes_install() {
     # not ship, which the fleet has to hear about even though nothing here is
     # broken. Default 0, so every path that never attempted an upgrade returns
     # 0 exactly as before.
+    #
+    # A dashboard that could not be bounced is deliberately NOT folded in here:
+    # it rides the CLAWBOX-WARN channel instead, so an install that worked is
+    # never reported as a failed step. See hermes_dashboard_restart_warn.
     return "$_hermes_off_pin"
   fi
   echo "  Warning: the Hermes agent is still not runnable after this step" >&2
@@ -5714,7 +5904,7 @@ step_openclaw_tts() {
             # AND THE SELECTION IS MADE WHATEVER THE ENGINE ANSWERED, which is
             # the opposite of what this card first asked for, because to Hermes
             # an unset `tts.provider` is not "no voice": measured read-only on
-            # the pinned 0.20.5 package on the Hermes box —
+            # the then-pinned 0.20.5 package on the Hermes box —
             # `tools/tts_tool.py:211` `DEFAULT_PROVIDER = "edge"` and `:661`
             # `provider = (tts_config.get("provider") or DEFAULT_PROVIDER)` —
             # an ABSENT key resolves to Microsoft's Edge cloud, and the harness

@@ -62,7 +62,7 @@ const VENV_PYTHON = path.join(AGENT_DIR, "venv", "bin", "python");
 
 /** The banner a silenced probe gets, verbatim from the Hermes box. */
 const SILENT_BANNER = [
-  "Hermes Agent v0.20.5 (2026.8.19) · upstream 089bb328 · local fcbd1076 (+24396 carried commits)",
+  "Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35 (+32678 carried commits)",
   "Install directory: /home/clawbox/.hermes/hermes-agent",
   "Install method: git",
   "Python: 3.11.15",
@@ -126,7 +126,7 @@ describe("runHermesCli({ silenceUpdateCheck }) — the version probe stops payin
     expect(bin).toBe(VENV_PYTHON);
     expect(argv).toEqual(["-c", expect.stringContaining("check_updates=False")]);
     expect(result.stdout).not.toMatch(/Update available/);
-    expect(parseHermesVersion(result.stdout)).toBe("v0.20.5");
+    expect(parseHermesVersion(result.stdout)).toBe("v0.21.1");
   });
 
   it("makes the checkout importable the way the shim does, and inherits no Python home", async () => {
@@ -188,7 +188,7 @@ describe("runHermesCli({ silenceUpdateCheck }) — the version probe stops payin
 
     expect(mockSpawn).toHaveBeenCalledTimes(2);
     expect(mockSpawn.mock.calls[1][0]).toBe(HERMES_BIN);
-    expect(parseHermesVersion(result.stdout)).toBe("v0.20.5");
+    expect(parseHermesVersion(result.stdout)).toBe("v0.21.1");
   });
 
   it("does not ask the same question twice when the child said far too much", async () => {
@@ -227,7 +227,7 @@ describe("runHermesCli({ silenceUpdateCheck }) — the version probe stops payin
     // The false-failure guard: the silence being absent must cost the nag
     // line and NOTHING else — the version still reads out of the banner.
     expect(result.stdout).toContain("Update available");
-    expect(parseHermesVersion(result.stdout)).toBe("v0.20.5");
+    expect(parseHermesVersion(result.stdout)).toBe("v0.21.1");
   });
 
   it("falls open when the printer is there but refuses", async () => {
@@ -244,7 +244,7 @@ describe("runHermesCli({ silenceUpdateCheck }) — the version probe stops payin
 
     expect(mockSpawn).toHaveBeenCalledTimes(2);
     expect(mockSpawn.mock.calls[1][0]).toBe(HERMES_BIN);
-    expect(parseHermesVersion(result.stdout)).toBe("v0.20.5");
+    expect(parseHermesVersion(result.stdout)).toBe("v0.21.1");
   });
 
   it("leaves every other hermes call exactly as it was", async () => {

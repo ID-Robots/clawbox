@@ -37,8 +37,34 @@ describe("parseHermesVersion", () => {
     "Install method: git",
   ].join("\n");
 
+  // The real banner at the commit HERMES_PIN_COMMIT now installs, read off the
+  // Hermes box (TASK-784). Kept BESIDE the older one rather than replacing it
+  // for two reasons: a box mid-update still prints the older banner, and the
+  // two differ in their field separator, which pins that the parser does not
+  // depend on one. (Which separator belongs to which VERSION is not something
+  // this tree can say — the two v0.20.5 fixtures it carries disagree — so
+  // nothing here claims it.)
+  const banner021 = [
+    "Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35 (+32678 carried commits)",
+    "Install directory: /home/clawbox/.hermes/hermes-agent",
+    "Install method: git",
+    "Python: 3.11.15",
+  ].join("\n");
+
   it("reduces the multi-line banner to the version tag", () => {
     expect(parseHermesVersion(banner)).toBe("v0.20.5");
+  });
+
+  it("reads the pinned build's banner, whichever separator upstream printed", () => {
+    expect(parseHermesVersion(banner021)).toBe("v0.21.1");
+  });
+
+  it("takes the version, not the build date, when the tag is missing its v", () => {
+    // Both tokens on this line are semver-ish and the build date comes SECOND,
+    // so only "first match on line one" gets this right. Written without a
+    // leading `v` because that is the one shape the banner tests above cannot
+    // distinguish from a date.
+    expect(parseHermesVersion("Hermes Agent 0.21.1 (2026.9.7) · local 2237be35")).toBe("0.21.1");
   });
 
   it("returns null for empty values", () => {

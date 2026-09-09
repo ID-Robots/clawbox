@@ -24,9 +24,13 @@ export function cleanVersion(v: string | null | undefined): string | null {
  *
  * `hermes --version` is a multi-line report, not a version string:
  *
- *   Hermes Agent v0.20.5 (2026.8.19) — upstream 261a4efb — local 10914727
+ *   Hermes Agent v0.21.1 (2026.9.7) · upstream ead7e91d · local 2237be35 (+32678 carried commits)
  *   Install directory: /home/clawbox/.hermes/hermes-agent
  *   Install method: git
+ *
+ * The separator between the fields is upstream's to change — banners carrying
+ * an em dash and a middle dot have both been seen — so nothing here may depend
+ * on it: the version is the first semver-ish token on line one.
  *
  * Only the tag belongs in an About row, and `cleanVersion` cannot get it:
  * its rules are shaped for OpenClaw/git-describe output, and none of them
