@@ -14,7 +14,7 @@ import { saveEnv } from "@/tests/helpers/env";
  * candidate and the other only neutralised it. One helper, so that where the
  * core keeps a manifest is written down once.
  *
- * `manifestPaths` reads `CLAWBOX_OPENCLAW_HOME` first, then `OPENCLAW_HOME`,
+ * `coreManifestPaths` reads `CLAWBOX_OPENCLAW_HOME` first, then `OPENCLAW_HOME`,
  * then `$HOME/.openclaw`, so all three are aimed at the fixture — pointing only
  * one leaves the lookup wherever the surrounding environment aimed it, and
  * `vitest.config.ts` deliberately aims them at empty directories.
