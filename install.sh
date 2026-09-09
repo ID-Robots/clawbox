@@ -5267,6 +5267,46 @@ tts_ensure_provider_registered() {
 # chosen, and the owner can change it in Settings → Voice. Tightening this to
 # the same predicate would mean re-deriving ownership in a second language —
 # the thing the paragraph above declines to do with the tier.
+# Can openclaw.json be READ at all right now?
+#
+# `openclaw config get` exits 1 for an unset key AND for a config it could not
+# read — measured on the box, both give rc=1 with empty output — so the exit code
+# cannot tell "the owner has chosen nothing" from "we cannot see what the owner
+# chose". Seed-if-unset acts on the first and must never act on the second: an
+# unreadable config would otherwise be overwritten with our own selection, which
+# is how an owner's ElevenLabs pick disappears on an update.
+#
+# So ask the FILE. A config that parses means an empty `config get` really is an
+# unset key. A config that is absent is also genuinely unset — that is a fresh
+# box, which must still be seeded — and only a file that exists and does not
+# parse is the case this refuses to write over. Mirrors the discipline the
+# Hermes arm above already applies through HERMES_TTS_READ_FAILED.
+tts_config_readable() {
+  local rc=0
+  as_clawbox python3 - <<'PY' >/dev/null 2>&1 || rc=$?
+import json, os, sys
+home = os.path.expanduser("~")
+base = os.environ.get("CLAWBOX_OPENCLAW_HOME") or os.path.join(home, ".openclaw")
+path = os.path.join(base, "openclaw.json")
+if not os.path.exists(path):
+    sys.exit(0)          # fresh box: genuinely unset, seed it
+try:
+    with open(path) as fh:
+        json.load(fh)
+except Exception:
+    sys.exit(1)          # there IS a config and we cannot read it
+sys.exit(0)
+PY
+  # ONLY exit 1 — the probe's own verdict that a config exists and does not
+  # parse — refuses. Any OTHER failure means the question could not be asked at
+  # all (no python3, no `as_clawbox`, a harness that does not carry this
+  # function), and refusing on that would cost a box its voice over something
+  # never established. Fail OPEN, because the cost of the two mistakes is not
+  # symmetric: seeding over a config we could not read loses one setting the
+  # owner can set again, while refusing to seed leaves the box mute.
+  [ "$rc" -ne 1 ]
+}
+
 tts_managed_cloud_provider() {
   local home="$1"
   as_clawbox "$OPENCLAW_BIN" config get "$home.providers" 2>/dev/null | python3 -c '
@@ -5883,6 +5923,17 @@ step_openclaw_tts() {
       tts_write_local_provider_definition "$TTS_HOME" "$TTS_SCRIPT" "$TTS_SCRIPT_SRC" \
         || echo "  Warning: could not define the on-device voice provider; Settings → Voice can repair it" >&2
     fi
+    return "$TTS_RC"
+  fi
+
+  # An EMPTY read is only "the owner has chosen nothing" if the config could be
+  # read at all — `config get` returns the same rc=1 and the same empty string
+  # either way. Refuse to seed over a config we cannot see, and say so; the
+  # provider DEFINITION below is skipped with it, because writing into a file
+  # that does not parse is how a broken config becomes a lost one.
+  if ! tts_config_readable; then
+    echo "  Warning: openclaw.json exists and could not be read — leaving $TTS_HOME.provider alone rather than overwriting a choice we cannot see" >&2
+    echo "           Diagnose with: openclaw config get $TTS_HOME.provider" >&2
     return "$TTS_RC"
   fi
 

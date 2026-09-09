@@ -549,6 +549,9 @@ function ChromeDesktopInner() {
   // drop their cells, and by the `desktop_apps` write, which records the version
   // so it happens exactly once.
   const shedNeeded = useRef<Set<string> | null>(null);
+  // Bumped once by the load when a shed is owed, purely to run the write effect
+  // below on a box whose `desktopApps` the load did not change.
+  const [shedTick, setShedTick] = useState(0);
   // The docked chat's width as the DEVICE remembers it — see the write below.
   // Seeded from the stored value even on a phone, which never restores the
   // panel, so opening the desktop on a phone cannot erase the layout.
@@ -576,6 +579,20 @@ function ChromeDesktopInner() {
         // Installed apps
         if (Array.isArray(data.installed_apps)) setInstalledApps(data.installed_apps as string[]);
         if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, InstalledMeta>);
+        // Evaluated for EVERY box, not only one with a saved list. A fresh box
+        // has nothing to shed, but it still has to record the version: without
+        // that, its first saved list carries no marker, and the moment the owner
+        // adds one of these apps from the launcher the next load sheds it right
+        // back out. The owner's own addition would be undone by a migration that
+        // had nothing to migrate.
+        const shedFrom = Number(data.desktop_apps_shed ?? 0);
+        if (shedFrom < DESKTOP_APPS_SHED_VERSION) {
+          shedNeeded.current = desktopAppsToShed(shedFrom);
+          // The write effect keys on `desktopApps`, which does not change on a
+          // box that had no saved list — so nothing would carry the marker to
+          // disk. This is the one-shot that makes it run.
+          setShedTick((n) => n + 1);
+        }
         // Merge new built-ins into the saved list so they appear without a factory reset.
         if (Array.isArray(data.desktop_apps)) {
           // Built-in ids only. An older launcher pushed `installed-*` ids here
@@ -593,11 +610,9 @@ function ChromeDesktopInner() {
           // `desktopApps` and `iconPositions` into preferences do the writing.
           // The decision travels out on a ref because this load effect has empty
           // deps and cannot see `savePreferences`.
-          const shedFrom = Number(data.desktop_apps_shed ?? 0);
-          if (shedFrom < DESKTOP_APPS_SHED_VERSION) {
-            const shed = desktopAppsToShed(shedFrom);
+          if (shedNeeded.current) {
+            const shed = shedNeeded.current;
             saved = saved.filter(id => !shed.has(id));
-            shedNeeded.current = shed;
           }
           // ...but only default-set built-ins are auto-added, so an app that
           // ships off the desktop never appears on a box that never had it.
@@ -934,8 +949,13 @@ function ChromeDesktopInner() {
       shed
         ? { desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION }
         : { desktop_apps: desktopApps },
+      // An EXPLICIT slot, because this body has two shapes: without one the slot
+      // key is the field names, so the shed write and every later plain write
+      // would debounce in separate slots and could both be in flight. The
+      // appearance write above carries an explicit slot for the same reason.
+      "desktop_apps",
     );
-  }, [desktopApps, savePreferences]);
+  }, [desktopApps, shedTick, savePreferences]);
   useEffect(() => { savePreferences({ hidden_installed: hiddenInstalledApps }); }, [hiddenInstalledApps, savePreferences]);
   useEffect(() => { savePreferences({ pinned_apps: pinnedOverrides }); }, [pinnedOverrides, savePreferences]);
   useEffect(() => { savePreferences({ icon_grid: iconPositions }); }, [iconPositions, savePreferences]);

@@ -312,6 +312,8 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
     extractShellFn(INSTALL_SH, "tts_write_local_provider_definition"),
+    extractShellFn(INSTALL_SH, "tts_managed_cloud_provider"),
+    extractShellFn(INSTALL_SH, "tts_config_readable"),
     extractShellFn(INSTALL_SH, "tts_ensure_ffmpeg"),
     // The real knob, not a stub: the test is about what the step does with it.
     extractShellFn(INSTALL_SH, "harness_has_no_gpu"),

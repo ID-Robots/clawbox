@@ -5147,6 +5147,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!caps.shouldOpenFirstConversation) return
     if (!firstConversationCandidateRef.current) return
     if (greetedRef.current) return
+    // Not before the wire is up. This dispatches straight to the adapter rather
+    // than through `startRun`, so on a box with a live connection an early turn
+    // rejects with 'Not connected' — and `dispatchTurn` clears `sending` without
+    // clearing `greetedRef`, so the introduction would be lost for the life of
+    // the session. `status` is in the deps, so this simply runs again once the
+    // socket connects. Same predicate the abort path uses: a harness with no
+    // live connection has nothing to wait for.
+    if (caps.hasLiveConnection && status !== 'connected') return
     // Main only, re-checked at the moment of sending: a side tab the owner
     // switched to while the facts were in flight must not be greeted into.
     if (sessionKeyRef.current !== mainSessionKeyRef.current) return
@@ -5156,7 +5164,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
     void dispatchTurnRef.current(FIRST_CONVERSATION_OPENER, [], idempotencyKey)
-  }, [caps.shouldOpenFirstConversation, transcriptReads])
+  }, [caps.shouldOpenFirstConversation, caps.hasLiveConnection, status, transcriptReads])
 
   useEffect(() => {
     if (isOpen) {

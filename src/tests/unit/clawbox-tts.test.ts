@@ -947,6 +947,21 @@ describe("install.sh wires TTS to the on-device chain", () => {
     );
   });
 
+  it("refuses to seed over a config it could not read", () => {
+    // `openclaw config get` exits 1 for an unset key AND for an unreadable
+    // config, with empty output either way — measured on the box. Seed-if-unset
+    // must act on the first and never the second, or an owner's ElevenLabs pick
+    // is overwritten by an update that simply could not see it. The exit code
+    // cannot tell them apart, so the FILE is asked instead.
+    expect(step).toMatch(/if ! tts_config_readable; then/);
+    const helper = extractShellFunction(INSTALL_SH, "tts_config_readable");
+    // Absent is genuinely unset — a fresh box must still be seeded.
+    expect(helper).toMatch(/if not os\.path\.exists\(path\):\s*\n\s*sys\.exit\(0\)/);
+    // Present but unparseable is the one case that refuses.
+    expect(helper).toContain("sys.exit(1)");
+    expect(helper).toContain("json.load");
+  });
+
   it("proves the subscription from our own stamp, not a second plan read", () => {
     const helper = extractShellFunction(INSTALL_SH, "tts_managed_cloud_provider");
     // gateway-pre-start.sh writes this entry only at the speech tier and
