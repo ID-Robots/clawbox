@@ -46,6 +46,7 @@ beforeAll(() => {
 
 let root: string;
 let bin: string;
+let sandboxDispatcher: string;
 
 /** The shape NetworkManager's DHCP client actually writes for the wired link. */
 const ETH_ROUTE = "default via 192.0.2.1 dev eth0 proto dhcp src 192.0.2.50 metric 100";
@@ -95,6 +96,17 @@ function makeBox(opts: BoxOptions = {}): void {
   mkdirSync(path.join(root, "data"), { recursive: true });
   mkdirSync(path.join(root, "scripts"), { recursive: true });
   mkdirSync(bin, { recursive: true });
+
+  // The real dispatcher sources the installed, root-owned network.env before
+  // reading NETWORK_INTERFACE. On a Nano that overrides this fixture's wlan0
+  // with the real radio name. Relocate only that config path in the sandbox
+  // copy; never modify the device's configuration or skip the sourcing logic.
+  const networkEnv = path.join(root, "network.env");
+  writeFileSync(networkEnv, "NETWORK_INTERFACE=wlan0\n");
+  const dispatcherSource = readFileSync(DISPATCHER, "utf-8");
+  expect(dispatcherSource).toContain("/etc/clawbox/network.env");
+  sandboxDispatcher = path.join(root, "scripts", "nm-dispatcher-failover.sh");
+  writeFileSync(sandboxDispatcher, dispatcherSource.replaceAll("/etc/clawbox/network.env", networkEnv));
 
   // The shipped waiter. On a box it is installed ROOT-OWNED under
   // /usr/local/libexec/clawbox and the dispatcher is pointed there; the sandbox
@@ -189,7 +201,7 @@ case "$1" in
       # The carrier really goes, and NetworkManager runs the dispatcher for it
       # while this restart is still in flight.
       : > ${JSON.stringify(path.join(root, "routes"))}
-      bash ${JSON.stringify(DISPATCHER)} eth0 down >/dev/null 2>&1 || true
+      bash ${JSON.stringify(sandboxDispatcher)} eth0 down >/dev/null 2>&1 || true
     fi`
       : ""}
     exit ${opts.tryRestartFails ? 1 : 0} ;;
@@ -265,7 +277,7 @@ function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 }
 
 function runDispatcher(iface: string, action: string, extraEnv: Record<string, string> = {}): void {
-  const r = spawnSync("bash", [DISPATCHER, iface, action], { env: env(extraEnv), encoding: "utf-8", timeout: 25_000 });
+  const r = spawnSync("bash", [sandboxDispatcher, iface, action], { env: env(extraEnv), encoding: "utf-8", timeout: 25_000 });
   expect(r.status).toBe(0);
 }
 

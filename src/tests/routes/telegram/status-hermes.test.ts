@@ -30,16 +30,21 @@ vi.mock("@/lib/hermes-telegram", () => ({
   hermesGatewayStatus: vi.fn(),
   readHermesTelegramToken: vi.fn(),
 }));
+// The OpenClaw branch also probes channel status. Do not boot the device's
+// real CLI when this Hermes-focused suite exercises that branch.
+vi.mock("@/lib/openclaw-channels", () => ({ readCachedChannelStatus: vi.fn() }));
 
 import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesTelegramRegistered, hermesGatewayStatus, readHermesTelegramToken } from "@/lib/hermes-telegram";
+import { readCachedChannelStatus } from "@/lib/openclaw-channels";
 
 const mockGet = vi.mocked(get);
 const mockHarness = vi.mocked(getActiveHarness);
 const mockRegistered = vi.mocked(hermesTelegramRegistered);
 const mockGateway = vi.mocked(hermesGatewayStatus);
 const mockHermesToken = vi.mocked(readHermesTelegramToken);
+const mockChannelStatus = vi.mocked(readCachedChannelStatus);
 
 const TOKEN = "123456789:ABCDefGHIjklMNOpqrsTUVwxyz";
 const UP = { installed: true, running: true, scope: "system" as const };
@@ -62,6 +67,7 @@ describe("GET /setup-api/telegram/status on Hermes", () => {
     mockRegistered.mockResolvedValue(true);
     mockGateway.mockResolvedValue(UP);
     mockHermesToken.mockResolvedValue({ token: TOKEN, known: true });
+    mockChannelStatus.mockResolvedValue(null);
 
     GET = (await import("@/app/setup-api/telegram/status/route")).GET;
   });
@@ -183,6 +189,7 @@ describe("GET /setup-api/telegram/status on Hermes", () => {
     expect(mockRegistered).not.toHaveBeenCalled();
     expect(mockGateway).not.toHaveBeenCalled();
     expect(mockHermesToken).not.toHaveBeenCalled();
+    expect(mockChannelStatus).toHaveBeenCalledWith("telegram");
   });
 
   // The credential is the HARNESS's on a Hermes box. ClawBox's copy is written

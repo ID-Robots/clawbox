@@ -166,7 +166,16 @@ function runFirewall(opts: {
     }
   }
 
-  const res = spawnSync("bash", [FIREWALL], {
+  // The installed network.env overrides the environment on real Nanos. Keep
+  // the script's sourcing behavior, but point it at the fixture's radio so
+  // the host's actual interface cannot change these policy assertions.
+  const networkEnv = path.join(root, "network.env");
+  writeFileSync(networkEnv, "NETWORK_INTERFACE=wlTEST0\n");
+  const firewallSource = readFileSync(FIREWALL, "utf-8");
+  expect(firewallSource).toContain("/etc/clawbox/network.env");
+  const sandboxFirewall = path.join(root, "clawbox-firewall.sh");
+  writeFileSync(sandboxFirewall, firewallSource.replaceAll("/etc/clawbox/network.env", networkEnv));
+  const res = spawnSync("bash", [sandboxFirewall], {
     env: {
       ...process.env,
       PATH: bin,
