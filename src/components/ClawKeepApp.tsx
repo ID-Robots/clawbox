@@ -221,6 +221,15 @@ export default function ClawKeepApp() {
   // outer full-app login gate was tried and removed — it duplicated the
   // inline UX and broke local-only flows where ClawBox AI isn't required.
   const [status, setStatus] = useState<ClawKeepStatus | null>(null);
+  /**
+   * Is the first-run wizard the face this app is showing?
+   *
+   * Decided ONCE, from the first status that arrives, and cleared only by the
+   * wizard's own onDone — see the front door below for why deriving it per
+   * render ejected the owner in the middle of their first run. `null` means no
+   * status has answered yet, which is neither "show it" nor "don't".
+   */
+  const [wizardActive, setWizardActive] = useState<boolean | null>(null);
   // Which agent this box archives, for the strings that name it. Read before
   // the status has landed too, hence the optional chain — the default is the
   // word every one of those strings used to be hardcoded to.
@@ -275,6 +284,12 @@ export default function ClawKeepApp() {
         await fetch("/setup-api/clawkeep", { cache: "no-store" }),
       );
       setStatus(next);
+      // Latch the front-door decision on the FIRST status only. Every later
+      // refresh — including the one the wizard's own pairing step triggers —
+      // leaves it alone, so the wizard keeps the screen until it is finished.
+      setWizardActive((prev) =>
+        prev === null ? next.setupComplete === false && !next.paired : prev,
+      );
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -606,7 +621,18 @@ export default function ClawKeepApp() {
   // happen yet. A paired box skips it whatever the flag says — pairing is the
   // wizard's point, and an owner who paired before the wizard existed must
   // not be sent back through it.
-  if (status.setupComplete === false && !status.paired) {
+  //
+  // LATCHED, not re-derived. `!status.paired` is a statement about the box the
+  // owner ARRIVED on, and it was being re-evaluated against every status poll —
+  // so the wizard's own step 1 falsified its display condition the instant it
+  // succeeded. The owner was dropped onto the dashboard mid-wizard, before the
+  // passphrase and schedule steps, and the box sat in "Protection Lapsed" with
+  // setupComplete still false: a first run that ends in a scary state nobody was
+  // walked past. `wizardActive` answers the question once, on the first status
+  // that arrives, and only the wizard's own onDone clears it — which keeps the
+  // legacy case above working, since a box that was already paired when the
+  // owner opened the app still never enters.
+  if (wizardActive) {
     return (
       <AgentLabelContext.Provider value={agent}>
         <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
@@ -615,7 +641,7 @@ export default function ClawKeepApp() {
               status={status}
               agent={agent}
               onStatusChanged={refresh}
-              onDone={() => { void refresh(); }}
+              onDone={() => { setWizardActive(false); void refresh(); }}
             />
           </div>
         </div>
@@ -883,9 +909,17 @@ function ScheduleCard({
           </p>
         </div>
         <label className="relative inline-flex items-center cursor-pointer">
+          {/* The input IS the hit target, not a 1x1 `sr-only` box behind one.
+              Sized to the track and merely transparent, so a click anywhere on
+              the switch lands on the control itself rather than on whatever
+              element happens to sit over the hidden input's corner — which is
+              what `elementFromPoint` resolves, and therefore what a pointer
+              driven by coordinates (an automated check, an assistive pointer,
+              a stylus) actually hits. `peer` still styles the track below. */}
           <input
             type="checkbox"
-            className="sr-only peer"
+            className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+            aria-label={t("clawkeep.schedule.title")}
             checked={draft.enabled}
             disabled={saving}
             onChange={(e) => {

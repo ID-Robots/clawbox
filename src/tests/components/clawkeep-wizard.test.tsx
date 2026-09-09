@@ -86,6 +86,28 @@ describe("the ClawKeep front door", () => {
     expect(screen.queryByTestId("clawkeep-wizard")).toBeNull();
   });
 
+  it("keeps the wizard up when its OWN pairing step succeeds", async () => {
+    // The regression this pins, found on a box upgraded to v4.0.0: the front
+    // door re-derived `!paired` on every status poll, so the wizard's own step 1
+    // falsified the condition keeping it on screen. The owner was dropped onto
+    // the dashboard mid-run — before the passphrase and schedule steps — and the
+    // box sat in "Protection Lapsed" with setupComplete still false, a first run
+    // that ends in a scary state nobody was walked past.
+    //
+    // Through ClawKeepApp deliberately: the wizard's own steps are exercised
+    // against ClawKeepWizard directly below, and a component that is never
+    // unmounted cannot show this. The gate lives in the app.
+    app();
+    fireEvent.click(await screen.findByTestId("clawkeep-wizard-enable", {}, { timeout: 5000 }));
+    fireEvent.click(await screen.findByTestId("clawkeep-wizard-pair", {}, { timeout: 5000 }));
+    // The stub flips `paired` on the first poll, and the wizard refreshes the
+    // app's status — the exact moment the old condition went false.
+    await waitFor(() => expect(calls.some((c) => c.url === "/setup-api/clawkeep/pair/poll")).toBe(true), { timeout: 5000 });
+    await waitFor(() => expect(status.paired).toBe(true), { timeout: 5000 });
+    // Still the wizard. Not the dashboard, and not "Protection Lapsed".
+    expect(screen.getByTestId("clawkeep-wizard")).toBeInTheDocument();
+  });
+
   it("Not now marks setup done without pairing, and the dashboard's Pair card takes over", async () => {
     app();
     fireEvent.click(await screen.findByTestId("clawkeep-wizard-skip", {}, { timeout: 5000 }));
