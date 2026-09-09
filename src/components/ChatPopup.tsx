@@ -104,6 +104,18 @@ const MAX_QUEUED_SENDS = 20
 const SPOKEN_REPLIES_KEPT = 12
 /** The most one ask for a spoken reply may take, queue and cold start included. */
 const SPEAK_REPLY_TIMEOUT_MS = 150_000
+/**
+ * How long the composer's spoken-replies write may take before the button
+ * stops waiting for it.
+ *
+ * ABOVE the route's own worst case, deliberately: on OpenClaw that write is
+ * `openclaw config set`, which is 30 s per attempt and up to four attempts
+ * with backoff (`openclaw-config.ts`), so a shorter deadline would abort
+ * writes that were still landing. Its job is the OTHER failure — a request
+ * that never returns at all, which without it left the button disabled and
+ * `aria-busy` for the life of the page.
+ */
+const SPEAK_TOGGLE_TIMEOUT_MS = 150_000
 /** The longest one spoken reply holds the queue while playing (a capped reply is ~100 s of speech). */
 const PLAYBACK_MAX_MS = 150_000
 
@@ -3604,6 +3616,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'autoReply', enabled: next }),
+        // A deadline, so a request that never returns cannot leave this button
+        // disabled for good. See SPEAK_TOGGLE_TIMEOUT_MS for why it is this long.
+        signal: AbortSignal.timeout(SPEAK_TOGGLE_TIMEOUT_MS),
       })
       if (!res.ok) { setSpokenRepliesNotice('failed'); return }
       const data = await res.json().catch(() => null) as { autoReply?: unknown; engines?: unknown } | null
@@ -3619,7 +3634,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Settings -> Voice can be open on the same switch behind the chat.
       window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: applied, engines: data.engines } }))
     } catch {
-      setSpokenRepliesNotice('failed')
+      // A throw is not a refusal: the request was aborted, or the wire went
+      // away, and whether the box took the write is UNKNOWN — the CLI half can
+      // land after the deadline. Saying "could not be changed" over a write
+      // that did happen is the false-failure shape, so the box is asked what
+      // it now does and its answer is what the button shows. Only when it
+      // cannot be asked either is anything claimed.
+      try {
+        const after = await fetch('/setup-api/tts', { cache: 'no-store' })
+        const data = await after.json().catch(() => null) as { autoReply?: unknown; engines?: unknown } | null
+        if (!after.ok || typeof data?.autoReply !== 'boolean') throw new Error('unreadable')
+        setVoiceAutoReply(data.autoReply)
+        setVoiceCanSpeak(speechEngineAvailable(data.engines))
+        setSpokenRepliesNotice(data.autoReply ? 'on' : 'off')
+        window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: data.autoReply, engines: data.engines } }))
+      } catch {
+        setSpokenRepliesNotice('failed')
+      }
     } finally {
       speakToggleBusyRef.current = false
       setSpeakToggleBusy(false)

@@ -39,6 +39,8 @@ let postAnswer: { ok: boolean; status?: number; body: Record<string, unknown> } 
   ok: true,
   body: { choice: "auto", autoReply: false },
 };
+/** The write never returns — a deadline, or the wire going away mid-flight. */
+let postThrows = false;
 
 function assistantMessage(text: string, timestamp: number, audioPath?: string) {
   const content: unknown[] = [{ type: "text", text }];
@@ -99,6 +101,7 @@ function installFetch() {
     if (init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body ?? "null")) });
       if (url.includes("/setup-api/tts")) {
+        if (postThrows) throw new DOMException("The operation was aborted.", "TimeoutError");
         return {
           ok: postAnswer.ok,
           status: postAnswer.status ?? (postAnswer.ok ? 200 : 403),
@@ -276,6 +279,7 @@ describe("the ClawBox player for a spoken reply", () => {
     resetSpokenReplyPeakCache();
     ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
     postAnswer = { ok: true, body: { choice: "auto", autoReply: false } };
+    postThrows = false;
     decodeMode = "ok";
     clipDuration = 21;
     visible = true;
@@ -477,6 +481,7 @@ describe("the composer's spoken-replies toggle", () => {
     resetSpokenReplyPeakCache();
     ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
     postAnswer = { ok: true, body: { choice: "auto", autoReply: false } };
+    postThrows = false;
     clipDuration = 21;
     resetHarnessCache();
     window.localStorage.clear();
@@ -553,6 +558,41 @@ describe("the composer's spoken-replies toggle", () => {
       }));
     });
     expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
+  });
+
+  it("never stays stuck when the write does not come back", async () => {
+    // The write can be an `openclaw config set` — 30 s an attempt, four
+    // attempts — so it has a deadline. What must NOT follow is the button
+    // staying disabled for the life of the page, or the chat claiming a
+    // failure over a write that may well have landed: it asks the box what it
+    // now does and shows that.
+    postThrows = true;
+    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const toggle = await screen.findByTestId("chat-speak-toggle");
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
+
+    // The box says it is now OFF — the write did land after all.
+    ttsAnswer = { choice: "auto", autoReply: false, engines: [{ id: "local", configured: true }] };
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "false"));
+    expect(toggle).not.toBeDisabled();
+    expect(await screen.findByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesOffNotice");
+  });
+
+  it("says so, and stays usable, when the box cannot be asked either", async () => {
+    postThrows = true;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const toggle = await screen.findByTestId("chat-speak-toggle");
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
+    // Now nothing answers at all.
+    ttsAnswer = {};
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(screen.getByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesFailed"));
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(toggle).not.toBeDisabled();
   });
 
   it("is not offered on a box with no voice to speak with", async () => {
