@@ -5152,11 +5152,17 @@ for key, row in rows.items():
     # `pluginConsentRepairIsAllowed`): `plugins.entries` can be keyed
     # `openclaw-discord` where the row says `discord`, and an exact lookup would
     # answer "no entry" and skip the row for ever without saying why.
-    entry_key = None
-    for key in entries:
-        if isinstance(key, str) and canonical(key) == canonical(plugin_id):
-            entry_key = key
-            break
+    # THE EXACT KEY FIRST, the canonical scan only as a fallback. Every writer
+    # files the row under the key `plugins.entries` carries, so an exact match
+    # IS the intended entry — and a config that somehow held both spellings
+    # would otherwise be resolved by whichever one JSON happened to list first,
+    # which is not a rule anybody chose.
+    entry_key = plugin_id if plugin_id in entries else None
+    if entry_key is None:
+        for key in entries:
+            if isinstance(key, str) and canonical(key) == canonical(plugin_id):
+                entry_key = key
+                break
     if entry_key is None:
         continue
     entry = entries[entry_key]

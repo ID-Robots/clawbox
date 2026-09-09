@@ -554,6 +554,46 @@ ${CONFIG_SET_STUB}`);
     expect(marker().discord.disabled).toBe(true);
   });
 
+  it("takes the exactly-keyed entry even when an alias is listed before it", () => {
+    // A canonical scan alone resolved this by whichever spelling JSON listed
+    // first — a rule nobody chose. The row is filed under the key
+    // `plugins.entries` carries, so the exact match is the intended entry and
+    // the alias scan is only the fallback.
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        { plugins: { entries: { "openclaw-discord": { enabled: false }, discord: { enabled: false } } } },
+        null,
+        2,
+      ),
+    );
+    writeFileSync(
+      markerPath,
+      JSON.stringify(
+        {
+          discord: {
+            id: "discord",
+            stage: "consent",
+            reason: "The plugin is installed but its capabilities could not be accepted.",
+            atMs: 1788668446552,
+            disabled: true,
+            spec: "",
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    stubRealCli();
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.discord?.enabled).toBe(true);
+    // The alias is left exactly as it was — this repairs one entry, not two.
+    expect(config().plugins?.entries?.["openclaw-discord"]?.enabled).toBe(false);
+    expect(marker()).toEqual({});
+    expect(r.stderr).not.toContain("keyed differently");
+  });
+
   it("says so, rather than skipping in silence, when the row and its entry are keyed differently", () => {
     // `plugins.entries` can be keyed `openclaw-discord` where the row says
     // `discord`. An exact lookup answered "no entry" and skipped the row for
