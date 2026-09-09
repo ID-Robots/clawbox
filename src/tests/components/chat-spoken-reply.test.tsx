@@ -185,9 +185,14 @@ function deliver(message: unknown) {
 }
 
 const players = () => screen.queryAllByTestId("chat-audio") as HTMLAudioElement[];
+/** The transport of each player, in the same order — where the name now lives. */
+const playButtons = () => screen.queryAllByTestId("spoken-reply-play");
 
 function messageBubble(element: Element): Element | null {
-  if (element instanceof HTMLAudioElement) return element.parentElement?.parentElement ?? null;
+  // audio -> the player's own root -> the per-clip wrapper -> the audio list.
+  if (element instanceof HTMLAudioElement) {
+    return element.parentElement?.parentElement?.parentElement ?? null;
+  }
   // img -> preview button -> image wrapper -> image list -> message bubble.
   return element.parentElement?.parentElement?.parentElement?.parentElement ?? null;
 }
@@ -211,7 +216,7 @@ describe("spoken replies in the mascot chat", () => {
     resetHarnessCache();
   });
 
-  it("renders the audio the harness attached as a player with native controls", async () => {
+  it("renders the audio the harness attached as ClawBox's own player", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
     await screen.findByRole("textbox");
@@ -222,14 +227,17 @@ describe("spoken replies in the mascot chat", () => {
 
     await waitFor(() => expect(players()).toHaveLength(1));
     const player = players()[0];
-    // `controls` is the acceptance: play/pause, seek and duration are the
-    // browser's, and they are only there if the attribute is.
-    expect(player.getAttribute("controls")).not.toBeNull();
+    // The browser's grey bar is gone — the transport is ours now (TASK-782,
+    // pinned in chat-spoken-reply-player.test.tsx) — and the element under it
+    // keeps what made the old one work.
+    expect(player.getAttribute("controls")).toBeNull();
     expect(player.getAttribute("src")).toBe(playerSrc(VOICE));
     // Duration on screen before anything is played, without pulling the file
     // down for a reply nobody listens to.
     expect(player.getAttribute("preload")).toBe("metadata");
-    expect(player).toHaveAccessibleName(`chat.audioReply: ${SPOKEN_TEXT}`);
+    // The name the code computes is still the control's name; it sits on the
+    // button that is pressed rather than on a media element nothing exposes.
+    expect(playButtons()[0]).toHaveAccessibleName(`chat.audioPlay chat.audioReply: ${SPOKEN_TEXT}`);
   });
 
   it("labels the player with speakable text, not the markdown the model wrote", async () => {
@@ -247,8 +255,9 @@ describe("spoken replies in the mascot chat", () => {
     deliverSessionMessage(assistantMessage(MARKDOWN, 1787291825743, VOICE));
     await waitFor(() => expect(players()).toHaveLength(1));
 
-    const name = players()[0].getAttribute("aria-label") ?? "";
-    expect(name.startsWith("chat.audioReply: ")).toBe(true);
+    const name = playButtons()[0].getAttribute("aria-label") ?? "";
+    // The verb of the next press, then the computed name, unchanged.
+    expect(name.startsWith("chat.audioPlay chat.audioReply: ")).toBe(true);
     for (const marker of ["*", "`", "](", "https://"]) {
       expect(name).not.toContain(marker);
     }
@@ -557,7 +566,7 @@ EMAIL:4471`;
     // or by running ClawBox's own scripts/openclaw/clawbox-tts.sh for on-device
     // Kokoro — and neither engine strips the id, so it is still spoken there.
     // TASK-697's half, on the outbound hook that covers both.
-    const label = players()[0].getAttribute("aria-label") ?? "";
+    const label = playButtons()[0].getAttribute("aria-label") ?? "";
     expect(label).toContain(summary);
     expect(label).not.toContain("EMAIL:4471");
     expect(label).not.toContain("4471");
