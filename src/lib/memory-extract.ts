@@ -26,9 +26,15 @@ import { EXTRACTABLE_EXTENSIONS } from "@/lib/memory-shard-state";
 /** Where derived Markdown lives. One folder per source. */
 export const EXTRACT_ROOT = path.join(DATA_DIR, "memory-extracted");
 
-/** A document over this size is skipped: the extractors are happy to spend
- *  minutes on a huge scan, and this runs while the owner is watching a wizard. */
-const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
+/**
+ * A document over this size is skipped: the extractors are happy to spend
+ * minutes on a huge scan, and this runs while the owner is watching a wizard.
+ *
+ * Exported because the Hermes-side indexer applies the SAME bound to the files
+ * it reads directly (`src/lib/memory-index-local.ts`) — two copies of one
+ * number is how "the extractor uses the same bound" stops being true.
+ */
+export const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
 
 /** One extractor call's budget. */
 const EXTRACT_TIMEOUT_MS = 60_000;
@@ -129,9 +135,6 @@ export interface WalkBudget {
 export function newWalkBudget(): WalkBudget {
   return { left: MAX_ENTRIES, truncated: false, unreadable: 0, rootUnreadable: false };
 }
-
-/** How many entries one walk may read before it stops short. */
-export const WALK_MAX_ENTRIES = MAX_ENTRIES;
 
 export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator<string> {
   if (depth > MAX_DEPTH) return;

@@ -275,13 +275,17 @@ export async function register() {
     console.error('[instrumentation] Could not resume email chat approvals:', err instanceof Error ? err.message : err)
   }
   try {
-    // The memory-status probe boots a whole OpenClaw process (~8 s on a
-    // Jetson). Pay it once, after the boot rush (gateway restart, schedulers,
-    // Next's own warm-up) has passed, so the first Settings → Local AI open
-    // answers from the cache. On every edition: the probe was gated on there
-    // being an openclaw to spawn, and on the SKU with none it now reads
-    // ClawBox's own index instead — cheap, and worth warming for the same
-    // reason. Not under an update — see armMemoryStatusWarm.
+    // On the OpenClaw arm the memory-status probe boots a whole OpenClaw
+    // process (~8 s on a Jetson), so it is paid once, after the boot rush
+    // (gateway restart, schedulers, Next's own warm-up) has passed, and the
+    // first Settings → Local AI open answers from the cache.
+    //
+    // Armed on EVERY edition, not because the other arm is expensive — reading
+    // ClawBox's own index is a couple of sqlite counts — but because the cache
+    // this fills is what makes `peekMemoryStatus()` answer at all, and the
+    // Local AI route peeks rather than waits. Without it the memory row on that
+    // SKU is blank until something else has asked. Not under an update — see
+    // armMemoryStatusWarm.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { warmMemoryStatusCache } = require('./lib/clawkeep-memory')
     // eslint-disable-next-line @typescript-eslint/no-require-imports

@@ -36,17 +36,22 @@ import fs from "fs/promises";
 import { constants as fsConstants } from "fs";
 import path from "path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
+import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { openSqlite } from "@/lib/openclaw-session-store";
 import { getEmbedProvisioningStatus, getEmbedProxyBaseUrl } from "@/lib/embed-server";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { getLocalAiToken } from "@/lib/local-ai-token";
-import { EXTRACT_ROOT, extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
-import { readConfig as readOpenclawConfig } from "@/lib/openclaw-config";
+import { EXTRACT_ROOT, MAX_DOCUMENT_BYTES, extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
+import { isInside } from "@/lib/file-guard";
+import { readConfig as readOpenclawConfig, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import {
+  EXTRA_PATHS_CONFIG_PATH,
   INDEXABLE_EXTENSIONS,
   LOCAL_EMBEDDING_MODEL,
   LOCAL_EMBEDDING_PROVIDER,
   MEMORY_SHARD_SOURCES_KEY,
+  extraPathsOf,
+  stringList,
 } from "@/lib/memory-shard-state";
 // Type-only, so nothing at runtime crosses back to the module that imports
 // this one — `clawkeep-memory.ts` is the arm that CALLS the pass.
@@ -107,8 +112,9 @@ export const MAX_INDEX_CHUNKS = 20_000;
 /** One embeddings request's budget. The unit may be cold on the first call. */
 const EMBED_TIMEOUT_MS = 120_000;
 
-/** A document over this size is not chunked. The extractor uses the same bound. */
-const MAX_INDEXABLE_BYTES = 40 * 1024 * 1024;
+/** A document over this size is not read. The extractor's own bound, shared
+ *  rather than repeated, so the two cannot drift into disagreeing. */
+const MAX_INDEXABLE_BYTES = MAX_DOCUMENT_BYTES;
 
 /**
  * The embedder could not be reached or refused the request.
@@ -145,118 +151,71 @@ export class IndexPassAbortedError extends Error {
  * exactly one copy of the list.
  */
 export async function readLocalSources(): Promise<string[]> {
-  const raw = await configGet(MEMORY_SHARD_SOURCES_KEY);
-  if (Array.isArray(raw)) {
-    return raw.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-  }
-  // No key at all — never written on this box. That is a fresh install, or a
-  // box that has just been swapped to this harness from OpenClaw, and the two
-  // want different answers: see `carryOverSources`.
-  return seedSources();
-}
-
-/**
- * The seed, at most once at a time and re-checked at the moment it writes.
- *
- * Both halves matter, because this is a WRITE on a read path. `readLocalSources`
- * is what the status probe calls — every two minutes, from a route the desktop
- * polls — and what a folder mutation calls inside its own queue. Two of those
- * arriving together on a freshly swapped box would each carry the list over and
- * each write it, and if the probe's write landed after the mutation's the
- * folder the owner had just added would be gone. Sharing one in-flight promise
- * means there is only ever one seed to land, and reading the key again inside
- * it means a seed that raced a real write does nothing at all.
- *
- * The promise is dropped when it settles rather than kept for the process's
- * life: after the seed the key EXISTS, so a later call re-reads it and never
- * gets here — and a caller that arrives after an owner has cleared their whole
- * list must see the empty list, not a memoised carry-over.
- */
-let seeding: Promise<string[]> | null = null;
-
-function seedSources(): Promise<string[]> {
-  if (seeding) return seeding;
-  const run = (async (): Promise<string[]> => {
-    const again = await configGet(MEMORY_SHARD_SOURCES_KEY);
-    if (Array.isArray(again)) {
-      return again.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-    }
-    const carried = await carryOverSources();
-    // Written even when it is empty, so the carry-over happens exactly once and
-    // an owner who later removes every folder does not get them back.
-    await configSet(MEMORY_SHARD_SOURCES_KEY, carried);
-    return carried;
-  })();
-  seeding = run;
-  void run.then(
-    () => { if (seeding === run) seeding = null; },
-    () => { if (seeding === run) seeding = null; },
-  );
-  return run;
-}
-
-/**
- * The folders the owner chose while this box ran OpenClaw.
- *
- * The harness swap is a product feature, and its dialogue promises that what
- * the assistant knows about the owner carries over. A list of folders they
- * picked by hand is squarely that, and it lived in openclaw.json — so without
- * this a swapped box comes up with Memory Shard set up, switched on, and
- * reading nothing at all, which reads as a broken feature rather than as a
- * setting that needs redoing.
- *
- * Deliberately narrow. It runs ONCE (the caller writes the result whatever it
- * is), it only reads a file this edition otherwise ignores, and it keeps only
- * folders that are still there — a `~/.openclaw` left behind by a swap is a
- * snapshot of a moment, and resurrecting a folder the owner deleted would be
- * worse than asking them to add it again. Every failure is an empty list.
- */
-async function carryOverSources(): Promise<string[]> {
-  let config: unknown;
-  try {
-    config = await readOpenclawConfig();
-  } catch {
-    return [];
-  }
-  const search = (config as { memory?: { search?: { extraPaths?: unknown } } })?.memory?.search?.extraPaths;
-  if (!Array.isArray(search)) return [];
-  const named = search
-    .map((entry) => (typeof entry === "string" ? entry : (entry as { path?: unknown })?.path))
-    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-  const kept: string[] = [];
-  for (const folder of named) {
-    // The derived folders ClawBox itself registered alongside a source on the
-    // OpenClaw side are not the owner's choices — this arm walks them from the
-    // source instead, so carrying them would add a scratch directory to a list
-    // the owner is shown.
-    if (folder.startsWith(EXTRACT_ROOT)) continue;
-    try {
-      if ((await fs.stat(folder)).isDirectory()) kept.push(folder);
-    } catch {
-      /* gone since the swap */
-    }
-  }
-  if (kept.length) {
-    console.warn(`[memory-index] carried ${kept.length} folder(s) over from the OpenClaw configuration`);
-  }
-  return kept;
+  return stringList(await configGet(MEMORY_SHARD_SOURCES_KEY));
 }
 
 export async function writeLocalSources(paths: readonly string[]): Promise<void> {
   await configSet(MEMORY_SHARD_SOURCES_KEY, [...paths]);
 }
 
+/**
+ * Carry the owner's chosen folders across a harness swap.
+ *
+ * The swap's dialogue promises that what the assistant knows about the owner
+ * carries over, and a list of folders they picked by hand is squarely that.
+ * The two arms keep the list in different places by design — the one that
+ * INDEXES owns the setting — so the swap has to move it, or the box comes up
+ * with Memory Shard set up, switched on, and reading nothing at all: a feature
+ * that looks broken rather than a setting that needs redoing.
+ *
+ * Called from `carryOverAfterSwap` in harness-swap.ts, beside the ClawBox AI
+ * sign-in and the Telegram bot, because that is the one place a swap has
+ * already happened and it runs exactly once. It was briefly done lazily inside
+ * `readLocalSources` instead, which meant a WRITE on the path a polled status
+ * route takes, single-flight machinery to stop that racing a folder edit, and
+ * a carry-over in one direction only.
+ *
+ * Answers what it moved, so the swap can say so, and moves NOTHING it is not
+ * sure of: only folders that are still there — a config left behind by a swap
+ * is a snapshot of a moment, and resurrecting a folder the owner deleted is
+ * worse than asking for it again — and never over a list the target arm
+ * already has.
+ */
+export async function carryMemorySourcesTo(target: "openclaw" | "hermes"): Promise<number> {
+  const toLocal = target === "hermes";
+  const existing = toLocal ? await readLocalSources() : extraPathsOf(await readOpenclawConfig());
+  if (existing.length) return 0;
+
+  const named = toLocal ? extraPathsOf(await readOpenclawConfig()) : await readLocalSources();
+  const kept: string[] = [];
+  for (const folder of named) {
+    // ClawBox's own derived-Markdown folders are not the owner's choices — the
+    // local arm walks them from the source instead — so carrying one would put
+    // a scratch directory in a list the owner is shown.
+    if (isInside(path.resolve(folder), EXTRACT_ROOT)) continue;
+    try {
+      if ((await fs.stat(folder)).isDirectory()) kept.push(folder);
+    } catch {
+      /* gone since the swap */
+    }
+  }
+  if (!kept.length) return 0;
+  if (toLocal) await writeLocalSources(kept);
+  else await runOpenclawConfigSetBatch([[EXTRA_PATHS_CONFIG_PATH, JSON.stringify(kept), "--json"]]);
+  return kept.length;
+}
+
 // ─── the store ───────────────────────────────────────────────────────────────
 
-interface IndexDb {
-  exec(sql: string): void;
-  prepare(sql: string): {
-    all(...params: unknown[]): unknown[];
-    get(...params: unknown[]): unknown;
-    run(...params: unknown[]): { changes: number | bigint; lastInsertRowid: number | bigint };
-  };
-  close(): void;
-}
+/**
+ * The handle `openSqlite` hands back.
+ *
+ * The ambient declaration in src/types/node-sqlite.d.ts, not a private copy of
+ * the parts this file happens to use — a second surface here is a second thing
+ * to keep in step with the runtime, and it is how `iterate` came to be missing.
+ * Same shape openclaw-state-store.ts passes around.
+ */
+type IndexDb = DatabaseSyncType;
 
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS meta (
@@ -286,7 +245,7 @@ const SCHEMA = `
 
 async function openIndexForWrite(): Promise<IndexDb> {
   await fs.mkdir(LOCAL_INDEX_DIR, { recursive: true, mode: 0o700 });
-  const db = openSqlite(LOCAL_INDEX_PATH, false) as unknown as IndexDb;
+  const db = openSqlite(LOCAL_INDEX_PATH, false);
   // WAL so the panel can still READ while a pass is writing. An index run over
   // a real folder is minutes long and the status route is polled throughout;
   // under the default rollback journal every one of those reads would be
@@ -295,6 +254,13 @@ async function openIndexForWrite(): Promise<IndexDb> {
   try {
     try {
       db.exec("PRAGMA journal_mode = WAL");
+      // NORMAL, and safe here for a reason that is specific to this store.
+      // Under WAL it cannot corrupt the database — it only risks losing the
+      // last few commits to a power cut — and every byte in here is DERIVED
+      // from files the owner still has, so the worst a lost commit costs is
+      // re-embedding what the next pass would re-read anyway. Measured at 1.8x
+      // on the whole write path even on an SSD; more on the box's eMMC.
+      db.exec("PRAGMA synchronous = NORMAL");
     } catch {
       /* A filesystem that cannot do WAL still works; it is a speed-up, not a rule. */
     }
@@ -332,7 +298,7 @@ async function openIndexForRead(): Promise<IndexDb | null> {
     return null;
   }
   try {
-    return openSqlite(LOCAL_INDEX_PATH, false) as unknown as IndexDb;
+    return openSqlite(LOCAL_INDEX_PATH, false);
   } catch (err) {
     console.warn(`[memory-index] could not open the index: ${errorText(err)}`);
     return null;
@@ -501,19 +467,6 @@ function normalise(vec: Float32Array): Float32Array {
 
 function toBlob(vec: Float32Array): Uint8Array {
   return new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength);
-}
-
-/**
- * A stored blob back as floats, through a COPY.
- *
- * `new Float32Array(bytes.buffer)` would reuse whatever buffer sqlite handed
- * back, whose byte offset is not guaranteed to be four-aligned; the copy makes
- * the alignment ours.
- */
-function toVector(blob: Uint8Array): Float32Array {
-  const copy = new Uint8Array(blob.byteLength);
-  copy.set(blob);
-  return new Float32Array(copy.buffer);
 }
 
 // ─── chunking ────────────────────────────────────────────────────────────────
@@ -707,6 +660,31 @@ export async function runLocalIndexPass(
     let chunkCount = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
     let failures = scan.unreadableSources.size;
     let capped = false;
+    let wrote = false;
+
+    // Prepared ONCE. Every one of these was re-parsed and re-planned on each of
+    // up to 20,000 files: ~10 us each, so about a second of pure SQL parsing
+    // per pass on an Orin, for statements that never change.
+    const sql = {
+      row: db.prepare("SELECT mtime_ms, size, sha, source, display FROM files WHERE path = ?"),
+      touch: db.prepare("UPDATE files SET mtime_ms = ?, size = ? WHERE path = ?"),
+      chunksFor: db.prepare("SELECT COUNT(*) AS n FROM chunks WHERE path = ?"),
+      dropChunks: db.prepare("DELETE FROM chunks WHERE path = ?"),
+      dropFile: db.prepare("DELETE FROM files WHERE path = ?"),
+      insertChunk: db.prepare("INSERT INTO chunks (path, ord, text, vec) VALUES (?, ?, ?, ?)"),
+      upsertFile: db.prepare(
+        `INSERT INTO files (path, source, display, mtime_ms, size, sha, chunks, indexed_at, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')
+         ON CONFLICT(path) DO UPDATE SET source = excluded.source, display = excluded.display,
+           mtime_ms = excluded.mtime_ms, size = excluded.size, sha = excluded.sha,
+           chunks = excluded.chunks, indexed_at = excluded.indexed_at, error = ''`,
+      ),
+    };
+    // Files whose bytes are unchanged but whose stat moved — a restore, an
+    // rsync, a git checkout touches thousands at once. Flushed in ONE
+    // transaction at the end rather than one autocommit each: measured at 2.3 ms
+    // of fsync per row, which is eleven seconds for five thousand files.
+    const touched: { path: string; mtimeMs: number; size: number }[] = [];
 
     for (const entry of scan.files) {
       throwIfAborted(signal);
@@ -730,43 +708,36 @@ export async function runLocalIndexPass(
         continue;
       }
       const { stat } = opened;
-      const row = db.prepare("SELECT mtime_ms, size, sha, source, display FROM files WHERE path = ?").get(entry.file) as
+      const row = sql.row.get(entry.file) as
         { mtime_ms?: unknown; size?: unknown; sha?: unknown; source?: unknown; display?: unknown } | undefined;
       // The source and the display name are part of what is stored, so they are
       // part of what "unchanged" means. Without them, moving a folder's entry
       // in the list (removing `~/Docs`, adding `~`) left every already-indexed
       // file citing the folder the owner had just removed, in results the agent
       // reads back to them.
-      const sameFile = row
-        && Number(row.mtime_ms) === Math.floor(stat.mtimeMs)
-        && Number(row.size) === stat.size
-        && row.source === entry.source
-        && row.display === entry.display;
-      if (sameFile) {
-        await opened.close();
-        continue;
-      }
+      const sameMeta = !!row && row.source === entry.source && row.display === entry.display;
 
       let text: string;
       try {
+        if (sameMeta && Number(row!.mtime_ms) === Math.floor(stat.mtimeMs) && Number(row!.size) === stat.size) continue;
         text = await opened.read();
       } catch {
         failures += 1;
         continue;
       } finally {
+        // `continue` runs this too, so the descriptor is released on every path.
         await opened.close();
       }
       const sha = sha256Of(text);
-      if (row && row.sha === sha && row.source === entry.source && row.display === entry.display) {
+      if (sameMeta && row!.sha === sha) {
         // Touched, not edited. Record the new stat so the next pass skips it
-        // without reading it again.
-        db.prepare("UPDATE files SET mtime_ms = ?, size = ? WHERE path = ?")
-          .run(Math.floor(stat.mtimeMs), stat.size, entry.file);
+        // without reading it again — batched, see `touched`.
+        touched.push({ path: entry.file, mtimeMs: Math.floor(stat.mtimeMs), size: stat.size });
         continue;
       }
 
       const pieces = chunkText(text);
-      const existing = row ? countOf(db, "SELECT COUNT(*) AS n FROM chunks WHERE path = ?", entry.file) : 0;
+      const existing = row ? countOf2(sql.chunksFor, entry.file) : 0;
       if (chunkCount - existing + pieces.length > MAX_INDEX_CHUNKS) {
         // `continue`, not `break`: one large document early in the scan must not
         // shut out the thousand small ones behind it that still fit.
@@ -792,32 +763,45 @@ export async function runLocalIndexPass(
       // gone: re-read rather than carry a total that no longer describes
       // anything. Left stale, the next cap check fired on a store of ~19,800
       // rows that held none, and the rebuild indexed almost nothing.
-      if (assertDimension(db, vectors[0])) chunkCount = 0;
+      // A width change empties the store, so everything counted before it is
+      // gone — including this file's own rows, which is why `replaced` follows
+      // from the same answer rather than being asked for a second time.
+      const wiped = assertDimension(db, vectors[0]);
+      if (wiped) chunkCount = 0;
+      const replaced = wiped ? 0 : existing;
 
       // One transaction per FILE: sqlite fsyncs at every commit, so a document
       // of 200 chunks written a row at a time is 200 syncs on an SD card. Per
       // file rather than per pass because a pass is minutes long and its work
       // should survive being interrupted — an interrupted run is reconciled and
       // re-run, and everything already committed is skipped on the way back.
-      const replaced = countOf(db, "SELECT COUNT(*) AS n FROM chunks WHERE path = ?", entry.file);
       db.exec("BEGIN");
       try {
-        db.prepare("DELETE FROM chunks WHERE path = ?").run(entry.file);
-        const insert = db.prepare("INSERT INTO chunks (path, ord, text, vec) VALUES (?, ?, ?, ?)");
-        for (let i = 0; i < pieces.length; i += 1) insert.run(entry.file, i, pieces[i], toBlob(vectors[i]));
-        db.prepare(
-          `INSERT INTO files (path, source, display, mtime_ms, size, sha, chunks, indexed_at, error)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, '')
-           ON CONFLICT(path) DO UPDATE SET source = excluded.source, display = excluded.display,
-             mtime_ms = excluded.mtime_ms, size = excluded.size, sha = excluded.sha,
-             chunks = excluded.chunks, indexed_at = excluded.indexed_at, error = ''`,
-        ).run(entry.file, entry.source, entry.display, Math.floor(stat.mtimeMs), stat.size, sha, pieces.length, Date.now());
+        sql.dropChunks.run(entry.file);
+        for (let i = 0; i < pieces.length; i += 1) sql.insertChunk.run(entry.file, i, pieces[i], toBlob(vectors[i]));
+        sql.upsertFile.run(
+          entry.file, entry.source, entry.display,
+          Math.floor(stat.mtimeMs), stat.size, sha, pieces.length, Date.now(),
+        );
         db.exec("COMMIT");
       } catch (err) {
         db.exec("ROLLBACK");
         throw err;
       }
       chunkCount = chunkCount - replaced + pieces.length;
+      wrote = true;
+    }
+
+    if (touched.length) {
+      db.exec("BEGIN");
+      try {
+        for (const t of touched) sql.touch.run(t.mtimeMs, t.size, t.path);
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      wrote = true;
     }
 
     // Anything the scan did not find is gone from the owner's folders — or the
@@ -837,20 +821,56 @@ export async function runLocalIndexPass(
     // permanently unable to shrink: the chunks of deleted files were never
     // reclaimed, so every later pass hit the ceiling again and skipped the
     // delete again. Only a full reindex escaped.
+    // IN ONE TRANSACTION, and this is not a micro-optimisation: removing a
+    // single source folder makes every file under it stale, and at two
+    // autocommits each — an fsync apiece — two thousand of them measured 2.4
+    // seconds on an SSD against 52 ms batched. On the box's eMMC, with the
+    // whole event loop blocked on every one of those syncs, that is the
+    // difference between a pause and an outage.
+    const stale: string[] = [];
     for (const row of db.prepare("SELECT path, source FROM files").all() as { path?: unknown; source?: unknown }[]) {
       const stored = typeof row.path === "string" ? row.path : "";
       if (!stored || scan.seen.has(stored)) continue;
       if (typeof row.source === "string" && scan.unreadableSources.has(row.source)) continue;
-      db.prepare("DELETE FROM chunks WHERE path = ?").run(stored);
-      db.prepare("DELETE FROM files WHERE path = ?").run(stored);
+      stale.push(stored);
+    }
+    if (stale.length) {
+      db.exec("BEGIN");
+      try {
+        for (const gone of stale) {
+          sql.dropChunks.run(gone);
+          sql.dropFile.run(gone);
+        }
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+      chunkCount = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
+      wrote = true;
     }
 
-    // Now, and only now: the identity describes an index that exists.
-    metaSet(db, "identity", localEmbeddingIdentity());
-    metaSet(db, "built_at", String(Date.now()));
-    metaSet(db, "scan_total_files", String(scan.files.length));
-    metaSet(db, "failures", String(failures));
-    metaSet(db, "capped", capped ? "1" : "");
+    const files = countOf(db, "SELECT COUNT(*) AS n FROM files");
+    const chunks = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
+    // Now, and only now: the identity describes an index that exists. All of it
+    // in one transaction — five autocommits is five fsyncs for six short rows.
+    db.exec("BEGIN");
+    try {
+      metaSet(db, "identity", localEmbeddingIdentity());
+      metaSet(db, "built_at", String(Date.now()));
+      metaSet(db, "scan_total_files", String(scan.files.length));
+      metaSet(db, "failures", String(failures));
+      metaSet(db, "capped", capped ? "1" : "");
+      // What the vector cache keys on. A file mtime cannot do this job under
+      // WAL: an ordinary commit lands in the -wal and leaves the main file's
+      // stat untouched, so the stamp both missed real changes and invalidated
+      // over a checkpoint that changed nothing.
+      metaSet(db, "generation", String(Number(metaGet(db, "generation") ?? 0) + 1));
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
     if (capped) {
       console.warn(
         `[memory-index] the index reached its ${MAX_INDEX_CHUNKS}-chunk ceiling; some files in this pass were not indexed`,
@@ -862,17 +882,18 @@ export async function runLocalIndexPass(
       );
     }
 
-    return {
-      mode: rebuild ? "full" : mode,
-      files: countOf(db, "SELECT COUNT(*) AS n FROM files"),
-      chunks: countOf(db, "SELECT COUNT(*) AS n FROM chunks"),
-      failures,
-      capped,
-    };
+    if (wrote) invalidateVectorCache();
+    return { mode: rebuild ? "full" : mode, files, chunks, failures, capped };
   } finally {
     db.close();
-    invalidateVectorCache();
   }
+}
+
+/** `countOf` for a statement that is already prepared. */
+function countOf2(statement: { get(...params: unknown[]): unknown }, ...params: unknown[]): number {
+  const row = statement.get(...params) as { n?: unknown } | undefined;
+  const n = Number(row?.n ?? 0);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 interface ScanResult {
@@ -976,56 +997,45 @@ export async function localMemoryStatusJson(): Promise<unknown> {
   // The model on disk is what makes semantic search POSSIBLE; whether it is
   // awake right now is not the question — the proxy wakes it on demand.
   const ready = provisioning?.installed === true;
+  // ONE object literal for both cases, so the "there is no index yet" shape and
+  // the real one cannot drift into disagreeing about a field name.
+  //
+  // The counts are COUNTED, not read from a number the last pass wrote. A
+  // cached count is only true while every pass finishes: one that dies partway
+  // — the embedder refusing a wake is the common case — leaves the tables and
+  // the recorded totals describing different indexes, and this probe is what
+  // the panel believes. Measured at ~0.1 ms warm on a store at its 20,000-chunk
+  // ceiling (sqlite answers both from `chunks_by_path`), which is not a price
+  // worth paying in honesty.
   const db = await openIndexForRead();
-  if (!db) {
-    return {
-      agentId: "main",
-      scan: { totalFiles: 0 },
-      status: {
-        provider: LOCAL_EMBEDDING_PROVIDER,
-        model: LOCAL_EMBEDDING_MODEL,
-        files: 0,
-        chunks: 0,
-        dbPath: LOCAL_INDEX_PATH,
-        dirty: false,
-        sources,
-        vector: { semanticAvailable: ready },
-        batch: { failures: 0 },
-        custom: {
-          providerState: { mode: ready ? "active" : "degraded" },
-          // Nothing has been built, so there is no identity to be wrong: the
-          // wizard is what stamps one, and until it has, "missing" is the
-          // honest answer and the one the OpenClaw box gives too.
-          indexIdentity: { status: "missing" },
-        },
-      },
-    };
-  }
   try {
     return {
       agentId: "main",
-      scan: { totalFiles: Number(metaGet(db, "scan_total_files") ?? 0) },
+      scan: { totalFiles: db ? Number(metaGet(db, "scan_total_files") ?? 0) : 0 },
       status: {
         provider: LOCAL_EMBEDDING_PROVIDER,
         model: LOCAL_EMBEDDING_MODEL,
-        files: countOf(db, "SELECT COUNT(*) AS n FROM files"),
-        chunks: countOf(db, "SELECT COUNT(*) AS n FROM chunks"),
+        files: db ? countOf(db, "SELECT COUNT(*) AS n FROM files") : 0,
+        chunks: db ? countOf(db, "SELECT COUNT(*) AS n FROM chunks") : 0,
         dbPath: LOCAL_INDEX_PATH,
         // OpenClaw's `dirty` means "this index still has work owed to it",
         // which is exactly true of one that hit its ceiling: files were
         // scanned and not indexed, and `pendingFiles` carries how many.
-        dirty: metaGet(db, "capped") === "1",
+        dirty: db ? metaGet(db, "capped") === "1" : false,
         sources,
         vector: { semanticAvailable: ready },
-        batch: { failures: Number(metaGet(db, "failures") ?? 0) },
+        batch: { failures: db ? Number(metaGet(db, "failures") ?? 0) : 0 },
         custom: {
           providerState: { mode: ready ? "active" : "degraded" },
-          indexIdentity: { status: identityOf(db) },
+          // No store at all is the same answer as a store with nothing in it:
+          // the wizard stamps an identity before the first pass, and until
+          // something has been built "missing" is what the OpenClaw box says.
+          indexIdentity: { status: db ? identityOf(db) : "missing" },
         },
       },
     };
   } finally {
-    db.close();
+    db?.close();
   }
 }
 
@@ -1043,7 +1053,7 @@ export interface LocalMemoryHit {
 const SNIPPET_CHARS = 400;
 
 interface VectorCache {
-  /** `mtimeMs:size` of the store the cache was built from. */
+  /** The `generation` the pass stamped when it last wrote a vector. */
   stamp: string;
   dim: number;
   vectors: Float32Array;
@@ -1051,9 +1061,31 @@ interface VectorCache {
 }
 
 let vectorCache: VectorCache | null = null;
+let cacheRelease: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * How long the vectors stay resident after the last search.
+ *
+ * At the 20,000-chunk ceiling the cache is ~82 MB of float32, and this box has
+ * 7.4 GB shared with a local model and a 2 GB embedder. The embedder itself is
+ * put away after ten idle minutes (`LOCAL_AI_IDLE_TIMEOUT_MS`); a search index
+ * that pinned 82 MB for the life of the process while the model it belongs to
+ * was handing memory back would be the odd one out.
+ */
+const VECTOR_CACHE_IDLE_MS = 10 * 60 * 1000;
 
 function invalidateVectorCache(): void {
   vectorCache = null;
+  if (cacheRelease) {
+    clearTimeout(cacheRelease);
+    cacheRelease = null;
+  }
+}
+
+function armCacheRelease(): void {
+  if (cacheRelease) clearTimeout(cacheRelease);
+  cacheRelease = setTimeout(invalidateVectorCache, VECTOR_CACHE_IDLE_MS);
+  cacheRelease.unref();
 }
 
 /** Exported for the tests, which build several indexes in one process. */
@@ -1062,33 +1094,56 @@ export function _resetLocalMemoryCacheForTests(): void {
 }
 
 /**
- * Every vector as ONE Float32Array, cached against the store's own stat.
+ * Every vector as ONE Float32Array.
  *
  * 20,000 chunks of 1,024 floats is a 20M-multiply scan, which is tens of
  * milliseconds in JS — no vector extension, no approximate index, and nothing
- * to keep in step with the rows. Keyed on the file's mtime and size rather than
- * an in-process generation counter so a store rewritten by anything else — a
- * restore, a factory reset — invalidates it too.
+ * to keep in step with the rows.
+ *
+ * `iterate`, not `all`, and the bytes go STRAIGHT into the destination. `all`
+ * built 20,000 row objects each holding a 4 KB buffer before one could be
+ * consumed, then `toVector` copied each into a second buffer and `set` into a
+ * third: measured at a 265 MB resident spike against 107 MB this way, inside a
+ * synchronous block, on a box with 7.4 GB shared with a language model. Writing
+ * through a byte view also removes the alignment problem `toVector` exists for,
+ * because the destination is ours and four-aligned by construction.
+ *
+ * Keyed on the `generation` the pass stamps, not on the file's mtime: this
+ * store is in WAL mode, so an ordinary commit lands in the -wal and leaves the
+ * main file's stat alone — the stamp would have missed real changes, and
+ * thrown the cache away over a checkpoint that changed nothing.
  */
 function loadVectors(db: IndexDb, stamp: string): VectorCache | null {
-  if (vectorCache?.stamp === stamp) return vectorCache;
-  const rows = db.prepare("SELECT id, vec FROM chunks ORDER BY id").all() as { id?: unknown; vec?: unknown }[];
-  if (rows.length === 0) return null;
-  const first = toVector(rows[0].vec as Uint8Array);
-  const dim = first.length;
-  const vectors = new Float32Array(rows.length * dim);
+  if (vectorCache?.stamp === stamp) {
+    armCacheRelease();
+    return vectorCache;
+  }
+  const total = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
+  if (total === 0) return null;
+
+  let vectors: Float32Array | null = null;
+  let bytes: Uint8Array | null = null;
+  let dim = 0;
   const ids: number[] = [];
-  for (let i = 0; i < rows.length; i += 1) {
-    const vec = i === 0 ? first : toVector(rows[i].vec as Uint8Array);
+  for (const raw of db.prepare("SELECT id, vec FROM chunks ORDER BY id").iterate()) {
+    const row = raw as { id?: unknown; vec?: unknown };
+    const vec = row.vec as Uint8Array;
+    if (!vectors) {
+      dim = vec.byteLength / Float32Array.BYTES_PER_ELEMENT;
+      if (!Number.isInteger(dim) || dim === 0) return null;
+      vectors = new Float32Array(total * dim);
+      bytes = new Uint8Array(vectors.buffer);
+    }
     // A row of another width belongs to a previous embedder and cannot be
     // compared with this query; skipping it is right, and the identity check
     // is what gets the index rebuilt.
-    if (vec.length !== dim) continue;
-    vectors.set(vec, ids.length * dim);
-    ids.push(Number(rows[i].id));
+    if (vec.byteLength !== dim * Float32Array.BYTES_PER_ELEMENT) continue;
+    bytes!.set(vec, ids.length * dim * Float32Array.BYTES_PER_ELEMENT);
+    ids.push(Number(row.id));
   }
-  if (ids.length === 0) return null;
+  if (!vectors || ids.length === 0) return null;
   vectorCache = { stamp, dim, vectors: vectors.subarray(0, ids.length * dim), ids };
+  armCacheRelease();
   return vectorCache;
 }
 
@@ -1110,18 +1165,23 @@ export async function searchLocalMemory(
   // Clamped HERE, not only in the two callers: the top-k loop indexes
   // `best[best.length - 1]` and a limit of zero makes that `best[-1]`.
   const want = Math.max(1, Math.min(50, Math.trunc(limit) || 1));
-  let stat;
-  try {
-    stat = await fs.stat(LOCAL_INDEX_PATH);
-  } catch {
-    return [];
-  }
   const db = await openIndexForRead();
   if (!db) return [];
   try {
-    const cache = loadVectors(db, `${Math.floor(stat.mtimeMs)}:${stat.size}`);
+    // The two halves are independent, so they run together. The embed call is
+    // the one that WAKES a sleeping llama.cpp unit — its budget is two minutes
+    // for exactly that reason — and loading 82 MB of vectors needs nothing from
+    // it. Started first, the wake covers the whole cold load, which is the
+    // worst case this feature has: the agent's first search after a restart.
+    const embedding = embedBatch([text], "query", signal);
+    // A handler on a DERIVED promise, attached before anything can throw: the
+    // load below can return early or fail, and an in-flight rejection with
+    // nobody listening takes the whole process down. `await embedding` still
+    // sees the real rejection.
+    embedding.catch(() => {});
+    const cache = loadVectors(db, metaGet(db, "generation") ?? "0");
     if (!cache) return [];
-    const [embedded] = await embedBatch([text], "query", signal);
+    const [embedded] = await embedding;
     if (!embedded || embedded.length !== cache.dim) return [];
 
     // Top-k by insertion into a small array: k is at most 10, so a heap would

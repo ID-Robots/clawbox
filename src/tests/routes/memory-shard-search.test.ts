@@ -25,17 +25,14 @@ vi.mock("@/lib/openclaw-config", () => ({ openclawIsAbsent: () => absent.value }
 vi.mock("@/lib/memory-shard", () => ({ getMemoryShardEnabled: async () => enabled.value }));
 vi.mock("@/lib/memory-index-local", () => ({ searchLocalMemory: search }));
 
+import { NextRequest } from "next/server";
 import { GET } from "@/app/setup-api/clawkeep/memory/search/route";
 
-function request(query: string): Request {
-  return new Request(`http://clawbox.local/setup-api/clawkeep/memory/search${query}`);
-}
-
-/** Next's route signature wants a NextRequest; the handler reads nextUrl and signal. */
+/** A real NextRequest, like every other route suite — a hand-patched `Request`
+ *  cast to `never` turns the handler's argument type off, so the day the route
+ *  reads another member of it the suite fails at runtime and type-checks clean. */
 function call(query: string) {
-  const req = request(query);
-  const url = new URL(req.url);
-  return GET(Object.assign(req, { nextUrl: url }) as never);
+  return GET(new NextRequest(`http://clawbox.local/setup-api/clawkeep/memory/search${query}`));
 }
 
 beforeEach(() => {

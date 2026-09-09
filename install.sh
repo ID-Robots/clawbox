@@ -4067,9 +4067,6 @@ ensure_embed_model_cached() {
   echo "  Memory-search model cached for offline use"
 }
 
-# Gated on the OpenClaw harness, unlike step_llamacpp_model: memory search is
-# an OpenClaw feature, and a hermes box has no core to point at the 639 MB
-# this would fetch.
 # Cache the memory-search GGUF.
 #
 # NO HARNESS GATE HERE, deliberately, and the gate moved to the CALL SITES

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { settledMemoryRun } from "@/tests/helpers/memory-run-state";
 
 /**
  * Memory Shard's Hermes arm, at the seam.
@@ -120,15 +121,6 @@ async function buildIndex(): Promise<void> {
   await local.runLocalIndexPass("full");
 }
 
-/** Wait for the run-state file to settle out of "running". */
-async function settled(readState: () => Promise<{ status: string }>): Promise<{ status: string }> {
-  for (let i = 0; i < 200; i += 1) {
-    const state = await readState();
-    if (state.status !== "running") return state;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  throw new Error("the run never settled");
-}
 
 /** Every value `MemoryStatusErrorCode` allows, which is every value a locale
  *  pack words. A status carrying anything else is English on a German desktop. */
@@ -212,7 +204,7 @@ describe("which arm runs the pass", () => {
     const local = await import("@/lib/memory-index-local");
     await local.writeLocalSources([source]);
 
-    const { startMemoryIndex, readMemoryRunState } = await lib();
+    const { startMemoryIndex } = await lib();
     const started = await startMemoryIndex("full", "manual");
     expect(started.accepted).toBe(true);
     // There is no openclaw binary on this SKU; spawning one is the bug this
@@ -220,7 +212,7 @@ describe("which arm runs the pass", () => {
     // embedder rather than like a missing arm.
     expect(spawned).toEqual([]);
 
-    const final = await settled(readMemoryRunState);
+    const final = await settledMemoryRun(clawkeepDir);
     expect(final.status).toBe("succeeded");
     const status = await (await lib()).getMemoryStatus();
     expect(status.files).toBe(1);
@@ -237,7 +229,7 @@ describe("which arm runs the pass", () => {
     }
     const local = await import("@/lib/memory-index-local");
     await local.writeLocalSources([source]);
-    const { startMemoryIndex, readMemoryRunState } = await lib();
+    const { startMemoryIndex } = await lib();
     await startMemoryIndex("full", "manual");
 
     const statePath = path.join(clawkeepDir, "memory-index-state.json");
@@ -249,7 +241,7 @@ describe("which arm runs the pass", () => {
       await new Promise((r) => setTimeout(r, 5));
     }
     expect(sawPid, "the run must record a live pid while it works").toBe(process.pid);
-    await settled(readMemoryRunState);
+    await settledMemoryRun(clawkeepDir);
   });
 
   it("declines a second start while one is going", async () => {
@@ -258,14 +250,14 @@ describe("which arm runs the pass", () => {
     }
     const local = await import("@/lib/memory-index-local");
     await local.writeLocalSources([source]);
-    const { startMemoryIndex, readMemoryRunState } = await lib();
+    const { startMemoryIndex } = await lib();
 
     const first = await startMemoryIndex("full", "manual");
     expect(first.accepted).toBe(true);
     const second = await startMemoryIndex("full", "manual");
     expect(second.accepted).toBe(false);
     expect(second.declined).toBe("running");
-    await settled(readMemoryRunState);
+    await settledMemoryRun(clawkeepDir);
   });
 
   it("refuses to index at all while the owner's switch is off", async () => {
@@ -280,7 +272,7 @@ describe("which arm runs the pass", () => {
   it("still drives the OpenClaw CLI, argv for argv, where there IS an OpenClaw", async () => {
     // The regression guard for "additive": the other arm must be untouched.
     absent.value = false;
-    const { startMemoryIndex, readMemoryRunState } = await lib();
+    const { startMemoryIndex } = await lib();
     const started = await startMemoryIndex("full", "manual");
     expect(started.accepted).toBe(true);
     expect(spawned).toHaveLength(1);
@@ -293,6 +285,6 @@ describe("which arm runs the pass", () => {
       "/home/clawbox/.npm-global/bin/openclaw",
       "memory", "index", "--agent", "main", "--force",
     ]);
-    await settled(readMemoryRunState);
+    await settledMemoryRun(clawkeepDir);
   });
 });

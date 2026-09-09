@@ -72,8 +72,7 @@ export default function CrabWaitMark({
       data-testid="crab-wait-mark"
     >
       <style>{`
-        @keyframes crab-wait-check-draw { to { stroke-dashoffset: 0 } }
-        @keyframes crab-wait-check-circle { to { stroke-dashoffset: 0 } }
+        @keyframes crab-wait-draw { to { stroke-dashoffset: 0 } }
         @keyframes crab-wait-fade-in { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
         @keyframes crab-wait-pulse-ring { 0% { transform: scale(0.85); opacity: 0.55 } 50% { transform: scale(1.15); opacity: 0 } 100% { transform: scale(0.85); opacity: 0.55 } }
         @keyframes crab-wait-orbit { from { transform: rotate(0deg) translateX(var(--crab-orbit)) rotate(0deg) } to { transform: rotate(360deg) translateX(var(--crab-orbit)) rotate(-360deg) } }
@@ -104,8 +103,8 @@ export default function CrabWaitMark({
 
       {completed ? (
         <svg width={crab} height={crab} viewBox="0 0 56 56" fill="none" className="crab-wait-fade-in relative z-10">
-          <circle cx="28" cy="28" r="25" stroke={checkStroke} strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "crab-wait-check-circle 0.6s ease-out 0.1s forwards" }} />
-          <path d="M17 28l7 7 15-15" stroke={checkStroke} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "crab-wait-check-draw 0.4s ease-out 0.5s forwards" }} />
+          <circle cx="28" cy="28" r="25" stroke={checkStroke} strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "crab-wait-draw 0.6s ease-out 0.1s forwards" }} />
+          <path d="M17 28l7 7 15-15" stroke={checkStroke} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "crab-wait-draw 0.4s ease-out 0.5s forwards" }} />
         </svg>
       ) : (
         <div

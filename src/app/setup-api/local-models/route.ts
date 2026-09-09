@@ -29,22 +29,25 @@ async function llamaCppRunning(baseUrl: string): Promise<string | null> {
 async function probes(): Promise<InventoryProbes> {
   const llamaBase = getLlamaCppBaseUrl();
   const alias = getDefaultLlamaCppModel();
-  // Every edition has a memory index now — OpenClaw's where there is an
-  // OpenClaw, ClawBox's own where there is not (`memory-index-local.ts`) —
-  // over the same embedder, which was always installed on every SKU. This read
-  // `!openclawIsAbsent()` while the index it reported on could only be
-  // OpenClaw's: asking there could only fail, and the failure was swallowed
-  // into a probe indistinguishable from "the embedding provider is down",
-  // which is the wrong thing to tell a customer whose box never had one. The
-  // `supported: false` branch below is kept — the field is the route's
-  // contract and an older client reads it — but no shipping SKU takes it.
-  const embeddingsSupported = true;
   // Each probe is independently guarded: an engine that cannot be reached must
   // cost only its own row, never the whole inventory.
+  //
+  // The box is asked UNCONDITIONALLY. This used to be gated on
+  // `!openclawIsAbsent()`, correctly, while the index it reported on could only
+  // be OpenClaw's: asking on a SKU with no openclaw binary could only fail, and
+  // the failure was swallowed into a probe indistinguishable from "the
+  // embedding provider is down" — the wrong thing to tell a customer whose box
+  // never had one. Every edition has an index now (`memory-index-local.ts` on
+  // the one with no OpenClaw) over the same embedder, which was always
+  // installed everywhere, so there is nothing left to gate. The `supported`
+  // FIELD stays in the answer, because it is the route's contract and the row's
+  // "not on this edition" wording still exists for a SKU that ever ships
+  // without the embedder.
+  //
   // The memory reading is PEEKED, never awaited: on the OpenClaw arm it costs
   // a process boot, and this route is polled every five seconds by a panel
   // that must open at once. A cold peek starts that probe and answers null.
-  const memory = embeddingsSupported ? peekMemoryStatus() : null;
+  const memory = peekMemoryStatus();
   const [provisioning, servedModel, configuredAlias, embedProvisioning] = await Promise.all([
     getLlamaCppProvisioningStatus(alias).catch(() => null),
     llamaCppRunning(llamaBase),
@@ -52,7 +55,7 @@ async function probes(): Promise<InventoryProbes> {
     // claimed exactly when the proxy would in fact start it.
     resolveConfiguredLlamaCppAlias().catch(() => null),
     // Two stats: the binary and the GGUF. The unit itself is read by the row.
-    embeddingsSupported ? getEmbedProvisioningStatus().catch(() => null) : Promise.resolve(null),
+    getEmbedProvisioningStatus().catch(() => null),
   ]);
   return {
     llamacpp: {
@@ -62,7 +65,7 @@ async function probes(): Promise<InventoryProbes> {
       configured: configuredAlias !== null,
     },
     embeddings: {
-      supported: embeddingsSupported,
+      supported: true,
       ready: memory !== null,
       available: !!memory?.available,
       provider: memory?.provider || null,

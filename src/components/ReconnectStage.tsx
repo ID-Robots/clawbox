@@ -88,12 +88,7 @@ export default function ReconnectStage({
       aria-live="polite"
     >
       <style>{`
-        @keyframes reconnect-check-draw { to { stroke-dashoffset: 0 } }
-        @keyframes reconnect-check-circle { to { stroke-dashoffset: 0 } }
         @keyframes reconnect-fade-in { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
-        @keyframes reconnect-pulse-ring { 0% { transform: scale(0.85); opacity: 0.55 } 50% { transform: scale(1.15); opacity: 0 } 100% { transform: scale(0.85); opacity: 0.55 } }
-        @keyframes reconnect-orbit { from { transform: rotate(0deg) translateX(38px) rotate(0deg) } to { transform: rotate(360deg) translateX(38px) rotate(-360deg) } }
-        @keyframes reconnect-bob { 0%, 100% { transform: translateY(0) } 50% { transform: translateY(-5px) } }
         .reconnect-fade-in { animation: reconnect-fade-in 0.4s ease-out both }
       `}</style>
 

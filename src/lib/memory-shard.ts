@@ -16,6 +16,7 @@ import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import {
   EXTRA_PATHS_CONFIG_PATH,
+  extraPathsOf,
   LOCAL_EMBEDDING_MODEL,
   LOCAL_EMBEDDING_PROVIDER,
   MEMORY_SHARD_ENABLED_KEY,
@@ -56,21 +57,6 @@ export async function setMemoryShardSetupComplete(done: boolean): Promise<boolea
 }
 
 /**
- * The list as one parsed config holds it. Each entry is
- * `string | { path, pattern? }`; ClawBox writes the object form when it has
- * extra facts to carry (a derived folder of extracted Markdown and the folder
- * of documents it came from).
- */
-function extraPathsOf(config: unknown): string[] {
-  const search = (config as Record<string, unknown>)?.memory as { search?: { extraPaths?: unknown } } | undefined;
-  const raw = search?.search?.extraPaths;
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .map((entry) => (typeof entry === "string" ? entry : (entry as { path?: unknown })?.path))
-    .filter((p): p is string => typeof p === "string" && p.trim().length > 0);
-}
-
-/**
  * The folders the owner added, read from OpenClaw's own config.
  *
  * `memory.search.extraPaths` is OpenClaw's supported way to widen the index, and
@@ -79,16 +65,10 @@ function extraPathsOf(config: unknown): string[] {
  * away from it.
  */
 export async function readExtraPaths(): Promise<string[]> {
-  // No OpenClaw means no `memory.search.extraPaths` and no indexer to honour
-  // it — ClawBox keeps the list, because ClawBox does the indexing there.
-  if (openclawIsAbsent()) {
-    try {
-      return await readLocalSources();
-    } catch {
-      return [];
-    }
-  }
   try {
+    // No OpenClaw means no `memory.search.extraPaths` and no indexer to honour
+    // it — ClawBox keeps the list, because ClawBox does the indexing there.
+    if (openclawIsAbsent()) return await readLocalSources();
     return extraPathsOf(await readConfig());
   } catch {
     // An unreadable config is "no extra folders", not a crash: the wizard has
@@ -119,19 +99,19 @@ export class ExtraPathsUnreadableError extends Error {
  * reader built for that — ENOENT is still `{}` (a fresh box has nothing to
  * lose), everything else throws.
  */
-async function readExtraPathsForWrite(): Promise<string[]> {
+async function readExtraPathsForWrite(local: boolean): Promise<string[]> {
   try {
     // Same rule on both arms and for the same reason: a read that FAILED must
     // not be written over as if it were an empty list.
-    return openclawIsAbsent() ? await readLocalSources() : extraPathsOf(await readConfigStrict());
+    return local ? await readLocalSources() : extraPathsOf(await readConfigStrict());
   } catch (err) {
     throw new ExtraPathsUnreadableError(err);
   }
 }
 
 /** Replace the whole list. OpenClaw validates the shape on write. */
-export async function writeExtraPaths(paths: readonly string[]): Promise<void> {
-  if (openclawIsAbsent()) {
+export async function writeExtraPaths(paths: readonly string[], local = openclawIsAbsent()): Promise<void> {
+  if (local) {
     await writeLocalSources(paths);
     return;
   }
@@ -176,10 +156,15 @@ export async function mutateExtraPaths(
   fn: (current: string[]) => string[] | Promise<string[]>,
 ): Promise<string[]> {
   const turn = extraPathsQueue.then(async () => {
-    const current = await readExtraPathsForWrite();
+    // WHICH ARM, once, for the whole read-modify-write. The predicate reads a
+    // root-owned file that a harness swap rewrites on a LIVE box, and there is
+    // an `await fn(...)` in the middle of this — asked twice, a swap landing
+    // inside a mutation could read the local store and write openclaw.json.
+    const local = openclawIsAbsent();
+    const current = await readExtraPathsForWrite(local);
     const next = [...(await fn([...current]))];
     if (sameList(current, next)) return current;
-    await writeExtraPaths(next);
+    await writeExtraPaths(next, local);
     // Strict here too: a lenient read-back would answer `[]` over the list
     // just written. But a read-back that FAILS is not a failed mutation —
     // the CLI has validated and saved `next` by now — so it is not the
@@ -189,7 +174,7 @@ export async function mutateExtraPaths(
     // cache left warm over a changed identity. The written list is the
     // truth here, so it is answered, and the read-back failure logged.
     try {
-      return await readExtraPathsForWrite();
+      return await readExtraPathsForWrite(local);
     } catch (err) {
       console.warn("[memory-shard] extraPaths written but could not be read back; answering the written list:", err);
       return next;

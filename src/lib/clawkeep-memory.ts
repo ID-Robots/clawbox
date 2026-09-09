@@ -937,14 +937,23 @@ async function acquireRunLock(): Promise<boolean> {
   }
 }
 
+/** The two verdicts both arms can reach, said once. */
+const TIMED_OUT_FAILURE = {
+  error: "Indexing timed out. Try again after the device is idle.",
+  errorCode: "timed_out" as const,
+};
+const INDEX_FAILED_FAILURE = {
+  error: "Indexing failed. Check that the embedding model is available, then try again.",
+  errorCode: "index_failed" as const,
+};
+
 function fixedFailure(
-  timedOut: boolean,
   code: number | null,
   signal: NodeJS.Signals | null,
 ): { error: string; errorCode: MemoryRunErrorCode } {
-  if (timedOut || code === 124) {
-    return { error: "Indexing timed out. Try again after the device is idle.", errorCode: "timed_out" };
-  }
+  // 124 is `timeout`'s own verdict, which is the same fact arriving as an exit
+  // code rather than as this module's budget.
+  if (code === 124) return TIMED_OUT_FAILURE;
   // Killed from outside — the OOM killer, an operator, a service restart. The
   // embedding model had nothing to do with it, so do not send the owner to
   // check it; the same words the reconcile uses for a run lost to a reboot.
@@ -955,10 +964,7 @@ function fixedFailure(
   if (EXEC_FAILURE_EXITS.has(code)) {
     return { error: "OpenClaw is not installed or could not be started.", errorCode: "openclaw_missing" };
   }
-  return {
-    error: "Indexing failed. Check that the embedding model is available, then try again.",
-    errorCode: "index_failed",
-  };
+  return INDEX_FAILED_FAILURE;
 }
 
 /**
@@ -984,7 +990,6 @@ function lastMeaningfulLine(text: string): string {
  */
 type PassOutcome =
   | { kind: "exit"; code: number | null; signal: NodeJS.Signals | null }
-  | { kind: "done" }
   | { kind: "threw"; error: unknown };
 
 /**
@@ -1072,10 +1077,16 @@ function startLocalPass(mode: MemoryIndexMode): IndexPass {
   // and a second lock would only be a second thing to leave behind.
   const ended = runLocalIndexPass(mode, controller.signal).then(
     (result): PassOutcome => {
-      tail = `indexed ${result.files} files into ${result.chunks} chunks`
+      // The pass's own numbers exist nowhere else — the run record keeps a
+      // status and a duration, not a count — so they are said once, here.
+      console.warn(
+        `[memory-index] ${mode} pass: ${result.files} files, ${result.chunks} chunks`
         + (result.failures ? `, ${result.failures} unreadable` : "")
-        + (result.capped ? " (the index reached its ceiling)" : "");
-      return { kind: "done" };
+        + (result.capped ? " (the index reached its ceiling)" : ""),
+      );
+      // A success is an exit 0, in the vocabulary the other arm already speaks,
+      // so `finish` has one shape to reason about instead of two.
+      return { kind: "exit", code: 0, signal: null };
     },
     (error): PassOutcome => {
       tail = error instanceof Error ? error.message : String(error);
@@ -1107,10 +1118,7 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
   // Everything else — the embedder refusing (EmbeddingUnavailableError), an
   // unreadable store, a bug — reads the same to the owner and has the same
   // next step.
-  return {
-    error: "Indexing failed. Check that the embedding model is available, then try again.",
-    errorCode: "index_failed",
-  };
+  return INDEX_FAILED_FAILURE;
 }
 
 /**
@@ -1197,18 +1205,21 @@ export async function startMemoryIndex(
   const finish = async (outcome: PassOutcome) => {
     clearTimeout(timer);
     const finishedAtMs = Date.now();
-    const ok = !timedOut && (outcome.kind === "done" || (outcome.kind === "exit" && outcome.code === 0));
+    const ok = !timedOut && outcome.kind === "exit" && outcome.code === 0;
+    // The timeout first, because it is the one verdict that does not depend on
+    // which arm ran: whatever the pass said on its way out, the budget is what
+    // ended it. After that each arm is worded by its own mapper.
     const failure = ok
       ? null
-      : outcome.kind === "threw"
-        ? (timedOut
-          ? { error: "Indexing timed out. Try again after the device is idle.", errorCode: "timed_out" as const }
-          : localFailure(outcome.error))
-        : fixedFailure(timedOut, outcome.kind === "exit" ? outcome.code : null, outcome.kind === "exit" ? outcome.signal : null);
+      : timedOut
+        ? TIMED_OUT_FAILURE
+        : outcome.kind === "threw"
+          ? localFailure(outcome.error)
+          : fixedFailure(outcome.code, outcome.signal);
     if (failure) {
       const how = outcome.kind === "exit"
         ? `exit ${outcome.code ?? "none"}${outcome.signal ? `, ${outcome.signal}` : ""}`
-        : outcome.kind;
+        : "threw";
       console.warn(
         `[clawkeep-memory] ${mode} index run failed (${failure.errorCode}, ${how}): `
         + `${lastMeaningfulLine(pass.tail()) || "it said nothing"}`,

@@ -6,7 +6,7 @@ import { searchLocalMemory } from "@/lib/memory-index-local";
 
 export const dynamic = "force-dynamic";
 
-/** Cap on what one call may return, and how much of a chunk each hit shows. */
+/** Cap on what one call may return. */
 const MAX_LIMIT = 10;
 const DEFAULT_LIMIT = 5;
 
@@ -39,11 +39,13 @@ const DEFAULT_LIMIT = 5;
  */
 export async function GET(request: NextRequest) {
   if (!openclawIsAbsent()) {
-    // On an edition with OpenClaw, OpenClaw's index is the one that exists and
-    // OpenClaw is what searches it. There is nothing here to read, and saying
-    // so plainly beats an empty result that reads like "nothing matched".
+    // Where there is an OpenClaw, the index is OpenClaw's — ClawBox has built
+    // nothing here to read. Worded as what is TRUE of the box rather than as
+    // "the assistant searches it itself", which is right on the OpenClaw SKU
+    // and wrong on a `dual` box running Hermes: there OpenClaw's index is still
+    // the one that exists, and the Hermes agent cannot reach it.
     return NextResponse.json(
-      { error: "This edition's memory index is searched by the assistant itself.", code: "edition" },
+      { error: "This box's memory index belongs to OpenClaw; ClawBox does not search it.", code: "edition" },
       { status: 409 },
     );
   }
