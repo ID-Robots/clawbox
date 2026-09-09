@@ -91,6 +91,19 @@ export interface HarnessFacts {
    * it by default.
    */
   hermesSpeaksReplies: boolean;
+  /**
+   * OpenClaw's first-conversation ritual is armed and unfinished — a box that
+   * has never been introduced to its owner.
+   *
+   * A FILE fact (`BOOTSTRAP.md` in the workspace, read by
+   * `onboardingRitualArmed`), not a guess from an empty transcript: a cleared
+   * conversation, a restored side tab and a reset session are all empty too,
+   * and the chat used to greet itself on every one of them.
+   *
+   * False on Hermes, which runs no such ritual, and false on every box that has
+   * already been introduced — which is nearly all of them after first boot.
+   */
+  onboardingArmed: boolean;
 }
 
 /**
@@ -127,6 +140,9 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // dashboard it still honestly says no.
       streamsTurns: facts.hermesStreamsTurns,
       canListHistory: HERMES_DURABLE_TRANSCRIPT,
+      // Hermes has no first-conversation ritual, so there is no introduction
+      // for a greeting to start and nothing an unasked-for turn could achieve.
+      shouldOpenFirstConversation: false,
       // Forgetting the resumed session id IS the reset: the next turn goes out
       // with no `--resume`, so the box opens a fresh session. Every bit as real
       // a reset as the gateway's, and the only one Hermes can have.
@@ -221,6 +237,9 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
   return {
     streamsTurns: true,
     canListHistory: true,
+    // Only while the agent's own introduction is waiting to run. On every box
+    // that has been introduced this is false and the chat opens silently.
+    shouldOpenFirstConversation: facts.onboardingArmed,
     canResetSession: true,
     canPatchSessionDefaults: true,
     reasoningScope: "session",
@@ -268,6 +287,11 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
 /** The facts to assume before the box has answered: the cautious ones. */
 export const UNKNOWN_FACTS: HarnessFacts = {
   hasClawaiToken: false,
+  // Cautious here means SILENT. A box that has not answered yet must not be
+  // greeted on the guess that it might be new: greeting a box that was already
+  // introduced spends a turn and puts a word in the owner's mouth, while a
+  // fresh box that greets one load later has lost nothing.
+  onboardingArmed: false,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
   // Cautious in the same direction as the rest: a composer that has not heard

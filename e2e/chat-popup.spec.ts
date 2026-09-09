@@ -60,6 +60,12 @@ async function installFakeGatewaySocket(page: Page) {
         }
 
         if (message.method === "chat.history") {
+          // Counted so a test can wait for the transcript read to have HAPPENED
+          // before asserting that nothing was sent. Without that, "no turn went
+          // out" is asserted before the greeting path could have run and would
+          // pass against a regression that still greets.
+          const w = window as unknown as { __chatHistoryReads?: number };
+          w.__chatHistoryReads = (w.__chatHistoryReads ?? 0) + 1;
           emit({
             type: "res",
             id: message.id,
@@ -78,7 +84,10 @@ async function installFakeGatewaySocket(page: Page) {
           // the greeting's words after typing found that bubble AND the new
           // one — the same text twice, which a strict locator refuses — and
           // passed only when it looked before the second reply landed.
+          const w = window as unknown as { __chatSends?: string[] };
+          w.__chatSends = w.__chatSends ?? [];
           const sent = String((message.params as { message?: unknown } | undefined)?.message ?? "");
+          w.__chatSends.push(sent);
           const reply = sent === "hi" ? "Hello from the fake gateway" : `Fake gateway heard: ${sent}`;
           emit({
             type: "res",
@@ -178,6 +187,65 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await expect(page.getByTitle("Undock panel")).toBeVisible();
   await page.getByTitle("Undock panel").click();
   await expect(page.getByTitle("Dock to right")).toBeVisible();
+});
+
+test("chat popup stays silent on a box whose agent has been introduced", async ({ page }) => {
+  // The common case on a real box, and the one the greet used to get wrong: an
+  // empty transcript is not a first conversation. A cleared conversation, a
+  // reset session and a box introduced months ago all look identical, and every
+  // one of them used to be answered with an unasked-for "hi" that spent a model
+  // turn and put a word in the owner's mouth.
+  await installFakeGatewaySocket(page);
+
+  await installClawboxMocks(page, {
+    timeoutCapMs: 300_000,
+    kvEntries: { "clawbox-mascot-hidden": "1" },
+    // No introduction waiting: BOOTSTRAP.md is gone because the ritual finished.
+    chatFacts: { onboardingArmed: false },
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      telegram_configured: true,
+    },
+    preferences: { ui_mascot_hidden: 1 },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+
+  await openChatPopup(page);
+
+  // The composer is usable and the transcript is empty: nothing was sent, so
+  // the fake gateway — which answers "hi" and nothing else with that line —
+  // never replied. Asserted against the gateway's OWN reply rather than a
+  // generic empty check, so a turn that went out under any other text still
+  // fails this.
+  await expect(page.getByTestId("chat-composer-row")).toBeVisible();
+
+  // Wait for the transcript read to have HAPPENED before claiming nothing was
+  // sent. `toHaveCount(0)` on its own succeeds the moment the composer renders,
+  // which is before the greeting path has had its chance — so a regression that
+  // still greets would sail past it. The read is the input the greet decision
+  // waits on, so once it has landed, a box that was going to greet has.
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __chatHistoryReads?: number }).__chatHistoryReads ?? 0))
+    .toBeGreaterThan(0);
+
+  // A settle window, because this is a NEGATIVE assertion: polling for an empty
+  // array succeeds on its first evaluation, so without a pause it proves only
+  // that nothing had been sent yet. The greet waits on two inputs — the read
+  // above and the capabilities fetch — and this covers the gap between them.
+  await page.waitForTimeout(1000);
+
+  // Asserted on what reached the WIRE, not on what is painted: a turn that went
+  // out and whose reply merely had not rendered yet would still fail this.
+  expect(
+    await page.evaluate(() => (window as unknown as { __chatSends?: string[] }).__chatSends ?? []),
+  ).toEqual([]);
+  await expect(page.getByText("Hello from the fake gateway")).toHaveCount(0);
 });
 
 test("chat popup lets you switch to Local AI when it is configured", async ({ page }) => {

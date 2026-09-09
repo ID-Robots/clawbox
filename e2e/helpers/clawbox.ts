@@ -48,6 +48,35 @@ type MockOptions = {
   files?: FileTree;
   storeApps?: StoreCatalogApp[];
   timeoutCapMs?: number;
+  /**
+   * Overrides for `/setup-api/chat/capabilities`, merged over CHAT_FACTS.
+   *
+   * Pass `{ onboardingArmed: false }` for a box whose agent has already been
+   * introduced — the chat then opens silently, which is what nearly every real
+   * box does.
+   */
+  chatFacts?: Record<string, unknown>;
+};
+
+/**
+ * The chat capability facts the mocked box reports.
+ *
+ * All false but `onboardingArmed`, which keeps the specs' status quo: the chat
+ * used to open a first conversation on any empty transcript, so every spec that
+ * opened it got a greeting and the fake gateway's reply to it. That greet is
+ * now gated on the agent having an introduction waiting, and this is where the
+ * mocked box says it has one. A spec that wants the silent case — the common
+ * one on a real box — passes `chatFacts: { onboardingArmed: false }`.
+ */
+const CHAT_FACTS = {
+  hasClawaiToken: false,
+  hermesSupportsImages: false,
+  hermesHasVisionRoute: false,
+  hermesStreamsTurns: false,
+  hasClawaiImageRoute: false,
+  hermesAgentDrawsImages: false,
+  hermesSpeaksReplies: false,
+  onboardingArmed: true,
 };
 
 const DEFAULT_SETUP: SetupState = {
@@ -649,6 +678,25 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     // store-flow and installed-app-settings drive.
     if (path === "/setup-api/harness/active") {
       await fulfillJson(route, { active: "openclaw", edition: "openclaw", activeKnown: true });
+      return;
+    }
+
+    // Answered here rather than left to the catch-all `{}`, because one of
+    // these facts decides whether the chat opens a conversation by itself.
+    //
+    // `onboardingArmed` is read from the agent's BOOTSTRAP.md on the real box,
+    // so falling through would make the greet depend on whether the machine
+    // running these tests happens to have an un-introduced OpenClaw workspace —
+    // false on CI, true on a fresh developer box. Mocked, it is a property of
+    // the test instead of the runner. Every other fact stays false, exactly as
+    // the catch-all left it.
+    if (path === "/setup-api/chat/capabilities") {
+      await fulfillJson(route, {
+        harness: "openclaw",
+        facts: { ...CHAT_FACTS, ...(options.chatFacts ?? {}) },
+        factsPending: false,
+        factsRetryAfterMs: 30_000,
+      });
       return;
     }
 

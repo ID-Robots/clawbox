@@ -5433,6 +5433,105 @@ tts_ensure_provider_registered() {
   as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1
 }
 
+# The name of the ClawBox AI cloud voice entry, when this box has one.
+#
+# Its PRESENCE is the subscription test, and deliberately so rather than a
+# second read of the plan: `scripts/gateway-pre-start.sh` writes this entry only
+# on a box whose tier stamp equals CLAWBOX_SPEECH_DEVICE_TIER and withdraws it
+# again on a downgrade, so the gate has already been applied by the one place
+# that owns it. Asking the tier a second time here would be a copy of that rule
+# free to drift from it.
+#
+# `clawboxManaged` is our own stamp on the entry, not the provider's name: an
+# owner's own `openai` speech route carries no stamp and is never mistaken for
+# ours. The apiKey comes back redacted from `config get`, which does not matter
+# — the flag and the key's NAME are all this needs.
+#
+# A DELIBERATELY weaker test than pre-start's `_clawai_route_is_ours`, which
+# requires the stamp AND a base URL still pointing at our proxy, because
+# `openclaw config set` edits in place and a stale stamp can outlive an entry
+# the owner has re-aimed elsewhere. The difference is safe here and is not there:
+# pre-start uses that predicate to decide whether to REWRITE or WITHDRAW an
+# entry, where being wrong edits somebody else's provider; this only decides
+# which of two already-present voices is selected FIRST on a box that has not
+# chosen, and the owner can change it in Settings → Voice. Tightening this to
+# the same predicate would mean re-deriving ownership in a second language —
+# the thing the paragraph above declines to do with the tier.
+# Can openclaw.json be READ at all right now?
+#
+# `openclaw config get` exits 1 for an unset key AND for a config it could not
+# read — measured on the box, both give rc=1 with empty output — so the exit code
+# cannot tell "the owner has chosen nothing" from "we cannot see what the owner
+# chose". Seed-if-unset acts on the first and must never act on the second: an
+# unreadable config would otherwise be overwritten with our own selection, which
+# is how an owner's ElevenLabs pick disappears on an update.
+#
+# So ask the FILE. A config that parses means an empty `config get` really is an
+# unset key. A config that is absent is also genuinely unset — that is a fresh
+# box, which must still be seeded — and only a file that exists and does not
+# parse is the case this refuses to write over. Mirrors the discipline the
+# Hermes arm above already applies through HERMES_TTS_READ_FAILED.
+# Runs through `as_clawbox`, exactly like every `oc_config_set` in this step, and
+# that correspondence is the point: the probe must resolve the SAME config the
+# writes will land in. Pinning HOME here alone would break it — the probe could
+# then vet one file while the writes touched another. (Measured on the box:
+# sudoers sets `env_reset`, so `sudo -u clawbox` already gives
+# HOME=/home/clawbox. A box where that did not hold would send this step's reads
+# AND its writes to the same wrong place, which is a property of the whole file
+# rather than of this helper.)
+tts_config_readable() {
+  local rc=0
+  as_clawbox python3 - <<'PY' >/dev/null 2>&1 || rc=$?
+import json, os, sys
+# 3, not 1: an uncaught Python exception exits 1, and so does a sudo that was
+# refused, so 1 cannot mean "this config does not parse" — it is the code every
+# kind of plumbing failure already speaks. A verdict needs a code nothing else
+# uses, or the caller cannot tell an answer from an accident.
+VERDICT_UNREADABLE = 3
+try:
+    home = os.path.expanduser("~")
+    base = os.environ.get("CLAWBOX_OPENCLAW_HOME") or os.path.join(home, ".openclaw")
+    path = os.path.join(base, "openclaw.json")
+    if not os.path.exists(path):
+        sys.exit(0)                  # fresh box: genuinely unset, seed it
+    with open(path) as fh:
+        json.load(fh)
+except SystemExit:
+    raise
+except OSError:
+    # Could not even look (permissions, a path that vanished): not a verdict.
+    sys.exit(1)
+except Exception:
+    sys.exit(VERDICT_UNREADABLE)     # there IS a config and it does not parse
+sys.exit(0)
+PY
+  # ONLY the probe's own verdict refuses. Everything else — no python3, a sudo
+  # that was denied, a test harness that does not carry this function, an
+  # unreadable directory — means the question could not be ASKED, and refusing
+  # then would cost a box its voice over something never established.
+  #
+  # Fail OPEN, because the two mistakes do not cost the same: seeding over a
+  # config we could not read loses one setting the owner can set again, while
+  # refusing to seed leaves a fresh device with no TTS provider at all.
+  [ "$rc" -ne 3 ]
+}
+
+tts_managed_cloud_provider() {
+  local home="$1"
+  as_clawbox "$OPENCLAW_BIN" config get "$home.providers" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    providers = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+if isinstance(providers, dict):
+    for name, entry in providers.items():
+        if isinstance(entry, dict) and entry.get("clawboxManaged") is True:
+            print(name)
+            break
+' 2>/dev/null
+}
+
 # The on-device voice, for EVERY edition.
 #
 # This step used to open with
@@ -6036,6 +6135,17 @@ step_openclaw_tts() {
     return "$TTS_RC"
   fi
 
+  # An EMPTY read is only "the owner has chosen nothing" if the config could be
+  # read at all — `config get` returns the same rc=1 and the same empty string
+  # either way. Refuse to seed over a config we cannot see, and say so; the
+  # provider DEFINITION below is skipped with it, because writing into a file
+  # that does not parse is how a broken config becomes a lost one.
+  if ! tts_config_readable; then
+    echo "  Warning: openclaw.json exists and could not be read — leaving $TTS_HOME.provider alone rather than overwriting a choice we cannot see" >&2
+    echo "           Diagnose with: openclaw config get $TTS_HOME.provider" >&2
+    return "$TTS_RC"
+  fi
+
   # Never point OpenClaw at a command that is not there: that configures the
   # exact silent failure this task removes, and it would look like a working
   # install until someone asked the box to speak.
@@ -6066,9 +6176,47 @@ step_openclaw_tts() {
     return 1
   fi
 
-  if ! oc_config_set "$TTS_HOME.provider" "tts-local-cli"; then
-    echo "  ERROR: could not select the tts-local-cli provider" >&2
-    return 1
+  # WHICH voice speaks first on a box that has both.
+  #
+  # Kokoro is installed either way — that is the step above, and it stays the
+  # box's own voice, one click away in Settings → Voice. What is decided here is
+  # only the DEFAULT, and on a box with a ClawBox AI subscription the default is
+  # the cloud voice (owner's ruling, 2026-09-09): it answers immediately, while
+  # Kokoro's server stops itself after five idle minutes and the first utterance
+  # after a quiet spell pays a 13-19 s cold start on this hardware.
+  #
+  # This is not the `edge` case the Hermes arm above refuses. That refusal is
+  # about defaulting an owner's speech to MICROSOFT — a third party the box
+  # merely happens to ship a client for. This is ClawBox AI: our own service, on
+  # a plan the owner is already paying for, reached through our own proxy. The
+  # principle that a ClawBox must not hand speech to someone else's cloud is
+  # kept; what is narrowed is the assumption that every cloud is someone else's.
+  #
+  # Seed-if-unset still governs: this whole branch is only reached when
+  # `tts.provider` was unset, so an owner's explicit pick — including an
+  # explicit pick of the local voice — is never overwritten by an update.
+  local TTS_SELECTED="tts-local-cli"
+  local CLOUD_TTS
+  CLOUD_TTS=$(tts_managed_cloud_provider "$TTS_HOME")
+  if [ -n "$CLOUD_TTS" ]; then
+    TTS_SELECTED="$CLOUD_TTS"
+  fi
+
+  if ! oc_config_set "$TTS_HOME.provider" "$TTS_SELECTED"; then
+    echo "  ERROR: could not select the $TTS_SELECTED provider" >&2
+    # Falling back to the local voice rather than leaving the box mute: the
+    # tts-local-cli entry is written and its plugin verified directly above, so
+    # it is the one provider this step KNOWS can answer. A cloud entry that
+    # could not be selected leaves the box with a working engine and no
+    # selection, which is the silent failure the checks above exist to prevent.
+    if [ "$TTS_SELECTED" = "tts-local-cli" ] || ! oc_config_set "$TTS_HOME.provider" "tts-local-cli"; then
+      return 1
+    fi
+    echo "  Fell back to the on-device voice after the cloud voice could not be selected" >&2
+    TTS_SELECTED="tts-local-cli"
+  fi
+  if [ "$TTS_SELECTED" != "tts-local-cli" ]; then
+    echo "  ClawBox AI cloud voice selected ($TTS_SELECTED); Kokoro is installed and can be made primary in Settings → Voice"
   fi
   # Only claim Kokoro when Kokoro is genuinely there. This line asserting
   # "Kokoro GPU" unconditionally is what kept TASK-420 invisible: three

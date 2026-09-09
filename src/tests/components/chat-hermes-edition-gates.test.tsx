@@ -191,15 +191,31 @@ describe("the conversation surviving a refresh", () => {
     expect(box.socketsOpened).toBe(0);
   });
 
-  it("greets once on a genuinely first conversation, and completes the turn", async () => {
-    // An empty transcript is the only "first conversation" signal there is now.
-    // The greeting must also END: a harness that resolves with its reply has no
-    // socket handler to paint it, so a greet that went straight to the adapter
-    // left the composer disabled with a Stop button and nothing running.
+  it("opens no conversation of its own, even on an empty transcript", async () => {
+    // An empty transcript is NOT a first conversation, and on Hermes there is no
+    // first conversation to open at all: the greeting existed to start OpenClaw's
+    // introduction ritual, and Hermes runs none (see `onboardingRitualArmed`).
+    // So the box stays silent and the first turn is the owner's — which is also
+    // what an empty transcript gets on an OpenClaw box that has already been
+    // introduced, since a cleared conversation and a reset session look
+    // identical to a fresh one.
+    box.storedTranscript = [];
+    await mountHermesChat(box);
+    await waitFor(() => expect(box.socketsOpened).toBe(0));
+    expect(box.chatPosts).toHaveLength(0);
+  });
+
+  it("completes a turn the owner starts, and re-enables the composer", async () => {
+    // The coverage the greeting used to carry, moved onto the turn that actually
+    // happens now: a harness that resolves with its reply has no socket handler
+    // to paint it, so a turn that went straight to the adapter once left the
+    // composer disabled with a Stop button and nothing running.
     box.storedTranscript = [];
     const textarea = await mountHermesChat(box);
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
     await waitFor(() => expect(box.chatPosts.length).toBe(1));
-    expect(box.chatPosts[0].message).toBe("hi");
+    expect(box.chatPosts[0].message).toBe("hello");
     await screen.findByText("hello back");
     await waitFor(() => expect(textarea).not.toBeDisabled());
   });

@@ -1066,14 +1066,30 @@ function UpdateProgressCard({
       {state && state.steps.length > 0 && (
         <ul className="mt-4 space-y-2">
           {state.steps.map((step) => (
-            <li key={step.id} className="flex items-center gap-3 text-sm">
+            <li key={step.id} className="flex items-start gap-3 text-sm">
               <StepIcon status={step.status} />
-              <span className={
-                step.status === "running" ? "text-gray-100 font-medium" :
-                step.status === "completed" ? "text-emerald-300/80" :
-                step.status === "failed" ? "text-red-300" : "text-[var(--text-muted)]"
-              }>
-                {step.label}
+              <span className="min-w-0">
+                <span className={
+                  step.status === "running" ? "text-gray-100 font-medium" :
+                  step.status === "completed" ? "text-emerald-300/80" :
+                  step.status === "failed" ? "text-red-300" : "text-[var(--text-muted)]"
+                }>
+                  {step.label}
+                </span>
+                {/* What the step is doing under a label that cannot say it —
+                    "Applying system fixups" is fifteen minutes of CUDA compile
+                    and multi-hundred-MB downloads. Only ever on the running
+                    step, and absent unless the installer has said something, so
+                    a step with nothing to add looks exactly as it did. */}
+                {step.status === "running" && step.detail && (
+                  <span
+                    className="block truncate text-xs text-[var(--text-muted)]"
+                    title={step.detail}
+                    data-testid="update-step-detail"
+                  >
+                    {step.detail}
+                  </span>
+                )}
               </span>
             </li>
           ))}

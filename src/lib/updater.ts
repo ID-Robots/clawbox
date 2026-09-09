@@ -23,6 +23,7 @@ import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { startRootStep } from "./root-step-runner";
+import { watchRootStepProgress } from "./root-step-follow";
 import { setUpdateLock, clearUpdateLock, isUpdateLocked, updateLockHeldByLiveProcess } from "./update-lock";
 
 /**
@@ -402,6 +403,22 @@ export interface StepState {
   label: string;
   status: StepStatus;
   error?: string;
+  /**
+   * What the step is doing RIGHT NOW, in install.sh's own words.
+   *
+   * The labels above are deliberately coarse — "Applying system fixups" covers
+   * nineteen sub-phases, among them a CUDA compile and several hundred-MB
+   * downloads, and on a Jetson that one step runs for fifteen minutes behind
+   * four unchanging words. This carries the installer's current headline
+   * ("Building CTranslate2 with CUDA for sm_87", "Installing CUDA-enabled
+   * PyTorch for Jetson (~300 MB)") so the screen can say which of them it is.
+   *
+   * OPTIONAL, and absent is the normal case: only root steps are watched, the
+   * watcher is read-only, and a step that says nothing simply has no detail —
+   * the UI then looks exactly as it did before. Cleared when the step ends, so
+   * a finished step never keeps the last thing it happened to be doing.
+   */
+  detail?: string;
 }
 
 export type UpdatePhase =
@@ -4220,6 +4237,20 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
 
     console.log(`[Updater] Running step: ${step.label}`);
 
+    // Say what the step is DOING, not only which step it is. Root steps write
+    // their sub-phases to the journal they are already writing, so this reads
+    // them — it cannot affect how the step is started, timed, or torn down,
+    // which is the whole reason it is a separate watcher rather than a change
+    // to execAsRoot. `stepStartedAt` bounds it to THIS run of the step.
+    // No guard needed on the write: `watchRootStepProgress` promises no headline
+    // after its stopper runs, and the `finally` below stops it before the step
+    // is marked anything but running.
+    const stopProgress = step.requiresRoot
+      ? watchRootStepProgress(step.id, stepStartedAt, (headline) => {
+          runtime.state.steps[i].detail = headline;
+        })
+      : null;
+
     try {
       if (step.customRun) {
         await step.customRun();
@@ -4276,6 +4307,12 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         runtime.state.error = message;
         break;
       }
+    } finally {
+      // Both exits, including the advisory `continue` and the failFast `break`:
+      // a step that has stopped running must not keep the last thing it was
+      // doing on screen, and the watcher must not outlive it.
+      stopProgress?.();
+      runtime.state.steps[i].detail = undefined;
     }
   }
 

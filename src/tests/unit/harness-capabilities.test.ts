@@ -17,40 +17,12 @@ import {
  *    combination, or a button appears that promises something impossible.
  */
 
-const linked: HarnessFacts = {
-  hasClawaiToken: true,
-  hermesSupportsImages: false,
-  hermesHasVisionRoute: false,
-  hermesStreamsTurns: false,
-  hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
-};
-const bare: HarnessFacts = {
-  hasClawaiToken: false,
-  hermesSupportsImages: false,
-  hermesHasVisionRoute: false,
-  hermesStreamsTurns: false,
-  hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
-};
+const linked: HarnessFacts = { ...UNKNOWN_FACTS, hasClawaiToken: true };
+const bare: HarnessFacts = { ...UNKNOWN_FACTS };
 /** The box the attach button is honest on: the flag AND somewhere to look. */
-const seeing: HarnessFacts = {
-  hasClawaiToken: true,
-  hermesSupportsImages: true,
-  hermesHasVisionRoute: true,
-  hermesStreamsTurns: false,
-  hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
-};
+const seeing: HarnessFacts = { ...UNKNOWN_FACTS, hasClawaiToken: true, hermesSupportsImages: true, hermesHasVisionRoute: true };
 /** A linked box whose agent has an image backend selected — it can draw. */
-const drawing: HarnessFacts = {
-  hasClawaiToken: true,
-  hermesSupportsImages: false,
-  hermesHasVisionRoute: false,
-  hermesStreamsTurns: false,
-  hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: true, hermesSpeaksReplies: false
-};
+const drawing: HarnessFacts = { ...UNKNOWN_FACTS, hasClawaiToken: true, hermesAgentDrawsImages: true };
 
 describe("capabilitiesFor", () => {
   it("follows the credential, not the edition, for transcription", () => {
@@ -250,7 +222,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: false,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
       }).canAttachImages,
     ).toBe(false);
     // And the mirror: a vision route on an agent whose turn cannot carry the
@@ -262,7 +234,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: true,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
       }).canAttachImages,
     ).toBe(false);
   });
@@ -281,7 +253,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: false,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
       }).canAttachImages,
     ).toBe(false);
     expect(
@@ -291,7 +263,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: true,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
       }).canAttachImages,
     ).toBe(true);
   });

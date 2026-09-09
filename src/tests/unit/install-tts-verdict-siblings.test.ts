@@ -91,7 +91,7 @@ function runShellProgram(program: string, env: Record<string, string>, args: str
   return spawnSync("bash", [file, ...args], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, ...env },
+    env: { ...process.env, CLAWBOX_OPENCLAW_HOME: `${root}/openclaw-home`, ...env },
   });
 }
 
@@ -368,6 +368,8 @@ function runStep(voiceExit: number, verdict?: string) {
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
     extractShellFn(INSTALL_SH, "tts_write_local_provider_definition"),
+    extractShellFn(INSTALL_SH, "tts_managed_cloud_provider"),
+    extractShellFn(INSTALL_SH, "tts_config_readable"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
     "step_openclaw_tts",
     'echo "STEP_RC=$?"',

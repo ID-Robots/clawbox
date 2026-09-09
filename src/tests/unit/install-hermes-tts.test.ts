@@ -206,6 +206,8 @@ function runStep(edition: string, opts: StepOpts = {}) {
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
     extractShellFn(INSTALL_SH, "tts_write_local_provider_definition"),
+    extractShellFn(INSTALL_SH, "tts_managed_cloud_provider"),
+    extractShellFn(INSTALL_SH, "tts_config_readable"),
     extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
     "step_openclaw_tts",
@@ -215,7 +217,7 @@ function runStep(edition: string, opts: StepOpts = {}) {
   const res = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, TTS_STATUS_FILE: ttsStatusFile },
+    env: { ...process.env, CLAWBOX_OPENCLAW_HOME: `${root}/openclaw-home`, TTS_STATUS_FILE: ttsStatusFile },
   });
   const lines = (f: string) => (existsSync(f) ? readFileSync(f, "utf-8").trim().split("\n").filter(Boolean) : []);
   const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
@@ -812,7 +814,7 @@ function runValidator(edition: string, ttsStatusContents: string | null) {
   const r = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, TTS_STATUS_FILE: ttsStatusFile },
+    env: { ...process.env, CLAWBOX_OPENCLAW_HOME: `${root}/openclaw-home`, TTS_STATUS_FILE: ttsStatusFile },
   });
   return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }

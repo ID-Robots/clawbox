@@ -26,6 +26,11 @@ import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vite
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+// Mocked so the route's own filesystem read cannot decide this suite's timing.
+// It is not one of the probes under test — those are the Hermes ones below —
+// and left real it takes a genuine I/O turn that no fake timer stands in for,
+// which is what stops "settled without moving the clock" from being provable.
+vi.mock("@/lib/language-persona", () => ({ onboardingRitualArmed: vi.fn(async () => false) }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/harness/clawai-images", () => ({ clawaiImageRouteReachable: vi.fn() }));
 vi.mock("@/lib/hermes-dashboard-turn", () => ({ hermesCanStreamTurns: vi.fn() }));
@@ -141,6 +146,7 @@ describe("GET /setup-api/chat/capabilities asks the Hermes probes together", () 
       hasClawaiImageRoute: true,
       hermesAgentDrawsImages: true,
       hermesSpeaksReplies: true,
+      onboardingArmed: false,
     });
   });
 
@@ -168,6 +174,9 @@ describe("GET /setup-api/chat/capabilities asks the Hermes probes together", () 
   it("still asks nothing of hermes on an OpenClaw box", async () => {
     getActiveHarness.mockResolvedValue("openclaw");
     const request = startRequest();
+    // Settled without moving the clock — asserted on its own, NOT after
+    // awaiting `request.body()`, which awaits the very promise that marks the
+    // request settled and would make this pass whatever the route did.
     await vi.advanceTimersByTimeAsync(0);
     expect(request.settled()).toBe(true);
     for (const [name, probe] of Object.entries(probes)) {

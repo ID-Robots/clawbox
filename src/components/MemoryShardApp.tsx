@@ -438,14 +438,18 @@ function MemoryIndexCard({ initial, onError }: {
             </p>
           </div>
           <label className="relative inline-flex items-center cursor-pointer">
+            {/* Sized to the track and transparent rather than `sr-only`: the
+                input itself is then what a pointer at the switch's centre lands
+                on, instead of the wrapper that sat over the 1x1 hidden box.
+                Same change as ClawKeep's auto-backup switch. */}
             <input
               type="checkbox"
-              className="sr-only peer"
+              className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer opacity-0"
               aria-label={t("clawkeep.memory.schedule")}
               checked={schedule.enabled}
               onChange={(e) => void saveSchedule({ ...schedule, enabled: e.target.checked })}
             />
-            {/* The checkbox itself is off-screen, so the track is what has to
+            {/* The checkbox itself is invisible, so the track is what has to
                 show the keyboard focus — the desktop's coral, not the track's
                 own accent, which would vanish on the switched-on state. */}
             <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-[var(--coral-bright)] transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--coral-bright)]" />

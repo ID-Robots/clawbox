@@ -601,12 +601,19 @@ export default function ClawKeepApp() {
     );
   }
 
-  // The front door: a box whose owner has not been through setup and is not
-  // paired shows the wizard instead of a dashboard of things that cannot
-  // happen yet. A paired box skips it whatever the flag says — pairing is the
-  // wizard's point, and an owner who paired before the wizard existed must
-  // not be sent back through it.
-  if (status.setupComplete === false && !status.paired) {
+  // The front door: an owner who has not been through setup gets the wizard
+  // rather than a dashboard of things that cannot happen yet.
+  //
+  // ONE question, the same one BrowserApp, CodingAgentApp and MemoryShardApp
+  // ask. This used to also require `!status.paired`, and that conjunct was the
+  // defect: re-evaluated on every status poll, the wizard's own pairing step
+  // falsified the condition keeping it on screen, dropping the owner onto the
+  // dashboard two steps early at "Protection Lapsed". The legacy case that
+  // conjunct existed for — a box paired before this wizard shipped — is now
+  // answered where it belongs, by `getClawKeepSetupComplete`, so it cannot
+  // fight the wizard's own progress. The wizard already skips the pair step on
+  // a paired box.
+  if (status.setupComplete === false) {
     return (
       <AgentLabelContext.Provider value={agent}>
         <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
@@ -883,9 +890,17 @@ function ScheduleCard({
           </p>
         </div>
         <label className="relative inline-flex items-center cursor-pointer">
+          {/* The input IS the hit target, not a 1x1 `sr-only` box behind one.
+              Sized to the track and merely transparent, so a click anywhere on
+              the switch lands on the control itself rather than on whatever
+              element happens to sit over the hidden input's corner — which is
+              what `elementFromPoint` resolves, and therefore what a pointer
+              driven by coordinates (an automated check, an assistive pointer,
+              a stylus) actually hits. `peer` still styles the track below. */}
           <input
             type="checkbox"
-            className="sr-only peer"
+            className="peer absolute inset-0 z-10 m-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed"
+            aria-label={t("clawkeep.schedule.title")}
             checked={draft.enabled}
             disabled={saving}
             onChange={(e) => {

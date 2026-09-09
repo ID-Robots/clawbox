@@ -57,14 +57,27 @@ async function unitState(unit: string): Promise<{ active: string; result: string
  * anything is exactly when that happens. A second install of the voice would
  * open by showing the first one's error.
  */
-async function journalLines(step: string, sinceMs: number, lines: number): Promise<string[]> {
+async function journalLines(
+  step: string,
+  sinceMs: number,
+  lines: number,
+  // Keep the LEADING whitespace. install.sh's two-space indent is the only
+  // thing separating its own sub-phase headlines from the pip/apt output
+  // underneath them, so the progress watcher below has to read them untrimmed.
+  // Everything else wants them trimmed: `failureReason`'s MARKER regex is
+  // `^`-anchored, and an indented line would slip past it.
+  { keepIndent = false }: { keepIndent?: boolean } = {},
+): Promise<string[]> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
       rootStepJournalArgs(step, { sinceMs, lines }),
       { timeout: 10_000 },
     );
-    return stdout.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    return stdout
+      .split(/\r?\n/)
+      .map((l) => (keepIndent ? l.replace(/\s+$/, "") : l.trim()))
+      .filter(Boolean);
   } catch {
     return [];
   }
@@ -73,6 +86,81 @@ async function journalLines(step: string, sinceMs: number, lines: number): Promi
 async function lastJournalLine(step: string, sinceMs: number, lines: number): Promise<string | null> {
   const all = await journalLines(step, sinceMs, lines);
   return all.length > 0 ? all[all.length - 1] : null;
+}
+
+/** How often a watched step's journal is re-read for a new headline. */
+const PROGRESS_POLL_MS = 4000;
+/** How far back each poll looks; enough to span a chatty pip install. */
+const PROGRESS_WINDOW_LINES = 60;
+
+/**
+ * install.sh's own progress lines, told apart from the noise underneath them.
+ *
+ * The installer announces each sub-phase with a two-space indent — "  Installing
+ * Kokoro TTS...", "  Building CTranslate2 with CUDA for sm_87..." — while the
+ * tools it drives write flush left ("Installing collected packages: ...",
+ * "Successfully installed av-17.1.0 ..."). That indent is the only marker there
+ * is, and it is enough: it is applied consistently by every step, and matching
+ * it means a caller shows the box's own account of what it is doing rather than
+ * pip's.
+ *
+ * Deliberately NOT the last journal line, which is what `followRootStep` streams:
+ * during the CUDA compile the last line is whatever cc1plus last said, and for
+ * six minutes there is no line at all. The headline is what stays true.
+ */
+const HEADLINE_RE = /^ {2}(\S.*)$/;
+
+/**
+ * Watch a root step that someone ELSE is running, and report what it is doing.
+ *
+ * Read-only on purpose. `followRootStep` above both STARTS a step and follows
+ * it, which suits a route that owns the install; the updater does not want that
+ * — its root steps carry their own budgets, overrun handling and gateway
+ * quiescing, and swapping how they are started to get progress out would put
+ * all of that at risk for a cosmetic gain. This only reads the journal.
+ *
+ * Returns the stopper. Safe to call after the step has ended.
+ */
+export function watchRootStepProgress(
+  step: string,
+  sinceMs: number,
+  onHeadline: (headline: string) => void,
+): () => void {
+  let stopped = false;
+  let last: string | null = null;
+  let sleepTimer: ReturnType<typeof setTimeout> | null = null;
+
+  void (async () => {
+    while (!stopped) {
+      const lines = await journalLines(step, sinceMs, PROGRESS_WINDOW_LINES, { keepIndent: true });
+      // Checked HERE, once, rather than by every caller: a read already in
+      // flight when the watch was stopped resolves after it, and this is what
+      // makes "no headline after stop()" the watcher's own guarantee instead of
+      // something each listener has to defend against.
+      if (stopped) return;
+
+      let newest: string | null = null;
+      for (const line of lines) {
+        const headline = HEADLINE_RE.exec(line)?.[1];
+        if (headline) newest = headline;
+      }
+      if (newest && newest !== last) {
+        last = newest;
+        // A throwing listener must not end the watch, nor bubble into the step.
+        try { onHeadline(newest); } catch { /* nobody listening */ }
+      }
+
+      await new Promise<void>((resolve) => { sleepTimer = setTimeout(resolve, PROGRESS_POLL_MS); });
+    }
+  })();
+
+  return () => {
+    stopped = true;
+    // Or the step's last sleep keeps a timer alive for four more seconds — 13
+    // root steps' worth per update, and enough to hold the event loop open just
+    // as the rebuild step wants to take the process down.
+    if (sleepTimer) clearTimeout(sleepTimer);
+  };
 }
 
 /** install.sh's --step EXIT trap ends a failed run with these; none of them is the reason. */
