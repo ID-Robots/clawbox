@@ -99,8 +99,14 @@ const SAFE_PROVIDER_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
  * PATHS are that script's; the fallback RULE is not the same one — it falls
  * back on existence alone (`[ ! -f … ]`) and gives up outright on a manifest it
  * cannot parse, while this reads on to the next candidate.
+ *
+ * Exported because the manifest carries more than the lifecycle: its
+ * `modelCatalog.suppressions` are how the core says a model runs on ONE auth
+ * only, which is what `src/tests/unit/codex-surface-follows-core.test.ts` reads
+ * to catch the ChatGPT list drifting behind a core bump. Where the manifest
+ * lives is written down once.
  */
-function manifestPaths(provider: string): string[] {
+export function coreManifestPaths(provider: string): string[] {
   const bin = findOpenclawBin();
   const paths: string[] = [];
   if (path.isAbsolute(bin)) {
@@ -204,7 +210,7 @@ function retiredFor(provider: string): Set<string> {
   // that is the ordinary shape of an OpenClaw 2 box, where the bundled path
   // never exists and the beside-config answer is the right one to cache.
   let degraded = false;
-  for (const file of manifestPaths(provider)) {
+  for (const file of coreManifestPaths(provider)) {
     // Opened ONCE and both stat and read taken from the descriptor. A
     // `statSync` followed by a `readFileSync` of the same path is two lookups
     // of a name that can change between them — and the whole point of the stat

@@ -66,9 +66,9 @@ import {
 } from "@/lib/chatgpt-subscription";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
 import {
-  CODEX_SUPPORTED_MODEL_RE,
   chatgptSupportedModelsSentence,
   isClaudeSubscriptionOnly,
+  isCodexSupportedModelId,
   isKeyModeProfile,
   offSurfaceClaudeModelMessage,
   offSurfaceCodexModelMessage,
@@ -134,7 +134,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
 
-// CODEX_SUPPORTED_MODEL_RE moved to @/lib/subscription-surface: the wizard/
+// The ChatGPT allowlist lives in @/lib/subscription-surface: the wizard/
 // Settings save resolves onto the same ChatGPT credential and has to apply the
 // same allowlist, and a second copy of it there would be a copy that can
 // drift. Which pick is on that credential is no longer readable from the
@@ -308,7 +308,7 @@ function resolveChatgptPick(
     return { refusal: refuseKeylessOpenAiModel(parsed.modelId, credentials.hasApiKey) };
   }
   if (legacy) return { model: canonicalChatgptModelRef(ref) };
-  if (CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) return { model: chatgptModelRef(parsed.modelId) };
+  if (isCodexSupportedModelId(parsed.modelId)) return { model: chatgptModelRef(parsed.modelId) };
   return { refusal: refuseKeylessOpenAiModel(parsed.modelId, credentials.hasApiKey) };
 }
 
@@ -622,11 +622,11 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     // OpenAI key it was the FIRST row — so the OpenAI dropdown row was
     // represented by an image model that fails on every chat turn.
     //
-    // Deliberately NOT the catalog route's `ALLOWED_MODEL_RE_BY_PROVIDER`.
-    // That list curates a noisy UPSTREAM catalog down for a picker; this list
+    // Deliberately NOT the catalog route's `OFFERABLE_MODEL_ID_BY_PROVIDER`.
+    // That rule curates a noisy UPSTREAM catalog down for a picker; this list
     // is what the owner configured, which this route's own sibling
     // (`foreignOpenAiRoute` in ai-models/configure) treats as "the owner's own
-    // work". Running it through the curation regex empties `models[]` for a
+    // work". Running it through the curation rule empties `models[]` for a
     // self-hosted openai-compatible endpoint and falls the row through to a
     // hard-coded default that endpoint does not serve.
     const definedModels = (providerDef?.models ?? []).filter(

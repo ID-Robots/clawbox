@@ -2,12 +2,12 @@ import { promises as fsp } from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
 import {
+  CODEX_MODELS,
   getProviderCatalog,
   subscriptionSurfaceLabel,
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
 import {
-  CHATGPT_UI_PROVIDER,
   isOauthProfile,
   profileProviderId,
 } from "@/lib/chatgpt-subscription";
@@ -119,7 +119,10 @@ export async function readSubscriptionSurfaceIds(
  * The file read only — the two callers below draw OPPOSITE conclusions from an
  * absent cache and each states its own, which is why the policy is not in here.
  * Read-only and spawn-free: the catalog route owns enumerating and refreshing
- * (`openclaw models list` takes ~3 minutes on a Jetson).
+ * (`openclaw models list` takes ~3 minutes on a Jetson) — and, for a provider
+ * that core cannot enumerate, DELETING: `discardUnwritableDiskCache` drops
+ * `codex.json`, so this answers null for it and `readKnownModelIds` falls back
+ * to the curated list alone rather than adding an older build's ids back.
  */
 async function readCachedCatalogueIds(provider: string): Promise<string[] | null> {
   try {
@@ -159,43 +162,74 @@ export async function readKnownModelIds(provider: string): Promise<Set<string> |
 }
 
 /**
- * Models selectable while the device is on ChatGPT/Codex subscription auth.
+ * Is this model id selectable while the device is on ChatGPT/Codex
+ * subscription auth?
  *
- * GPT-5.6 Sol/Terra/Luna are subscription-eligible — OpenClaw's ChatGPT route
- * catalog carries all three, and `openai/gpt-5.6-sol` is the documented
- * default for a fresh Codex OAuth setup. Keeping them out of this allowlist
- * rejected them locally with "not supported with ChatGPT subscription auth"
- * before the request ever reached OpenAI. GPT-5.6 is a limited preview, so
- * per-account access still varies: let the pick through and surface the
- * upstream access error instead of pre-rejecting it here. `-pro` tiers stay
- * out — those remain API-key only.
+ * THE CHATGPT CATALOGUE IS THE ANSWER — `CODEX_MODELS`, and nothing beside it.
+ * This used to be a second spelling of that list as a GENERATION regex
+ * (`/^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/`), and it
+ * failed the way generation allowlists always fail here: the `openai` provider
+ * carried the identical pattern until it hid the whole gpt-5.6 family and was
+ * removed with "a generation allowlist cannot know what the next generation is
+ * called"; the codex copy survived and hid `gpt-5.3-codex-spark`, a model the
+ * installed core routes on THIS surface and on no other. One list cannot
+ * disagree with itself, and a row added to the catalogue now reaches the
+ * picker, both write guards and the refusal sentence together.
+ *
+ * WHAT UPSTREAM SAYS, and why this is still a mirror. The core's own
+ * `extensions/openai/model-route-contract` holds the truth as
+ * `OPENAI_CHATGPT_MODERN_MODEL_IDS` — its dual-route ids plus the
+ * subscription-only ones — and 2026.8.1 exposes it through no CLI and no RPC:
+ * measured on the box, `openclaw models list --provider codex` and
+ * `--provider openai-chatgpt` both answer `Unknown provider filter`, and the
+ * `openai` enumeration carries no plan- or auth-scoped field to filter on
+ * (`available` there answers the PLATFORM route — it reads `false` for
+ * `gpt-5.3-codex-spark`, which runs fine on the ChatGPT one). So ClawBox
+ * mirrors that contract, in ONE place, pinned by
+ * `src/tests/unit/codex-supported-models.test.ts`.
+ *
+ * The mirror is deliberately NARROWER than the core's set in one respect: the
+ * `-pro` tiers are dual-route upstream but answer "model not supported when
+ * using Codex with a ChatGPT account" on the subscription path
+ * (developers.openai.com/codex/models), so they stay out of the catalogue and
+ * therefore out of this rule. Plan gating is the opposite case and is NOT
+ * filtered here — gpt-5.6 access varies per account, so the pick goes through
+ * and the upstream access error is what the customer sees.
  *
  * It lives here, beside the Claude rule, for the same reason that one does:
  * both write paths to `agents.defaults.model.primary` have to apply it, and a
  * second copy in the second route is a copy that can drift.
- * `scripts/gateway-pre-start.sh` keeps a hand-maintained mirror of this list
- * in `_CODEX_SUPPORTED`, pinned by
+ * `scripts/gateway-pre-start.sh` keeps a hand-maintained mirror of the
+ * catalogue in `_CODEX_SUPPORTED`, pinned by
  * `src/tests/unit/gateway-pre-start-codex-models.test.ts`. That mirror is
  * OpenClaw 1 ONLY — its single consumer, `_openai_gpt_to_codex`, rewrites
  * `openai/<id>` into the retired namespace and is skipped on
  * `CLAWBOX_OPENCLAW_V2`. It stays because a box mid-update still runs the v1
  * branch; nothing on the pinned core reads it.
  */
-export const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/;
+export function isCodexSupportedModelId(modelId: string): boolean {
+  // `CODEX_MODELS` directly, not `getProviderCatalog(CHATGPT_UI_PROVIDER)`: that
+  // lookup takes a plain string, answers `null` for a key nobody renamed it for
+  // — `openai-codex` already became `codex` once — and this guard would then
+  // refuse EVERY model with "use a model the ChatGPT subscription supports",
+  // naming none. A guard that fails CLOSED on an unreadable list is the one
+  // shape the rest of this file spends three docblocks forbidding, and the
+  // indirection bought nothing: `PROVIDER_CATALOGS.codex.models` IS this array.
+  // No `trim()` — the anchored regex this replaces did not trim either, and the
+  // caller writes the id it passed in, not the one this judged.
+  return CODEX_MODELS.some((model) => model.id === modelId);
+}
 
 /**
  * The models this box can name when it refuses one, as a sentence fragment.
  *
- * Built from the ChatGPT catalogue filtered by the allowlist above rather than
- * hand-written, because the same list was spelled in three places and had
- * already drifted: the chat route's keyless refusal omitted the GPT-5.6
- * generation the allowlist accepts. A model added to the catalogue and to the
- * regex now reaches every refusal by itself.
+ * Built from the ChatGPT catalogue rather than hand-written, because the same
+ * list was spelled in three places and had already drifted: the chat route's
+ * keyless refusal omitted the GPT-5.6 generation the allowlist accepts. A
+ * model added to the catalogue now reaches every refusal by itself.
  */
 export function chatgptSupportedModelsSentence(): string {
-  const labels = (getProviderCatalog(CHATGPT_UI_PROVIDER)?.models ?? [])
-    .filter((model) => CODEX_SUPPORTED_MODEL_RE.test(model.id))
-    .map((model) => model.label);
+  const labels = CODEX_MODELS.map((model) => model.label);
   // Never an empty fragment: the callers embed this mid-sentence, and "Use ,
   // or switch OpenAI to API-key mode" is worse than naming the surface
   // generically. Unreachable while the catalogue is the static CODEX_MODELS,
@@ -229,7 +263,7 @@ export function offSurfaceCodexModelMessage(
   chatgptSubscription: boolean,
 ): string | null {
   if (!chatgptSubscription) return null;
-  if (CODEX_SUPPORTED_MODEL_RE.test(modelId)) return null;
+  if (isCodexSupportedModelId(modelId)) return null;
   return `${modelId} is not supported with ChatGPT subscription auth. `
     + `Use ${chatgptSupportedModelsSentence()}, `
     + "or switch OpenAI to API-key mode for Pro/API-only models.";

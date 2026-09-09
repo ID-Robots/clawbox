@@ -1505,14 +1505,15 @@ elif _wants_llamacpp and _llamacpp_gaps:
 # surfaces as a FailoverError days into use. The chat-model pick route already
 # rewrites `openai/<gpt>` -> `codex/<gpt>`, but only when the user re-picks the
 # model; existing configs never re-pick, so migrate primary + fallbacks here on
-# gateway start. Mirrors CODEX_SUPPORTED_MODEL_RE in
-# src/lib/subscription-surface.ts, and hasOpenAiApiKeyProfile /
+# gateway start. Mirrors CODEX_MODELS in src/lib/provider-models.ts,
+# the one list src/lib/subscription-surface.ts also reads, and hasOpenAiApiKeyProfile /
 # hasCodexOauthProfile in src/app/setup-api/chat/model/route.ts. Guarded on
 # "codex OAuth present AND no OpenAI API key" so dual-auth / API-key boxes,
 # where openai/* is a valid keyed route, are left untouched.
 _CODEX_SUPPORTED = (
     "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+    "gpt-5.3-codex-spark",
 )
 
 def _auth_profiles():

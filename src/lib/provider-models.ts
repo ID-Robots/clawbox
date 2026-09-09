@@ -222,15 +222,35 @@ export const OPENAI_DEFAULT_MODEL_ID = "gpt-5.4";
 // subscription; the models themselves are written as `openai/<id>` — OpenClaw
 // 2 retired the `codex` provider id (`openai-codex` before 2026.6), see
 // src/lib/chatgpt-subscription.ts. Available when the user authenticates via
-// ChatGPT OAuth instead of pasting an API key. NO -pro variants — those are
-// API-key only (they 400 with "model
-// not supported when using Codex with a ChatGPT account" on the OAuth
-// path). Per developers.openai.com/codex/models the supported set via
-// ChatGPT-account auth is gpt-5.6-{sol,terra,luna}, gpt-5.5, gpt-5.4,
-// gpt-5.4-mini. The gpt-5.6 models are plan-gated upstream (Plus/Pro/Max)
-// — the live catalog only returns them for entitled accounts, so listing
-// them here just gives them stable labels; accounts without the plan
-// never see them. Filter lives in ALLOWED_MODEL_RE_BY_PROVIDER (catalog).
+// ChatGPT OAuth instead of pasting an API key.
+//
+// THIS ARRAY IS THE WHOLE ChatGPT SURFACE. The picker offers it, both write
+// paths to `agents.defaults.model.primary` accept exactly it
+// (`isCodexSupportedModelId`), and the refusal sentence is built from it —
+// there is no second spelling to keep in step. There was: a generation regex
+// in subscription-surface.ts, which could not spell `gpt-5.3-codex-spark` and
+// so hid it (TASK-786).
+//
+// It mirrors the core's own `OPENAI_CHATGPT_MODERN_MODEL_IDS`
+// (`extensions/openai/model-route-contract` in the installed dist), because
+// 2026.8.1 publishes that set through no CLI and no RPC — `openclaw models
+// list --provider codex` answers `Unknown provider filter`, and the `openai`
+// enumeration has no auth-scoped field. Measured on the box, 2026-09-09:
+//   * gpt-5.6-sol      -> chatgpt.com/backend-api/codex/responses  200
+//   * gpt-5.3-codex-spark -> chatgpt.com/backend-api/codex/responses  200
+//   * gpt-6-astra      -> NOT on that route; the core sends it to
+//     api.openai.com/v1/responses on the API key instead, so it belongs to the
+//     `openai` surface and must not appear here.
+//
+// NO -pro variants — those are API-key only (they 400 with "model not
+// supported when using Codex with a ChatGPT account" on the OAuth path), even
+// though the core files them as dual-route. Plan gating is the opposite case
+// and is deliberately NOT applied: the gpt-5.6 models are gated upstream
+// (Plus/Pro/Max), there is no plan-scoped list on this core to filter by — the
+// catalog route's `WHY codex IS NOT ENUMERATED FROM openai` note is the whole
+// argument — so an unentitled account sees all three, the turn 400s upstream
+// and the sign-in probe (src/lib/codex-model-probe.ts) is what keeps a box off
+// a row its plan cannot run. Listing them here gives them stable labels.
 export const CODEX_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", hint: "Newest flagship. Plus/Pro." },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", hint: "GPT-5.6. Plus/Pro." },
@@ -238,6 +258,17 @@ export const CODEX_MODELS: readonly ProviderModelOption[] = [
   { id: "gpt-5.5", label: "GPT-5.5", hint: "Default. Every tier." },
   { id: "gpt-5.4", label: "GPT-5.4", hint: "Previous gen. 1M context." },
   { id: "gpt-5.4-mini", label: "GPT-5.4 Mini", hint: "Fast, cheap." },
+  // Subscription-ONLY upstream: the core's route contract lists it under
+  // OPENAI_SUBSCRIPTION_ONLY_ROUTE_MODEL_IDS, and the box's own `models list
+  // --provider openai` reports it `available: false` because the platform
+  // route excludes it. This is the only surface that can offer it.
+  // Label deliberately short of the core's "GPT-5.3 Codex Spark": the chat
+  // header's model pill has ~142px for its text (chat-header-pills.ts) and
+  // drops only a LEADING or TRAILING token that repeats the provider pill —
+  // "Codex" sits in the middle here, so the full name would be the longest
+  // label in any catalogue we ship and the only one that truncates. The
+  // popover still shows the whole id.
+  { id: "gpt-5.3-codex-spark", label: "GPT-5.3 Spark", hint: "Codex, fast. ChatGPT sign-in only." },
 ] as const;
 
 // Unlike the other picker lists, GOOGLE_MODELS is ALSO the seed for
