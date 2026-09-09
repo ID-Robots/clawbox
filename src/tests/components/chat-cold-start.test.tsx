@@ -8,6 +8,7 @@ import { resetHarnessCache } from "@/lib/client-harness";
 let ready = false;
 let attempts = 0;
 let connected = 0;
+let stallHandshake = false;
 class ColdGateway {
   static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
   readyState = ColdGateway.CONNECTING;
@@ -20,6 +21,7 @@ class ColdGateway {
     setTimeout(() => {
       if (this.readyState === ColdGateway.CLOSED) return;
       if (!ready) { this.readyState = ColdGateway.CLOSED; this.onclose?.({ code: 1006, reason: "" } as CloseEvent); return; }
+      if (stallHandshake) return;
       this.readyState = ColdGateway.OPEN;
       this.emit({ type: "event", event: "connect.challenge", payload: { nonce: "n" } });
     }, 1);
@@ -45,7 +47,7 @@ async function advance(ms: number) {
 
 describe("cold gateway desktop recovery", () => {
   beforeEach(() => {
-    vi.useFakeTimers(); ready = false; attempts = 0; connected = 0;
+    vi.useFakeTimers(); ready = false; attempts = 0; connected = 0; stallHandshake = false;
     resetHarnessCache(); window.localStorage.clear(); Element.prototype.scrollIntoView = vi.fn();
     vi.stubGlobal("WebSocket", ColdGateway as unknown as typeof WebSocket);
     vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
@@ -74,9 +76,57 @@ describe("cold gateway desktop recovery", () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await advance(330_000);
     expect(screen.getByText("Could not connect to gateway")).toBeTruthy();
+    expect(attempts).toBeLessThanOrEqual(100);
     const exhausted = attempts;
     await advance(60_000);
     expect(attempts).toBe(exhausted);
+  });
+
+  it("ends a pending WebSocket handshake at the shared five-minute deadline", async () => {
+    ready = true; stallHandshake = true;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await advance(300_000);
+    expect(screen.getByText("Could not connect to gateway")).toBeTruthy();
+    expect(attempts).toBe(1);
+    expect(connected).toBe(0);
+  });
+
+  it("aborts a pending config fetch at the shared five-minute deadline", async () => {
+    const original = globalThis.fetch;
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/gateway/ws-config")) {
+        signal = init?.signal ?? undefined;
+        return new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+      }
+      return original(input, init);
+    }));
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await advance(300_000);
+    expect(signal?.aborted).toBe(true);
+    expect(attempts).toBe(0);
+    expect(screen.getByText("Could not connect to gateway")).toBeTruthy();
+  });
+
+  it("ignores a late config response after unmount even when fetch ignores abort", async () => {
+    const original = globalThis.fetch;
+    let resolveConfig: ((r: Response) => void) | undefined;
+    let signal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/gateway/ws-config")) {
+        signal = init?.signal ?? undefined;
+        return new Promise<Response>(resolve => { resolveConfig = resolve; });
+      }
+      return original(input, init);
+    }));
+    const view = render(<ChatPopup isOpen onClose={() => {}} />);
+    await advance(100);
+    expect(resolveConfig).toBeDefined();
+    view.unmount();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => { resolveConfig?.({ json: async () => ({ token: "t", wsUrl: "ws://localhost/gw" }) } as Response); });
+    await advance(330_000);
+    expect(attempts).toBe(0);
   });
 
   it("cancels startup retries when the chat unmounts", async () => {

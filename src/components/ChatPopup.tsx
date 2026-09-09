@@ -96,7 +96,8 @@ const MAX_RETRIES = 8
 // A measured Jetson cold boot takes ~175 s before its gateway listens.
 // Keep the initial connection alive for five minutes, but still end a dead
 // gateway's ladder and preserve the existing shorter reconnect/auth policies.
-const INITIAL_CONNECT_MAX_RETRIES = 100
+const INITIAL_CONNECT_MAX_RETRIES = 99 // initial attempt + 99 retries = 100
+const INITIAL_CONNECT_TIMEOUT_MS = 5 * 60_000
 const MAX_QUEUED_SENDS = 20
 
 /** How many spoken replies' audio the chat keeps alive at once; older ones lose their player. */
@@ -1973,6 +1974,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [headerProvider, headerModel, applyThinkingLevel])
 
   // Connect to gateway
+  const connectionGenerationRef = useRef(0)
+  const connectionAbortRef = useRef<AbortController | null>(null)
+  const connectionDeadlineRef = useRef<number | null>(null)
+  const connectionDeadlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -2001,6 +2006,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       retryTimerRef.current = null
     }
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
+    const generation = ++connectionGenerationRef.current
+    const isCurrent = () => generation === connectionGenerationRef.current
+    connectionAbortRef.current?.abort()
+    const controller = new AbortController()
+    connectionAbortRef.current = controller
+    const clearDeadlineTimer = () => {
+      if (connectionDeadlineTimerRef.current) clearTimeout(connectionDeadlineTimerRef.current)
+      connectionDeadlineTimerRef.current = null
+    }
+    clearDeadlineTimer()
+    if (!hasEverConnectedRef.current) {
+      if (retryCountRef.current === 0 || connectionDeadlineRef.current === null) {
+        connectionDeadlineRef.current = Date.now() + INITIAL_CONNECT_TIMEOUT_MS
+      }
+      const expire = () => {
+        if (!isCurrent()) return
+        ++connectionGenerationRef.current
+        controller.abort()
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = null
+        const socket = wsRef.current
+        wsRef.current = null
+        socket?.close()
+        failPending('Gateway connection timed out')
+        tearDownReloadOverlay()
+        setStatus('error')
+        setErrorMsg('Could not connect to gateway')
+      }
+      const remaining = connectionDeadlineRef.current - Date.now()
+      if (remaining <= 0) { expire(); return }
+      connectionDeadlineTimerRef.current = setTimeout(expire, remaining)
+    }
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
@@ -2018,11 +2055,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // settings change, post-update). A cached ws-config response would replay
       // a stale token on every reconnect and the gateway would reject it with
       // "token mismatch" forever. Always fetch the current token.
-      const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store' })
+      const res = await fetch('/setup-api/gateway/ws-config', { cache: 'no-store', signal: controller.signal })
       const config = await res.json()
+      if (!isCurrent()) return
       token = config.token
       wsUrl = config.wsUrl
     } catch {
+      if (!isCurrent()) return
+      clearDeadlineTimer()
       // Auto-retry if gateway config not ready yet. Extend the budget
       // during skill-install windows so the chat silently recovers once
       // the restarted gateway finishes reloading skills.
@@ -2030,10 +2070,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const maxRetries = !hasEverConnectedRef.current
         ? INITIAL_CONNECT_MAX_RETRIES
         : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
-      if (retryCountRef.current < maxRetries) {
+      if (retryCountRef.current < maxRetries && (hasEverConnectedRef.current || Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? 0))) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
-        retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
+        retryTimerRef.current = setTimeout(() => { if (isCurrent()) void connect() }, RETRY_DELAY)
         return
       }
       // Same terminal-failure teardown as the onClose exhaustion path: a reboot
@@ -2050,12 +2090,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     let ws: WebSocket
 
     const sendConnect = (challenge?: Record<string, unknown>) => {
-      if (connectSent || !ws || ws.readyState !== WebSocket.OPEN) return
+      if (!isCurrent() || connectSent || !ws || ws.readyState !== WebSocket.OPEN) return
       connectSent = true
 
       const id = uuid()
       pendingRef.current.set(id, {
         resolve: (hello: unknown) => {
+          if (!isCurrent()) return
+          clearDeadlineTimer()
           setStatus('connected')
           connectedOnceRef.current = true
           hasEverConnectedRef.current = true
@@ -2176,6 +2218,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           }
         },
         reject: (err: Error) => {
+          if (!isCurrent()) return
+          clearDeadlineTimer()
           // The fifth terminal-failure path, and it used to be the one that
           // forgot both halves. A gateway that REFUSES the connect frame
           // (protocol skew, a rejected device identity, a denied scope) keeps
@@ -2232,6 +2276,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
 
     const onMessage = (event: MessageEvent) => {
+      if (!isCurrent()) return
       let data: Record<string, unknown>
       try { data = JSON.parse(String(event.data)) } catch { return }
 
@@ -2578,7 +2623,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // and describes a connection nobody is using — acting on it would null
       // the live socket's reference, reject the requests waiting on IT, and
       // schedule a reconnect on top of a healthy connection.
-      if (wsRef.current !== ws) return
+      if (!isCurrent() || wsRef.current !== ws) return
+      clearDeadlineTimer()
       wsRef.current = null
       // The socket is gone; nothing that was waiting on it can still arrive.
       failPending('Not connected')
@@ -2595,7 +2641,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
         setStatus('error')
         setErrorMsg(closeReason || 'Unauthorized — retrying shortly')
-        retryTimerRef.current = setTimeout(() => { retryCountRef.current = 0; connect() }, AUTH_BACKOFF_DELAY)
+        retryTimerRef.current = setTimeout(() => { if (!isCurrent()) return; retryCountRef.current = 0; connect() }, AUTH_BACKOFF_DELAY)
         return
       }
 
@@ -2627,10 +2673,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const maxRetries = !hasEverConnectedRef.current
         ? INITIAL_CONNECT_MAX_RETRIES
         : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
-      if (retryCountRef.current < maxRetries) {
+      if (retryCountRef.current < maxRetries && (hasEverConnectedRef.current || Date.now() + RETRY_DELAY < (connectionDeadlineRef.current ?? 0))) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
-        retryTimerRef.current = setTimeout(() => connect(), RETRY_DELAY)
+        retryTimerRef.current = setTimeout(() => { if (isCurrent()) void connect() }, RETRY_DELAY)
         return
       }
       // Retries exhausted — the gateway isn't coming back on its own. Tear the
@@ -2646,6 +2692,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     try {
       ws = new WebSocket(wsUrl)
     } catch (err) {
+      clearDeadlineTimer()
       // The same terminal-failure teardown the other three error paths do, and
       // for the same reason. A wsUrl the browser's parser rejects throws here
       // on EVERY attempt, so leaving the overlay up left the safety-net retry
@@ -5050,6 +5097,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      ++connectionGenerationRef.current
+      connectionAbortRef.current?.abort()
+      if (connectionDeadlineTimerRef.current) clearTimeout(connectionDeadlineTimerRef.current)
+      connectionDeadlineTimerRef.current = null
       wsRef.current?.close()
       wsRef.current = null
       failPending('Chat closed')
