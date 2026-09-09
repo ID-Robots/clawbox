@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import LocalAiPanel from "@/components/LocalAiPanel";
-import { OPEN_APP_EVENT } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
 
 function model(over: Record<string, unknown>) {
   return {
@@ -71,6 +71,59 @@ afterEach(() => {
 });
 
 describe("LocalAiPanel", () => {
+
+  it("refreshes other provider surfaces only after a successful streamed model activation", async () => {
+    let finish!: () => void;
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      stubFetch({ post: (url) => url === "/setup-api/llamacpp/install"
+        ? new Response(new ReadableStream<Uint8Array>({ start(controller) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(JSON.stringify({ status: "Starting Gemma" }) + "\n"));
+            finish = () => { controller.enqueue(encoder.encode(JSON.stringify({ success: true }) + "\n")); controller.close(); };
+          } }), { headers: { "content-type": "application/x-ndjson" } })
+        : undefined });
+      renderPanel();
+      await screen.findByTestId("local-model-role-llamacpp");
+      fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+      fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-primary"));
+      await screen.findByTestId("local-model-progress-llamacpp");
+      expect(changed).not.toHaveBeenCalled();
+      finish();
+      await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    } finally { window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed); }
+  });
+
+  it("does not announce a provider change when a model activation stream fails", async () => {
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      stubFetch({ post: (url) => url === "/setup-api/llamacpp/install"
+        ? new Response(JSON.stringify({ error: "Activation failed" }) + "\n", { headers: { "content-type": "application/x-ndjson" } }) : undefined });
+      renderPanel();
+      await screen.findByTestId("local-model-role-llamacpp");
+      fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+      fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-primary"));
+      expect(await screen.findByRole("alert")).toHaveTextContent("Activation failed");
+      expect(changed).not.toHaveBeenCalled();
+    } finally { window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed); }
+  });
+
+  it("refreshes provider surfaces after a saved fallback change even while the gateway restarts", async () => {
+    const changed = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, changed);
+    try {
+      stubFetch({ llmDefault: true, post: (url) => url === "/setup-api/providers/default"
+        ? new Response(JSON.stringify({ ok: true, warning: "Saved, gateway restarting" }), { headers: { "content-type": "application/json" } }) : undefined });
+      renderPanel();
+      await screen.findByTestId("local-model-role-llamacpp");
+      fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+      fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-fallback"));
+      await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    } finally { window.removeEventListener(PROVIDERS_CHANGED_EVENT, changed); }
+  });
+
   it("groups the box's engines by what they are for", async () => {
     stubFetch();
     renderPanel();

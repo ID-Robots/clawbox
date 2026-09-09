@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
-import { dispatchOpenApp, onStandaloneAppPage } from "@/lib/ui-events";
+import { dispatchOpenApp, onStandaloneAppPage, notifyProvidersChanged } from "@/lib/ui-events";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
 
 /**
@@ -361,9 +361,14 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       if (action.streams) {
         const outcome = await readInstallStream(res, (line) => setProgress((p) => ({ ...p, [entry.id]: line })));
         if (!outcome.ok) setError(outcome.error ?? t("localModels.error.changeFailed"));
+        // A successful install/activation changes the device pairing. Tell
+        // already-mounted chat and provider pickers only after the terminal
+        // success line, not the initial HTTP 200 of a still-running stream.
+        else if (entry.kind === "llm") notifyProvidersChanged();
         return;
       }
       const data = await res.json().catch(() => ({}));
+      if (entry.kind === "llm") notifyProvidersChanged();
       if (typeof data?.warning === "string" && data.warning) setNotice(data.warning);
       if (isSnapshot(data)) applySnapshot(data);
       if (data && typeof data === "object" && "fallback" in data && data.fallback) {
