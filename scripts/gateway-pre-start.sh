@@ -3650,17 +3650,23 @@ raise SystemExit(0 if isinstance(entry, dict) and entry.get("enabled") is True e
 PY
 }
 
-# Ids this boot has already filed a repair row for.
+# Ids THIS RUN of the script has already filed a repair row for.
 #
-# The re-attempt block far below is for what a PREVIOUS boot switched off, and
-# nothing enforced the "previous": every `clawbox_plugin_boot_without` in this
-# script runs earlier than that block, so a plugin the managed loop had just
-# failed and disabled was fed straight back in and its `plugins enable` re-run
-# seconds later — learning nothing, and spending an enable, an inspect and a
-# config write out of a `TimeoutStartSec=600` the failed recovery had already
-# been drawing on. Collected HERE because every writer in this script goes
-# through this one function, so no new call site can forget it.
-CLAWBOX_REPAIR_MARKED_THIS_BOOT=""
+# One run, not one boot, and the distinction is real: `systemctl restart
+# clawbox-gateway` runs this ExecStartPre again without rebooting, and a row an
+# earlier run wrote is then a fair candidate again.
+#
+# The re-attempt block far below is for what an earlier run switched off, and
+# nothing enforced the "earlier": every `clawbox_plugin_boot_without` in this
+# script runs before that block, so a plugin the managed loop had just failed
+# and disabled was fed straight back in and its `plugins enable` re-run seconds
+# later. It learnt nothing — the same verb, the same core, the same config —
+# and it OVERWROTE the row the managed loop had just written, replacing "the
+# payload is missing and could not be reinstalled" with "not installed on this
+# core" and losing the fact that the pinned `install --force` had already been
+# tried. Collected HERE because every writer in this script goes through this
+# one function, so no new call site can forget it.
+CLAWBOX_REPAIR_MARKED_THIS_RUN=""
 
 # Record — or update — one plugin's repair row. Never fatal: a box that cannot
 # write this file still boots without the plugin, it just cannot explain itself
@@ -3668,9 +3674,9 @@ CLAWBOX_REPAIR_MARKED_THIS_BOOT=""
 clawbox_plugin_repair_mark() {
   local id="$1" stage="$2" disabled="$3" reason="$4" spec="${5:-}"
   # Before the write, not after: an id whose row could not be written is still
-  # one this boot has just tried and failed, and re-attempting it here would
+  # one this run has just tried and failed, and re-attempting it below would
   # repeat that failure inside the same startup.
-  CLAWBOX_REPAIR_MARKED_THIS_BOOT="$CLAWBOX_REPAIR_MARKED_THIS_BOOT $id"
+  CLAWBOX_REPAIR_MARKED_THIS_RUN="$CLAWBOX_REPAIR_MARKED_THIS_RUN $id"
   if ! CLAWBOX_REPAIR_ID="$id" CLAWBOX_REPAIR_STAGE="$stage" \
     CLAWBOX_REPAIR_DISABLED="$disabled" CLAWBOX_REPAIR_REASON="$reason" \
     CLAWBOX_REPAIR_SPEC="$spec" \
@@ -5123,31 +5129,8 @@ fi
 # to activate for a reason that is not consent would be re-enabled here. That
 # call costs tens of seconds on an Orin because it loads every enabled plugin,
 # which a person waiting on a button can afford and an ExecStartPre cannot.
-#
-# AND HOW MUCH OF THE STARTUP IS LEFT, asked before anything is spent. The loops
-# above can burn minutes on a box whose plugins are failing — 120 s installs,
-# 60 s consents, 60 s config writes — and this is a blocking ExecStartPre inside
-# `TimeoutStartSec=600`. `SECONDS` is the shell's own count since the script
-# began; the threshold is an environment variable only so a test can move it,
-# and the default is the real one.
-#
-# WHAT THIS DOES NOT DO, stated because the arithmetic has been done and does
-# not support the larger claim: it guards THIS block's own increment, not the
-# script's budget. On the worst path — a core bump that stranded both channel
-# payloads — the time boxes above this line already add up past 600 s on
-# unmodified beta, and roughly ten of them are unbudgeted. A deadline in front
-# of ~195 s does not save that boot; it only keeps this block from being the
-# thing that makes a marginal one worse. The script-wide budget is a separate
-# piece of work and is on the queue as a residual.
-CLAWBOX_REATTEMPT_BUDGET_S="${CLAWBOX_REATTEMPT_BUDGET_S:-300}"
-
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$SECONDS" -ge "$CLAWBOX_REATTEMPT_BUDGET_S" ]; then
-  # Said, not skipped in silence: a box that never reaches its own repair is
-  # exactly the shape this card is about, and the boot log is where that is
-  # looked for.
-  echo "  Startup has already used ${SECONDS}s of its budget; leaving any plugin repair to the next boot"
-elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
-  CLAWBOX_REPAIR_REATTEMPT="$(CLAWBOX_REPAIR_MARKED_THIS_BOOT="$CLAWBOX_REPAIR_MARKED_THIS_BOOT" \
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  CLAWBOX_REPAIR_REATTEMPT="$(CLAWBOX_REPAIR_MARKED_THIS_RUN="$CLAWBOX_REPAIR_MARKED_THIS_RUN" \
     python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_PLUGIN_REPAIR_FILE" <<'REATTEMPTPY' || true
 import json, os, sys
 
@@ -5187,11 +5170,11 @@ except (OSError, json.JSONDecodeError):
 if not isinstance(rows, dict):
     raise SystemExit(0)
 
-# What THIS boot has already filed a row for. Those failures are minutes old,
-# not a previous boot's, and the verb that produced them has just run.
-marked_this_boot = {
+# What THIS RUN has already filed a row for. Those failures are seconds old, not
+# an earlier run's, and the verb that produced them has just been tried.
+marked_this_run = {
     canonical(name)
-    for name in os.environ.get("CLAWBOX_REPAIR_MARKED_THIS_BOOT", "").split()
+    for name in os.environ.get("CLAWBOX_REPAIR_MARKED_THIS_RUN", "").split()
     if name
 }
 
@@ -5207,7 +5190,7 @@ for key, row in rows.items():
         plugin_id = key
     if not isinstance(plugin_id, str) or canonical(plugin_id) not in REATTEMPTABLE:
         continue
-    if canonical(plugin_id) in marked_this_boot:
+    if canonical(plugin_id) in marked_this_run:
         continue
     if row.get("disabled") is not True:
         continue

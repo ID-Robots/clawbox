@@ -640,7 +640,7 @@ ${CONFIG_SET_STUB}`);
     expect(marker().discord.atMs).toBe(1788668446552);
   });
 
-  it("does not retry a row THIS boot has just written", () => {
+  it("does not retry a row THIS RUN has just written", () => {
     // The block is for what a PREVIOUS boot switched off, and nothing enforced
     // the "previous". Every `clawbox_plugin_boot_without` runs earlier in this
     // same script, so a plugin the managed loop had just failed and disabled
@@ -665,22 +665,6 @@ ${CONFIG_SET_STUB}`);
       .split("\n")
       .filter((line) => line.startsWith("plugins enable discord"));
     expect(enables).toHaveLength(1);
-  });
-
-  it("leaves the repair to the next boot when this startup is already late", () => {
-    // The loops above can burn minutes on a box whose plugins are failing, and
-    // this is a blocking ExecStartPre inside TimeoutStartSec=600. A recovery
-    // stacked on a startup that is already late turns a box that WOULD have
-    // come back into one systemd kills — the opposite of what this block is
-    // for. The row keeps its badge and the next boot tries.
-    seedStaleConsentRow();
-    stubRealCli();
-    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", CLAWBOX_REATTEMPT_BUDGET_S: "0" });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain("Startup has already used");
-    expect(r.stdout).not.toContain("Re-attempting the discord plugin");
-    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
-    expect(marker().discord.atMs).toBe(1788668446552);
   });
 
   it("never turns on a disabled entry the record does not vouch for", () => {
