@@ -93,6 +93,10 @@ import {
 } from '@/lib/chat-reasoning'
 
 const MAX_RETRIES = 8
+// A measured Jetson cold boot takes ~175 s before its gateway listens.
+// Keep the initial connection alive for five minutes, but still end a dead
+// gateway's ladder and preserve the existing shorter reconnect/auth policies.
+const INITIAL_CONNECT_MAX_RETRIES = 100
 const MAX_QUEUED_SENDS = 20
 
 /** How many spoken replies' audio the chat keeps alive at once; older ones lose their player. */
@@ -1753,6 +1757,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
+  const hasEverConnectedRef = useRef(false)
   const pendingModelSwitchResetRef = useRef<{ model: string; label: string } | null>(null)
   // Sends queued while the WS handshake hasn't completed yet. Drained by
   // a useEffect when status flips to 'connected' so the user can type and
@@ -2022,7 +2027,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // during skill-install windows so the chat silently recovers once
       // the restarted gateway finishes reloading skills.
 
-      const maxRetries = skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
+      const maxRetries = !hasEverConnectedRef.current
+        ? INITIAL_CONNECT_MAX_RETRIES
+        : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
       if (retryCountRef.current < maxRetries) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
@@ -2051,6 +2058,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         resolve: (hello: unknown) => {
           setStatus('connected')
           connectedOnceRef.current = true
+          hasEverConnectedRef.current = true
 
           retryCountRef.current = 0
           const h = hello as Record<string, unknown>
@@ -2616,7 +2624,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // comes back, instead of bailing out with 'Could not connect to
       // gateway' and making the user click Try again manually. The normal
       // cap still applies outside of restart windows.
-      const maxRetries = skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
+      const maxRetries = !hasEverConnectedRef.current
+        ? INITIAL_CONNECT_MAX_RETRIES
+        : skillInstalledRef.current ? SKILL_INSTALL_MAX_RETRIES : MAX_RETRIES
       if (retryCountRef.current < maxRetries) {
         retryCountRef.current++
         if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
