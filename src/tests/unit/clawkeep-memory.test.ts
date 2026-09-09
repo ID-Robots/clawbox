@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
+import { settledMemoryRun } from "@/tests/helpers/memory-run-state";
 import path from "node:path";
 
 /**
@@ -663,14 +664,7 @@ describe("how a run ends", () => {
     delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
   });
 
-  async function settledRun(): Promise<{ status: string; error: string; errorCode: string; childPid: number }> {
-    for (let i = 0; i < 300; i++) {
-      const now = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8").catch(() => "{}"));
-      if (now.status && now.status !== "running") return now;
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    throw new Error("the run never settled");
-  }
+  const settledRun = () => settledMemoryRun(tmpDir);
 
   it("reports a busy model migration as such, within milliseconds — never as interrupted", async () => {
     // `flock -n` exits in a couple of milliseconds when ensure-local-embeddings

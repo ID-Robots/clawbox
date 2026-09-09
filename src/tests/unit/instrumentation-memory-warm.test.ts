@@ -94,11 +94,13 @@ describe("boot arms the memory-status warm behind the update gate", () => {
     expect(inside).toMatch(/require\(['"]\.\/lib\/updater['"]\)/);
   });
 
-  it("keeps it off the Hermes edition", () => {
-    // There is no openclaw to probe there; the guard has to come first.
-    const guard = source.indexOf("if (!openclawIsAbsent())");
-    const call = source.search(BOOT_CALL);
-    expect(guard).toBeGreaterThan(-1);
-    expect(call).toBeGreaterThan(guard);
+  it("arms it on EVERY edition, because every edition has an index to warm", () => {
+    // It used to be wrapped in `if (!openclawIsAbsent())`: there was no
+    // openclaw to probe on the Hermes SKU and no index either. There is one
+    // there now (src/lib/memory-index-local.ts), and warming it is cheap —
+    // sqlite rather than a process boot — and worth the same as warming the
+    // other. The update gate below is the guard that still applies.
+    expect(source).not.toContain("if (!openclawIsAbsent())");
+    expect(source.search(BOOT_CALL)).toBeGreaterThan(-1);
   });
 });

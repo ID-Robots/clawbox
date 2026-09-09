@@ -1,7 +1,6 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { followRootStep } from "@/lib/root-step-follow";
@@ -41,9 +40,13 @@ function emit(controller: ReadableStreamDefaultController<Uint8Array>, payload: 
 let inFlight = false;
 
 export async function POST(req: Request) {
-  if (openclawIsAbsent()) {
-    return NextResponse.json({ error: "Memory search is not part of this edition.", code: "edition" }, { status: 409 });
-  }
+  // No edition gate. This route used to refuse the Hermes SKU outright —
+  // "Memory search is not part of this edition" — because the index it fed was
+  // OpenClaw's. ClawBox owns an index on that edition now, over this very
+  // model, so the wizard's provisioning step has to be able to fetch it there.
+  // The main install still does NOT (see install.sh's call site): 639 MB is
+  // spent on the owner's click, not on every flash.
+  //
   // OWNER ONLY. Fetching software as root is the person's decision; the agent
   // holds the MCP bearer the middleware also admits here.
   if (!(await hasOwnerSession(req))) {

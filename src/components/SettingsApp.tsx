@@ -190,13 +190,15 @@ interface NetworkIface { name: string; ip: string; rx: number; tx: number }
 interface ProcessEntry { pid: string; user: string; cpu: number; mem: number; command: string }
 interface SystemStats {
   overview: { hostname: string; os: string; kernel: string; uptime: string; arch: string; platform: string };
-  cpu: { usage: number; model: string; cores: number; loadAvg: string[]; speed: number };
+  cpu: { usage: number; model: string; cores: number; loadAvg: string[]; speed: number; perCore?: number[] };
   memory: { total: number; used: number; free: number; usedPercent: number; swap: SwapStats };
   temperature?: { value: number | null };
   gpu?: { usage: number };
   storage: DiskMount[];
   network: NetworkIface[];
   processes: ProcessEntry[];
+  /** The same processes ordered by memory. Absent on a server that predates it. */
+  processesByMemory?: ProcessEntry[];
   timestamp: number;
 }
 
@@ -715,9 +717,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * (arch/platform) render instead of "...".
    */
   const [stats, setStats] = useState<SystemStats | null>(null);
+  /**
+   * Which ordering the busiest-processes table is showing.
+   *
+   * Not persisted: it is a way of LOOKING at a live table, and an owner who
+   * opened the page to see what is eating the memory does not want that choice
+   * following them around a week later.
+   */
+  const [processOrder, setProcessOrder] = useState<"cpu" | "mem">("cpu");
   // Which commit this box is really running, and whether that agrees with the
   // code on its disk. Fetched only where it is shown (About + System).
   const buildIdentity = useBuildIdentity(section === "system" || section === "about");
+  // `processes` has always been the by-CPU list, so a server that predates the
+  // second ordering simply has no memory view to switch to.
+  const processRows = (processOrder === "mem" ? stats?.processesByMemory : stats?.processes) ?? stats?.processes ?? [];
   useEffect(() => {
     if (section !== "system" && section !== "about") return;
     const poll = () => fetch("/setup-api/system/stats", { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
@@ -5773,6 +5786,124 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 screen. */}
             <HarnessPicker />
             <BackgroundJobsPanel />
+
+            {/* Desktop environment, Performance mode and the box's password,
+                moved here from System at the owner's request (2026-09-09).
+                All three are set once and then left alone, which is the same
+                reason the harness picker and the background jobs are here;
+                System is the page you open to LOOK at the box, and it now
+                carries the figures alone. Nothing about them changed on the
+                way — the state, the handlers and the confirmation dialog are
+                where they were, so the mobile and desktop layouts still share
+                one dialog and one form. */}
+            <SystemProfilePanel />
+
+            {/* Password card — used for both web sign-in and SSH/sudo (PAM-backed) */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.security.passwordLabel")}</label>
+              </div>
+              {/* Split around the font-mono span: markup can't live in a catalogue
+                  value, and `sudo` is a command name that must not be translated. */}
+              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">
+                {t("settings.security.passwordHintPrefix")} <span className="font-mono">sudo</span>{t("settings.security.passwordHintSuffix")}
+              </p>
+              <div className="space-y-2">
+                <div className="flex items-stretch gap-2">
+                  <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
+                    <label htmlFor="sys-current-password" className="sr-only">{t("settings.security.currentPassword")}</label>
+                    <input
+                      id="sys-current-password"
+                      type={sysPasswordShow ? "text" : "password"}
+                      value={sysCurrentPassword}
+                      onChange={e => { setSysCurrentPassword(e.target.value); if (sysCurrentVerified) setSysCurrentVerified(false); setSysPasswordStatus(null); }}
+                      onKeyDown={e => { if (e.key === "Enter" && !sysCurrentVerified) { e.preventDefault(); void verifyCurrentPassword(); } }}
+                      placeholder={t("settings.security.currentPassword")}
+                      maxLength={128}
+                      autoComplete="current-password"
+                      disabled={sysCurrentVerified}
+                      className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20 disabled:opacity-60"
+                    />
+                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? t("settings.security.hideCurrentPassword") : t("settings.security.showCurrentPassword")}>
+                      <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysPasswordShow ? "visibility_off" : "visibility"}</span>
+                    </button>
+                  </div>
+                  {sysCurrentVerified ? (
+                    <button
+                      type="button"
+                      onClick={resetSysPasswordForm}
+                      className="px-3 py-2 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
+                      title={t("settings.security.clearAndReenter")}
+                      aria-label={t("settings.security.clearAndReenter")}
+                    >
+                      <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }}>check_circle</span>
+                      {t("settings.security.reenter")}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={verifyCurrentPassword}
+                      disabled={sysVerifying || !sysCurrentPassword}
+                      className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
+                    >
+                      {sysVerifying ? t("settings.security.checking") : t("settings.security.verify")}
+                    </button>
+                  )}
+                </div>
+
+                {sysCurrentVerified && (
+                  <>
+                    <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
+                      <label htmlFor="sys-new-password" className="sr-only">{t("settings.security.newPassword")}</label>
+                      <input
+                        id="sys-new-password"
+                        type={sysNewShow ? "text" : "password"}
+                        value={sysPassword}
+                        onChange={e => { setSysPassword(e.target.value); setSysPasswordStatus(null); }}
+                        placeholder={t("settings.security.newPasswordPlaceholder")}
+                        maxLength={128}
+                        autoComplete="new-password"
+                        autoFocus
+                        className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
+                      />
+                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? t("settings.security.hideNewPassword") : t("settings.security.showNewPassword")}>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysNewShow ? "visibility_off" : "visibility"}</span>
+                      </button>
+                    </div>
+                    <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
+                      <label htmlFor="sys-confirm-password" className="sr-only">{t("settings.security.confirmNewPassword")}</label>
+                      <input
+                        id="sys-confirm-password"
+                        type={sysConfirmShow ? "text" : "password"}
+                        value={sysPasswordConfirm}
+                        onChange={e => { setSysPasswordConfirm(e.target.value); setSysPasswordStatus(null); }}
+                        placeholder={t("settings.security.confirmNewPassword")}
+                        maxLength={128}
+                        autoComplete="new-password"
+                        className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
+                      />
+                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? t("settings.security.hideConfirmPassword") : t("settings.security.showConfirmPassword")}>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysConfirmShow ? "visibility_off" : "visibility"}</span>
+                      </button>
+                    </div>
+                    {sysPassword.length > 0 && sysPasswordConfirm.length > 0 && sysPassword !== sysPasswordConfirm && (
+                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">{t("settings.security.passwordsDontMatchYet")}</div>
+                    )}
+                    <div className="flex justify-end">
+                      <button
+                        onClick={requestSystemPasswordChange}
+                        disabled={sysPasswordSaving || sysPassword.length < 8 || sysPassword !== sysPasswordConfirm}
+                        className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
+                      >
+                        {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.updatePassword")}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+              {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
+            </div>
           </div>
         )}
 
@@ -5911,6 +6042,101 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                 </div>
 
+                {/* Per core, and the busiest processes — the two things an
+                    owner opens a system page to see that a single aggregate
+                    bar cannot tell them. They live here rather than in a
+                    second app because the password card and the desktop
+                    switches left (2026-09-09) and this is what System is for.
+
+                    Both degrade rather than lie: a server that predates the
+                    per-core reading sends no `perCore`, and one that cannot
+                    read /proc/stat sends an empty list — either way the row is
+                    absent, never a row of zeros claiming an idle machine. */}
+                {stats.cpu.perCore && stats.cpu.perCore.length > 0 && (
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-per-core">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>view_module</span>
+                      <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.perCore")}</label>
+                      <span className="ml-auto text-[10px] font-mono text-[var(--text-muted)] opacity-60">
+                        {t("settings.load")} {stats.cpu.loadAvg.map(v => formatLoad(v, locale)).join(" · ")}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-2.5">
+                      {stats.cpu.perCore.map((busy, n) => (
+                        <div key={n} className="flex items-center gap-2">
+                          <span className="text-[10px] font-mono text-[var(--text-muted)] opacity-50 w-6 shrink-0">{n}</span>
+                          <div className="flex-1 h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                            <div className="h-full rounded-full transition-all duration-700" style={{ width: `${busy}%`, backgroundColor: barColor(busy) }} />
+                          </div>
+                          <span className="text-[10px] font-mono tabular-nums w-9 text-right shrink-0" style={{ color: barColor(busy) }}>{busy}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {processRows.length > 0 && (
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-processes">
+                    <div className="flex items-center gap-2 mb-4">
+                      <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>list_alt</span>
+                      <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.busiestProcesses")}</label>
+                      {/* The ordering matters as much as the list: CPU is what a
+                          slow desktop looks like, memory is what an OOM-killed
+                          update looks like. The toggle is only offered when the
+                          server actually sent the second ordering. */}
+                      {stats.processesByMemory && (
+                        <div className="ml-auto flex rounded-lg bg-white/[0.06] p-0.5" role="group">
+                          {(["cpu", "mem"] as const).map(by => (
+                            <button
+                              key={by}
+                              type="button"
+                              onClick={() => setProcessOrder(by)}
+                              aria-pressed={processOrder === by}
+                              className={`px-2.5 py-1 text-[10px] rounded-md border-none cursor-pointer transition-colors ${processOrder === by ? "bg-white/[0.12] text-[var(--text-primary)]" : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]"}`}
+                            >
+                              {by === "cpu" ? t("settings.byCpu") : t("settings.byMemory")}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                    {/* A real table, because the figures are meaningless
+                        without their column: two grids of divs read out as
+                        "1201 llama-server 42.5 3.1", with nothing saying which
+                        number is CPU and which is memory. The percent sign is
+                        in the header rather than on every cell so the columns
+                        stay narrow and the unit is still said once. */}
+                    {/* Named, because the headers say what a CELL is and
+                        nothing says what the TABLE is: a screen-reader user
+                        landing on it hears a grid of numbers before they know
+                        what they are looking at. */}
+                    <table className="w-full table-fixed border-collapse" aria-label={t("settings.busiestProcesses")}>
+                      <thead>
+                        <tr className="text-[10px] uppercase tracking-widest text-[var(--text-muted)] opacity-50">
+                          <th scope="col" className="w-12 text-left font-semibold pb-2">{t("settings.pid")}</th>
+                          <th scope="col" className="text-left font-semibold pb-2">{t("settings.busiestProcesses")}</th>
+                          <th scope="col" className="w-14 text-right font-semibold pb-2">{t("settings.cpu")} %</th>
+                          <th scope="col" className="w-14 text-right font-semibold pb-2">{t("settings.memory")} %</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {processRows.map(proc => (
+                          <tr key={`${proc.pid}-${proc.command}`}>
+                            <td className="text-[11px] font-mono text-[var(--text-muted)] opacity-60 tabular-nums py-0.5 pr-3">{proc.pid}</td>
+                            <td className="text-xs font-mono text-[var(--text-secondary)] truncate py-0.5 pr-3" title={proc.command}>{proc.command}</td>
+                            {/* One decimal, which is what `ps` reports and what
+                                fits the column; `formatLoad` is the load
+                                average's two and would read as false precision
+                                on a percentage. */}
+                            <td className="text-[11px] font-mono tabular-nums text-right py-0.5" style={{ color: barColor(proc.cpu) }}>{localeFixed(proc.cpu, 1, locale)}</td>
+                            <td className="text-[11px] font-mono tabular-nums text-right py-0.5 pl-3" style={{ color: barColor(proc.mem) }}>{localeFixed(proc.mem, 1, locale)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
               </>
             ) : (
               <div className="flex items-center justify-center py-12 text-[var(--text-muted)] opacity-60">
@@ -5919,120 +6145,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             )}
 
-            {/* Password card — used for both web sign-in and SSH/sudo (PAM-backed) */}
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.security.passwordLabel")}</label>
-              </div>
-              {/* Split around the font-mono span: markup can't live in a catalogue
-                  value, and `sudo` is a command name that must not be translated. */}
-              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">
-                {t("settings.security.passwordHintPrefix")} <span className="font-mono">sudo</span>{t("settings.security.passwordHintSuffix")}
-              </p>
-              <div className="space-y-2">
-                <div className="flex items-stretch gap-2">
-                  <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                    <label htmlFor="sys-current-password" className="sr-only">{t("settings.security.currentPassword")}</label>
-                    <input
-                      id="sys-current-password"
-                      type={sysPasswordShow ? "text" : "password"}
-                      value={sysCurrentPassword}
-                      onChange={e => { setSysCurrentPassword(e.target.value); if (sysCurrentVerified) setSysCurrentVerified(false); setSysPasswordStatus(null); }}
-                      onKeyDown={e => { if (e.key === "Enter" && !sysCurrentVerified) { e.preventDefault(); void verifyCurrentPassword(); } }}
-                      placeholder={t("settings.security.currentPassword")}
-                      maxLength={128}
-                      autoComplete="current-password"
-                      disabled={sysCurrentVerified}
-                      className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20 disabled:opacity-60"
-                    />
-                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? t("settings.security.hideCurrentPassword") : t("settings.security.showCurrentPassword")}>
-                      <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysPasswordShow ? "visibility_off" : "visibility"}</span>
-                    </button>
-                  </div>
-                  {sysCurrentVerified ? (
-                    <button
-                      type="button"
-                      onClick={resetSysPasswordForm}
-                      className="px-3 py-2 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
-                      title={t("settings.security.clearAndReenter")}
-                      aria-label={t("settings.security.clearAndReenter")}
-                    >
-                      <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }}>check_circle</span>
-                      {t("settings.security.reenter")}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={verifyCurrentPassword}
-                      disabled={sysVerifying || !sysCurrentPassword}
-                      className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
-                    >
-                      {sysVerifying ? t("settings.security.checking") : t("settings.security.verify")}
-                    </button>
-                  )}
-                </div>
-
-                {sysCurrentVerified && (
-                  <>
-                    <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                      <label htmlFor="sys-new-password" className="sr-only">{t("settings.security.newPassword")}</label>
-                      <input
-                        id="sys-new-password"
-                        type={sysNewShow ? "text" : "password"}
-                        value={sysPassword}
-                        onChange={e => { setSysPassword(e.target.value); setSysPasswordStatus(null); }}
-                        placeholder={t("settings.security.newPasswordPlaceholder")}
-                        maxLength={128}
-                        autoComplete="new-password"
-                        autoFocus
-                        className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
-                      />
-                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? t("settings.security.hideNewPassword") : t("settings.security.showNewPassword")}>
-                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysNewShow ? "visibility_off" : "visibility"}</span>
-                      </button>
-                    </div>
-                    <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                      <label htmlFor="sys-confirm-password" className="sr-only">{t("settings.security.confirmNewPassword")}</label>
-                      <input
-                        id="sys-confirm-password"
-                        type={sysConfirmShow ? "text" : "password"}
-                        value={sysPasswordConfirm}
-                        onChange={e => { setSysPasswordConfirm(e.target.value); setSysPasswordStatus(null); }}
-                        placeholder={t("settings.security.confirmNewPassword")}
-                        maxLength={128}
-                        autoComplete="new-password"
-                        className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
-                      />
-                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? t("settings.security.hideConfirmPassword") : t("settings.security.showConfirmPassword")}>
-                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysConfirmShow ? "visibility_off" : "visibility"}</span>
-                      </button>
-                    </div>
-                    {sysPassword.length > 0 && sysPasswordConfirm.length > 0 && sysPassword !== sysPasswordConfirm && (
-                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">{t("settings.security.passwordsDontMatchYet")}</div>
-                    )}
-                    <div className="flex justify-end">
-                      <button
-                        onClick={requestSystemPasswordChange}
-                        disabled={sysPasswordSaving || sysPassword.length < 8 || sysPassword !== sysPasswordConfirm}
-                        className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
-                      >
-                        {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.updatePassword")}
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-              {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
-            </div>
-
-
-            {/* Desktop environment + Performance mode — under the password
-                card, at the owner's request (2026-09-07): the two switches
-                are set once and the figures above them are what the page is
-                opened for. (TASK-455 had them above the figures for the
-                opposite reason; the owner ruled.) */}
-            <SystemProfilePanel />
           </div>
         )}
 

@@ -72,12 +72,49 @@ export const LOCAL_EMBEDDING_BYTES = 639_000_000;
 /** Where OpenClaw keeps the owner's extra folders. */
 export const EXTRA_PATHS_CONFIG_PATH = "memory.search.extraPaths";
 
+/**
+ * Where the SAME list lives on the edition that has no OpenClaw.
+ *
+ * Not a mirror of the line above — the two are never both in play. On OpenClaw
+ * the list is read and written where the indexer reads it, which is
+ * `memory.search.extraPaths`; on the Hermes SKU ClawBox is the indexer
+ * (`src/lib/memory-index-local.ts`), so its own store is what governs. One
+ * copy either way, and no box has two.
+ */
+export const MEMORY_SHARD_SOURCES_KEY = "memory_shard_sources";
+
 /** Documents ClawBox can turn into Markdown for the indexer. */
 export const EXTRACTABLE_EXTENSIONS = [".pdf", ".docx", ".odt", ".rtf", ".txt"] as const;
 
 /** What OpenClaw's indexer reads on its own. Everything else has to be
  *  extracted into one of these first — it accepts `.md` and nothing else. */
 export const INDEXABLE_EXTENSIONS = [".md"] as const;
+
+/**
+ * The folder list as a parsed config holds it.
+ *
+ * ONE parser, because there are two readers: OpenClaw's `memory.search.extraPaths`
+ * (the live setting on that edition) and the one-time carry-over the other arm
+ * does after a harness swap. Two copies of this drifted apart the moment
+ * OpenClaw grew the object form, and the carry-over would have silently dropped
+ * folders the live reader keeps.
+ *
+ * Each entry is `string | { path, pattern? }`; ClawBox writes the object form
+ * when it has extra facts to carry (a derived folder of extracted Markdown and
+ * the folder of documents it came from).
+ */
+export function extraPathsOf(config: unknown): string[] {
+  const search = (config as Record<string, unknown>)?.memory as { search?: { extraPaths?: unknown } } | undefined;
+  return stringList(search?.search?.extraPaths);
+}
+
+/** The strings in a value that should be a list of them, and nothing else. */
+export function stringList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => (typeof entry === "string" ? entry : (entry as { path?: unknown })?.path))
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+}
 
 /**
  * What the schedule routes accept as a time of day. The ONE copy: the home

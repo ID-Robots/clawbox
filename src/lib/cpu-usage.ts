@@ -34,10 +34,11 @@ const MAX_SAMPLE_AGE_MS = 60_000;
 
 let lastSample: CpuSample | null = null;
 let lastUsage: number | null = null;
+let lastCoreSamples: (CpuSample | null)[] = [];
+let lastCoreUsage: number[] | null = null;
 
-/** Parse the aggregate `cpu` line of /proc/stat. Returns null if unusable. */
-export function parseProcStat(raw: string, now: number): CpuSample | null {
-  const line = raw.split("\n")[0];
+/** One `cpu…` line of /proc/stat as a sample, or null if it is not one. */
+function sampleFromLine(line: string | undefined, now: number): CpuSample | null {
   if (!line || !line.startsWith("cpu")) return null;
   const parts = line.trim().split(/\s+/).slice(1).map(Number);
   // idle is field 4 (user nice system idle ...). Anything shorter is not
@@ -47,6 +48,29 @@ export function parseProcStat(raw: string, now: number): CpuSample | null {
   const total = parts.reduce((a, b) => a + b, 0);
   if (total <= 0) return null;
   return { idle, total, at: now };
+}
+
+/** Parse the aggregate `cpu` line of /proc/stat. Returns null if unusable. */
+export function parseProcStat(raw: string, now: number): CpuSample | null {
+  return sampleFromLine(raw.split("\n")[0], now);
+}
+
+/**
+ * The PER-CORE lines, `cpu0`…`cpuN`, in order.
+ *
+ * The same file and the same arithmetic as the aggregate above — /proc/stat
+ * carries both, so a per-core reading costs no extra read and no extra sleep.
+ * A core whose line is unusable is `null` rather than 0: on a six-core Orin the
+ * difference between "this core is idle" and "this core could not be read" is
+ * the difference between a reassuring picture and a wrong one.
+ */
+export function parseProcStatCores(raw: string, now: number): (CpuSample | null)[] {
+  const out: (CpuSample | null)[] = [];
+  for (const line of raw.split("\n")) {
+    if (!/^cpu\d+\s/.test(line)) continue;
+    out.push(sampleFromLine(line, now));
+  }
+  return out;
 }
 
 function loadAverageApproximation(): number {
@@ -91,8 +115,57 @@ export function getCpuUsage(now: number = Date.now()): number {
   return usage;
 }
 
+/**
+ * Percent busy per core since the previous call, one entry per `cpuN` line.
+ *
+ * The htop-style bars on Settings → System. Same delta discipline as the
+ * aggregate: no sleep, no block, and a first call (or a stale previous sample,
+ * or a counter that went backwards over a suspend) answers the last figures it
+ * had rather than a fabricated zero — a row of empty bars is a claim about the
+ * box, and "not measured yet" is not that claim.
+ *
+ * Empty when /proc/stat cannot be read at all, which the caller renders as no
+ * per-core row rather than as a machine with no cores.
+ */
+export function getCpuCoreUsage(now: number = Date.now()): number[] {
+  let current: (CpuSample | null)[];
+  try {
+    current = parseProcStatCores(fs.readFileSync("/proc/stat", "utf-8"), now);
+  } catch {
+    return lastCoreUsage ?? [];
+  }
+  if (current.length === 0) return lastCoreUsage ?? [];
+
+  const previous = lastCoreSamples;
+  lastCoreSamples = current;
+  // A core count that changed (a hotplug, or a first call) has nothing to diff
+  // against; so does a sample too old to be about "now".
+  const comparable = previous.length === current.length;
+
+  const usage: number[] = [];
+  for (let i = 0; i < current.length; i += 1) {
+    const now_ = current[i];
+    const then = comparable ? previous[i] : null;
+    if (!now_ || !then || now - then.at > MAX_SAMPLE_AGE_MS) {
+      usage.push(lastCoreUsage?.[i] ?? 0);
+      continue;
+    }
+    const dTotal = now_.total - then.total;
+    const dIdle = now_.idle - then.idle;
+    if (dTotal <= 0 || dIdle < 0) {
+      usage.push(lastCoreUsage?.[i] ?? 0);
+      continue;
+    }
+    usage.push(Math.min(100, Math.max(0, Math.round(((dTotal - dIdle) / dTotal) * 100))));
+  }
+  lastCoreUsage = usage;
+  return usage;
+}
+
 /** Test seam — drops the cached sample so each test starts cold. */
 export function __resetCpuUsageCache(): void {
   lastSample = null;
   lastUsage = null;
+  lastCoreSamples = [];
+  lastCoreUsage = null;
 }

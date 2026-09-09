@@ -1,12 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * The "Memory embeddings" row came from `openclaw memory status`, spawned
- * through ClawKeep's memory module. On the Hermes edition there is no openclaw
- * binary, so that call could only fail — and the failure was swallowed into a
- * probe indistinguishable from a box whose embedding provider is down. The row
- * then told the customer "No embedding model is answering", i.e. that something
- * on their box was broken, about a feature this SKU never shipped.
+ * The "Memory embeddings" row.
+ *
+ * It came from `openclaw memory status`, spawned through ClawKeep's memory
+ * module, and on the Hermes edition there was no openclaw binary — so the call
+ * could only fail, and the failure was swallowed into a probe indistinguishable
+ * from a box whose embedding provider is down. The row then told the customer
+ * "No embedding model is answering", i.e. that something on their box was
+ * broken, about a feature that SKU never shipped. Hence `supported`.
+ *
+ * SINCE THE HERMES PORT there is an index on every edition — OpenClaw's where
+ * there is an OpenClaw, ClawBox's own where there is not — over the same
+ * embedder, which was always installed everywhere. So the row is MEASURED on
+ * every SKU and `supported` is true. The field and its branch stay: it is the
+ * honest answer to a question that can be asked again (a future SKU without the
+ * embedder), and it is the route's contract. What these tests pin now is that
+ * no shipping edition takes the "not on this edition" branch by accident.
  */
 
 const mockOpenclawIsAbsent = vi.fn();
@@ -64,18 +74,22 @@ beforeEach(() => {
 });
 
 describe("GET /setup-api/local-models — embeddings on the hermes edition", () => {
-  it("reports the row as not on this edition", async () => {
+  it("measures the row there, because that edition has an index of its own now", async () => {
     mockOpenclawIsAbsent.mockReturnValue(true);
     await GET();
-    expect(probes().embeddings.supported).toBe(false);
+    expect(probes().embeddings.supported).toBe(true);
   });
 
-  it("does not ask openclaw for a memory status it cannot give, nor stat an engine it never had", async () => {
+  it("asks the box the same questions it asks an OpenClaw one", async () => {
+    // `peekMemoryStatus` answers from whichever arm the server picked, and the
+    // engine half is two stats of files that exist on every SKU. Skipping
+    // either used to be right and is now the bug: it drew "not on this
+    // edition" over a working embedder and a real index.
     mockOpenclawIsAbsent.mockReturnValue(true);
     await GET();
-    expect(memoryStatus).not.toHaveBeenCalled();
-    expect(embedProvisioning).not.toHaveBeenCalled();
-    expect(probes().embeddings.engine).toEqual({ installed: false, modelBytes: null });
+    expect(memoryStatus).toHaveBeenCalledTimes(1);
+    expect(embedProvisioning).toHaveBeenCalledTimes(1);
+    expect(probes().embeddings.engine).toEqual({ installed: true, modelBytes: 639_000_000 });
   });
 
   it("still reads the real memory status where openclaw exists", async () => {

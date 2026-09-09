@@ -6,8 +6,11 @@
 #   * OpenClaw: refresh the REAL copies (its scanner ignores symlinks) and
 #     restart the gateway so the workspace-file scan re-reads the new content
 #     (OpenClaw caches injected file content at gateway start).
-#   * Hermes: its identity files are symlinks (already live), but its state.db
-#     FTS5 recall must re-index to see external markdown edits.
+#   * Hermes: its identity files are symlinks, so placing them IS the sync and
+#     there is nothing to re-index. (This line used to claim a state.db FTS5
+#     recall index that had to be rebuilt. There is none — see the note beside
+#     the Hermes branch below, written after `hermes memory reindex` turned out
+#     to be a command that does not exist and failed every harness switch.)
 #
 # Canonical is authoritative (edit there). Edits made from inside a harness are
 # NOT auto-propagated back in this version — that reverse sync is future work,

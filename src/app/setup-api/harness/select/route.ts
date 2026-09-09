@@ -57,7 +57,9 @@ export async function POST(request: Request) {
   }
 
   // Propagate the canonical identity to both harnesses (OpenClaw real copies +
-  // gateway refresh; Hermes FTS5 reindex) BEFORE flipping the active one, so we
+  // gateway refresh; on Hermes the symlinks ARE the sync — there is no recall
+  // index to rebuild, whatever this comment used to say) BEFORE flipping the
+  // active one, so we
   // never complete a switch that leaves the selected harness without its shared
   // identity. If the sync fails, the harness is NOT switched.
   try {

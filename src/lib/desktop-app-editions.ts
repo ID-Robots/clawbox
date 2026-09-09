@@ -24,10 +24,15 @@ export type AppEdition = "openclaw" | "hermes";
 //   - "store" is the OpenClaw App Store — it installs OpenClaw desktop apps via
 //     the openclaw binary and reloads the OpenClaw gateway. On Hermes the Skills
 //     app ("hermes-skills") is the equivalent surface.
-//   - "memory-shard" is OpenClaw's memory index (`openclaw memory status`);
-//     Hermes has no equivalent, and ClawKeep hid the same panel on that box.
 //   - "hermes" / "hermes-skills" are the Hermes dashboard and skills store.
-export const OPENCLAW_ONLY_APP_IDS = ["openclaw", "store", "memory-shard"] as const;
+//
+// "memory-shard" WAS on the OpenClaw list, because the app was OpenClaw's
+// memory index (`openclaw memory status`) and Hermes ships nothing equivalent.
+// It is not any more: on the edition with no OpenClaw, ClawBox owns the index
+// itself (`src/lib/memory-index-local.ts`) over the same embedder, which is
+// installed on every edition. There is a backend on both harnesses now, so
+// there is nothing left to hide.
+export const OPENCLAW_ONLY_APP_IDS = ["openclaw", "store"] as const;
 export const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"] as const;
 
 /** Every id that is gated on a harness at all — the two lists above, joined. */

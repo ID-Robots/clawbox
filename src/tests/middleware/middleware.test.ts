@@ -1182,6 +1182,31 @@ describe("middleware", () => {
       expect((await authed("/setup-api/update/status")).status).toBe(200);
     });
 
+    it("stamps the lock on a /setup-api answer, so an OPEN desktop learns of it", async () => {
+      // The redirect above only fires on a NAVIGATION, and a page that was
+      // already on screen when the update began makes none: it sat there, kept
+      // polling, and went blank when the rebuild stopped the server under it.
+      // The header rides on a request the desktop already makes.
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      const res = await authed("/setup-api/kv?key=ui:pending-actions");
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-clawbox-update-lock")).toBe("1");
+    });
+
+    it("stamps nothing while no update is running", async () => {
+      writeConfig({ setup_complete: true });
+      const res = await authed("/setup-api/kv?key=ui:pending-actions");
+      expect(res.headers.get("x-clawbox-update-lock")).toBeNull();
+    });
+
+    it("stamps nothing on a path that only LOOKS like the API namespace", async () => {
+      // `/setup-api` also starts with `/setup`, and the whole namespace guard
+      // is written on segment boundaries for that reason.
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      const res = await authed("/setup-apinotreally");
+      expect(res.headers.get("x-clawbox-update-lock")).toBeNull();
+    });
+
     it("does nothing when no update is running", async () => {
       writeConfig({ setup_complete: true });
       expect((await authed("/")).status).toBe(200);

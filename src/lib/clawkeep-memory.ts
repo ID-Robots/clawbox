@@ -1,10 +1,23 @@
 /**
  * ClawKeep memory-management bridge.
  *
- * OpenClaw owns the memory index and its embedding provider. This module gives
- * the ClawKeep UI a deliberately small, sanitised view of that state and a
- * persistent, single-flight way to trigger incremental/full indexing. Raw CLI
- * output, database paths and provider errors never cross the API boundary.
+ * Gives the Memory Shard UI a deliberately small, sanitised view of the index
+ * and a persistent, single-flight way to trigger incremental/full indexing. Raw
+ * CLI output, database paths and provider errors never cross the API boundary.
+ *
+ * TWO ARMS BEHIND ONE FACE, chosen per call by `openclawIsAbsent()`. Where
+ * there is an OpenClaw, OpenClaw owns the index and its embedding provider and
+ * this module drives its CLI. On the Hermes SKU there is no such index to drive
+ * — that harness ships none — so ClawBox owns one itself
+ * (`src/lib/memory-index-local.ts`) and this module drives that instead.
+ *
+ * The seam is deliberately narrow: the local arm answers the SAME status JSON
+ * the CLI does and runs behind the SAME lock, state file and reconcile, so
+ * `parseMemoryStatus`, the health rules, the error-code catalogue and every
+ * screen and locale pack downstream are shared rather than duplicated. The
+ * predicate is `openclawIsAbsent()` and never `hasHermesHarness()`: on a `dual`
+ * box the openclaw binary exists and its index is the one that must keep being
+ * used, under either harness.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -15,7 +28,13 @@ import path from "node:path";
 import { getMemoryShardEnabled, getMemoryShardSetupComplete } from "@/lib/memory-shard";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
-import { CONFIG_PATH, findOpenclawBin } from "@/lib/openclaw-config";
+import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
+import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import {
+  IndexPassAbortedError,
+  localMemoryStatusJson,
+  runLocalIndexPass,
+} from "@/lib/memory-index-local";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 
 export type MemoryScheduleFrequency = "daily" | "weekly";
@@ -671,17 +690,25 @@ async function withLiveRunState(base: ClawKeepMemoryStatus): Promise<ClawKeepMem
 }
 
 async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
+  // Where there is no OpenClaw there is no CLI to probe: ClawBox's own index
+  // answers the same shape, and everything below is unchanged.
+  const local = openclawIsAbsent();
   // The probe first, the run state after it. Read the other way round, a
   // cold answer carried the run state from when the probe STARTED — "running"
   // for a pass that had finished eight seconds before the answer arrived.
-  const probe = await collectMemoryStatusJson().then(
+  const probe = await (local ? localMemoryStatusJson() : collectMemoryStatusJson()).then(
     (raw) => ({ raw, ok: true as const }),
     () => ({ raw: null, ok: false as const }),
   );
   const [run, schedule, remoteBaseUrl] = await Promise.all([
     readMemoryRunState(),
     readMemorySchedule(),
-    readEmbeddingRemoteBaseUrl(),
+    // openclaw.json is what points the OTHER arm's client at an embedder, and
+    // on this SKU there is no such file — asked anyway it answers null, which
+    // `providerLocation` reports as "unknown" and the card draws as an
+    // embedder it cannot place. The local arm embeds through this box's own
+    // loopback proxy, so that URL is the answer.
+    local ? Promise.resolve(getEmbedProxyBaseUrl()) : readEmbeddingRemoteBaseUrl(),
   ]);
   if (!probe.ok) return unavailableStatus(run, schedule);
   try {
@@ -910,14 +937,23 @@ async function acquireRunLock(): Promise<boolean> {
   }
 }
 
+/** The two verdicts both arms can reach, said once. */
+const TIMED_OUT_FAILURE = {
+  error: "Indexing timed out. Try again after the device is idle.",
+  errorCode: "timed_out" as const,
+};
+const INDEX_FAILED_FAILURE = {
+  error: "Indexing failed. Check that the embedding model is available, then try again.",
+  errorCode: "index_failed" as const,
+};
+
 function fixedFailure(
-  timedOut: boolean,
   code: number | null,
   signal: NodeJS.Signals | null,
 ): { error: string; errorCode: MemoryRunErrorCode } {
-  if (timedOut || code === 124) {
-    return { error: "Indexing timed out. Try again after the device is idle.", errorCode: "timed_out" };
-  }
+  // 124 is `timeout`'s own verdict, which is the same fact arriving as an exit
+  // code rather than as this module's budget.
+  if (code === 124) return TIMED_OUT_FAILURE;
   // Killed from outside — the OOM killer, an operator, a service restart. The
   // embedding model had nothing to do with it, so do not send the owner to
   // check it; the same words the reconcile uses for a run lost to a reboot.
@@ -928,10 +964,7 @@ function fixedFailure(
   if (EXEC_FAILURE_EXITS.has(code)) {
     return { error: "OpenClaw is not installed or could not be started.", errorCode: "openclaw_missing" };
   }
-  return {
-    error: "Indexing failed. Check that the embedding model is available, then try again.",
-    errorCode: "index_failed",
-  };
+  return INDEX_FAILED_FAILURE;
 }
 
 /**
@@ -945,6 +978,147 @@ const MAX_RUN_STDERR_CHARS = 4_000;
 function lastMeaningfulLine(text: string): string {
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
   return lines.length ? lines[lines.length - 1].slice(0, 300) : "";
+}
+
+/**
+ * How a pass ENDED, in the vocabulary of whichever arm ran it.
+ *
+ * Deliberately raw. The two arms fail in genuinely different ways — an exit
+ * code and a signal on one, a thrown error on the other — and flattening that
+ * at the source would mean each arm privately deciding what the owner is told.
+ * `fixedFailure` and `localFailure` do the wording, in one place, below.
+ */
+type PassOutcome =
+  | { kind: "exit"; code: number | null; signal: NodeJS.Signals | null }
+  | { kind: "threw"; error: unknown };
+
+/**
+ * One indexing pass, however it is performed.
+ *
+ * The whole point of the interface is that everything AROUND a pass — the
+ * decline, the lock, the run-state file, the liveness reconcile, the two-hour
+ * budget, the cache invalidation and the reload behind it — is written once and
+ * is the same on both editions. Only the work in the middle differs.
+ */
+interface IndexPass {
+  /**
+   * Recorded as `childPid`, which `acquireRunLock` checks with
+   * `processIsAlive`. The OpenClaw arm records the indexer's own pid. The local
+   * arm records THIS process, which is the same fact for a pass that runs
+   * inside it: while the web server is up the run is going, and a run lost to a
+   * restart reads dead and is reconciled as interrupted — exactly as before.
+   */
+  pid: number;
+  /** Settles when the pass has ended, whatever became of it. */
+  ended: Promise<PassOutcome>;
+  /** Give up on it. Not the same as failing: the caller decides what to say. */
+  abandon(): void;
+  /** Its own last words, for the device log and never for the response. */
+  tail(): string;
+}
+
+function startOpenclawPass(mode: MemoryIndexMode): IndexPass {
+  const args = ["memory", "index", "--agent", "main"];
+  if (mode === "full") args.push("--force");
+  // `-n -E 75` so a busy migration comes back as its own exit code rather than
+  // looking like an indexing failure the customer should retry.
+  //
+  // `--no-fork` is load-bearing, not tidiness. util-linux `flock` defaults to
+  // forking the command and waiting on it, so `child.pid` would be the WRAPPER:
+  // killing it on the timeout or on a failed state write would leave
+  // `openclaw memory index` running unsupervised while the lock it was holding
+  // is released with the wrapper — the exact opposite of what both of those
+  // paths are trying to achieve. With `--no-fork` flock execs into openclaw —
+  // and with OPENCLAW_NO_RESPAWN in the environment (see openclawEnv) that is
+  // the CLI itself rather than a launcher in front of it — so the pid we
+  // record, supervise and signal is the indexer.
+  const child = spawn(
+    "flock",
+    ["--no-fork", "-n", "-E", String(LOCK_BUSY_EXIT), EMBED_MIGRATION_LOCK, openclawBin(), ...args],
+    { env: openclawEnv(), stdio: ["ignore", "ignore", "pipe"] },
+  );
+  // The CLI's stderr, kept for the device log and NOT for the response: this
+  // module's contract is that raw CLI output, paths and provider errors stop
+  // here. With `stdio: "ignore"` it was discarded before anyone could read it
+  // either, so a run that failed in 1.3 s left the owner with the catch-all
+  // "check that the embedding model is available" — about a model that was
+  // answering perfectly — and nothing anywhere on the box said why. Draining
+  // the pipe is also what keeps a chatty run from blocking on a full one.
+  let stderrTail = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    stderrTail = (stderrTail + chunk.toString("utf8")).slice(-MAX_RUN_STDERR_CHARS);
+  });
+  // Listen BEFORE the first await. A busy migration lock makes `flock -n`
+  // exit in a couple of milliseconds, inside the state write below; with the
+  // listeners attached after it, that exit went unseen, the run stayed
+  // "running" with a dead pid, and the reconcile later called it interrupted
+  // — the one outcome `-E 75` exists to avoid. A spawn error is emitted on
+  // the next tick, which without a listener is an unhandled event.
+  const ended = new Promise<PassOutcome>((resolve) => {
+    child.once("error", (err) => {
+      resolve({ kind: "exit", code: (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1, signal: null });
+    });
+    child.once("close", (code, signal) => resolve({ kind: "exit", code, signal }));
+  });
+  return {
+    pid: child.pid ?? 0,
+    ended,
+    abandon: () => terminate(child),
+    tail: () => stderrTail,
+  };
+}
+
+function startLocalPass(mode: MemoryIndexMode): IndexPass {
+  const controller = new AbortController();
+  let tail = "";
+  // `EMBED_MIGRATION_LOCK` is deliberately not taken here. Its only other
+  // holder is `scripts/ensure-local-embeddings.sh`, which writes openclaw.json
+  // and never runs on this SKU, so `RUN_LOCK_PATH` is the whole single-flight
+  // and a second lock would only be a second thing to leave behind.
+  const ended = runLocalIndexPass(mode, controller.signal).then(
+    (result): PassOutcome => {
+      // The pass's own numbers exist nowhere else — the run record keeps a
+      // status and a duration, not a count — so they are said once, here.
+      console.warn(
+        `[memory-index] ${mode} pass: ${result.files} files, ${result.chunks} chunks`
+        + (result.failures ? `, ${result.failures} unreadable` : "")
+        + (result.capped ? " (the index reached its ceiling)" : ""),
+      );
+      // A success is an exit 0, in the vocabulary the other arm already speaks,
+      // so `finish` has one shape to reason about instead of two.
+      return { kind: "exit", code: 0, signal: null };
+    },
+    (error): PassOutcome => {
+      tail = error instanceof Error ? error.message : String(error);
+      return { kind: "threw", error };
+    },
+  );
+  return {
+    pid: process.pid,
+    ended,
+    abandon: () => controller.abort(),
+    tail: () => tail,
+  };
+}
+
+/**
+ * What the owner is told when the LOCAL pass threw.
+ *
+ * Mapped onto the codes that already exist rather than adding new ones: every
+ * one of them is already worded in ten languages, and none of these outcomes is
+ * a thing the owner would act on differently. An embedder that would not answer
+ * IS "check that the embedding model is available" — including the 502 the
+ * MemAvailable guard answers a wake with, which is the box saying it is too
+ * busy right now.
+ */
+function localFailure(error: unknown): { error: string; errorCode: MemoryRunErrorCode } {
+  if (error instanceof IndexPassAbortedError) {
+    return { error: INTERRUPTED_MESSAGE, errorCode: "interrupted" };
+  }
+  // Everything else — the embedder refusing (EmbeddingUnavailableError), an
+  // unreadable store, a bug — reads the same to the owner and has the same
+  // next step.
+  return INDEX_FAILED_FAILURE;
 }
 
 /**
@@ -1002,58 +1176,20 @@ export async function startMemoryIndex(
     throw err;
   }
 
-  const args = ["memory", "index", "--agent", "main"];
-  if (mode === "full") args.push("--force");
-  // `-n -E 75` so a busy migration comes back as its own exit code rather than
-  // looking like an indexing failure the customer should retry.
-  //
-  // `--no-fork` is load-bearing, not tidiness. util-linux `flock` defaults to
-  // forking the command and waiting on it, so `child.pid` would be the WRAPPER:
-  // killing it on the timeout or on a failed state write would leave
-  // `openclaw memory index` running unsupervised while the lock it was holding
-  // is released with the wrapper — the exact opposite of what both of those
-  // paths are trying to achieve. With `--no-fork` flock execs into openclaw —
-  // and with OPENCLAW_NO_RESPAWN in the environment (see openclawEnv) that is
-  // the CLI itself rather than a launcher in front of it — so the pid we
-  // record, supervise and signal is the indexer.
-  const child = spawn(
-    "flock",
-    ["--no-fork", "-n", "-E", String(LOCK_BUSY_EXIT), EMBED_MIGRATION_LOCK, openclawBin(), ...args],
-    { env: openclawEnv(), stdio: ["ignore", "ignore", "pipe"] },
-  );
-  // The CLI's stderr, kept for the device log and NOT for the response: this
-  // module's contract is that raw CLI output, paths and provider errors stop
-  // here. With `stdio: "ignore"` it was discarded before anyone could read it
-  // either, so a run that failed in 1.3 s left the owner with the catch-all
-  // "check that the embedding model is available" — about a model that was
-  // answering perfectly — and nothing anywhere on the box said why. Draining
-  // the pipe is also what keeps a chatty run from blocking on a full one.
-  let stderrTail = "";
-  child.stderr?.on("data", (chunk: Buffer) => {
-    stderrTail = (stderrTail + chunk.toString("utf8")).slice(-MAX_RUN_STDERR_CHARS);
-  });
-  // Listen BEFORE the first await. A busy migration lock makes `flock -n`
-  // exit in a couple of milliseconds, inside the state write below; with the
-  // listeners attached after it, that exit went unseen, the run stayed
-  // "running" with a dead pid, and the reconcile later called it interrupted
-  // — the one outcome `-E 75` exists to avoid. A spawn error is emitted on
-  // the next tick, which without a listener is an unhandled event.
-  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-    child.once("error", (err) => {
-      resolve({ code: (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1, signal: null });
-    });
-    child.once("close", (code, signal) => resolve({ code, signal }));
-  });
-  state = { ...state, childPid: child.pid ?? 0 };
+  // The one line that differs by edition. Everything above and below it — the
+  // decline, the lock, the state file, the reconcile, the budget, the cache —
+  // is the same work whoever does the indexing.
+  const pass = openclawIsAbsent() ? startLocalPass(mode) : startOpenclawPass(mode);
+  state = { ...state, childPid: pass.pid };
   try {
     await writeRunState(state);
   } catch (err) {
-    // Without this, the child keeps indexing unsupervised while the lock stays
+    // Without this, the pass keeps indexing unsupervised while the lock stays
     // on disk with childPid 0; LOCK_START_GRACE_MS later the reconcile calls
     // the live run interrupted and frees the lock, and a second index starts
-    // on top of the first. `exited` has no handler yet, so the child's end
+    // on top of the first. `finish` is not attached yet, so the pass's end
     // cannot write a final state over this cleanup.
-    terminate(child);
+    pass.abandon();
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
@@ -1064,17 +1200,29 @@ export async function startMemoryIndex(
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
-    terminate(child);
+    pass.abandon();
   }, INDEX_TIMEOUT_MS);
-  const finish = async ({ code, signal }: { code: number | null; signal: NodeJS.Signals | null }) => {
+  const finish = async (outcome: PassOutcome) => {
     clearTimeout(timer);
     const finishedAtMs = Date.now();
-    const ok = code === 0 && !timedOut;
-    const failure = ok ? null : fixedFailure(timedOut, code, signal);
+    const ok = !timedOut && outcome.kind === "exit" && outcome.code === 0;
+    // The timeout first, because it is the one verdict that does not depend on
+    // which arm ran: whatever the pass said on its way out, the budget is what
+    // ended it. After that each arm is worded by its own mapper.
+    const failure = ok
+      ? null
+      : timedOut
+        ? TIMED_OUT_FAILURE
+        : outcome.kind === "threw"
+          ? localFailure(outcome.error)
+          : fixedFailure(outcome.code, outcome.signal);
     if (failure) {
+      const how = outcome.kind === "exit"
+        ? `exit ${outcome.code ?? "none"}${outcome.signal ? `, ${outcome.signal}` : ""}`
+        : "threw";
       console.warn(
-        `[clawkeep-memory] ${mode} index run failed (${failure.errorCode}, exit ${code ?? "none"}`
-        + `${signal ? `, ${signal}` : ""}): ${lastMeaningfulLine(stderrTail) || "the CLI printed nothing"}`,
+        `[clawkeep-memory] ${mode} index run failed (${failure.errorCode}, ${how}): `
+        + `${lastMeaningfulLine(pass.tail()) || "it said nothing"}`,
       );
     }
     const finalState: PersistedMemoryRunState = {
@@ -1101,7 +1249,7 @@ export async function startMemoryIndex(
     // counts are there by the time the owner looks, not ten seconds after.
     reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   };
-  void exited.then(finish);
+  void pass.ended.then(finish);
 
   return { accepted: true, run: publicMemoryRunState(state) };
 }

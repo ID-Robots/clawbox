@@ -606,11 +606,16 @@ async function llamaCppEntry(probe: LlamaCppProbe): Promise<LocalModelEntry> {
 
 interface EmbeddingProbe {
   /**
-   * False when this edition has no memory index at all — the index and its
-   * embedding provider belong to OpenClaw, and the Hermes SKU ships no
-   * openclaw binary. `available` cannot carry that: a Hermes box and an
-   * OpenClaw box whose provider is down would both read `available: false`,
-   * and only one of them is a fault.
+   * False when this edition has no memory index at all. `available` cannot
+   * carry that: a box with no index and a box whose provider is down would
+   * both read `available: false`, and only one of them is a fault.
+   *
+   * NO SHIPPING SKU ANSWERS FALSE ANY MORE. It did while the index could only
+   * be OpenClaw's and the Hermes SKU shipped no openclaw binary; ClawBox owns
+   * an index on that edition now (`src/lib/memory-index-local.ts`). The field
+   * and the row it draws stay because they are the honest answer to a question
+   * that can be asked again — a future SKU without the embedder — and because
+   * removing them would change the route's contract for no gain.
    */
   supported: boolean;
   /**

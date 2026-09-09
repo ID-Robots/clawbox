@@ -26,9 +26,15 @@ import { EXTRACTABLE_EXTENSIONS } from "@/lib/memory-shard-state";
 /** Where derived Markdown lives. One folder per source. */
 export const EXTRACT_ROOT = path.join(DATA_DIR, "memory-extracted");
 
-/** A document over this size is skipped: the extractors are happy to spend
- *  minutes on a huge scan, and this runs while the owner is watching a wizard. */
-const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
+/**
+ * A document over this size is skipped: the extractors are happy to spend
+ * minutes on a huge scan, and this runs while the owner is watching a wizard.
+ *
+ * Exported because the Hermes-side indexer applies the SAME bound to the files
+ * it reads directly (`src/lib/memory-index-local.ts`) — two copies of one
+ * number is how "the extractor uses the same bound" stops being true.
+ */
+export const MAX_DOCUMENT_BYTES = 40 * 1024 * 1024;
 
 /** One extractor call's budget. */
 const EXTRACT_TIMEOUT_MS = 60_000;
@@ -69,6 +75,31 @@ export interface ExtractionResult {
   skipped: number;
   /** Why files were skipped, worded for the owner. Empty when none were. */
   notes: string[];
+  /**
+   * Derived file name (basename, inside `derived`) -> the source-relative path
+   * of the document it came from.
+   *
+   * The derived name flattens `a/b.pdf` to `a__b.pdf-<digest>.md`, which is
+   * deliberately not reversible — a document whose own name contains `__`
+   * would decode wrong — so the mapping is RECORDED here rather than inferred
+   * by a reader. It covers every extractable file this call SAW, not only the
+   * ones it converted, because a second run skips what is already current and
+   * a caller still needs to know where those came from.
+   *
+   * It exists so a search result can name the owner's PDF instead of ClawBox's
+   * scratch copy of it.
+   */
+  origins: Record<string, string>;
+  /**
+   * The scan fell short of the whole folder: it could not be opened, part of it
+   * could not be read, or it ran past the entry budget.
+   *
+   * `notes` already says all three in the owner's words, but a CALLER cannot
+   * act on prose. The indexer has to know, because "found nothing here" and
+   * "could not look here" are the same silence and only one of them means the
+   * owner's documents are gone.
+   */
+  partial: boolean;
 }
 
 /** A stable folder name for a source, so re-running reuses the same output. */
@@ -77,8 +108,15 @@ export function derivedFolderFor(source: string): string {
   return path.join(EXTRACT_ROOT, `${path.basename(source).replace(/[^A-Za-z0-9._-]/g, "-")}-${digest}`);
 }
 
-/** The walk's budget, shared across every level of the recursion. */
-interface WalkBudget {
+/**
+ * The walk's budget, shared across every level of the recursion.
+ *
+ * Exported with the walk itself: the Hermes-side indexer has to visit the very
+ * same trees under the very same limits (`src/lib/memory-index-local.ts`), and
+ * a second walker would be a second answer to "how deep, how many, and what
+ * happens at a symlink".
+ */
+export interface WalkBudget {
   left: number;
   /** Set once the budget ran out with entries still unread. */
   truncated: boolean;
@@ -93,7 +131,12 @@ interface WalkBudget {
   rootUnreadable: boolean;
 }
 
-async function* walk(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator<string> {
+/** A fresh budget for one walk. */
+export function newWalkBudget(): WalkBudget {
+  return { left: MAX_ENTRIES, truncated: false, unreadable: 0, rootUnreadable: false };
+}
+
+export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator<string> {
   if (depth > MAX_DEPTH) return;
   // opendir, not readdir: readdir hands back the WHOLE listing as one array
   // before a single entry can be charged, so a directory of a million files
@@ -121,7 +164,7 @@ async function* walk(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator
       const full = path.join(dir, entry.name);
       // isDirectory() is false for a symlink, which is what keeps a link loop out
       // of the walk — the same reason the folder picker reads it this way.
-      if (entry.isDirectory()) yield* walk(full, budget, depth + 1);
+      if (entry.isDirectory()) yield* walkFiles(full, budget, depth + 1);
       else if (entry.isFile()) yield full;
     }
   } catch {
@@ -175,18 +218,27 @@ async function extractOne(file: string, out: string): Promise<boolean> {
  * alone, so re-running after adding one PDF costs one conversion rather than
  * the whole folder.
  */
-export async function extractDocuments(source: string): Promise<ExtractionResult> {
+export async function extractDocuments(source: string, signal?: AbortSignal): Promise<ExtractionResult> {
   const derived = derivedFolderFor(source);
   let extracted = 0;
   let skipped = 0;
   const notes: string[] = [];
+  const origins: Record<string, string> = {};
   let seen = 0;
   let sawExtractable = false;
-  const budget: WalkBudget = { left: MAX_ENTRIES, truncated: false, unreadable: 0, rootUnreadable: false };
+  /** MAX_FILES stopped the extraction short of the folder's documents. */
+  let cutShort = false;
+  const budget = newWalkBudget();
 
-  for await (const file of walk(path.resolve(source), budget)) {
+  for await (const file of walkFiles(path.resolve(source), budget)) {
+    // A conversion is a spawned pdftotext or libreoffice with a 60 s budget of
+    // its own, and a folder can hold 500 of them — so a caller that has given
+    // up (the index run's two-hour deadline, a web server going down) must be
+    // able to stop this between files rather than up to 500 timeouts later.
+    signal?.throwIfAborted();
     if (seen >= MAX_FILES) {
       notes.push(`Only the first ${MAX_FILES} files in this folder were read.`);
+      cutShort = true;
       break;
     }
     const ext = path.extname(file).toLowerCase();
@@ -214,7 +266,12 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
     const relativePath = path.relative(path.resolve(source), file);
     const flat = relativePath.replace(/[\\/]/g, "__");
     const suffix = crypto.createHash("sha256").update(relativePath).digest("hex").slice(0, 12);
-    const out = path.join(derived, `${flat}-${suffix}.md`);
+    const outName = `${flat}-${suffix}.md`;
+    const out = path.join(derived, outName);
+    // Recorded before the up-to-date check below, which `continue`s: the
+    // mapping is about where a derived file CAME FROM, and that is just as
+    // true of one an earlier run wrote.
+    origins[outName] = relativePath;
     try {
       const previous = await fs.stat(out);
       // Already extracted and still current.
@@ -256,5 +313,7 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
     // Three is enough for the owner to see the shape of the problem without the
     // step turning into a log.
     notes: notes.slice(0, 3),
+    origins,
+    partial: budget.rootUnreadable || budget.unreadable > 0 || budget.truncated || cutShort,
   };
 }

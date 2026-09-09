@@ -130,6 +130,61 @@ describe("the lock is written where a run starts and released where one ends", (
   });
 });
 
+describe("a desktop that was already open learns the update started", () => {
+  const MIDDLEWARE = readFileSync(path.join(REPO, "src/middleware.ts"), "utf-8");
+  const DESKTOP = readFileSync(path.join(REPO, "src/app/page.tsx"), "utf-8");
+  const CONSTANTS = readFileSync(path.join(REPO, "src/lib/update-constants.ts"), "utf-8");
+
+  // These read SOURCE, which is what this whole file does — the module opens
+  // with `import fs` and cannot be loaded here. What they cannot prove is that
+  // the branch is reachable, so the BEHAVIOUR is pinned where the middleware
+  // can actually be invoked: "stamps the lock on a /setup-api answer" and its
+  // two negatives in src/tests/middleware/middleware.test.ts. These say WHY the
+  // code is shaped the way it is; those say that it works.
+  it("stamps the lock header on /setup-api while the lock is held", () => {
+    // The redirect above only fires on a NAVIGATION, and a page that is already
+    // open makes none: it stayed on the desktop, kept polling, and went blank
+    // when the rebuild stopped the web server under it. Reported on the box,
+    // 2026-09-09 — the owner had to reload by hand to reach /updating.
+    expect(MIDDLEWARE).toMatch(/const updateInProgress = readConfigCached\(\)\.updateInProgress/);
+    // `isSetupApiPath`, not a bare `startsWith("/setup-api")`: that helper
+    // matches on a SEGMENT boundary, which is the rule the rest of this file
+    // already lives by — `/setup-api` also starts with `/setup`, and a
+    // hand-rolled prefix test is how the two namespaces get folded into one.
+    expect(MIDDLEWARE).toMatch(
+      /if \(updateInProgress && isSetupApiPath\(pathname\)\) \{\s*\n\s*res\.headers\.set\(UPDATE_LOCK_HEADER, "1"\);/,
+    );
+  });
+
+  it("still refuses to REDIRECT an API call", () => {
+    // Defect #304: an API surface answering a navigation redirect with HTML.
+    // The header is the whole point — it carries the fact without moving the
+    // request. The redirect stays gated on a desktop PAGE path.
+    expect(MIDDLEWARE).toMatch(/if \(isDesktopPagePath\(pathname\) && updateInProgress\)/);
+  });
+
+  it("turns the header into a navigation from a request the desktop already makes", () => {
+    // Read off the pending-actions poll rather than a new interval or endpoint:
+    // the lock is read for the redirect regardless, so the header is free, and
+    // nothing new has to be polled for a twice-a-year event.
+    expect(DESKTOP).toMatch(/res\.headers\.get\(UPDATE_LOCK_HEADER\) === "1"/);
+    // `replace`, not `assign`: the page it leaves is one the middleware would
+    // bounce straight back, so it must not be left in history.
+    expect(DESKTOP).toMatch(/window\.location\.replace\(UPDATING_PAGE\)/);
+  });
+
+  it("keeps both constants out of the fs-importing module", () => {
+    // update-lock.ts opens with `import fs`, and the desktop is a client
+    // component — importing the constants from there would drag Node's fs into
+    // the browser bundle, which is the exact reason update-constants.ts exists.
+    expect(CONSTANTS).toMatch(/export const UPDATE_LOCK_HEADER = "x-clawbox-update-lock"/);
+    expect(CONSTANTS).toMatch(/export const UPDATING_PAGE = "\/updating"/);
+    expect(CONSTANTS).not.toMatch(/^import /m);
+    expect(DESKTOP).toMatch(/from "@\/lib\/update-constants"/);
+    expect(DESKTOP).not.toMatch(/from "@\/lib\/update-lock"/);
+  });
+});
+
 describe("the updating screen tells the truth about escaping", () => {
   const PAGE = readFileSync(path.join(REPO, "src/app/updating/page.tsx"), "utf-8");
 

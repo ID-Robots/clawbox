@@ -12,9 +12,12 @@ export const dynamic = "force-dynamic";
 /**
  * The extra folders the owner wants indexed.
  *
- * Backed by OpenClaw's own `memory.search.extraPaths`, which is what actually
- * governs indexing — so this reads and writes the setting that takes effect,
- * rather than a ClawBox-side mirror that could drift away from it.
+ * Backed by whatever actually governs indexing on this edition — so this reads
+ * and writes the setting that takes effect, never a mirror of it that could
+ * drift away. Where there is an OpenClaw that is its own
+ * `memory.search.extraPaths`; where there is not, ClawBox is the indexer
+ * (`src/lib/memory-index-local.ts`) and its own store IS the setting. The
+ * no-mirror invariant is kept either way, and no box holds two copies.
  *
  * OWNER ONLY. The agent must not be able to widen what gets indexed: the whole
  * point of the list is that the owner chose it.

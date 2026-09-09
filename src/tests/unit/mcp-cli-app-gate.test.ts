@@ -258,9 +258,11 @@ d("clawbox app open — when the harness cannot be determined", () => {
   // permission change, a partial reflash. The MCP resolves that to the smaller
   // TOOL SET on purpose — an unreadable lock must not hand a device the shell
   // and file tools. The APP sets are not nested, so the same doubt cannot fail
-  // closed onto one harness: answering "hermes" hides `store`, `openclaw` and
-  // `memory-shard` from a box that has them, and answering "openclaw" ticks off
-  // apps a Hermes box does not have. Both sets are hidden and the reason said.
+  // closed onto one harness: answering "hermes" hides `store` and `openclaw`
+  // from a box that has them, and answering "openclaw" ticks off apps a Hermes
+  // box does not have. Both sets are hidden and the reason said. (Memory Shard
+  // is on neither set any more — every edition has an index — so it stays
+  // offered here, like `settings`.)
   //
   // The device is NOT asked here, and that is deliberate:
   // /setup-api/harness/active resolves through `readEdition()` — the same file
@@ -280,7 +282,7 @@ d("clawbox app open — when the harness cannot be determined", () => {
     // it would tick off `store` and `openclaw` on a box whose lock nobody could
     // read, and deny a Hermes box its own dashboard.
     activeHarness = "openclaw";
-    for (const appId of ["hermes", "hermes-skills", "store", "openclaw", "memory-shard"]) {
+    for (const appId of ["hermes", "hermes-skills", "store", "openclaw"]) {
       posted = [];
       const r = await cli(["app", "open", appId], "openclaw", { lockBody: NO_EDITION });
       expect(r.status, `${appId} must be refused`).toBe(1);
@@ -295,9 +297,11 @@ d("clawbox app open — when the harness cannot be determined", () => {
     const r = await cli(["app", "list"], "openclaw", { lockBody: NO_EDITION });
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain("settings —");
-    for (const appId of ["hermes —", "store —", "openclaw —", "memory-shard —"]) {
+    for (const appId of ["hermes —", "store —", "openclaw —"]) {
       expect(r.stdout).not.toContain(appId);
     }
+    // Not gated on a harness any more, so an unreadable lock does not hide it.
+    expect(r.stdout).toContain("memory-shard —");
     expect(r.stdout).toMatch(/harness/i);
   });
 

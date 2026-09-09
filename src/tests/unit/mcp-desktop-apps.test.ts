@@ -80,9 +80,18 @@ describe("MCP built-in apps match the desktop registry", () => {
   it("hides only the other harness's apps", () => {
     expect(idsFor("hermes")).not.toContain("openclaw");
     expect(idsFor("hermes")).not.toContain("store");
-    expect(idsFor("hermes")).not.toContain("memory-shard");
     expect(idsFor("openclaw")).not.toContain("hermes");
     expect(idsFor("openclaw")).not.toContain("hermes-skills");
+  });
+
+  it("offers Memory Shard on BOTH harnesses, because both have an index now", () => {
+    // It was OpenClaw-only while the app was OpenClaw's memory index and
+    // Hermes shipped no equivalent. ClawBox owns an index on that edition now
+    // (src/lib/memory-index-local.ts) over the same embedder, which every
+    // edition installs — so `ui_open_app("memory-shard")` has somewhere to go.
+    expect(idsFor("hermes")).toContain("memory-shard");
+    expect(idsFor("openclaw")).toContain("memory-shard");
+    expect([...HARNESS_ONLY_APP_IDS]).not.toContain("memory-shard");
   });
 
   it("lists exactly the desktop registry, edition-gated, in registry order", () => {

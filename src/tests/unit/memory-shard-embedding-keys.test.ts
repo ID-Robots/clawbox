@@ -16,8 +16,10 @@ const OPENCLAW_PACKAGE_JSON = "/home/clawbox/.npm-global/lib/node_modules/opencl
 const PROXY_URL = "http://127.0.0.1/setup-api/local-ai/embed/v1";
 const TOKEN = "t".repeat(64);
 
-const { runOpenclawConfigSetBatch, readFile } = vi.hoisted(() => ({
+const { runOpenclawConfigSetBatch, readFile, openclawIsAbsent, stampLocalEmbeddingIdentity } = vi.hoisted(() => ({
   runOpenclawConfigSetBatch: vi.fn(async () => ""),
+  openclawIsAbsent: vi.fn(() => false),
+  stampLocalEmbeddingIdentity: vi.fn(async () => {}),
   readFile: vi.fn<(path: string, encoding: string) => Promise<string>>(),
 }));
 
@@ -28,9 +30,18 @@ vi.mock("@/lib/config-store", () => ({
 }));
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn(async () => ({})),
+  readConfigStrict: vi.fn(async () => ({})),
   runOpenclawConfigSetBatch,
+  openclawIsAbsent,
   // The npm --prefix layout of /home/clawbox/.npm-global on the box.
   findOpenclawBin: () => "/home/clawbox/.npm-global/bin/openclaw",
+}));
+// The other arm, stubbed rather than exercised: this file is about the keys
+// written into openclaw.json, and the local index has suites of its own.
+vi.mock("@/lib/memory-index-local", () => ({
+  stampLocalEmbeddingIdentity,
+  readLocalSources: vi.fn(async () => []),
+  writeLocalSources: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/embed-server", () => ({
   getEmbedProxyBaseUrl: () => PROXY_URL,
@@ -63,6 +74,8 @@ function installedCore(version: string): void {
 beforeEach(() => {
   runOpenclawConfigSetBatch.mockClear();
   readFile.mockReset();
+  stampLocalEmbeddingIdentity.mockClear();
+  openclawIsAbsent.mockReturnValue(false);
 });
 
 describe("embeddingConfigHome", () => {
@@ -130,5 +143,17 @@ describe("switchToLocalEmbeddings", () => {
     readFile.mockResolvedValue("{ not json");
     await switchToLocalEmbeddings();
     expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith(V2_OPS);
+  });
+
+  it("writes NOTHING into openclaw.json on the edition that has no OpenClaw", async () => {
+    // There is no external client to point at the embedder on that SKU —
+    // ClawBox is the client — so the only thing left to record is which model
+    // the vectors about to be written belong to. Spawning the CLI there would
+    // be spawning a binary that is not installed.
+    openclawIsAbsent.mockReturnValue(true);
+    await switchToLocalEmbeddings();
+    expect(stampLocalEmbeddingIdentity).toHaveBeenCalledTimes(1);
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    expect(readFile).not.toHaveBeenCalled();
   });
 });

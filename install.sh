@@ -4067,16 +4067,19 @@ ensure_embed_model_cached() {
   echo "  Memory-search model cached for offline use"
 }
 
-# Gated on the OpenClaw harness, unlike step_llamacpp_model: memory search is
-# an OpenClaw feature, and a hermes box has no core to point at the 639 MB
-# this would fetch.
+# Cache the memory-search GGUF.
+#
+# NO HARNESS GATE HERE, deliberately, and the gate moved to the CALL SITES
+# rather than away: `/setup-api/embed/install` dispatches this very step as
+# `--step embed_model`, and on the SKU with no OpenClaw that is the Memory
+# Shard wizard's own provisioning click — ClawBox owns the index there
+# (src/lib/memory-index-local.ts) and the model is what it embeds with. What
+# must NOT happen is a flash spending 639 MB on a box that may never switch
+# the feature on, so the main install flow keeps asking `has_openclaw_harness`
+# before it calls this.
 step_embed_model() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping the memory-search model cache"
-    return 0
-  fi
-  if ! has_openclaw_harness; then
-    echo "  Memory search is an OpenClaw feature; this edition does not include it."
     return 0
   fi
   # `hf` is installed by step_llamacpp_install. Without it there is nothing
@@ -10045,7 +10048,18 @@ log "Installing llama.cpp runtime..."
 step_llamacpp_install
 
 log "Caching the memory-search model..."
-step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
+# The GATE is here rather than inside step_embed_model, because
+# /setup-api/embed/install dispatches that same step as `--step embed_model` and
+# on the Hermes SKU that is the Memory Shard wizard's own provisioning click.
+# What must not happen is a flash spending 639 MB on a box whose owner may never
+# switch the feature on — so the step is announced either way (the progress
+# counter counts one line per step and every edition runs this one) and only the
+# download is conditional.
+if has_openclaw_harness; then
+  step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
+else
+  echo "  Deferred: Memory Shard fetches it when its setup is run."
+fi
 
 log "Installing Chromium..."
 step_chromium_install

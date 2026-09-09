@@ -36,14 +36,18 @@ import {
  * window about something else. ClawKeep keeps a one-line card pointing here.
  *
  * Deliberately NOT gated on ClawKeep pairing: the memory index is entirely
- * local, and an unpaired box still has one. It IS OpenClaw's index — its own
- * store and its own embedding provider (`clawkeep-memory.ts`) — so the desktop
- * lists the app on the OpenClaw harness only, the way ClawKeep gated the card
- * on the OpenClaw CLI.
+ * local, and an unpaired box still has one.
  *
- * Everything it shows comes from `openclaw memory status` through
- * /setup-api/clawkeep/memory, which already strips paths, provider errors and
- * raw CLI output before they reach the browser. The routes kept their
+ * NOT gated on the harness either, any more. The app WAS OpenClaw-only,
+ * because the index it drew was OpenClaw's own store and embedding provider
+ * and the Hermes SKU has nothing equivalent; on that edition ClawBox now owns
+ * an index itself (`src/lib/memory-index-local.ts`) over the same embedder,
+ * which every edition installs. This component is untouched by that: it reads
+ * /setup-api/clawkeep/memory and the server decides which arm answers, so
+ * there is one face over two backends rather than two faces.
+ *
+ * What it shows is a sanitised status — paths, provider errors and raw CLI
+ * output are stripped before they reach the browser. The routes kept their
  * `clawkeep/` prefix on purpose: renaming them would break nothing for the
  * browser and everything for a box mid-update, whose bundle and server can be
  * a version apart.

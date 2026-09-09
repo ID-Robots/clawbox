@@ -336,8 +336,34 @@ describe("step_embed_model — driven against stubs", () => {
     });
   }
 
+  it("downloads on a box with no OpenClaw too — that is the wizard's own dispatch", () => {
+    // It used to refuse here ("Memory search is an OpenClaw feature"), which
+    // was right while the index it fed was OpenClaw's. ClawBox owns an index on
+    // that edition now, `/setup-api/embed/install` dispatches THIS step as
+    // `--step embed_model`, and it is the Memory Shard wizard's provisioning
+    // click — so a refusal would make the feature unreachable on the one SKU
+    // that needs the route.
+    const r = run({ hermes: true });
+    expect(r.out).toContain("RC=0");
+    expect(r.calls).toEqual([
+      expect.stringMatching(/^hf download Qwen\/Qwen3-Embedding-0\.6B-GGUF /),
+    ]);
+    expect(r.cached).toBe(true);
+  });
+
+  it("is not what a Hermes FLASH spends 639 MB on — the main flow defers it", () => {
+    // The gate moved to the call site rather than away: a box whose owner never
+    // opens Memory Shard must not pay for the model at install time. Read from
+    // the shipped installer, because that is where the decision now lives.
+    const source = fs.readFileSync(INSTALL_SH_PATH, "utf8");
+    const at = source.indexOf('log "Caching the memory-search model..."');
+    expect(at, "the step must still be announced on every edition").toBeGreaterThan(-1);
+    const block = source.slice(at, at + 900);
+    expect(block).toMatch(/if has_openclaw_harness; then\n\s*step_embed_model/);
+    expect(block).toMatch(/else\n\s*echo "  Deferred:/);
+  });
+
   for (const [name, opts, said] of [
-    ["a hermes box with no core to point at the model", { hermes: true }, /does not include it/],
     ["the e2e container", { testMode: true }, /skipping/],
     ["a box without the Hugging Face CLI", { hf: false }, /Hugging Face CLI not installed/],
   ] as const) {

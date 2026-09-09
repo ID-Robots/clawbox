@@ -41,6 +41,7 @@ import { HARNESSES, type Harness } from "@/lib/harness";
 import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { ensureHermesGateway, retireHermesUserGateway, setHermesTelegramToken } from "@/lib/hermes-telegram";
 import { memAvailableMb } from "@/lib/mem-available";
+import { carryMemorySourcesTo } from "@/lib/memory-index-local";
 import { findOpenclawBin, readConfig, restartGateway, setTelegramToken } from "@/lib/openclaw-config";
 import { freeBytes } from "@/lib/project-import";
 import { rootStepUnit } from "@/lib/root-step-journal";
@@ -106,6 +107,8 @@ export const SWAP_NOTES = {
     "The Telegram bot token could not be carried over — enter it again in Settings → Channels",
   identityNotSynced:
     "The agent's persona could not be refreshed for OpenClaw — it keeps what its workspace already had",
+  memoryFoldersNotCarried:
+    "The folders Memory Shard reads could not be carried over — add them again in Memory Shard → Settings",
   hermesGatewayLeft:
     "Hermes' message gateway may still be running — run `hermes gateway uninstall` in the Terminal so it does not fight OpenClaw for the Telegram bot",
 } as const;
@@ -760,6 +763,20 @@ export async function carryOverAfterSwap(target: Harness, emit: SwapEmit): Promi
       emit(`Hermes' message gateway could not be retired: ${withoutSecrets(errorText(err), secrets)}`);
       notes.push(SWAP_NOTES.hermesGatewayLeft);
     }
+  }
+
+  // ── Memory Shard's folders ──
+  // Before the Telegram block, which has two early returns of its own: a box
+  // with no bot token must still keep the folders its owner chose. The two
+  // arms hold the list in different places by design — the one that INDEXES
+  // owns the setting — so without this the box comes up with Memory Shard set
+  // up, switched on, and reading nothing.
+  try {
+    const carried = await carryMemorySourcesTo(target);
+    if (carried) emit(`Carried ${carried} indexed folder${carried === 1 ? "" : "s"} over.`);
+  } catch (err) {
+    emit(`The indexed folders could not be carried over: ${withoutSecrets(errorText(err), secrets)}`);
+    notes.push(SWAP_NOTES.memoryFoldersNotCarried);
   }
 
   // ── Telegram ──

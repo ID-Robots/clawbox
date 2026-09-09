@@ -58,6 +58,7 @@ import { registerEmailTools } from "./tools/email";
 import { registerMediaTools } from "./tools/media";
 import { registerOrientationTools } from "./tools/orientation";
 import { registerSkillTools } from "./tools/skills";
+import { registerMemoryTools } from "./tools/memory";
 import { registerSystemTools } from "./tools/system";
 
 const VERSION = "3.2.0";
@@ -186,6 +187,7 @@ export async function buildServer(
   // transport connects, so tools/list is stable for the process lifetime.
   registerOrientationTools(reg, ctx);
   registerSkillTools(reg);
+  registerMemoryTools(reg);
   registerAiTools(reg, ctx);
   registerSystemTools(reg, ctx);
   registerDesktopTools(reg, ctx);
