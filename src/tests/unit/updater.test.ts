@@ -3605,7 +3605,7 @@ describe("updater", () => {
  */
 describe("getVersionInfo harness reporting", () => {
   const HERMES_BANNER =
-    "Hermes Agent v0.20.5 (2026.8.19) — upstream 261a4efb — local 10914727\n" +
+    "Hermes Agent v0.21.1 (2026.9.7) · upstream d0df3248 · local 2237be35\n" +
     "Install directory: /home/clawbox/.hermes/hermes-agent";
 
   beforeEach(() => {
@@ -3632,7 +3632,7 @@ describe("getVersionInfo harness reporting", () => {
     const info = await versionsFor("hermes");
 
     expect(info.edition).toBe("hermes");
-    expect(info.hermes?.current).toBe("v0.20.5");
+    expect(info.hermes?.current).toBe("v0.21.1");
     // TASK-613: and it asks for the banner WITHOUT the agent's passive update
     // check. `--version` is the only hermes call that runs one, and on a
     // six-hourly cache miss that check does a `git fetch` plus a GitHub
@@ -3659,7 +3659,7 @@ describe("getVersionInfo harness reporting", () => {
 
     expect(info.edition).toBe("dual");
     expect(info.openclaw.current).toBe("1.0.0");
-    expect(info.hermes?.current).toBe("v0.20.5");
+    expect(info.hermes?.current).toBe("v0.21.1");
   });
 
   it("reports a null hermes version rather than failing when the CLI is missing", async () => {

@@ -918,8 +918,8 @@ OPENCLAW_VERSION="2026.8.1"
 # Bump the default in a PR, ship it through beta -> main, and the fleet
 # follows on its next update.
 #
-# Current pin: upstream tag v2026.8.19 == "Hermes Agent v0.20.5".
-HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-fcbd1076a93841fa88855acce810e342a5b78101}"
+# Current pin: upstream tag v2026.9.7 == "Hermes Agent v0.21.1" (TASK-784).
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-2237be355906fbe6065ce1815711eee52b2d646e}"
 
 # The OpenAI Codex CLI (TASK-439). The pinned version and the digest that
 # authorises it live in config/codex-target.txt; these two are only WHERE the
@@ -3472,6 +3472,96 @@ step_openclaw_setup() {
   esac
 }
 
+# Put the Hermes dashboard back onto the agent the step above just replaced.
+#
+# A pinned upgrade is a move-aside plus a FRESH CLONE, and the tree it moved
+# aside is deleted a few lines later — while clawbox-hermes-dashboard is a
+# long-lived Python process holding the OLD files open. Measured on the Hermes
+# box (TASK-784) right after an upgrade from v0.20.5 to v0.21.1: the dashboard
+# was still the pid it had been an hour earlier, `grep -c "(deleted)"
+# /proc/<pid>/maps` returned 84, and `journalctl -u clawbox-hermes-dashboard`
+# had NO entries — nothing had signalled it at all. Python imports lazily, so
+# such a process keeps answering until it reaches a module it had not yet
+# imported, which is now unreachable. A full chat battery PASSED on that box in
+# that state — three turns, correct answers, all of it served by an agent that
+# no longer existed on disk. That is the false green this exists to close.
+#
+# `Restart=always` is not a mechanism here: nothing stops the process, so
+# nothing restarts it, and neither unit has an ExecStop.
+#
+# `try-restart`, never `restart`: `restart` STARTS a stopped unit, and a box
+# whose Hermes units are stopped and disabled — the openclaw direction of
+# step_edition_foreign_teardown, or a fresh install where step_hermes_edition
+# has not installed them yet — must never have them resurrected by an agent
+# upgrade. Same invariant src/lib/hermes-dashboard-control.ts is built around
+# and the same call refresh_agent_coding_tools makes, for the same reason.
+#
+# HARNESS-FIRST, and the answer is that there is nothing to defer to. Hermes
+# owns a STOP — `hermes dashboard --stop`, its own SIGTERM-grace-SIGKILL path,
+# which this unit already runs as an ExecStartPre — but no restart hook and no
+# supervision of its own. The only thing upstream offers around an upgrade is
+# `hermes update`, which reattaches a detached checkout to main
+# (hermes_cli/update_cmd.py), the exact outcome the pin exists to prevent. The
+# proxy is not Hermes's at all: scripts/hermes-dashboard-proxy.js is our node
+# process. systemd owns both units on this box, so systemd is what gets asked.
+#
+# Returns non-zero when a unit that WAS running could not be put back on the new
+# agent: "still serving files that were deleted" is a real outcome and the
+# update's own status has to carry it, not just a line in the journal.
+hermes_dashboard_restart_after_install() {
+  local unit before after waited budget rc=0
+  # Overridable so a slow box — or a test that cannot spend the whole budget
+  # proving a unit never came back — can say so without a rebuild, the same
+  # shape as HERMES_DASHBOARD_WAIT_MS in the web app. Guarded: a malformed
+  # value would make the `-lt` below a fatal arithmetic error and take the step
+  # down AFTER a successful install.
+  budget="${HERMES_DASHBOARD_RESTART_WAIT_S:-90}"
+  case "$budget" in ''|*[!0-9]*) budget=90 ;; esac
+
+  for unit in clawbox-hermes-dashboard.service clawbox-hermes-dashboard-proxy.service; do
+    if [ "$(systemctl is-active "$unit" 2>/dev/null || true)" != "active" ]; then
+      echo "  $unit is not running — it will pick up the new agent when it next starts"
+      continue
+    fi
+    # Read BEFORE the restart, because a NEW main process is the only proof one
+    # happened: `try-restart` exits 0 both when it restarted the unit and when
+    # the unit had stopped in the gap since the probe above, and it returns as
+    # soon as the start job is queued — before a unit that cannot come back has
+    # failed. Reading its exit code as the outcome would be this step's
+    # original defect in a new place.
+    before="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+    if ! systemctl try-restart "$unit" >/dev/null 2>&1; then
+      echo "  Warning: could not restart $unit — it is still serving the agent this step replaced" >&2
+      rc=1
+      continue
+    fi
+    waited=0
+    after="$before"
+    while :; do
+      after="$(systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+      # Empty (no systemd, a failed query), 0 (stopped or still in
+      # ExecStartPre) and the pid we started with are all "not yet".
+      case "$after" in
+        ''|0|"$before") ;;
+        *) break ;;
+      esac
+      [ "$waited" -lt "$budget" ] || break
+      sleep 1
+      waited=$((waited + 1))
+    done
+    case "$after" in
+      ''|0|"$before")
+        echo "  Warning: $unit did not report a new main process within ${budget}s — it may still be serving the agent this step replaced (systemctl status $unit)" >&2
+        rc=1
+        ;;
+      *)
+        echo "  Restarted $unit on the new agent (main pid ${before:-unknown} -> $after)"
+        ;;
+    esac
+  done
+  return "$rc"
+}
+
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every
 # edition that runs Hermes — the hermes SKU and the premium dual SKU (which was
 # previously skipped here, so a dual box got the switcher but no second
@@ -3487,6 +3577,10 @@ step_hermes_install() {
   # `local`, so a second call in one shell cannot inherit the first one's
   # answer.
   local _hermes_off_pin=0
+  # Whether a unit that was serving the OLD agent is still serving it. Same
+  # `local` reason, and the same channel: the box works, but it is not running
+  # what is on its disk.
+  local _hermes_dash_stale=0
 
   # The pin is spliced into a URL below and the file that URL returns is piped
   # into bash, so it is validated before it is used. A malformed value — a tag
@@ -3567,7 +3661,7 @@ step_hermes_install() {
   fi
 
   # A version string cannot answer "is this the pinned build?": upstream prints
-  # the same `v0.20.5` for the tag and for every untagged commit after it, and
+  # the same `v0.21.1` for the tag and for every untagged commit after it, and
   # there are hundreds of those a week. The checkout's HEAD is the only proof,
   # so HEAD is what decides. Read as the clawbox user for the same reason the
   # probe is: git refuses to operate on a repository owned by somebody else
@@ -3734,6 +3828,12 @@ step_hermes_install() {
     # directory a later factory reset has to be able to delete.
     rm -rf "$agent_dir.broken"
 
+    # BEFORE the bridge warm-up below, not after it. The tree the dashboard is
+    # executing has just been deleted; the warm-up is allowed 300 s and has
+    # nothing to do with the dashboard, so running it first would hold the
+    # box's chat backend on files that are gone for five more minutes.
+    hermes_dashboard_restart_after_install || _hermes_dash_stale=1
+
     # The upgrade above is a move-aside plus a FRESH clone, and the bridge's
     # ~80 MB node_modules is untracked — so every pinned upgrade deletes it.
     # Nothing is broken by that: the pairing manager runs this same `npm
@@ -3804,12 +3904,16 @@ step_hermes_install() {
   # The same two-part test the step's own probe makes (a shim alone is a
   # four-line wrapper and proves nothing about the agent under ~/.hermes).
   if [ -x "$shim" ] && [ -x "$venv_python" ]; then
-    # Runnable — and `$_hermes_off_pin` is the second half of the answer: an
-    # install that landed off the pin leaves the box working on a build we do
-    # not ship, which the fleet has to hear about even though nothing here is
-    # broken. Default 0, so every path that never attempted an upgrade returns
-    # 0 exactly as before.
-    return "$_hermes_off_pin"
+    # Runnable — and the two flags are the rest of the answer. An install that
+    # landed off the pin leaves the box working on a build we do not ship; a
+    # dashboard that could not be restarted leaves it working on a build that
+    # is no longer on its disk. Neither is broken, both have to reach the
+    # fleet. Both default 0, so every path that never attempted an upgrade
+    # returns 0 exactly as before.
+    if [ "$_hermes_off_pin" -ne 0 ] || [ "$_hermes_dash_stale" -ne 0 ]; then
+      return 1
+    fi
+    return 0
   fi
   echo "  Warning: the Hermes agent is still not runnable after this step" >&2
   return 1

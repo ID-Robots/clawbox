@@ -242,7 +242,7 @@ describe("step_hermes_install installs one pinned Hermes release", () => {
   });
 
   it("decides pinned-or-not from HEAD, never from the version string", () => {
-    // `hermes --version` prints the same v0.20.5 for the tag and for every
+    // `hermes --version` prints the same v0.21.1 for the tag and for every
     // untagged commit after it — hundreds a week — so a version comparison
     // could never see the difference. Only HEAD can.
     expect(HERMES_CODE).toMatch(/git -C "\$agent_dir" rev-parse HEAD/);
@@ -471,6 +471,17 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     // Whether the stubbed npm succeeds. A registry that is down must cost the
     // owner a warning and nothing else.
     npmOk = true,
+    // Whether the two Hermes units are RUNNING when the step starts. Default
+    // false, which is the fresh-install shape: step_hermes_edition has not
+    // installed them yet, so there is nothing to restart and nothing to say.
+    dashRunning = false,
+    proxyRunning = false,
+    // Whether `systemctl try-restart` succeeds.
+    restartOk = true,
+    // Whether a restarted unit comes back with a NEW main process. `false` is
+    // the unit that was asked and never returned — the case a step that reads
+    // try-restart's exit code as the outcome cannot tell from success.
+    newPid = true,
   } = {}) {
     // The reachability precheck is the `-o /dev/null` call; anything else is
     // the real installer being fetched to be piped into bash.
@@ -518,6 +529,47 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       ["#!/bin/sh", 'printf "%s\\n" "$*" > npm-ran', 'exit "$NPM_RC"', ""].join(NL),
       { mode: 0o755 },
     );
+    // systemd, stubbed as a real executable for the same reason curl is — and
+    // stubbed UNCONDITIONALLY, so no case in this file can ever reach the
+    // machine's own systemctl. It records every invocation, so "was a restart
+    // issued at all" is directly observable, and it models the one thing an
+    // exit code cannot express: whether the unit came back as a NEW process.
+    fs.mkdirSync(path.join(tmp, "sysd"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmp, "bin", "systemctl"),
+      [
+        "#!/bin/sh",
+        'printf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"',
+        "unit=",
+        'for a in "$@"; do case "$a" in *.service) unit="$a" ;; esac; done',
+        "active=0",
+        'case "$unit" in',
+        '  clawbox-hermes-dashboard.service) [ "$DASH_ACTIVE" = "1" ] && active=1 ;;',
+        '  clawbox-hermes-dashboard-proxy.service) [ "$PROXY_ACTIVE" = "1" ] && active=1 ;;',
+        "esac",
+        'case "$1" in',
+        "  is-active)",
+        // An inactive unit exits non-zero, exactly as systemd's does.
+        '    if [ "$active" = "1" ]; then echo active; exit 0; fi',
+        "    echo inactive; exit 3 ;;",
+        "  show)",
+        // A stopped unit reports MainPID=0; a running one reports its pid, and
+        // a different one once it has actually been restarted.
+        '    if [ "$active" != "1" ]; then echo 0; exit 0; fi',
+        '    if [ -f "$SYSD_STATE/$unit.restarted" ] && [ "$NEW_PID" = "1" ]; then',
+        "      echo 4242; else echo 1111; fi",
+        "    exit 0 ;;",
+        "  try-restart)",
+        '    [ "$RESTART_OK" = "1" ] || exit 1',
+        // try-restart is a no-op on a unit that is not running — and exits 0.
+        '    [ "$active" = "1" ] && touch "$SYSD_STATE/$unit.restarted"',
+        "    exit 0 ;;",
+        "esac",
+        "exit 0",
+        "",
+      ].join(NL),
+      { mode: 0o755 },
+    );
     // `git -C <dir> rev-parse HEAD` is the only git the step runs, and it runs
     // it through `env`, which does a PATH lookup — so, like curl, it has to be
     // a real executable and not a shell function.
@@ -559,7 +611,10 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       // lookup and never sees a function. A function stub therefore let the
       // precheck reach the real network — the test passed for the wrong reason.
       'export PATH="$1/bin:$PATH"',
-      "sed -n '/^step_hermes_install() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
+      // Both functions: the step calls the restart helper, so lifting the step
+      // alone would only prove that bash cannot find it.
+      "sed -n '/^hermes_dashboard_restart_after_install() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
+      "sed -n '/^step_hermes_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       '. "$1/fn.sh"',
       // Merged, because the warnings that matter here are all on stderr.
       "step_hermes_install 2>&1",
@@ -584,7 +639,20 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
         {
           encoding: "utf8",
           stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env, BRIDGE: bridge, NPM_RC: npmOk ? "0" : "1" },
+          env: {
+            ...process.env,
+            BRIDGE: bridge,
+            NPM_RC: npmOk ? "0" : "1",
+            SYSTEMCTL_LOG: path.join(tmp, "systemctl-log"),
+            SYSD_STATE: path.join(tmp, "sysd"),
+            DASH_ACTIVE: dashRunning ? "1" : "0",
+            PROXY_ACTIVE: proxyRunning ? "1" : "0",
+            RESTART_OK: restartOk ? "1" : "0",
+            NEW_PID: newPid ? "1" : "0",
+            // The wait for a replacement main process, cut to a value a test
+            // can afford to let expire. The shipped default is 90 s.
+            HERMES_DASHBOARD_RESTART_WAIT_S: "2",
+          },
         },
       );
     } catch (e: unknown) {
@@ -593,9 +661,14 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
     }
     const npmMarker = path.join(bridgeDir(), "npm-ran");
+    const sysLog = path.join(tmp, "systemctl-log");
     return {
       code,
       out,
+      /** Every `systemctl …` the step ran, in order. */
+      systemctl: exists(sysLog)
+        ? fs.readFileSync(sysLog, "utf8").split(NL).filter(Boolean)
+        : ([] as string[]),
       installerRan: exists(path.join(tmp, "installer-ran")),
       // Read out of the BRIDGE directory, so a non-null value is already proof
       // that npm ran with the bridge as its working directory.
@@ -983,6 +1056,168 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     expect(r.out).toMatch(/Hermes installed \(Hermes 9\.9\.9\) at the pinned commit/);
     expect(headOf(agentDir())).toBe(PIN);
     expect(exists(`${agentDir()}.broken`)).toBe(false);
+  });
+
+  /**
+   * TASK-784. The upgrade replaces ~/.hermes/hermes-agent with a FRESH CLONE
+   * and then deletes the tree it moved aside — while `clawbox-hermes-dashboard`
+   * is a long-lived process that mapped the old files. Measured on the Hermes
+   * box after `install.sh --step hermes_install` took it from v0.20.5 to
+   * v0.21.1: the dashboard was still the pid it had been an hour earlier,
+   * `grep -c "(deleted)" /proc/<pid>/maps` returned 84, and
+   * `journalctl -u clawbox-hermes-dashboard` had no entries at all — it was
+   * never signalled.
+   *
+   * Python imports lazily, so the process keeps serving until it reaches a
+   * module it had not yet imported, which is now unreachable. A full chat
+   * battery PASSED on that box in that state: three turns, 200s, correct
+   * answers — all of it the OLD agent answering. That is what makes this a
+   * false green rather than an outage, and why nothing downstream catches it.
+   *
+   * `Restart=always` on the unit is not a mechanism: nothing stops the process,
+   * so nothing restarts it. Neither unit has an ExecStop either.
+   */
+  const RESTART_UNITS = [
+    "clawbox-hermes-dashboard.service",
+    "clawbox-hermes-dashboard-proxy.service",
+  ];
+  /** The `try-restart` lines out of the recorded systemctl calls. */
+  const restartsIn = (calls: string[]) => calls.filter((c) => c.startsWith("try-restart "));
+
+  it("a pinned upgrade restarts the dashboard so the box stops serving deleted files", () => {
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ dashRunning: true, proxyRunning: true });
+
+    expect(r.code).toBe(0);
+    expect(r.installerRan).toBe(true);
+    // Both units: the proxy holds a brokered Hermes session against the
+    // dashboard process that is being replaced.
+    expect(restartsIn(r.systemctl)).toEqual(RESTART_UNITS.map((u) => `try-restart ${u}`));
+    // Said out loud, in the step's own output — an owner reading an update log
+    // has to be able to see that the new agent is the one now serving.
+    expect(r.out).toMatch(/Restarted clawbox-hermes-dashboard\.service/);
+    expect(r.out).toMatch(/Restarted clawbox-hermes-dashboard-proxy\.service/);
+  });
+
+  it("verifies the restart instead of reading try-restart's exit code as the outcome", () => {
+    // `systemctl try-restart` exits 0 for "restarted it" AND for "it was not
+    // running, so I did nothing" — and returns before a unit that then fails
+    // to come back has failed. A step that claims a restart on that exit code
+    // is this PR's own defect in miniature, so the new main process is what
+    // proves it.
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ dashRunning: true, proxyRunning: true, newPid: false });
+
+    expect(restartsIn(r.systemctl)).toHaveLength(2);
+    expect(r.out).not.toMatch(/Restarted clawbox-hermes-dashboard\.service/);
+    expect(r.out).toMatch(/did not report a new main process/);
+    // A box left serving an agent that is no longer on disk is not a completed
+    // fixup, and `optional_step` is what carries that to the update's status.
+    expect(r.code).toBe(1);
+  });
+
+  it("a restart that systemd refuses is reported, not swallowed", () => {
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ dashRunning: true, proxyRunning: true, restartOk: false });
+
+    expect(r.out).toMatch(/could not restart clawbox-hermes-dashboard\.service/);
+    expect(r.code).toBe(1);
+    // The install itself still happened and is still reported — the agent on
+    // disk is the pinned one either way.
+    expect(headOf(agentDir())).toBe(PIN);
+    expect(r.out).toMatch(/Hermes installed \(Hermes 9\.9\.9\) at the pinned commit/);
+  });
+
+  it("a box already on the pin restarts nothing at all", () => {
+    // The overwhelmingly common case: post_update runs this step on every
+    // update on every hermes/dual box. Nothing changed under the dashboard, so
+    // bouncing the box's chat backend would be a self-inflicted outage.
+    giveShim();
+    giveAgent({ venv: true, head: PIN });
+
+    const r = run({ dashRunning: true, proxyRunning: true });
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/already installed at the pinned commit/);
+    expect(restartsIn(r.systemctl)).toEqual([]);
+  });
+
+  it("a failed install, whose old agent is restored, restarts nothing", () => {
+    // The restore puts the ORIGINAL checkout back at the original path, so the
+    // running dashboard's mappings are still valid. There is nothing to pick
+    // up, and restarting would cost an owner their chat for no reason.
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ installOk: false, dashRunning: true, proxyRunning: true });
+
+    expect(r.out).toMatch(/Restored the previous agent/);
+    expect(restartsIn(r.systemctl)).toEqual([]);
+  });
+
+  it("an unreachable installer restarts nothing", () => {
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ reachable: false, dashRunning: true, proxyRunning: true });
+
+    expect(r.out).toMatch(/cannot reach the Hermes installer/);
+    expect(restartsIn(r.systemctl)).toEqual([]);
+  });
+
+  it("never STARTS a dashboard that is not running", () => {
+    // The invariant `install-foreign-edition-teardown.test.ts` guards from the
+    // other side: a box whose Hermes units were stopped and disabled — the
+    // openclaw direction of the edition teardown, or a fresh install where
+    // step_hermes_edition has not installed them yet — must not have them
+    // resurrected by an agent upgrade. `try-restart` acts only on a unit that
+    // is running, and the step says what it did instead of claiming a restart.
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ dashRunning: false, proxyRunning: false });
+
+    expect(r.code).toBe(0);
+    expect(r.systemctl.some((c) => /^(start|restart) /.test(c))).toBe(false);
+    expect(r.out).not.toMatch(/Restarted clawbox-hermes-dashboard/);
+    expect(r.out).toMatch(/not running — it will pick up the new agent when it next starts/);
+  });
+
+  it("restarts the dashboard even when the upgrade landed off the pin", () => {
+    // The tree was still replaced, so the running process is still mapping
+    // files that no longer exist. "Not the build we ship" and "serving deleted
+    // code" are two different problems and only one of them is the pin's.
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ installHead: OTHER_COMMIT, dashRunning: true, proxyRunning: true });
+
+    expect(r.out).toMatch(/but HEAD is/);
+    expect(restartsIn(r.systemctl)).toHaveLength(2);
+  });
+
+  it("restarts before the WhatsApp warm-up, not after it", () => {
+    // The warm-up is allowed 300 s. Ordering it in front of the restart would
+    // hold the box on deleted code for five more minutes for a npm install
+    // that has nothing to do with the dashboard.
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ bridge: "fresh", dashRunning: true, proxyRunning: true });
+
+    expect(r.npmArgs).not.toBeNull();
+    const lines = r.out.split(NL);
+    const restartedAt = lines.findIndex((l) => l.includes("Restarted clawbox-hermes-dashboard."));
+    const warmedAt = lines.findIndex((l) => l.includes("Warming up the WhatsApp bridge"));
+    expect(restartedAt).toBeGreaterThanOrEqual(0);
+    expect(warmedAt).toBeGreaterThanOrEqual(0);
+    expect(restartedAt).toBeLessThan(warmedAt);
   });
 
   it("a bridge that already has its node_modules is left alone", () => {
