@@ -556,10 +556,17 @@ async function indexableFilesUnder(root: string): Promise<{ files: string[]; com
  * `contracts__lease.pdf-9f2c1a04bb7e.md`; `origins` from the extractor is what
  * turns that back into `Documents/contracts/lease.pdf`.
  */
-function displayName(source: string, file: string, origins: Record<string, string>): string {
+function displayName(source: string, file: string, origins: Record<string, string>): string | null {
   const origin = origins[path.basename(file)];
   const label = path.basename(source);
-  return path.join(label, origin ?? path.relative(path.resolve(source), file));
+  if (origin) return path.join(label, origin);
+  const relative = path.relative(path.resolve(source), file);
+  // A file that is not UNDER the source has no name in the owner's terms, and
+  // the relative path to it would be a `../../…/data/memory-extracted/…` chain
+  // — ClawBox's own scratch folder, handed to the agent as if it were the
+  // owner's document. Refuse instead: the caller drops the file.
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  return path.join(label, relative);
 }
 
 /** A file this pass will read, held open so nothing can swap it underneath. */
@@ -949,8 +956,17 @@ async function scanSources(sources: readonly string[], signal: AbortSignal | und
         // One file can sit under two overlapping sources; the first to claim
         // it is the one that indexes it.
         if (seen.has(file)) continue;
+        // A derived file the extractor did not name in THIS call is a leftover:
+        // the derived folder outlives a run, so it can hold a copy of a
+        // document the owner has since deleted, or one an extraction cut short
+        // by MAX_FILES never reached. There is no owner-facing name for it, and
+        // the fallback below would be ClawBox's own scratch path — the exact
+        // answer `searchLocalMemory` must never give. Skipped, and reclaimed by
+        // the delete pass on the next complete run.
+        const display = displayName(source, file, origins);
+        if (!display) continue;
         seen.add(file);
-        files.push({ file, source, display: displayName(source, file, origins) });
+        files.push({ file, source, display });
       }
     }
   }

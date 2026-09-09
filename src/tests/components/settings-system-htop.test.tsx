@@ -135,6 +135,19 @@ describe("Settings → System, the figures page", () => {
     expect(within(panel).getByText("3.1")).toBeInTheDocument();
   });
 
+  it("says which figure is which, for a reader who cannot see the columns", async () => {
+    // Two grids of divs read out as "1201 llama-server 42.5 3.1" — four values
+    // and no indication of which is CPU and which is memory. A real table with
+    // scoped headers is what associates them, and the unit is said once in the
+    // header rather than on every cell.
+    await openSection("system");
+    const panel = await screen.findByTestId("settings-processes");
+    expect(within(panel).getByRole("table")).toBeInTheDocument();
+    expect(within(panel).getByRole("columnheader", { name: "CPU %" })).toBeInTheDocument();
+    expect(within(panel).getByRole("columnheader", { name: "Memory %" })).toBeInTheDocument();
+    expect(within(panel).getAllByRole("row")).toHaveLength(PROCESSES.length + 1);
+  });
+
   it("switches the table to the memory ordering when asked", async () => {
     serve(statsResponse({
       cpu: { usage: 12, model: "ARMv8", cores: 6, loadAvg: ["2.69", "2.10", "1.90"], speed: 1800, perCore: [93] },

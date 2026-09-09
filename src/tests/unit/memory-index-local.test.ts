@@ -332,6 +332,38 @@ describe("finding things again", () => {
     expect(embedCalls.types.at(-1)).toBe("query");
   });
 
+  it("never names a file by ClawBox's own scratch folder", async () => {
+    // The derived folder OUTLIVES a run, so it can hold a `.md` copy of a
+    // document the owner has since deleted, or one an extraction cut short by
+    // its file budget never reached. Such a file has no name in the owner's
+    // terms, and the relative path to it is a `../../…/data/memory-extracted/…`
+    // chain — which would be handed to the agent as if it were their document.
+    const { EXTRACT_ROOT, derivedFolderFor } = await import("@/lib/memory-extract");
+    const derived = derivedFolderFor(source);
+    fs.mkdirSync(derived, { recursive: true });
+    // A leftover with no origin: nothing in `source` produced it.
+    fs.writeFileSync(path.join(derived, "gone__lease.pdf-0123456789ab.md"), "The deposit is two months' rent.");
+    // …and one real document, so the folder is walked at all.
+    write("real.txt", "A bicycle is stored in the basement.");
+    await runLocalIndexPass("full");
+    _resetLocalMemoryCacheForTests();
+
+    const hits = await searchLocalMemory("deposit bicycle basement", 10);
+    expect(hits.length).toBeGreaterThan(0);
+    for (const hit of hits) {
+      // `path.basename(EXTRACT_ROOT)` and not the whole path: `path.join`
+      // collapses the `..` segments, so what actually reaches the agent is a
+      // clean-looking `memory-extracted/<folder>/<flat>-<digest>.md` — which is
+      // why an assertion on "starts with .." would have passed either way.
+      expect(hit.path).not.toContain(path.basename(EXTRACT_ROOT));
+      expect(hit.path).not.toContain("0123456789ab");
+      expect(path.isAbsolute(hit.path)).toBe(false);
+    }
+    // The real document is still there — the refusal drops the leftover, not
+    // the folder.
+    expect(hits.some((h) => h.path.endsWith("real.txt.md") || h.path.includes("real"))).toBe(true);
+  });
+
   it("names the file the way the owner does, never by its absolute path", async () => {
     write("lease.md", "The deposit is two months' rent.");
     await runLocalIndexPass("full");

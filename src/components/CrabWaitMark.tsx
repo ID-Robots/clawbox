@@ -67,7 +67,11 @@ export default function CrabWaitMark({
 
   return (
     <div
-      className="relative flex items-center justify-center"
+      // The reduced-motion class belongs on the ROOT: the crab's bob and the
+      // completion fade are siblings of the ring wrapper, so scoped to that
+      // wrapper the media query left the two largest movements running for
+      // someone who had asked the machine to stop moving.
+      className="crab-wait-mark-animated relative flex items-center justify-center"
       style={{ width: size, height: size }}
       data-testid="crab-wait-mark"
     >
@@ -84,7 +88,7 @@ export default function CrabWaitMark({
       `}</style>
 
       <div
-        className="crab-wait-mark-animated absolute inset-0"
+        className="absolute inset-0"
         style={{ ["--crab-orbit" as string]: `${orbitRadius}px` }}
       >
         <div className={`absolute inset-0 rounded-full border-2 ${ringOuter}`} style={{ animation: "crab-wait-pulse-ring 2s ease-in-out infinite" }} />

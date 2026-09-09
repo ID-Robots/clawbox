@@ -135,6 +135,12 @@ describe("a desktop that was already open learns the update started", () => {
   const DESKTOP = readFileSync(path.join(REPO, "src/app/page.tsx"), "utf-8");
   const CONSTANTS = readFileSync(path.join(REPO, "src/lib/update-constants.ts"), "utf-8");
 
+  // These read SOURCE, which is what this whole file does — the module opens
+  // with `import fs` and cannot be loaded here. What they cannot prove is that
+  // the branch is reachable, so the BEHAVIOUR is pinned where the middleware
+  // can actually be invoked: "stamps the lock on a /setup-api answer" and its
+  // two negatives in src/tests/middleware/middleware.test.ts. These say WHY the
+  // code is shaped the way it is; those say that it works.
   it("stamps the lock header on /setup-api while the lock is held", () => {
     // The redirect above only fires on a NAVIGATION, and a page that is already
     // open makes none: it stayed on the desktop, kept polling, and went blank

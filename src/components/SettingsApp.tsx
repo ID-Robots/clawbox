@@ -6100,25 +6100,36 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         </div>
                       )}
                     </div>
-                    <div className="grid grid-cols-[3rem_1fr_2.75rem_2.75rem] gap-x-3 text-[10px] uppercase tracking-widest text-[var(--text-muted)] opacity-50 mb-2">
-                      <span>{t("settings.pid")}</span>
-                      <span />
-                      <span className="text-right">{t("settings.cpu")}</span>
-                      <span className="text-right">{t("settings.memory")}</span>
-                    </div>
-                    <div className="space-y-1.5">
-                      {processRows.map(proc => (
-                        <div key={`${proc.pid}-${proc.command}`} className="grid grid-cols-[3rem_1fr_2.75rem_2.75rem] gap-x-3 items-baseline">
-                          <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60 tabular-nums">{proc.pid}</span>
-                          <span className="text-xs font-mono text-[var(--text-secondary)] truncate" title={proc.command}>{proc.command}</span>
-                          {/* One decimal, which is what `ps` reports and what fits the column;
-                              `formatLoad` is the load average's two and would
-                              read as false precision on a percentage. */}
-                          <span className="text-[11px] font-mono tabular-nums text-right" style={{ color: barColor(proc.cpu) }}>{localeFixed(proc.cpu, 1, locale)}</span>
-                          <span className="text-[11px] font-mono tabular-nums text-right" style={{ color: barColor(proc.mem) }}>{localeFixed(proc.mem, 1, locale)}</span>
-                        </div>
-                      ))}
-                    </div>
+                    {/* A real table, because the figures are meaningless
+                        without their column: two grids of divs read out as
+                        "1201 llama-server 42.5 3.1", with nothing saying which
+                        number is CPU and which is memory. The percent sign is
+                        in the header rather than on every cell so the columns
+                        stay narrow and the unit is still said once. */}
+                    <table className="w-full table-fixed border-collapse">
+                      <thead>
+                        <tr className="text-[10px] uppercase tracking-widest text-[var(--text-muted)] opacity-50">
+                          <th scope="col" className="w-12 text-left font-semibold pb-2">{t("settings.pid")}</th>
+                          <th scope="col" className="text-left font-semibold pb-2">{t("settings.busiestProcesses")}</th>
+                          <th scope="col" className="w-14 text-right font-semibold pb-2">{t("settings.cpu")} %</th>
+                          <th scope="col" className="w-14 text-right font-semibold pb-2">{t("settings.memory")} %</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {processRows.map(proc => (
+                          <tr key={`${proc.pid}-${proc.command}`}>
+                            <td className="text-[11px] font-mono text-[var(--text-muted)] opacity-60 tabular-nums py-0.5 pr-3">{proc.pid}</td>
+                            <td className="text-xs font-mono text-[var(--text-secondary)] truncate py-0.5 pr-3" title={proc.command}>{proc.command}</td>
+                            {/* One decimal, which is what `ps` reports and what
+                                fits the column; `formatLoad` is the load
+                                average's two and would read as false precision
+                                on a percentage. */}
+                            <td className="text-[11px] font-mono tabular-nums text-right py-0.5" style={{ color: barColor(proc.cpu) }}>{localeFixed(proc.cpu, 1, locale)}</td>
+                            <td className="text-[11px] font-mono tabular-nums text-right py-0.5 pl-3" style={{ color: barColor(proc.mem) }}>{localeFixed(proc.mem, 1, locale)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
 
