@@ -73,17 +73,32 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   if (!Array.isArray(raw)) return { ok: false, reason: "The planner's answer is not a JSON array." };
   if (raw.length === 0) return { ok: false, reason: "The planner produced no tasks." };
   if (raw.length > MAX_TEAM_TASKS) return { ok: false, reason: `The planner produced ${raw.length} tasks; a team holds at most ${MAX_TEAM_TASKS}.` };
+  // Every task is read before answering, and every fault this plan has is
+  // named at once. Returning on the first one taught the planner about t1
+  // alone: it would shorten t1, re-answer, and be told about t2 — spending a
+  // whole planner run per fault against a budget of a few. A plan is still
+  // never repaired here; the planner is simply shown the whole list to fix.
   const tasks: PlannedTask[] = [];
+  const problems: string[] = [];
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i] as Record<string, unknown>;
     const id = `t${i + 1}`;
-    if (!item || typeof item !== "object") return { ok: false, reason: `Task ${id} is not an object.` };
+    if (!item || typeof item !== "object") {
+      problems.push(`Task ${id} is not an object.`);
+      continue;
+    }
     const description = typeof item.task_description === "string" ? item.task_description.trim() : "";
-    if (!description) return { ok: false, reason: `Task ${id} has no task_description.` };
-    if (description.length > MAX_TASK_DESCRIPTION_CHARS) return { ok: false, reason: `Task ${id}'s task_description has ${description.length} characters; the maximum is ${MAX_TASK_DESCRIPTION_CHARS}. Shorten this field without dropping its verification requirements.` };
+    if (!description) problems.push(`Task ${id} has no task_description.`);
+    // The overage is spelled out: "shorten this" left the planner guessing how
+    // much, and a planner asked only to shorten has answered longer than before.
+    else if (description.length > MAX_TASK_DESCRIPTION_CHARS) problems.push(`Task ${id}'s task_description has ${description.length} characters; the maximum is ${MAX_TASK_DESCRIPTION_CHARS}, so it must lose at least ${description.length - MAX_TASK_DESCRIPTION_CHARS} characters. Shorten this field without dropping its verification requirements.`);
+    // No early exit on a bad field either: a task whose depends_on AND
+    // files_hint are both malformed must report both, for the same reason the
+    // plan reports every task — one fault per planner run is the bug.
     const depends = item.depends_on === undefined ? [] : item.depends_on;
-    if (!Array.isArray(depends) || !depends.every((d) => typeof d === "string")) return { ok: false, reason: `Task ${id}'s depends_on is not a list of task ids.` };
-    const depends_on = [...new Set(depends as string[])];
+    const validDepends = Array.isArray(depends) && depends.every((d) => typeof d === "string");
+    if (!validDepends) problems.push(`Task ${id}'s depends_on is not a list of task ids.`);
+    const depends_on = validDepends ? [...new Set(depends as string[])] : [];
     for (const d of depends_on) {
       // Canonical ids only — t1, not t01: the board numbers tasks t1…t999 and
       // knows no other spelling, so a plan that said `t01` would post and
@@ -92,15 +107,29 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
       // what it waits for is done, whatever the order — as long as the
       // dependencies form no cycle (checked once every task is read).
       const n = /^t([1-9][0-9]{0,2})$/.exec(d);
-      if (!n || Number(n[1]) > raw.length || Number(n[1]) === i + 1) return { ok: false, reason: `Task ${id} depends on ${d}, which is not another task in the plan.` };
+      if (!n || Number(n[1]) > raw.length || Number(n[1]) === i + 1) problems.push(`Task ${id} depends on ${d}, which is not another task in the plan.`);
     }
     const hint = item.files_hint === undefined ? [] : item.files_hint;
-    if (!Array.isArray(hint) || !hint.every((f) => typeof f === "string")) return { ok: false, reason: `Task ${id}'s files_hint is not a list of paths.` };
-    tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
+    const validHint = Array.isArray(hint) && hint.every((f) => typeof f === "string");
+    if (!validHint) problems.push(`Task ${id}'s files_hint is not a list of paths.`);
+    // Only a task whose every field checked out is built; the plan is refused
+    // whole anyway once anything went into `problems`.
+    if (description && description.length <= MAX_TASK_DESCRIPTION_CHARS && validDepends && validHint) tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
   }
+  if (problems.length) return { ok: false, reason: joinProblems(problems) };
   const cycle = dependencyCycle(tasks.map((t) => t.depends_on));
   if (cycle) return { ok: false, reason: `Tasks ${cycle.join(" and ")} depend on each other.` };
   return { ok: true, tasks };
+}
+
+/** How many faults are named before the rest are only counted. */
+const MAX_REPORTED_PROBLEMS = 6;
+
+/** Every fault in one sentence the planner can act on, without an unbounded wall of text. */
+function joinProblems(problems: string[]): string {
+  if (problems.length <= MAX_REPORTED_PROBLEMS) return problems.join(" ");
+  const rest = problems.length - MAX_REPORTED_PROBLEMS;
+  return `${problems.slice(0, MAX_REPORTED_PROBLEMS).join(" ")} …and ${rest} further ${rest === 1 ? "fault" : "faults"} in the same plan.`;
 }
 
 /** The first cycle among the tasks' dependencies as their ids, or null: a cycle would wait forever. */

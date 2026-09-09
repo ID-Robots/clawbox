@@ -106,6 +106,9 @@ interface LiveTeam {
 
 const live = new Map<string, LiveTeam>();
 
+/** Planner runs a team will pay for before giving up on getting an array. */
+const MAX_PLANNER_ATTEMPTS = 3;
+
 const SYSTEM: Actor = { kind: "system" };
 const PLANNER: Actor = { kind: "planner" };
 const REVIEWER: Actor = { kind: "reviewer" };
@@ -227,14 +230,21 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     saveBoard(board);
     return;
   }
-  let plan = parsePlan(planned.resultText ?? planned.summary);
-  if (!plan.ok) {
+  let answer = planned.resultText ?? planned.summary;
+  let plan = parsePlan(answer);
+  // More than one correction, because one was not enough. On the box, a planner
+  // told only to "shorten" a 2835-character description answered 3013 the second
+  // time and the board died with no task ever posted — twice, on two devices.
+  // Each ask now carries every fault and how far over the limit it is; the
+  // budget is small because a planner that cannot answer an array in three
+  // tries is not going to on the fourth, and every try is a paid run.
+  for (let attempt = 2; !plan.ok && attempt <= MAX_PLANNER_ATTEMPTS; attempt++) {
     // Once more, and for the array alone: a planner that wrote its plan as
     // prose is asked to say it as the JSON the team reads. On the record as
-    // an alert, so a team that needed the second ask says so.
-    bus.send(SYSTEM, { type: "alert", reason: `The planner's answer was not a plan (${plan.reason}); asking once more for the JSON array.` });
+    // an alert, so a team that needed another ask says so.
+    bus.send(SYSTEM, { type: "alert", reason: `The planner's answer was not a plan (${plan.reason}); asking once more for the JSON array (attempt ${attempt} of ${MAX_PLANNER_ATTEMPTS}).` });
     const again = await startRun({
-      task: replanTask(board.goal, planned.resultText ?? planned.summary, plan.reason),
+      task: replanTask(board.goal, answer, plan.reason),
       projectId: board.projectId,
       directory: board.directory,
       source,
@@ -246,15 +256,21 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     saveBoard(board);
     const replanned = await settle(team, again.id);
     if (team.stopRequested) return;
-    plan = replanned?.status === "completed"
-      ? parsePlan(replanned.resultText ?? replanned.summary)
-      : { ok: false, reason: `The planner did not finish its second answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` };
-    if (!plan.ok) {
-      setTeamStatus(board, SYSTEM, "failed", plan.reason);
-      saveBoard(board);
-      return;
+    if (replanned?.status !== "completed") {
+      // A planner run that did not finish is not a wording problem, so it is
+      // not re-asked: the team fails with what actually happened to it.
+      plan = { ok: false, reason: `The planner did not finish its answer: ${replanned?.error ?? replanned?.status ?? "no run"}.` };
+      break;
     }
+    answer = replanned.resultText ?? replanned.summary;
+    plan = parsePlan(answer);
   }
+  if (!plan.ok) {
+    setTeamStatus(board, SYSTEM, "failed", plan.reason);
+    saveBoard(board);
+    return;
+  }
+
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
 
   // The team's own branch in a folder project: workers get worktrees off it

@@ -195,15 +195,46 @@ describe("a planner that wrote prose", () => {
     expect(done.alerts).toBe(1);
     expect(done.plannerRunId).toBe("run-00000001");
     expect(done.agents.planner).toBe(2);
-    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)[0]).toMatch(/asking once more/);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)[0]).toMatch(/asking once more for the JSON array \(attempt 2 of 3\)/);
   });
 
-  it("fails the team when the second answer is no plan either, saying why", async () => {
-    outcomes = [{ summary: "prose" }, { summary: "still prose" }];
+  it("asks a third time when the second answer is no plan either", async () => {
+    // One correction was not enough on the box: a planner told to shorten a
+    // 2835-character description answered 3013 the next time, and the team
+    // died having posted no task at all.
+    outcomes = [
+      { summary: "prose" },
+      { summary: "still prose" },
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(starts.filter((s) => (s.team as { role: string }).role === "planner")).toHaveLength(3);
+    expect(done.agents.planner).toBe(3);
+    expect(done.alerts).toBe(2);
+    expect(done.plannerRunId).toBe("run-00000001");
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)[1]).toMatch(/attempt 3 of 3/);
+  });
+
+  it("fails the team after the third answer is no plan either, saying why", async () => {
+    outcomes = [{ summary: "prose" }, { summary: "still prose" }, { summary: "prose again" }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
     expect(done.error).toMatch(/no JSON array/);
+    expect(starts).toHaveLength(3);
+  });
+
+  it("does not spend the remaining asks on a planner run that did not finish", async () => {
+    // A crashed planner is not a wording problem; re-asking it is paid noise.
+    outcomes = [{ summary: "prose" }, { status: "failed", error: "planner exploded" }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toMatch(/did not finish its answer/);
     expect(starts).toHaveLength(2);
   });
 });
@@ -510,14 +541,14 @@ describe("a team that works", () => {
     expect(starts).toHaveLength(2);
   });
 
-  it("fails the team, with the reason, when the planner answers no plan twice — and never starts a worker", async () => {
-    outcomes = [{ summary: "I think we should refactor everything." }, { summary: "Still prose, sorry." }];
+  it("fails the team, with the reason, when the planner answers no plan every time — and never starts a worker", async () => {
+    outcomes = [{ summary: "I think we should refactor everything." }, { summary: "Still prose, sorry." }, { summary: "Prose once more." }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
     expect(done.error).toMatch(/no JSON array/);
-    // The planner, and the planner asked once more; no worker.
-    expect(starts).toHaveLength(2);
+    // The planner and its two corrections; no worker, and no fourth ask.
+    expect(starts).toHaveLength(3);
     expect(starts.every((s) => (s.team as { role: string }).role === "planner")).toBe(true);
     expect(done.tasks).toEqual([]);
   });
