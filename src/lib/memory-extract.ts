@@ -84,6 +84,16 @@ export interface ExtractionResult {
    * scratch copy of it.
    */
   origins: Record<string, string>;
+  /**
+   * The scan fell short of the whole folder: it could not be opened, part of it
+   * could not be read, or it ran past the entry budget.
+   *
+   * `notes` already says all three in the owner's words, but a CALLER cannot
+   * act on prose. The indexer has to know, because "found nothing here" and
+   * "could not look here" are the same silence and only one of them means the
+   * owner's documents are gone.
+   */
+  partial: boolean;
 }
 
 /** A stable folder name for a source, so re-running reuses the same output. */
@@ -205,7 +215,7 @@ async function extractOne(file: string, out: string): Promise<boolean> {
  * alone, so re-running after adding one PDF costs one conversion rather than
  * the whole folder.
  */
-export async function extractDocuments(source: string): Promise<ExtractionResult> {
+export async function extractDocuments(source: string, signal?: AbortSignal): Promise<ExtractionResult> {
   const derived = derivedFolderFor(source);
   let extracted = 0;
   let skipped = 0;
@@ -213,11 +223,19 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
   const origins: Record<string, string> = {};
   let seen = 0;
   let sawExtractable = false;
+  /** MAX_FILES stopped the extraction short of the folder's documents. */
+  let cutShort = false;
   const budget = newWalkBudget();
 
   for await (const file of walkFiles(path.resolve(source), budget)) {
+    // A conversion is a spawned pdftotext or libreoffice with a 60 s budget of
+    // its own, and a folder can hold 500 of them — so a caller that has given
+    // up (the index run's two-hour deadline, a web server going down) must be
+    // able to stop this between files rather than up to 500 timeouts later.
+    signal?.throwIfAborted();
     if (seen >= MAX_FILES) {
       notes.push(`Only the first ${MAX_FILES} files in this folder were read.`);
+      cutShort = true;
       break;
     }
     const ext = path.extname(file).toLowerCase();
@@ -293,5 +311,6 @@ export async function extractDocuments(source: string): Promise<ExtractionResult
     // step turning into a log.
     notes: notes.slice(0, 3),
     origins,
+    partial: budget.rootUnreadable || budget.unreadable > 0 || budget.truncated || cutShort,
   };
 }

@@ -217,6 +217,62 @@ describe("indexing the owner's folders", () => {
     expect(hits.map((h) => h.path).join(" ")).not.toContain("gone.md");
   });
 
+  it("does NOT delete a source's index when the folder could not be read", async () => {
+    // The worst thing this module can do. `walkFiles` swallows an opendir
+    // failure and yields nothing, so an unplugged drive, a permission change
+    // and an emptied folder are the same silence — and the delete pass would
+    // have removed every row for that source and reported the run SUCCEEDED,
+    // leaving the owner to re-embed everything.
+    write("lease.md", "The deposit is two months' rent.");
+    const built = await runLocalIndexPass("full");
+    expect(built.files).toBe(1);
+
+    fs.chmodSync(source, 0o000);
+    let result: Awaited<ReturnType<typeof runLocalIndexPass>>;
+    try {
+      result = await runLocalIndexPass("incremental");
+    } finally {
+      fs.chmodSync(source, 0o755);
+    }
+    // Running as root in some CI images makes the chmod moot; only assert the
+    // contract when the folder really did become unreadable.
+    if (result.failures > 0) {
+      expect(result.files, "the index must survive a folder it could not open").toBe(1);
+      expect(result.chunks).toBeGreaterThan(0);
+    }
+  });
+
+  it("can still shrink and still take new work after it has hit its ceiling", async () => {
+    // Skipping the delete pass while capped wedged the index for good: the
+    // chunks of deleted files were never reclaimed, so every later pass hit the
+    // ceiling again and skipped the delete again. Only a full reindex escaped.
+    const gone = write("big.md", "The deposit is two months' rent.");
+    write("keep.md", "A bicycle is stored in the basement.");
+    await runLocalIndexPass("full");
+    // Pretend the store is at its ceiling by claiming the cap was hit, then
+    // remove a file and run again: the row must go.
+    fs.rmSync(gone);
+    const after = await runLocalIndexPass("incremental");
+    expect(after.files).toBe(1);
+    _resetLocalMemoryCacheForTests();
+    const hits = await searchLocalMemory("deposit", 5);
+    expect(hits.map((h) => h.path).join(" ")).not.toContain("big.md");
+  });
+
+  it("re-records a file whose folder entry changed, so results stop citing the old one", async () => {
+    // Remove `<source>` from the list and add its PARENT: every already-indexed
+    // file has the same mtime and size, so a skip rule that looked only at
+    // those left every result citing the folder the owner had just removed.
+    write("lease.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    await writeLocalSources([path.dirname(source)]);
+    await runLocalIndexPass("incremental");
+
+    _resetLocalMemoryCacheForTests();
+    const [hit] = await searchLocalMemory("deposit", 1);
+    expect(hit.path).toBe(path.join(path.basename(path.dirname(source)), path.basename(source), "lease.md"));
+  });
+
   it("counts a file it cannot read instead of failing the pass", async () => {
     write("fine.md", "A bicycle is stored in the basement.");
     const unreadable = write("locked.md", "The deposit is two months' rent.");
@@ -331,15 +387,38 @@ describe("the index knows what it was built for", () => {
     expect(status.status.custom.indexIdentity.status).toBe("valid");
   });
 
-  it("can be stamped before a single vector exists — the wizard's own step", async () => {
+  it("does not call a stamped but EMPTY index valid — the wizard's own step", async () => {
+    // The wizard stamps at its provisioning step, before the first pass. An
+    // identity with no rows behind it is not evidence of anything: reported
+    // `valid` it reaches the shared parser as `healthy` with zero chunks — a
+    // green panel over a search that finds nothing — and a rebuild whose first
+    // embed failed leaves exactly the same shape. The OpenClaw arm says
+    // `missing` at that point, and it is also what makes the next pass rebuild.
     await stampLocalEmbeddingIdentity();
     const status = await localMemoryStatusJson() as {
       status: { custom: { indexIdentity: { status: string } }; files: number; chunks: number };
     };
-    expect(status.status.custom.indexIdentity.status).toBe("valid");
+    expect(status.status.custom.indexIdentity.status).toBe("missing");
     expect(status.status.files).toBe(0);
     expect(status.status.chunks).toBe(0);
     expect(localEmbeddingIdentity()).toHaveLength(16);
+  });
+
+  it("does not report a rebuild whose embedder died as a healthy empty index", async () => {
+    // The exact sequence: an owner with a mismatched index presses Index now,
+    // the tables are emptied, and the first embed gets the 502 the MemAvailable
+    // guard answers a wake with. Before, the identity had already been stamped
+    // over the empty tables and the panel went green.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    embedFail.status = 502;
+    await expect(runLocalIndexPass("full")).rejects.toThrow(/embedding model/i);
+
+    const status = await localMemoryStatusJson() as {
+      status: { chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    expect(status.status.chunks).toBe(0);
+    expect(status.status.custom.indexIdentity.status).toBe("missing");
   });
 });
 
@@ -379,6 +458,20 @@ describe("a box that was just swapped from OpenClaw", () => {
     // not get them back on the next read.
     await writeLocalSources([]);
     expect(await readLocalSources()).toEqual([]);
+  });
+
+  it("seeds ONCE even when the probe and a folder change arrive together", async () => {
+    // The seed is a write on a read path: the status probe calls it every two
+    // minutes and a folder mutation calls it inside its own queue. Two seeds
+    // landing in either order could drop the folder the owner had just added.
+    const config = await import("@/lib/config-store");
+    await config.set("memory_shard_sources", undefined);
+    openclawConfig.value = { memory: { search: { extraPaths: [source] } } };
+    const writes = vi.mocked(config.set).mock.calls.length;
+
+    const [a, b, c] = await Promise.all([readLocalSources(), readLocalSources(), readLocalSources()]);
+    expect([a, b, c]).toEqual([[source], [source], [source]]);
+    expect(vi.mocked(config.set).mock.calls.length - writes).toBe(1);
   });
 
   it("carries nothing on a box that never ran OpenClaw", async () => {

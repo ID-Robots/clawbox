@@ -150,11 +150,47 @@ export async function readLocalSources(): Promise<string[]> {
   // No key at all — never written on this box. That is a fresh install, or a
   // box that has just been swapped to this harness from OpenClaw, and the two
   // want different answers: see `carryOverSources`.
-  const carried = await carryOverSources();
-  // Written even when it is empty, so the carry-over happens exactly once and
-  // an owner who later removes every folder does not get them back.
-  await configSet(MEMORY_SHARD_SOURCES_KEY, carried);
-  return carried;
+  return seedSources();
+}
+
+/**
+ * The seed, at most once at a time and re-checked at the moment it writes.
+ *
+ * Both halves matter, because this is a WRITE on a read path. `readLocalSources`
+ * is what the status probe calls — every two minutes, from a route the desktop
+ * polls — and what a folder mutation calls inside its own queue. Two of those
+ * arriving together on a freshly swapped box would each carry the list over and
+ * each write it, and if the probe's write landed after the mutation's the
+ * folder the owner had just added would be gone. Sharing one in-flight promise
+ * means there is only ever one seed to land, and reading the key again inside
+ * it means a seed that raced a real write does nothing at all.
+ *
+ * The promise is dropped when it settles rather than kept for the process's
+ * life: after the seed the key EXISTS, so a later call re-reads it and never
+ * gets here — and a caller that arrives after an owner has cleared their whole
+ * list must see the empty list, not a memoised carry-over.
+ */
+let seeding: Promise<string[]> | null = null;
+
+function seedSources(): Promise<string[]> {
+  if (seeding) return seeding;
+  const run = (async (): Promise<string[]> => {
+    const again = await configGet(MEMORY_SHARD_SOURCES_KEY);
+    if (Array.isArray(again)) {
+      return again.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+    }
+    const carried = await carryOverSources();
+    // Written even when it is empty, so the carry-over happens exactly once and
+    // an owner who later removes every folder does not get them back.
+    await configSet(MEMORY_SHARD_SOURCES_KEY, carried);
+    return carried;
+  })();
+  seeding = run;
+  void run.then(
+    () => { if (seeding === run) seeding = null; },
+    () => { if (seeding === run) seeding = null; },
+  );
+  return run;
 }
 
 /**
@@ -255,11 +291,19 @@ async function openIndexForWrite(): Promise<IndexDb> {
   // racing a writer for the same file, and `busy_timeout` would turn the
   // collisions into five-second stalls in the UI rather than into errors.
   try {
-    db.exec("PRAGMA journal_mode = WAL");
-  } catch {
-    /* A filesystem that cannot do WAL still works; it is a speed-up, not a rule. */
+    try {
+      db.exec("PRAGMA journal_mode = WAL");
+    } catch {
+      /* A filesystem that cannot do WAL still works; it is a speed-up, not a rule. */
+    }
+    db.exec(SCHEMA);
+  } catch (err) {
+    // The open is lazy, so a corrupt store or a full disk fails HERE, with a
+    // handle already allocated. Left unclosed it is one leaked descriptor per
+    // scheduled run, on a box where indexing is nightly.
+    try { db.close(); } catch { /* nothing more to do about it */ }
+    throw err;
   }
-  db.exec(SCHEMA);
   return db;
 }
 
@@ -357,7 +401,14 @@ export async function stampLocalEmbeddingIdentity(): Promise<void> {
 function identityOf(db: IndexDb): "valid" | "missing" | "mismatched" {
   const stored = metaGet(db, "identity");
   if (!stored) return "missing";
-  return stored === localEmbeddingIdentity() ? "valid" : "mismatched";
+  if (stored !== localEmbeddingIdentity()) return "mismatched";
+  // An identity over an EMPTY index is not evidence of anything: the wizard
+  // stamps one before the first pass, and a rebuild whose first embed failed
+  // leaves exactly the same shape. Reported `valid`, the shared parser reads
+  // both as `healthy` — a green panel over a search that finds nothing. The
+  // OpenClaw arm says `missing` at that point and so does this one, which is
+  // also what gets the next pass to rebuild rather than to do nothing.
+  return countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0 ? "valid" : "missing";
 }
 
 // ─── embedding ───────────────────────────────────────────────────────────────
@@ -512,14 +563,23 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new IndexPassAbortedError();
 }
 
-/** Every `.md` under one root, inside the shared walk budget. */
-async function indexableFilesUnder(root: string): Promise<string[]> {
-  const found: string[] = [];
+/**
+ * Every `.md` under one root, inside the shared walk budget — and whether the
+ * walk actually SAW the whole tree.
+ *
+ * The second half is the load-bearing one. `walkFiles` swallows an opendir
+ * failure and yields nothing, so a drive that is unplugged, a folder whose
+ * permissions changed and a tree past the entry budget are all indistinguishable
+ * from a folder the owner emptied. Only the caller knows that difference is the
+ * difference between "delete this source's index" and "leave it exactly alone".
+ */
+async function indexableFilesUnder(root: string): Promise<{ files: string[]; complete: boolean }> {
+  const files: string[] = [];
   const budget = newWalkBudget();
   for await (const file of walkFiles(path.resolve(root), budget)) {
-    if (isIndexable(file)) found.push(file);
+    if (isIndexable(file)) files.push(file);
   }
-  return found;
+  return { files, complete: !budget.rootUnreadable && budget.unreadable === 0 && !budget.truncated };
 }
 
 /**
@@ -565,57 +625,35 @@ export async function runLocalIndexPass(
 ): Promise<LocalIndexPassResult> {
   const db = await openIndexForWrite();
   try {
+    // THE SCAN COMES FIRST, before anything is emptied. A `full` pass wipes the
+    // tables, and reading the owner's folder list can fail — the config store
+    // being unreadable is exactly the state an index run might be trying to
+    // recover from — so a wipe followed by a failed read would have destroyed a
+    // working index over a momentary failure. Same rule as `mutateExtraPaths`:
+    // a read that FAILED is never written over as if it were empty.
+    const sources = await readLocalSources();
+    const scan = await scanSources(sources, signal);
+
     const identity = identityOf(db);
     const schema = metaGet(db, "schema_version");
     const rebuild = mode === "full" || identity === "mismatched" || schema !== SCHEMA_VERSION;
     if (rebuild) {
+      // The identity goes WITH the rows it describes. Stamping it here — before
+      // a single vector had been written — meant a rebuild whose first embed
+      // failed left a valid identity over an empty index, which the shared
+      // parser reads as `healthy` with zero chunks: a green panel and a search
+      // that finds nothing. It is stamped at the END, once there is something
+      // for it to be true of.
       db.exec("DELETE FROM chunks; DELETE FROM files;");
+      db.prepare("DELETE FROM meta WHERE key = 'identity'").run();
     }
-    metaSet(db, "identity", localEmbeddingIdentity());
     metaSet(db, "schema_version", SCHEMA_VERSION);
 
-    const sources = await readLocalSources();
-    const pending: PendingFile[] = [];
-    for (const source of sources) {
-      throwIfAborted(signal);
-      // The extractor turns the owner's PDFs, .docx, .odt, .rtf and .txt into
-      // Markdown in a folder of its own, and skips what it already converted.
-      // On OpenClaw that derived folder is registered as a second source
-      // because its indexer reads `.md` and nothing else; here the pass simply
-      // walks both, which is the same coverage without a second entry in a
-      // list the owner did not put it in.
-      let origins: Record<string, string> = {};
-      let derived: string | null = null;
-      try {
-        const extraction = await extractDocuments(source);
-        origins = extraction.origins;
-        derived = extraction.derived;
-      } catch (err) {
-        console.warn(`[memory-index] extracting documents from a source failed: ${errorText(err)}`);
-      }
-      for (const root of derived ? [source, derived] : [source]) {
-        for (const file of await indexableFilesUnder(root)) {
-          pending.push({ file, source, display: displayName(source, file, origins) });
-        }
-      }
-    }
-
-    // Files the pass found, so rows for anything the owner removed or deleted
-    // can go at the end. Built from the whole scan rather than per source: one
-    // file can sit under two overlapping sources, and the first one to claim
-    // it is the one that indexes it.
-    const seen = new Set<string>();
-    const scanned = pending.filter((entry) => {
-      if (seen.has(entry.file)) return false;
-      seen.add(entry.file);
-      return true;
-    });
-
     let chunkCount = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
-    let failures = 0;
+    let failures = scan.unreadableSources.size;
     let capped = false;
 
-    for (const entry of scanned) {
+    for (const entry of scan.files) {
       throwIfAborted(signal);
       let stat;
       try {
@@ -628,9 +666,19 @@ export async function runLocalIndexPass(
         failures += 1;
         continue;
       }
-      const row = db.prepare("SELECT mtime_ms, size, sha FROM files WHERE path = ?").get(entry.file) as
-        { mtime_ms?: unknown; size?: unknown; sha?: unknown } | undefined;
-      if (row && Number(row.mtime_ms) === Math.floor(stat.mtimeMs) && Number(row.size) === stat.size) continue;
+      const row = db.prepare("SELECT mtime_ms, size, sha, source, display FROM files WHERE path = ?").get(entry.file) as
+        { mtime_ms?: unknown; size?: unknown; sha?: unknown; source?: unknown; display?: unknown } | undefined;
+      // The source and the display name are part of what is stored, so they are
+      // part of what "unchanged" means. Without them, moving a folder's entry
+      // in the list (removing `~/Docs`, adding `~`) left every already-indexed
+      // file citing the folder the owner had just removed, in results the agent
+      // reads back to them.
+      const sameFile = row
+        && Number(row.mtime_ms) === Math.floor(stat.mtimeMs)
+        && Number(row.size) === stat.size
+        && row.source === entry.source
+        && row.display === entry.display;
+      if (sameFile) continue;
 
       let text: string;
       try {
@@ -640,7 +688,7 @@ export async function runLocalIndexPass(
         continue;
       }
       const sha = sha256Of(text);
-      if (row && row.sha === sha) {
+      if (row && row.sha === sha && row.source === entry.source && row.display === entry.display) {
         // Touched, not edited. Record the new stat so the next pass skips it
         // without reading it again.
         db.prepare("UPDATE files SET mtime_ms = ?, size = ? WHERE path = ?")
@@ -651,8 +699,10 @@ export async function runLocalIndexPass(
       const pieces = chunkText(text);
       const existing = row ? countOf(db, "SELECT COUNT(*) AS n FROM chunks WHERE path = ?", entry.file) : 0;
       if (chunkCount - existing + pieces.length > MAX_INDEX_CHUNKS) {
+        // `continue`, not `break`: one large document early in the scan must not
+        // shut out the thousand small ones behind it that still fit.
         capped = true;
-        break;
+        continue;
       }
 
       let vectors: Float32Array[];
@@ -669,13 +719,18 @@ export async function runLocalIndexPass(
         failures += 1;
         continue;
       }
-      assertDimension(db, vectors[0]);
+      // A width change empties the store, so everything counted before it is
+      // gone: re-read rather than carry a total that no longer describes
+      // anything. Left stale, the next cap check fired on a store of ~19,800
+      // rows that held none, and the rebuild indexed almost nothing.
+      if (assertDimension(db, vectors[0])) chunkCount = 0;
 
       // One transaction per FILE: sqlite fsyncs at every commit, so a document
       // of 200 chunks written a row at a time is 200 syncs on an SD card. Per
       // file rather than per pass because a pass is minutes long and its work
       // should survive being interrupted — an interrupted run is reconciled and
       // re-run, and everything already committed is skipped on the way back.
+      const replaced = countOf(db, "SELECT COUNT(*) AS n FROM chunks WHERE path = ?", entry.file);
       db.exec("BEGIN");
       try {
         db.prepare("DELETE FROM chunks WHERE path = ?").run(entry.file);
@@ -693,29 +748,48 @@ export async function runLocalIndexPass(
         db.exec("ROLLBACK");
         throw err;
       }
-      chunkCount = chunkCount - existing + pieces.length;
+      chunkCount = chunkCount - replaced + pieces.length;
     }
 
     // Anything the scan did not find is gone from the owner's folders — or the
-    // folder itself is. Only when the pass ran to the end: a capped or aborted
-    // pass has an incomplete `seen`, and deleting from it would drop files that
-    // are still there.
-    if (!capped) {
-      for (const row of db.prepare("SELECT path FROM files").all() as { path?: unknown }[]) {
-        const stored = typeof row.path === "string" ? row.path : "";
-        if (!stored || seen.has(stored)) continue;
-        db.prepare("DELETE FROM chunks WHERE path = ?").run(stored);
-        db.prepare("DELETE FROM files WHERE path = ?").run(stored);
-      }
+    // folder itself is.
+    //
+    // ONLY for a source the scan could actually READ. `walkFiles` swallows an
+    // opendir failure and yields nothing, so an unplugged drive, a permission
+    // blip or a tree past the walk's entry budget all look exactly like an
+    // emptied folder — and this loop would then delete that whole source's
+    // slice of the index and the run would report `succeeded`. The owner would
+    // have to re-embed everything. A source that could not be read is counted
+    // as a failure instead and its rows are left alone.
+    //
+    // The cap is deliberately NOT a reason to skip this. `seen` is complete
+    // whatever the cap did — it comes from the scan, which always runs to the
+    // end — and skipping the delete while capped is what made a full index
+    // permanently unable to shrink: the chunks of deleted files were never
+    // reclaimed, so every later pass hit the ceiling again and skipped the
+    // delete again. Only a full reindex escaped.
+    for (const row of db.prepare("SELECT path, source FROM files").all() as { path?: unknown; source?: unknown }[]) {
+      const stored = typeof row.path === "string" ? row.path : "";
+      if (!stored || scan.seen.has(stored)) continue;
+      if (typeof row.source === "string" && scan.unreadableSources.has(row.source)) continue;
+      db.prepare("DELETE FROM chunks WHERE path = ?").run(stored);
+      db.prepare("DELETE FROM files WHERE path = ?").run(stored);
     }
 
+    // Now, and only now: the identity describes an index that exists.
+    metaSet(db, "identity", localEmbeddingIdentity());
     metaSet(db, "built_at", String(Date.now()));
-    metaSet(db, "scan_total_files", String(scanned.length));
+    metaSet(db, "scan_total_files", String(scan.files.length));
     metaSet(db, "failures", String(failures));
     metaSet(db, "capped", capped ? "1" : "");
     if (capped) {
       console.warn(
-        `[memory-index] the index reached its ${MAX_INDEX_CHUNKS}-chunk ceiling; later files in this pass were not indexed`,
+        `[memory-index] the index reached its ${MAX_INDEX_CHUNKS}-chunk ceiling; some files in this pass were not indexed`,
+      );
+    }
+    if (scan.unreadableSources.size) {
+      console.warn(
+        `[memory-index] ${scan.unreadableSources.size} source folder(s) could not be read in full; their entries were left as they were`,
       );
     }
 
@@ -732,6 +806,67 @@ export async function runLocalIndexPass(
   }
 }
 
+interface ScanResult {
+  /** Every indexable file found, deduplicated, in scan order. */
+  files: PendingFile[];
+  /** Their paths, for the "is this still there?" question. */
+  seen: Set<string>;
+  /**
+   * Sources whose walk was INCOMPLETE — unreadable, partly unreadable, or past
+   * the walk's entry budget. Their rows are not deletable on this pass, because
+   * "found nothing" and "could not look" are the same silence from `walkFiles`
+   * and only one of them means the documents are gone.
+   */
+  unreadableSources: Set<string>;
+}
+
+/** Find everything there is to index, and be honest about what could not be looked at. */
+async function scanSources(sources: readonly string[], signal: AbortSignal | undefined): Promise<ScanResult> {
+  const files: PendingFile[] = [];
+  const seen = new Set<string>();
+  const unreadableSources = new Set<string>();
+
+  for (const source of sources) {
+    throwIfAborted(signal);
+    // The extractor turns the owner's PDFs, .docx, .odt, .rtf and .txt into
+    // Markdown in a folder of its own, and skips what it already converted.
+    // On OpenClaw that derived folder is registered as a second source
+    // because its indexer reads `.md` and nothing else; here the pass simply
+    // walks both, which is the same coverage without a second entry in a
+    // list the owner did not put it in.
+    let origins: Record<string, string> = {};
+    let derived: string | null = null;
+    try {
+      const extraction = await extractDocuments(source, signal);
+      origins = extraction.origins;
+      derived = extraction.derived;
+      // The extractor's own notes are about a scan that fell short — a folder
+      // it could not open, a budget it ran out of — so they carry the same
+      // "do not delete from this source" meaning the walk below does.
+      if (extraction.partial) unreadableSources.add(source);
+    } catch (err) {
+      // The extractor stops on the shared signal, and it throws the platform's
+      // own AbortError doing it — which is this pass ending, not this folder
+      // failing.
+      if (err instanceof IndexPassAbortedError || signal?.aborted) throw new IndexPassAbortedError();
+      console.warn(`[memory-index] extracting documents from a source failed: ${errorText(err)}`);
+      unreadableSources.add(source);
+    }
+    for (const root of derived ? [source, derived] : [source]) {
+      const found = await indexableFilesUnder(root);
+      if (!found.complete) unreadableSources.add(source);
+      for (const file of found.files) {
+        // One file can sit under two overlapping sources; the first to claim
+        // it is the one that indexes it.
+        if (seen.has(file)) continue;
+        seen.add(file);
+        files.push({ file, source, display: displayName(source, file, origins) });
+      }
+    }
+  }
+  return { files, seen, unreadableSources };
+}
+
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -742,14 +877,17 @@ function errorText(err: unknown): string {
  * stored vector is unreadable, so the store is emptied on the spot instead of
  * mixing widths that no comparison could survive.
  */
-function assertDimension(db: IndexDb, sample: Float32Array | undefined): void {
-  if (!sample) return;
+function assertDimension(db: IndexDb, sample: Float32Array | undefined): boolean {
+  if (!sample) return false;
   const stored = metaGet(db, "dim");
+  let wiped = false;
   if (stored && Number(stored) !== sample.length) {
     db.exec("DELETE FROM chunks; DELETE FROM files;");
+    wiped = true;
     console.warn(`[memory-index] the embedder changed width (${stored} -> ${sample.length}); the index was rebuilt`);
   }
   metaSet(db, "dim", String(sample.length));
+  return wiped;
 }
 
 // ─── status ──────────────────────────────────────────────────────────────────
@@ -900,6 +1038,9 @@ export async function searchLocalMemory(
 ): Promise<LocalMemoryHit[]> {
   const text = query.trim();
   if (!text) return [];
+  // Clamped HERE, not only in the two callers: the top-k loop indexes
+  // `best[best.length - 1]` and a limit of zero makes that `best[-1]`.
+  const want = Math.max(1, Math.min(50, Math.trunc(limit) || 1));
   let stat;
   try {
     stat = await fs.stat(LOCAL_INDEX_PATH);
@@ -921,7 +1062,7 @@ export async function searchLocalMemory(
       let score = 0;
       const base = row * cache.dim;
       for (let i = 0; i < cache.dim; i += 1) score += cache.vectors[base + i] * embedded[i];
-      if (best.length < limit) {
+      if (best.length < want) {
         best.push({ at: row, score });
         best.sort((a, b) => b.score - a.score);
       } else if (score > best[best.length - 1].score) {
