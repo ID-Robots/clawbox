@@ -136,6 +136,14 @@ describe("a plan whose faults must all be fixed at once", () => {
     expect(out.reason).toContain("Task t4's files_hint is not a list");
   });
 
+  it("reports both a bad depends_on and a bad files_hint on the same task", () => {
+    const out = parsePlan(JSON.stringify([{ task_description: "ok", depends_on: [7], files_hint: "nope" }]));
+    expect(out.ok).toBe(false);
+    if (out.ok) return;
+    expect(out.reason).toContain("Task t1's depends_on is not a list of task ids");
+    expect(out.reason).toContain("Task t1's files_hint is not a list of paths");
+  });
+
   it("counts the rest instead of printing an unbounded wall of faults", () => {
     const out = parsePlan(JSON.stringify(Array.from({ length: 8 }, () => ({ task_description: over(7), files_hint: [] }))));
     expect(out.ok).toBe(false);

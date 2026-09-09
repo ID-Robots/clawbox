@@ -92,12 +92,13 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
     // The overage is spelled out: "shorten this" left the planner guessing how
     // much, and a planner asked only to shorten has answered longer than before.
     else if (description.length > MAX_TASK_DESCRIPTION_CHARS) problems.push(`Task ${id}'s task_description has ${description.length} characters; the maximum is ${MAX_TASK_DESCRIPTION_CHARS}, so it must lose at least ${description.length - MAX_TASK_DESCRIPTION_CHARS} characters. Shorten this field without dropping its verification requirements.`);
+    // No early exit on a bad field either: a task whose depends_on AND
+    // files_hint are both malformed must report both, for the same reason the
+    // plan reports every task — one fault per planner run is the bug.
     const depends = item.depends_on === undefined ? [] : item.depends_on;
-    if (!Array.isArray(depends) || !depends.every((d) => typeof d === "string")) {
-      problems.push(`Task ${id}'s depends_on is not a list of task ids.`);
-      continue;
-    }
-    const depends_on = [...new Set(depends as string[])];
+    const validDepends = Array.isArray(depends) && depends.every((d) => typeof d === "string");
+    if (!validDepends) problems.push(`Task ${id}'s depends_on is not a list of task ids.`);
+    const depends_on = validDepends ? [...new Set(depends as string[])] : [];
     for (const d of depends_on) {
       // Canonical ids only — t1, not t01: the board numbers tasks t1…t999 and
       // knows no other spelling, so a plan that said `t01` would post and
@@ -109,11 +110,11 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
       if (!n || Number(n[1]) > raw.length || Number(n[1]) === i + 1) problems.push(`Task ${id} depends on ${d}, which is not another task in the plan.`);
     }
     const hint = item.files_hint === undefined ? [] : item.files_hint;
-    if (!Array.isArray(hint) || !hint.every((f) => typeof f === "string")) {
-      problems.push(`Task ${id}'s files_hint is not a list of paths.`);
-      continue;
-    }
-    if (description && description.length <= MAX_TASK_DESCRIPTION_CHARS) tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
+    const validHint = Array.isArray(hint) && hint.every((f) => typeof f === "string");
+    if (!validHint) problems.push(`Task ${id}'s files_hint is not a list of paths.`);
+    // Only a task whose every field checked out is built; the plan is refused
+    // whole anyway once anything went into `problems`.
+    if (description && description.length <= MAX_TASK_DESCRIPTION_CHARS && validDepends && validHint) tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
   }
   if (problems.length) return { ok: false, reason: joinProblems(problems) };
   const cycle = dependencyCycle(tasks.map((t) => t.depends_on));
