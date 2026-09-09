@@ -43,6 +43,7 @@ type StoreCatalogApp = {
 type MockOptions = {
   initialSetup?: Partial<SetupState>;
   preferences?: Record<string, unknown>;
+  kvEntries?: Record<string, string>;
   wifiNetworks?: WifiNetwork[];
   files?: FileTree;
   storeApps?: StoreCatalogApp[];
@@ -264,7 +265,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
   };
   const wifiNetworks = clone(options.wifiNetworks ?? DEFAULT_WIFI_NETWORKS);
   const storeApps = clone(options.storeApps ?? DEFAULT_STORE_APPS);
-  const kvEntries: Record<string, string> = {};
+  const kvEntries: Record<string, string> = clone(options.kvEntries ?? {});
   const files = clone(options.files ?? DEFAULT_FILES);
   let dismissalFingerprint: string | null = null;
   let hotspotConfig = {

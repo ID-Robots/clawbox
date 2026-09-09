@@ -111,7 +111,10 @@ async function installFakeGatewaySocket(page: Page) {
           return;
         }
 
-        if (message.method === "chat.abort") {
+        // Session RPCs are part of a real reconnect/provider switch. Leaving
+        // them unanswered only worked when the global timer cap forced their
+        // failures early; the mock must acknowledge the protocol instead.
+        if (["chat.abort", "sessions.reset", "sessions.patch", "sessions.subscribe"].includes(message.method)) {
           emit({
             type: "res",
             id: message.id,
@@ -139,6 +142,11 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
+    // Keep the real startup deadline: the default 50 ms cap expires it
+    // before this spec's asynchronous gateway handshake can complete.
+    timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -176,6 +184,11 @@ test("chat popup lets you switch to Local AI when it is configured", async ({ pa
   await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
+    // Keep the real startup deadline: the default 50 ms cap expires it
+    // before this spec's asynchronous gateway handshake can complete.
+    timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -217,6 +230,11 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
+    // Keep the real startup deadline: the default 50 ms cap expires it
+    // before this spec's asynchronous gateway handshake can complete.
+    timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
@@ -294,6 +312,11 @@ test("chat popup opens Local AI settings when local AI is not configured", async
   await installFakeGatewaySocket(page);
 
   await installClawboxMocks(page, {
+    // Keep the real startup deadline: the default 50 ms cap expires it
+    // before this spec's asynchronous gateway handshake can complete.
+    timeoutCapMs: 300_000,
+    // Hiding the mascot writes both its KV state and desktop preference.
+    kvEntries: { "clawbox-mascot-hidden": "1" },
     initialSetup: {
       setup_complete: true,
       wifi_configured: true,
