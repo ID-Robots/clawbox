@@ -77,7 +77,20 @@ export interface PluginRepairEntry {
   /** The plugin id as `openclaw plugins` takes it — what Retry passes back. */
   id: string;
   stage: PluginRepairStage;
-  /** One line, from the boot script, for the owner to read. Never a path. */
+  /**
+   * One line, from the boot script, for the owner to read.
+   *
+   * ClawBox's own sentence about the CONSEQUENCE ("the gateway would refuse to
+   * start with it enabled") and, since TASK-785, the core's own words about the
+   * CAUSE after it: the exit code of the verb that failed and one trimmed line
+   * of what it said. A row that carried only the first half stood on a box for
+   * three days saying what would have happened and nothing about why, over a
+   * failure that turned out to be transient. The boot script collapses the
+   * CLI's answer to one line of at most 160 characters (`clawbox_plugin_cli_cause`)
+   * because every renderer of this field prints it verbatim beside a Retry.
+   * It is the core's English, not a translated string — the same as every other
+   * sentence the boot script writes into this field.
+   */
   reason: string;
   /** When the boot script gave up, epoch ms. */
   atMs: number;
@@ -90,10 +103,21 @@ export interface PluginRepairEntry {
    */
   disabled: boolean;
   /**
-   * The spec the boot script actually installs, when the failure was an
-   * install: `@openclaw/codex@<pinned core>`, or
-   * `clawhub:@openclaw/deepseek-provider@<release>`. Empty for a consent
-   * failure, which installs nothing.
+   * The spec the boot script would install: `@openclaw/codex@<pinned core>`,
+   * `@openclaw/discord@<installed core>`, or
+   * `clawhub:@openclaw/deepseek-provider@<release>`.
+   *
+   * RECORDED FOR A CONSENT ROW TOO since TASK-785, though a consent Retry does
+   * not install anything. A consent failure and a missing payload are the same
+   * refusal from the outside — `plugins enable` answers the second with "Plugin
+   * not found" — so a row filed as `consent` with no spec could never be
+   * re-filed as the install it actually needs, and the Retry it offered ran the
+   * verb that had just refused. Empty only where ClawBox owns no package for
+   * the id (`clawbox-email-directives`, which is copied out of the checkout)
+   * or where the pinned release could not be read. A writer that cannot build
+   * the spec never ERASES one the row already carries: `deepseek`'s ClawHub
+   * scheme is known only to its own block, and the boot re-attempt refiles that
+   * row without it.
    *
    * NOT derivable from the id, which is the whole reason it is recorded. A
    * Retry that ran `plugins install codex` would resolve `@latest`, drift ahead
@@ -221,7 +245,17 @@ export async function recordPluginRepair(row: PluginRepairRecord): Promise<void>
       // Same as the boot script: an unparseable file is started over.
     }
   }
-  rows[row.id] = { ...row, atMs: Date.now() };
+  // AN EMPTY SPEC NEVER ERASES ONE THE ROW ALREADY CARRIES, the same rule
+  // `clawbox_plugin_repair_mark` follows in the boot script (TASK-785). Each id
+  // had one writer while this was safe; the boot re-attempt made a second, and
+  // a caller that cannot build the spec would otherwise wipe the string the
+  // Retry needs. A re-file changes the stage, never which package it is.
+  const previous = rows[row.id];
+  const previousSpec = previous && typeof previous === "object" && !Array.isArray(previous)
+    ? (previous as { spec?: unknown }).spec
+    : undefined;
+  const spec = row.spec || (typeof previousSpec === "string" ? previousSpec : "");
+  rows[row.id] = { ...row, spec, atMs: Date.now() };
   await writeRowsAtomically(target, rows);
 }
 
