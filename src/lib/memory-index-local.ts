@@ -38,7 +38,8 @@ import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store
 import { openSqlite } from "@/lib/openclaw-session-store";
 import { getEmbedProvisioningStatus, getEmbedProxyBaseUrl } from "@/lib/embed-server";
 import { getLocalAiToken } from "@/lib/local-ai-token";
-import { extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
+import { EXTRACT_ROOT, extractDocuments, newWalkBudget, walkFiles } from "@/lib/memory-extract";
+import { readConfig as readOpenclawConfig } from "@/lib/openclaw-config";
 import {
   INDEXABLE_EXTENSIONS,
   LOCAL_EMBEDDING_MODEL,
@@ -143,8 +144,64 @@ export class IndexPassAbortedError extends Error {
  */
 export async function readLocalSources(): Promise<string[]> {
   const raw = await configGet(MEMORY_SHARD_SOURCES_KEY);
-  if (!Array.isArray(raw)) return [];
-  return raw.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+  if (Array.isArray(raw)) {
+    return raw.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+  }
+  // No key at all — never written on this box. That is a fresh install, or a
+  // box that has just been swapped to this harness from OpenClaw, and the two
+  // want different answers: see `carryOverSources`.
+  const carried = await carryOverSources();
+  // Written even when it is empty, so the carry-over happens exactly once and
+  // an owner who later removes every folder does not get them back.
+  await configSet(MEMORY_SHARD_SOURCES_KEY, carried);
+  return carried;
+}
+
+/**
+ * The folders the owner chose while this box ran OpenClaw.
+ *
+ * The harness swap is a product feature, and its dialogue promises that what
+ * the assistant knows about the owner carries over. A list of folders they
+ * picked by hand is squarely that, and it lived in openclaw.json — so without
+ * this a swapped box comes up with Memory Shard set up, switched on, and
+ * reading nothing at all, which reads as a broken feature rather than as a
+ * setting that needs redoing.
+ *
+ * Deliberately narrow. It runs ONCE (the caller writes the result whatever it
+ * is), it only reads a file this edition otherwise ignores, and it keeps only
+ * folders that are still there — a `~/.openclaw` left behind by a swap is a
+ * snapshot of a moment, and resurrecting a folder the owner deleted would be
+ * worse than asking them to add it again. Every failure is an empty list.
+ */
+async function carryOverSources(): Promise<string[]> {
+  let config: unknown;
+  try {
+    config = await readOpenclawConfig();
+  } catch {
+    return [];
+  }
+  const search = (config as { memory?: { search?: { extraPaths?: unknown } } })?.memory?.search?.extraPaths;
+  if (!Array.isArray(search)) return [];
+  const named = search
+    .map((entry) => (typeof entry === "string" ? entry : (entry as { path?: unknown })?.path))
+    .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+  const kept: string[] = [];
+  for (const folder of named) {
+    // The derived folders ClawBox itself registered alongside a source on the
+    // OpenClaw side are not the owner's choices — this arm walks them from the
+    // source instead, so carrying them would add a scratch directory to a list
+    // the owner is shown.
+    if (folder.startsWith(EXTRACT_ROOT)) continue;
+    try {
+      if ((await fs.stat(folder)).isDirectory()) kept.push(folder);
+    } catch {
+      /* gone since the swap */
+    }
+  }
+  if (kept.length) {
+    console.warn(`[memory-index] carried ${kept.length} folder(s) over from the OpenClaw configuration`);
+  }
+  return kept;
 }
 
 export async function writeLocalSources(paths: readonly string[]): Promise<void> {

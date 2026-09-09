@@ -19,7 +19,7 @@ import path from "node:path";
  * real: a real sqlite store on a real temp DATA_DIR, real files on disk.
  */
 
-const { dataDir, embedCalls, embedFail } = vi.hoisted(() => {
+const { dataDir, embedCalls, embedFail, openclawConfig } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const nodeFs = require("node:fs") as typeof import("node:fs");
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -32,6 +32,8 @@ const { dataDir, embedCalls, embedFail } = vi.hoisted(() => {
     embedCalls: { texts: [] as string[], types: [] as string[] },
     /** When set, the next embeddings request answers this HTTP status. */
     embedFail: { status: 0 },
+    /** What openclaw.json holds, for the one-time carry-over after a swap. */
+    openclawConfig: { value: {} as unknown },
   };
 });
 
@@ -51,6 +53,7 @@ vi.mock("@/lib/embed-server", () => ({
   getEmbedProvisioningStatus: async () => ({ installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 1, binPath: "", modelPath: "" }),
 }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "t".repeat(64) }));
+vi.mock("@/lib/openclaw-config", () => ({ readConfig: async () => openclawConfig.value }));
 
 import {
   LOCAL_INDEX_PATH,
@@ -58,6 +61,7 @@ import {
   chunkText,
   localEmbeddingIdentity,
   localMemoryStatusJson,
+  readLocalSources,
   runLocalIndexPass,
   searchLocalMemory,
   stampLocalEmbeddingIdentity,
@@ -101,6 +105,7 @@ beforeEach(async () => {
   embedCalls.texts = [];
   embedCalls.types = [];
   embedFail.status = 0;
+  openclawConfig.value = {};
   installFetchStub();
   _resetLocalMemoryCacheForTests();
   fs.rmSync(path.dirname(LOCAL_INDEX_PATH), { recursive: true, force: true });
@@ -353,6 +358,34 @@ describe("the status it hands to the shared parser", () => {
     expect((status.vector as { semanticAvailable: boolean }).semanticAvailable).toBe(true);
     expect((status.batch as { failures: number }).failures).toBe(0);
     expect((status.custom as { providerState: { mode: string } }).providerState.mode).toBe("active");
+  });
+});
+
+describe("a box that was just swapped from OpenClaw", () => {
+  it("carries the owner's folders over, once", async () => {
+    // The swap dialogue promises that what the assistant knows about the owner
+    // carries over, and a list of folders they picked by hand is that. Without
+    // this the box comes up set up, switched on and reading nothing, which
+    // looks like a broken feature rather than a setting to redo.
+    const config = await import("@/lib/config-store");
+    await config.set("memory_shard_sources", undefined);
+    openclawConfig.value = { memory: { search: { extraPaths: [source, "/gone/for/good"] } } };
+
+    // The folder that is still there is kept; the one that is not is dropped,
+    // because a ~/.openclaw left behind by a swap is a snapshot of a moment.
+    expect(await readLocalSources()).toEqual([source]);
+
+    // And it happens exactly once: an owner who then removes every folder does
+    // not get them back on the next read.
+    await writeLocalSources([]);
+    expect(await readLocalSources()).toEqual([]);
+  });
+
+  it("carries nothing on a box that never ran OpenClaw", async () => {
+    const config = await import("@/lib/config-store");
+    await config.set("memory_shard_sources", undefined);
+    openclawConfig.value = {};
+    expect(await readLocalSources()).toEqual([]);
   });
 });
 
