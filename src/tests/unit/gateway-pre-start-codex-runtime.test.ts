@@ -341,6 +341,7 @@ describe("gateway-pre-start.sh managed-plugin capability consent", () => {
         "clawbox-email-directives": { enabled: true },
       },
     })).toEqual([
+      "plugins inspect --all --json",
       "plugins enable deepseek --accept-capabilities",
       "plugins enable discord --accept-capabilities",
       "plugins enable whatsapp --accept-capabilities",
@@ -374,6 +375,7 @@ describe("gateway-pre-start.sh managed-plugin capability consent", () => {
         "@openclaw/whatsapp": { enabled: true },
       },
     })).toEqual([
+      "plugins inspect --all --json",
       "plugins enable openclaw-discord --accept-capabilities",
       "plugins enable @openclaw/whatsapp --accept-capabilities",
     ]);
@@ -509,7 +511,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       enabledByConfig: probeCodexEnabled(normalizedConfig) === "1",
       installedVersion: "2026.8.1",
       peerHealthy: true,
-    })).toEqual(["plugins enable codex --accept-capabilities"]);
+    })).toEqual(["plugins inspect --all --json", "plugins enable codex --accept-capabilities"]);
   });
 
   it("repairs a stale default-enabled v2 plugin at the pinned version", () => {
@@ -545,7 +547,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       peerHealthy: false,
       layout: "registry",
       registryDependenciesOk: true,
-    })).toEqual(["plugins enable codex --accept-capabilities"]);
+    })).toEqual(["plugins inspect --all --json", "plugins enable codex --accept-capabilities"]);
   });
 
   it("trusts parent-resolved registry dependencies for a project-managed plugin", () => {
@@ -557,7 +559,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       peerHealthy: false,
       layout: "project-managed",
       registryDependenciesOk: true,
-    })).toEqual(["plugins enable codex --accept-capabilities"]);
+    })).toEqual(["plugins inspect --all --json", "plugins enable codex --accept-capabilities"]);
   });
 
   it("consents a healthy default-enabled v2 plugin without reinstalling it", () => {
@@ -567,7 +569,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       enabledByConfig: true,
       installedVersion: "2026.8.1",
       peerHealthy: true,
-    })).toEqual(["plugins enable codex --accept-capabilities"]);
+    })).toEqual(["plugins inspect --all --json", "plugins enable codex --accept-capabilities"]);
   });
 
   // ── The consent verb killed at its deadline (TASK-606 follow-up) ─────────
@@ -588,7 +590,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
       consentExit: code,
       inspectJson: inspectAllJson([{ id: "codex" }]),
     });
-    expect(argv).toContain("plugins inspect --all --json");
+    expect(argv).toEqual(["plugins inspect --all --json"]);
     expect(stdout).toContain("Codex runtime plugin capabilities accepted/current");
     expect(stdout).not.toContain("booting without Codex");
     expect(marker).toEqual({});
@@ -651,8 +653,8 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
     // needs an openclaw.json this fragment's environment does not set, and is
     // pinned in gateway-pre-start-managed-plugin-payload.test.ts.
     expect(marker.codex?.stage).toBe("consent");
-    // A refusal the core chose never pays for the second question.
-    expect(argv.some((line) => line.startsWith("plugins inspect"))).toBe(false);
+    // Failed preflight inspection does not bypass the real refusal.
+    expect(argv.filter((line) => line.startsWith("plugins inspect"))).toEqual(["plugins inspect --all --json"]);
   });
 
   it("leaves an explicitly disabled unused plugin alone", () => {

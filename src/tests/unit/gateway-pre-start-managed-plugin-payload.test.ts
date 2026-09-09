@@ -85,6 +85,9 @@ interface RunOptions {
    * is the core saying nothing about it rather than reporting its consent.
    */
   inspectJson?: string;
+  /** A payload install can change another plugin's consent surface. */
+  inspectAfterInstallJson?: string;
+  inspectAfterEnableJson?: string;
   /** A `data/plugin-repair.json` the boot starts with. */
   existingMarker?: Record<string, Record<string, unknown>>;
   /** Install specs (argv[3]) the fake CLI refuses. */
@@ -131,6 +134,12 @@ function run(opts: RunOptions): {
       ),
       "fi",
       'if [ "$2" = "inspect" ]; then',
+      ...(opts.inspectAfterEnableJson === undefined ? [] : [
+        `  if grep -q '^plugins enable ' "${log}"; then printf '%s' '${opts.inspectAfterEnableJson}'; exit 0; fi`,
+      ]),
+      ...(opts.inspectAfterInstallJson === undefined ? [] : [
+        `  if grep -q '^plugins install ' "${log}"; then printf '%s' '${opts.inspectAfterInstallJson}'; exit 0; fi`,
+      ]),
       ...(opts.inspectJson === undefined
         ? ["  exit 1"]
         : [`  printf '%s' '${opts.inspectJson}'; exit 0`]),
@@ -203,9 +212,57 @@ function run(opts: RunOptions): {
 }
 
 describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin payload repair", () => {
+  it("uses one core snapshot to skip current and unindexed no-op consent verbs", () => {
+    const { argv, stdout, entries, marker } = run({
+      entries: { discord: { enabled: true }, "clawbox-email-directives": { enabled: true } },
+      inspectJson: inspectAllJson([{ id: "discord" }, { id: "clawbox-email-directives", installed: false }]),
+      existingMarker: { "clawbox-email-directives": { stage: "consent" } },
+    });
+    expect(argv).toEqual(["plugins inspect --all --json"]);
+    expect(stdout).toContain("discord plugin capabilities accepted/current");
+    expect(stdout).not.toContain("clawbox-email-directives plugin capabilities accepted/current");
+    expect(entries.discord.enabled).toBe(true);
+    expect(entries["clawbox-email-directives"].enabled).toBe(true);
+    expect(marker["clawbox-email-directives"].stage).toBe("consent");
+  });
+
+  it("invalidates an earlier positive snapshot after a payload reinstall", () => {
+    const { argv, marker, entries } = run({
+      entries: { discord: { enabled: true }, whatsapp: { enabled: true } },
+      payloadMissing: ["discord"],
+      enableKilled: { whatsapp: 124 },
+      inspectJson: inspectAllJson([{ id: "whatsapp" }]),
+      inspectAfterInstallJson: inspectAllJson([{ id: "discord" }, { id: "whatsapp", consentRequired: true }]),
+    });
+    expect(argv.filter((line) => line.startsWith("plugins"))).toEqual([
+      "plugins inspect --all --json",
+      "plugins enable discord --accept-capabilities",
+      "plugins install @openclaw/discord@2026.8.1 --force --accept-capabilities",
+      "plugins inspect --all --json",
+      "plugins enable whatsapp --accept-capabilities",
+      "plugins inspect --all --json",
+    ]);
+    expect(marker.whatsapp.stage).toBe("consent");
+    expect(entries.whatsapp.enabled).toBe(false);
+  });
+
+  it("rechecks consent recorded by a killed enable after a pending preflight", () => {
+    const { argv, marker, entries } = run({
+      entries: { discord: { enabled: true } },
+      enableKilled: { discord: 124 },
+      inspectJson: inspectAllJson([{ id: "discord", consentRequired: true }]),
+      inspectAfterEnableJson: inspectAllJson([{ id: "discord" }]),
+    });
+    expect(argv).toEqual([
+      "plugins inspect --all --json", "plugins enable discord --accept-capabilities", "plugins inspect --all --json",
+    ]);
+    expect(marker).toEqual({});
+    expect(entries.discord.enabled).toBe(true);
+  });
+
   it("consents and stops there while the payload is intact", () => {
     const { argv } = run({ entries: { discord: { enabled: true } } });
-    expect(argv).toEqual(["plugins enable discord --accept-capabilities"]);
+    expect(argv).toEqual(["plugins inspect --all --json", "plugins enable discord --accept-capabilities"]);
   });
 
   it("reinstalls the pinned payload when the core says the package is not there", () => {
@@ -214,6 +271,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       payloadMissing: ["discord"],
     });
     expect(argv).toEqual([
+      "plugins inspect --all --json",
       "plugins enable discord --accept-capabilities",
       "plugins install @openclaw/discord@2026.8.1 --force --accept-capabilities",
     ]);
@@ -231,6 +289,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       enableFails: ["discord", "whatsapp"],
     });
     expect(argv.filter((line) => line.startsWith("plugins"))).toEqual([
+      "plugins inspect --all --json",
       "plugins enable discord --accept-capabilities",
       "plugins enable whatsapp --accept-capabilities",
     ]);
@@ -357,7 +416,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     expect(first.argv.some((line) => line.startsWith("config set"))).toBe(false);
     // The same directory, so this argv log carries BOTH boots.
     const second = run(opts);
-    expect(second.argv.filter((line) => line === "plugins enable deepseek --accept-capabilities"))
+    expect(second.argv.filter((line) => line === "plugins inspect --all --json"))
       .toHaveLength(2);
     expect(second.entries.deepseek?.enabled).toBe(true);
   });
@@ -430,7 +489,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
   });
 
   it("still switches the plugin off when the core actually refused", () => {
-    // A refusal the core CHOSE to make never pays for the second question.
+    // A failed preflight does not override a real consent refusal.
     const { argv, stdout, marker } = run({
       entries: { discord: { enabled: true } },
       enableFails: ["discord"],
@@ -438,7 +497,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
     expect(argv).toContain('config set plugins.entries["discord"].enabled false --strict-json');
     expect(stdout).toContain("booting without it");
     expect(marker.discord?.stage).toBe("consent");
-    expect(argv.some((line) => line.startsWith("plugins inspect"))).toBe(false);
+    expect(argv.filter((line) => line.startsWith("plugins inspect"))).toEqual(["plugins inspect --all --json"]);
   });
 
   it("repairs the payload under the alias the registry answers to", () => {
@@ -449,6 +508,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       payloadMissing: ["openclaw-whatsapp"],
     });
     expect(argv).toEqual([
+      "plugins inspect --all --json",
       "plugins enable openclaw-whatsapp --accept-capabilities",
       "plugins install @openclaw/whatsapp@2026.8.1 --force --accept-capabilities",
     ]);
@@ -473,7 +533,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       entries: { deepseek: { enabled: true } },
       payloadMissing: ["deepseek"],
     });
-    expect(argv).toEqual(["plugins enable deepseek --accept-capabilities"]);
+    expect(argv).toEqual(["plugins inspect --all --json", "plugins enable deepseek --accept-capabilities"]);
     expect(stdout).toContain("ClawBox has no npm package of its own for it");
   });
 
@@ -504,6 +564,7 @@ describe.skipIf(!hasBash || !hasPython3)("gateway-pre-start.sh managed plugin pa
       effective: "",
     });
     expect(argv).toEqual([
+      "plugins inspect --all --json",
       "plugins enable discord --accept-capabilities",
       "plugins install @openclaw/discord --force --accept-capabilities",
     ]);
