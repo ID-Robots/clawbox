@@ -677,4 +677,41 @@ ${CONFIG_SET_STUB}`);
     // The spec the repair needs, recorded for a consent row too.
     expect(row.spec).toBe("@openclaw/discord@2026.8.1");
   });
+
+  it("records the core's LAST refusal, not the first line that merely looks like one", () => {
+    // A CLI prints progress first and its verdict last. With a one-line stub a
+    // first-match picker would pass this suite and still file the wrong
+    // sentence on the one screen the owner reads.
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  echo "Checking the capability manifest for errors…" >&2
+  echo "Error: capability consent failed for discord: registry snapshot is locked" >&2
+  exit 1
+fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    const row = marker().discord;
+    expect(row.reason).toContain("registry snapshot is locked");
+    expect(row.reason).not.toContain("Checking the capability manifest");
+  });
+
+  it("records no spec at all rather than a bare alias the Retry would resolve as @latest", () => {
+    // The install path falls back to the unpinned `@openclaw/<id>` when the
+    // core's release cannot be read, because one bare install beats a box with
+    // no gateway. A ROW is read later, by a Retry that would resolve `@latest`
+    // and drift ahead of the runtime — so the row's contract is the pinned spec
+    // or nothing. `CLAWBOX_OPENCLAW_EFFECTIVE` is unset here.
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  echo "Error: capability consent failed for discord" >&2
+  exit 1
+fi
+${CONFIG_SET_STUB}`);
+    const r = run();
+    expect(r.status).toBe(0);
+    const row = marker().discord;
+    expect(row.stage).toBe("consent");
+    expect(row.spec).toBe("");
+  });
 });

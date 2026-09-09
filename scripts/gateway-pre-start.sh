@@ -3921,6 +3921,27 @@ clawbox_managed_plugin_spec() {
   fi
 }
 
+# The spec for a REPAIR ROW: the pinned one, or nothing at all.
+#
+# NOT the same question the install path asks. That one falls back to the
+# unpinned `@openclaw/<id>` when the core's release could not be read at all,
+# because one bare install is better than a box with no gateway, and
+# `gateway-pre-start-managed-plugin-payload.test.ts` pins that fallback. A ROW
+# is read LATER, by a Retry that would resolve `@latest`, drift ahead of the
+# runtime and crash the channel — the exact bug the pin exists to prevent — and
+# a re-attempt that finds the payload gone can escalate the row to an `install`
+# stage, where that spec is what runs. So `plugin-repair.ts` states the field's
+# contract as the pinned spec or absent, never the bare alias, and this is
+# where that holds. The codex consent row already does the same with its own
+# `OPENCLAW_TARGET` pin.
+#
+# Empty costs nothing: `clawbox_plugin_repair_mark` keeps whatever spec the row
+# already carried rather than erasing it.
+clawbox_managed_plugin_row_spec() {
+  [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] || return 0
+  clawbox_managed_plugin_spec "$1"
+}
+
 # The core's own words about a refusal, as ONE line to append to a repair reason.
 #
 # TASK-785. A row on a box read "The plugin is installed but its capabilities
@@ -5025,7 +5046,7 @@ MANAGEDPY
     # to escalate to the install its own `Plugin not found` implies.
     clawbox_plugin_boot_without "$MANAGED_PLUGIN" consent \
       "The plugin is installed but its capabilities could not be accepted, so the gateway would refuse to start with it enabled.$(clawbox_plugin_cli_cause "openclaw plugins enable" "${MANAGED_PLUGIN_RC:-}" "${MANAGED_PLUGIN_OUT:-}")" \
-      "$(clawbox_managed_plugin_spec "$MANAGED_PLUGIN")"
+      "$(clawbox_managed_plugin_row_spec "$MANAGED_PLUGIN")"
   done
 fi
 
@@ -5254,7 +5275,7 @@ REATTEMPTPY
         echo "  WARN: could not confirm $REPAIR_PLUGIN plugin capabilities after the re-attempt" >&2
         clawbox_plugin_reattempt_failed "$REPAIR_PLUGIN" "$REPAIR_STAGE" \
           "$REPAIR_LEAD $REPAIR_DETAIL" \
-          "$(clawbox_managed_plugin_spec "$REPAIR_PLUGIN")"
+          "$(clawbox_managed_plugin_row_spec "$REPAIR_PLUGIN")"
       else
         # `clawbox_plugin_repair_clear` is the whole repair from here: the row
         # says ClawBox switched this entry off, so it writes `enabled: true`
@@ -5288,7 +5309,7 @@ REATTEMPTPY
       echo "  WARN: could not confirm $REPAIR_PLUGIN plugin capabilities on the re-attempt" >&2
       clawbox_plugin_reattempt_failed "$REPAIR_PLUGIN" "$REPAIR_STAGE" \
         "$REPAIR_DETAIL$(clawbox_plugin_cli_cause "openclaw plugins enable" "$REPAIR_RC" "$REPAIR_OUT")" \
-        "$(clawbox_managed_plugin_spec "$REPAIR_PLUGIN")"
+        "$(clawbox_managed_plugin_row_spec "$REPAIR_PLUGIN")"
     fi
   fi
 fi
