@@ -537,6 +537,15 @@ describe("the composer's spoken-replies toggle", () => {
     expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
   });
 
+  it("stays offered when only SOME of the engines have answered", async () => {
+    // Hiding it takes every engine saying no. One `false` beside one that says
+    // nothing is a partial answer, and treating it as a whole one would take a
+    // working control off a box on the strength of a field that never arrived.
+    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: false }, { id: "cloud" }] };
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
+  });
+
   it("stays offered when the box says nothing about its engines", async () => {
     // `null` is not "no". An unreachable route, or one too old to report its
     // engines, says nothing about them — and hiding the switch on silence

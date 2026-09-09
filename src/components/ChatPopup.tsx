@@ -234,16 +234,16 @@ interface ChatPopupProps {
 export function speechEngineAvailable(engines: unknown): boolean | null {
   if (!Array.isArray(engines) || engines.length === 0) return null
   // An entry that does not STATE `configured` is silence too, and the rule
-  // above is about silence: a list of entries none of which says anything
-  // would otherwise read as "none of them is configured" and hide the button.
-  // The route's own type makes `configured` a required boolean, so this is
-  // hardening rather than a live path — but the code and the rule it is
-  // written under have to agree, or the next reader gets to pick one.
-  const stated = engines.filter(
-    engine => typeof (engine as { configured?: unknown } | null)?.configured === 'boolean',
-  ) as Array<{ configured: boolean }>
-  if (stated.length === 0) return null
-  return stated.some(engine => engine.configured)
+  // above is about silence: hiding the button needs every engine to have said
+  // no, not merely no engine to have said yes. A PARTIAL list — one engine
+  // reporting `false` beside one that reports nothing — is not that answer,
+  // and reading it as one would take a working control off the box on the
+  // strength of a field that never arrived. The route's own type makes
+  // `configured` a required boolean, so this is hardening rather than a live
+  // path; it is here so the code and the rule it is written under agree.
+  const configured = engines.map(engine => (engine as { configured?: unknown } | null)?.configured)
+  if (configured.some(value => value === true)) return true
+  return configured.every(value => value === false) ? false : null
 }
 
 export function noticeColumnInset(
