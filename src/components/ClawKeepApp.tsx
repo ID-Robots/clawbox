@@ -1691,26 +1691,22 @@ function RestoreModal({
     }
   }, [load]);
 
-  // Esc closes the modal — basic dialog hygiene; the click-on-backdrop
-  // handler covers the mouse path.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  // Use the desktop's shared capture-phase trap so Escape closes only this
+  // picker, never the chat behind it, and focus cannot reach live-state actions
+  // outside the dialog. Restore focus to the trigger when the picker closes.
+  const panelRef = useModalDialog<HTMLDivElement>({ onClose });
 
   return (
     <ClawKeepModalPortal>
     <div
       className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t("clawkeep.restoreModal.aria")}
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("clawkeep.restoreModal.aria")}
         className="w-full max-w-xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
         onClick={(e) => e.stopPropagation()}
       >
