@@ -1,6 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import { deriveProtection, isBackupRunning, type ProtectionState } from "@/lib/clawkeep-protection";
@@ -9,6 +10,7 @@ import ClawKeepWizard from "./ClawKeepWizard";
 import { PairChallengeCard, type PairStartResponse } from "./ClawKeepPairChallengeCard";
 import {
   CARD,
+  ClawKeepModalPortal,
   ConfirmDialog,
   Stat,
   WEEKDAY_LABEL_KEYS,
@@ -814,6 +816,12 @@ interface ScheduleSaveResponse {
   scheduleArmedAtMs: number;
 }
 
+function sameSchedule(a: ClawKeepSchedule, b: ClawKeepSchedule): boolean {
+  return a.enabled === b.enabled && a.frequency === b.frequency
+    && a.timeOfDay === b.timeOfDay && a.weekday === b.weekday
+    && a.retentionKeepLast === b.retentionKeepLast;
+}
+
 function ScheduleCard({
   schedule,
   nextRunAtMs,
@@ -828,9 +836,13 @@ function ScheduleCard({
   const { t } = useT();
   const [draft, setDraft] = useState<ClawKeepSchedule>(schedule);
   const [saving, setSaving] = useState(false);
-  // Re-sync the draft when the parent re-fetches (e.g. after a backup run
-  // bumped nextRunAtMs server-side).
-  useEffect(() => { setDraft(schedule); }, [schedule]);
+  const previousSchedule = useRef(schedule);
+  // A background status poll must not discard an owner's unsaved input.
+  useEffect(() => {
+    const previous = previousSchedule.current;
+    previousSchedule.current = schedule;
+    setDraft(current => sameSchedule(current, previous) ? schedule : current);
+  }, [schedule]);
 
   const dirty =
     draft.enabled !== schedule.enabled
@@ -1690,8 +1702,9 @@ function RestoreModal({
   }, [onClose]);
 
   return (
+    <ClawKeepModalPortal>
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
+      className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md"
       role="dialog"
       aria-modal="true"
       aria-label={t("clawkeep.restoreModal.aria")}
@@ -1951,6 +1964,7 @@ function RestoreModal({
         </footer>
       </div>
     </div>
+    </ClawKeepModalPortal>
   );
 }
 
@@ -1982,18 +1996,7 @@ function SetPassphraseModal({
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
-  // Esc cancels the modal (consistent with ConfirmDialog and RestoreModal).
-  // Skip while a save is in flight so the user can't half-cancel a request.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !submitting) {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel, submitting]);
+  const panelRef = useModalDialog<HTMLFormElement>({ onClose: () => { if (!submitting) onCancel(); } });
 
   const canSubmit =
     pw.length >= 8 && pw === confirm && acknowledged && !submitting;
@@ -2027,10 +2030,15 @@ function SetPassphraseModal({
   };
 
   return (
+    <ClawKeepModalPortal>
     <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <form
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("clawkeep.encryption.setTitle")}
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
+        className="max-h-[calc(100dvh-2rem)] overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.setTitle")}
@@ -2125,6 +2133,7 @@ function SetPassphraseModal({
           <button
             type="button"
             onClick={onCancel}
+            disabled={submitting}
             className="px-3 py-1.5 rounded-md text-xs font-medium text-white/70 bg-white/5 hover:bg-white/10 cursor-pointer"
           >
             {t("clawkeep.cancel")}
@@ -2139,6 +2148,7 @@ function SetPassphraseModal({
         </div>
       </form>
     </div>
+    </ClawKeepModalPortal>
   );
 }
 
@@ -2165,20 +2175,7 @@ function RestorePassphraseModal({
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(initialError ?? null);
 
-  // Esc cancels the modal (consistent with ConfirmDialog/RestoreModal).
-  // Skip while a decrypt+restore is in flight — interrupting via Esc
-  // wouldn't actually abort the underlying CLI subprocess and would
-  // leave the user thinking they cancelled when they didn't.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !submitting) {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel, submitting]);
+  const panelRef = useModalDialog<HTMLFormElement>({ onClose: () => { if (!submitting) onCancel(); } });
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2197,10 +2194,15 @@ function RestorePassphraseModal({
   const descSuffix = t("clawkeep.encryption.enterDescriptionSuffix");
 
   return (
+    <ClawKeepModalPortal>
     <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <form
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={t("clawkeep.encryption.enterTitle")}
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
+        className="max-h-[calc(100dvh-2rem)] overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.enterTitle")}
@@ -2245,5 +2247,6 @@ function RestorePassphraseModal({
         </div>
       </form>
     </div>
+    </ClawKeepModalPortal>
   );
 }

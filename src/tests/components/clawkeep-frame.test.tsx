@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, within } from "@/tests/helpers/test-utils";
+import { render, screen, within, fireEvent, act } from "@/tests/helpers/test-utils";
 import ClawKeepApp from "@/components/ClawKeepApp";
 import { I18nProvider } from "@/lib/i18n";
 
@@ -32,7 +32,7 @@ function installFetch() {
     const url = String(input);
     urls.push(url);
     const ok = (json: unknown) => ({ ok: true, status: 200, json: async () => json });
-    if (url.includes("/setup-api/clawkeep")) return ok(status);
+    if (url.includes("/setup-api/clawkeep")) return ok({ ...status, schedule: { ...(status.schedule as object) } });
     return ok({});
   }));
 }
@@ -69,6 +69,36 @@ describe("ClawKeep's frame", () => {
     expect(portal.getAttribute("href")).toBe("https://portal.example/portal/clawkeep");
     expect(portal.getAttribute("target")).toBe("_blank");
     expect(within(header).getByRole("button", { name: "Unpair" })).toBeTruthy();
+  });
+
+  it("keeps unsaved schedule input when a background status poll arrives", async () => {
+    vi.useFakeTimers();
+    let unmount: (() => void) | undefined;
+    try {
+      status = { ...BASE_STATUS, paired: true, configured: true, lastBackupAtMs: Date.now(), cloudBytes: 1024, snapshotCount: 2 };
+      await act(async () => {
+        ({ unmount } = render(<I18nProvider><ClawKeepApp /></I18nProvider>));
+      });
+      const input = screen.getByRole("spinbutton");
+      fireEvent.change(input, { target: { value: "7" } });
+      const pollsBefore = urls.length;
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(urls.length).toBeGreaterThan(pollsBefore);
+      expect((input as HTMLInputElement).value).toBe("7");
+      expect(screen.getByRole("button", { name: "Save schedule" })).toBeTruthy();
+    } finally { unmount?.(); vi.useRealTimers(); }
+  });
+
+  it("renders the encryption dialog outside the transformed app window", async () => {
+    status = { ...BASE_STATUS, paired: true, configured: true, encryptionConfigured: false, lastBackupAtMs: Date.now(), cloudBytes: 1024, snapshotCount: 2 };
+    const { container } = render(<div style={{ transform: "translate(10px, 10px)" }}><I18nProvider><ClawKeepApp /></I18nProvider></div>);
+    const button = await screen.findByRole("button", { name: /Protect my OpenClaw/i });
+    fireEvent.click(button);
+    const dialog = screen.getByRole("dialog");
+    expect(container.contains(dialog)).toBe(false);
+    expect(dialog.parentElement?.parentElement).toBe(document.body);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("no longer points at Memory Shard, nor probes the memory index", async () => {

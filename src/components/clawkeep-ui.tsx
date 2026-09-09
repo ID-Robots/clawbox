@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { CARD as KIT_CARD } from "./coding-agent-ui";
@@ -103,6 +104,11 @@ export function formatNextRun(ms: number, t: Translator): string {
   return t("clawkeep.inMinutes", { mins });
 }
 
+/** Escape the desktop window's transform/stacking context and taskbar. */
+export function ClawKeepModalPortal({ children }: { children: ReactNode }) {
+  return typeof document === "undefined" ? null : createPortal(children, document.body);
+}
+
 export function ConfirmDialog({
   title,
   body,
@@ -140,8 +146,9 @@ export function ConfirmDialog({
     : "bg-emerald-500 hover:bg-emerald-400 text-black";
 
   return (
+    <ClawKeepModalPortal>
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      className="fixed inset-0 z-[100001] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       onClick={onCancel}
     >
       {/* The role sits on the PANEL, where the trap is attached: on the
@@ -191,6 +198,7 @@ export function ConfirmDialog({
         </div>
       </div>
     </div>
+    </ClawKeepModalPortal>
   );
 }
 
