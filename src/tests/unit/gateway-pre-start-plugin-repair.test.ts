@@ -83,8 +83,54 @@ with open(cfg_path, "w") as fh:
 PY
   exit $?
 fi
-if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then exit "\${OC_ENABLE_EXIT:-0}"; fi
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  # THE REAL VERB'S SIDE EFFECT, which the boot script depends on and a stub
+  # that only exits was hiding: \`plugins enable\` writes
+  # \`plugins.entries.<id>.enabled = true\` — it is how a re-attempt puts an
+  # entry the previous boot switched off back on, and the post-enable
+  # verification cannot see a plugin the config still calls disabled.
+  if [ "\${OC_ENABLE_EXIT:-0}" = "0" ]; then
+    "$0" config set "plugins.entries[\\"$3\\"].enabled" true >/dev/null 2>&1 || true
+  fi
+  exit "\${OC_ENABLE_EXIT:-0}"
+fi
 exit 0
+`;
+
+/**
+ * An `openclaw plugins inspect --all --json` that answers from the CONFIG.
+ *
+ * `status` is the config's own enablement bit under another name — which is
+ * exactly why the boot script's post-enable check has to run after the enable
+ * wrote it — so a fixture that answered `loaded` unconditionally would make the
+ * re-attempt look repaired on a box where it is inert. `OC_CONSENT_PENDING`
+ * lists the ids the core still refuses, in its own wording.
+ */
+const INSPECT_STUB = `
+if [ "$1" = "plugins" ] && [ "$2" = "inspect" ]; then
+  python3 - "$OPENCLAW_CONFIG" <<'PY'
+import json, os, sys
+try:
+    with open(sys.argv[1]) as fh:
+        entries = (json.load(fh).get("plugins") or {}).get("entries") or {}
+except Exception:
+    entries = {}
+pending = {p for p in os.environ.get("OC_CONSENT_PENDING", "").split(",") if p}
+reports = []
+for key, entry in entries.items():
+    on = isinstance(entry, dict) and entry.get("enabled") is True
+    reports.append({
+        "plugin": {"id": key, "status": "loaded" if on else "disabled", "activated": on},
+        "install": {"source": "npm", "spec": "@openclaw/%s@2026.8.1" % key},
+        "diagnostics": (
+            [{"pluginId": key, "message": 'Plugin "%s" requires capability consent' % key}]
+            if key in pending else []
+        ),
+    })
+print(json.dumps(reports))
+PY
+  exit 0
+fi
 `;
 
 function run(env: Record<string, string> = {}) {
@@ -267,18 +313,32 @@ ${CONFIG_SET_STUB}`);
 // describes the entry the previous boot switched OFF. The owner's Retry then
 // repaired it on the first press, so the failure had been transient for days.
 d("gateway-pre-start.sh — a plugin a PREVIOUS boot switched off", () => {
-  /** The 2026-09-06 row off the box, as the boot script wrote it. */
-  function seedStaleConsentRow() {
+  /** A row exactly as the boot script wrote it, over an entry it switched off. */
+  function seedRow(
+    id: string,
+    row: Partial<{ stage: string; disabled: boolean; spec: string; atMs: number }> = {},
+    rest: Record<string, unknown> = {},
+  ) {
     writeFileSync(
       configPath,
-      JSON.stringify({ plugins: { entries: { discord: { enabled: false } } } }, null, 2),
+      JSON.stringify(
+        {
+          plugins: {
+            entries: Object.fromEntries(
+              [id, ...Object.keys(rest)].map((key) => [key, { enabled: false }]),
+            ),
+          },
+        },
+        null,
+        2,
+      ),
     );
     writeFileSync(
       markerPath,
       JSON.stringify(
         {
-          discord: {
-            id: "discord",
+          [id]: {
+            id,
             stage: "consent",
             reason:
               "The plugin is installed but its capabilities could not be accepted, "
@@ -286,7 +346,9 @@ d("gateway-pre-start.sh — a plugin a PREVIOUS boot switched off", () => {
             atMs: 1788668446552,
             disabled: true,
             spec: "",
+            ...row,
           },
+          ...rest,
         },
         null,
         2,
@@ -294,8 +356,15 @@ d("gateway-pre-start.sh — a plugin a PREVIOUS boot switched off", () => {
     );
   }
 
+  /** The 2026-09-06 discord row off the OpenClaw box, verbatim. */
+  const seedStaleConsentRow = () => seedRow("discord");
+
+  /** Both halves of a real box: the verb writes the config, the report reads it. */
+  const stubRealCli = () => stubOpenclaw(`${INSPECT_STUB}${CONFIG_SET_STUB}`);
+
   it("re-attempts the consent and clears the record when it works", () => {
     seedStaleConsentRow();
+    stubRealCli();
     const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
     expect(r.status).toBe(0);
 
@@ -310,6 +379,7 @@ d("gateway-pre-start.sh — a plugin a PREVIOUS boot switched off", () => {
 
   it("leaves it off and refreshes the record when the consent still fails", () => {
     seedStaleConsentRow();
+    stubRealCli();
     const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", OC_ENABLE_EXIT: "1" });
     expect(r.status).toBe(0);
     // Still off: the gateway must still be able to start.
@@ -319,6 +389,36 @@ d("gateway-pre-start.sh — a plugin a PREVIOUS boot switched off", () => {
     expect(row.disabled).toBe(true);
     // A fresh attempt, not the 2026-09-06 one.
     expect(row.atMs).toBeGreaterThan(1788668446552);
+  });
+
+  it("switches it back off when the core still says the consent is missing", () => {
+    // An exit code is not the outcome. This block turns a plugin back ON, so a
+    // `plugins enable` that exited 0 without the consent landing would hand the
+    // gateway the readiness refusal the previous boot switched the entry off to
+    // avoid — the false success this codebase keeps producing.
+    seedStaleConsentRow();
+    stubRealCli();
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", OC_CONSENT_PENDING: "discord" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+    expect(r.stderr).toContain("could not confirm discord plugin capabilities after the re-attempt");
+    const row = marker().discord;
+    expect(row.disabled).toBe(true);
+    expect(row.reason).toContain("still reports it as requiring capability consent");
+  });
+
+  it("leaves it switched off when the core cannot be asked at all", () => {
+    // The same strictness for the answer that is not an answer: the box ends
+    // this boot exactly as it started it rather than carrying an unresolved
+    // plugin into a readiness refusal, and the next boot asks again.
+    seedStaleConsentRow();
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.discord?.enabled).toBe(false);
+    expect(r.stderr).toContain("could not confirm discord plugin capabilities after the re-attempt");
+    const row = marker().discord;
+    expect(row.disabled).toBe(true);
+    expect(row.reason).toContain("could not confirm the consent after a fresh attempt");
   });
 
   it("re-files the row as the install it needs when the payload is gone", () => {
@@ -342,6 +442,58 @@ ${CONFIG_SET_STUB}`);
     expect(row.reason).toContain("Plugin not found");
   });
 
+  it("keeps an install row an install row, and its spec, on any other failure", () => {
+    // ONLY EVER ESCALATES. `Plugin not found` is the one answer that licenses a
+    // change of stage; rewriting an `install` row as `consent` would send every
+    // future Retry to `plugins enable` (the route branches on the stage)
+    // instead of the `plugins install --force` that is its repair, and the badge
+    // could then never clear. The ClawHub spec is the deepseek block's to build,
+    // so a re-file that cannot build one must not erase it either.
+    seedRow("deepseek", {
+      stage: "install",
+      spec: "clawhub:@openclaw/deepseek-provider@2026.8.1",
+    });
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  echo "Error: cannot find module '@openclaw/deepseek-provider/dist/index.js'" >&2
+  exit 1
+fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    const row = marker().deepseek;
+    expect(row.stage).toBe("install");
+    expect(row.spec).toBe("clawhub:@openclaw/deepseek-provider@2026.8.1");
+    expect(row.disabled).toBe(true);
+  });
+
+  it("re-attempts one row per boot, the one attempted longest ago", () => {
+    // The whole bound, and the anti-starvation rule in one: a blocking
+    // ExecStartPre under TimeoutStartSec=600 cannot afford three of these, and
+    // every attempt restamps its row, so the next boot picks the other one
+    // rather than the same broken row for ever.
+    seedRow("discord", { atMs: 1000 }, {
+      whatsapp: {
+        id: "whatsapp",
+        stage: "consent",
+        reason: "The plugin is installed but its capabilities could not be accepted.",
+        atMs: 2000,
+        disabled: true,
+        spec: "",
+      },
+    });
+    stubRealCli();
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1", OC_ENABLE_EXIT: "1" });
+    expect(r.status).toBe(0);
+    const calls = readFileSync(path.join(dir, "calls.log"), "utf-8");
+    expect(calls).toContain("plugins enable discord --accept-capabilities");
+    expect(calls).not.toContain("plugins enable whatsapp");
+    // The older row was tried and restamped; the newer one is untouched, and
+    // is what the next boot will pick.
+    expect(marker().discord.atMs).toBeGreaterThan(1000);
+    expect(marker().whatsapp.atMs).toBe(2000);
+  });
+
   it("puts the entry back off when the failed enable had already switched it on", () => {
     // `plugins enable` writes `plugins.entries.<id>.enabled` FIRST and only
     // then loads the gateway SDK, so a re-attempt that fails can leave the
@@ -360,10 +512,31 @@ ${CONFIG_SET_STUB}`);
     const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
     expect(r.status).toBe(0);
     expect(config().plugins?.entries?.discord?.enabled).toBe(false);
-    expect(r.stdout).toContain("Switched the discord plugin off again");
+    expect(r.stdout).toContain("Leaving the discord plugin switched off");
     const row = marker().discord;
     expect(row.disabled).toBe(true);
     expect(row.reason).toContain("the gateway SDK could not be loaded");
+  });
+
+  it("still records ClawBox's own switch-off when the re-disable fails", () => {
+    // `disabled` says WHOSE switch-off this is, not whether the last write
+    // landed. Handing the entry back to the owner here would stop the Retry
+    // switching an unloadable plugin off and stop the next boot re-attempting
+    // the row at all.
+    seedStaleConsentRow();
+    stubOpenclaw(`
+if [ "$1" = "plugins" ] && [ "$2" = "enable" ]; then
+  "$0" config set "plugins.entries[\\"$3\\"].enabled" true >/dev/null 2>&1 || true
+  echo "Error: the gateway SDK could not be loaded" >&2
+  exit 1
+fi
+if [ "$1" = "config" ] && [ "$2" = "set" ] && [ "$4" = "false" ]; then exit 1; fi
+${CONFIG_SET_STUB}`);
+    const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
+    expect(r.status).toBe(0);
+    expect(config().plugins?.entries?.discord?.enabled).toBe(true);
+    expect(r.stderr).toContain("could not switch the discord plugin off again");
+    expect(marker().discord.disabled).toBe(true);
   });
 
   it("never turns on a disabled entry the record does not vouch for", () => {
@@ -383,27 +556,7 @@ ${CONFIG_SET_STUB}`);
     // `disabled: false` is the boot script's record of a failure over which it
     // changed NOTHING. An entry that is off with such a row against it is off
     // because its owner said so, and no boot may turn a channel on for him.
-    writeFileSync(
-      configPath,
-      JSON.stringify({ plugins: { entries: { discord: { enabled: false } } } }, null, 2),
-    );
-    writeFileSync(
-      markerPath,
-      JSON.stringify(
-        {
-          discord: {
-            id: "discord",
-            stage: "consent",
-            reason: "The plugin is installed but its capabilities could not be accepted.",
-            atMs: 1788668446552,
-            disabled: false,
-            spec: "",
-          },
-        },
-        null,
-        2,
-      ),
-    );
+    seedRow("discord", { disabled: false });
     const r = run({ CLAWBOX_OPENCLAW_EFFECTIVE: "2026.8.1" });
     expect(r.status).toBe(0);
     expect(config().plugins?.entries?.discord?.enabled).toBe(false);

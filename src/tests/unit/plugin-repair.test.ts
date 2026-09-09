@@ -181,6 +181,57 @@ describe("plugin-repair — recording a row from the server side", () => {
     expect(Object.keys(await readPluginRepairs()).sort()).toEqual(["byteplus", "discord"]);
   });
 
+  it("does not erase a spec the row already carries", async () => {
+    // TASK-785. Each id had one writer while stating the whole row was safe;
+    // the boot re-attempt made a second, and it cannot build every spec — the
+    // ClawHub scheme is known only to the deepseek block. A re-file changes the
+    // stage, never which package it is, so an empty spec keeps the old one.
+    write({
+      deepseek: {
+        id: "deepseek",
+        stage: "install",
+        reason: "could not install",
+        atMs: 1,
+        disabled: true,
+        spec: "clawhub:@openclaw/deepseek-provider@2026.8.1",
+      },
+    });
+    const { recordPluginRepair, readPluginRepairs } = await load();
+    await recordPluginRepair({
+      id: "deepseek",
+      stage: "install",
+      reason: "still could not install",
+      disabled: true,
+      spec: "",
+    });
+    const rows = await readPluginRepairs();
+    expect(rows.deepseek.spec).toBe("clawhub:@openclaw/deepseek-provider@2026.8.1");
+    expect(rows.deepseek.reason).toBe("still could not install");
+  });
+
+  it("takes a new spec over the old one", async () => {
+    write({
+      deepseek: {
+        id: "deepseek",
+        stage: "install",
+        reason: "could not install",
+        atMs: 1,
+        disabled: true,
+        spec: "clawhub:@openclaw/deepseek-provider@2026.7.1",
+      },
+    });
+    const { recordPluginRepair, readPluginRepairs } = await load();
+    await recordPluginRepair({
+      id: "deepseek",
+      stage: "install",
+      reason: "still could not install",
+      disabled: true,
+      spec: "clawhub:@openclaw/deepseek-provider@2026.8.1",
+    });
+    expect((await readPluginRepairs()).deepseek.spec)
+      .toBe("clawhub:@openclaw/deepseek-provider@2026.8.1");
+  });
+
   it("starts over on a file it cannot parse, exactly as the boot script does", async () => {
     mkdirSync(path.join(dir, "data"), { recursive: true });
     writeFileSync(path.join(dir, "data", "plugin-repair.json"), "{ not json", "utf-8");
