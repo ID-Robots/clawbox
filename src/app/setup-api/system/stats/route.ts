@@ -4,7 +4,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import fsP from "fs/promises";
-import { getCpuUsage } from "@/lib/cpu-usage";
+import { getCpuCoreUsage, getCpuUsage } from "@/lib/cpu-usage";
 
 const execFileAsync = promisify(execFile);
 
@@ -165,33 +165,55 @@ function getNetworkInterfaces(): NetworkInterface[] {
   return result;
 }
 
-async function readTopProcesses(): Promise<ProcessEntry[]> {
+/** How many rows each of the two lists carries. */
+const TOP_PROCESS_ROWS = 10;
+
+function parsePsLine(line: string): ProcessEntry | null {
+  const parts = line.trim().split(/\s+/);
+  const [user, pid, cpu, mem, , , , , , , ...cmdParts] = parts;
+  if (!pid) return null;
+  return {
+    pid,
+    user: user || "",
+    cpu: parseFloat(cpu) || 0,
+    mem: parseFloat(mem) || 0,
+    command: cmdParts.join(" ").slice(0, 60) || parts[10] || "?",
+  };
+}
+
+/**
+ * The busiest processes, by CPU and by memory, from ONE `ps`.
+ *
+ * `ps aux` is 91% of this route's cost (28.5 ms on an Orin Nano against 2.8 ms
+ * for `df`), and the second ordering is a sort of a list already in hand — so
+ * the memory list is free, and spawning a second `ps --sort=-%mem` for it would
+ * roughly double what the two panels that poll this every three seconds cost.
+ *
+ * Both orderings matter on this box and for different reasons: CPU is what a
+ * slow desktop looks like, and MEMORY is what an OOM-killed update looks like
+ * on 7.4 GB shared with a language model.
+ */
+async function readTopProcesses(): Promise<{ byCpu: ProcessEntry[]; byMemory: ProcessEntry[] }> {
   const { stdout: output } = await execFileAsync("ps", ["aux", "--sort=-%cpu"], {
     encoding: "utf-8",
     timeout: 5000,
   });
-  // Skip the header, keep the top 10 by CPU (the old `| head -11` limit).
-  const lines = output.trim().split("\n").slice(1, 11);
-  return lines.map((line) => {
-    const parts = line.trim().split(/\s+/);
-    const [user, pid, cpu, mem, , , , , , , ...cmdParts] = parts;
-    return {
-      pid: pid || "",
-      user: user || "",
-      cpu: parseFloat(cpu) || 0,
-      mem: parseFloat(mem) || 0,
-      command: cmdParts.join(" ").slice(0, 60) || parts[10] || "?",
-    };
-  }).filter((p) => p.pid);
+  const all = output.trim().split("\n").slice(1)
+    .map(parsePsLine)
+    .filter((p): p is ProcessEntry => p !== null);
+  return {
+    byCpu: all.slice(0, TOP_PROCESS_ROWS),
+    byMemory: [...all].sort((a, b) => b.mem - a.mem).slice(0, TOP_PROCESS_ROWS),
+  };
 }
 
 const topProcesses = memoAsync(readTopProcesses);
 
-async function getTopProcesses(): Promise<ProcessEntry[]> {
+async function getTopProcesses(): Promise<{ byCpu: ProcessEntry[]; byMemory: ProcessEntry[] }> {
   try {
     return await topProcesses();
   } catch {
-    return [];
+    return { byCpu: [], byMemory: [] };
   }
 }
 
@@ -265,6 +287,8 @@ export async function GET() {
     // await. Everything below it still touches the event loop (temp/gpu reads,
     // promisified execFile shells) so it stays in one Promise.all.
     const cpuUsage = getCpuUsage();
+    // Per core, from the same /proc/stat read discipline — no sleep, no spawn.
+    const cpuCores = getCpuCoreUsage();
     const [temp, gpuUsage, storage, processes] = await Promise.all([
       getTemperature(),
       getGpuUsage(),
@@ -291,6 +315,9 @@ export async function GET() {
         cores: cpus.length,
         loadAvg: os.loadavg().map((v) => v.toFixed(2)),
         speed: cpus[0]?.speed || 0,
+        // One entry per core, or empty where /proc/stat could not be read —
+        // never a row of zeros, which would be a claim that the box is idle.
+        perCore: cpuCores,
       },
       memory: {
         total: totalMem,
@@ -303,7 +330,10 @@ export async function GET() {
       gpu: { usage: gpuUsage },
       storage,
       network: getNetworkInterfaces(),
-      processes,
+      // `processes` stays the by-CPU list it has always been, so every existing
+      // reader is untouched; the memory ordering arrives beside it.
+      processes: processes.byCpu,
+      processesByMemory: processes.byMemory,
       timestamp: Date.now(),
     };
 

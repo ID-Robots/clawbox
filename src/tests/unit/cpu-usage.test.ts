@@ -143,3 +143,65 @@ describe("parseProcStat", () => {
     expect(cpuUsage.parseProcStat("cpu  a b c d\n", 0)).toBeNull();
   });
 });
+
+/**
+ * Per-core usage, for the htop-style bars on Settings → System.
+ *
+ * Same file, same delta discipline and the same read as the aggregate figure —
+ * so the thing worth pinning is not the arithmetic but the honesty: a core that
+ * has not been measured yet, or whose counters went backwards over a suspend,
+ * must not be drawn as an idle one.
+ */
+describe("getCpuCoreUsage", () => {
+  /** Four cores, each with its own user/idle pair, under the aggregate line. */
+  function cores(pairs: [number, number][]): string {
+    const total = pairs.reduce((a, [u, i]) => [a[0] + u, a[1] + i] as [number, number], [0, 0]);
+    return [
+      `cpu  ${total[0]} 0 0 ${total[1]} 0 0 0 0 0 0`,
+      ...pairs.map(([user, idle], n) => `cpu${n} ${user} 0 0 ${idle} 0 0 0 0 0 0`),
+      "intr 12345",
+      "",
+    ].join("\n");
+  }
+
+  it("reads one figure per core out of the same /proc/stat", () => {
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900], [100, 900], [100, 900]]));
+    cpuUsage.getCpuCoreUsage();
+    // core 0 busy, core 1 idle, cores 2-3 half.
+    mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000], [150, 950], [150, 950]]));
+    expect(cpuUsage.getCpuCoreUsage()).toEqual([100, 0, 50, 50]);
+  });
+
+  it("answers nothing at all when /proc/stat cannot be read", () => {
+    // Not a row of zeros: an empty list is "no reading", and a row of zeros
+    // would be a claim that every core on the box is idle.
+    mockFs.readFileSync.mockImplementation(() => { throw new Error("EACCES"); });
+    expect(cpuUsage.getCpuCoreUsage()).toEqual([]);
+  });
+
+  it("keeps the last real figures when the counters go backwards", () => {
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900]]));
+    cpuUsage.getCpuCoreUsage();
+    mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000]]));
+    expect(cpuUsage.getCpuCoreUsage()).toEqual([100, 0]);
+    // A suspend/rollover rewinds the counters; the previous answer stands
+    // rather than a fabricated 0%.
+    mockFs.readFileSync.mockReturnValue(cores([[10, 90], [10, 90]]));
+    expect(cpuUsage.getCpuCoreUsage()).toEqual([100, 0]);
+  });
+
+  it("starts over when the core count changes under it", () => {
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900]]));
+    cpuUsage.getCpuCoreUsage();
+    // A hotplug leaves nothing comparable; the next call is the one with a
+    // real figure, and this one must not diff core 2 against core 1's history.
+    mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000], [100, 1000]]));
+    expect(cpuUsage.getCpuCoreUsage()).toEqual([0, 0, 0]);
+  });
+
+  it("skips a core line it cannot parse rather than calling it idle", () => {
+    mockFs.readFileSync.mockReturnValue("cpu  100 0 0 900 0\ncpu0 1 2\ncpu1 100 0 0 900 0\n");
+    expect(cpuUsage.parseProcStatCores("cpu  1 0 0 1\ncpu0 1 2\ncpu1 100 0 0 900\n", 1_000))
+      .toEqual([null, { idle: 900, total: 1000, at: 1_000 }]);
+  });
+});

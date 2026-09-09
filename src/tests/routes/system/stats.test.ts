@@ -140,6 +140,33 @@ SwapFree:        1500000 kB`;
     expect(Array.isArray(body.processes)).toBe(true);
   });
 
+  it("returns a per-core CPU reading beside the aggregate one", async () => {
+    const res = await systemStatsGet();
+    const body = await res.json();
+
+    // One entry per `cpuN` line in the mocked /proc/stat above, and an array
+    // either way — the panel draws no per-core row rather than a row of zeros
+    // when the file could not be read.
+    expect(Array.isArray(body.cpu.perCore)).toBe(true);
+    for (const core of body.cpu.perCore) {
+      expect(core).toBeGreaterThanOrEqual(0);
+      expect(core).toBeLessThanOrEqual(100);
+    }
+  });
+
+  it("returns the busiest processes by MEMORY as well as by CPU", async () => {
+    // Both matter on this box and for different reasons: CPU is what a slow
+    // desktop looks like, and memory is what an OOM-killed update looks like on
+    // 7.4 GB shared with a language model.
+    const res = await systemStatsGet();
+    const body = await res.json();
+
+    expect(Array.isArray(body.processesByMemory)).toBe(true);
+    // Whatever the box answered, the memory list is ordered by memory.
+    const mems = (body.processesByMemory as { mem: number }[]).map((p) => p.mem);
+    expect([...mems].sort((a, b) => b - a)).toEqual(mems);
+  });
+
   it("returns load averages in cpu object", async () => {
     const res = await systemStatsGet();
     const body = await res.json();
