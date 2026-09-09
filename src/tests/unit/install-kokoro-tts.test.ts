@@ -327,7 +327,7 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
   const res = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, TTS_FFMPEG_BIN: ffmpegBin, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
+    env: { ...process.env, CLAWBOX_OPENCLAW_HOME: `${root}/openclaw-home`, TTS_FFMPEG_BIN: ffmpegBin, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
   });
   const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf-8").trim().split("\n").filter(Boolean) : []);
   return {
@@ -1090,7 +1090,7 @@ function runValidator(ttsStatusContents: string | null, extraEnv: Record<string,
   const r = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
+    env: { ...process.env, CLAWBOX_OPENCLAW_HOME: `${root}/openclaw-home`, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
   });
   return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }

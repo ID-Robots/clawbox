@@ -114,7 +114,7 @@ function runStep(env: Record<string, string> = {}) {
 
   return spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
-    env: { ...process.env, ...env },
+    env: { ...process.env, CLAWBOX_OPENCLAW_HOME: `${dir}/openclaw-home`, ...env },
   });
 }
 

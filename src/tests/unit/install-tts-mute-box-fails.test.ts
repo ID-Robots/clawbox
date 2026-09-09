@@ -90,7 +90,7 @@ function runShellProgram(program: string, env: Record<string, string>) {
   return spawnSync("bash", [file], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, ...env },
+    env: { ...process.env, CLAWBOX_OPENCLAW_HOME: `${root}/openclaw-home`, ...env },
   });
 }
 

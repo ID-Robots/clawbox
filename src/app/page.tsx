@@ -552,6 +552,9 @@ function ChromeDesktopInner() {
   // Bumped once by the load when a shed is owed, purely to run the write effect
   // below on a box whose `desktopApps` the load did not change.
   const [shedTick, setShedTick] = useState(0);
+  // Set once this page has shed, and never cleared: every `desktop_apps` write
+  // from then on carries the version, so no debounce replacement can drop it.
+  const shedRecorded = useRef(false);
   // The docked chat's width as the DEVICE remembers it — see the write below.
   // Seeded from the stored value even on a phone, which never restores the
   // panel, so opening the desktop on a phone cannot erase the layout.
@@ -943,10 +946,19 @@ function ChromeDesktopInner() {
     // a second effect on the same dependency would cost a second POST on every
     // first load that sheds, and the two must not be able to land apart — a box
     // that shed its icons without recording the version would shed them again.
-    const shed = shedNeeded.current !== null;
-    shedNeeded.current = null;
+    // STICKY, not consumed. The write is debounced by 500 ms and shares one slot
+    // with every later `desktop_apps` write, so a replacement queued inside that
+    // window cancels the pending one — and if the marker had been consumed by
+    // then, the payload that actually reaches the disk carries no version and
+    // the next load sheds the app the owner just restored. Carrying it on every
+    // write for the life of the page is idempotent (same value each time) and
+    // cannot lose the race.
+    if (shedNeeded.current !== null) {
+      shedRecorded.current = true;
+      shedNeeded.current = null;
+    }
     savePreferences(
-      shed
+      shedRecorded.current
         ? { desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION }
         : { desktop_apps: desktopApps },
       // An EXPLICIT slot, because this body has two shapes: without one the slot

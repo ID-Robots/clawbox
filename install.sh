@@ -5281,6 +5281,14 @@ tts_ensure_provider_registered() {
 # box, which must still be seeded — and only a file that exists and does not
 # parse is the case this refuses to write over. Mirrors the discipline the
 # Hermes arm above already applies through HERMES_TTS_READ_FAILED.
+# Runs through `as_clawbox`, exactly like every `oc_config_set` in this step, and
+# that correspondence is the point: the probe must resolve the SAME config the
+# writes will land in. Pinning HOME here alone would break it — the probe could
+# then vet one file while the writes touched another. (Measured on the box:
+# sudoers sets `env_reset`, so `sudo -u clawbox` already gives
+# HOME=/home/clawbox. A box where that did not hold would send this step's reads
+# AND its writes to the same wrong place, which is a property of the whole file
+# rather than of this helper.)
 tts_config_readable() {
   local rc=0
   as_clawbox python3 - <<'PY' >/dev/null 2>&1 || rc=$?
