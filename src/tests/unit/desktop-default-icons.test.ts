@@ -28,8 +28,10 @@ describe("default desktop icons", () => {
   });
 
   it("validates a saved layout against every built-in, not just the defaults", () => {
+    // The binding keyword is not the point — the shed below reassigns `saved`,
+    // so this matches either form and pins only the rule it exists for.
     expect(src).toMatch(
-      /const saved = \(data\.desktop_apps as string\[\]\)\.filter\(id => BUILT_IN_APP_IDS\.includes\(id\)\)/
+      /(?:const|let) saved = \(data\.desktop_apps as string\[\]\)\.filter\(id => BUILT_IN_APP_IDS\.includes\(id\)\)/
     );
   });
 
@@ -41,5 +43,40 @@ describe("default desktop icons", () => {
 
   it("gives every built-in a declared icon slot, including the off-by-default ones", () => {
     expect(src).toMatch(/BUILT_IN_APP_IDS\.map\(\(id\) => `desktop-\$\{id\}`\)/);
+  });
+});
+
+// `OFF_DESKTOP_BY_DEFAULT` only shapes the DEFAULT grid, and a saved list is
+// restored verbatim so an owner's own additions survive. The consequence was
+// that moving an app off the desktop reached FRESH boxes only: an upgraded box
+// kept the icon for good, which is the state a v3.9.0 -> v4.0.0 box was found in.
+describe("one-time shed of apps that moved off the desktop", () => {
+  it("sheds exactly the ids that moved, and only from a saved list", () => {
+    expect(src).toMatch(/const SHED_FROM_SAVED_DESKTOP = new Set\(\["system_update", "vnc"\]\)/);
+    expect(src).toMatch(
+      /saved = saved\.filter\(id => !SHED_FROM_SAVED_DESKTOP\.has\(id\)\)/
+    );
+  });
+
+  it("is gated on a persisted version, so an icon put back is not shed again", () => {
+    expect(src).toMatch(/const DESKTOP_APPS_SHED_VERSION = \d+/);
+    expect(src).toMatch(
+      /Number\(data\.desktop_apps_shed \?\? 0\) < DESKTOP_APPS_SHED_VERSION/
+    );
+    // Recorded from an effect rather than from inside the load: the preference
+    // writer is gated on `prefsLoaded` and drops a write issued during it.
+    expect(src).toMatch(/savePreferences\(\{ desktop_apps_shed: DESKTOP_APPS_SHED_VERSION \}\)/);
+  });
+
+  it("drops the shed app's reserved grid cell where icon_grid is applied", () => {
+    // Applied at the icon_grid assignment, which runs AFTER the shed and would
+    // otherwise put the empty slot straight back.
+    expect(src).toMatch(/for \(const id of SHED_FROM_SAVED_DESKTOP\) delete grid\[`desktop-\$\{id\}`\]/);
+  });
+
+  it("leaves both apps installable from the launcher", () => {
+    // The shed is about the default grid, never about removing the app.
+    expect(registrySrc).toMatch(/id: "vnc", name: "app\.remoteDesktop"/);
+    expect(registrySrc).toMatch(/id: "system_update", name: "app\.systemUpdate"/);
   });
 });
