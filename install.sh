@@ -10050,13 +10050,18 @@ step_ollama_install
 log "Installing llama.cpp runtime..."
 step_llamacpp_install
 
-# Only where the harness is going to use it unprompted. On the Hermes SKU the
-# model is fetched by the Memory Shard wizard instead (embed/install dispatches
-# --step embed_model), so a box whose owner never opens that app never spends
-# the 639 MB.
+log "Caching the memory-search model..."
+# The GATE is here rather than inside step_embed_model, because
+# /setup-api/embed/install dispatches that same step as `--step embed_model` and
+# on the Hermes SKU that is the Memory Shard wizard's own provisioning click.
+# What must not happen is a flash spending 639 MB on a box whose owner may never
+# switch the feature on — so the step is announced either way (the progress
+# counter counts one line per step and every edition runs this one) and only the
+# download is conditional.
 if has_openclaw_harness; then
-  log "Caching the memory-search model..."
   step_embed_model || echo "  Warning: memory-search model cache failed (non-fatal; the embedder fetches it on first use)"
+else
+  echo "  Deferred: Memory Shard fetches it when its setup is run."
 fi
 
 log "Installing Chromium..."
