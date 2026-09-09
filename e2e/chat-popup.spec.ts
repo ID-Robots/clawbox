@@ -180,6 +180,45 @@ test("chat popup connects, streams a reply, and supports panel docking", async (
   await expect(page.getByTitle("Dock to right")).toBeVisible();
 });
 
+test("chat popup stays silent on a box whose agent has been introduced", async ({ page }) => {
+  // The common case on a real box, and the one the greet used to get wrong: an
+  // empty transcript is not a first conversation. A cleared conversation, a
+  // reset session and a box introduced months ago all look identical, and every
+  // one of them used to be answered with an unasked-for "hi" that spent a model
+  // turn and put a word in the owner's mouth.
+  await installFakeGatewaySocket(page);
+
+  await installClawboxMocks(page, {
+    timeoutCapMs: 300_000,
+    kvEntries: { "clawbox-mascot-hidden": "1" },
+    // No introduction waiting: BOOTSTRAP.md is gone because the ritual finished.
+    chatFacts: { onboardingArmed: false },
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      ai_model_configured: true,
+      telegram_configured: true,
+    },
+    preferences: { ui_mascot_hidden: 1 },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+
+  await openChatPopup(page);
+
+  // The composer is usable and the transcript is empty: nothing was sent, so
+  // the fake gateway — which answers "hi" and nothing else with that line —
+  // never replied. Asserted against the gateway's OWN reply rather than a
+  // generic empty check, so a turn that went out under any other text still
+  // fails this.
+  await expect(page.getByTestId("chat-composer-row")).toBeVisible();
+  await expect(page.getByText("Hello from the fake gateway")).toHaveCount(0);
+  await expect(page.getByText(/Fake gateway heard:/)).toHaveCount(0);
+});
+
 test("chat popup lets you switch to Local AI when it is configured", async ({ page }) => {
   await installFakeGatewaySocket(page);
 
