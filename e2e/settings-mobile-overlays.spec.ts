@@ -19,9 +19,10 @@ test("mobile Settings renders account and password confirmation overlays", async
   await expect(page.getByRole("dialog", { name: "Sign in to use Remote Control" })).toBeVisible();
   await page.getByRole("button", { name: "Maybe later" }).click();
 
-  // "System" and not "System Update": the row's name also carries the icon glyph,
-  // the status subtitle and the chevron, so an exact match never lands.
-  await page.getByRole("button", { name: /\bSystem\b(?! Update)/ }).click();
+  // Harness, not System: the box's password moved there with the Desktop &
+  // power switches (2026-09-09) — the set-once settings live beside the harness
+  // picker and System carries the device's figures alone.
+  await page.getByRole("button", { name: /Harness/ }).click();
   await page.getByPlaceholder("Current password").fill("existing-password");
   await page.getByRole("button", { name: "Verify" }).click();
   await page.getByRole("textbox", { name: "New password", exact: true }).fill("new-password-123");
