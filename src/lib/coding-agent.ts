@@ -1,4 +1,4 @@
-import { workflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-workflow-telemetry";
+import { cachedWorkflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-workflow-telemetry";
 /**
  * The Coding Agent — a headless Claude Code session the assistant delegates
  * coding work to.
@@ -2182,7 +2182,7 @@ function persist(immediate = false): void {
 function cloneRun(run: CodingRun): CodingRun {
   return {
     ...run,
-    workflowTelemetry: workflowTelemetry(transcriptPath(run), run.startedAt, run.completedAt),
+    workflowTelemetry: cachedWorkflowTelemetry(transcriptPath(run), run.startedAt, run.completedAt),
     filesTouched: [...run.filesTouched],
     progress: [...run.progress],
     progressAt: [...run.progressAt],

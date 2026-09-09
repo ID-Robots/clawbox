@@ -183,16 +183,37 @@ type GuardablePage = {
 async function installNavGuard(page: GuardablePage, runId?: string | null): Promise<void> {
   if (page.__navGuardInstalled) return;
   page.__navGuardInstalled = true;
+  // Page-local and run-bound. Coalesce parallel asset requests as well as reuse
+  // recent validations, without carrying an origin grant to a different page.
+  const origins = new Map<string, { at: number; check: Promise<string | null> }>();
   await page.route("**/*", async (route) => {
     const req = route.request();
-    // Only pay the DNS-resolution cost on top-level navigations — the requests
-    // whose rendered result gets screenshot and where redirect/rebind SSRF
-    // lands. Subresources continue unblocked.
-    if (!req.isNavigationRequest() && !runId) {
+    const navigation = req.isNavigationRequest();
+    // Legacy unowned pages retain their navigation-only policy. Owned pages
+    // also vet asset origins, with a short cache to avoid DNS/ss work per asset.
+    if (!navigation && !runId) {
       await route.continue();
       return;
     }
-    const err = await validateNavUrl(req.url(), runId);
+    if (runId && !liveBrowserRun(runId)) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    let origin: string | null = null;
+    try {
+      const url = new URL(req.url());
+      // File containment and credential-bearing URLs must always be checked.
+      if (["http:", "https:"].includes(url.protocol) && !url.username && !url.password) origin = url.origin;
+    } catch { /* Invalid URLs are rejected by validateNavUrl below. */ }
+    const cached = origin ? origins.get(origin) : undefined;
+    // Navigations (including redirect hops) ALWAYS revalidate ownership/DNS.
+    const reuse = !navigation && cached && Date.now() - cached.at < 5000;
+    const check = reuse ? cached.check : validateNavUrl(req.url(), runId);
+    if (origin && !reuse) {
+      if (origins.size >= 128) origins.delete(origins.keys().next().value!);
+      origins.set(origin, { at: Date.now(), check });
+    }
+    const err = await check;
     if (err) {
       await route.abort("blockedbyclient");
       return;

@@ -17,7 +17,7 @@ function readBounded(file: string): string {
   try {
     const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > 2 * 1024 * 1024) throw new Error("journal unavailable or too large");
-    const buffer = Buffer.alloc(2 * 1024 * 1024 + 1);
+    const buffer = Buffer.allocUnsafe(Math.min(st.size, 2 * 1024 * 1024) + 1);
     let size = 0;
     while (size < buffer.length) {
       const n = fs.readSync(fd, buffer, size, buffer.length - size, null);
@@ -73,4 +73,28 @@ export function workflowTelemetry(transcript: string | null, startedAt: number, 
     } catch { out.complete = false; }
   }
   return out;
+}
+
+// At most one journal scan per run/phase every five seconds. Transcript changes
+// invalidate completeness immediately; journal-only changes are picked up by TTL.
+// Return detached data: routes must not be able to mutate another poll's snapshot.
+const telemetryCache = new Map<string, { at: number; stamp: string; value: WorkflowTelemetry }>();
+export function cachedWorkflowTelemetry(transcript: string | null, startedAt: number, completedAt: number | null): WorkflowTelemetry {
+  if (!transcript) return { workflows: [], childrenTotal: 0, childrenActive: 0, complete: false };
+  const key = JSON.stringify([transcript, startedAt, completedAt]);
+  let stamp: string;
+  try {
+    const st = fs.statSync(transcript);
+    stamp = `${st.ino}:${st.size}:${st.mtimeMs}`;
+  } catch { stamp = "unavailable"; }
+  const now = Date.now();
+  let entry = telemetryCache.get(key);
+  if (!entry || now - entry.at >= 5000) {
+    entry = { at: now, stamp, value: workflowTelemetry(transcript, startedAt, completedAt) };
+    if (telemetryCache.size >= 100) telemetryCache.delete(telemetryCache.keys().next().value!);
+    telemetryCache.set(key, entry);
+  }
+  const value = structuredClone(entry.value);
+  if (stamp === "unavailable" || stamp !== entry.stamp) value.complete = false;
+  return value;
 }
