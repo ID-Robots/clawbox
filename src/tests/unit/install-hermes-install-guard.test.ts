@@ -1063,8 +1063,8 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
    * and then deletes the tree it moved aside — while `clawbox-hermes-dashboard`
    * is a long-lived process that mapped the old files. Measured on the Hermes
    * box after `install.sh --step hermes_install` took it from v0.20.5 to
-   * v0.21.1: the dashboard was still the pid it had been an hour earlier,
-   * `grep -c "(deleted)" /proc/<pid>/maps` returned 84, and
+   * v0.21.1: the dashboard was still the pid it had been more than two hours
+   * earlier, `grep -c "(deleted)" /proc/<pid>/maps` returned 83, and
    * `journalctl -u clawbox-hermes-dashboard` had no entries at all — it was
    * never signalled.
    *

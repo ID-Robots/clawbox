@@ -3478,8 +3478,8 @@ step_openclaw_setup() {
 # aside is deleted a few lines later — while clawbox-hermes-dashboard is a
 # long-lived Python process holding the OLD files open. Measured on the Hermes
 # box (TASK-784) right after an upgrade from v0.20.5 to v0.21.1: the dashboard
-# was still the pid it had been an hour earlier, `grep -c "(deleted)"
-# /proc/<pid>/maps` returned 84, and `journalctl -u clawbox-hermes-dashboard`
+# was still the pid it had been more than two hours earlier, `grep -c
+# "(deleted)" /proc/<pid>/maps` returned 83, and `journalctl -u clawbox-hermes-dashboard`
 # had NO entries — nothing had signalled it at all. Python imports lazily, so
 # such a process keeps answering until it reaches a module it had not yet
 # imported, which is now unreachable. A full chat battery PASSED on that box in
