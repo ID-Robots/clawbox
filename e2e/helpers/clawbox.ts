@@ -264,7 +264,12 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
   };
   const wifiNetworks = clone(options.wifiNetworks ?? DEFAULT_WIFI_NETWORKS);
   const storeApps = clone(options.storeApps ?? DEFAULT_STORE_APPS);
-  const kvEntries: Record<string, string> = {};
+  // The desktop preference controls the shelf; Mascot reads the matching KV
+  // entry. A real hide action writes both. Keep the fixture coherent so an
+  // allegedly hidden, randomly walking mascot cannot cover tested controls.
+  const kvEntries: Record<string, string> = preferences.ui_mascot_hidden
+    ? { "clawbox-mascot-hidden": "1" }
+    : {};
   const files = clone(options.files ?? DEFAULT_FILES);
   let dismissalFingerprint: string | null = null;
   let hotspotConfig = {
