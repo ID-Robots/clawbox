@@ -218,6 +218,47 @@ describe("a Hermes reply on a box with a voice", () => {
   });
 });
 
+describe("the owner's spoken-replies switch, on a Hermes box", () => {
+  /** Write the config store the way the switch's own writer leaves it. */
+  function setSwitch(enabled: boolean) {
+    fs.writeFileSync(
+      path.join(root, "data", "config.json"),
+      JSON.stringify({ voice_auto_reply: enabled }),
+    );
+  }
+
+  it("says nothing while the switch is off", async () => {
+    // THE FALSE CLAIM this exists to stop. `voice_auto_reply` is the one
+    // spoken-replies switch — Settings -> Voice writes it, and since TASK-782
+    // so does the chat composer's own toggle, whose words are "Replies will
+    // not be spoken." On OpenClaw that is true because the same write puts the
+    // gateway's `tts.auto` to `off`; on THIS edition ClawBox makes the clip
+    // itself, right here, and asked only whether the box CAN speak — so every
+    // reply came back with a player however firmly the owner had said no.
+    setSwitch(false);
+    const res = await post({ message: "what colour" });
+
+    expect(res.status).toBe(200);
+    expect(speakCalls.map((c) => c.path)).not.toContain("/api/audio/speak");
+    const assistant = transcript().filter((m) => m.role === "assistant").pop();
+    // The answer is untouched: switching the voice off is not switching the
+    // chat off.
+    expect(assistant.text).toBe("The lantern is green.");
+    expect(assistant.audio).toBeUndefined();
+  });
+
+  it("speaks again when the switch is on", async () => {
+    // The other half, so "says nothing" cannot pass by breaking the voice.
+    setSwitch(true);
+    const res = await post({ message: "what colour" });
+
+    expect(res.status).toBe(200);
+    expect(speakCalls.map((c) => c.path)).toContain("/api/audio/speak");
+    const assistant = transcript().filter((m) => m.role === "assistant").pop();
+    expect(assistant.audio).toHaveLength(1);
+  });
+});
+
 describe("a Hermes reply that cannot be spoken", () => {
   it("still answers, silently, when the voice refuses", async () => {
     // FALSE FAILURE is the risk here: losing the answer because the voice was
