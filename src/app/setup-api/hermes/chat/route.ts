@@ -433,6 +433,17 @@ async function settleTurn(
   // player however firmly the owner had said no. The switch first, because it
   // is a config-store read while the capability is a `hermes config get` and a
   // systemd probe on the chat turn.
+  //
+  // ONE HALF OF THE SWITCH, and the comment must not claim the other. OFF now
+  // means off on both editions. ON does NOT mean the same thing on both:
+  // OpenClaw writes `tts.auto: "inbound"`, so a TYPED question there gets a
+  // typed answer, while this route speaks every reply because it has no
+  // inbound-voice signal to go on — the desktop chat transcribes on the box
+  // and posts text, exactly as `voice-reply.ts` describes. That behaviour
+  // predates this line and is pinned by the test above ("hands the chat a
+  // playable clip on the reply"); making it `inbound` here means carrying a
+  // "this turn was spoken" flag from the composer into this route and is a
+  // product decision, not a rider on the switch. Named in the PR body.
   const spokenClip = (await getVoiceAutoReply()) && (await hermesSpeaksReplies())
     ? await speakHermesReply(splitEmailRefs(caption).text)
     : null;

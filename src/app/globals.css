@@ -435,12 +435,18 @@ h6 {
  * player is shared by the mascot chat, the chat app and the Voice tab, so a
  * per-surface copy is three chances to drift.
  *
- * The waveform is the only fluid part: the button and the clock keep their
- * size down to the 340px minimum chat, and the bars give up the difference. */
+ * The waveform is the only fluid part: the button, the clock and the download
+ * keep their size down to the 340px minimum chat and the track gives up the
+ * difference — which it can, because the number of bars follows the measured
+ * width (see barsForWidth) instead of being fixed at 56. `min-width: 0` and
+ * the clip are what stop the row pushing out of the bubble while that
+ * measurement settles. */
 .spoken-reply-player {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+  overflow: hidden;
   max-width: 320px;
   padding: 7px 10px 7px 7px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -464,13 +470,18 @@ h6 {
   transition: background-color 0.15s, color 0.15s;
 }
 
-.spoken-reply-play:hover {
+.spoken-reply-play:hover:not(:disabled) {
   background: rgba(249, 115, 22, 0.28);
+}
+
+.spoken-reply-play:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .spoken-reply-wave {
   flex: 1;
-  min-width: 90px;
+  min-width: 0;
   height: 26px;
   display: flex;
   align-items: center;
@@ -519,6 +530,14 @@ h6 {
   display: block;
   height: 100%;
   background: var(--coral-bright);
+}
+
+/* A clip that could not be loaded says so where its shape would have been. */
+.spoken-reply-gone {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.5);
 }
 
 .spoken-reply-clock {

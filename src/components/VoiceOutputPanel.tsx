@@ -370,11 +370,14 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       }
       if (isVoiceStatus(data)) {
         setStatus(data);
-        // The open chat decides per reply whether to speak; tell it now
-        // rather than on its next open.
-        if (body.action === "autoReply") {
-          window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: data.autoReply !== false } }));
-        }
+        // The open chat decides per reply whether to speak, and whether to
+        // OFFER the switch at all — so it hears about every write, not only
+        // about `autoReply`. `select` and the ffmpeg repair are what install
+        // or retire this box's voice, and a chat docked beside this page kept
+        // showing the old answer until it was closed and reopened.
+        window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
+          detail: { autoReply: data.autoReply !== false, engines: data.engines },
+        }));
       }
       if (data && typeof data === "object" && (data as { fallback?: unknown }).fallback) {
         setNotice(t("settings.voice.fallback"));

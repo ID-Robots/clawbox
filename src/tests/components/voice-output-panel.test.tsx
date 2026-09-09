@@ -394,7 +394,11 @@ describe("status validation", () => {
       fireEvent.click(toggle);
       await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "autoReply", enabled: false } }));
       await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
-      expect(heard).toEqual([{ autoReply: false }]);
+      // The chat is told the switch AND what the box can speak with, because it
+      // decides both whether to speak and whether to offer the button at all.
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toMatchObject({ autoReply: false });
+      expect((heard[0] as { engines?: unknown }).engines).toEqual(status().engines);
     } finally {
       window.removeEventListener("clawbox:voice-settings-changed", listener);
     }

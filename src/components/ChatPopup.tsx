@@ -208,6 +208,16 @@ interface ChatPopupProps {
  * whether a Telegram voice note can be answered — while a spoken reply HERE is
  * made by /setup-api/tts/speak, which a Hermes box answers through its own
  * harness. Reading it would have hidden the switch on every Hermes box.
+ *
+ * And deliberately not `caps.canSpeakReplies` either, which is the fact this
+ * SHOULD one day be: on Hermes it is honest (it follows the box's own speech
+ * config, `hermes-tts.ts`), but on OpenClaw it is hardcoded `true`
+ * (`harness/capabilities.ts`) — so gating on it would put the button on an
+ * OpenClaw box with neither Kokoro installed nor ClawBox AI linked, which is
+ * exactly the mistake that table already records for `canTranscribe`. The
+ * engines list is the box's own assertion and is right on both editions.
+ * Making `canSpeakReplies` honest on OpenClaw is the convergence point, and it
+ * is a server change of its own — named in the PR body.
  */
 export function speechEngineAvailable(engines: unknown): boolean | null {
   if (!Array.isArray(engines) || engines.length === 0) return null
@@ -3418,9 +3428,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         setVoiceCanSpeak(speechEngineAvailable(data?.engines))
       })
       .catch(() => { /* keep the last reading */ })
+    // Both facts follow the event, not just the switch: Settings -> Voice can
+    // INSTALL the box's voice or take it away while the chat is docked beside
+    // it, and reading only `autoReply` left the button absent on a box that
+    // had just gained a voice — and, worse, present on one that had lost it,
+    // where every press wrote a switch the box could not honour.
     const onChanged = (e: Event) => {
-      const detail = (e as CustomEvent<{ autoReply?: unknown }>).detail
+      const detail = (e as CustomEvent<{ autoReply?: unknown; engines?: unknown }>).detail
       if (typeof detail?.autoReply === 'boolean') setVoiceAutoReply(detail.autoReply)
+      if (detail && 'engines' in detail) setVoiceCanSpeak(speechEngineAvailable(detail.engines))
     }
     window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged)
     return () => { active = false; window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged) }
@@ -3590,12 +3606,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         body: JSON.stringify({ action: 'autoReply', enabled: next }),
       })
       if (!res.ok) { setSpokenRepliesNotice('failed'); return }
-      const data = await res.json().catch(() => null) as { autoReply?: unknown } | null
-      const applied = typeof data?.autoReply === 'boolean' ? data.autoReply : next
+      const data = await res.json().catch(() => null) as { autoReply?: unknown; engines?: unknown } | null
+      // A 200 is not an outcome. The route always answers with the whole
+      // status, so a body with no boolean `autoReply` is a captive portal or a
+      // proxy answering for it — reporting "Replies will be spoken." over that
+      // is precisely the false success this function exists to avoid.
+      if (typeof data?.autoReply !== 'boolean') { setSpokenRepliesNotice('failed'); return }
+      const applied = data.autoReply
       setVoiceAutoReply(applied)
+      setVoiceCanSpeak(speechEngineAvailable(data.engines))
       setSpokenRepliesNotice(applied ? 'on' : 'off')
       // Settings -> Voice can be open on the same switch behind the chat.
-      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: applied } }))
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: applied, engines: data.engines } }))
     } catch {
       setSpokenRepliesNotice('failed')
     } finally {

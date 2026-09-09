@@ -473,15 +473,24 @@ describe("spoken replies in the mascot chat", () => {
   it("caps a live reply at four distinct audio players", async () => {
     const sources = Array.from({ length: 6 }, (_, index) =>
       `/home/clawbox/.openclaw/media/outbound/live-${index}.wav`);
+    // The stored transcript carries the turn: `session.message` schedules a
+    // history re-read, and an EMPTY history rebuilds the transcript without
+    // the bubble a moment after it appeared — which under a parallel run took
+    // the four players away between the `waitFor` that found them and the
+    // assertion on the next line.
+    history = [assistantMessage("Bounded live reply", 250)];
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
 
     deliver(assistantMessageWithAudio("Bounded live reply", 250, sources));
 
-    await waitFor(() => expect(players()).toHaveLength(4));
-    expect(players().map(player => player.getAttribute("src"))).toEqual(
-      sources.slice(0, 4).map(playerSrc),
-    );
+    // Read INSIDE the wait, so the list asserted on is the list that was found.
+    let seen: (string | null)[] = [];
+    await waitFor(() => {
+      seen = players().map(player => player.getAttribute("src"));
+      expect(seen).toHaveLength(4);
+    });
+    expect(seen).toEqual(sources.slice(0, 4).map(playerSrc));
   });
 
   it("deduplicates and caps durable audio at four players", async () => {

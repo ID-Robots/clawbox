@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-ut
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { resetSpokenReplyPeakCache } from "@/components/SpokenReplyPlayer";
+import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
 
 /**
  * The ClawBox player for a spoken reply, and the switch that asks for one.
@@ -123,7 +124,8 @@ function installFetch() {
     }
     // The peak reader asks for the clip itself.
     if (url.includes("/setup-api/chat/media")) {
-      return { ok: true, arrayBuffer: async () => new ArrayBuffer(64) };
+      clipFetches.push(url);
+      return { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(64) };
     }
     return { ok: true, json: async () => ({}) };
   }));
@@ -152,7 +154,7 @@ const MEDIA = window.HTMLMediaElement.prototype;
 const saved: Array<[string, PropertyDescriptor | undefined]> = [];
 const clocks = new WeakMap<HTMLMediaElement, number>();
 const paused = new WeakMap<HTMLMediaElement, boolean>();
-let clipDuration = 21;
+let clipDuration: number = 21;
 
 function stubMediaElement() {
   for (const name of ["play", "pause", "duration", "currentTime", "paused"]) {
@@ -220,6 +222,31 @@ function stubAudioDecoder() {
   vi.stubGlobal("AudioContext", FakeOfflineAudioContext);
 }
 
+/**
+ * A viewport that reports what it sees.
+ *
+ * `src/tests/setup.ts` installs a NO-OP IntersectionObserver for every suite,
+ * which is right for a component that only uses one to be polite and wrong
+ * here: the waveform is read when the player comes ON SCREEN, so a viewport
+ * that never reports anything means no waveform, ever. `visible = false` is
+ * the other half — a player scrolled far down a transcript, which must cost
+ * nothing at all.
+ */
+let visible = true;
+function stubViewport() {
+  class FakeIntersectionObserver {
+    constructor(private cb: (entries: { isIntersecting: boolean }[]) => void) {}
+    observe() { if (visible) setTimeout(() => this.cb([{ isIntersecting: true }]), 0); }
+    unobserve() {}
+    disconnect() {}
+    takeRecords() { return []; }
+  }
+  vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+}
+
+/** Every clip body the peak reader asked the box for. */
+let clipFetches: string[] = [];
+
 const playButton = () => screen.getByTestId("spoken-reply-play");
 const wave = () => screen.getByTestId("spoken-reply-wave");
 const clock = () => screen.getByTestId("spoken-reply-clock");
@@ -251,6 +278,8 @@ describe("the ClawBox player for a spoken reply", () => {
     postAnswer = { ok: true, body: { choice: "auto", autoReply: false } };
     decodeMode = "ok";
     clipDuration = 21;
+    visible = true;
+    clipFetches = [];
     resetHarnessCache();
     window.localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
@@ -258,6 +287,7 @@ describe("the ClawBox player for a spoken reply", () => {
     installFetch();
     stubMediaElement();
     stubAudioDecoder();
+    stubViewport();
   });
 
   afterEach(() => {
@@ -352,6 +382,80 @@ describe("the ClawBox player for a spoken reply", () => {
     await waitFor(() => expect(audio.currentTime).toBe(21));
   });
 
+  it("draws the clip's own shape, and fills it as the reply plays", async () => {
+    // The headline of the whole control, and the one thing a `data-peaks`
+    // attribute cannot promise: that the decoded envelope reaches the screen
+    // and that the played part of it is the part that is filled.
+    await renderReplyWithAudio();
+    await waitFor(() => expect(wave()).toHaveAttribute("data-peaks", "ready"));
+    const bars = () => wave().querySelectorAll(".spoken-reply-bar");
+    expect(bars().length).toBeGreaterThan(8);
+    // Nothing played yet, so nothing is filled.
+    expect(wave().querySelectorAll(".spoken-reply-bar.on")).toHaveLength(0);
+    // The shape is the CLIP's, not a flat block: the stub's envelope rises.
+    const heights = [...bars()].map((bar) => Number.parseFloat((bar as HTMLElement).style.height));
+    expect(new Set(heights).size).toBeGreaterThan(1);
+
+    const audio = screen.getByTestId("chat-audio") as HTMLAudioElement;
+    act(() => { audio.currentTime = clipDuration / 2; });
+    await waitFor(() => {
+      const on = wave().querySelectorAll(".spoken-reply-bar.on").length;
+      expect(on).toBeGreaterThan(0);
+      expect(on).toBeLessThan(bars().length);
+    });
+  });
+
+  it("holds still until the element knows how long the clip is", async () => {
+    // In a browser `duration` is NaN until `loadedmetadata`, which the stub's
+    // synchronous getter otherwise hides. Every seek is computed from it, and
+    // a player that treated NaN as a number would jump the position to NaN and
+    // put "NaN:NaN" on the clock.
+    clipDuration = Number.NaN;
+    await renderReplyWithAudio();
+    expect(clock()).toHaveTextContent("0:00");
+    expect(wave()).toHaveAttribute("aria-valuemax", "0");
+    const audio = screen.getByTestId("chat-audio") as HTMLAudioElement;
+    fireEvent.keyDown(wave(), { key: "End" });
+    fireEvent.keyDown(wave(), { key: "ArrowRight" });
+    expect(audio.currentTime).toBe(0);
+
+    // ...and it catches up the moment the metadata lands.
+    clipDuration = 21;
+    act(() => { audio.dispatchEvent(new Event("loadedmetadata")); });
+    await waitFor(() => expect(wave()).toHaveAttribute("aria-valuemax", "21"));
+  });
+
+  it("says so, and stops pretending to be pressable, when the clip is gone", async () => {
+    // A transcript keeps its media URLs; the file behind one can be cleaned up
+    // and the route then 404s. The browser's own bar showed its broken state —
+    // ours has to, or it draws play / 0:00 / download over nothing.
+    await renderReplyWithAudio();
+    const audio = screen.getByTestId("chat-audio") as HTMLAudioElement;
+    act(() => { audio.dispatchEvent(new Event("error")); });
+
+    await screen.findByTestId("spoken-reply-unavailable");
+    expect(playButton()).toBeDisabled();
+    expect(screen.queryByTestId("spoken-reply-wave")).toBeNull();
+    expect(screen.queryByTestId("spoken-reply-download")).toBeNull();
+  });
+
+  it("costs nothing for a reply nobody has scrolled to", async () => {
+    // The whole clip has to come down to draw its shape, and a replayed
+    // transcript can hold fifty of them. Eagerly that is tens of megabytes
+    // pulled through the box's own server, on a Jetson, for bars nobody is
+    // looking at — so the read waits for the player to be on screen, exactly
+    // as `preload="metadata"` makes the audio wait to be played.
+    visible = false;
+    await renderReplyWithAudio();
+    // The player is there and usable; only its picture is deferred.
+    expect(wave()).toHaveAttribute("data-peaks", "placeholder");
+    fireEvent.click(playButton());
+    await waitFor(() => expect(playButton()).toHaveAccessibleName(
+      `chat.audioPause chat.audioReply: ${SPOKEN_TEXT}`));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(clipFetches).toEqual([]);
+  });
+
   it("gives a silent reply no player at all", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
@@ -373,6 +477,7 @@ describe("the composer's spoken-replies toggle", () => {
     resetSpokenReplyPeakCache();
     ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
     postAnswer = { ok: true, body: { choice: "auto", autoReply: false } };
+    clipDuration = 21;
     resetHarnessCache();
     window.localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
@@ -380,6 +485,7 @@ describe("the composer's spoken-replies toggle", () => {
     installFetch();
     stubMediaElement();
     stubAudioDecoder();
+    stubViewport();
   });
 
   afterEach(() => {
@@ -421,6 +527,32 @@ describe("the composer's spoken-replies toggle", () => {
     await waitFor(() => expect(posts.length).toBe(1));
     await waitFor(() => expect(screen.getByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesFailed"));
     expect(toggle).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("stays offered when the box says nothing about its engines", async () => {
+    // `null` is not "no". An unreachable route, or one too old to report its
+    // engines, says nothing about them — and hiding the switch on silence
+    // would take a working control off a box that speaks perfectly well.
+    ttsAnswer = { choice: "auto", autoReply: true };
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
+  });
+
+  it("follows the box's voice being installed while the chat is open", async () => {
+    // Probe-once: the engines were read only when the popup opened, so an
+    // owner who installed Kokoro in Settings beside a docked chat had no
+    // button until the chat was closed and reopened.
+    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: false }] };
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await screen.findByRole("textbox");
+    await waitFor(() => expect(screen.queryByTestId("chat-speak-toggle")).toBeNull());
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
+        detail: { autoReply: true, engines: [{ id: "local", configured: true }] },
+      }));
+    });
+    expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
   });
 
   it("is not offered on a box with no voice to speak with", async () => {
