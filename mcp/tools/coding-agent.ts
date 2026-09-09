@@ -137,6 +137,7 @@ interface RunPayload {
   permissionDenials: number;
   /** Set on the automatic review pass, naming the run it reviewed. */
   reviewOf?: string | null;
+  workflowTelemetry?: { childrenTotal: number; childrenActive: number; complete: boolean; workflows: { id: string; peakActive: number }[] };
   thinkingTokens?: number;
   lastActivityAt?: number;
   resumable: boolean;
@@ -175,6 +176,11 @@ function describeRun(run: RunPayload, tail: number): string {
   if (run.reviewOf) parts.push(`Automatic review pass of ${run.reviewOf}`);
   parts.push(`Task: ${firstLine(run.task)}`);
   parts.push(`Folder: ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}`);
+  if (run.workflowTelemetry) {
+    const w = run.workflowTelemetry;
+    parts.push(`Workflow children: ${w.childrenTotal} observed, ${w.childrenActive} active; journal evidence ${w.complete ? "complete" : "incomplete/unavailable"}. Containers are not extra agents.`);
+    for (const flow of w.workflows) parts.push(`${flow.id}: peak ${flow.peakActive} overlapping child lifetimes`);
+  }
   const facts = [
     run.model ? `model ${run.model}` : null,
     `${run.numTurns} turns`,

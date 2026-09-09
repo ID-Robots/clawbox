@@ -2436,3 +2436,21 @@ describe("the team's spawn slot", () => {
     expect(memAvailable).not.toHaveBeenCalled();
   });
 });
+
+
+it("encodes dotted, spaced and underscored worktree transcript directories like the CLI", () => {
+  const directory = path.join(home, "Projects", "my_app", ".clawbox", "worktrees", "t1 1");
+  const actual = lib.transcriptPath({ sessionId: "sess-123", directory });
+  expect(actual).toBe(path.join(home, ".claude-ds", "projects", directory.replace(/[^a-zA-Z0-9]/g, "-"), "sess-123.jsonl"));
+});
+
+it("preserves a final result beyond the display summary for machine consumers and reports", async () => {
+  readyDevice();
+  makeProject("site");
+  const full = "A".repeat(9000);
+  installFakeWrapper(`echo '${INIT}'\necho '${JSON.stringify({ type: "result", subtype: "success", result: full, num_turns: 1 })}'\nexit 0`);
+  const run = await lib.startRun({ task: "Plan it", projectId: "site", source: "agent" });
+  const done = await finished(run.id);
+  expect(done.summary).toHaveLength(6000);
+  expect(done.resultText).toBe(full);
+});

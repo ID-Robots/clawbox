@@ -90,7 +90,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; commitError: string | null; resumesAs: Record<string, unknown> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; commitError: string | null; resumesAs: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -597,4 +597,15 @@ describe("the words", () => {
     // is deliberately NOT ignorable: dropping it would lose the work.
     expect(team.outsideHint(["dist/bundle.js"], ["src"])).toEqual(["dist/bundle.js"]);
   });
+});
+
+
+it("dispatches the full machine result, never its clipped display summary", async () => {
+  const resultText = JSON.stringify(Array.from({ length: 4 }, (_, i) => ({ task_description: String(i).repeat(1800), depends_on: [] })));
+  outcomes = [{ summary: resultText.slice(0, 6000), resultText }];
+  const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+  const done = await finished(board.id);
+  expect(done.status).toBe("done");
+  expect(done.tasks).toHaveLength(4);
+  expect(starts.filter((s) => (s.team as { role: string }).role === "planner")).toHaveLength(1);
 });

@@ -17,6 +17,7 @@ import { pathToFileURL } from "url";
 
 const mocks = vi.hoisted(() => ({
   activeRunDirectory: vi.fn<() => string | null>(),
+  getRun: vi.fn(),
   page: {
     goto: vi.fn(),
     route: vi.fn(),
@@ -32,6 +33,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   activeRunDirectory: mocks.activeRunDirectory,
+  getRun: mocks.getRun,
 }));
 
 // Readiness is not this test's subject: the probe would otherwise call the
@@ -142,4 +144,21 @@ describe("file:// navigation inside the active run", () => {
     expect(noRun.body.error).toMatch(/no coding run is active/);
     expect(mocks.page.goto).not.toHaveBeenCalled();
   });
+});
+
+
+it("scopes concurrent run pages to the requested run and rejects another run's session", async () => {
+  const otherDir = path.join(base, "other");
+  fs.mkdirSync(otherDir);
+  fs.writeFileSync(path.join(otherDir, "index.html"), "other run");
+  mocks.getRun.mockImplementation((id) => ({ id, status: "running", directory: id === "run-aaaaaaaa" ? runDir : otherDir, pgid: null }));
+  const request = (body: unknown) => POST(new Request("http://localhost/setup-api/browser", { method: "POST", body: JSON.stringify(body) }));
+  const launched = await request({ action: "launch", codingRunId: "run-bbbbbbbb" });
+  const { sessionId } = await launched.json();
+  expect(launched.status).toBe(200);
+  expect((await request({ action: "navigate", sessionId, codingRunId: "run-bbbbbbbb", url: pathToFileURL(path.join(otherDir, "index.html")).href })).status).toBe(200);
+  expect((await request({ action: "navigate", sessionId, codingRunId: "run-bbbbbbbb", url: pathToFileURL(path.join(runDir, "index.html")).href })).status).toBe(400);
+  expect((await request({ action: "navigate", sessionId, codingRunId: "run-aaaaaaaa", url: "http://127.0.0.1:80/" })).status).toBe(403);
+  mocks.getRun.mockReturnValue({ status: "completed" });
+  expect((await request({ action: "launch", codingRunId: "run-bbbbbbbb" })).status).toBe(400);
 });

@@ -85,3 +85,18 @@ describe("replanTask", () => {
     expect(long.endsWith("…")).toBe(true);
   });
 });
+
+
+it("never mistakes a truncated outer plan's nested depends_on array for the plan", () => {
+  const plan = JSON.stringify([{ task_description: "Backend", depends_on: [], files_hint: ["src"] }, { task_description: "Frontend" }]);
+  expect(parsePlan(plan.slice(0, -8))).toMatchObject({ ok: false, reason: expect.stringMatching(/no JSON array/) });
+});
+
+it("accepts a full plan above the display-summary limit and names precise schema violations", () => {
+  const tasks = Array.from({ length: 5 }, () => ({ task_description: "x".repeat(1800), depends_on: [] }));
+  expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: true });
+  tasks[2].task_description = "x".repeat(2001);
+  expect(parsePlan(JSON.stringify(tasks))).toMatchObject({ ok: false, reason: expect.stringMatching(/t3.*2001.*2000/) });
+  expect(PLANNER_BRIEF).toContain("2000");
+  expect(PLANNER_BRIEF).toContain("parallel");
+});
