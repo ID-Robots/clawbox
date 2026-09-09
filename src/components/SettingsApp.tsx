@@ -6106,7 +6106,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         number is CPU and which is memory. The percent sign is
                         in the header rather than on every cell so the columns
                         stay narrow and the unit is still said once. */}
-                    <table className="w-full table-fixed border-collapse">
+                    {/* Named, because the headers say what a CELL is and
+                        nothing says what the TABLE is: a screen-reader user
+                        landing on it hears a grid of numbers before they know
+                        what they are looking at. */}
+                    <table className="w-full table-fixed border-collapse" aria-label={t("settings.busiestProcesses")}>
                       <thead>
                         <tr className="text-[10px] uppercase tracking-widest text-[var(--text-muted)] opacity-50">
                           <th scope="col" className="w-12 text-left font-semibold pb-2">{t("settings.pid")}</th>

@@ -556,6 +556,10 @@ async function indexableFilesUnder(root: string): Promise<{ files: string[]; com
  * `contracts__lease.pdf-9f2c1a04bb7e.md`; `origins` from the extractor is what
  * turns that back into `Documents/contracts/lease.pdf`.
  */
+/** The naming rule, for the tests — the walk cannot reach every case it covers. */
+export const _displayNameForTests = (source: string, file: string, origins: Record<string, string>) =>
+  displayName(source, file, origins);
+
 function displayName(source: string, file: string, origins: Record<string, string>): string | null {
   const origin = origins[path.basename(file)];
   const label = path.basename(source);
@@ -565,7 +569,13 @@ function displayName(source: string, file: string, origins: Record<string, strin
   // the relative path to it would be a `../../…/data/memory-extracted/…` chain
   // — ClawBox's own scratch folder, handed to the agent as if it were the
   // owner's document. Refuse instead: the caller drops the file.
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return null;
+  //
+  // `".." + sep`, not `startsWith("..")`: a document the owner named
+  // `..notes.txt` is a file INSIDE the folder, and a prefix test would refuse
+  // to index it. (The walk skips dot-prefixed entries today, so nothing reaches
+  // this — which is exactly why the rule has to be right rather than lucky.)
+  const escapes = relative === ".." || relative.startsWith(`..${path.sep}`);
+  if (!relative || escapes || path.isAbsolute(relative)) return null;
   return path.join(label, relative);
 }
 

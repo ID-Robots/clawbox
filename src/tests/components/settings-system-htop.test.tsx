@@ -142,7 +142,9 @@ describe("Settings → System, the figures page", () => {
     // header rather than on every cell.
     await openSection("system");
     const panel = await screen.findByTestId("settings-processes");
-    expect(within(panel).getByRole("table")).toBeInTheDocument();
+    // By its accessible name: the headers say what a cell is, and this says
+    // what the table is.
+    expect(within(panel).getByRole("table", { name: "Busiest processes" })).toBeInTheDocument();
     expect(within(panel).getByRole("columnheader", { name: "CPU %" })).toBeInTheDocument();
     expect(within(panel).getByRole("columnheader", { name: "Memory %" })).toBeInTheDocument();
     expect(within(panel).getAllByRole("row")).toHaveLength(PROCESSES.length + 1);

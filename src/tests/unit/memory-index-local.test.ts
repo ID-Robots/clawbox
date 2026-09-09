@@ -364,6 +364,18 @@ describe("finding things again", () => {
     expect(hits.some((h) => h.path.endsWith("real.txt.md") || h.path.includes("real"))).toBe(true);
   });
 
+  it("indexes a document whose own name starts with dots", async () => {
+    // `path.relative` answers `..notes.md` for a file called that INSIDE the
+    // folder, and a `startsWith("..")` escape test would have refused to index
+    // it. The walk skips dot-prefixed entries today, so this reaches the rule
+    // through `displayName` directly — which is the rule that has to be right.
+    const { _displayNameForTests } = await import("@/lib/memory-index-local");
+    expect(_displayNameForTests(source, path.join(source, "..notes.md"), {}))
+      .toBe(path.join(path.basename(source), "..notes.md"));
+    // …and the escape it exists for is still refused.
+    expect(_displayNameForTests(source, "/tmp/elsewhere/leak.md", {})).toBeNull();
+  });
+
   it("names the file the way the owner does, never by its absolute path", async () => {
     write("lease.md", "The deposit is two months' rent.");
     await runLocalIndexPass("full");
