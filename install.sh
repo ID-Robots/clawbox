@@ -5293,26 +5293,37 @@ tts_config_readable() {
   local rc=0
   as_clawbox python3 - <<'PY' >/dev/null 2>&1 || rc=$?
 import json, os, sys
-home = os.path.expanduser("~")
-base = os.environ.get("CLAWBOX_OPENCLAW_HOME") or os.path.join(home, ".openclaw")
-path = os.path.join(base, "openclaw.json")
-if not os.path.exists(path):
-    sys.exit(0)          # fresh box: genuinely unset, seed it
+# 3, not 1: an uncaught Python exception exits 1, and so does a sudo that was
+# refused, so 1 cannot mean "this config does not parse" — it is the code every
+# kind of plumbing failure already speaks. A verdict needs a code nothing else
+# uses, or the caller cannot tell an answer from an accident.
+VERDICT_UNREADABLE = 3
 try:
+    home = os.path.expanduser("~")
+    base = os.environ.get("CLAWBOX_OPENCLAW_HOME") or os.path.join(home, ".openclaw")
+    path = os.path.join(base, "openclaw.json")
+    if not os.path.exists(path):
+        sys.exit(0)                  # fresh box: genuinely unset, seed it
     with open(path) as fh:
         json.load(fh)
+except SystemExit:
+    raise
+except OSError:
+    # Could not even look (permissions, a path that vanished): not a verdict.
+    sys.exit(1)
 except Exception:
-    sys.exit(1)          # there IS a config and we cannot read it
+    sys.exit(VERDICT_UNREADABLE)     # there IS a config and it does not parse
 sys.exit(0)
 PY
-  # ONLY exit 1 — the probe's own verdict that a config exists and does not
-  # parse — refuses. Any OTHER failure means the question could not be asked at
-  # all (no python3, no `as_clawbox`, a harness that does not carry this
-  # function), and refusing on that would cost a box its voice over something
-  # never established. Fail OPEN, because the cost of the two mistakes is not
-  # symmetric: seeding over a config we could not read loses one setting the
-  # owner can set again, while refusing to seed leaves the box mute.
-  [ "$rc" -ne 1 ]
+  # ONLY the probe's own verdict refuses. Everything else — no python3, a sudo
+  # that was denied, a test harness that does not carry this function, an
+  # unreadable directory — means the question could not be ASKED, and refusing
+  # then would cost a box its voice over something never established.
+  #
+  # Fail OPEN, because the two mistakes do not cost the same: seeding over a
+  # config we could not read loses one setting the owner can set again, while
+  # refusing to seed leaves a fresh device with no TTS provider at all.
+  [ "$rc" -ne 3 ]
 }
 
 tts_managed_cloud_provider() {

@@ -74,7 +74,17 @@ case "$1" in
     # "already configured — preserving" path. Empty by default.
     if [ "$2" = "get" ]; then
       [ "$3" = "messages.tts.provider" ] && printf '%s' "\${CURRENT_TTS_PROVIDER:-}"
+      # The provider MAP, which tts_managed_cloud_provider parses to find the
+      # entry carrying our own \`clawboxManaged\` stamp. Empty by default, so a
+      # test that says nothing about it gets the on-device voice.
+      [ "$3" = "messages.tts.providers" ] && printf '%s' "\${PROVIDERS_JSON:-}"
       exit 0
+    fi
+    # Lets a test make the SELECTION fail for one provider while every other
+    # write still succeeds — the fallback path's only trigger.
+    if [ "$2" = "set" ] && [ "$3" = "messages.tts.provider" ] \\
+       && [ -n "\${SELECT_FAIL_FOR:-}" ] && [ "$4" = "\${SELECT_FAIL_FOR}" ]; then
+      exit 1
     fi
     exit 0 ;;
 esac
@@ -250,5 +260,78 @@ describe.skipIf(!hasBash)("an already-configured box is re-verified, not just pr
     expect(calls()).not.toContain("plugins registry --refresh");
     expect(calls()).not.toContain("config set messages.tts.provider tts-local-cli");
     expect(res.stdout).toMatch(/preserving/i);
+  });
+});
+
+/**
+ * WHICH voice an unset box is pointed at.
+ *
+ * Executed, not asserted from the source: `tts_managed_cloud_provider` parses
+ * the provider MAP, and a stub that answers only `…provider` leaves the map
+ * empty — so every one of these runs would have taken the on-device branch and
+ * the cloud default would have looked covered while never once running.
+ */
+const MANAGED_CLOUD = JSON.stringify({
+  openai: { baseUrl: "https://clawbox.com/api/ai", model: "gpt-4o-mini-tts", clawboxManaged: true },
+  "tts-local-cli": { command: "/x/clawbox-tts.sh" },
+});
+
+describe.skipIf(!hasBash)("step_openclaw_tts picks the first voice for an unset box", () => {
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "clawbox-tts-registry-"));
+    projectDir = path.join(dir, "project");
+    callsLog = path.join(dir, "calls.log");
+    mkdirSync(path.join(projectDir, "scripts", "openclaw"), { recursive: true });
+    // Answers `--provider-timeout-ms`, which the sibling describe's stub never
+    // has to: `tts_write_local_provider_definition` asks the script for the
+    // timeout it will put in the provider entry, and refuses to write one
+    // without it — so a silent stub fails the definition and the step returns
+    // before it ever reaches the selection these tests are about.
+    writeFileSync(
+      path.join(projectDir, "scripts", "openclaw", "clawbox-tts.sh"),
+      "#!/usr/bin/env bash\ncase \"${1:-}\" in --provider-timeout-ms) echo 100000; exit 0 ;; esac\nexit 0\n",
+      { mode: 0o755 },
+    );
+    // A HEALTHY box, unlike the sibling describe above: these tests run the
+    // step all the way to the end (the others return early on an
+    // already-configured provider), so the engine has to report itself ready or
+    // the step exits on the mute-box path and the selection is beside the point.
+    writeFileSync(
+      path.join(projectDir, "scripts", "install-voice.sh"),
+      `#!/usr/bin/env bash\nprintf 'CLAWBOX_TTS_KOKORO=ready\\n' > "${path.join(dir, "tts-status")}"\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    writeOpenclawStub();
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("selects the ClawBox AI cloud voice when the box has one", () => {
+    const res = runStep({ PROVIDERS_JSON: MANAGED_CLOUD });
+    expect(res.status).toBe(0);
+    expect(calls()).toContain("config set messages.tts.provider openai");
+    expect(calls()).not.toContain("config set messages.tts.provider tts-local-cli");
+    // Kokoro is still INSTALLED and still defined — only the default changed.
+    expect(calls().some((c) => c.startsWith("config set messages.tts.providers.tts-local-cli"))).toBe(true);
+    expect(res.stdout).toMatch(/cloud voice selected/i);
+  });
+
+  it("selects the on-device voice when there is no managed cloud entry", () => {
+    // An owner's OWN openai speech route carries no `clawboxManaged` stamp and
+    // must never be mistaken for ours.
+    const unstamped = JSON.stringify({ openai: { baseUrl: "https://api.openai.com/v1" } });
+    const res = runStep({ PROVIDERS_JSON: unstamped });
+    expect(res.status).toBe(0);
+    expect(calls()).toContain("config set messages.tts.provider tts-local-cli");
+    expect(calls()).not.toContain("config set messages.tts.provider openai");
+  });
+
+  it("falls back to the on-device voice when the cloud one cannot be selected", () => {
+    // tts-local-cli was written and its plugin verified moments earlier, so it
+    // is the one provider this step KNOWS can answer. A cloud entry that will
+    // not select must not leave a working engine with no selection at all.
+    const res = runStep({ PROVIDERS_JSON: MANAGED_CLOUD, SELECT_FAIL_FOR: "openai" });
+    expect(res.status).toBe(0);
+    expect(calls()).toContain("config set messages.tts.provider tts-local-cli");
+    expect(res.stderr).toMatch(/fell back to the on-device voice/i);
   });
 });
