@@ -68,8 +68,13 @@ describe("the ClawKeep front door", () => {
     expect(screen.queryByRole("button", { name: "Pair with portal" })).toBeNull();
   });
 
-  it("skips the wizard on a paired box whatever the flag says, and on a box that finished it", async () => {
-    status = { ...BASE_STATUS, paired: true, configured: true, lastBackupAtMs: Date.now() - 3_600_000, cloudBytes: 1024, snapshotCount: 2, encryptionConfigured: true };
+  it("skips the wizard on a box that has been set up, paired or otherwise", async () => {
+    // A box paired before this wizard shipped reaches the app as
+    // `setupComplete: true` — `getClawKeepSetupComplete` derives that from the
+    // token when the flag is unset, so the legacy box is answered at the source
+    // rather than by a second condition on the front door. The front door then
+    // asks one question, and the wizard cannot dismiss itself by pairing.
+    status = { ...BASE_STATUS, setupComplete: true, paired: true, configured: true, lastBackupAtMs: Date.now() - 3_600_000, cloudBytes: 1024, snapshotCount: 2, encryptionConfigured: true };
     app();
     const pill = await screen.findByTestId("clawkeep-state", {}, { timeout: 5000 });
     // The pill is on screen before the locale has loaded; wait for the word.

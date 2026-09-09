@@ -221,15 +221,6 @@ export default function ClawKeepApp() {
   // outer full-app login gate was tried and removed — it duplicated the
   // inline UX and broke local-only flows where ClawBox AI isn't required.
   const [status, setStatus] = useState<ClawKeepStatus | null>(null);
-  /**
-   * Is the first-run wizard the face this app is showing?
-   *
-   * Decided ONCE, from the first status that arrives, and cleared only by the
-   * wizard's own onDone — see the front door below for why deriving it per
-   * render ejected the owner in the middle of their first run. `null` means no
-   * status has answered yet, which is neither "show it" nor "don't".
-   */
-  const [wizardActive, setWizardActive] = useState<boolean | null>(null);
   // Which agent this box archives, for the strings that name it. Read before
   // the status has landed too, hence the optional chain — the default is the
   // word every one of those strings used to be hardcoded to.
@@ -284,12 +275,6 @@ export default function ClawKeepApp() {
         await fetch("/setup-api/clawkeep", { cache: "no-store" }),
       );
       setStatus(next);
-      // Latch the front-door decision on the FIRST status only. Every later
-      // refresh — including the one the wizard's own pairing step triggers —
-      // leaves it alone, so the wizard keeps the screen until it is finished.
-      setWizardActive((prev) =>
-        prev === null ? next.setupComplete === false && !next.paired : prev,
-      );
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -616,23 +601,19 @@ export default function ClawKeepApp() {
     );
   }
 
-  // The front door: a box whose owner has not been through setup and is not
-  // paired shows the wizard instead of a dashboard of things that cannot
-  // happen yet. A paired box skips it whatever the flag says — pairing is the
-  // wizard's point, and an owner who paired before the wizard existed must
-  // not be sent back through it.
+  // The front door: an owner who has not been through setup gets the wizard
+  // rather than a dashboard of things that cannot happen yet.
   //
-  // LATCHED, not re-derived. `!status.paired` is a statement about the box the
-  // owner ARRIVED on, and it was being re-evaluated against every status poll —
-  // so the wizard's own step 1 falsified its display condition the instant it
-  // succeeded. The owner was dropped onto the dashboard mid-wizard, before the
-  // passphrase and schedule steps, and the box sat in "Protection Lapsed" with
-  // setupComplete still false: a first run that ends in a scary state nobody was
-  // walked past. `wizardActive` answers the question once, on the first status
-  // that arrives, and only the wizard's own onDone clears it — which keeps the
-  // legacy case above working, since a box that was already paired when the
-  // owner opened the app still never enters.
-  if (wizardActive) {
+  // ONE question, the same one BrowserApp, CodingAgentApp and MemoryShardApp
+  // ask. This used to also require `!status.paired`, and that conjunct was the
+  // defect: re-evaluated on every status poll, the wizard's own pairing step
+  // falsified the condition keeping it on screen, dropping the owner onto the
+  // dashboard two steps early at "Protection Lapsed". The legacy case that
+  // conjunct existed for — a box paired before this wizard shipped — is now
+  // answered where it belongs, by `getClawKeepSetupComplete`, so it cannot
+  // fight the wizard's own progress. The wizard already skips the pair step on
+  // a paired box.
+  if (status.setupComplete === false) {
     return (
       <AgentLabelContext.Provider value={agent}>
         <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-deep)] text-gray-200 @container" data-testid="clawkeep-panel">
@@ -641,7 +622,7 @@ export default function ClawKeepApp() {
               status={status}
               agent={agent}
               onStatusChanged={refresh}
-              onDone={() => { setWizardActive(false); void refresh(); }}
+              onDone={() => { void refresh(); }}
             />
           </div>
         </div>

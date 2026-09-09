@@ -933,8 +933,31 @@ export async function clearPassphrase(): Promise<{ removed: boolean }> {
  */
 export const CLAWKEEP_SETUP_CONFIG_KEY = "clawkeep_setup_complete";
 
+/**
+ * Has the owner been through ClawKeep's first-run wizard?
+ *
+ * An EXPLICIT flag wins; absent, a box that is already PAIRED counts as set up.
+ * Pairing is the wizard's point, so a box that had done it before this flag
+ * existed must not be dragged through onboarding by an update.
+ *
+ * That legacy answer belongs here rather than in the app's front door, and the
+ * difference is a defect this repairs. ClawKeepApp used to ask
+ * `setupComplete === false && !paired`, re-evaluated on every status poll — so
+ * the wizard's OWN pairing step falsified the condition keeping it on screen
+ * and dropped the owner onto the dashboard two steps early, at "Protection
+ * Lapsed", with setupComplete still false. Answered at the source, the app asks
+ * the single question its siblings ask (BrowserApp, CodingAgentApp and
+ * MemoryShardApp all gate on `setupComplete` alone), and the wizard survives its
+ * own success — including across a reload, which a front-door latch could not
+ * fix because the reloaded page reads `paired: true` on its very first status.
+ *
+ * Same shape as `getMemoryShardSetupComplete`, deliberately: a derivation, not
+ * a write, so nothing is persisted from a status read.
+ */
 export async function getClawKeepSetupComplete(): Promise<boolean> {
-  return (await configGet(CLAWKEEP_SETUP_CONFIG_KEY)) === true;
+  const flag = await configGet(CLAWKEEP_SETUP_CONFIG_KEY);
+  if (typeof flag === "boolean") return flag;
+  return (await readToken()) !== null;
 }
 
 export async function setClawKeepSetupComplete(done: boolean): Promise<boolean> {
