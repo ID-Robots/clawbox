@@ -304,7 +304,12 @@ function freshBox() {
   stubViewport();
 }
 
+/** Teardown a single test asked for. */
+let onTestEnd: Array<() => void> = [];
+
 function restoreBox() {
+  for (const undo of onTestEnd) undo();
+  onTestEnd = [];
   restoreMediaElement();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
@@ -557,6 +562,10 @@ describe("the composer's spoken-replies toggle", () => {
     // now does and shows that.
     postThrows = true;
     ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, listener);
+    onTestEnd.push(() => window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, listener));
     render(<ChatPopup isOpen onClose={() => {}} />);
     const toggle = await screen.findByTestId("chat-speak-toggle");
     await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
@@ -567,7 +576,12 @@ describe("the composer's spoken-replies toggle", () => {
 
     await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "false"));
     expect(toggle).not.toBeDisabled();
-    expect(await screen.findByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesOffNotice");
+    // What it must NOT say is that the change was made: the write may still be
+    // landing, so the read that answered can be one value out of date.
+    expect(await screen.findByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesUnconfirmed");
+    // ...and for the same reason it is not handed to Settings as this box's
+    // state, since nothing would correct it there afterwards.
+    expect(heard).toEqual([]);
   });
 
   it("says so, and stays usable, when the box cannot be asked either", async () => {

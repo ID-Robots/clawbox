@@ -3397,7 +3397,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [voiceCanSpeak, setVoiceCanSpeak] = useState<boolean | null>(null)
   const [speakToggleBusy, setSpeakToggleBusy] = useState(false)
   const speakToggleBusyRef = useRef(false)
-  const [spokenRepliesNotice, setSpokenRepliesNotice] = useState<'on' | 'off' | 'failed' | null>(null)
+  const [spokenRepliesNotice, setSpokenRepliesNotice] = useState<'on' | 'off' | 'unconfirmed' | 'failed' | null>(null)
   // The run started by a spoken question, until its reply has been spoken.
   const voiceTurnKeyRef = useRef<string | null>(null)
   // Spoken replies are asked for one after another: the box speaks one at a
@@ -3640,20 +3640,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Settings -> Voice can be open on the same switch behind the chat.
       window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: applied, engines: data.engines } }))
     } catch {
-      // A throw is not a refusal: the request was aborted, or the wire went
-      // away, and whether the box took the write is UNKNOWN — the CLI half can
-      // land after the deadline. Saying "could not be changed" over a write
-      // that did happen is the false-failure shape, so the box is asked what
-      // it now does and its answer is what the button shows. Only when it
-      // cannot be asked either is anything claimed.
+      // A throw is not a refusal, and it is not a success either: the request
+      // was aborted or the wire went away, and whether the box took the write
+      // is UNKNOWN — the CLI half can land after the deadline, so a read taken
+      // now may answer with either value. Both "Replies will be spoken." and
+      // "could not be changed" would therefore be claims this code cannot
+      // make.
+      //
+      // So: the box is still asked, because its last known answer is a better
+      // thing to draw than the value that was clicked — but it is NOT
+      // published. The line says the change was not confirmed rather than
+      // reporting an outcome, and no `VOICE_SETTINGS_CHANGED_EVENT` goes out,
+      // because a value that may be one write out of date must not be handed
+      // to Settings as this box's state with nothing to correct it later.
       try {
-        const after = await fetch('/setup-api/tts', { cache: 'no-store' })
+        const after = await fetch('/setup-api/tts', {
+          cache: 'no-store',
+          // The same deadline, for the same reason: a recovery read that never
+          // returns would leave this button disabled exactly as the write did.
+          signal: AbortSignal.timeout(SPEAK_TOGGLE_TIMEOUT_MS),
+        })
         const data = await after.json().catch(() => null) as { autoReply?: unknown; engines?: unknown } | null
         if (!after.ok || typeof data?.autoReply !== 'boolean') throw new Error('unreadable')
         setVoiceAutoReply(data.autoReply)
         setVoiceCanSpeak(speechEngineAvailable(data.engines))
-        setSpokenRepliesNotice(data.autoReply ? 'on' : 'off')
-        window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: data.autoReply, engines: data.engines } }))
+        setSpokenRepliesNotice('unconfirmed')
       } catch {
         setSpokenRepliesNotice('failed')
       }
@@ -6558,18 +6569,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           style={{
             padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 8,
             background: 'rgba(0,0,0,0.2)', fontSize: 11.5,
-            color: spokenRepliesNotice === 'failed' ? '#f87171' : '#f97316',
+            color: spokenRepliesNotice === 'failed' ? '#f87171'
+              : spokenRepliesNotice === 'unconfirmed' ? 'rgba(255,255,255,0.6)' : '#f97316',
           }}
         >
           <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 15, flexShrink: 0 }}>
-            {spokenRepliesNotice === 'failed' ? 'error' : spokenRepliesNotice === 'on' ? 'volume_up' : 'volume_off'}
+            {spokenRepliesNotice === 'failed' ? 'error'
+              : spokenRepliesNotice === 'unconfirmed' ? 'help'
+                : spokenRepliesNotice === 'on' ? 'volume_up' : 'volume_off'}
           </span>
           <span style={{ flex: 1 }}>
             {spokenRepliesNotice === 'failed'
               ? t("chat.spokenRepliesFailed")
-              : spokenRepliesNotice === 'on'
-                ? t("chat.spokenRepliesOnNotice")
-                : t("chat.spokenRepliesOffNotice")}
+              : spokenRepliesNotice === 'unconfirmed'
+                ? t("chat.spokenRepliesUnconfirmed")
+                : spokenRepliesNotice === 'on'
+                  ? t("chat.spokenRepliesOnNotice")
+                  : t("chat.spokenRepliesOffNotice")}
           </span>
         </div>
       )}

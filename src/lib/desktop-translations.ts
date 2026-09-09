@@ -245,6 +245,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.spokenRepliesOnNotice": "Replies will be spoken.",
     "chat.spokenRepliesOffNotice": "Replies will not be spoken.",
     "chat.spokenRepliesFailed": "Spoken replies could not be changed.",
+    "chat.spokenRepliesUnconfirmed": "ClawBox did not confirm the change — check Settings → Voice.",
     "chat.audioUnavailable": "This recording is no longer available.",
     "chat.table": "Table",
     "chat.imagePreview": "Image preview",
