@@ -324,6 +324,7 @@ test("restore modal: clicking a snapshot opens the confirm dialog", async ({ pag
 });
 
 test("paired-without-encryption opens the passphrase setup modal on backup", async ({ page }) => {
+  await page.setViewportSize({ width: 1271, height: 594 });
   await setupDesktop(page);
 
   await page.route("**/setup-api/clawkeep", (route) =>
@@ -341,14 +342,15 @@ test("paired-without-encryption opens the passphrase setup modal on backup", asy
   const clawkeep = await openClawkeep(page);
   await clawkeep.getByRole("button", { name: "Protect my OpenClaw" }).click();
 
-  // SetPassphraseModal mounts and renders two password inputs plus an
-  // acknowledge checkbox. We fill the password fields to cover their
-  // onChange handlers + the mismatch-error render branch — but stop
-  // short of the submit click (the checkbox locator timed out cross-
-  // browser, likely because the modal's z-[100000] overlay confuses
-  // visibility heuristics in headless chromium).
-  const passwordInputs = clawkeep.locator('input[type="password"]');
+  // The dialog is portalled above the desktop, not trapped in its app window.
+  const dialog = page.getByRole("dialog", { name: "Set your backup passphrase" });
+  const passwordInputs = dialog.locator('input[type="password"]');
   await expect(passwordInputs.first()).toBeVisible();
   await passwordInputs.nth(0).fill("strong-passphrase-1234");
   await passwordInputs.nth(1).fill("strong-passphrase-1234");
+  await dialog.getByRole("checkbox").check();
+  await expect(dialog.getByRole("button", { name: "Save passphrase" })).toBeEnabled();
+  // A real pointer click must reach the controls above the desktop taskbar.
+  await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
 });
