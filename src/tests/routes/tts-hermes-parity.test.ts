@@ -275,12 +275,30 @@ describe("POST /setup-api/tts on a Hermes box", () => {
   });
 
   it("does not persist an explicit choice when stand-down removal fails", async () => {
+    hermesConfig["tts.provider"] = "openai";
+    hermesConfig["tts.openai.base_url"] = "https://clawbox.com/api/ai";
+    hermesConfig["tts.openai.api_key"] = "claw_a_linked_hermes_box";
     clearStanddownMock.mockRejectedValueOnce(new Error("marker permission denied"));
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "local" }));
 
     expect(res.ok).toBe(false);
     expect(clearStanddownMock).toHaveBeenCalledOnce();
+    expect(writeStateMock).not.toHaveBeenCalled();
+    const providerWrites = hermesCliMock.mock.calls
+      .map(([args]) => args as string[]).filter(args => args[2] === "tts.provider");
+    expect(providerWrites.map(args => args[3])).toEqual(["clawbox-local", "openai"]);
+  });
+
+  it.each(["elevenlabs", "edge", null])("restores the native provider %s if marker removal fails", async (provider) => {
+    if (provider === null) delete hermesConfig["tts.provider"];
+    else hermesConfig["tts.provider"] = provider;
+    clearStanddownMock.mockRejectedValueOnce(new Error("marker permission denied"));
+    const { POST } = await route();
+    expect((await POST(post({ action: "select", choice: "local" }))).ok).toBe(false);
+    const writes = hermesCliMock.mock.calls.map(([args]) => args as string[]);
+    expect(writes.at(-1)).toEqual(provider === null
+      ? ["config", "unset", "tts.provider"] : ["config", "set", "tts.provider", provider]);
     expect(writeStateMock).not.toHaveBeenCalled();
   });
 

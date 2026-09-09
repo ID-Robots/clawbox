@@ -1515,7 +1515,7 @@ CLAWBOX_VOICE_VERDICT="${CLAWBOX_VOICE_PLAN%% *}"
 # remembered; the Voice panel clears it whenever the owner makes a choice.
 hermes_voice_stamp() {
   CLAWBOX_HERMES_CONFIG="$HERMES_CONFIG" CLAWBOX_STAMP_ACTION="$1" python3 - <<'STAMPPY'
-import json, os, tempfile, yaml
+import json, os, sys, tempfile, yaml
 cfg_path = os.environ["CLAWBOX_HERMES_CONFIG"]
 stamp_path = cfg_path + ".clawbox-voice-standdown.json"
 action = os.environ["CLAWBOX_STAMP_ACTION"]
@@ -1535,16 +1535,20 @@ elif action == "remember":
         if os.path.exists(tmp): os.unlink(tmp)
 elif action == "voice":
     try:
-        voice = json.load(open(stamp_path)).get("cloudVoice", "")
-        if isinstance(voice, str): print(voice)
-    except (OSError, ValueError, AttributeError): pass
+        with open(stamp_path) as f: stamp = json.load(f)
+        if not isinstance(stamp, dict) or stamp.get("version") != 1 or stamp.get("provider") != "clawbox-local":
+            raise ValueError("invalid stand-down marker")
+        voice = stamp.get("cloudVoice", "")
+        if not isinstance(voice, str): raise ValueError("invalid saved voice")
+        print(voice)
+    except (OSError, ValueError): sys.exit(1)
 STAMPPY
 }
 
 hermes_voice_restore_name() {
   [ "$CLAWBOX_VOICE_VERDICT" = restore ] || return 0
   local voice
-  voice=$(hermes_voice_stamp voice)
+  voice=$(hermes_voice_stamp voice) || return 1
   [ -z "$voice" ] || hermes_voice_write config set tts.openai.voice "$voice"
 }
 

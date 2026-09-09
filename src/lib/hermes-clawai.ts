@@ -26,6 +26,7 @@ import {
 } from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_CHAT_MODEL_IDS,
+  CLAWBOX_AI_PROXY_URLS,
   CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_MODEL_ID_BY_TIER,
   CLAWBOX_AI_VISION_MODEL_ID,
@@ -1903,7 +1904,7 @@ async function selectHermesCloudVoiceIfUnvoicedUnlocked(
     const { readHermesVoiceStanddown, clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
     const stoodDown = current === HERMES_LOCAL_TTS_PROVIDER ? await readHermesVoiceStanddown() : null;
     const restoreRouteIsOurs = !voice.unread.cloudRoute && !voice.unread.cloudKey && ((!voice.cloudBaseUrl && !voice.cloudHasKey)
-      || [CLAWBOX_AI_PROXY_URL, "https://clawbox.com/api/ai", "https://openclawhardware.dev/api/ai", "https://www.openclawhardware.dev/api/ai"]
+      || [CLAWBOX_AI_PROXY_URL, ...CLAWBOX_AI_PROXY_URLS]
         .map(url => url.replace(/\/+$/, "")).includes((voice.cloudBaseUrl ?? "").replace(/\/+$/, "")));
     if (stoodDown && !restoreRouteIsOurs) return;
     if (stoodDown && restoreRouteIsOurs) {

@@ -10,6 +10,7 @@ import {
   hermesVoiceConfigView,
   readHermesVoice,
   selectHermesEngine,
+  restoreHermesProviderId,
   writeHermesCloudVoice,
   HermesTtsWriteError,
 } from "@/lib/hermes-tts";
@@ -462,7 +463,14 @@ async function handleSelectUnlocked(choice: VoiceChoice, harness: Awaited<Return
     return refuse("That voice is not available on this box.", "not_available", 409);
   }
 
-  if (providerId !== before.activeProviderId) {
+  const changingProvider = providerId !== before.activeProviderId;
+  // The shared view intentionally hides custom/factory providers. Keep the
+  // native selection for rollback, rather than replacing it with that view.
+  const previousHermesVoice = harness === "hermes" && changingProvider ? await readHermesVoice() : null;
+  if (previousHermesVoice?.unread.provider) {
+    return refuse("This box could not read its current voice. Please try again.", "cannot_change", 409);
+  }
+  if (changingProvider) {
     const refused = await selectProvider(harness, before, providerId);
     if (refused) return refused;
   }
@@ -475,7 +483,12 @@ async function handleSelectUnlocked(choice: VoiceChoice, harness: Awaited<Return
       // A failed removal must not leave a persisted explicit local preference
       // alongside a marker that tells the next relink to restore cloud voice.
       const { clearHermesVoiceStanddown } = await import("@/lib/hermes-voice-standdown");
-      await clearHermesVoiceStanddown();
+      try {
+        await clearHermesVoiceStanddown();
+      } catch (error) {
+        if (previousHermesVoice) await restoreHermesProviderId(previousHermesVoice.provider);
+        throw error;
+      }
     }
     await writeVoiceState({ ...(await readVoiceState()), choice });
   });

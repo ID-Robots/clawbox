@@ -116,6 +116,9 @@ else:
         raise SystemExit(1)
 with open(os.environ["CLAWBOX_TEST_CFG"], "w") as fh:
     yaml.safe_dump(cfg, fh, sort_keys=False)
+if os.environ.get("CLAWBOX_TEST_CORRUPT_MARKER") and os.environ["CLAWBOX_TEST_KEY"] == "tts.openai.model":
+    with open(os.environ["CLAWBOX_TEST_CFG"] + ".clawbox-voice-standdown.json", "w") as fh:
+        fh.write(os.environ["CLAWBOX_TEST_CORRUPT_MARKER"])
 EOPY
 `);
   fs.chmodSync(stub, 0o755);
@@ -640,6 +643,24 @@ d("register-mcp.sh — the ClawBox AI cloud voice at boot", () => {
       expect(at("tts.openai.voice")).toBe("shimmer");
       expect(fs.existsSync(marker)).toBe(false);
       expect(restored.stdout).toContain("restored the ClawBox AI cloud voice");
+    });
+
+    it.each(["not-json", "[]", '{"version":1,"provider":"clawbox-local","cloudVoice":42}'])("keeps the local selection and marker when the saved voice becomes unreadable: %s", (corrupt) => {
+      armedWithLocalEngine("    voice: shimmer\n");
+      downgraded();
+      expect(run().status).toBe(0);
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      run({ CLAWBOX_TEST_CORRUPT_MARKER: corrupt });
+      expect(at("tts.provider")).toBe("clawbox-local");
+      expect(fs.readFileSync(`${configPath}.clawbox-voice-standdown.json`, "utf8")).toBe(corrupt);
+    });
+
+    it("restores a valid marker without a saved cloud voice", () => {
+      armedWithLocalEngine(); downgraded(); run();
+      writeStore({ clawai_token: TOKEN, clawai_tier: "pro", clawai_plan_tier: "pro" });
+      run();
+      expect(at("tts.provider")).toBe("openai");
+      expect(fs.existsSync(`${configPath}.clawbox-voice-standdown.json`)).toBe(false);
     });
 
     it("preserves a custom endpoint even when it contains an old claw credential and a valid marker", () => {
