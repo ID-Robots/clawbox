@@ -166,7 +166,8 @@ test("restore modal opens, fetches snapshots, and Esc dismisses it", async ({ pa
   await page.evaluate(() => {
     (window as Window & { restoreEscapeLeaks?: number }).restoreEscapeLeaks = 0;
     window.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") (window as Window & { restoreEscapeLeaks: number }).restoreEscapeLeaks++;
+      const state = window as Window & { restoreEscapeLeaks?: number };
+      if (event.key === "Escape") state.restoreEscapeLeaks = (state.restoreEscapeLeaks ?? 0) + 1;
     });
   });
   const close = modal.getByRole("button", { name: "Close", exact: true });
@@ -177,7 +178,7 @@ test("restore modal opens, fetches snapshots, and Esc dismisses it", async ({ pa
   await expect(close).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(modal).not.toBeVisible();
-  expect(await page.evaluate(() => (window as Window & { restoreEscapeLeaks: number }).restoreEscapeLeaks)).toBe(0);
+  expect(await page.evaluate(() => (window as Window & { restoreEscapeLeaks?: number }).restoreEscapeLeaks)).toBe(0);
   await expect(clawkeep.getByRole("button", { name: "Restore from snapshot" })).toBeFocused();
 });
 
