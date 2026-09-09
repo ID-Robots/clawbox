@@ -14,6 +14,7 @@ import {
 import { clawaiImageRouteReachable } from "@/lib/harness/clawai-images";
 import { hermesCanStreamTurns } from "@/lib/hermes-dashboard-turn";
 import { hermesSpeaksReplies, hermesVoiceProbePending } from "@/lib/hermes-tts";
+import { onboardingRitualArmed } from "@/lib/language-persona";
 
 export const dynamic = "force-dynamic";
 
@@ -92,9 +93,16 @@ export async function GET() {
       // next re-probe rather than at the next restart.
       onHermes ? hermesSpeaksReplies() : false,
     ]);
+  // Is the agent's own introduction still waiting to run? One `access()` on the
+  // workspace, off the Hermes gather above because it is neither a Hermes fact
+  // nor a probe that can hang — and asked on every request rather than memoised,
+  // since it flips exactly once in a box's life and the chat must not greet on
+  // the far side of that.
+  const onboardingArmed = await onboardingRitualArmed(harness);
   const facts: HarnessFacts = {
     // A boolean precisely so the device credential never travels to a browser.
     hasClawaiToken: linked,
+    onboardingArmed,
     hermesSupportsImages: supportsImages,
     hermesHasVisionRoute: hasVisionRoute,
     hermesStreamsTurns: streamsTurns,

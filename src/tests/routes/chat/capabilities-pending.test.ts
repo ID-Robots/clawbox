@@ -24,7 +24,7 @@ vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/harness/clawai-images", () => ({ clawaiImageRouteReachable: vi.fn() }));
 vi.mock("@/lib/hermes-dashboard-turn", () => ({ hermesCanStreamTurns: vi.fn() }));
 vi.mock("@/lib/hermes-tts", () => ({
-  hermesSpeaksReplies: vi.fn(),
+  hermesSpeaksReplies: vi.fn(), onboardingArmed: false,
   hermesVoiceProbePending: vi.fn(),
 }));
 vi.mock("@/lib/harness/hermes-features", () => ({

@@ -22,7 +22,7 @@ const HERMES_WITH_IMAGES = capabilitiesFor("hermes", {
   hermesHasVisionRoute: true,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
 });
 const HERMES_BARE = capabilitiesFor("hermes", {
   hasClawaiToken: false,
@@ -30,7 +30,7 @@ const HERMES_BARE = capabilitiesFor("hermes", {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
 });
 const OPENCLAW = capabilitiesFor("openclaw", {
   hasClawaiToken: true,
@@ -38,7 +38,7 @@ const OPENCLAW = capabilitiesFor("openclaw", {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
 });
 
 describe("partitionAttachments", () => {

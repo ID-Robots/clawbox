@@ -30,7 +30,7 @@ vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: vi.fn() }));
 vi.mock("@/lib/harness/clawai-images", () => ({ clawaiImageRouteReachable: vi.fn() }));
 vi.mock("@/lib/hermes-dashboard-turn", () => ({ hermesCanStreamTurns: vi.fn() }));
 vi.mock("@/lib/hermes-tts", () => ({
-  hermesSpeaksReplies: vi.fn(),
+  hermesSpeaksReplies: vi.fn(), onboardingArmed: false,
   // Read by `factsPending`; the memo accessor never spawns, so a plain false.
   hermesVoiceProbePending: vi.fn(() => false),
 }));
@@ -140,7 +140,7 @@ describe("GET /setup-api/chat/capabilities asks the Hermes probes together", () 
       hermesStreamsTurns: true,
       hasClawaiImageRoute: true,
       hermesAgentDrawsImages: true,
-      hermesSpeaksReplies: true,
+      hermesSpeaksReplies: true, onboardingArmed: false,
     });
   });
 
@@ -168,7 +168,13 @@ describe("GET /setup-api/chat/capabilities asks the Hermes probes together", () 
   it("still asks nothing of hermes on an OpenClaw box", async () => {
     getActiveHarness.mockResolvedValue("openclaw");
     const request = startRequest();
+    // Settled without moving the clock, but not within a single microtask: the
+    // OpenClaw path does one real filesystem read of its own — whether the
+    // agent's introduction is still armed — which no fake timer stands in for.
+    // What this test is actually about is the line below: not one Hermes probe,
+    // each of which is a Python spawn or a request that leaves the device.
     await vi.advanceTimersByTimeAsync(0);
+    await request.body();
     expect(request.settled()).toBe(true);
     for (const [name, probe] of Object.entries(probes)) {
       expect(probe, name).not.toHaveBeenCalled();

@@ -53,6 +53,17 @@ export interface HarnessCapabilities {
   readonly streamsTurns: boolean;
   /** The transcript survives a page refresh. */
   readonly canListHistory: boolean;
+  /**
+   * The chat should open a FIRST conversation by itself, because the agent has
+   * an introduction waiting that only its own first reply can start.
+   *
+   * True only on a box whose OpenClaw ritual is armed and unfinished. Everywhere
+   * else the chat stays silent and the first turn is the owner's: an empty
+   * transcript is not evidence of a fresh box — a cleared conversation, a
+   * restored side tab and a reset session all look identical — and greeting on
+   * one spends a model turn nobody asked for.
+   */
+  readonly shouldOpenFirstConversation: boolean;
   /** "New chat" can make the AGENT forget, not merely blank the view. */
   readonly canResetSession: boolean;
   /** A sticky per-session default can be pushed (OpenClaw `sessions.patch`). */

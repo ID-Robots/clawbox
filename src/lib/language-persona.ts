@@ -100,6 +100,27 @@ export async function personaWritesAllowed(harness: Harness): Promise<boolean> {
 }
 
 /**
+ * Is OpenClaw's first-conversation ritual armed and still unfinished?
+ *
+ * The same fact `personaWritesAllowed` reads, asked in the positive: BOOTSTRAP.md
+ * is present exactly while the ritual is waiting to run, and OpenClaw deletes it
+ * on the turn that finishes the introduction. It is therefore the one honest
+ * answer to "is this a fresh box that has never been introduced to its owner?"
+ * — better than an empty transcript, which is also what a cleared conversation,
+ * a restored side tab and a reset session all look like.
+ *
+ * Read here rather than derived in the caller so the two guards cannot drift:
+ * a change to how a fresh workspace is recognised belongs in one file.
+ *
+ * Hermes runs no such ritual (see above), so it is never armed there — a Hermes
+ * box has no introduction for a greeting to start.
+ */
+export async function onboardingRitualArmed(harness: Harness): Promise<boolean> {
+  if (harness === "hermes") return false;
+  return fileExists(path.join(openclawWorkspaceDir(), BOOTSTRAP_FILENAME));
+}
+
+/**
  * The device-store key that records a language pick the guard above sent away.
  *
  * Deliberately not a `pref:` key: it is not the owner's preference, it is a

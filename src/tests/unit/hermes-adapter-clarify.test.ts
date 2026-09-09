@@ -25,7 +25,7 @@ const CAPS = capabilitiesFor("hermes", {
   hermesStreamsTurns: true,
   hasClawaiImageRoute: false,
   hermesAgentDrawsImages: false,
-  hermesSpeaksReplies: false,
+  hermesSpeaksReplies: false, onboardingArmed: false,
 });
 
 /** One SSE frame, framed the way the route frames it. */

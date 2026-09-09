@@ -105,6 +105,10 @@ async function fetchFacts(signal?: AbortSignal): Promise<ProbedFacts | null> {
         hasClawaiImageRoute: data.facts?.hasClawaiImageRoute === true,
         hermesAgentDrawsImages: data.facts?.hermesAgentDrawsImages === true,
         hermesSpeaksReplies: data.facts?.hermesSpeaksReplies === true,
+        // `=== true` like its neighbours, so a server that predates this field
+        // reads as "not armed" and the chat stays silent rather than greeting a
+        // box whose introduction is long finished.
+        onboardingArmed: data.facts?.onboardingArmed === true,
       },
       // A box too old to send the field is not pending, it is simply not
       // saying — which is the pre-existing behaviour, unchanged.

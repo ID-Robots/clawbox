@@ -100,6 +100,18 @@ const INITIAL_CONNECT_MAX_RETRIES = 99 // initial attempt + 99 retries = 100
 const INITIAL_CONNECT_TIMEOUT_MS = 5 * 60_000
 const MAX_QUEUED_SENDS = 20
 
+/**
+ * What the chat says to start the agent's own introduction, on the one kind of
+ * box that gets one (see `shouldOpenFirstConversation`).
+ *
+ * Deliberately NOT translated, and deliberately trivial. It is not a message to
+ * the owner — they never see a reply to it as an answer to anything they wrote —
+ * it is the minimum turn that makes OpenClaw run the ritual, which then greets
+ * the owner in the box's own language and asks their name. Translating it would
+ * imply the owner said it; a longer opener would put words in their mouth.
+ */
+const FIRST_CONVERSATION_OPENER = 'hi'
+
 /** How many spoken replies' audio the chat keeps alive at once; older ones lose their player. */
 const SPOKEN_REPLIES_KEPT = 12
 /** The most one ask for a spoken reply may take, queue and cold start included. */
@@ -2736,8 +2748,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return onProvidersChanged(() => { refreshChatModelState() })
   }, [isOpen, refreshChatModelState])
 
-  // Load chat history, auto-greet if empty
+  // Load chat history, and open the first conversation on a box that has an
+  // introduction waiting.
   const greetedRef = useRef(false)
+  // Did the last history read come back empty, on the main session? One half of
+  // the first-conversation decision (see the effect that makes it).
+  const firstConversationCandidateRef = useRef(false)
+  // Bumped by every completed history read, purely so that decision re-runs
+  // when a read lands after the capabilities did. A counter rather than a
+  // boolean: the second read of a session that was cleared has to re-trigger it.
+  const [transcriptReads, setTranscriptReads] = useState(0)
   const loadHistory = useCallback(async () => {
     // A harness with no durable transcript has nothing to replay. Returning
     // before the bootstrap bookkeeping rather than calling and catching keeps
@@ -2750,7 +2770,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // re-entry guard, and onThinkingChange aren't tripped before any
     // generation actually starts.
     const keyAtCall = sessionKeyRef.current
-    const mightAutoGreet = !greetedRef.current
+    // Gated on the same fact as the greet itself: the bubble is a preview of a
+    // turn that is about to start, so on a box that will never greet it would be
+    // a typing indicator for nothing — a phantom the owner sees on every open.
+    const mightAutoGreet = caps.shouldOpenFirstConversation && !greetedRef.current
     if (mightAutoGreet) {
       setIsBootstrappingHistory(true)
       applyStreaming('')
@@ -2791,21 +2814,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         return sameTranscript(prev, next) ? prev : next
       })
 
-      // Auto-send a greeting if no history exists (first conversation).
-      // Main only: a restored side tab the owner never typed in is ALSO an
-      // empty transcript, and on a desktop reload the hello binds straight to
-      // it — greeting there would spend a model turn nobody asked for and
-      // resurrect a session the gateway may have deleted. (On Hermes both
-      // keys are '' and the greet keeps working as before.)
-      if (chatMsgs.length === 0 && !greetedRef.current && sessionKeyRef.current === mainSessionKeyRef.current) {
-        greetedRef.current = true
-        setIsBootstrappingHistory(false)
-        sendingRef.current = true
-        setSending(true)
-        const idempotencyKey = uuid()
-        runIdRef.current = idempotencyKey
-        await dispatchTurnRef.current('hi', [], idempotencyKey)
-      } else if (mightAutoGreet) {
+      // Open the FIRST conversation, but only on a box that actually has an
+      // introduction waiting.
+      //
+      // `shouldOpenFirstConversation` is the server's answer, from the presence
+      // of the agent's own BOOTSTRAP.md — the ritual that asks the owner's name
+      // and can only be started by the agent's first reply. An empty transcript
+      // is NOT that fact and never was: a cleared conversation, a restored side
+      // tab, a reset session and a box whose introduction finished months ago
+      // are all empty too, and every one of them used to be answered with an
+      // unasked-for "hi" that cost a model turn and put a word in the owner's
+      // mouth. Off a fresh box the chat now opens silently and the first turn is
+      // the owner's.
+      //
+      // The other three conditions stand unchanged. Main only: a restored side
+      // tab the owner never typed in is ALSO an empty transcript, and on a
+      // desktop reload the hello binds straight to it — greeting there would
+      // resurrect a session the gateway may have deleted.
+      // Half of the first-conversation decision; the effect that owns it makes
+      // the call. Recorded rather than acted on here because the OTHER half —
+      // whether the box has an introduction waiting — may not have arrived yet,
+      // and this read must not answer for it.
+      firstConversationCandidateRef.current =
+        chatMsgs.length === 0 && sessionKeyRef.current === mainSessionKeyRef.current
+      setTranscriptReads((n) => n + 1)
+      if (mightAutoGreet) {
         setIsBootstrappingHistory(false)
       }
       // Handed back so a caller can act on what was just loaded without waiting
@@ -5085,6 +5118,36 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     replayedRef.current = true
     void loadHistory()
   }, [harnessLoaded, isOpen, caps, loadHistory])
+
+  // Open the first conversation, once both of its inputs are in.
+  //
+  // The decision needs two facts that arrive independently and in either order:
+  // the transcript came back EMPTY (a history read) and the box says it has an
+  // introduction WAITING (the capabilities fetch). Deciding inside the history
+  // read — where this used to live — meant deciding on whichever half had
+  // landed: on OpenClaw the socket calls loadHistory() the moment the
+  // connection is up, usually before the facts, so a genuinely fresh box read
+  // "not armed" on the only pass that ran and sat silent for good.
+  //
+  // As an effect it is ordering-proof: whichever input lands last runs it, and
+  // `greetedRef` keeps it to one turn. `caps` is read fresh here rather than
+  // through loadHistory's closure, which is captured when that callback is
+  // created and goes stale the moment the facts change.
+  useEffect(() => {
+    if (!caps.shouldOpenFirstConversation) return
+    if (!firstConversationCandidateRef.current) return
+    if (greetedRef.current) return
+    // Main only, re-checked at the moment of sending: a side tab the owner
+    // switched to while the facts were in flight must not be greeted into.
+    if (sessionKeyRef.current !== mainSessionKeyRef.current) return
+    greetedRef.current = true
+    setIsBootstrappingHistory(false)
+    sendingRef.current = true
+    setSending(true)
+    const idempotencyKey = uuid()
+    runIdRef.current = idempotencyKey
+    void dispatchTurnRef.current(FIRST_CONVERSATION_OPENER, [], idempotencyKey)
+  }, [caps.shouldOpenFirstConversation, transcriptReads])
 
   useEffect(() => {
     if (isOpen) {

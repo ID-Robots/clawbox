@@ -23,7 +23,7 @@ const linked: HarnessFacts = {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
 };
 const bare: HarnessFacts = {
   hasClawaiToken: false,
@@ -31,7 +31,7 @@ const bare: HarnessFacts = {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
 };
 /** The box the attach button is honest on: the flag AND somewhere to look. */
 const seeing: HarnessFacts = {
@@ -40,7 +40,7 @@ const seeing: HarnessFacts = {
   hermesHasVisionRoute: true,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+  hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
 };
 /** A linked box whose agent has an image backend selected — it can draw. */
 const drawing: HarnessFacts = {
@@ -49,7 +49,7 @@ const drawing: HarnessFacts = {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
   hasClawaiImageRoute: false,
-  hermesAgentDrawsImages: true, hermesSpeaksReplies: false
+  hermesAgentDrawsImages: true, hermesSpeaksReplies: false, onboardingArmed: false
 };
 
 describe("capabilitiesFor", () => {
@@ -250,7 +250,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: false,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
       }).canAttachImages,
     ).toBe(false);
     // And the mirror: a vision route on an agent whose turn cannot carry the
@@ -262,7 +262,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: true,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
       }).canAttachImages,
     ).toBe(false);
   });
@@ -281,7 +281,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: false,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
       }).canAttachImages,
     ).toBe(false);
     expect(
@@ -291,7 +291,7 @@ describe("capabilitiesFor", () => {
         hermesHasVisionRoute: true,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
-        hermesAgentDrawsImages: false, hermesSpeaksReplies: false
+        hermesAgentDrawsImages: false, hermesSpeaksReplies: false, onboardingArmed: false
       }).canAttachImages,
     ).toBe(true);
   });

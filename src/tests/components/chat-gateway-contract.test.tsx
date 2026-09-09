@@ -82,7 +82,7 @@ function installFetch() {
       return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
     }
     if (url.includes("/setup-api/chat/capabilities")) {
-      return { ok: true, json: async () => ({ harness: "openclaw", facts: { hasClawaiToken: true, hermesSupportsImages: false } }) };
+      return { ok: true, json: async () => ({ harness: "openclaw", facts: { hasClawaiToken: true, hermesSupportsImages: false, onboardingArmed: true } }) };
     }
     if (url.includes("/setup-api/chat/model")) {
       return {
