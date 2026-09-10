@@ -664,6 +664,12 @@ clawbox_core_residual_issues() {
   if [ "$child_rc" -ne 0 ]; then
     if [ "$child_rc" -ne 3 ]; then
       child_why="$(head -c 400 "$preview_why" 2>/dev/null | tr '\n\t' '  ' || true)"
+      # `timeout` kills the child before it can write a reason, and that case is
+      # the one worth naming out of all of them: it is what an entry point or a
+      # chunk that blocks at module scope looks like from out here.
+      case "$child_rc" in
+        124|137) child_why="${child_why:-killed after 30 s without answering}" ;;
+      esac
       echo "  NOTE: the installed core's own migration table could not be run${child_why:+ ($child_why)}, so what it still refuses AFTER those migrations could not be worked out here" >&2
     fi
     rm -rf "$preview_dir"
