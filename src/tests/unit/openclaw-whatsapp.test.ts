@@ -259,8 +259,12 @@ describe("OpenclawWhatsappPairing", () => {
 
     const pairing = new lib.OpenclawWhatsappPairing();
     let finishRead: () => void = () => {};
+    // Resolved with the key OFF, which is the case that would otherwise go on to
+    // write it: a read that answers "nothing to do" would prove nothing here.
     mockReadConfig.mockImplementation(
-      () => new Promise((resolve) => { finishRead = () => resolve({}); }),
+      () => new Promise((resolve) => {
+        finishRead = () => resolve({ channels: { whatsapp: { enabled: false } } });
+      }),
     );
 
     const started = pairing.start();
@@ -269,6 +273,7 @@ describe("OpenclawWhatsappPairing", () => {
     finishRead();
     await started;
 
+    // Neither the owner's channel flipped on, nor the gateway bounced.
     expect(mockConfigSet).not.toHaveBeenCalled();
     expect(mockRestart).not.toHaveBeenCalled();
   });

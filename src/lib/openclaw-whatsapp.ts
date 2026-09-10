@@ -643,7 +643,26 @@ export class OpenclawWhatsappPairing {
     // cleared here because the restart below is what would otherwise reload the
     // same unloadable plugin. READ first: on every box but the one that came
     // through `/whatsapp/unpair` this costs a file read and writes nothing.
+    // EVERY await from here on is a window the cancel can land in, and each one
+    // is followed by the same question. `stop()` sets the snapshot back to IDLE
+    // (and bumps the epoch) while a config read or a 45 s `config set` is in
+    // flight, and `start()`'s epoch check only runs AFTER the restart — so
+    // without asking here, a pairing card the owner closed would still flip his
+    // channel on and bounce the gateway, dropping the Telegram conversation he
+    // went back to. That is the outcome the check above exists to prevent.
+    //
+    // The PHASE is the right question at each of them, not the epoch: it asks
+    // "is anybody pairing right now", which is what makes a gateway bounce
+    // wanted. The epoch asks "is this answer still the caller's", which is the
+    // call site's own check after this returns — and making the bail
+    // epoch-sensitive would be wrong here, because `this.repairing` is shared:
+    // a second session that joined an in-flight repair needs its reload.
     if (await whatsappChannelExplicitlyDisabled()) {
+      // Asked after the READ and BEFORE the write, so a cancelled pairing does
+      // not leave the owner's channel switched on with nothing linked to it.
+      if (this.snap.phase !== "preparing" && this.snap.phase !== "starting") {
+        return { ok: true, reloaded: false, gatewayReady: false };
+      }
       try {
         await setOpenclawWhatsappEnabled(true);
       } catch (err) {
@@ -652,18 +671,11 @@ export class OpenclawWhatsappPairing {
         console.error("[openclaw-whatsapp] enabling channels.whatsapp before the reload failed:", err);
       }
     }
-    // ASKED AGAIN, AFTER BOTH AWAITS AND OUTSIDE THE BRANCH. The config read
-    // happens on every box and the 45 s `config set` on the one that came
-    // through `/whatsapp/unpair`, and either is a window `stop()` lands in: it
-    // sets the phase to `idle` (and bumps the epoch) while the work is in
-    // flight, and the epoch check in `start()` only runs AFTER the restart. So a
-    // pairing card the owner closed could otherwise still bounce the gateway and
-    // drop the Telegram conversation he went back to — the very outcome the
-    // check above exists to prevent — and on the common path, where the key is
-    // absent or already true, the branch above would not even have been entered.
-    // The key stays written: it is the owner's own channel switched back on,
-    // what `/whatsapp/configure` writes anyway, and what the next pairing needs.
-    // Only the bounce is withheld.
+    // Asked again after the write — which on the common path (key absent or
+    // already true) is the only place the read above is covered at all. A write
+    // that has already landed stays landed: it is the owner's own channel
+    // switched back on, what `/whatsapp/configure` writes anyway, and what the
+    // next pairing needs. Only the bounce is withheld.
     if (this.snap.phase !== "preparing" && this.snap.phase !== "starting") {
       return { ok: true, reloaded: false, gatewayReady: false };
     }

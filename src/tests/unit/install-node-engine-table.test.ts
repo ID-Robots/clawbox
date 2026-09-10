@@ -52,29 +52,93 @@ function shellFunction(source: string, name: string): string {
 }
 
 /**
+ * The same, for a function a tree may not have yet.
+ *
+ * An absent one becomes nothing rather than an error, so this suite still RUNS
+ * against a tree that predates the split between the table and its caller and
+ * fails on what the shipped guard ANSWERED — which is how its own red was
+ * demonstrated against beta.
+ */
+function optionalShellFunction(source: string, name: string): string {
+  return source.includes(`${name}() {`) ? shellFunction(source, name) : "";
+}
+
+/**
  * Ask the shipped guard about one Node version.
  *
- * The version reaches it the way it reaches it on a box: the function asks the
- * `node` on PATH for `process.versions.node`, so the stub answers that and
- * nothing else is faked — `dpkg --compare-versions` is the real one.
+ * Every version in the matrix is asked in ONE bash per installer, not one per
+ * case: the shipped functions are sourced once and the loop drives them over the
+ * whole list. The answers are then read per `it`, so a failure still names the
+ * version it is about. Two spawns rather than twenty-six — this suite shares the
+ * `test` job with a thousand component files, and a five-second default timeout
+ * somewhere else is not a budget to spend on process startup.
+ *
+ * The version reaches the guard the way it reaches it on a box: the function
+ * asks the `node` on PATH for `process.versions.node`, so the stub answers that
+ * from a file the loop rewrites, and nothing else is faked —
+ * `dpkg --compare-versions` is the real one.
  */
-function accepts(installer: keyof typeof INSTALLERS, version: string): boolean {
+const VERDICTS = new Map<keyof typeof INSTALLERS, Map<string, boolean>>();
+
+/**
+ * install-x64's verified-tarball version, asked in the same batch.
+ *
+ * In the list rather than asked separately, so a future edit to that constant is
+ * measured by the same run instead of falling outside the matrix.
+ */
+const DIST_VERSION = (() => {
+  const m = /^NODE_DIST_VERSION="([^"]+)"/m.exec(INSTALLERS["install-x64.sh"]);
+  if (!m) throw new Error("NODE_DIST_VERSION not found in install-x64.sh");
+  return m[1];
+})();
+
+function verdicts(installer: keyof typeof INSTALLERS): Map<string, boolean> {
+  const cached = VERDICTS.get(installer);
+  if (cached) return cached;
+
   const dir = mkdtempSync(path.join(tmpdir(), "clawbox-node-engine-"));
   const bin = path.join(dir, "bin");
   mkdirSync(bin);
+  const asked = path.join(dir, "version");
   const stub = path.join(bin, "node");
-  writeFileSync(stub, `#!/usr/bin/env bash\nprintf '%s' ${JSON.stringify(version)}\n`);
+  writeFileSync(stub, `#!/usr/bin/env bash\ncat ${JSON.stringify(asked)}\n`);
   chmodSync(stub, 0o755);
-  const r = spawnSync(
-    "bash",
-    ["-c", [shellFunction(INSTALLERS[installer], "node_satisfies_openclaw_engine"),
-      "node_satisfies_openclaw_engine"].join("\n")],
-    { env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` }, encoding: "utf-8" },
-  );
-  if (r.status !== 0 && r.status !== 1) {
-    throw new Error(`guard crashed (status ${r.status}): ${r.stderr}`);
+
+  const source = INSTALLERS[installer];
+  const program = [
+    optionalShellFunction(source, "node_version_satisfies_openclaw_engine"),
+    shellFunction(source, "node_satisfies_openclaw_engine"),
+    `for v in ${[...REJECTED, ...ACCEPTED, DIST_VERSION].join(" ")}; do`,
+    `  printf '%s' "$v" > ${JSON.stringify(asked)}`,
+    '  if node_satisfies_openclaw_engine; then printf "%s=yes\\n" "$v"; else printf "%s=no\\n" "$v"; fi',
+    "done",
+  ].join("\n");
+  const r = spawnSync("bash", ["-c", program], {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    encoding: "utf-8",
+  });
+  if (r.status !== 0) throw new Error(`the guard could not be run (status ${r.status}): ${r.stderr}`);
+
+  const map = new Map<string, boolean>();
+  for (const line of r.stdout.split("\n").filter(Boolean)) {
+    const [version, verdict] = line.split("=");
+    map.set(version, verdict === "yes");
   }
-  return r.status === 0;
+  VERDICTS.set(installer, map);
+  return map;
+}
+
+/** What the shipped guard answered about one version. */
+function accepts(installer: keyof typeof INSTALLERS, version: string): boolean {
+  const map = verdicts(installer);
+  const answer = map.get(version);
+  if (answer === undefined) {
+    // A version asked about outside the matrix above would silently read as
+    // "rejected" from a missing map entry, which is how a green suite stops
+    // testing anything.
+    throw new Error(`${version} is not in the matrix the batch run covers`);
+  }
+  return answer;
 }
 
 /** Exactly the published `engines.node` of the pinned core, as a table. */
@@ -159,9 +223,7 @@ describe("install.sh / install-x64.sh Node engine table", () => {
     // deliver NodeSource's package. It is fetched, checksummed, and then put
     // through the very guard above — so a value below the floor turns the
     // fallback into a guaranteed `exit 1` on exactly the machines that need it.
-    const m = /^NODE_DIST_VERSION="([^"]+)"/m.exec(INSTALLERS["install-x64.sh"]);
-    expect(m, "NODE_DIST_VERSION not found").not.toBeNull();
-    expect(accepts("install-x64.sh", m![1])).toBe(true);
+    expect(accepts("install-x64.sh", DIST_VERSION), DIST_VERSION).toBe(true);
   });
 
   it("pins the same core version in both installers and in the pin file", () => {

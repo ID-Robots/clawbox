@@ -100,9 +100,13 @@ as_user_login() {
 # below those builds).
 OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
 
-node_satisfies_openclaw_engine() {
-  local version major
-  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+# The table itself, over a VERSION STRING rather than over whatever `node` is on
+# PATH — because two callers need it: the guard below asks about the installed
+# Node, and `node_engine_remedy` asks about each version apt is OFFERING. A
+# Debian revision (`24.21.0-1nodesource1`) compares correctly here: dpkg reads
+# the upstream part first.
+node_version_satisfies_openclaw_engine() {
+  local version="$1" major
   [ -n "$version" ] || return 1
   major="${version%%.*}"
   case "$major" in
@@ -113,6 +117,10 @@ node_satisfies_openclaw_engine() {
     2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+node_satisfies_openclaw_engine() {
+  node_version_satisfies_openclaw_engine "$(node -p 'process.versions.node' 2>/dev/null || echo "")"
 }
 
 activate_node_runtime() {

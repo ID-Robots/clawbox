@@ -177,10 +177,33 @@ done
 exit 0
 `);
 
-  // What apt is offering for nodejs, which the remedy quotes back in the one
-  // command that works. Stubbed so the case does not read this machine.
+  // apt's two answers about nodejs, modelled the way apt really answers them on
+  // the host the remedy is for — which is the whole point of this stub.
+  //
+  // `policy` reports the INSTALLED version as the candidate whenever the
+  // installed one is higher: apt will not select a lower version at NodeSource's
+  // priority. So on a Node 25 host the candidate IS the runtime the core
+  // refuses, and a remedy built from it reinstalls the problem. `madison` lists
+  // what the configured repositories offer, which is where an acceptable version
+  // can actually be found.
   write("apt-cache", `
-printf 'nodejs:\\n  Installed: %s\\n  Candidate: 24.21.0-1nodesource1\\n' "$(cat "$ST/node-version" 2>/dev/null || echo none)"
+verb="\${1:-}"
+have="$(cat "$ST/node-version" 2>/dev/null || echo none)"
+channel="$(cat "$ST/channel" 2>/dev/null || true)"
+case "$verb" in
+  policy)
+    printf 'nodejs:\\n  Installed: %s-1nodesource1\\n  Candidate: %s-1nodesource1\\n' "$have" "$have" ;;
+  madison)
+    case "$channel" in
+      22) printf '   nodejs | 22.23.2-1nodesource1 | https://deb.nodesource.com/node_22.x nodistro/main arm64 Packages\\n' ;;
+      24) printf '   nodejs | 24.21.0-1nodesource1 | https://deb.nodesource.com/node_24.x nodistro/main arm64 Packages\\n' ;;
+      26) printf '   nodejs | 26.8.2-1nodesource1 | https://deb.nodesource.com/node_26.x nodistro/main arm64 Packages\\n' ;;
+    esac
+    # The installed one is on offer too, from the channel it came from, and it is
+    # the highest — so a pick that is not filtered by the engine table lands on it.
+    printf '   nodejs | %s-1nodesource1 | https://deb.nodesource.com/node_%s.x nodistro/main arm64 Packages\\n' "$have" "\${have%%.*}"
+    printf '   nodejs | 18.19.1+dfsg-6ubuntu5 | http://ports.ubuntu.com jammy/universe arm64 Packages\\n' ;;
+esac
 `);
 
   const openclawBin = path.join(npmPrefix, "bin", "openclaw");
@@ -211,6 +234,7 @@ exit 0
 const SHIPPED = [
   assignment("OPENCLAW_VERSION"),
   assignment("OPENCLAW_NODE_ENGINE"),
+  shellFunction("node_version_satisfies_openclaw_engine"),
   shellFunction("node_satisfies_openclaw_engine"),
   shellFunction("node_engine_remedy"),
   shellFunction("ensure_openclaw_node_engine"),
@@ -387,7 +411,12 @@ exit 1
     expect(box.calls().join("\n")).toContain("deb.nodesource.com/setup_24.x");
     expect(box.nodeVersion()).toBe("25.9.0");
     expect(r.stderr).toContain("is ABOVE the range");
-    expect(r.stderr).toContain("--allow-downgrades nodejs=");
+    // The version named must be one the box will ACCEPT afterwards. `apt-cache
+    // policy`'s candidate here is the installed 25.9.0 — apt cannot select a
+    // lower one — so a remedy built from the candidate would hand the operator a
+    // command that reinstalls the runtime the core refuses.
+    expect(r.stderr).toContain("--allow-downgrades nodejs=24.21.0-1nodesource1");
+    expect(r.stderr).not.toContain("nodejs=25.9.0");
     // …and nothing was installed over it.
     expect(box.calls().join("\n")).not.toContain("npm install -g openclaw@");
     expect(box.coreVersion()).toBe("2026.8.1");

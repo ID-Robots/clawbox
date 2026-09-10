@@ -1309,9 +1309,13 @@ PATHEOF
 # that fix regardless of the core.
 OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
 
-node_satisfies_openclaw_engine() {
-  local version major
-  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+# The table itself, over a VERSION STRING rather than over whatever `node` is on
+# PATH — because two callers need it: the guard below asks about the installed
+# Node, and `node_engine_remedy` asks about each version apt is OFFERING. A
+# Debian revision (`24.21.0-1nodesource1`) compares correctly here: dpkg reads
+# the upstream part first.
+node_version_satisfies_openclaw_engine() {
+  local version="$1" major
   [ -n "$version" ] || return 1
   major="${version%%.*}"
 
@@ -1323,6 +1327,10 @@ node_satisfies_openclaw_engine() {
     2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+node_satisfies_openclaw_engine() {
+  node_version_satisfies_openclaw_engine "$(node -p 'process.versions.node' 2>/dev/null || echo "")"
 }
 
 # What to do about a Node the apt transaction CANNOT reach, said rather than
@@ -1342,7 +1350,7 @@ node_satisfies_openclaw_engine() {
 # an installer should take on its own. It prints the one command that works
 # instead, with the version apt itself is offering.
 node_engine_remedy() {
-  local version major candidate
+  local version major offered pick
   version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
   case "$version" in ""|*[!0-9.]*) return 0 ;; esac
   major="${version%%.*}"
@@ -1355,11 +1363,31 @@ node_engine_remedy() {
     echo "         curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && apt-get install -y nodejs" >&2
     echo "           (26.1.0 and newer are accepted, so moving UP is the cheaper way out here)" >&2
   fi
-  candidate=$(apt-cache policy nodejs 2>/dev/null | awk '/Candidate:/{print $2}')
-  if [ -n "$candidate" ]; then
-    echo "         apt-get install -y --allow-downgrades nodejs=$candidate" >&2
+  # `apt-cache madison`, NOT `apt-cache policy`. On this very host the candidate
+  # IS the broken runtime: apt will not select a LOWER version at NodeSource's
+  # priority, so `Candidate:` still reads the installed 25.x and a command built
+  # from it would reinstall exactly what the core refuses. madison lists every
+  # version the configured repositories actually offer — including the Node 24
+  # channel this step has just configured — and each one goes through the same
+  # engine table the guard uses, so what is printed is a version the box will
+  # accept afterwards. Newest acceptable wins.
+  pick=""
+  while read -r offered; do
+    [ -n "$offered" ] || continue
+    node_version_satisfies_openclaw_engine "$offered" || continue
+    if [ -z "$pick" ] || dpkg --compare-versions "$offered" gt "$pick"; then
+      pick="$offered"
+    fi
+  done <<EOF
+$(apt-cache madison nodejs 2>/dev/null | awk -F'|' '{gsub(/ /, "", $2); if ($2 != "") print $2}')
+EOF
+  if [ -n "$pick" ]; then
+    echo "         apt-get install -y --allow-downgrades nodejs=$pick" >&2
   else
-    echo "         apt-get install -y --allow-downgrades nodejs=<a 24.16+ build from: apt-cache madison nodejs>" >&2
+    # Nothing acceptable is on offer, so naming a version would be inventing
+    # one: say what is missing instead.
+    echo "         (no nodejs version satisfying $OPENCLAW_NODE_ENGINE is on offer on this host —" >&2
+    echo "          configure the NodeSource 24 channel first, then re-run this step)" >&2
   fi
 }
 
