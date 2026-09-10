@@ -704,22 +704,28 @@ describe("clearHermesTelegramPairingState", () => {
   // A clear that could not happen must not pass as one: the route answers
   // `reset: true` either way, the requester stays denied in silence, and without
   // this line the service log holds nothing that explains it.
+  //
+  // The failure is stubbed rather than provoked with a 0500 dir: a suite running
+  // as uid 0 would write straight through the permissions and test nothing.
   it("says so in the log when the store cannot be written", async () => {
     const file = path.join(storeDir, "_rate_limits.json");
     await fs.writeFile(file, JSON.stringify({ "telegram:333": Date.now() / 1000 }), {
       mode: 0o600,
     });
-    await fs.chmod(storeDir, 0o500);
+    const write = vi
+      .spyOn(fs, "writeFile")
+      .mockRejectedValue(Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" }));
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const { clearHermesTelegramPairingState } = await import("@/lib/hermes-telegram");
       await expect(clearHermesTelegramPairingState()).resolves.toBeUndefined();
+      expect(write).toHaveBeenCalled();
       expect(logged.mock.calls.map((args) => String(args[0])).join("\n")).toContain(
         "could not be cleared",
       );
     } finally {
       logged.mockRestore();
-      await fs.chmod(storeDir, 0o700);
+      write.mockRestore();
     }
   });
 
