@@ -12,7 +12,7 @@
 // boolean, because "which account is this box sending as" is a legitimate
 // question and "what is the password" is not.
 
-import { get, setMany } from "@/lib/config-store";
+import { get, getKnown, setMany } from "@/lib/config-store";
 import type { ImapConfig } from "@/lib/imap-client";
 import { isEmailAddress, isHostname, isPort, type SmtpConfig } from "@/lib/smtp-client";
 
@@ -249,6 +249,37 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
     canRead: modeAllowsReading(settings.mode),
     askBeforeSend: settings.askBeforeSend,
   };
+}
+
+/**
+ * Whether a `configured: false` can be TRUSTED — asked with the strict read, and
+ * kept beside `getEmailCredentials` because it is the same three keys.
+ *
+ * `config-store`'s ordinary read answers `{}` to a missing file, an EACCES from
+ * a `data/config.json` an update left root-owned, an EIO and a half-written JSON
+ * alike. That is right for the settings it was written for and a guess here: the
+ * MCP server WITHDRAWS the mailbox read tools from a running agent on a definite
+ * "no" (mcp/lib/context.ts `probeEmailReadStatus`), and one unreadable moment
+ * must not look like the owner switching reading off.
+ *
+ * TWO READS OF ONE FILE CAN DISAGREE, which is the other half. A store that was
+ * unreadable when `getEmailCredentials` looked and readable a moment later would
+ * answer `configured: false` with a clean bill of health — the first read's
+ * failure erased by the second read's success. So this reports UNREADABLE for
+ * either shape: a strict read that fails, and a strict read that finds a
+ * complete account behind a `configured: false`, which no single snapshot can
+ * produce. A half-filled account (an address and no password) is neither — it is
+ * genuinely not configured, and says so.
+ */
+export async function emailStoreDisagrees(): Promise<boolean> {
+  const [address, password, smtpHost] = await Promise.all([
+    getKnown(EMAIL_KEYS.address),
+    getKnown(EMAIL_KEYS.password),
+    getKnown(EMAIL_KEYS.smtpHost),
+  ]);
+  if (!address.known || !password.known || !smtpHost.known) return true;
+  // Presence only. The value never leaves this function.
+  return [address, password, smtpHost].every((k) => asString(k.value).length > 0);
 }
 
 export function toSmtpConfig(settings: EmailSettings): SmtpConfig {

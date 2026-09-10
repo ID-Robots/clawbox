@@ -94,6 +94,41 @@ describe("GET /setup-api/email/status", () => {
     expect(data.storeUnreadable).toBe(true);
   });
 
+  it("says so when the FIRST read failed and a later one succeeded", async () => {
+    // Two reads of one file can disagree. A store that was unreadable when the
+    // account was resolved and readable a moment later would otherwise answer
+    // `configured: false` with a clean bill of health — the first read's failure
+    // erased by the second read's success — and the agent would lose the read
+    // tools over a transient EACCES. No single snapshot can hold a complete
+    // account behind a `configured: false`, so that shape is reported as
+    // unreadable too.
+    storeWith({});
+    mockGetKnown.mockImplementation(async (key: string) => ({
+      known: true,
+      value: {
+        email_address: "box@example.com",
+        email_password: PASSWORD,
+        email_smtp_host: "smtp.gmail.com",
+      }[key],
+    }));
+    const data = await (await GET()).json();
+    expect(data.configured).toBe(false);
+    expect(data.storeUnreadable).toBe(true);
+  });
+
+  it("does not cry unreadable over an account that is genuinely half-filled", async () => {
+    // An address and no app password is not a store problem — it is a device
+    // that is not set up, and the read tools are correctly absent.
+    storeWith({ email_address: "box@example.com" });
+    mockGetKnown.mockImplementation(async (key: string) => ({
+      known: true,
+      value: key === "email_address" ? "box@example.com" : undefined,
+    }));
+    const data = await (await GET()).json();
+    expect(data.configured).toBe(false);
+    expect(data.storeUnreadable).toBeUndefined();
+  });
+
   it("carries the pending-draft count and the defaults the panel fills in with", async () => {
     // The badge on the nav item comes from here, before the panel has ever
     // opened the pending route.
