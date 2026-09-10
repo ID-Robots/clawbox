@@ -629,8 +629,18 @@ clawbox_core_residual_issues() {
       why("no candidate chunk could be run: " + rejected.join("; "));
       process.exit(1);
     }
+    // Read APART from the arm below, so a config that is not JSON is never
+    // reported as the core migration table throwing: it never ran. (No
+    // apostrophes anywhere in this child: it is a single-quoted shell string,
+    // and one would end it mid-program.)
+    let raw;
     try {
-      const raw = JSON.parse(readFileSync(process.env.CLAWBOX_PREVIEW_IN, "utf8"));
+      raw = JSON.parse(readFileSync(process.env.CLAWBOX_PREVIEW_IN, "utf8"));
+    } catch (error) {
+      why("the config could not be read as JSON: " + ((error && error.message) || String(error)));
+      process.exit(1);
+    }
+    try {
       // The same test `containsConfigIncludeDirective` makes in the core, on
       // the DECODED document: a `$include` may be written `"\u0024include"` in
       // JSON, which the shell pre-filter cannot see, and a preview built from
