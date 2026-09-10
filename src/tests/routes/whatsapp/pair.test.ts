@@ -18,10 +18,13 @@ vi.mock("@/lib/openclaw-whatsapp", () => ({
   setOpenclawWhatsappEnabled: openclawSetEnabled,
 }));
 vi.mock("@/lib/openclaw-config", () => ({
-  // A REAL class, not undefined: `src/lib/openclaw-whatsapp.ts` narrows on
-  // `instanceof GatewayNotReadyError` when it reloads the gateway after
-  // installing the WhatsApp plugin, and `instanceof undefined` throws a
-  // TypeError the first time a test makes the mocked restart reject.
+  // Defensive, and required: `openclaw-config-mock-completeness.test.ts` fails
+  // any suite that replaces this module without the class while importing a
+  // module that narrows on `instanceof GatewayNotReadyError` — which
+  // `openclaw-whatsapp.ts` now does when it reloads the gateway after installing
+  // the plugin. This file mocks `openclaw-whatsapp` wholesale, so the narrowing
+  // never runs HERE; the class is what keeps that true of the file rather than
+  // of the mock, for the day a test stops mocking the module.
   GatewayNotReadyError: class GatewayNotReadyError extends Error {
     constructor(message = "gateway did not come back") {
       super(message);

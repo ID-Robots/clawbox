@@ -5181,7 +5181,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                                       Hermes cannot find its Baileys script,
                                       OpenClaw has no web-login provider and
                                       could not install one. Mapping only the
-                                      first left the second saying nothing. */}
+                                      first left the second saying nothing.
+                                      Hermes' `prepare_failed` stays on the
+                                      generic tail on purpose — "something went
+                                      wrong while starting the bridge" is
+                                      precisely what it means — and so does
+                                      `start_failed`. */}
                                   {waPair.error === "bridge_missing" || waPair.error === "plugin_missing"
                                     ? t("settings.whatsappPairErrBridge")
                                     : waPair.error === "install_failed"

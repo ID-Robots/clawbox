@@ -79,6 +79,34 @@ const LOGIN_START_MS = 30_000;
 const RPC_HEADROOM_MS = 5_000;
 
 /**
+ * How many times `web.login.start` may be asked while the gateway is still
+ * coming back from the reload, and how long to leave between the attempts.
+ *
+ * `restartGateway` gives up on its readiness wait after its own budget and says
+ * so; a Jetson that has just spent three minutes on an npm install can take
+ * longer than that to bind. One immediate shot at a port nobody is listening on
+ * is not a verdict on the repair — it is a connection error reported to the
+ * owner as "something went wrong" over a plugin that is installed and about to
+ * work, and the Retry that follows succeeds. That is the false-failure shape.
+ *
+ * Only ever spent after a reload that said it had not finished: a refusal is an
+ * ANSWER and ends the loop at once, so a box with no plugin never waits here.
+ */
+const GATEWAY_CATCHUP_ATTEMPTS = 3;
+const GATEWAY_CATCHUP_GAP_MS = 5_000;
+
+/** What the repair answers: a code to report, or what it managed to do. */
+type RepairOutcome =
+  | { ok: false; error: WhatsappPairErrorCode }
+  | {
+      ok: true;
+      /** The gateway was actually bounced, so it has had a chance to load the plugin. */
+      reloaded: boolean;
+      /** It was bounced AND had finished binding when we stopped waiting. */
+      gatewayReady: boolean;
+    };
+
+/**
  * What this manager may put in `snapshot.error`.
  *
  * The panel maps each of these to a sentence, so the set is a contract rather
@@ -117,7 +145,7 @@ export interface OpenclawWhatsappSnapshot {
   user: { id: string | null; name: string | null } | null;
   gatewayRestartPending: boolean;
   /** Machine-readable reason, never a raw stack. */
-  error: string | null;
+  error: WhatsappPairErrorCode | null;
   startedAt: number | null;
 }
 
@@ -169,7 +197,16 @@ async function gatewayCall(
       "--timeout",
       String(timeoutMs),
     ],
-    { captureStdout: true, timeoutMs: RPC_SPAWN_TIMEOUT_MS },
+    {
+      captureStdout: true,
+      timeoutMs: RPC_SPAWN_TIMEOUT_MS,
+      // `spawnOpenclaw` names the process by `labelArgs ?? args` when it builds
+      // an error message, and `web.login.wait` carries `currentQrDataUrl` in its
+      // params. Without this, one spawn timeout writes live pairing material
+      // into the journal — which is exactly what /whatsapp/pair documents can
+      // never happen ("neither is ever logged").
+      labelArgs: ["gateway", "call", method, "--params", "<json>", "--json"],
+    },
   );
   const parsed: unknown = JSON.parse(out);
   if (!parsed || typeof parsed !== "object") {
@@ -242,7 +279,14 @@ export class OpenclawWhatsappPairing {
   private epoch = 0;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   /** The plugin install in flight, shared by every start that is waiting on it. */
-  private repairing: Promise<WhatsappPairErrorCode | null> | null = null;
+  private repairing: Promise<RepairOutcome> | null = null;
+  /**
+   * The repair has already run in this process and the gateway still refuses.
+   *
+   * Latched so that Retry answers from what we know instead of reinstalling and
+   * restarting the device again; cleared the moment a login actually starts.
+   */
+  private providerMissingAfterRepair = false;
   private readonly now: () => number;
 
   constructor(deps: { now?: () => number } = {}) {
@@ -271,12 +315,18 @@ export class OpenclawWhatsappPairing {
     this.lastPollAt = this.now();
     if (this.snap.phase === "paired" && !opts.force) return this.peek();
     if (this.snap.phase === "waiting" && !opts.force) return this.peek();
+    // A second panel pressing the button during an install would otherwise
+    // rewrite the phase back to `starting` — the first panel's poller then reads
+    // "Starting the bridge…" with minutes of npm still to run — and spend a
+    // whole `web.login.start` budget on a call certain to be refused.
+    if (this.snap.phase === "preparing" && !opts.force) return this.peek();
 
     this.epoch += 1;
     const epoch = this.epoch;
     this.snap = { ...IDLE, phase: "starting", startedAt: this.now() };
     this.ensureTicking();
 
+    let repaired = false;
     try {
       let result: Record<string, unknown>;
       try {
@@ -284,16 +334,32 @@ export class OpenclawWhatsappPairing {
       } catch (err) {
         if (!isProviderMissing(err)) throw err;
         if (epoch !== this.epoch) return this.peek();
+        // Already installed and reloaded once here, and the gateway still has
+        // no provider: a second npm install and a second gateway bounce cannot
+        // change that. Without this latch the red box's own Retry button
+        // restarts the whole device on every press — Telegram, the agent and
+        // every open session with it — for a failure that is now a fact about
+        // the box. `restartGateway` clears the unit's start-limit before each
+        // restart, so nothing else would stop that loop either.
+        if (this.providerMissingAfterRepair) {
+          this.snap = { ...this.snap, phase: "error", error: "plugin_missing" };
+          return this.peek();
+        }
         // The gateway named the one failure that has a remedy. Run it and ask
         // again, rather than handing the owner a red box over a plugin this
         // device can install for itself.
         this.snap = { ...this.snap, phase: "preparing" };
-        const failure = await this.repairWebLoginProvider();
+        const repair = await this.repairWebLoginProvider();
         if (epoch !== this.epoch) return this.peek();
-        if (failure) {
-          this.snap = { ...this.snap, phase: "error", error: failure };
+        if (!repair.ok) {
+          this.snap = { ...this.snap, phase: "error", error: repair.error };
           return this.peek();
         }
+        // Only a repair that actually bounced the gateway may latch a refusal
+        // below: one that skipped the reload has not given the plugin its
+        // chance, and answering `plugin_missing` for the rest of the process
+        // over that would be a verdict we never earned.
+        repaired = repair.reloaded;
         // The caller has been blocked on this POST for the whole install, so
         // the panel is demonstrably still open. Without this the first tick
         // after an install longer than REAP_AFTER_MS reaps the login start() is
@@ -301,18 +367,24 @@ export class OpenclawWhatsappPairing {
         // phone" button back, with no QR and nothing saying why.
         this.lastPollAt = this.now();
         this.snap = { ...this.snap, phase: "starting" };
-        result = await this.loginStart(opts.force === true);
+        result = await this.startAfterReload(opts.force === true, epoch, repair.gatewayReady);
       }
       if (epoch !== this.epoch) return this.peek();
+      // A login that started is proof the provider is there, whatever an
+      // earlier attempt in this process concluded.
+      this.providerMissingAfterRepair = false;
       this.apply(result);
     } catch (err) {
       if (epoch !== this.epoch) return this.peek();
+      const missing = isProviderMissing(err);
+      // Refused again, after the plugin was installed and the gateway reloaded:
+      // this box genuinely has no WhatsApp bridge, and every later press should
+      // be told so without repeating the repair.
+      if (missing && repaired) this.providerMissingAfterRepair = true;
       this.snap = {
         ...this.snap,
         phase: "error",
-        // Refused again, after the plugin was installed and the gateway
-        // reloaded: this box genuinely has no WhatsApp bridge.
-        error: isProviderMissing(err) ? "plugin_missing" : "start_failed",
+        error: missing ? "plugin_missing" : "start_failed",
       };
       console.error("[openclaw-whatsapp] login start failed:", err);
     }
@@ -338,6 +410,31 @@ export class OpenclawWhatsappPairing {
   }
 
   /**
+   * `web.login.start`, allowing for a gateway that is still coming back.
+   *
+   * A refusal ends the loop immediately: that is the gateway ANSWERING, and no
+   * amount of waiting turns a missing provider into a present one.
+   */
+  private async startAfterReload(
+    force: boolean,
+    epoch: number,
+    gatewayReady: boolean,
+  ): Promise<Record<string, unknown>> {
+    const attempts = gatewayReady ? 1 : GATEWAY_CATCHUP_ATTEMPTS;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.loginStart(force);
+      } catch (err) {
+        if (attempt >= attempts || isProviderMissing(err) || epoch !== this.epoch) throw err;
+        console.warn(
+          "[openclaw-whatsapp] the gateway has not finished coming back; asking again",
+        );
+        await new Promise((resolve) => setTimeout(resolve, GATEWAY_CATCHUP_GAP_MS));
+      }
+    }
+  }
+
+  /**
    * Put the WhatsApp plugin in service, on the gateway's own say-so.
    *
    * WHY THIS LIVES ON THE PAIRING PATH. `@openclaw/whatsapp` is an npm plugin
@@ -351,13 +448,12 @@ export class OpenclawWhatsappPairing {
    * own bridge in `preparing`, by running the wizard's npm install itself; this
    * is that step for the harness whose installer is `openclaw plugins`.
    *
-   * Entered only from the gateway's refusal, so a healthy box pays nothing —
-   * not an extra `plugins list`, and above all not a gateway restart, which
-   * would drop every other channel mid-conversation.
-   *
-   * Answers with the code to report, or null when the retry is worth making.
+   * Entered only from the gateway's refusal, and at most once per process (see
+   * `providerMissingAfterRepair`), so a healthy box pays nothing — not an extra
+   * `plugins list`, and above all not a gateway restart, which would drop every
+   * other channel mid-conversation.
    */
-  private repairWebLoginProvider(): Promise<WhatsappPairErrorCode | null> {
+  private repairWebLoginProvider(): Promise<RepairOutcome> {
     // Two panels — or one reopened while the first install is still running —
     // must not both drive `plugins install` into the same plugin store. Whoever
     // arrives second waits for the first one's answer instead of starting a
@@ -368,7 +464,7 @@ export class OpenclawWhatsappPairing {
     return this.repairing;
   }
 
-  private async installAndLoadPlugin(): Promise<WhatsappPairErrorCode | null> {
+  private async installAndLoadPlugin(): Promise<RepairOutcome> {
     const plugin = await ensureChannelPlugin(WHATSAPP_CHANNEL_ID);
     if (!plugin.ok) {
       console.error(`[openclaw-whatsapp] installing the WhatsApp plugin failed: ${plugin.reason}`);
@@ -376,27 +472,41 @@ export class OpenclawWhatsappPairing {
       // true words for that one. `unsupported_channel` cannot happen for a
       // channel that is in OFFICIAL_CHANNEL_PLUGINS, and if it ever did it
       // would mean precisely that no plugin can be installed for it.
-      return plugin.reason === "unsupported_channel" ? "plugin_missing" : "install_failed";
+      return {
+        ok: false,
+        error: plugin.reason === "unsupported_channel" ? "plugin_missing" : "install_failed",
+      };
     }
+    // Nobody is pairing any more: the owner cancelled, or left the panel, and
+    // the DELETE that reaped the session cannot reach the install already in
+    // flight. The package is on disk, so the restart is not lost — it is what
+    // the next start pays, with someone watching. Bouncing the gateway now
+    // would drop the Telegram conversation the owner has gone back to, minutes
+    // after the pairing card they closed.
+    if (this.snap.phase !== "preparing" && this.snap.phase !== "starting") {
+      return { ok: true, reloaded: false, gatewayReady: false };
+    }
+    let gatewayReady = true;
     try {
       // Installed is not loaded: `plugins install` prints "Restart the gateway
       // to load plugins", and the gateway is what publishes web.login.*.
       await restartGateway();
     } catch (err) {
       // A gateway that took the restart but has not finished binding is
-      // starting, not broken — the retry is the probe that settles it, the same
-      // split /whatsapp/configure makes. Anything else is a restart that did
-      // not happen, and calling that a missing bridge would blame the plugin
-      // for a service failure.
+      // starting, not broken — the caller asks again while it comes up rather
+      // than calling a working repair a failure. Anything else is a restart
+      // that did not happen, and calling that a missing bridge would blame the
+      // plugin for a service failure.
       if (!(err instanceof GatewayNotReadyError)) {
         console.error("[openclaw-whatsapp] reloading the gateway after the plugin install failed:", err);
-        return "start_failed";
+        return { ok: false, error: "start_failed" };
       }
+      gatewayReady = false;
     }
     // The gateway now owns a channel it did not have, so a remembered row
     // describes the box as it was before this repair.
     invalidateChannelStatus(WHATSAPP_CHANNEL_ID);
-    return null;
+    return { ok: true, reloaded: true, gatewayReady };
   }
 
   /** Fold one RPC answer into the snapshot. */
@@ -459,6 +569,10 @@ export class OpenclawWhatsappPairing {
    */
   private async tick(): Promise<void> {
     if (this.waiting) return;
+    // `preparing` is deliberately outside the watchdog: there is no login to
+    // reap while npm runs, and the caller is still blocked on the POST that
+    // started it. The keepalive window restarts when the install ends, which is
+    // what stops the first tick afterwards from reaping a healthy login.
     if (this.snap.phase !== "waiting" && this.snap.phase !== "starting") return;
     if (this.now() - this.lastPollAt > REAP_AFTER_MS) {
       this.stop();

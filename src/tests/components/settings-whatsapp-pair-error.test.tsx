@@ -55,7 +55,7 @@ beforeEach(() => {
 
   vi.stubGlobal(
     "fetch",
-    vi.fn((input: string | URL, init?: RequestInit) => {
+    vi.fn((input: string | URL) => {
       const url = input.toString();
       if (url.startsWith("/setup-api/whatsapp/status")) {
         return json({
@@ -73,9 +73,11 @@ beforeEach(() => {
         });
       }
       if (url.startsWith("/setup-api/whatsapp/pair")) {
-        // Only the start; the poller's GET must not answer the same snapshot
-        // and re-render it as a second failure.
-        return init?.method === "POST" ? json(pairSnapshot) : json({ supported: true, phase: "idle" });
+        // The real GET calls poll(), which returns the SAME snapshot the POST
+        // answered with — the panel re-rendering the failure is the contract,
+        // not an artefact — so the fixture answers it too rather than an idle
+        // snapshot the route would never send.
+        return json(pairSnapshot);
       }
       return json({});
     }),
