@@ -61,11 +61,13 @@ function configWithEnabled(...ids: string[]) {
  * `plugins list --json` output with the given plugin ids present and enabled.
  *
  * In the row shape the PINNED core answers with: 2026.9.3 added
- * `dependencyStatus` and `trust` to every row (TASK-788, measured against both
- * cores side by side — the only difference in this payload). They are carried by
- * every fixture here rather than by one case of its own, so the whole suite is
- * read against what the box will actually print; nothing in `PluginRow` looks at
- * them, and a parser that started to care would be caught by the cases below.
+ * `dependencyStatus` and `trust` to every row (TASK-788). Both are copied from a
+ * real `plugins list --json` taken off an isolated 2026.9.3 home with our own
+ * plugins installed — `trust` is an OBJECT, not the string a guess would have
+ * written, and that is the point of taking it from a measurement. They are
+ * carried by every fixture here rather than by one case of its own, so the whole
+ * suite is read against what the box will actually print; nothing in `PluginRow`
+ * looks at them, and a parser that started to care is caught by the cases below.
  */
 function pluginsListJson(entries: { id: string; channelIds?: string[]; enabled?: boolean }[]) {
   return JSON.stringify(
@@ -74,8 +76,21 @@ function pluginsListJson(entries: { id: string; channelIds?: string[]; enabled?:
       channelIds: e.channelIds ?? [e.id],
       enabled: e.enabled ?? true,
       status: (e.enabled ?? true) ? "enabled" : "disabled",
-      dependencyStatus: { requiredInstalled: true },
-      trust: "official",
+      dependencyStatus: {
+        hasDependencies: false,
+        installed: true,
+        requiredInstalled: true,
+        optionalInstalled: true,
+        missing: [],
+        missingOptional: [],
+        dependencies: [],
+        optionalDependencies: [],
+      },
+      trust: {
+        reason: "record-missing",
+        registryPath: "/var/lib/clawbox/openclaw/state/openclaw.sqlite",
+        origin: "global",
+      },
     })),
   );
 }
