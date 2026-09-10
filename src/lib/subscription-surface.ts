@@ -8,6 +8,7 @@ import {
 } from "@/lib/provider-models";
 import { chatgptSurface } from "@/lib/chatgpt-surface";
 import {
+  CHATGPT_PROVIDER,
   isOauthProfile,
   profileProviderId,
 } from "@/lib/chatgpt-subscription";
@@ -153,11 +154,19 @@ async function readCachedCatalogueIds(provider: string): Promise<string[] | null
  * curated catalogue and no enumeration — llamacpp, ollama, deepseek — cannot
  * be judged at all, and a caller that read null as "the id does not exist"
  * would report a defect about every one of them.
+ *
+ * The ChatGPT surface is folded in for `openai`, because a ChatGPT sign-in
+ * writes its model as `openai/<id>` and the surface is a list this box HAS.
+ * Without it, a box that saved a model the installed core added — the whole
+ * point of deriving the surface — was told "…is in no model list this box has
+ * for openai. Chat turns on it will fail", over a model the same box had just
+ * declared runnable.
  */
 export async function readKnownModelIds(provider: string): Promise<Set<string> | null> {
   const cached = await readCachedCatalogueIds(provider);
   const curated = getProviderCatalog(provider)?.models ?? [];
-  const ids = [...(cached ?? []), ...curated.map((m) => m.id)];
+  const chatgpt = provider === CHATGPT_PROVIDER ? chatgptSurface().models : [];
+  const ids = [...(cached ?? []), ...curated.map((m) => m.id), ...chatgpt.map((m) => m.id)];
   return ids.length > 0 ? new Set(ids) : null;
 }
 

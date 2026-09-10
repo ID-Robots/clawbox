@@ -87,12 +87,25 @@ const PLATFORM_HOST = "api.openai.com";
 const CHATGPT_HOST = "chatgpt.com";
 
 /**
- * The `api` the core gives the ChatGPT route's provider config
- * (`buildOpenAICodexLiveProviderConfig` / `buildOpenAICodexStaticProviderConfig`
- * both set `api: "openai-chatgpt-responses"`), for the OTHER condition its
- * suppression matcher supports — `when.providerConfigApiIn`.
+ * The core's suppression matcher supports a SECOND condition,
+ * `when.providerConfigApiIn`, and this file deliberately does not read it.
+ *
+ * Two reasons, both measured against `dist/model-suppression-*.js`:
+ *
+ *   * the matcher ANDs every condition that is present
+ *     (`manifestSuppressionMatchesConditions` returns false on the first miss),
+ *     so treating either one as sufficient would remove a row the core keeps;
+ *   * it evaluates that condition against the OWNER'S configured
+ *     `models.providers.<id>.api` — `resolveConfiguredProviderValue` reads
+ *     `config.models.providers` — not against the route's internal
+ *     `api: "openai-chatgpt-responses"`. ClawBox never writes that field (only
+ *     `apiKey`, `baseUrl` and `models[]`), so on a box this repo configures the
+ *     effective api is `""` and such a suppression never fires in the core at
+ *     all. Honouring it here would be a false failure over a model the box runs.
+ *
+ * If ClawBox ever writes `models.providers.openai.api`, this is where to read
+ * that value and AND it with the host condition below.
  */
-const CHATGPT_ROUTE_API = "openai-chatgpt-responses";
 
 /** Lowercased, or "" for anything that is not a usable string. */
 function lower(value: unknown): string {
@@ -119,13 +132,20 @@ function conditionSet(value: unknown): ReadonlySet<string> {
   return out;
 }
 
-/** What the installed core says about one provider's ChatGPT (Codex) route. */
+/**
+ * What the installed core says about one provider's ChatGPT (Codex) route.
+ *
+ * `listed` keeps the manifest's own spelling, because it is what the picker
+ * displays. The two suppression sets are LOWERCASED, because they are matched
+ * against and the core matches them case-folded — a caller testing membership
+ * must lowercase the id it is asking about.
+ */
 export interface CoreChatgptRoute {
   /** The catalogue rows the manifest lists, in the order it lists them. */
   listed: ReadonlyArray<{ id: string; name?: string }>;
-  /** Ids the manifest suppresses ON that route — retired from the surface. */
+  /** Lowercased ids the manifest suppresses ON that route — retired from the surface. */
   offRoute: ReadonlySet<string>;
-  /** Ids suppressed on the platform host: this route reaches them and no other. */
+  /** Lowercased ids suppressed on the platform host: this route reaches them and no other. */
   subscriptionOnly: readonly string[];
 }
 
@@ -164,6 +184,7 @@ interface CachedManifest extends ManifestFacts {
 }
 
 const cache = new Map<string, CachedManifest>();
+
 
 /**
  * A provider id that can only ever name a directory, never traverse out of one.
@@ -317,36 +338,30 @@ function chatgptRouteFrom(manifest: unknown, provider: string): CoreChatgptRoute
   const subscriptionOnly: string[] = [];
   const suppressions = (modelCatalog as { suppressions?: unknown } | null)?.suppressions;
   if (Array.isArray(suppressions)) {
-    type Suppression = {
-      provider?: unknown;
-      model?: unknown;
-      when?: { baseUrlHosts?: unknown; providerConfigApiIn?: unknown } | null;
-    };
+    type Suppression = { provider?: unknown; model?: unknown; when?: { baseUrlHosts?: unknown } | null };
     for (const entry of suppressions as Suppression[]) {
-      // Case-insensitively, as the core's own matcher compares them
-      // (`normalizeProviderId` / `normalizeLowercaseStringOrEmpty` before the
-      // test): a manifest that spelled `"provider": "OpenAI"` would be honoured
-      // there and ignored here, and the picker would keep a row the core
-      // refuses.
+      // Provider AND model case-insensitively, as the core's own matcher
+      // compares them: it keys suppressions by
+      // `normalizeProviderId(provider) + "::" + normalizeLowercaseStringOrEmpty(modelId)`
+      // and normalises the looked-up id the same way. A manifest that spelled
+      // `"provider": "OpenAI"` or listed a row `GPT-5.4` while suppressing
+      // `gpt-5.4` would be honoured there and missed here, leaving a dead row in
+      // the picker and in the write guard.
       if (lower(entry?.provider) !== provider.toLowerCase()) continue;
-      const model = typeof entry?.model === "string" ? entry.model.trim() : "";
+      const model = lower(entry?.model);
       if (!model) continue;
       const hosts = conditionSet(entry?.when?.baseUrlHosts);
-      // The core's suppression matcher compiles TWO conditions —
-      // `when.baseUrlHosts` and `when.providerConfigApiIn` — and the second is
-      // the natural spelling for this route once the transport, rather than the
-      // URL, is what identifies it. Reading only the host one would leave a
-      // model the core has taken off the ChatGPT route in the picker and in the
-      // write guard, with every turn dying on the core's own `Unknown model`.
-      const apis = conditionSet(entry?.when?.providerConfigApiIn);
-      if (hosts.size === 0 && apis.size === 0) continue; // unconditional: not a route claim
-      if (hosts.has(CHATGPT_HOST) || apis.has(CHATGPT_ROUTE_API)) offRoute.add(model);
+      if (hosts.size === 0) continue; // unconditional, or a condition this does not read: not a route claim
+      if (hosts.has(CHATGPT_HOST)) offRoute.add(model);
       else if (hosts.has(PLATFORM_HOST) && !subscriptionOnly.includes(model)) subscriptionOnly.push(model);
     }
   }
   // FROZEN before it is cached: `coreChatgptRoute` hands the caller the cached
   // object itself, and a caller that pushed a row onto `listed` would corrupt
-  // the answer for every other reader of the same manifest.
+  // the answer for every other reader of the same manifest. `Object.freeze` does
+  // not reach inside a Set, so `offRoute` is protected by its `ReadonlySet` type
+  // alone — enough to stop `.add()` at the type level, which is where every
+  // caller in this repo lives.
   return Object.freeze({
     listed: Object.freeze(listed),
     offRoute: offRoute as ReadonlySet<string>,
@@ -485,8 +500,14 @@ function factsFor(provider: string): ManifestFacts {
     }
     return { retired, chatgpt };
   }
-  // Nothing found. Deliberately NOT cached: on a box with no core yet, or one
-  // mid-upgrade, the answer is "ask again", not "there is nothing".
+  // Nothing found. Deliberately NOT cached, not even for the stat floor: "there is
+  // no core yet" and "there is nothing retired" are different answers, and
+  // `core-model-lifecycle.test.ts > does not remember having found no manifest at
+  // all` pins that a manifest written moments later is seen at once. The cost is
+  // that `isCodexSupportedModelId` re-walks the candidates per row on a box with
+  // no readable manifest (the Hermes SKU, a box mid-upgrade, CI) — a few
+  // `existsSync` each. Accepted, rather than traded for a filter that can switch
+  // itself off for the life of a process.
   return { retired: new Set(), chatgpt: null };
 }
 

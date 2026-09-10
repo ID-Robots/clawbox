@@ -1,4 +1,4 @@
-import { CODEX_MODELS, type ProviderModelOption } from "@/lib/provider-models";
+import { CODEX_MODELS, isNonChatModelId, type ProviderModelOption } from "@/lib/provider-models";
 import { coreChatgptRoute } from "@/lib/core-model-lifecycle";
 import { CHATGPT_DEFAULT_MODEL_ID } from "@/lib/chatgpt-subscription";
 
@@ -189,9 +189,23 @@ export function chatgptSurface(): ChatgptSurface {
    * "retired from this route" is never overridden.
    */
   const add = (id: string, name?: string, routeStated = false) => {
-    if (seen.has(id) || route.offRoute.has(id)) return;
+    // Lowercased for both tests, because `route.offRoute` is lowercased and the
+    // core matches suppressions case-folded — a manifest that lists `GPT-5.4`
+    // and suppresses `gpt-5.4` must not keep the row.
+    const key = id.toLowerCase();
+    if (seen.has(key) || route.offRoute.has(key)) return;
+    // NOT A CHAT MODEL AT ALL, and this one applies even to a `routeStated` id.
+    // The block this derivation seeds from is the core's PLATFORM provider
+    // config (`baseUrl: https://api.openai.com/v1`), which is a ChatGPT-route
+    // list only because today's manifest happens to carry nothing else — the
+    // first core that lists an image, embedding or transcription SKU there would
+    // otherwise put it in the picker AND through `isCodexSupportedModelId`, which
+    // is the only gate `chat/model` and `configure` apply before writing
+    // `agents.defaults.model.primary`. The catalogue route already refuses these
+    // on the payload side; the write guard had no such filter.
+    if (isNonChatModelId(id)) return;
     if (!routeStated && offSurface(id)) return;
-    seen.add(id);
+    seen.add(key);
     models.push({
       id,
       label: labelFor(id, name),
@@ -200,7 +214,10 @@ export function chatgptSurface(): ChatgptSurface {
       // nothing on the device publishes one (neither the manifest nor an
       // enumeration carries a description), and inventing one for a model that
       // arrived with a core upgrade would be guessing at what the customer is
-      // entitled to. The picker renders no hint line for an empty string.
+      // entitled to. The setup wizard falls back to the id for an empty hint
+      // (`AIModelsStep.tsx`, `option.hint || option.id`), so such a row shows its
+      // own id as the subtitle — plain, and true, which a guessed plan tier
+      // would not be.
       hint: curatedRow(id)?.hint ?? "",
     });
   };
@@ -247,7 +264,17 @@ export function chatgptSurface(): ChatgptSurface {
  *
  * `gpt-5.5` while the surface carries it — it is the newest model every ChatGPT
  * tier can run, Free included, which is the whole reason it is the floor — and
- * otherwise the surface's first row.
+ * otherwise the surface's LAST row.
+ *
+ * The last and not the first, which is the whole point of the word "floor".
+ * This value is a cold start for an account whose plan is not known yet, and it
+ * is also what {@link chatgptUpgradeCandidates} measures "ahead of" — so the
+ * first row would be the newest, most likely plan-gated model AND would leave
+ * nothing ahead of it to probe, pinning a Free account onto a row that 400s on
+ * every turn with the probe silently disabled. The last row is the oldest model
+ * the core still routes here, which is the best available guess at "the one
+ * every tier can run" once the known floor is gone, and it leaves every other
+ * row for the probe to try.
  *
  * It has to be ASKED rather than assumed, because the same request that
  * computes this default is the one that then judges it: `configure` writes the
@@ -259,8 +286,11 @@ export function chatgptSurface(): ChatgptSurface {
  * `status: "deprecated"` — would make a ChatGPT sign-in 400 on its own default
  * with no other door: setup could not complete.
  *
- * The first row rather than a second hand-kept name: it is the core's own
- * order, and the core lists its newest first.
+ * A position in the core's own list rather than a second hand-kept name. The
+ * position is only as good as the manifest's ordering, which is a convention
+ * and not a schema rule — but it is a convention this fallback only consults
+ * once the id every tier is known to run has gone, and the probe below is what
+ * corrects it upwards.
  */
 export function chatgptDefaultModelId(): string {
   return defaultIdFrom(chatgptSurface().models);
@@ -268,7 +298,7 @@ export function chatgptDefaultModelId(): string {
 
 function defaultIdFrom(models: readonly ProviderModelOption[]): string {
   if (models.some((model) => model.id === CHATGPT_DEFAULT_MODEL_ID)) return CHATGPT_DEFAULT_MODEL_ID;
-  return models[0]?.id ?? CHATGPT_DEFAULT_MODEL_ID;
+  return models[models.length - 1]?.id ?? CHATGPT_DEFAULT_MODEL_ID;
 }
 
 /**
@@ -285,9 +315,21 @@ function defaultIdFrom(models: readonly ProviderModelOption[]): string {
  * (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`), which is what makes it a
  * safe swap: the probe still only upgrades on a POSITIVE answer, and anything
  * ambiguous still leaves the box on the floor every tier can run.
+ *
+ * CAPPED at what the probe's own budget can actually spend. `codex-model-probe`
+ * allows 6s per probe inside a 15s total, so it affords three attempts and
+ * stops at the deadline — a limit that was invisible while the list was a fixed
+ * three-item constant and becomes silent truncation now that the core supplies
+ * it. Naming the cap here keeps sign-in bounded and makes the trade explicit:
+ * beyond the third row the probe would not have run anyway, and an account
+ * entitled to none of the three stays on the floor, which is the conservative
+ * direction the probe is built around.
  */
+const MAX_UPGRADE_PROBES = 3;
+
 export function chatgptUpgradeCandidates(): string[] {
   const models = chatgptSurface().models;
   const floor = models.findIndex((model) => model.id === defaultIdFrom(models));
-  return (floor < 0 ? models : models.slice(0, floor)).map((model) => model.id);
+  const ahead = floor < 0 ? models : models.slice(0, floor);
+  return ahead.slice(0, MAX_UPGRADE_PROBES).map((model) => model.id);
 }

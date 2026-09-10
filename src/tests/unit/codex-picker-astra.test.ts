@@ -303,11 +303,13 @@ describe("the ChatGPT-account surface follows the installed core", () => {
     expect(isCodexSupportedModelId("gpt-5.5")).toBe(true);
   });
 
-  it("reads the api-shaped suppression the core's matcher also compiles", () => {
-    // `when.providerConfigApiIn` is the core's OTHER condition, and the natural
-    // spelling once the transport rather than the URL identifies the route.
-    // Ignoring it would leave the row offered, the write guard accepting it, and
-    // every turn dying on the core's own `Unknown model`.
+  it("ignores the api-shaped condition, which never fires in the core on this box", () => {
+    // `when.providerConfigApiIn` is the core's OTHER condition and is deliberately
+    // NOT read — see the note above `lower` in core-model-lifecycle.ts. The core
+    // ANDs its conditions and evaluates this one against the OWNER'S configured
+    // `models.providers.openai.api`, which ClawBox never writes, so such a
+    // suppression does not fire there. Honouring it would drop a row the box can
+    // still run: a false failure.
     write({
       modelCatalog: {
         providers: {
@@ -324,23 +326,124 @@ describe("the ChatGPT-account surface follows the installed core", () => {
         ],
       },
     });
-    expect(chatgptSurface().models.map((m) => m.id)).not.toContain("gpt-5.6-sol");
-    expect(isCodexSupportedModelId("gpt-5.6-sol")).toBe(false);
+    expect(chatgptSurface().models.map((m) => m.id)).toContain("gpt-5.6-sol");
+    expect(isCodexSupportedModelId("gpt-5.6-sol")).toBe(true);
   });
 
-  it("matches a suppression whose provider or model is spelled in another case", () => {
-    // The core normalises both sides before comparing; a manifest that spelled
-    // `"provider": "OpenAI"` would be honoured there and ignored here, leaving a
-    // row the core refuses in the picker.
+  it("matches a suppression whose provider, model or host is spelled in another case", () => {
+    // The core keys suppressions by
+    // `normalizeProviderId(provider) + "::" + normalizeLowercaseStringOrEmpty(id)`
+    // and normalises the looked-up id the same way, so all three sides are
+    // case-folded there. A manifest that listed `GPT-5.4` while suppressing
+    // `gpt-5.4` would be blocked by the core and still offered here — a dead
+    // button whose every turn dies on `Unknown model`.
     write({
       modelCatalog: {
-        providers: { openai: { models: [{ id: "gpt-5.5", name: "GPT-5.5" }, { id: "gpt-5.4", name: "GPT-5.4" }] } },
+        providers: { openai: { models: [{ id: "gpt-5.5", name: "GPT-5.5" }, { id: "GPT-5.4", name: "GPT-5.4" }] } },
         suppressions: [
           { provider: "OpenAI", model: "gpt-5.4", when: { baseUrlHosts: ["ChatGPT.com"] } },
         ],
       },
     });
-    expect(chatgptSurface().models.map((m) => m.id)).not.toContain("gpt-5.4");
+    const ids = chatgptSurface().models.map((m) => m.id);
+    expect(ids).not.toContain("GPT-5.4");
+    expect(ids).not.toContain("gpt-5.4");
+    expect(isCodexSupportedModelId("GPT-5.4")).toBe(false);
+    expect(isCodexSupportedModelId("gpt-5.4")).toBe(false);
+  });
+
+  it("never leaves a sign-in with nothing to probe when the floor is gone", () => {
+    // H-1. The floor is the OLDEST row the core still routes, not the newest: the
+    // first row would be the most likely plan-gated model AND would leave nothing
+    // ahead of it, so the entitlement probe would be handed an empty list and a
+    // Free account would be pinned to a model that 400s on every turn — with the
+    // probe silently disabled in exactly the case this derivation exists for.
+    write({
+      modelCatalog: {
+        providers: {
+          openai: {
+            models: [
+              { id: ASTRA, name: "GPT-6 Astra" },
+              { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+              { id: "gpt-5.5", name: "GPT-5.5" },
+            ],
+          },
+        },
+        suppressions: [
+          { provider: "openai", model: "gpt-5.5", when: { baseUrlHosts: ["chatgpt.com"] } },
+        ],
+      },
+    });
+    const models = chatgptSurface().models.map((m) => m.id);
+    const fallbackDefault = chatgptDefaultModelId();
+    // Not the floor the core removed, and not the newest row either.
+    expect(fallbackDefault).not.toBe("gpt-5.5");
+    expect(fallbackDefault).not.toBe(models[0]);
+    // A default its own write guard refuses is a sign-in that cannot complete.
+    expect(isCodexSupportedModelId(fallbackDefault)).toBe(true);
+    // And the thing this case exists for: the probe still has rows to try, newest
+    // first, so a non-entitled account is not pinned to a plan-gated model.
+    const candidates = chatgptUpgradeCandidates();
+    expect(candidates.length).toBeGreaterThan(0);
+    expect(candidates[0]).toBe(ASTRA);
+    expect(candidates).not.toContain(fallbackDefault);
+  });
+
+  it("never lets a platform-only non-chat SKU reach the picker or the write guard", () => {
+    // H-2. The block this derivation seeds from is the core's PLATFORM provider
+    // config, and it is a ChatGPT-route list only because today's manifest
+    // happens to carry nothing else. The first core that lists an image or
+    // embedding SKU there would otherwise put it in the picker AND through
+    // `isCodexSupportedModelId`, which is the only gate the two write paths to
+    // `agents.defaults.model.primary` apply.
+    write({
+      modelCatalog: {
+        providers: {
+          openai: {
+            models: [
+              { id: "gpt-5.5", name: "GPT-5.5" },
+              { id: "gpt-image-2", name: "GPT Image 2" },
+              { id: "text-embedding-4-large", name: "Text Embedding 4 Large" },
+              { id: "gpt-5.6-realtime-preview", name: "GPT-5.6 Realtime" },
+            ],
+          },
+        },
+        // Even stated as reachable on THIS route and no other, a SKU a chat
+        // picker cannot talk to is still not a chat model.
+        suppressions: [
+          { provider: "openai", model: "gpt-audio-2", when: { baseUrlHosts: ["api.openai.com"] } },
+        ],
+      },
+    });
+    const ids = chatgptSurface().models.map((m) => m.id);
+    for (const id of ["gpt-image-2", "text-embedding-4-large", "gpt-5.6-realtime-preview", "gpt-audio-2"]) {
+      expect(ids, `${id} is not a chat model and must not be offered`).not.toContain(id);
+      expect(isCodexSupportedModelId(id)).toBe(false);
+    }
+    expect(ids).toContain("gpt-5.5");
+  });
+
+  it("never asks the probe for more attempts than its budget affords", () => {
+    // M-4. `codex-model-probe` allows 6s per probe inside a 15s total, so it runs
+    // three and stops at the deadline. An unbounded list made that an invisible
+    // truncation; the cap states it.
+    write({
+      modelCatalog: {
+        providers: {
+          openai: {
+            models: [
+              { id: ASTRA, name: "GPT-6 Astra" },
+              { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" },
+              { id: "gpt-5.6-terra", name: "GPT-5.6 Terra" },
+              { id: "gpt-5.6-luna", name: "GPT-5.6 Luna" },
+              { id: "gpt-5.5", name: "GPT-5.5" },
+            ],
+          },
+        },
+      },
+    });
+    expect(chatgptDefaultModelId()).toBe("gpt-5.5");
+    expect(chatgptUpgradeCandidates()).toEqual([ASTRA, "gpt-5.6-sol", "gpt-5.6-terra"]);
   });
 
   it("keeps a subscription-only model whose name looks like an off-surface tier", () => {

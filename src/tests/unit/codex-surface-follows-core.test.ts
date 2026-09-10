@@ -76,16 +76,26 @@ interface Suppression {
  * provider we are asking about, so only a `baseUrlHosts` naming the platform
  * host counts.
  */
+/** A `when` condition array as a lowercased SET, for exact membership tests. */
+function hostSet(value: unknown): Set<string> {
+  if (!Array.isArray(value)) return new Set();
+  return new Set(value
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim().toLowerCase()));
+}
+
 function subscriptionOnlyIds(manifest: unknown, provider: string): string[] {
   const list = (manifest as { modelCatalog?: { suppressions?: unknown } } | null)
     ?.modelCatalog?.suppressions;
   if (!Array.isArray(list)) return [];
   const out: string[] = [];
   for (const entry of list as Suppression[]) {
-    if (entry?.provider !== provider) continue;
-    const hosts = entry?.when?.baseUrlHosts;
-    if (!Array.isArray(hosts) || !hosts.includes(PLATFORM_HOST)) continue;
-    if (typeof entry.model === "string" && entry.model.trim()) out.push(entry.model.trim());
+    if (String(entry?.provider ?? "").toLowerCase() !== provider.toLowerCase()) continue;
+    // A SET, so the test is an exact element match rather than a substring search
+    // over a host — see `conditionSet` in core-model-lifecycle.ts.
+    if (!hostSet(entry?.when?.baseUrlHosts).has(PLATFORM_HOST)) continue;
+    const model = typeof entry.model === "string" ? entry.model.trim().toLowerCase() : "";
+    if (model) out.push(model);
   }
   return out;
 }
@@ -107,19 +117,14 @@ function chatgptRouteSuppressedIds(manifest: unknown, provider: string): string[
     ?.modelCatalog?.suppressions;
   if (!Array.isArray(list)) return [];
   const out: string[] = [];
-  for (const entry of list as Array<Suppression & { when?: { providerConfigApiIn?: unknown } | null }>) {
+  for (const entry of list as Suppression[]) {
     if (String(entry?.provider ?? "").toLowerCase() !== provider.toLowerCase()) continue;
-    if (typeof entry.model !== "string" || !entry.model.trim()) continue;
-    const hosts = Array.isArray(entry?.when?.baseUrlHosts) ? entry.when?.baseUrlHosts : [];
-    const apis = Array.isArray(entry?.when?.providerConfigApiIn) ? entry.when?.providerConfigApiIn : [];
-    // A SET, so each test is an exact element match rather than a substring
-    // search over a host — see `conditionSet` in core-model-lifecycle.ts.
-    const conditions = new Set([...hosts, ...apis]
-      .filter((v): v is string => typeof v === "string")
-      .map((v) => v.trim().toLowerCase()));
-    if (conditions.has("chatgpt.com") || conditions.has("openai-chatgpt-responses")) {
-      out.push(entry.model.trim());
-    }
+    const model = typeof entry.model === "string" ? entry.model.trim().toLowerCase() : "";
+    if (!model) continue;
+    // `baseUrlHosts` only, the one condition the surface reads — the core ANDs its
+    // conditions and resolves `providerConfigApiIn` against the owner's own
+    // config, which ClawBox never writes.
+    if (hostSet(entry?.when?.baseUrlHosts).has("chatgpt.com")) out.push(model);
   }
   return out;
 }
