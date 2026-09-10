@@ -272,23 +272,39 @@ which of these tools exist:
 | **Answer senders** | Hermes' native adapter polls and replies to an allowlist | yes |
 
 `email_list`/`email_read` are **not registered at all** unless a mail account is
-connected AND the mode allows reading (probed once at startup — `mcp/lib/context.ts`).
-Same rule as edition gating and for the same reason: a tool that could only ever
-answer 409 is a tool that trips Hermes' circuit breaker and takes every ClawBox
-tool offline. The route enforces the gate independently, because the two live on
-opposite sides of a process boundary and the owner can change the mode under a
-running server.
+connected AND the mode allows reading (`mcp/lib/context.ts` probes it at
+startup). Same rule as edition gating and for the same reason: a tool that could
+only ever answer 409 is a tool that trips Hermes' circuit breaker and takes every
+ClawBox tool offline. The route enforces the gate independently, because the two
+live on opposite sides of a process boundary and the owner can change the mode
+under a running server.
 
-Because the probe is startup-only, a mode or credential change would otherwise
-leave a long-lived server with the tool list it built at boot — a mailbox
-connected under a running server stayed invisible to the agent until something
-respawned the server. So `/setup-api/email/configure` now asks Hermes to reload
-its MCP servers (`reload.mcp` on the dashboard socket, `confirm: true`) whenever
-a save or a disconnect **flips** `canRead`; the server starts again and re-probes
-the gate, and live sessions pick the new list up at their next turn boundary.
-Only on a flip: a reload respawns every MCP child process and invalidates the
-model's prompt cache, so it is not free and must not fire on an ordinary save.
-See `src/lib/email-mcp-refresh.ts`.
+This is the ONE gate here that is not startup-only, because it is the one the
+owner changes with the agent already running. A startup-only answer left a
+long-lived server holding the tool list it built at boot: measured on an OpenClaw
+box (2026-09-10), seven minutes after the mode moved to "Read on demand" the MCP
+child serving the chat still advertised `email_send` alone, while a fresh spawn
+of the same server advertised all three. So the server re-asks
+`/setup-api/email/status` every `EMAIL_READABILITY_POLL_MS` (30 s) and, on a
+CHANGE of the answer, registers or withdraws the pair on the live connection
+(`watchEmailReadability`, `mcp/tools/email.ts`). The MCP SDK turns each of those
+into a `notifications/tools/list_changed`, which is what the harness acts on —
+OpenClaw's bundle MCP runtime invalidates the tool catalogue it cached for this
+server and re-lists at the next turn. A probe that could not REACH the device
+answers `null` and changes nothing, so one slow moment cannot take a working
+mailbox away from the agent.
+
+That notification is also the only mechanism that reaches a RUNNING OpenClaw
+gateway: `openclaw mcp reload` disposes the MCP runtimes cached in the CLI's own
+process (`disposeAllSessionMcpRuntimes`, OpenClaw 2026.8.1) and the gateway never
+hears of it, and the gateway's JSON-RPC exposes no MCP method at all.
+
+On Hermes there IS a way to ask, and it is faster than a poll, so it stays:
+`/setup-api/email/configure` asks the dashboard to reload its MCP servers
+(`reload.mcp`, `confirm: true`) whenever a save or a disconnect **flips**
+`canRead`. Only on a flip: a reload respawns every MCP child process and
+invalidates the model's prompt cache, so it is not free and must not fire on an
+ordinary save. See `src/lib/email-mcp-refresh.ts`.
 
 Both read tools ARE `readOnly`, and that claim is literal rather than polite: the
 mailbox is opened with `EXAMINE` (read-only at the protocol level) and every

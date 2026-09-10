@@ -208,7 +208,8 @@ of them kept failing.
     `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`,
     `describe_image`,
     `coding_agent_run/status/stop` (registered only while the owner's switch is on
-    and the `claude-ds` harness is ready — probed at startup like `email_list`)
+    and the `claude-ds` harness is ready — probed at startup, and unlike
+    `email_list` never re-probed after it)
   - **The browser family** (`mcp/tools/browser.ts`) relays the route's
     `browser` field: the header line names the device's own window on the
     screen or the invisible one, said ONCE per session and again when a fresh
