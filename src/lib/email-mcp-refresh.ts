@@ -27,6 +27,17 @@ import { MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/li
  * The mechanism is Hermes' own `reload.mcp`, and it is shared with the other
  * family that has the same startup-only gate — see `hermes-mcp-reload.ts`. What
  * belongs HERE is the rule for when it is worth paying for, below.
+ *
+ * IT IS NO LONGER THE ONLY HALF, and it never worked on the OpenClaw SKU, which
+ * has no dashboard to ask and no CLI or gateway call that reaches a running
+ * agent's MCP runtimes. The same symptom therefore turned up there
+ * (2026-09-10): the owner's box had moved to "Read on demand" and the MCP child
+ * serving the chat, 28 minutes old, still advertised `email_send` alone. So the
+ * MCP server now re-probes this one gate itself and registers or withdraws the
+ * pair on a running connection (`watchEmailReadability`, mcp/tools/email.ts) —
+ * which is what fixes OpenClaw, and is the backstop on Hermes. This call stays
+ * because it is INSTANT where it works: the owner who has just pressed Save is
+ * the person waiting, and a poll interval is a wait the dashboard can skip.
  */
 
 /**
@@ -44,10 +55,10 @@ import { MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/li
  * Never throws and never reports. A box whose dashboard is down, or an OpenClaw
  * box that has no dashboard at all, must not have its email settings save turned
  * into an error by a best-effort refresh: the settings ARE saved, the gate is
- * still enforced route-side, and the tool list catches up at the next restart —
- * which is exactly the behaviour of every box before this existed. WHICH of
- * those two it was decides how it is said; `reportMcpReloadRefused` owns that
- * rule for all three refresh helpers.
+ * still enforced route-side, and — for THIS family since 2026-09-10 — the MCP
+ * server re-probes the gate on its own within its poll, so a refusal here costs
+ * the owner seconds rather than a restart. WHICH of those it was decides how it
+ * is said; `reportMcpReloadRefused` owns that rule for all five refresh helpers.
  */
 export async function refreshEmailToolsIfReadabilityChanged(before: boolean, after: boolean): Promise<void> {
   if (before === after) return;
@@ -58,8 +69,18 @@ export async function refreshEmailToolsIfReadabilityChanged(before: boolean, aft
   if (!(await reloadMcpServers().catch(() => false))) {
     // Logged, not surfaced. Worth a line because "the agent still cannot see my
     // mailbox" is otherwise invisible from the outside, and this is the one
-    // place that knows the refresh was wanted and did not happen.
-    await reportMcpReloadRefused("email/mcp-refresh", became);
+    // place that knows the refresh was wanted and did not happen. The note is
+    // this family's own: unlike the other three, the MCP server re-probes this
+    // gate by itself, so a box with no dashboard is waiting a poll interval and
+    // not a restart.
+    await reportMcpReloadRefused(
+      "email/mcp-refresh",
+      became,
+      // Hedged on purpose: the re-probe belongs to a RUNNING MCP server, and a
+      // box between sessions has none. Both halves are true as written.
+      "a running MCP server re-probes the mailbox gate on its own within the minute,"
+        + " and one started later re-probes as it boots",
+    );
     return;
   }
   console.log(`[email/mcp-refresh] ${became}; ${MCP_RELOAD_ASKED}`);

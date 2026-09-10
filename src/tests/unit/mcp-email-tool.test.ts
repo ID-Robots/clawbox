@@ -25,6 +25,7 @@ function collect(emailCanRead = true): Map<string, Captured> {
         handler,
       });
     },
+    remove: (name: string) => void tools.delete(name),
     list: () => [...tools.values()].map((t) => t.info),
     finalize: () => undefined,
   };

@@ -55,6 +55,9 @@ export function captureRegistrar(edition: "openclaw" | "hermes" = "hermes"): Cap
       if (opts.editions && !opts.editions.includes(edition)) return;
       tools.set(name, { name, description, shape, opts, handler });
     },
+    remove(name) {
+      tools.delete(name);
+    },
     list() {
       return [...tools.values()].map((t) => ({
         name: t.name,

@@ -11,7 +11,13 @@
 // agent will actually do.
 
 import { NextResponse } from "next/server";
-import { DEFAULT_IMAP_HOST, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, publicEmailStatus } from "@/lib/email-config";
+import {
+  DEFAULT_IMAP_HOST,
+  DEFAULT_SMTP_HOST,
+  DEFAULT_SMTP_PORT,
+  emailStoreDisagrees,
+  publicEmailStatus,
+} from "@/lib/email-config";
 import { countPending } from "@/lib/email-pending";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesEmailState } from "@/lib/hermes-email";
@@ -22,6 +28,21 @@ export async function GET() {
   try {
     const status = await publicEmailStatus();
     const harness = await getActiveHarness();
+    // WHY THE STORE IS QUESTIONED AT ALL, and why HERE: `publicEmailStatus` is
+    // shared with five callers that want the ACCOUNT, and this is the only
+    // reader that acts on the state of the STORE — the MCP server withdraws the
+    // mailbox read tools from a running agent on a definite "no".
+    // `emailStoreDisagrees` owns the rule and the reasoning.
+    //
+    // Asked on BOTH branches. `configured: true, canRead: false` is reachable
+    // from a store that went unreadable midway through `getEmailCredentials`'
+    // per-key reads, and is the same definite "no" as the other branch; the flag
+    // is passed so the function knows which of its two questions is the
+    // ambiguous one, not whether to look.
+    //
+    // Absent rather than `false` when all is well, so a build that predates the
+    // field cannot be read as one promising a readable store.
+    const storeUnreadable = await emailStoreDisagrees(status.configured, status.canRead);
 
     // Only Hermes can receive mail; the UI hides the inbound fields otherwise
     // rather than offering a switch that does nothing.
@@ -29,6 +50,7 @@ export async function GET() {
 
     const base = {
       ...status,
+      ...(storeUnreadable ? { storeUnreadable: true } : {}),
       harness,
       inboundSupported,
       // The approvals strip needs a count even when the panel has not opened

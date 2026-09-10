@@ -12,7 +12,7 @@
 // boolean, because "which account is this box sending as" is a legitimate
 // question and "what is the password" is not.
 
-import { get, setMany } from "@/lib/config-store";
+import { get, getKnownMany, setMany } from "@/lib/config-store";
 import type { ImapConfig } from "@/lib/imap-client";
 import { isEmailAddress, isHostname, isPort, type SmtpConfig } from "@/lib/smtp-client";
 
@@ -249,6 +249,95 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
     canRead: modeAllowsReading(settings.mode),
     askBeforeSend: settings.askBeforeSend,
   };
+}
+
+/**
+ * Whether the answer `publicEmailStatus` just gave can be TRUSTED — asked with
+ * the strict read, and kept beside `getEmailCredentials` because it is the same
+ * three keys.
+ *
+ * `config-store`'s ordinary read answers `{}` to a missing file, an EACCES from
+ * a `data/config.json` an update left root-owned, an EIO and a half-written JSON
+ * alike. That is right for the settings it was written for and a guess here: the
+ * MCP server WITHDRAWS the mailbox read tools from a running agent on a definite
+ * "no" (mcp/lib/context.ts `probeEmailReadStatus`), and one unreadable moment
+ * must not look like the owner switching reading off.
+ *
+ * ASKED ON BOTH BRANCHES, not only behind a `configured: false`. An account that
+ * resolved is NOT proof the store was readable throughout:
+ * `getEmailCredentials` reads the file once per key through the forgiving
+ * reader, and only the first three gate `configured`. A store readable for those
+ * three and unreadable by the time `email_mode` is read yields
+ * `{ configured: true, canRead: false }` — `resolveStoredMode` sees `undefined`
+ * and falls back to "send" — which is the same definite "no" that costs a
+ * running agent its mailbox tools. `accountResolved` therefore selects WHICH
+ * question is ambiguous, never whether to ask.
+ *
+ * TWO READS OF ONE FILE CAN DISAGREE, which is the other half. A store that was
+ * unreadable when `getEmailCredentials` looked and readable a moment later would
+ * answer `configured: false` with a clean bill of health — the first read's
+ * failure erased by the second read's success. So this reports UNREADABLE for
+ * either shape: a strict read that fails, and a strict read that finds a
+ * complete account behind a `configured: false`, which no single snapshot can
+ * produce. A half-filled account (an address and no password) is neither — it is
+ * genuinely not configured, and says so.
+ *
+ * A RESOLVED account is still questioned, because a store can heal between the
+ * two reads as easily as it can break: `getEmailCredentials` loses `email_mode`
+ * to a failed read, falls back to "send", and answers
+ * `{ configured: true, canRead: false }`; if the file is readable again by the
+ * time this looks, "the store is fine" would erase that failure exactly as the
+ * earlier version erased the other one. So the mode is read strictly here too
+ * and compared with the `canRead` the caller derived — a disagreement means the
+ * two reads saw different files, and the honest answer is "could not ask".
+ *
+ * One read, not several: separate `getKnown` calls are separate reads that can
+ * disagree with each other, which is the very fault this function exists to
+ * catch.
+ */
+export async function emailStoreDisagrees(
+  accountResolved: boolean,
+  canRead?: boolean,
+): Promise<boolean> {
+  const { values, known } = await getKnownMany([
+    EMAIL_KEYS.address,
+    EMAIL_KEYS.password,
+    EMAIL_KEYS.smtpHost,
+    EMAIL_KEYS.mode,
+    EMAIL_KEYS.imapHost,
+    EMAIL_KEYS.allowedSenders,
+  ]);
+  // The unambiguous shape, on either branch: we could not read the file at all.
+  if (!known) return true;
+  if (accountResolved) {
+    // The account itself has to still be there. An account that resolved from the
+    // first read and is INCOMPLETE in this one is the same disagreement as the
+    // opposite shape below, and comparing only the mode would miss it: a strict
+    // snapshot with no credentials but `email_mode: "read"` agrees about reading
+    // and has no mailbox to read, so the watch would hold the read tools open
+    // over an account that is not there.
+    const accountStillResolved = [
+      EMAIL_KEYS.address,
+      EMAIL_KEYS.password,
+      EMAIL_KEYS.smtpHost,
+    ].every((key) => asString(values[key]).length > 0);
+    if (!accountStillResolved) return true;
+    // Nothing to compare against on a build that does not pass it.
+    if (canRead === undefined) return false;
+    const rawSenders = values[EMAIL_KEYS.allowedSenders];
+    const strictMode = resolveStoredMode(
+      values[EMAIL_KEYS.mode],
+      asString(values[EMAIL_KEYS.imapHost]) || undefined,
+      Array.isArray(rawSenders)
+        ? rawSenders.filter((s): s is string => typeof s === "string")
+        : undefined,
+    );
+    return modeAllowsReading(strictMode) !== canRead;
+  }
+  // Presence only. The value never leaves this function.
+  return [EMAIL_KEYS.address, EMAIL_KEYS.password, EMAIL_KEYS.smtpHost].every(
+    (key) => asString(values[key]).length > 0,
+  );
 }
 
 export function toSmtpConfig(settings: EmailSettings): SmtpConfig {

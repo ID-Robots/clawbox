@@ -192,18 +192,59 @@ function held(config: Record<string, unknown>, key: string): unknown {
   return Object.hasOwn(config, key) ? config[key] : undefined;
 }
 
+/**
+ * WHY THIS LOGS THE KIND OF FAILURE AND NEVER THE MESSAGE.
+ *
+ * A `SyntaxError` from `JSON.parse` quotes a WINDOW OF THE INPUT in its own
+ * message — `Unexpected token '}', ..."d": "s3cret", "a": }" is not valid
+ * JSON` — and the input here is the file holding the mailbox password, both
+ * bot tokens and the portal token. Printing `err.message` therefore puts a
+ * slice of those secrets in the journal, which `logs_tail` hands straight back
+ * to the agent. The failing PATH is already in the line; the class or errno is
+ * everything an operator needs to tell "no permission" from "corrupt".
+ */
+function readFailureKind(err: unknown): string {
+  if (err instanceof SyntaxError) return "invalid JSON";
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  if (typeof code === "string" && code.length > 0) return code;
+  return err instanceof Error ? err.name : "unknown error";
+}
+
 /** One key, tri-state: `known: false` when the store could not be read. */
 export async function getKnown(key: string): Promise<{ value: unknown; known: boolean }> {
   try {
     return { value: held(readConfigStrict(), key), known: true };
   } catch (err) {
-    // The message only: a JSON parse error quotes a window of the INPUT, and
-    // this file holds the mailbox password and both bot tokens.
-    console.error(
-      "[config-store] data/config.json could not be read:",
-      err instanceof Error ? err.message : err,
-    );
+    console.error("[config-store] data/config.json could not be read:", readFailureKind(err));
     return { value: undefined, known: false };
+  }
+}
+
+/**
+ * The same tri-state, for several keys, from ONE read.
+ *
+ * Asking `getKnown` three times reads the file three times, and three reads of
+ * one file can disagree: a store readable for the first key and unreadable for
+ * the third answers a torn mixture that no single state of the disk ever had.
+ * Every caller weighing several keys against each other wants this instead.
+ */
+export async function getKnownMany(
+  keys: readonly string[],
+): Promise<{ values: Record<string, unknown>; known: boolean }> {
+  try {
+    const config = readConfigStrict();
+    // A NULL-PROTOTYPE bag, because the keys are strings from the caller and one
+    // of them can be `"__proto__"`: on an ordinary object literal
+    // `values["__proto__"] = undefined` reaches Object.prototype's setter
+    // instead of creating an own property, and the read back then answers the
+    // PROTOTYPE OBJECT for a key the store holds nothing under. `held` already
+    // guards the read side of this; the write side needs the same care.
+    const values: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of keys) values[key] = held(config, key);
+    return { values, known: true };
+  } catch (err) {
+    console.error("[config-store] data/config.json could not be read:", readFailureKind(err));
+    return { values: {}, known: false };
   }
 }
 

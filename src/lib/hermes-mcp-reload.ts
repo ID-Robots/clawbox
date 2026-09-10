@@ -57,7 +57,7 @@ const ACTED_STATUSES = new Set(["ok", "reloaded", "success", "completed", "done"
  * is a perfectly ordinary non-error reply that means NOTHING HAPPENED (see
  * `RELOAD_PARAMS`), and a `result !== null` test scored it as success. That is
  * the "reported from the fact that a call returned, not from what it returned"
- * shape, in the one helper all four refresh call sites depend on.
+ * shape, in the one helper all five refresh call sites depend on.
  *
  * A reply that names NO status stays a success: that is the historical reading,
  * and only a frame that names a state is allowed to contradict it — a dashboard
@@ -96,17 +96,31 @@ export const MCP_RELOAD_ALREADY = "the MCP servers were already reloaded for thi
  * Every family this module serves is registered on BOTH editions (the mailbox
  * read tools, the coding-agent family, the honest-refusal `image_generate`), but
  * the only mechanism here is HERMES' dashboard JSON-RPC. An OpenClaw box has no
- * dashboard by design, so `reloadMcpServers()` can never return true there — and
- * nothing is broken when it does not: OpenClaw spawns the ClawBox MCP server
- * lazily per session and reaps it after ten idle minutes, so the probe re-runs
- * and the tool list catches up on its own. Reporting that as an ERROR is the
- * recurring false-alarm shape — a repair announced over an operation that in
- * fact succeeded — and it costs a real one: an operator who learns to skip these
- * lines skips the Hermes box that genuinely refused.
+ * dashboard by design, so `reloadMcpServers()` can never return true there, and
+ * there is nothing else to ask: `openclaw mcp reload` disposes the MCP runtimes
+ * cached in the CLI's OWN process and the running gateway never hears of it
+ * (`disposeAllSessionMcpRuntimes`, OpenClaw 2026.8.1), and that gateway's
+ * JSON-RPC exposes no MCP method at all. Reporting the absence as an ERROR is
+ * still the recurring false-alarm shape — a repair announced over a box that is
+ * behaving exactly as designed — and it costs a real one: an operator who learns
+ * to skip these lines skips the Hermes box that genuinely refused.
  *
  * So `console.error` is kept for exactly the case a human can act on: a box that
  * HAS a dashboard and it said no. Everything else is a `console.log` that says
- * what will actually happen next.
+ * what will actually happen next — and WHAT that is differs per family, which is
+ * why a caller may supply the sentence (`noDashboardNote`). The MCP server
+ * re-probes the mailbox gate on its own now (mcp/tools/email.ts), so the mailbox
+ * catches up within its poll; nothing re-probes the other FOUR families, and for
+ * them the honest answer is still "when the MCP server is next spawned". That is
+ * a longer wait than it reads: measured on the owner's OpenClaw box
+ * (2026-09-10) the child serving the chat had been up for 28 minutes across a
+ * settings change, so an OpenClaw box is not quietly respawning these servers.
+ *
+ * The note rides on the REFUSAL line too, not just the no-dashboard one. A
+ * Hermes box whose dashboard answers `confirm_required` is a real refusal and
+ * stays an error — but for the family that repairs itself, an operator reading
+ * that line needs to know the tool list is not stuck, or the error is the same
+ * false alarm one branch further along.
  *
  * THE QUESTION IS THE EDITION, NOT THE ACTIVE HARNESS. Which agent serves the
  * owner right now and whether this box HAS a Hermes dashboard are different
@@ -129,8 +143,15 @@ export const MCP_RELOAD_ALREADY = "the MCP servers were already reloaded for thi
  * @param tag   the caller's log prefix, e.g. `coding-agent/mcp-refresh`
  * @param what  what changed, in the caller's own words, e.g. "the coding agent
  *              became available"
+ * @param noDashboardNote what happens NEXT on a box with no dashboard, in the
+ *              caller's own words. Defaults to the wait every family without a
+ *              re-probe of its own is in for.
  */
-export async function reportMcpReloadRefused(tag: string, what: string): Promise<void> {
+export async function reportMcpReloadRefused(
+  tag: string,
+  what: string,
+  noDashboardNote = "the tool list re-probes when the MCP server is next spawned",
+): Promise<void> {
   // BOUND THE RECORD, whoever the caller is. Five families share these two
   // lines — `hermes-image-refresh`, `email-mcp-refresh`, `provider-mcp-refresh`,
   // `coding-agent-mcp-refresh` and `harness-mcp-refresh` — and one of them
@@ -144,14 +165,13 @@ export async function reportMcpReloadRefused(tag: string, what: string): Promise
   const { edition, defaulted } = readEditionSource();
   const mayHaveDashboard = defaulted || edition === "hermes" || edition === "dual";
   if (!mayHaveDashboard) {
-    console.log(
-      `${line}; this edition has no dashboard to ask — the tool list re-probes `
-        + "when the MCP server is next spawned",
-    );
+    console.log(`${line}; this edition has no dashboard to ask — ${logSafe(noDashboardNote, 160)}`);
     return;
   }
   // Names the mechanism, like the success sentences above and for the same
   // reason: what was asked is Hermes' dashboard, whatever this box calls its
   // agent.
-  console.error(`${line}, but Hermes would not reload its MCP servers`);
+  console.error(
+    `${line}, but Hermes would not reload its MCP servers — ${logSafe(noDashboardNote, 160)}`,
+  );
 }

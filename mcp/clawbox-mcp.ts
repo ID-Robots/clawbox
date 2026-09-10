@@ -48,13 +48,18 @@ import { API_BASE, authHeader, primeApiToken } from "./lib/api";
 import { buildContext, type McpContext } from "./lib/context";
 import { installEdition, resolveAppHarness, resolveEdition, type Ed } from "./lib/edition";
 import { resolveProfile } from "./lib/profile";
-import { createRegistrar, type Profile } from "./lib/register";
+import { createRegistrar, type Profile, type Registrar } from "./lib/register";
 import { registerAiTools } from "./tools/ai";
 import { registerBrowserTools } from "./tools/browser";
 import { registerCodingTools } from "./tools/coding";
 import { registerCodingAgentTools, registerCodingTeamTools } from "./tools/coding-agent";
 import { registerDesktopTools } from "./tools/desktop";
-import { registerEmailTools } from "./tools/email";
+import {
+  hasMailboxSurface,
+  registerEmailTools,
+  watchEmailReadability,
+  type EmailReadabilityWatchOptions,
+} from "./tools/email";
 import { registerMediaTools } from "./tools/media";
 import { registerOrientationTools } from "./tools/orientation";
 import { registerSkillTools } from "./tools/skills";
@@ -183,8 +188,10 @@ export async function buildServer(
   );
   const reg = createRegistrar(server, edition, profile);
 
-  // Order matters only for readability; registration is complete before the
-  // transport connects, so tools/list is stable for the process lifetime.
+  // Order matters only for readability. Registration is complete before the
+  // transport connects, and the list then holds for the process lifetime with
+  // ONE exception: the mailbox read tools follow Settings → Email afterwards
+  // (see `watchEmailReadability` in main()). Nothing else here is re-asked.
   registerOrientationTools(reg, ctx);
   registerSkillTools(reg);
   registerMemoryTools(reg);
@@ -207,6 +214,50 @@ export async function buildServer(
   return { server, reg, ctx };
 }
 
+/**
+ * Start following Settings → Email on a server that is ALREADY CONNECTED.
+ *
+ * The mailbox gate is the one thing this server probes that the owner changes
+ * while the agent is running, and a tool list that never catches up is what left
+ * the box answering "send only" seven minutes after Settings said "Read on
+ * demand". `hasMailboxSurface` is asked of the registrar rather than of
+ * `profile`/`edition` again — it owns both reasons, including the SDK one.
+ * `buildServer` deliberately does not do this: mcp/check-tools.ts builds ten
+ * servers and connects none of them.
+ *
+ * STOPPED WITH THE TRANSPORT. `unref` is what stops the poll holding an
+ * otherwise-idle process open (measured under the box's Bun: without it the same
+ * script does not exit on stdin EOF), and it is not the whole story — a request
+ * still in flight keeps the loop alive after the harness has hung up, and a poll
+ * that went on re-registering tools into a closed server would be work nobody
+ * can see the result of. `Protocol.onclose` is free for a caller (the SDK drives
+ * its own teardown through `_onclose`), and a handler already installed when
+ * this runs is chained rather than overwritten. Note the direction: an EARLIER
+ * handler survives, while a later plain `server.server.onclose = fn` from
+ * anywhere would replace this wrapper and leave the poll outliving the
+ * transport — which is why arming is the LAST thing `main()` does.
+ *
+ * A function rather than four lines in `main()` because `main()` claims stdio
+ * and cannot be tested, and this is the line that carries the whole fix to a
+ * real box.
+ */
+export function armMailboxWatch(
+  server: McpServer,
+  reg: Registrar,
+  emailCanRead: boolean,
+  // The watch's own seam, forwarded so a test can drive the probe and the clock
+  // rather than the device. Never passed on a box.
+  options?: EmailReadabilityWatchOptions,
+): void {
+  if (!hasMailboxSurface(reg)) return;
+  const watch = watchEmailReadability(reg, emailCanRead, options);
+  const previous = server.server.onclose;
+  server.server.onclose = () => {
+    watch.stop();
+    previous?.();
+  };
+}
+
 async function main(): Promise<void> {
   // FIRST, before the probes below spawn anything: the bearer goes into this
   // process's cache and out of its environment, so no child — a startup probe,
@@ -219,6 +270,7 @@ async function main(): Promise<void> {
   const { server, reg, ctx } = await buildServer(edition, profile, appHarness);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  armMailboxWatch(server, reg, ctx.emailCanRead);
   // The model is named because "why do I only have 16 tools?" is the first
   // question a slimmed device raises, and this line is the answer.
   const because = model?.provider
