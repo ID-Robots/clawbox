@@ -213,18 +213,34 @@ interface EmailStatusPayload {
 }
 
 /**
- * Ask the device whether reading is switched on. A device whose status route
- * cannot be reached (an older build, a service still starting) answers null,
- * and the read tools stay UNREGISTERED — the safe direction, because the
- * failure mode of guessing "yes" is a permanently-failing tool.
+ * Ask the device whether reading is switched on, keeping "could not ask" apart
+ * from "no".
+ *
+ * `null` is a device whose status route could not be reached (an older build, a
+ * service still starting). The two callers want opposite things from it, which
+ * is why it is not collapsed here:
+ *
+ *  - at STARTUP, unknown means the read tools stay unregistered — the safe
+ *    direction, because the failure mode of guessing "yes" is a
+ *    permanently-failing tool (see `probeEmailRead`);
+ *  - while the server RUNS, unknown must change nothing at all. Reading one
+ *    timed-out request as "the owner switched reading off" would strip the
+ *    tools off a working mailbox — a failure reported over an operation that
+ *    never happened.
  */
-async function probeEmailRead(): Promise<boolean> {
+export async function probeEmailReadStatus(): Promise<boolean | null> {
   const status = await apiTry<EmailStatusPayload>("/setup-api/email/status", { timeoutMs: 3_000 });
-  if (!status?.configured) return false;
+  if (!status) return null;
+  if (!status.configured) return false;
   // The device answers this itself (src/lib/email-config.ts modeAllowsReading).
   // Restating which modes allow reading here would be a second copy of the
   // rule, in the process least likely to be updated when a mode is added.
   return status.canRead === true;
+}
+
+/** The startup gate: see `probeEmailReadStatus` for why unknown is `false` here. */
+async function probeEmailRead(): Promise<boolean> {
+  return (await probeEmailReadStatus()) === true;
 }
 
 interface CodingAgentStatusPayload {

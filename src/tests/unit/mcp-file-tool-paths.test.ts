@@ -44,6 +44,9 @@ async function captureTools(): Promise<Map<string, Captured>> {
     tool(name: string, _description: string, shape: Shape, _opts, handler: ToolHandler) {
       out.set(name, { shape, handler });
     },
+    remove(name: string) {
+      out.delete(name);
+    },
     list(): RegisteredToolInfo[] {
       return [];
     },

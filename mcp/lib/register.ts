@@ -18,7 +18,7 @@
 //   4. THE ERROR ENVELOPE. Every throw becomes { error, code, message, next } —
 //      no stack, no upstream body, no absolute path.
 
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer, RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CallToolRequestSchema, type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { capText } from "./guard";
@@ -106,6 +106,18 @@ export const MAX_DESCRIPTION_CHARS = 1000;
 
 export interface Registrar {
   tool(name: string, description: string, shape: Shape, opts: ToolOpts, handler: ToolHandler): void;
+  /**
+   * Withdraw one tool again, by name. A no-op for a name this registrar never
+   * registered — the edition and profile gates above drop tools silently, so a
+   * caller that withdraws a family cannot know which half of it ever existed.
+   *
+   * It exists for the ONE decision an owner changes while the agent is running:
+   * whether the agent may open the mailbox (mcp/tools/email.ts). Everything
+   * else this server gates on is settled before `connect()` and stays settled,
+   * and `tool()` is still the only way in — so the dispatcher, the tool list and
+   * the SDK's own registry cannot disagree about what exists.
+   */
+  remove(name: string): void;
   list(): RegisteredToolInfo[];
   /** Must be called once, after every tool is registered. See installCallHandler(). */
   finalize(): void;
@@ -245,13 +257,20 @@ function installCallHandler(server: McpServer, entries: Map<string, CallEntry>):
 }
 
 /**
- * Build the registrar for one server instance. Every registration decision —
- * edition, profile — is made HERE, once, before server.connect(); never per
- * call, so tools/list is stable for the life of the process.
+ * Build the registrar for one server instance. The registration RULES — edition,
+ * profile — are applied HERE and never per call, so an individual tool cannot
+ * answer the same question a second way.
+ *
+ * The list is built before `server.connect()` and, with the one exception the
+ * mailbox gate needs, does not change afterwards: `registerEmailReadTools` and
+ * `remove` follow Settings → Email on a running server, and the SDK turns each
+ * of those into a `notifications/tools/list_changed` the harness acts on.
  */
 export function createRegistrar(server: McpServer, edition: Ed, profile: Profile): Registrar {
   const registered: RegisteredToolInfo[] = [];
   const entries = new Map<string, CallEntry>();
+  // The SDK's own handle per tool, which is what can withdraw one again.
+  const handles = new Map<string, RegisteredTool>();
 
   return {
     tool(name, description, shape, opts, handler) {
@@ -284,7 +303,7 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
         }
       };
 
-      server.registerTool(
+      const handle = server.registerTool(
         name,
         {
           description,
@@ -298,6 +317,21 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see ToolHandler
         wrapped as any,
       );
+      if (handle) handles.set(name, handle);
+    },
+    remove(name) {
+      const handle = handles.get(name);
+      if (!handle) return;
+      handles.delete(name);
+      // The DISPATCHER first. `installCallHandler` answers from `entries`, so a
+      // tool left there would still run for a host that called it from a list
+      // it had not refreshed yet — and the gate would be gone from the one
+      // place that is not the route's.
+      entries.delete(name);
+      const at = registered.findIndex((t) => t.name === name);
+      if (at >= 0) registered.splice(at, 1);
+      // Last, because this is what emits tools/list_changed.
+      handle.remove();
     },
     list() {
       return registered;

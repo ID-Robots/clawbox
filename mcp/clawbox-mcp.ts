@@ -54,7 +54,7 @@ import { registerBrowserTools } from "./tools/browser";
 import { registerCodingTools } from "./tools/coding";
 import { registerCodingAgentTools, registerCodingTeamTools } from "./tools/coding-agent";
 import { registerDesktopTools } from "./tools/desktop";
-import { registerEmailTools } from "./tools/email";
+import { registerEmailTools, watchEmailReadability } from "./tools/email";
 import { registerMediaTools } from "./tools/media";
 import { registerOrientationTools } from "./tools/orientation";
 import { registerSkillTools } from "./tools/skills";
@@ -219,6 +219,18 @@ async function main(): Promise<void> {
   const { server, reg, ctx } = await buildServer(edition, profile, appHarness);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // AFTER connect, and only here: the mailbox gate is the one thing this server
+  // probes that the owner changes while the agent is running, and a tool list
+  // that never catches up is what left the box answering "send only" seven
+  // minutes after Settings said "Read on demand". Asked of the registrar rather
+  // than of `profile`/`edition` again, so the gates that decide whether this box
+  // has email tools at all are not restated here: a server that registered no
+  // `email_send` has no mailbox surface to keep in step, and nothing to poll for.
+  // `buildServer` deliberately does not arm it — mcp/check-tools.ts builds ten
+  // servers and connects none of them.
+  if (reg.list().some((tool) => tool.name === "email_send")) {
+    watchEmailReadability(reg, ctx.emailCanRead);
+  }
   // The model is named because "why do I only have 16 tools?" is the first
   // question a slimmed device raises, and this line is the answer.
   const because = model?.provider
