@@ -3307,7 +3307,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.error.cannotChange": "No se pudo cambiar la voz en este dispositivo.",
     "settings.voice.fallback": "No se pudo seleccionar la voz de este dispositivo, así que se mantiene la voz predeterminada. Ajustes → IA local muestra lo que tiene el dispositivo.",
     "settings.voice.autoReply": "Respuestas habladas",
-    "settings.voice.autoReplyHint": "En el chat de la mascota la respuesta llega con un reproductor para pulsar, y una pregunta hablada se responde en voz alta. Donde esta caja responde canales, un mensaje de voz allí también recibe una respuesta hablada.",
+    "settings.voice.autoReplyHint": "En el chat de la mascota la respuesta llega con un reproductor para pulsar, y una pregunta hablada se responde en voz alta. Cuando esta caja responde en canales, un mensaje de voz también recibe allí una respuesta hablada.",
     "settings.voice.channelVoiceNotes": "Los mensajes de voz en Telegram y los demás canales se responden con la voz en la nube: a este dispositivo le falta el codificador (ffmpeg) que convierte su propia voz en un mensaje de voz.",
     "settings.voice.channelVoiceNotesFix": "Instalar el codificador",
     "settings.voice.channelVoiceNotesInstalling": "Instalando… {seconds} s",

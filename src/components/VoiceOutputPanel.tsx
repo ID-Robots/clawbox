@@ -188,7 +188,10 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const playerRef = useRef<HTMLAudioElement | null>(null);
   const clipUrlRef = useRef<string | null>(null);
 
-  const load = useCallback(async () => {
+  // Answers what it read, so a caller that CHANGED the box can publish the
+  // refreshed facts (see installVoiceNotes); null whenever nothing readable
+  // came back and the panel kept its last reading.
+  const load = useCallback(async (): Promise<VoiceStatusAnswer | null> => {
     try {
       const res = await fetch("/setup-api/tts", { cache: "no-store" });
       const data = await res.json();
@@ -196,12 +199,14 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       // Set before the guard, an error body — `res.ok` is never checked — would
       // read as `channelsUnavailable: false` and quietly clear a note the box
       // had already given us, while `status` correctly kept its last value.
-      if (!isVoiceStatus(data)) return;
+      if (!isVoiceStatus(data)) return null;
       setNoChannelSpeech(channelsUnavailable(data));
       setNoVoiceNotes(channelVoiceNotesMissing(data));
       setStatus(data);
+      return data;
     } catch {
       /* keep the last good reading rather than blanking the panel */
+      return null;
     }
   }, []);
 
@@ -312,7 +317,17 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         }
       }
       setInstallFailed(!ok);
-      await load();
+      const refreshed = await load();
+      // This button INSTALLS the voice, so it changes the one fact the chat
+      // uses to decide whether to ask for a reply's clip at all: a chat told
+      // earlier that no engine was configured would have stayed silent until
+      // the page was reloaded. Only on a real success, and only with what the
+      // box answered afterwards — the same rule `post` follows below.
+      if (ok && refreshed) {
+        window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
+          detail: { autoReply: refreshed.autoReply !== false, engines: refreshed.engines },
+        }));
+      }
     } catch {
       setInstallFailed(true);
     } finally {
