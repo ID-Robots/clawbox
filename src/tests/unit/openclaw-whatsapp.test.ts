@@ -336,8 +336,18 @@ describe("OpenclawWhatsappPairing", () => {
       expect((await pairing.start()).error).toBe("plugin_missing");
       expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
 
-      // An hour later the measurement is old enough that the owner may have
-      // changed the box under it, and the press is owed a real attempt.
+      // Still pressing five minutes later: the measurement is fresh enough, and
+      // this is the half that keeps a flurry of presses down to one repair.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+
+      // An hour after the refusal the measurement is old enough that the owner
+      // may have changed the box under it, and the press is owed a real attempt.
+      // Deliberately a wall-clock contract rather than the module's own constant:
+      // a test that reads REPAIR_REFUSAL_TTL_MS would follow any future change to
+      // it and stop asserting the policy — that a press soon after is answered
+      // from the measurement and a press much later is not.
       await vi.advanceTimersByTimeAsync(60 * 60_000);
       expect((await pairing.start()).error).toBe("plugin_missing");
       expect(mockEnsurePlugin).toHaveBeenCalledTimes(2);
