@@ -82,7 +82,14 @@ test.describe("the runtime and the core the install actually left behind", () =>
       { user: "clawbox", timeoutMs: 120_000 },
     )).trim();
 
-    expect(out, `openclaw --version answered ${JSON.stringify(out)}`).toContain(PINNED_CORE);
+    // The WHOLE version token, not a substring: `toContain("2026.9.3")` is also
+    // satisfied by `2026.9.30`, and a pin is the one place a prefix match must
+    // not pass. Taken the way install.sh itself takes it — the field that looks
+    // like a version out of `OpenClaw <version> (<hash>)` — so a prerelease pin
+    // (`2026.5.24-beta.2`, a documented QA override) is compared whole rather
+    // than clipped by a three-number regex.
+    const reported = out.split(/\s+/).find((field) => /^\d+\.\d+\.\d+/.test(field)) ?? "";
+    expect(reported, `openclaw --version answered ${JSON.stringify(out)}`).toBe(PINNED_CORE);
     // …and nothing of the refusal, in case a future CLI reports it on stdout
     // with a zero exit.
     expect(out).not.toContain("is required (current:");
