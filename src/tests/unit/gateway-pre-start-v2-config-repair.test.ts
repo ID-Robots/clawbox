@@ -685,10 +685,10 @@ json.dump(doc, open(CFG, "w"), indent=2)
    * that only worked on a matching export name fails. It performs the moves and
    * NOT the strip, exactly as the real one does.
    */
-  function stubCoreMigrationChunk() {
+  function stubCoreMigrationChunk(chunkName = "legacy-pGW3ZP3t.js") {
     mkdirSync(coreDistDir, { recursive: true });
     writeFileSync(
-      path.join(coreDistDir, "legacy-pGW3ZP3t.js"),
+      path.join(coreDistDir, chunkName),
       `function applyLegacyDoctorMigrations(raw, context, options) {
   if (!raw || typeof raw !== "object") return { next: null, changes: [] };
   const next = structuredClone(raw);
@@ -909,6 +909,27 @@ exit 0
     delete fixed.messages.tts.voiceId;
     writeFileSync(configPath, JSON.stringify(fixed, null, 2));
     expect(run().stderr).not.toContain("after the core's own migrations these remain");
+  });
+
+  it("reads the migration table out of a bundle whose chunks are .mjs", () => {
+    // TASK-788, measured on the published 2026.9.3 tarball: that dist is 275
+    // `*.js` and 5,380 `*.mjs`, and `applyLegacyDoctorMigrations` is declared
+    // only in a `.mjs` chunk (0 `.js` hits). A discovery grep restricted to
+    // `*.js` therefore finds nothing on the new core, and this arm takes its
+    // fail-closed branch on every boot of every box — the diagnosis stops
+    // being produced without anything failing. Which extension a bundler
+    // picks for a chunk is its business; the declaration text is what this
+    // looks for, so both extensions have to be in the search.
+    rmSync(coreDistDir, { recursive: true, force: true });
+    stubCoreMigrationChunk("legacy-pGW3ZP3t.mjs");
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("after the core's own migrations these remain");
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(r.stderr).not.toContain("migration table could not be read");
+    expect(previewFiles()).toEqual([]);
   });
 
   it("says nothing about a remainder when the core's own table cannot be read", () => {

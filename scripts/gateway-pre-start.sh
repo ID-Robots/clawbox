@@ -534,9 +534,15 @@ clawbox_core_residual_issues() {
   # `grep -rl` rather than a chunk name: every one of them is content-hashed and
   # changes with each core build. Bounded, and a SIGPIPE from `head` closing the
   # pipe is not a failure to report.
+  #
+  # BOTH module extensions, because which one a chunk gets is the bundler's
+  # decision and it has already changed once: 2026.8.1's dist is 5,852 `*.js`,
+  # 2026.9.3's is 275 `*.js` and 5,380 `*.mjs`, with this declaration only in
+  # the `.mjs` half. Still an allow-list rather than every file, so that a
+  # `.d.ts` or a `.map` carrying the same text as data is never imported.
   core_chunk=""
   if [ -d "$core_dist" ]; then
-    core_chunk="$(timeout -k 5 20 grep -rlF --include='*.js' 'function applyLegacyDoctorMigrations(' "$core_dist" 2>/dev/null | head -n1 || true)"
+    core_chunk="$(timeout -k 5 20 grep -rlF --include='*.js' --include='*.mjs' 'function applyLegacyDoctorMigrations(' "$core_dist" 2>/dev/null | head -n1 || true)"
   fi
   if [ -z "$core_chunk" ]; then
     echo "  NOTE: the installed core's own migration table could not be read from $core_dist, so what it still refuses AFTER those migrations could not be worked out here" >&2
