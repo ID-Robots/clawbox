@@ -15,11 +15,14 @@ beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), "task789-")); });
 afterEach(() => { rmSync(dir, {recursive:true, force:true}); });
 function bridge({buildRc=0, swapRc=0, version="3.9.0", hermes=false, preMasked=false} = {}) {
   mkdirSync(`${dir}/.next/standalone`,{recursive:true}); mkdirSync(`${dir}/data`);
+  mkdirSync(`${dir}/config`);
+  writeFileSync(`${dir}/config/clawbox-gateway-maintenance.sh`, 'echo "maintenance $1" >> "$PROJECT_DIR/events"');
   writeFileSync(`${dir}/.next/standalone/package.json`,JSON.stringify({version}));
   writeFileSync(`${dir}/package.json`,JSON.stringify({version:"4.0.0"}));
   writeFileSync(`${dir}/.next/BUILD_ID`,"old-build");
   const script = `set -euo pipefail
-PROJECT_DIR='${dir}'
+export PROJECT_DIR='${dir}'
+SRC_DIR='${dir}'
 systemctl() {
   echo "systemctl $*" >> "$PROJECT_DIR/events"
   if [ "$1" = is-enabled ]; then echo ${preMasked ? "masked-runtime" : "enabled"}; fi
@@ -43,15 +46,15 @@ describe("legacy bootstrap handover executes shipped shell functions",()=>{
   it("rebuilds before changing authorisation and leaves a full-upgrade continuation",()=>{
     const r=bridge(); expect(r.status,r.stderr).toBe(0);
     expect(r.events.indexOf("build\n")).toBeLessThan(r.events.indexOf("policy\n"));
-    expect(r.events).toContain("systemctl mask --runtime clawbox-gateway.service");
-    expect(r.events).toContain("systemctl unmask --runtime clawbox-gateway.service");
+    expect(r.events).toContain("maintenance enter");
+    expect(r.events).toContain("maintenance leave");
     expect(JSON.parse(readFileSync(`${dir}/data/updater-handover.json`,"utf8"))).toEqual({version:1,previousBuildId:"old-build"});
   });
   it("does not revoke the old app's permissions after build failure",()=>{
     const r=bridge({buildRc:137}); expect(r.status,r.stderr).toBe(137);
     expect(r.events).not.toContain("policy\n"); expect(r.events).not.toContain("services\n");
     expect(r.events).toContain("systemctl restart clawbox-setup.service");
-    expect(r.events).toContain("systemctl unmask --runtime clawbox-gateway.service");
+    expect(r.events).toContain("maintenance leave");
     expect(r.marker).toBe(false);
   });
   it("refuses before stopping any service when swap cannot be provisioned",()=>{
@@ -64,6 +67,7 @@ describe("legacy bootstrap handover executes shipped shell functions",()=>{
   it("does not remove an existing gateway maintenance mask",()=>{
     const r=bridge({preMasked:true});expect(r.status,r.stderr).toBe(0);
     expect(r.events).not.toContain("systemctl unmask");
+    expect(r.events).toContain("maintenance leave");
   });
   it("leaves the current 4.x updater alone",()=>{
     const r=bridge({version:"4.0.0"});expect(r.status).toBe(0);expect(r.events).toBe("");

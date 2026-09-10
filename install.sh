@@ -3367,10 +3367,10 @@ handover_legacy_updater() {
   [ -n "$previous_id" ] || return 1
   if ! is_hermes_edition; then
     systemctl is-active --quiet clawbox-gateway.service && gateway_was_active=1
-    case "$(systemctl is-enabled clawbox-gateway.service 2>/dev/null || true)" in
-      masked|masked-runtime) ;;
-      *) systemctl mask --runtime clawbox-gateway.service || return 1; mask_owned=1 ;;
-    esac
+    # /run masks cannot override the gold image's /etc unit. The root-held
+    # drop-in works before the new launcher has been installed as well.
+    bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" enter || return 1
+    mask_owned=1
     systemctl stop clawbox-gateway.service || rc=$?
   fi
   if [ "$rc" -eq 0 ]; then
@@ -3399,7 +3399,7 @@ os.replace(p + '.tmp', p)
 PY
   fi
   if [ "$mask_owned" -eq 1 ]; then
-    systemctl unmask --runtime clawbox-gateway.service || rc=$?
+    bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" leave || rc=$?
   fi
   # No reboot needed for the bridge. The normal new-updater flow owns that.
   systemctl reset-failed clawbox-setup.service 2>/dev/null || true
@@ -6822,7 +6822,7 @@ install_root_libexec() {
   local src failed=0
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
-  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh; do
+  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh clawbox-gateway-maintenance.sh; do
     if [ -f "$SRC_DIR/config/$src" ]; then
       install_root_file "$SRC_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
@@ -7732,6 +7732,10 @@ wait_for_gateway_port() {
 }
 
 step_gateway_legacy_state_recovery() {
+  if [ -d /run/clawbox-gateway-maintenance ]; then
+    echo "  Gateway recovery deferred until updater maintenance ends"
+    return 0
+  fi
   # No gateway on the Hermes SKU — "not listening on 18789" is the CORRECT
   # state there, and running `openclaw doctor` + restarting a masked unit would
   # just churn (and, before the mask, resurrect it).
@@ -7860,7 +7864,9 @@ step_update_smoke() {
   #    value the Control UI authenticates with; weak/missing = LAN bypass risk).
   local gw_code
   gw_code=$(curl -s -o /dev/null -w "%{http_code}" -m 5 "http://127.0.0.1:${GW_PORT}/" 2>/dev/null || echo "000")
-  if [ "$gw_code" = "200" ]; then
+  if [ -d /run/clawbox-gateway-maintenance ]; then
+    echo "    [skip] gateway reachability deferred to the updater's gateway_verify step"
+  elif [ "$gw_code" = "200" ]; then
     echo "    [ok] gateway reachable"
   else
     echo "    [WARN] gateway not reachable (HTTP $gw_code) — Control UI/chat may be down"

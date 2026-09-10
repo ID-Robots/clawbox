@@ -13,7 +13,7 @@ can no longer Retry.
 For a deployed 3.x app targeting a 4.x checkout, bootstrap first:
 
 1. Provisions and verifies disk swap on a low-memory appliance.
-2. Masks/stops the system gateway and stops the old dashboard for the build.
+2. Gates/stops the system gateway and stops the old dashboard for the build.
 3. Builds and verifies the new app while retaining the old app's authorization.
 4. Only after successful build, installs the new service/launcher policy.
 5. Writes an atomic `data/updater-handover.json` record and restarts the app.
@@ -39,3 +39,16 @@ In particular, a clean-image test does not cover the customer's populated
 historical session state. Verify preserved history, successful readiness and
 chat, restart stability, disk swap persistence, and failed-build Retry before
 closing the task.
+
+## Real-device maintenance guard finding
+
+On the clean-main Nano, `/run/systemd/system/clawbox-gateway.service -> /dev/null`
+coexisted with `LoadState=loaded` and `FragmentPath=/etc/systemd/system/clawbox-gateway.service`.
+The `/etc` unit wins: a successful `systemctl --runtime mask` was not a stopped-writer guarantee.
+The fixed-scope root helper installs a runtime drop-in condition, without changing
+operator masks or persistent unit files. It is installed root-owned before the
+new updater runs. Reboot clears it. A live start attempt under the guard returned
+`ActiveState=inactive`, `ConditionResult=no`; removal permits startup again.
+Post-update recovery/reachability probes defer to the final `gateway_verify`
+while the guard is held, so they neither restart a writer nor report intentional
+downtime as a failure.

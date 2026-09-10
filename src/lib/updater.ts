@@ -1776,14 +1776,14 @@ async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
   if (masked) {
     await execFile(
       "/usr/bin/sudo",
-      ["-n", "/usr/bin/systemctl", "--runtime", "mask", "clawbox-gateway.service"],
+      ["-n", "/usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh", "enter"],
       options,
     );
     return;
   }
   await execFile(
     "/usr/bin/sudo",
-    ["-n", "/usr/bin/systemctl", "--runtime", "unmask", "clawbox-gateway.service"],
+    ["-n", "/usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh", "leave"],
     options,
   );
 }
@@ -1862,9 +1862,10 @@ async function waitForGatewayPreStart(): Promise<void> {
 
 /**
  * Keep systemd from starting the gateway while an OpenClaw writer is active.
- * Mask comes before stop so a root update step cannot race the stop with its
+ * A root-owned runtime drop-in condition works even for /etc units, unlike
+ * a /run unit mask (TASK-789). The guard comes before stop so a root update step cannot race the stop with its
  * own restart, and before the pre-start wait so no new activation can slip
- * into `start-pre` behind it. The runtime mask is always removed, including
+ * into `start-pre` behind it. The runtime guard is always removed, including
  * failure paths.
  */
 async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
@@ -1873,8 +1874,8 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
   let masked = false;
   let outcome!: { ok: true; value: T } | { ok: false; error: unknown };
   try {
-    await setGatewayMaintenanceMask(true);
     masked = true;
+    await setGatewayMaintenanceMask(true);
     await waitForGatewayPreStart();
     await stopGatewayForMaintenance();
     outcome = { ok: true, value: await operation() };

@@ -941,7 +941,7 @@ describe("updater", () => {
         call.includes("show clawbox-root-update@post_update.service -p ActiveState --value"),
       );
       const firstUnmaskIndex = calls.findIndex((call) =>
-        call.includes("systemctl --runtime unmask clawbox-gateway.service"),
+        call.includes("clawbox-gateway-maintenance.sh leave"),
       );
       expect(settleIndex).toBeGreaterThanOrEqual(0);
       expect(firstUnmaskIndex).toBeGreaterThan(settleIndex);
@@ -1223,7 +1223,7 @@ describe("updater", () => {
       const calls = mockExecFile.mock.calls.map(([cmd, args]) =>
         `${cmd} ${(args as string[]).join(" ")}`,
       );
-      const firstMask = calls.findIndex((call) => call.includes("systemctl --runtime mask clawbox-gateway.service"));
+      const firstMask = calls.findIndex((call) => call.includes("clawbox-gateway-maintenance.sh enter"));
       const firstStop = calls.findIndex((call) => call.includes("systemctl stop clawbox-gateway.service"));
       const subStateQueries = calls
         .map((call, index) => call.includes("show clawbox-gateway.service -p SubState --value") ? index : -1)
@@ -1445,13 +1445,13 @@ describe("updater", () => {
         call.includes("/bin/bash") && call.includes("scripts/gateway-pre-start.sh"),
       );
       const maskIndexes = calls
-        .map((call, index) => call.includes("systemctl --runtime mask clawbox-gateway.service") ? index : -1)
+        .map((call, index) => call.includes("clawbox-gateway-maintenance.sh enter") ? index : -1)
         .filter((index) => index >= 0);
       const stopIndexes = calls
         .map((call, index) => call.includes("systemctl stop clawbox-gateway.service") ? index : -1)
         .filter((index) => index >= 0);
       const unmaskIndexes = calls
-        .map((call, index) => call.includes("systemctl --runtime unmask clawbox-gateway.service") ? index : -1)
+        .map((call, index) => call.includes("clawbox-gateway-maintenance.sh leave") ? index : -1)
         .filter((index) => index >= 0);
       const consentIndex = calls.findIndex((call) =>
         call.includes("plugins install @openclaw/codex@2026.8.1 --force --accept-capabilities"),
@@ -2134,7 +2134,7 @@ describe("updater", () => {
 
     it("retries a failed maintenance unmask and surfaces the cleanup failure", async () => {
       setupExecFileMock({
-        "systemctl --runtime unmask clawbox-gateway.service": new Error("unmask failed"),
+        "clawbox-gateway-maintenance.sh leave": new Error("unmask failed"),
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
@@ -2158,7 +2158,7 @@ describe("updater", () => {
 
       const unmaskCalls = mockExecFile.mock.calls.filter(([cmd, args]) =>
         cmd === "/usr/bin/sudo"
-          && (args as string[]).join(" ").includes("systemctl --runtime unmask clawbox-gateway.service"),
+          && (args as string[]).join(" ").includes("clawbox-gateway-maintenance.sh leave"),
       );
       expect(unmaskCalls.length).toBeGreaterThanOrEqual(3);
       expect(updater.getUpdateState().steps.find((step) => step.id === "post_update")?.error)
@@ -2300,7 +2300,7 @@ describe("updater", () => {
       );
       expect(calls.some((call) => call.includes("plugins install @openclaw/codex"))).toBe(false);
       const finalUnmaskIndex = calls
-        .map((call, index) => call.includes("systemctl --runtime unmask clawbox-gateway.service") ? index : -1)
+        .map((call, index) => call.includes("clawbox-gateway-maintenance.sh leave") ? index : -1)
         .filter((index) => index >= 0)
         .at(-1) ?? -1;
       expect(consentIndex).toBeGreaterThan(preStartIndex);
@@ -2402,13 +2402,13 @@ describe("updater", () => {
         call.includes("/usr/bin/sudo -n /usr/local/libexec/clawbox/clawbox-run-root-step.sh openclaw_install"),
       );
       const firstMaskIndex = calls.findIndex((call) =>
-        call.includes("systemctl --runtime mask clawbox-gateway.service"),
+        call.includes("clawbox-gateway-maintenance.sh enter"),
       );
       const firstStopIndex = calls.findIndex((call) =>
         call.includes("systemctl stop clawbox-gateway.service"),
       );
       const firstUnmaskIndex = calls.findIndex((call) =>
-        call.includes("systemctl --runtime unmask clawbox-gateway.service"),
+        call.includes("clawbox-gateway-maintenance.sh leave"),
       );
 
       expect(firstMaskIndex).toBeLessThan(firstStopIndex);
@@ -2901,8 +2901,8 @@ describe("updater", () => {
         `${cmd} ${(args as string[]).join(" ")}`,
       );
       expect(calls.some((call) =>
-        call.includes("systemctl --runtime mask clawbox-gateway.service")
-          || call.includes("systemctl --runtime unmask clawbox-gateway.service")
+        call.includes("clawbox-gateway-maintenance.sh enter")
+          || call.includes("clawbox-gateway-maintenance.sh leave")
           || call.includes("systemctl stop clawbox-gateway.service")
           || call.includes("scripts/gateway-pre-start.sh"),
       )).toBe(false);
