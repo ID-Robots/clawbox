@@ -310,6 +310,18 @@ export async function emailStoreDisagrees(
   // The unambiguous shape, on either branch: we could not read the file at all.
   if (!known) return true;
   if (accountResolved) {
+    // The account itself has to still be there. An account that resolved from the
+    // first read and is INCOMPLETE in this one is the same disagreement as the
+    // opposite shape below, and comparing only the mode would miss it: a strict
+    // snapshot with no credentials but `email_mode: "read"` agrees about reading
+    // and has no mailbox to read, so the watch would hold the read tools open
+    // over an account that is not there.
+    const accountStillResolved = [
+      EMAIL_KEYS.address,
+      EMAIL_KEYS.password,
+      EMAIL_KEYS.smtpHost,
+    ].every((key) => asString(values[key]).length > 0);
+    if (!accountStillResolved) return true;
     // Nothing to compare against on a build that does not pass it.
     if (canRead === undefined) return false;
     const rawSenders = values[EMAIL_KEYS.allowedSenders];

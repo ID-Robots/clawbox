@@ -166,6 +166,29 @@ describe("GET /setup-api/email/status", () => {
     expect(data.storeUnreadable).toBe(true);
   });
 
+  it("says so when the account itself is gone from the strict snapshot", async () => {
+    // The symmetric case. The first read resolved a complete, readable account;
+    // the strict read finds no credentials but still carries email_mode "read",
+    // so comparing the MODE alone agrees — about a mailbox that is not there.
+    // The two reads disagree about whether an account exists at all, which is
+    // the same fault as the opposite shape, and acting on the stale answer would
+    // hold email_list/email_read open over nothing.
+    storeWith({
+      email_address: "box@example.com",
+      email_password: PASSWORD,
+      email_smtp_host: "smtp.example.com",
+      email_mode: "read",
+    });
+    mockGetKnownMany.mockResolvedValue({
+      known: true,
+      values: { email_mode: "read" },
+    });
+    const data = await (await GET()).json();
+    expect(data.configured).toBe(true);
+    expect(data.canRead).toBe(true);
+    expect(data.storeUnreadable).toBe(true);
+  });
+
   it("stays quiet about the store when a resolved account merely chose send-only", async () => {
     // The other side of that coin: the store is readable and the owner picked a
     // mode that keeps the mailbox shut. A flag here would make every send-only
