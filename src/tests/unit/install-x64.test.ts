@@ -102,6 +102,129 @@ describe("install-x64.sh safety contracts", () => {
   });
 });
 
+/**
+ * The read-only host preflight, from `unit_user() {` down to (not including)
+ * the `--preflight` dispatch. Sliced so the test runs the shipped code.
+ */
+function preflightBlock(): string {
+  const start = SOURCE.indexOf("unit_user() {");
+  const end = SOURCE.indexOf('if [ "${1:-}" = "--preflight" ]; then', start);
+  if (start < 0 || end < 0) throw new Error("preflight block not found");
+  return SOURCE.slice(start, end);
+}
+
+describe("install-x64.sh shared-host preflight", () => {
+  /**
+   * Run `preflight_host` with the host probes replaced by stubs. Bash resolves
+   * a function before a command of the same name, so `pgrep` and `stat` are
+   * shadowed the same way as the script's own helpers.
+   */
+  function runPreflight(stubs: string[], env: Record<string, string> = {}): { status: number | null; out: string } {
+    const r = spawnSync("bash", ["-c", [
+      "set -uo pipefail",
+      "CLAWBOX_USER=clawbox",
+      "CLAWBOX_HOME=/home/clawbox",
+      'OPENCLAW_HOME="${OPENCLAW_HOME:-/home/clawbox/.openclaw}"',
+      "PROJECT_DIR=/nonexistent/clawbox",
+      "UI_SERVICE=clawbox-setup.service",
+      "GATEWAY_SERVICE=clawbox-gateway.service",
+      'PORT="${PORT:-3005}"',
+      'GATEWAY_PORT="${GATEWAY_PORT:-18789}"',
+      'TERMINAL_WS_PORT="${TERMINAL_WS_PORT:-3006}"',
+      'SKIP_DESKTOP_SERVICES="${SKIP_DESKTOP_SERVICES:-0}"',
+      preflightBlock(),
+      // Clean-host defaults; a case overrides what it needs.
+      "port_listener_pids() { :; }",
+      "pid_in_unit() { return 1; }",
+      "unit_user() { :; }",
+      "pgrep() { :; }",
+      "stat() { echo clawbox; }",
+      ...stubs,
+      "preflight_host",
+    ].join("\n")], { encoding: "utf-8", timeout: 30_000, env: { ...process.env, ...env } });
+    return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+  }
+
+  it("passes on a clean host and reports the effective ports", () => {
+    const r = runPreflight([], { GATEWAY_PORT: "18795", TERMINAL_WS_PORT: "3016", SKIP_DESKTOP_SERVICES: "1" });
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("Preflight OK");
+    expect(r.out).toContain("gateway=18795");
+    expect(r.out).toContain("desktop-units=skip");
+  });
+
+  it("refuses a port held by a process outside the ClawBox units and names the knob", () => {
+    const r = runPreflight(['port_listener_pids() { [ "$1" = "18789" ] && echo 4242 || true; }']);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("port 18789 is already taken by PID 4242");
+    expect(r.out).toContain("CLAWBOX_GATEWAY_PORT=<port>");
+    expect(r.out).toContain("nothing was changed");
+  });
+
+  it("accepts a port held by our own unit", () => {
+    const r = runPreflight([
+      'port_listener_pids() { [ "$1" = "18789" ] && echo 4242 || true; }',
+      'pid_in_unit() { [ "$1" = "4242" ] && [ "$2" = "clawbox-gateway.service" ]; }',
+    ]);
+    expect(r.status).toBe(0);
+  });
+
+  it("refuses to reconfigure a user whose OpenClaw gateway runs outside clawbox-gateway.service", () => {
+    const r = runPreflight(["pgrep() { echo 777; }"]);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("already runs an OpenClaw gateway (PID 777) outside clawbox-gateway.service");
+    expect(r.out).toContain("CLAWBOX_USER=clawbox");
+  });
+
+  it("refuses an openclaw.json owned by another user", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "clawbox-x64-foreign-home-"));
+    try {
+      writeFileSync(path.join(home, "openclaw.json"), "{}\n");
+      const r = runPreflight(["stat() { echo nexus0; }"], { OPENCLAW_HOME: home });
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("owned by 'nexus0', not 'clawbox'");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to re-point a unit that runs as another user, and lets the desktop units be skipped", () => {
+    const owned = 'unit_user() { case "$1" in clawbox-vnc.service|clawbox-setup.service) echo nexus0 ;; esac; }';
+    const managed = runPreflight([owned]);
+    expect(managed.status).toBe(1);
+    expect(managed.out).toContain("clawbox-setup.service currently runs as 'nexus0'");
+    expect(managed.out).toContain("clawbox-vnc.service runs as 'nexus0'");
+    expect(managed.out).toContain("CLAWBOX_SKIP_DESKTOP_SERVICES=1");
+
+    const skipped = runPreflight([owned], { SKIP_DESKTOP_SERVICES: "1" });
+    expect(skipped.status).toBe(1);
+    expect(skipped.out).toContain("clawbox-setup.service currently runs as 'nexus0'");
+    expect(skipped.out).not.toContain("clawbox-vnc.service runs as");
+  });
+
+  it("refuses three ports that are not distinct", () => {
+    const r = runPreflight([], { PORT: "3005", GATEWAY_PORT: "3005" });
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("must be three different ports");
+  });
+
+  it("runs before the first counted step and exposes --preflight", () => {
+    expect(SOURCE).toContain('if [ "${1:-}" = "--preflight" ]; then');
+    const preflightCall = SOURCE.indexOf("\npreflight_host\n");
+    const firstLog = SOURCE.indexOf('\nlog "');
+    expect(preflightCall).toBeGreaterThan(0);
+    expect(preflightCall).toBeLessThan(firstLog);
+  });
+
+  it("threads the configured ports into the units and the readiness wait", () => {
+    expect(SOURCE).toContain("Environment=OPENCLAW_GATEWAY_PORT=$GATEWAY_PORT");
+    expect(SOURCE).toContain("Environment=GATEWAY_PORT=$GATEWAY_PORT");
+    expect(SOURCE).toContain("Environment=TERMINAL_WS_PORT=$TERMINAL_WS_PORT");
+    expect(SOURCE).toContain('wait_for_http "http://127.0.0.1:$GATEWAY_PORT"');
+    expect(SOURCE).not.toContain('wait_for_http "http://127.0.0.1:18789"');
+  });
+});
+
 describe("install-x64.sh pinned-target read", () => {
   let root: string;
   beforeEach(() => {
