@@ -5,7 +5,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
   // email routes now reach) keeps its value.
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: vi.fn(),
-  getKnown: vi.fn(),
+  getKnownMany: vi.fn(),
   setMany: vi.fn(),
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
@@ -15,13 +15,13 @@ vi.mock("@/lib/hermes-email", () => ({ hermesEmailState: vi.fn() }));
 // machine running the suite.
 vi.mock("@/lib/email-pending", () => ({ countPending: vi.fn() }));
 
-import { get, getKnown } from "@/lib/config-store";
+import { get, getKnownMany } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { countPending } from "@/lib/email-pending";
 import { hermesEmailState } from "@/lib/hermes-email";
 
 const mockGet = vi.mocked(get);
-const mockGetKnown = vi.mocked(getKnown);
+const mockGetKnownMany = vi.mocked(getKnownMany);
 const mockHarness = vi.mocked(getActiveHarness);
 const mockHermesState = vi.mocked(hermesEmailState);
 const mockCount = vi.mocked(countPending);
@@ -41,7 +41,7 @@ beforeEach(async () => {
   mockHarness.mockResolvedValue("openclaw");
   mockCount.mockReturnValue(0);
   // The default is a store that WAS read and holds nothing.
-  mockGetKnown.mockResolvedValue({ value: undefined, known: true });
+  mockGetKnownMany.mockResolvedValue({ values: {}, known: true });
   storeWith({});
   GET = (await import("@/app/setup-api/email/status/route")).GET;
 });
@@ -87,7 +87,7 @@ describe("GET /setup-api/email/status", () => {
     // email_list/email_read from a running agent on a definite no, and a
     // root-owned data/config.json after an update would otherwise take a
     // working mailbox away from it (mcp/lib/context.ts probeEmailReadStatus).
-    mockGetKnown.mockResolvedValue({ value: undefined, known: false });
+    mockGetKnownMany.mockResolvedValue({ values: {}, known: false });
     const data = await (await GET()).json();
     expect(data.configured).toBe(false);
     expect(data.canRead).toBe(false);
@@ -103,27 +103,72 @@ describe("GET /setup-api/email/status", () => {
     // account behind a `configured: false`, so that shape is reported as
     // unreadable too.
     storeWith({});
-    mockGetKnown.mockImplementation(async (key: string) => ({
+    mockGetKnownMany.mockResolvedValue({
       known: true,
-      value: {
+      values: {
         email_address: "box@example.com",
         email_password: PASSWORD,
         email_smtp_host: "smtp.gmail.com",
-      }[key],
-    }));
+      },
+    });
     const data = await (await GET()).json();
     expect(data.configured).toBe(false);
     expect(data.storeUnreadable).toBe(true);
+  });
+
+  it("says so when the store went unreadable midway, behind a RESOLVED account", async () => {
+    // The branch an `configured: false`-only guard misses. getEmailCredentials
+    // reads the file once per key through the forgiving reader, and only the
+    // first three gate `configured`: a store readable for those and unreadable
+    // by the time email_mode is read answers `configured: true` with
+    // `canRead: false`, because resolveStoredMode falls back to "send". That is
+    // the same definite "no" that costs a running agent its mailbox tools, so
+    // the store has to be questioned on this branch too.
+    storeWith({
+      email_address: "box@example.com",
+      email_password: PASSWORD,
+      email_smtp_host: "smtp.example.com",
+      // email_mode and the rest: the later reads that failed.
+    });
+    mockGetKnownMany.mockResolvedValue({ values: {}, known: false });
+    const data = await (await GET()).json();
+    expect(data.configured).toBe(true);
+    expect(data.canRead).toBe(false);
+    expect(data.storeUnreadable).toBe(true);
+  });
+
+  it("stays quiet about the store when a resolved account merely chose send-only", async () => {
+    // The other side of that coin: the store is readable and the owner picked a
+    // mode that keeps the mailbox shut. A flag here would make every send-only
+    // device answer "could not ask", and the watch would never act on a real no.
+    storeWith({
+      email_address: "box@example.com",
+      email_password: PASSWORD,
+      email_smtp_host: "smtp.example.com",
+      email_mode: "send",
+    });
+    mockGetKnownMany.mockResolvedValue({
+      known: true,
+      values: {
+        email_address: "box@example.com",
+        email_password: PASSWORD,
+        email_smtp_host: "smtp.example.com",
+      },
+    });
+    const data = await (await GET()).json();
+    expect(data.configured).toBe(true);
+    expect(data.canRead).toBe(false);
+    expect(data.storeUnreadable).toBeUndefined();
   });
 
   it("does not cry unreadable over an account that is genuinely half-filled", async () => {
     // An address and no app password is not a store problem — it is a device
     // that is not set up, and the read tools are correctly absent.
     storeWith({ email_address: "box@example.com" });
-    mockGetKnown.mockImplementation(async (key: string) => ({
+    mockGetKnownMany.mockResolvedValue({
       known: true,
-      value: key === "email_address" ? "box@example.com" : undefined,
-    }));
+      values: { email_address: "box@example.com" },
+    });
     const data = await (await GET()).json();
     expect(data.configured).toBe(false);
     expect(data.storeUnreadable).toBeUndefined();

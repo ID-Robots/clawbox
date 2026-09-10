@@ -12,7 +12,7 @@
 // boolean, because "which account is this box sending as" is a legitimate
 // question and "what is the password" is not.
 
-import { get, getKnown, setMany } from "@/lib/config-store";
+import { get, getKnownMany, setMany } from "@/lib/config-store";
 import type { ImapConfig } from "@/lib/imap-client";
 import { isEmailAddress, isHostname, isPort, type SmtpConfig } from "@/lib/smtp-client";
 
@@ -252,8 +252,9 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
 }
 
 /**
- * Whether a `configured: false` can be TRUSTED — asked with the strict read, and
- * kept beside `getEmailCredentials` because it is the same three keys.
+ * Whether the answer `publicEmailStatus` just gave can be TRUSTED — asked with
+ * the strict read, and kept beside `getEmailCredentials` because it is the same
+ * three keys.
  *
  * `config-store`'s ordinary read answers `{}` to a missing file, an EACCES from
  * a `data/config.json` an update left root-owned, an EIO and a half-written JSON
@@ -261,6 +262,16 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
  * MCP server WITHDRAWS the mailbox read tools from a running agent on a definite
  * "no" (mcp/lib/context.ts `probeEmailReadStatus`), and one unreadable moment
  * must not look like the owner switching reading off.
+ *
+ * ASKED ON BOTH BRANCHES, not only behind a `configured: false`. An account that
+ * resolved is NOT proof the store was readable throughout:
+ * `getEmailCredentials` reads the file once per key through the forgiving
+ * reader, and only the first three gate `configured`. A store readable for those
+ * three and unreadable by the time `email_mode` is read yields
+ * `{ configured: true, canRead: false }` — `resolveStoredMode` sees `undefined`
+ * and falls back to "send" — which is the same definite "no" that costs a
+ * running agent its mailbox tools. `accountResolved` therefore selects WHICH
+ * question is ambiguous, never whether to ask.
  *
  * TWO READS OF ONE FILE CAN DISAGREE, which is the other half. A store that was
  * unreadable when `getEmailCredentials` looked and readable a moment later would
@@ -270,16 +281,25 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
  * complete account behind a `configured: false`, which no single snapshot can
  * produce. A half-filled account (an address and no password) is neither — it is
  * genuinely not configured, and says so.
+ *
+ * One read, not three: three `getKnown` calls are three reads that can disagree
+ * with each other, which is the very fault this function exists to catch.
  */
-export async function emailStoreDisagrees(): Promise<boolean> {
-  const [address, password, smtpHost] = await Promise.all([
-    getKnown(EMAIL_KEYS.address),
-    getKnown(EMAIL_KEYS.password),
-    getKnown(EMAIL_KEYS.smtpHost),
+export async function emailStoreDisagrees(accountResolved: boolean): Promise<boolean> {
+  const { values, known } = await getKnownMany([
+    EMAIL_KEYS.address,
+    EMAIL_KEYS.password,
+    EMAIL_KEYS.smtpHost,
   ]);
-  if (!address.known || !password.known || !smtpHost.known) return true;
+  // The unambiguous shape, on either branch: we could not read the file at all.
+  if (!known) return true;
+  // The store IS readable and the account resolved from it — the two reads agree,
+  // and a `canRead: false` here is the owner's own choice of mode.
+  if (accountResolved) return false;
   // Presence only. The value never leaves this function.
-  return [address, password, smtpHost].every((k) => asString(k.value).length > 0);
+  return [EMAIL_KEYS.address, EMAIL_KEYS.password, EMAIL_KEYS.smtpHost].every(
+    (key) => asString(values[key]).length > 0,
+  );
 }
 
 export function toSmtpConfig(settings: EmailSettings): SmtpConfig {
