@@ -48,10 +48,25 @@ import { CHATGPT_DEFAULT_MODEL_ID } from "@/lib/chatgpt-subscription";
  * array had by construction: a model this box has been running cannot stop
  * being selectable because a file changed shape.
  *
- * NOT the live per-account catalogue, which would be better still: the core
- * builds the real list from `chatgpt.com/backend-api/codex/models` per account,
- * and nothing on 2026.8.1 or 2026.9.3 publishes it in a form ClawBox can ask
- * for. `coreChatgptRoute` carries that measurement.
+ * NOT the live per-account catalogue, which would be better still — and the
+ * harness DOES have a mechanism for it, so the reason has to be a real one
+ * rather than "there is none". The core's `openai` catalog hook picks between
+ * two catalogues by the auth profile it resolves first: with an `oauth` or
+ * `token` profile it builds the live per-account Codex list from
+ * `chatgpt.com/backend-api/codex/models`, and with an api key the platform one.
+ * So on a box whose resolved `openai` profile is the ChatGPT sign-in,
+ * `models list --provider openai --all --json` DOES enumerate the real list —
+ * and which profile resolves is the auth ORDER, a knob this repo already owns
+ * and writes (`applyOpenAiAuthOrder` in `ai-models/configure`).
+ *
+ * It is not used here for two measured reasons, neither of them "unavailable":
+ * that enumeration is a `models list` spawn, ~3 minutes on a Jetson, and this
+ * surface is read synchronously by two write guards on a request path; and the
+ * answer depends on the box's credential order, so a picker built from it would
+ * change its own contents when a customer adds or removes an API key. The
+ * catalogue route's cache is where such a read would belong if it is ever worth
+ * the cost. What the manifest gives instead is credential-free, instant, and the
+ * same on every box with the same core, which is what a WRITE GUARD needs.
  *
  * NOT the core's own route contract either, and that is a judgement rather than
  * an oversight: `dist/extensions/openai/model-route-contract.js` exports
