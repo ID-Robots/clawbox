@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
-import type { StepStatus, StepState, UpdateState } from "@/lib/updater";
+import type { RemoteReachability, StepStatus, StepState, UpdateState } from "@/lib/updater";
 import { useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 import ReconnectingOverlay from "./ReconnectingOverlay";
@@ -208,7 +208,7 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean | null };
     // Optional: a payload from a server that predates the field must keep
     // behaving exactly as before, so ABSENT is "not known", never "unreachable".
-    remote?: { reachable: boolean; refusedAnonymously?: boolean; reason?: string };
+    remote?: RemoteReachability;
   } | null>(null);
   const [fetchError, setFetchError] = useState(false);
   const [loading, setLoading] = useState(true);

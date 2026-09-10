@@ -5,7 +5,7 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { useBuildIdentity } from "@/components/BuildIdentityPanel";
-import type { StepStatus, UpdateState } from "@/lib/updater";
+import type { RemoteReachability, StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
@@ -31,22 +31,13 @@ export interface VersionInfo {
   hermes?: ComponentVersion;
   edition?: "openclaw" | "hermes" | "dual";
   /**
-   * Whether the device actually reached its update remote. Optional for the
-   * same reason as the two above — a payload from a server that predates the
+   * Whether the device actually reached its update remote — the producer's own
+   * type, so a field added there (`cause`) cannot be missed here. Optional for
+   * the same reason as the two above: a payload from a server that predates the
    * field must keep rendering exactly as it did, so ABSENT means "not known",
    * never "unreachable".
    */
-  remote?: {
-    reachable: boolean;
-    refusedAnonymously?: boolean;
-    /**
-     * `"device"` when the failure is the box's own — its `origin`, its update
-     * branch, a local git read. Absent is the network case, which is also what
-     * a server that predates the field sends.
-     */
-    cause?: "device";
-    reason?: string;
-  };
+  remote?: RemoteReachability;
 }
 
 /**
