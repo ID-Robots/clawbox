@@ -282,20 +282,46 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
  * produce. A half-filled account (an address and no password) is neither — it is
  * genuinely not configured, and says so.
  *
- * One read, not three: three `getKnown` calls are three reads that can disagree
- * with each other, which is the very fault this function exists to catch.
+ * A RESOLVED account is still questioned, because a store can heal between the
+ * two reads as easily as it can break: `getEmailCredentials` loses `email_mode`
+ * to a failed read, falls back to "send", and answers
+ * `{ configured: true, canRead: false }`; if the file is readable again by the
+ * time this looks, "the store is fine" would erase that failure exactly as the
+ * earlier version erased the other one. So the mode is read strictly here too
+ * and compared with the `canRead` the caller derived — a disagreement means the
+ * two reads saw different files, and the honest answer is "could not ask".
+ *
+ * One read, not several: separate `getKnown` calls are separate reads that can
+ * disagree with each other, which is the very fault this function exists to
+ * catch.
  */
-export async function emailStoreDisagrees(accountResolved: boolean): Promise<boolean> {
+export async function emailStoreDisagrees(
+  accountResolved: boolean,
+  canRead?: boolean,
+): Promise<boolean> {
   const { values, known } = await getKnownMany([
     EMAIL_KEYS.address,
     EMAIL_KEYS.password,
     EMAIL_KEYS.smtpHost,
+    EMAIL_KEYS.mode,
+    EMAIL_KEYS.imapHost,
+    EMAIL_KEYS.allowedSenders,
   ]);
   // The unambiguous shape, on either branch: we could not read the file at all.
   if (!known) return true;
-  // The store IS readable and the account resolved from it — the two reads agree,
-  // and a `canRead: false` here is the owner's own choice of mode.
-  if (accountResolved) return false;
+  if (accountResolved) {
+    // Nothing to compare against on a build that does not pass it.
+    if (canRead === undefined) return false;
+    const rawSenders = values[EMAIL_KEYS.allowedSenders];
+    const strictMode = resolveStoredMode(
+      values[EMAIL_KEYS.mode],
+      asString(values[EMAIL_KEYS.imapHost]) || undefined,
+      Array.isArray(rawSenders)
+        ? rawSenders.filter((s): s is string => typeof s === "string")
+        : undefined,
+    );
+    return modeAllowsReading(strictMode) !== canRead;
+  }
   // Presence only. The value never leaves this function.
   return [EMAIL_KEYS.address, EMAIL_KEYS.password, EMAIL_KEYS.smtpHost].every(
     (key) => asString(values[key]).length > 0,

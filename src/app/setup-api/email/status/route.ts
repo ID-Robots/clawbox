@@ -42,7 +42,7 @@ export async function GET() {
     //
     // Absent rather than `false` when all is well, so a build that predates the
     // field cannot be read as one promising a readable store.
-    const storeUnreadable = await emailStoreDisagrees(status.configured);
+    const storeUnreadable = await emailStoreDisagrees(status.configured, status.canRead);
 
     // Only Hermes can receive mail; the UI hides the inbound fields otherwise
     // rather than offering a switch that does nothing.

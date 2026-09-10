@@ -160,6 +160,33 @@ describe("mailbox readability, after the server is already running", () => {
     expect(await h.toolNames()).toContain("email_list");
   });
 
+  it("does not apply an answer that arrives after it was stopped", async () => {
+    // stop() clears the interval, which only stops the NEXT tick. A probe
+    // already in flight when the transport closes comes back afterwards, and
+    // without a second check it would register tools into a server nobody is
+    // listening to and emit a tools/list_changed down a dead connection.
+    const h = await harness(false);
+    let release: (value: boolean) => void = () => {};
+    const probe = vi.fn(() => new Promise<boolean>((resolve) => { release = resolve; }));
+
+    const watch = watchEmailReadability(h.reg, false, { probe });
+    const inFlight = watch.refreshNow();
+    expect(probe).toHaveBeenCalledTimes(1);
+
+    // The transport closes while the device is still thinking.
+    watch.stop();
+    release(true);
+    await inFlight;
+
+    // The answer said "readable" and is discarded: no registration, no notice.
+    expect(h.reg.list().map((tool) => tool.name)).not.toContain("email_list");
+    expect(await h.toolNames()).not.toContain("email_list");
+
+    // And a later call is refused outright rather than probing again.
+    await watch.refreshNow();
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
   it("registers the read pair all-or-nothing, so a later tick can retry it", async () => {
     // The watch is the first caller that can register this pair more than once
     // in a process. If the second of the two registrations threw, a server left

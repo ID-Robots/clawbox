@@ -640,14 +640,22 @@ export function watchEmailReadability(
   // like a box where nothing changed — silence over a gate that has stopped
   // working, which is the shape this module exists to remove.
   let unreachable = false;
+  // Set by `stop()`, and checked again AFTER the probe resolves. Clearing the
+  // interval only stops the NEXT tick: a probe already in flight when the
+  // transport closes would come back afterwards and register or withdraw tools
+  // on a server nobody is listening to, emitting a `tools/list_changed` into a
+  // dead connection. The await is the one suspension point here, so one check
+  // after it is enough.
+  let stopped = false;
 
   async function refreshNow(): Promise<void> {
-    if (asking) return;
+    if (asking || stopped) return;
     asking = true;
     try {
       // `probeEmailReadStatus` never throws; a test double might, and a poll
       // that throws would take the whole server down through the interval.
       const answer = await probe().catch(() => null);
+      if (stopped) return;
       if (answer === null) {
         if (!unreachable) {
           unreachable = true;
@@ -711,5 +719,11 @@ export function watchEmailReadability(
     });
   }, intervalMs);
   timer.unref?.();
-  return { refreshNow, stop: () => clearInterval(timer) };
+  return {
+    refreshNow,
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+    },
+  };
 }

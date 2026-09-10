@@ -137,6 +137,35 @@ describe("GET /setup-api/email/status", () => {
     expect(data.storeUnreadable).toBe(true);
   });
 
+  it("says so when a failed mode read is healed by the time the store is re-read", async () => {
+    // The mirror of the two-reads-disagree case, on the resolved branch: the
+    // lenient per-key reads lose email_mode, resolveStoredMode falls back to
+    // "send" and the account still answers configured:true/canRead:false — and
+    // if the file is readable again a moment later, "the store is fine" would
+    // erase that failure exactly as the earlier version erased the other one,
+    // and the agent would lose the read tools over one transient EACCES.
+    storeWith({
+      email_address: "box@example.com",
+      email_password: PASSWORD,
+      email_smtp_host: "smtp.example.com",
+      // email_mode lost to the failed read.
+    });
+    mockGetKnownMany.mockResolvedValue({
+      known: true,
+      values: {
+        email_address: "box@example.com",
+        email_password: PASSWORD,
+        email_smtp_host: "smtp.example.com",
+        // The healed store still says the owner wants reading.
+        email_mode: "read",
+      },
+    });
+    const data = await (await GET()).json();
+    expect(data.configured).toBe(true);
+    expect(data.canRead).toBe(false);
+    expect(data.storeUnreadable).toBe(true);
+  });
+
   it("stays quiet about the store when a resolved account merely chose send-only", async () => {
     // The other side of that coin: the store is readable and the owner picked a
     // mode that keeps the mailbox shut. A flag here would make every send-only
@@ -153,6 +182,7 @@ describe("GET /setup-api/email/status", () => {
         email_address: "box@example.com",
         email_password: PASSWORD,
         email_smtp_host: "smtp.example.com",
+        email_mode: "send",
       },
     });
     const data = await (await GET()).json();
