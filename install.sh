@@ -4824,6 +4824,58 @@ openclaw_migration_complete() {
   return 0
 }
 
+# Stop a gateway through the supplied service manager and verify it is quiescent.
+# A failed query is not evidence that the unit is absent; systemctl can fail
+# while a live service still owns the state we are about to migrate.
+stop_openclaw_unit_for_migration() {
+  local unit="$1"; shift
+  local status rc=0 load active
+  status="$("$@" show "$unit" -p LoadState -p ActiveState)" || rc=$?
+  load="$(printf '%s\n' "$status" | sed -n 's/^LoadState=//p')"
+  active="$(printf '%s\n' "$status" | sed -n 's/^ActiveState=//p')"
+  # systemctl may return nonzero for a missing unit, but still reports its
+  # explicit state. Only that known absent/inactive combination is a no-op.
+  if [ "$load" = not-found ] && [ "$active" = inactive ]; then
+    return 0
+  fi
+  if [ "$rc" -ne 0 ] || { [ "$load" != loaded ] && [ "$load" != masked ]; }; then
+    echo "Error: cannot inspect $unit before OpenClaw maintenance" >&2
+    return 1
+  fi
+  if ! "$@" stop "$unit"; then
+    echo "Error: cannot stop $unit; refusing OpenClaw maintenance" >&2
+    return 1
+  fi
+  if ! active="$("$@" show "$unit" -p ActiveState --value)"; then
+    echo "Error: cannot verify $unit stopped; refusing OpenClaw maintenance" >&2
+    return 1
+  fi
+  case "$active" in
+    inactive|failed) return 0 ;;
+    *) echo "Error: $unit is still $active; refusing OpenClaw maintenance" >&2; return 1 ;;
+  esac
+}
+
+stop_openclaw_gateways_for_migration() {
+  stop_openclaw_unit_for_migration clawbox-gateway.service systemctl || return 1
+  local uid manager_state
+  uid="$(id -u "$CLAWBOX_USER")" || return 1
+  # A stopped user manager has no user services to stop. Do not treat an
+  # inaccessible bus on an ACTIVE manager as an absent legacy gateway.
+  if ! manager_state="$(systemctl show "user@$uid.service" -p ActiveState --value)"; then
+    echo "Error: cannot inspect the legacy gateway's user manager" >&2
+    return 1
+  fi
+  case "$manager_state" in
+    inactive|failed) return 0 ;;
+    active)
+      stop_openclaw_unit_for_migration openclaw-gateway.service \
+        as_clawbox -H env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user || return 1
+      ;;
+    *) echo "Error: user manager is $manager_state; refusing OpenClaw maintenance" >&2; return 1 ;;
+  esac
+}
+
 step_openclaw_install() {
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
   # Re-assert the .bashrc PATH stanza before the early-returns BELOW. The
@@ -4900,11 +4952,7 @@ step_openclaw_install() {
     fi
   fi
   if [ "$CORE_NEEDS_INSTALL" -eq 1 ]; then
-    if [ "$(systemctl show clawbox-gateway.service -p LoadState --value 2>/dev/null || true)" = loaded ]; then
-      systemctl stop clawbox-gateway.service || return 1
-    fi
-    as_clawbox -H env XDG_RUNTIME_DIR="/run/user/$(id -u "$CLAWBOX_USER")" \
-      systemctl --user stop openclaw-gateway.service 2>/dev/null || true
+    stop_openclaw_gateways_for_migration || return 1
     mkdir -p "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
@@ -4926,11 +4974,7 @@ step_openclaw_install() {
     echo "  Running openclaw doctor --fix (OpenClaw 2 config + session migrations)..."
     # The sessions-to-SQLite move must not race a still-running v1 gateway
     # writing the very files being migrated; gateway_setup restarts it later.
-    systemctl stop clawbox-gateway.service 2>/dev/null || true
-    # A legacy user-service gateway is a second writer, outside the system
-    # unit's maintenance mask. Stop it too; an absent user bus is harmless.
-    as_clawbox -H env XDG_RUNTIME_DIR="/run/user/$(id -u "$CLAWBOX_USER")" \
-      systemctl --user stop openclaw-gateway.service 2>/dev/null || true
+    stop_openclaw_gateways_for_migration || return 1
     local _oc_doctor_out
     local _oc_doctor_rc=0
     _oc_doctor_out="$(as_clawbox -H env \
