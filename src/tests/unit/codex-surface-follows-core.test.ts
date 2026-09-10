@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import { CODEX_MODELS } from "@/lib/provider-models";
-import { coreManifestPaths } from "@/lib/core-model-lifecycle";
+import { chatgptDefaultModelId, chatgptSurface } from "@/lib/chatgpt-surface";
+import { coreManifestPaths, resetCoreModelLifecycle } from "@/lib/core-model-lifecycle";
 import { createManifestFixture, type ManifestFixture } from "@/tests/helpers/core-model-manifests";
 
 /**
@@ -24,12 +25,12 @@ vi.mock("@/lib/openclaw-config", async (importActual) => {
 /**
  * The drift detector for the ChatGPT (OpenAI Codex) list.
  *
- * `CODEX_MODELS` mirrors the core's `OPENAI_CHATGPT_MODERN_MODEL_IDS`
- * (`extensions/openai/model-route-contract` in the installed dist) because
- * 2026.8.1 publishes that set through no CLI and no provider filter —
- * `openclaw models list --provider codex` and `--provider openai-chatgpt` both
- * answer `Unknown provider filter`. A hand-kept mirror is how the picker fell
- * behind in the first place, so the mirror needs something to fail against.
+ * The surface is DERIVED from this manifest now (`chatgptSurface()`), so the
+ * case below is no longer a drift detector for a hand-kept mirror but the
+ * end-to-end proof of the derivation on whatever core is installed: a model this
+ * box's core says the ChatGPT account is the only way to reach must be a model
+ * this box's picker offers. `CODEX_MODELS` is what the surface answers where
+ * there is no manifest, and cannot be checked against one that is not there.
  *
  * The core DOES publish one half of it in a machine-readable file at a stable
  * path — the same `extensions/<provider>/openclaw.plugin.json` that
@@ -75,16 +76,55 @@ interface Suppression {
  * provider we are asking about, so only a `baseUrlHosts` naming the platform
  * host counts.
  */
+/** A `when` condition array as a lowercased SET, for exact membership tests. */
+function hostSet(value: unknown): Set<string> {
+  if (!Array.isArray(value)) return new Set();
+  return new Set(value
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim().toLowerCase()));
+}
+
 function subscriptionOnlyIds(manifest: unknown, provider: string): string[] {
   const list = (manifest as { modelCatalog?: { suppressions?: unknown } } | null)
     ?.modelCatalog?.suppressions;
   if (!Array.isArray(list)) return [];
   const out: string[] = [];
   for (const entry of list as Suppression[]) {
-    if (entry?.provider !== provider) continue;
-    const hosts = entry?.when?.baseUrlHosts;
-    if (!Array.isArray(hosts) || !hosts.includes(PLATFORM_HOST)) continue;
-    if (typeof entry.model === "string" && entry.model.trim()) out.push(entry.model.trim());
+    if (String(entry?.provider ?? "").toLowerCase() !== provider.toLowerCase()) continue;
+    // A SET, so the test is an exact element match rather than a substring search
+    // over a host — see `conditionSet` in core-model-lifecycle.ts.
+    if (!hostSet(entry?.when?.baseUrlHosts).has(PLATFORM_HOST)) continue;
+    const model = typeof entry.model === "string" ? entry.model.trim().toLowerCase() : "";
+    if (model) out.push(model);
+  }
+  return out;
+}
+
+/** The ids the manifest's provider block lists. */
+function listedIds(manifest: unknown, provider: string): string[] {
+  const block = (manifest as { modelCatalog?: { providers?: Record<string, unknown> } } | null)
+    ?.modelCatalog?.providers?.[provider];
+  const rows = (block as { models?: unknown } | null)?.models;
+  if (!Array.isArray(rows)) return [];
+  return (rows as Array<{ id?: unknown }>)
+    .map((row) => (typeof row?.id === "string" ? row.id.trim() : ""))
+    .filter((id) => id.length > 0);
+}
+
+/** Ids the manifest suppresses ON the ChatGPT route — retired from this surface. */
+function chatgptRouteSuppressedIds(manifest: unknown, provider: string): string[] {
+  const list = (manifest as { modelCatalog?: { suppressions?: unknown } } | null)
+    ?.modelCatalog?.suppressions;
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  for (const entry of list as Suppression[]) {
+    if (String(entry?.provider ?? "").toLowerCase() !== provider.toLowerCase()) continue;
+    const model = typeof entry.model === "string" ? entry.model.trim().toLowerCase() : "";
+    if (!model) continue;
+    // `baseUrlHosts` only, the one condition the surface reads — the core ANDs its
+    // conditions and resolves `providerConfigApiIn` against the owner's own
+    // config, which ClawBox never writes.
+    if (hostSet(entry?.when?.baseUrlHosts).has("chatgpt.com")) out.push(model);
   }
   return out;
 }
@@ -103,6 +143,7 @@ function readFirstManifest(paths: string[]): unknown {
 
 describe("the ChatGPT surface follows the installed core", () => {
   it("carries every openai model the installed core says is ChatGPT-only", () => {
+    resetCoreModelLifecycle();
     const manifest = readFirstManifest(coreManifestPaths("openai"));
     const ids = subscriptionOnlyIds(manifest, "openai");
     if (ids.length === 0) {
@@ -111,11 +152,55 @@ describe("the ChatGPT surface follows the installed core", () => {
       expect(ids).toEqual([]);
       return;
     }
-    const curated = CODEX_MODELS.map((m) => m.id);
+    const offered = chatgptSurface().models.map((m) => m.id);
     for (const id of ids) {
-      expect(curated, `the installed core routes ${id} on the ChatGPT account only, `
-        + "but CODEX_MODELS does not offer it").toContain(id);
+      expect(offered, `the installed core routes ${id} on the ChatGPT account only, `
+        + "but the picker does not offer it").toContain(id);
     }
+  });
+
+  /**
+   * The WHOLE derived list against the installed core, not just its
+   * subscription-only half — the case that would have noticed "the shipped core
+   * sees no change" stopping being true, which the hand-typed fixtures in
+   * `codex-picker-astra.test.ts` cannot.
+   *
+   * Written as invariants rather than as a second copy of the derivation: an
+   * expected list spelled here would be the hand-kept mirror this change
+   * removed, one file over.
+   */
+  it("offers a list the installed core's own manifest justifies, row by row", () => {
+    resetCoreModelLifecycle();
+    const manifest = readFirstManifest(coreManifestPaths("openai"));
+    if (!manifest) {
+      // No core installed (CI). Stated rather than skipped silently.
+      expect(manifest).toBeNull();
+      return;
+    }
+    const listed = new Set(listedIds(manifest, "openai"));
+    const subscriptionOnly = new Set(subscriptionOnlyIds(manifest, "openai"));
+    const offRoute = new Set(chatgptRouteSuppressedIds(manifest, "openai"));
+    const curated = new Set(CODEX_MODELS.map((m) => m.id));
+    const offered = chatgptSurface().models.map((m) => m.id);
+
+    expect(offered.length).toBeGreaterThan(0);
+    for (const id of offered) {
+      // Nothing is invented: every row came from the manifest or from the
+      // curated floor the derivation is not allowed to narrow past.
+      expect(listed.has(id) || subscriptionOnly.has(id) || curated.has(id),
+        `${id} is offered but the installed manifest and the curated list both omit it`).toBe(true);
+      // …and nothing the core retired from this route survives.
+      expect(offRoute.has(id), `${id} is suppressed on the ChatGPT route and must not be offered`).toBe(false);
+    }
+    // The widening rule, against the real file: a curated row the core has NOT
+    // retired from this route is still there.
+    for (const id of curated) {
+      if (offRoute.has(id)) continue;
+      expect(offered, `${id} is in no suppression of the installed manifest and must still be offered`)
+        .toContain(id);
+    }
+    // And the cold-start default is a row the write guard will accept.
+    expect(offered).toContain(chatgptDefaultModelId());
   });
 });
 

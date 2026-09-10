@@ -1,15 +1,34 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { CODEX_MODELS } from "@/lib/provider-models";
 import { isCodexSupportedModelId } from "@/lib/subscription-surface";
 
+/**
+ * No installed core, whatever the machine has. `isCodexSupportedModelId` now
+ * reads the ChatGPT route off the INSTALLED core's manifest and answers
+ * `CODEX_MODELS` only as its fallback — so on a box running a core that has
+ * retired one of these ids from the route (2026.9.3 retires `gpt-5.4` and
+ * `gpt-5.4-mini`) the guard rightly refuses a row this curated list still
+ * carries. That is the derivation working, not a drifted mirror, and it is not
+ * what this file is about: `_CODEX_SUPPORTED` mirrors the FALLBACK, because its
+ * only consumer is the OpenClaw 1 branch of a script that runs before node
+ * exists. A bare binary name drops the bundled manifest candidate, which is
+ * what makes "the fallback" the answer here on every machine.
+ */
+vi.mock("@/lib/openclaw-config", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/openclaw-config")>();
+  return { ...actual, findOpenclawBin: () => "openclaw" };
+});
+
 // gateway-pre-start.sh rewrites `openai/<gpt>` -> `codex/<gpt>` on boxes with
 // ChatGPT (Codex OAuth) auth and no OpenAI API key. Its `_CODEX_SUPPORTED`
 // tuple is a hand-maintained MIRROR of CODEX_MODELS in
 // src/lib/provider-models.ts — the script cannot import, so it copies. It is
-// the only remaining copy: the route's own allowlist reads the catalogue
-// directly (`isCodexSupportedModelId`).
+// the only remaining copy: the route's own allowlist reads the surface directly
+// (`isCodexSupportedModelId`), which since 2026-09-10 is derived from the
+// installed core's manifest with CODEX_MODELS as its fallback. The mirror stays
+// pinned to that fallback on purpose — see the mock above.
 //
 // The two drifted: the regex learned gpt-5.6-{sol,terra,luna} (PR #271) but
 // the tuple did not, so a subscription box whose stored model was

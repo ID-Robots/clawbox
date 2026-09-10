@@ -19,7 +19,20 @@
 // ambiguity (auth trouble, rate limit, network, 5xx) leaves the caller on the
 // universally-available default.
 
-/** Newest first. gpt-5.5 is not here — it is the fallback everyone can use. */
+/**
+ * Newest first. gpt-5.5 is not here — it is the fallback everyone can use.
+ *
+ * The DEFAULT list, not the only one: since the ChatGPT surface began following
+ * the installed core's own manifest, `ai-models/configure` supplies
+ * `chatgptUpgradeCandidates()` instead, so a model a core upgrade adds can be
+ * probed with no release here. This array is what a caller that names none
+ * still gets, and what a box with no readable manifest falls back to — the two
+ * agree on every core measured so far.
+ *
+ * That caller caps its list at three, because the budget below affords three:
+ * 6 s per probe inside a 15 s total, and the loop stops at the deadline. A
+ * longer list is not a longer sign-in — it is a silently untried tail.
+ */
 export const CODEX_MODEL_PREFERENCE = [
   "gpt-5.6-sol",
   "gpt-5.6-terra",
@@ -31,6 +44,12 @@ export const CODEX_MODEL_PREFERENCE = [
  * can't improve on it. Only the gpt-5.6 generation is plan-gated, so there is
  * nothing to gain from probing gpt-5.5 — it would spend a round-trip during
  * setup to confirm a floor we already hold.
+ *
+ * True of the cores measured so far and not a permanent fact: on a core that
+ * retires this id from the ChatGPT route, `chatgptDefaultModelId()` answers the
+ * oldest row that core still routes there instead, and the probe is handed
+ * everything ahead of it. This constant stays the floor's NAME, not its
+ * definition.
  */
 export const CODEX_FALLBACK_MODEL = "gpt-5.5";
 

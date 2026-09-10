@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "events";
 import * as childProcess from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { NextRequest } from "next/server";
 
@@ -41,6 +42,7 @@ vi.mock("@/lib/config-store", () => ({ DATA_DIR: "/tmp/clawbox-catalog-codex-unw
 
 import { GET } from "@/app/setup-api/ai-models/catalog/route";
 import { CODEX_MODELS } from "@/lib/provider-models";
+import { resetCoreModelLifecycle } from "@/lib/core-model-lifecycle";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 
@@ -146,5 +148,73 @@ describe("catalog — codex is never served from a cache the code cannot write",
     // `source` is the stamp that means "a device enumerated this". The curated
     // list is not that, on this path or any other.
     expect(body.source).toBeUndefined();
+  });
+
+  it("serves what the INSTALLED core says the route carries", async () => {
+    // The end of the chain the rest of this suite only covers half of: the
+    // manifest on disk -> `chatgptSurface()` -> this payload. Shaped like core
+    // 2026.9.3's openai manifest, which lists `gpt-6-astra` first and suppresses
+    // `gpt-5.4` on `chatgpt.com` ("retired from the ChatGPT-account Codex
+    // route"). Both of those answers come from the file: the curated list can
+    // only widen what follows them, never reorder the head or restore a row the
+    // core retired.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "catalog-codex-manifest"));
+    const saved = {
+      HOME: process.env.HOME,
+      OPENCLAW_HOME: process.env.OPENCLAW_HOME,
+      CLAWBOX_OPENCLAW_HOME: process.env.CLAWBOX_OPENCLAW_HOME,
+    };
+    try {
+      const dir = path.join(home, ".openclaw", "extensions", "openai");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "openclaw.plugin.json"), JSON.stringify({
+        modelCatalog: {
+          providers: {
+            openai: {
+              models: [
+                { id: "gpt-6-astra", name: "GPT-6 Astra" },
+                { id: "gpt-5.5", name: "GPT-5.5" },
+                { id: "gpt-5.4", name: "GPT-5.4" },
+              ],
+            },
+          },
+          suppressions: [
+            {
+              provider: "openai",
+              model: "gpt-5.4",
+              reason: "GPT-5.4 has retired from the ChatGPT-account Codex route.",
+              when: { baseUrlHosts: ["chatgpt.com"] },
+            },
+          ],
+        },
+      }), "utf8");
+      process.env.HOME = home;
+      process.env.OPENCLAW_HOME = path.join(home, ".openclaw");
+      process.env.CLAWBOX_OPENCLAW_HOME = path.join(home, ".openclaw");
+      resetCoreModelLifecycle();
+
+      const res = await GET(new NextRequest("http://clawbox.local/setup-api/ai-models/catalog?provider=codex"));
+      const body = (await res.json()) as { models: Array<{ id: string; label: string }>; source?: string };
+
+      const ids = body.models.map((m) => m.id);
+      // The core's own rows first, in its order — a model this repo has never
+      // heard of reaches the payload, labelled by the core.
+      expect(ids.slice(0, 2)).toEqual(["gpt-6-astra", "gpt-5.5"]);
+      expect(body.models[0].label).toBe("GPT-6 Astra");
+      // …and the row the core retired from THIS route is gone, though the
+      // curated fallback still carries it.
+      expect(ids).not.toContain("gpt-5.4");
+      expect(CODEX_MODELS.map((m) => m.id)).toContain("gpt-5.4");
+      // Still not the box's own answer: the manifest says what the CORE routes,
+      // not what this account is entitled to, so it is served unstamped like
+      // every other list this route did not enumerate.
+      expect(body.source).toBeUndefined();
+    } finally {
+      process.env.HOME = saved.HOME;
+      process.env.OPENCLAW_HOME = saved.OPENCLAW_HOME;
+      process.env.CLAWBOX_OPENCLAW_HOME = saved.CLAWBOX_OPENCLAW_HOME;
+      fs.rmSync(home, { recursive: true, force: true });
+      resetCoreModelLifecycle();
+    }
   });
 });

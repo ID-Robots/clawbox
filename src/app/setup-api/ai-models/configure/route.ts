@@ -79,6 +79,7 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
+import { chatgptDefaultModelId, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   CHATGPT_DEFAULT_MODEL_ID,
@@ -200,9 +201,15 @@ const PROVIDERS: Record<string, ProviderConfig> = {
       // key of its own so it coexists with the API-key one, and the model is
       // `openai/<id>` — OpenClaw 2 has no `codex/` namespace and never
       // consults a `codex:*` profile for an openai route. Evidence in
-      // src/lib/chatgpt-subscription.ts. Newest model every ChatGPT tier can
-      // run, Free included; entitled accounts are moved up to gpt-5.6 by the
-      // sign-in probe below.
+      // src/lib/chatgpt-subscription.ts.
+      //
+      // A SEED that never reaches the config: the subscription branch below
+      // overwrites `config.defaultModel` with `chatgptDefaultModelId()` before
+      // the entitlement probe, and the explicit-pick branch overwrites it with
+      // what the owner named — so this constant is what the table needs to be
+      // shaped like, not what a box is written with. Which model the floor
+      // actually is, and what the probe is offered above it, are the installed
+      // core's answer now (src/lib/chatgpt-surface.ts), not this line's.
       defaultModel: chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID),
       profileKey: CHATGPT_PROFILE_KEY,
     },
@@ -2434,9 +2441,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // gpt-5.5, which every tier can use. Defaulting a non-entitled account
       // onto a gpt-5.6 model would be far worse than being conservative: the
       // upstream 400 is a surface error with no failover, so every turn fails.
+      // The FLOOR first, asked of the same surface that judges the result 90
+      // lines below (`offSurfaceCodexModelMessage`). `CHATGPT_DEFAULT_MODEL_ID`
+      // is a constant, and the day a core retires gpt-5.5 from the ChatGPT
+      // route a sign-in would 400 on its own default with no other door — see
+      // `chatgptDefaultModelId`. It answers gpt-5.5 on every core measured so
+      // far, so this is a no-op today and a floor that cannot be refused
+      // tomorrow.
+      config.defaultModel = chatgptModelRef(chatgptDefaultModelId());
       try {
         const entitled = await resolveEntitledCodexModel({
           accessToken: normalizedApiKey,
+          // The surface's own rows above the floor, newest first, instead of a
+          // second hand-kept list: on the pinned core that IS
+          // `CODEX_MODEL_PREFERENCE`, and on a core that adds a model the probe
+          // can now reach it — without one, a fresh sign-in would keep landing
+          // on gpt-5.5 while the picker offered something newer.
+          candidates: chatgptUpgradeCandidates(),
           onDiagnostic: (message) => console.log(`[configure] ${message}`),
         });
         if (entitled) {

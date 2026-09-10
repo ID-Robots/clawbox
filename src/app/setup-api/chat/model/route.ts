@@ -25,6 +25,7 @@ import {
   CLAWBOX_AI_DEFAULT_TIER,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
+import { chatgptDefaultModelId } from "@/lib/chatgpt-surface";
 import {
   ANTHROPIC_DEFAULT_MODEL_ID,
   GOOGLE_DEFAULT_MODEL_ID,
@@ -50,7 +51,6 @@ import {
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
-  CHATGPT_DEFAULT_MODEL_ID,
   CHATGPT_PROVIDER,
   CHATGPT_UI_PROVIDER,
   canonicalChatgptModelRef,
@@ -172,7 +172,7 @@ function defaultModelForProvider(provider: string | null): string | null {
   // src/lib/chatgpt-subscription.ts. Both retired ids (`codex`, and
   // `openai-codex` before 2026.6) resolve to the same row.
   if (isLegacyChatgptProvider(normalized)) {
-    return chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID);
+    return chatgptModelRef(chatgptDefaultModelId());
   }
   return DEFAULT_PROVIDER_MODELS[normalized]
     ?? DEFAULT_PROVIDER_MODELS[normalizeProvider(provider) ?? ""]
@@ -686,7 +686,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
   // refuses, and rather than vanishing, which reads as "never connected".
   if (hasLegacyChatgptProfile(authProfiles) && !hasChatgptOauthProfile(authProfiles)) {
     const existing = configuredPrimaryOptions.get(CHATGPT_UI_PROVIDER);
-    const model = existing?.model ?? chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID);
+    const model = existing?.model ?? chatgptModelRef(chatgptDefaultModelId());
     configuredPrimaryOptions.set(CHATGPT_UI_PROVIDER, {
       id: existing?.id ?? model,
       label: labelForProvider(CHATGPT_UI_PROVIDER, "AI Provider"),

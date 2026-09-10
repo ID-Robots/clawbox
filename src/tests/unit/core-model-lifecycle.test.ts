@@ -178,6 +178,30 @@ describe("coreModelRetired", () => {
     }
   });
 
+  it("notices a bundled manifest installed under a live process", async () => {
+    // `findOpenclawBin` answers the bare name where no core is installed, and
+    // `coreManifestPaths` then omits the bundled candidate entirely — so an
+    // install completing under a live server GROWS the candidate list and moves
+    // the already-cached beside-config file from index 0 to index 1. A position
+    // remembered with the cache would say "nothing better exists" for the life of
+    // the process, and the box would keep answering from the old manifest.
+    fixture.writeManifest("openai", { models: [{ id: "gpt-5.5" }] });
+    const { coreModelRetired } = await loadLifecycle();
+    expect(coreModelRetired("openai", "gpt-5.5")).toBe(false);
+
+    // The install lands: the binary resolves, and the bundled manifest it brings
+    // retires the model.
+    bin.override = fixture.bin;
+    fixture.writeBundledManifest("openai", { models: [{ id: "gpt-5.5", status: "deprecated" }] });
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.now() + 10_000);
+      expect(coreModelRetired("openai", "gpt-5.5")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not remember having found no manifest at all", async () => {
     // "There is no core yet" and "there is nothing retired" are different
     // answers, and caching the first as the second is how a filter turns

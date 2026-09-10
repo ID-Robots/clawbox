@@ -1505,7 +1505,15 @@ elif _wants_llamacpp and _llamacpp_gaps:
 # surfaces as a FailoverError days into use. The chat-model pick route already
 # rewrites `openai/<gpt>` -> `codex/<gpt>`, but only when the user re-picks the
 # model; existing configs never re-pick, so migrate primary + fallbacks here on
-# gateway start. Mirrors CODEX_MODELS in src/lib/provider-models.ts,
+# gateway start.
+#
+# Deliberately still a hand-kept copy, while the app derives its ChatGPT surface
+# from the installed core's own `extensions/openai` manifest
+# (src/lib/chatgpt-surface.ts): the one consumer below is the OpenClaw 1 branch,
+# and an OpenClaw 1 box's core predates every model the derivation would add. So
+# this mirrors the app's FALLBACK list, which is what
+# src/tests/unit/gateway-pre-start-codex-models.test.ts pins it against.
+# Mirrors CODEX_MODELS in src/lib/provider-models.ts,
 # the one list src/lib/subscription-surface.ts also reads, and hasOpenAiApiKeyProfile /
 # hasCodexOauthProfile in src/app/setup-api/chat/model/route.ts. Guarded on
 # "codex OAuth present AND no OpenAI API key" so dual-auth / API-key boxes,
