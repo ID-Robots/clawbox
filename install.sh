@@ -2439,6 +2439,9 @@ do_rebuild() {
   local rc=0 built=0 reboot_follows=0
   if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
 
+  # Check before stopping the dashboard: zram alone did not prevent TASK-789.
+  ensure_build_swap || return $?
+
   echo "Stopping clawbox-setup.service for rebuild..."
   systemctl stop clawbox-setup.service 2>/dev/null || true
 
@@ -3341,6 +3344,70 @@ sync_repo_to_update_target() {
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
 }
 
+# Refresh the running updater before it can replace the core or permissions.
+# The 3.x Node process otherwise keeps its old 330s timeout and raw systemctl
+# launcher even after bootstrap has fetched 4.x scripts (TASK-789).
+legacy_updater_needs_handover() {
+  python3 - "$PROJECT_DIR/.next/standalone/package.json" "$PROJECT_DIR/package.json" <<'PY'
+import json, sys
+try:
+    old, new = (str(json.load(open(p)).get('version', '')) for p in sys.argv[1:])
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if old.startswith('3.') and new.startswith('4.') else 1)
+PY
+}
+
+handover_legacy_updater() {
+  legacy_updater_needs_handover || return 0
+  echo "  Upgrading the legacy updater before changing OpenClaw or its launch permissions..."
+  ensure_build_swap || return 1
+  local previous_id mask_owned=0 gateway_was_active=0 rc=0
+  previous_id=$(cat "$PROJECT_DIR/.next/BUILD_ID") || return 1
+  [ -n "$previous_id" ] || return 1
+  systemctl is-active --quiet clawbox-gateway.service && gateway_was_active=1
+  if [ "$(systemctl is-enabled clawbox-gateway.service 2>/dev/null || true)" != masked ]; then
+    systemctl mask --runtime clawbox-gateway.service || return 1
+    mask_owned=1
+  fi
+  systemctl stop clawbox-gateway.service || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    # do_rebuild restores the OLD app on failure. Do not revoke that app's
+    # existing authorisation until a new build has actually been verified.
+    do_rebuild || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    ( step_systemd_services ) || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    ( step_polkit_rules ) || rc=$?
+  fi
+  if [ "$rc" -eq 0 ]; then
+    # A separate atomic marker avoids racing config-store's read/modify/write.
+    # New code resumes ALL update steps, not the normal post-reboot tail:
+    # neither the core nor the OS has been upgraded yet.
+    as_clawbox python3 - "$PROJECT_DIR/data/updater-handover.json" "$previous_id" <<'PY' || rc=$?
+import json, os, sys
+p, previous = sys.argv[1:]
+with open(p + '.tmp', 'w') as f:
+    json.dump({'version': 1, 'previousBuildId': previous}, f)
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(p + '.tmp', p)
+PY
+  fi
+  if [ "$mask_owned" -eq 1 ]; then
+    systemctl unmask --runtime clawbox-gateway.service || rc=$?
+  fi
+  # No reboot needed for the bridge. The normal new-updater flow owns that.
+  systemctl reset-failed clawbox-setup.service 2>/dev/null || true
+  systemctl restart clawbox-setup.service || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$gateway_was_active" -eq 1 ]; then
+    systemctl start clawbox-gateway.service 2>/dev/null || true
+  fi
+  return "$rc"
+}
+
 step_bootstrap_updater() {
   # Pull the latest repo files (especially install.sh) before any later update
   # steps run. The current root service finishes under the old script, but the
@@ -3356,6 +3423,7 @@ step_bootstrap_updater() {
   # It is gitignored now, so `git clean -fd` will not take it: drop it here.
   rm -f "$PROJECT_DIR/.deployed-sha"
   sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
+  handover_legacy_updater
 }
 
 step_git_pull() {
@@ -4743,6 +4811,14 @@ step_harness_swap() {
   echo "  This box is now the $name edition"
 }
 
+openclaw_migration_complete() {
+  [ "$1" -eq 0 ] || return 1
+  if printf '%s\n' "$2" | grep -qiE 'requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration'; then
+    return 1
+  fi
+  return 0
+}
+
 step_openclaw_install() {
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
   # Re-assert the .bashrc PATH stanza before the early-returns BELOW. The
@@ -4819,6 +4895,11 @@ step_openclaw_install() {
     fi
   fi
   if [ "$CORE_NEEDS_INSTALL" -eq 1 ]; then
+    if [ "$(systemctl show clawbox-gateway.service -p LoadState --value 2>/dev/null || true)" = loaded ]; then
+      systemctl stop clawbox-gateway.service || return 1
+    fi
+    as_clawbox -H env XDG_RUNTIME_DIR="/run/user/$(id -u "$CLAWBOX_USER")" \
+      systemctl --user stop openclaw-gateway.service 2>/dev/null || true
     mkdir -p "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
@@ -4833,41 +4914,30 @@ step_openclaw_install() {
   # OpenClaw 2 (>= 2026.8) refuses gateway readiness while legacy state is
   # present: the sessions/transcripts move into SQLite and stale config keys
   # fail validation, and BOTH migrations are doctor's to run. A box upgraded
-  # without this step boots into a gateway that never comes up. Non-fatal on
-  # purpose — a doctor refusal leaves evidence in the gateway's own logs and
-  # the gateway start below will say so loudly — and non-interactive so an
-  # unattended update never parks on a prompt.
+  # without this step boots into a gateway that never comes up. A failed or
+  # incomplete migration is fatal: later steps cannot make it complete by
+  # racing another writer. Non-interactive so an update never parks on a prompt.
   if openclaw_version_is_v2 "$TARGET"; then
     echo "  Running openclaw doctor --fix (OpenClaw 2 config + session migrations)..."
     # The sessions-to-SQLite move must not race a still-running v1 gateway
     # writing the very files being migrated; gateway_setup restarts it later.
     systemctl stop clawbox-gateway.service 2>/dev/null || true
-    # Say WHICH failure this was. `|| echo WARN` over a doctor that migrated
-    # nothing is the false-success shape this repo keeps producing, and the
-    # commonest reason it exits non-zero here is a legacy exec-approvals file
-    # whose mere presence makes it refuse every migration before starting one
-    # (measured against 2026.8.1, 2026-09-06). The gateway's own ExecStartPre
-    # clears that and re-runs the migration, so this stays non-fatal — but the
-    # install log has to name it rather than imply doctor merely stumbled.
-    # `local` like every other assignment in this function (PIN_FILE, PINNED,
-    # TARGET, CORE_NEEDS_INSTALL): without it the whole doctor transcript leaks
-    # into a global for the rest of the installer run.
+    # A legacy user-service gateway is a second writer, outside the system
+    # unit's maintenance mask. Stop it too; an absent user bus is harmless.
+    as_clawbox -H env XDG_RUNTIME_DIR="/run/user/$(id -u "$CLAWBOX_USER")" \
+      systemctl --user stop openclaw-gateway.service 2>/dev/null || true
     local _oc_doctor_out
-    if ! _oc_doctor_out="$(as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)"; then
-      printf '%s\n' "$_oc_doctor_out"
-      # `CLAWBOX-WARN:` rather than a plain WARN line: the updater reads this
-      # prefix back out of the step's journal and puts it on the update's own
-      # status. A doctor that migrated nothing is exactly the case an owner
-      # needs told — the gateway can refuse readiness for it — and a line only
-      # in the journal is a line nobody on the box will read.
-      if printf '%s\n' "$_oc_doctor_out" | grep -q 'Legacy exec approvals exist at'; then
-        echo "CLAWBOX-WARN[openclaw-doctor-fix-failed]: openclaw doctor --fix migrated NOTHING — a legacy exec-approvals file blocks it. The gateway's pre-start moves an empty one aside and re-runs the migration on the next start."
-      else
-        echo "CLAWBOX-WARN[openclaw-doctor-fix-failed]: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
-      fi
-    else
-      printf '%s\n' "$_oc_doctor_out"
+    local _oc_doctor_rc=0
+    _oc_doctor_out="$(as_clawbox -H env \
+      OPENCLAW_STATE_DIR="$CLAWBOX_HOME/.openclaw" \
+      OPENCLAW_CONFIG_PATH="$CLAWBOX_HOME/.openclaw/openclaw.json" \
+      "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _oc_doctor_rc=$?
+    printf '%s\n' "$_oc_doctor_out"
+    if ! openclaw_migration_complete "$_oc_doctor_rc" "$_oc_doctor_out"; then
+      echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Resolve the reported blocker and Retry before rebuilding." >&2
+      return 1
     fi
+
     # The stop above was for doctor's benefit. A FULL install restarts the
     # gateway later (gateway_setup), but this step is also on the standalone
     # run-step allow-list, where nothing follows — leaving it down would turn
@@ -6451,6 +6521,23 @@ step_swapfile() {
   fi
   ensure_swapfile_fstab "$file" || return 1
   echo "  Swap is now $(free -h | awk '/^Swap:/{print $2}') ($(swapon --show=NAME --noheadings | wc -l) devices)"
+}
+
+# An 8 GB appliance must not enter a known OOM-prone build with zram only.
+# Provisioning can deliberately skip on low disk; verify the outcome, not its
+# exit code. Bigger development hosts and container builds do not need this.
+ensure_build_swap() {
+  is_test_mode && return 0
+  in_container && return 0
+  local ram_kb disk_swap_kb
+  ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+  [ "${ram_kb:-0}" -ge 12000000 ] && return 0
+  step_swapfile || return 1
+  disk_swap_kb=$(swapon --show=NAME,SIZE --bytes --noheadings | awk '$1 !~ /^\/dev\/zram/ {sum += $2} END {printf "%.0f", sum / 1024}') || return 1
+  if [ "${disk_swap_kb:-0}" -lt 4194304 ]; then
+    echo "Error: build requires at least 4 GiB active disk-backed swap on this low-memory device; free disk space or repair swap and Retry. Dashboard has not been stopped." >&2
+    return 1
+  fi
 }
 
 # One fstab line, written once, so the file comes back after a reboot.
