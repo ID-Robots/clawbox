@@ -464,6 +464,19 @@ export class OpenclawWhatsappPairing {
     return this.repairing;
   }
 
+  /**
+   * The repair itself: install, enable, reload — the half that touches the box.
+   *
+   * Split from `repairWebLoginProvider` so that the in-flight guard there wraps
+   * exactly one body, and never so that a caller can reach this directly: every
+   * entry has to go through that guard, or two panels drive `plugins install`
+   * into the same plugin store at once.
+   *
+   * Answers what it managed to do rather than a bare success, because the two
+   * facts have different consequences upstream — `reloaded: false` must never
+   * latch a `plugin_missing` verdict (the plugin was never given its chance),
+   * and `gatewayReady: false` is what buys the retry its catch-up attempts.
+   */
   private async installAndLoadPlugin(): Promise<RepairOutcome> {
     const plugin = await ensureChannelPlugin(WHATSAPP_CHANNEL_ID);
     if (!plugin.ok) {
