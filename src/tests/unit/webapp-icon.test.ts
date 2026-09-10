@@ -307,8 +307,10 @@ describe("ensureWebappIcon", () => {
     mocks.generate.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
 
     const a = mod.ensureWebappIcon("todo-list", { name: "Todo List" });
-    const b = mod.ensureWebappIcon("notes", { name: "Notes" });
+    // Async file checks can complete in either order. Establish the first
+    // generation before checking that another app waits for its slot.
     await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledTimes(1));
+    const b = mod.ensureWebappIcon("notes", { name: "Notes" });
     // Give the second every chance to have jumped the queue.
     await new Promise((r) => setTimeout(r, 20));
     expect(mocks.generate).toHaveBeenCalledTimes(1);

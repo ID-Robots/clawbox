@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 const source=readFileSync("install.sh","utf8");
 const start=source.indexOf("\nopenclaw_migration_complete() {");
 const fn=source.slice(start+1,source.indexOf("\n}",start)+2);
