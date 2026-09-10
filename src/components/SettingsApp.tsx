@@ -5177,7 +5177,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                               <div role="alert" className="mt-3 rounded-xl border border-red-500/25 bg-red-500/[0.06] px-4 py-3">
                                 <div className="text-sm text-red-200 font-medium">{t("settings.whatsappPairFailedTitle")}</div>
                                 <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
-                                  {waPair.error === "bridge_missing"
+                                  {/* Two harnesses, two words for one thing:
+                                      Hermes cannot find its Baileys script,
+                                      OpenClaw has no web-login provider and
+                                      could not install one. Mapping only the
+                                      first left the second saying nothing. */}
+                                  {waPair.error === "bridge_missing" || waPair.error === "plugin_missing"
                                     ? t("settings.whatsappPairErrBridge")
                                     : waPair.error === "install_failed"
                                       ? t("settings.whatsappPairErrInstall")

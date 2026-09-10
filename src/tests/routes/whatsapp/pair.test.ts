@@ -17,7 +17,19 @@ vi.mock("@/lib/openclaw-whatsapp", () => ({
   logoutOpenclawWhatsapp: openclawLogout,
   setOpenclawWhatsappEnabled: openclawSetEnabled,
 }));
-vi.mock("@/lib/openclaw-config", () => ({ restartGateway: vi.fn(async () => {}) }));
+vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class, not undefined: `src/lib/openclaw-whatsapp.ts` narrows on
+  // `instanceof GatewayNotReadyError` when it reloads the gateway after
+  // installing the WhatsApp plugin, and `instanceof undefined` throws a
+  // TypeError the first time a test makes the mocked restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
+  restartGateway: vi.fn(async () => {}),
+}));
 
 const start = vi.fn();
 const poll = vi.fn();

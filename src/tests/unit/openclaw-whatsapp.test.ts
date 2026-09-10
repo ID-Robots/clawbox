@@ -14,18 +14,26 @@ vi.mock("@/lib/openclaw-config", async () => {
   const actual = await vi.importActual<typeof import("@/lib/openclaw-config")>(
     "@/lib/openclaw-config",
   );
-  return { ...actual, openclawIsAbsent: () => false, spawnOpenclawCli: vi.fn() };
+  return {
+    ...actual,
+    openclawIsAbsent: () => false,
+    spawnOpenclawCli: vi.fn(),
+    restartGateway: vi.fn(),
+  };
 });
 vi.mock("@/lib/openclaw-channels", () => ({
   invalidateChannelStatus: vi.fn(),
   readCachedChannelRowResult: vi.fn(),
+  ensureChannelPlugin: vi.fn(),
 }));
 
-import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { readCachedChannelRowResult } from "@/lib/openclaw-channels";
+import { restartGateway, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { ensureChannelPlugin, readCachedChannelRowResult } from "@/lib/openclaw-channels";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
 const mockChannelResult = vi.mocked(readCachedChannelRowResult);
+const mockEnsurePlugin = vi.mocked(ensureChannelPlugin);
+const mockRestart = vi.mocked(restartGateway);
 
 /**
  * The gateway ANSWERED. A `null` row from an answering gateway means "there is
@@ -56,6 +64,10 @@ describe("OpenclawWhatsappPairing", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // The plugin is present on a healthy box, so the repair path below is
+    // never entered by the tests that are not about it.
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: false });
+    mockRestart.mockResolvedValue(undefined);
     lib = await import("@/lib/openclaw-whatsapp");
   });
 
@@ -146,13 +158,97 @@ describe("OpenclawWhatsappPairing", () => {
     expect((await new lib.OpenclawWhatsappPairing().start()).qrImage).toBeNull();
   });
 
-  it("names a missing plugin, because that one is fixed by saving, not rescanning", async () => {
+  it("installs the plugin the gateway says is missing, then asks again", async () => {
+    // THE BOX THIS COMES FROM. A box upgraded from a build that had no WhatsApp
+    // panel has no `@openclaw/whatsapp` on disk, so the gateway refuses the
+    // login with "web login provider is not available" — and the only thing
+    // that installed the plugin was the channel SAVE, whose toggle the panel
+    // keeps disabled until a phone is paired. Pair needs the plugin, the plugin
+    // needs the save, the save needs the pairing: the owner presses "Link your
+    // phone", gets a red box, and has nothing to press that would change it.
+    //
+    // The gateway names the one failure that has a remedy, so the remedy runs
+    // here: OpenClaw's own `plugins install` / `plugins enable`, the reload that
+    // puts the plugin in service, and the same question again.
     mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(mockEnsurePlugin).toHaveBeenCalledWith("whatsapp");
+    // Installed is not loaded: `plugins install` says so itself.
+    expect(mockRestart).toHaveBeenCalled();
+    expect(snap.phase).toBe("waiting");
+    expect(snap.qrImage).toBe(QR_A);
+    expect(snap.error).toBeNull();
+  });
+
+  it("reports an install that failed as an install failure, not as a missing plugin", async () => {
+    // The panel has words for this one — "check the network connection" — and
+    // they are the true ones: the plugin is an npm download on a device.
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: false, reason: "install_failed" });
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(snap.phase).toBe("error");
+    expect(snap.error).toBe("install_failed");
+    // Nothing was installed, so there is nothing for a gateway restart to load.
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("names a missing plugin only once the install and the reload have both run", async () => {
+    // Still refused after OpenClaw installed its own plugin and the gateway
+    // reloaded: this box really has no WhatsApp bridge, and saying so is the
+    // one honest answer left.
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
 
     const snap = await new lib.OpenclawWhatsappPairing().start();
 
     expect(snap.phase).toBe("error");
     expect(snap.error).toBe("plugin_missing");
+  });
+
+  it("runs one install behind two starts that overlap inside it", async () => {
+    // The epoch discards the RESULT of a start a newer one replaced; it does
+    // not cancel an npm install already in flight. Two panels open on the same
+    // box would otherwise drive `plugins install` into the same plugin store
+    // twice, concurrently — which is how a store ends up half-written.
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    let finishInstall: (result: { ok: true; installed: boolean }) => void = () => {};
+    mockEnsurePlugin.mockReturnValue(
+      new Promise((resolve) => {
+        finishInstall = resolve;
+      }),
+    );
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    const first = pairing.start();
+    // The first refusal has landed and the install is running.
+    await vi.waitFor(() => expect(mockEnsurePlugin).toHaveBeenCalled());
+    const second = pairing.start();
+    await vi.waitFor(() => expect(mockSpawn.mock.calls.length).toBeGreaterThan(1));
+
+    finishInstall({ ok: true, installed: true });
+    await Promise.all([first, second]);
+
+    expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+    expect(mockRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not install anything over a failure that is not the missing provider", async () => {
+    // A gateway that is down is not a plugin that is absent, and an npm install
+    // plus a service restart is not what a socket error asks for.
+    mockSpawn.mockResolvedValueOnce(rpcError("connect ECONNREFUSED"));
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(snap.error).toBe("start_failed");
+    expect(mockEnsurePlugin).not.toHaveBeenCalled();
+    expect(mockRestart).not.toHaveBeenCalled();
   });
 
   it("reports any other start failure as a code, never as the gateway's sentence", async () => {

@@ -33,8 +33,17 @@
 // device credentials in the plugin's auth dir, not a bot token, so there is no
 // env-backed credential here and nothing for envSecretRef() to mint.
 
-import { runOpenclawConfigSet, spawnOpenclawCli } from "@/lib/openclaw-config";
-import { invalidateChannelStatus, readCachedChannelRowResult } from "@/lib/openclaw-channels";
+import {
+  GatewayNotReadyError,
+  restartGateway,
+  runOpenclawConfigSet,
+  spawnOpenclawCli,
+} from "@/lib/openclaw-config";
+import {
+  ensureChannelPlugin,
+  invalidateChannelStatus,
+  readCachedChannelRowResult,
+} from "@/lib/openclaw-channels";
 
 /** OpenClaw's id for this channel — the plugin's, the config key's, the CLI's. */
 export const WHATSAPP_CHANNEL_ID = "whatsapp";
@@ -68,6 +77,18 @@ const LOGIN_START_MS = 30_000;
  * window gets used up.
  */
 const RPC_HEADROOM_MS = 5_000;
+
+/**
+ * What this manager may put in `snapshot.error`.
+ *
+ * The panel maps each of these to a sentence, so the set is a contract rather
+ * than free text: `plugin_missing` shares its wording with the Hermes manager's
+ * `bridge_missing` ("no WhatsApp bridge on this ClawBox"), `install_failed` is
+ * the one that says to check the network, and `start_failed` is the generic
+ * tail. A code the panel does not know falls through to that tail, which is how
+ * `plugin_missing` used to reach the owner as "something went wrong".
+ */
+export type WhatsappPairErrorCode = "plugin_missing" | "install_failed" | "start_failed";
 
 /** Phases, identical to the Hermes pairing manager's — one panel renders both. */
 export type WhatsappPairPhase =
@@ -186,8 +207,13 @@ function readQrDataUrl(result: WebLoginResult): string | null {
 
 /**
  * "There is no WhatsApp login provider" — the gateway's answer when the plugin
- * is not loaded. Worth its own code: it is the one failure the owner fixes by
- * saving the channel again (which installs the plugin), not by rescanning.
+ * is not loaded, and the one failure on this path that has a remedy rather than
+ * a message. `respondProviderUnavailable` in the core's web-login RPC sends it
+ * whenever `resolveWebLoginProvider()` finds nothing, and appends its own
+ * install hint ONLY for a channel already present in `config.channels` — which
+ * a box that has never saved the channel is not, so what arrives is the bare
+ * sentence. Either way the fix is the same one OpenClaw would print: install
+ * the plugin and reload the gateway. See repairWebLoginProvider().
  */
 function isProviderMissing(err: unknown): boolean {
   return err instanceof Error && /login provider is not available/i.test(err.message);
@@ -215,6 +241,8 @@ export class OpenclawWhatsappPairing {
    */
   private epoch = 0;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  /** The plugin install in flight, shared by every start that is waiting on it. */
+  private repairing: Promise<WhatsappPairErrorCode | null> | null = null;
   private readonly now: () => number;
 
   constructor(deps: { now?: () => number } = {}) {
@@ -250,11 +278,25 @@ export class OpenclawWhatsappPairing {
     this.ensureTicking();
 
     try {
-      const result = await gatewayCall(
-        "web.login.start",
-        { force: opts.force === true, timeoutMs: LOGIN_START_MS },
-        LOGIN_START_MS + RPC_HEADROOM_MS,
-      );
+      let result: Record<string, unknown>;
+      try {
+        result = await this.loginStart(opts.force === true);
+      } catch (err) {
+        if (!isProviderMissing(err)) throw err;
+        if (epoch !== this.epoch) return this.peek();
+        // The gateway named the one failure that has a remedy. Run it and ask
+        // again, rather than handing the owner a red box over a plugin this
+        // device can install for itself.
+        this.snap = { ...this.snap, phase: "preparing" };
+        const failure = await this.repairWebLoginProvider();
+        if (epoch !== this.epoch) return this.peek();
+        if (failure) {
+          this.snap = { ...this.snap, phase: "error", error: failure };
+          return this.peek();
+        }
+        this.snap = { ...this.snap, phase: "starting" };
+        result = await this.loginStart(opts.force === true);
+      }
       if (epoch !== this.epoch) return this.peek();
       this.apply(result);
     } catch (err) {
@@ -262,6 +304,8 @@ export class OpenclawWhatsappPairing {
       this.snap = {
         ...this.snap,
         phase: "error",
+        // Refused again, after the plugin was installed and the gateway
+        // reloaded: this box genuinely has no WhatsApp bridge.
         error: isProviderMissing(err) ? "plugin_missing" : "start_failed",
       };
       console.error("[openclaw-whatsapp] login start failed:", err);
@@ -276,6 +320,77 @@ export class OpenclawWhatsappPairing {
     this.clearTicking();
     this.snap = { ...IDLE };
     return this.peek();
+  }
+
+  /** One `web.login.start`, with the budgets this module owes it. */
+  private loginStart(force: boolean): Promise<Record<string, unknown>> {
+    return gatewayCall(
+      "web.login.start",
+      { force, timeoutMs: LOGIN_START_MS },
+      LOGIN_START_MS + RPC_HEADROOM_MS,
+    );
+  }
+
+  /**
+   * Put the WhatsApp plugin in service, on the gateway's own say-so.
+   *
+   * WHY THIS LIVES ON THE PAIRING PATH. `@openclaw/whatsapp` is an npm plugin
+   * OpenClaw's stock extensions do not carry, and the only thing that installed
+   * it was /whatsapp/configure — whose Enable toggle the panel keeps disabled
+   * until a phone is paired, because on Hermes enabling a channel with no
+   * creds.json is meaningless. On OpenClaw the order is the other way round, so
+   * the two rules met in the middle: pairing wanted the plugin, the plugin
+   * wanted the save, the save wanted a pairing, and "Link your phone" was the
+   * only button on the card. The Hermes manager closes exactly this gap for its
+   * own bridge in `preparing`, by running the wizard's npm install itself; this
+   * is that step for the harness whose installer is `openclaw plugins`.
+   *
+   * Entered only from the gateway's refusal, so a healthy box pays nothing —
+   * not an extra `plugins list`, and above all not a gateway restart, which
+   * would drop every other channel mid-conversation.
+   *
+   * Answers with the code to report, or null when the retry is worth making.
+   */
+  private repairWebLoginProvider(): Promise<WhatsappPairErrorCode | null> {
+    // Two panels — or one reopened while the first install is still running —
+    // must not both drive `plugins install` into the same plugin store. Whoever
+    // arrives second waits for the first one's answer instead of starting a
+    // second npm install over it.
+    this.repairing ??= this.installAndLoadPlugin().finally(() => {
+      this.repairing = null;
+    });
+    return this.repairing;
+  }
+
+  private async installAndLoadPlugin(): Promise<WhatsappPairErrorCode | null> {
+    const plugin = await ensureChannelPlugin(WHATSAPP_CHANNEL_ID);
+    if (!plugin.ok) {
+      console.error(`[openclaw-whatsapp] installing the WhatsApp plugin failed: ${plugin.reason}`);
+      // An npm install on a device is a download, and the panel already has the
+      // true words for that one. `unsupported_channel` cannot happen for a
+      // channel that is in OFFICIAL_CHANNEL_PLUGINS, and if it ever did it
+      // would mean precisely that no plugin can be installed for it.
+      return plugin.reason === "unsupported_channel" ? "plugin_missing" : "install_failed";
+    }
+    try {
+      // Installed is not loaded: `plugins install` prints "Restart the gateway
+      // to load plugins", and the gateway is what publishes web.login.*.
+      await restartGateway();
+    } catch (err) {
+      // A gateway that took the restart but has not finished binding is
+      // starting, not broken — the retry is the probe that settles it, the same
+      // split /whatsapp/configure makes. Anything else is a restart that did
+      // not happen, and calling that a missing bridge would blame the plugin
+      // for a service failure.
+      if (!(err instanceof GatewayNotReadyError)) {
+        console.error("[openclaw-whatsapp] reloading the gateway after the plugin install failed:", err);
+        return "start_failed";
+      }
+    }
+    // The gateway now owns a channel it did not have, so a remembered row
+    // describes the box as it was before this repair.
+    invalidateChannelStatus(WHATSAPP_CHANNEL_ID);
+    return null;
   }
 
   /** Fold one RPC answer into the snapshot. */
