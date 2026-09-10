@@ -222,9 +222,11 @@ interface EmailStatusPayload {
   /** The device's own answer to "may the agent read?" — see below. */
   canRead?: boolean;
   /**
-   * `configured: false` because the device's config store could not be READ —
-   * an EACCES from a root-owned `data/config.json`, an EIO, a half-written
-   * file. See `storeUnreadable` in src/lib/email-config.ts.
+   * The device could not trust its own answer, because the config store could
+   * not be READ — an EACCES from a root-owned `data/config.json`, an EIO, a
+   * half-written file. Decided by `emailStoreDisagrees` in
+   * src/lib/email-config.ts and attached to the payload by
+   * src/app/setup-api/email/status/route.ts.
    */
   storeUnreadable?: boolean;
 }

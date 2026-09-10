@@ -574,10 +574,16 @@ export const EMAIL_READ_TOOL_NAMES = ["email_list", "email_read"] as const;
  * request refused often enough to look broken; polling faster buys nothing,
  * since the harness only re-reads the tool list between turns anyway.
  *
- * A DIRECT NUDGE would be better than any interval, and there is none to use:
- * the device's web server and this process share no channel, the OpenClaw
- * gateway exposes no RPC that reaches its MCP children (see
- * `registerEmailReadTools`), and `refreshNow` is here for the day one exists.
+ * A DIRECT NUDGE would be better than any interval, and none is wired: the
+ * OpenClaw gateway exposes no RPC that reaches its MCP children (see
+ * `registerEmailReadTools`), and no socket runs between the device's web server
+ * and this process. The one thing the two DO share is `data/config.json`, which
+ * `config-store` replaces by rename — so an `fs.watch` on `data/` would be a
+ * real nudge (mtime only; the answer would still come from the status route, so
+ * this process would still never read the secrets). Deliberately not taken here:
+ * it couples this process to a file it otherwise does not touch, and a missed
+ * event still needs an interval underneath as the floor. `refreshNow` is the
+ * seam to wire it to.
  */
 export const EMAIL_READABILITY_POLL_MS = 30_000;
 
@@ -658,8 +664,21 @@ export function watchEmailReadability(
       }
       if (answer === canRead) return;
       const before = new Set(reg.list().map((tool) => tool.name));
-      if (answer) registerEmailReadTools(reg);
-      else for (const name of EMAIL_READ_TOOL_NAMES) reg.remove(name);
+      if (answer) {
+        try {
+          registerEmailReadTools(reg);
+        } catch (err) {
+          // ALL OR NOTHING. The pair is two registrations, and this watch is the
+          // first caller that can run it more than once in a process: a throw
+          // between the two would leave one name held while `canRead` below
+          // stays false, so every later tick would re-register a name the SDK
+          // already holds and throw again — a permanently half-published list.
+          // Undo the half that landed (a no-op for a name never added) and let
+          // the interval's own catch report it; the next tick starts clean.
+          for (const name of EMAIL_READ_TOOL_NAMES) reg.remove(name);
+          throw err;
+        }
+      } else for (const name of EMAIL_READ_TOOL_NAMES) reg.remove(name);
       // AFTER the change, never before it: the SDK refuses a second
       // registration of a name it already holds, so a flip recorded over a
       // registration that threw would leave this server believing it had

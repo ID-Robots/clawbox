@@ -160,6 +160,38 @@ describe("mailbox readability, after the server is already running", () => {
     expect(await h.toolNames()).toContain("email_list");
   });
 
+  it("registers the read pair all-or-nothing, so a later tick can retry it", async () => {
+    // The watch is the first caller that can register this pair more than once
+    // in a process. If the second of the two registrations threw, a server left
+    // holding only email_list — with the watch still believing reading is off —
+    // would re-register that same name on every tick, and the SDK refuses a name
+    // it already holds: a permanently half-published list plus one throw every
+    // thirty seconds. Nothing in the tree makes registerTool throw today, so the
+    // failure is injected.
+    const h = await harness(false);
+    const real = h.reg.tool.bind(h.reg);
+    let calls = 0;
+    vi.spyOn(h.reg, "tool").mockImplementation(((...args: Parameters<typeof real>) => {
+      calls += 1;
+      // The FIRST read tool lands, the second one fails.
+      if (calls === 2) throw new Error("injected registration failure");
+      return real(...args);
+    }) as typeof real);
+
+    const watch = watchEmailReadability(h.reg, false, { probe: async () => true });
+    await expect(watch.refreshNow()).rejects.toThrow("injected registration failure");
+
+    // Neither half is left behind.
+    const names = h.reg.list().map((tool) => tool.name);
+    for (const tool of READ_TOOLS) expect(names).not.toContain(tool);
+
+    // And the next tick is a clean retry rather than a duplicate-name throw.
+    vi.mocked(h.reg.tool).mockRestore();
+    await watch.refreshNow();
+    watch.stop();
+    for (const tool of READ_TOOLS) expect(await h.toolNames()).toContain(tool);
+  });
+
   it("refuses a withdrawn tool at the dispatcher as well as in the list", async () => {
     // The two halves live in different places — the SDK's registry answers
     // tools/list, and mcp/lib/register.ts owns tools/call — so a withdrawal
@@ -279,9 +311,13 @@ describe("mailbox readability, after the server is already running", () => {
     await vi.advanceTimersByTimeAsync(2_500);
     expect(probe).toHaveBeenCalledTimes(2);
 
-    // Closing the transport stops the poll AND still runs the handler that was
-    // already there.
-    h.server.server.onclose?.();
+    // Closing the TRANSPORT — not calling the hook by hand — stops the poll and
+    // still runs the handler that was already there. Driving it through a real
+    // close is the point: that `onclose` is reached at all is the SDK's
+    // behaviour (`Protocol._onclose`), and a test that invoked the hook itself
+    // would keep passing over an SDK that stopped calling it, while the poll
+    // outlived every real box's transport.
+    await h.close();
     expect(closedAfter).toBe(true);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(probe).toHaveBeenCalledTimes(2);

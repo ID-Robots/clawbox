@@ -231,8 +231,11 @@ export async function buildServer(
  * still in flight keeps the loop alive after the harness has hung up, and a poll
  * that went on re-registering tools into a closed server would be work nobody
  * can see the result of. `Protocol.onclose` is free for a caller (the SDK drives
- * its own teardown through `_onclose`), and any handler a neighbour installs
- * later is chained rather than overwritten.
+ * its own teardown through `_onclose`), and a handler already installed when
+ * this runs is chained rather than overwritten. Note the direction: an EARLIER
+ * handler survives, while a later plain `server.server.onclose = fn` from
+ * anywhere would replace this wrapper and leave the poll outliving the
+ * transport — which is why arming is the LAST thing `main()` does.
  *
  * A function rather than four lines in `main()` because `main()` claims stdio
  * and cannot be tested, and this is the line that carries the whole fix to a
