@@ -21,6 +21,7 @@
 // Everything here goes through runHermesCli (argv only, never a shell).
 
 import { execFile } from "child_process";
+import { randomUUID } from "crypto";
 import fs from "fs/promises";
 import path from "path";
 import { promisify } from "util";
@@ -284,16 +285,138 @@ export async function revokeHermesPairing(userId: string, signal?: AbortSignal):
 /** Cap on the revokes a single reset will run — each is its own CLI start-up. */
 const MAX_RESET_REVOKES = 25;
 
+// Hermes rate-limits pairing REQUESTS, not approvals, and the stamps outlive the
+// bot. `generate_code` writes `<platform>:<user_id>` into the pairing store's
+// shared `_rate_limits.json` on its way out and then refuses that sender another
+// code for ten minutes (gateway/pairing.py, RATE_LIMIT_SECONDS = 600).
+// `_lockout:<platform>` holds the hour-long lockout after five failed approvals
+// and `_failures:<platform>` the consecutive-failure counter behind it.
+//
+// Cancelling the pending requests without these leaves the requester in a hole
+// neither end can see: their request is gone from the store, so Settings shows
+// nothing to approve, and the gateway answers their next message with a log line
+// and silence — `_hm_offer_pairing_code` returns before it generates anything
+// when `_is_rate_limited` says so, so the only trace is one "Unauthorized user"
+// warning per attempt until the ten minutes are up.
+//
+// BOTH pairing dirs, because Hermes merges them: `_migrate_split_pairing_dirs`
+// merges the inactive dir's `*.json` into the active one on start (the active
+// copy winning per key), so a stamp left in the legacy copy comes straight back.
+//
+// There is no command for it — `hermes pairing` is list / approve / revoke /
+// clear-pending and nothing else (hermes_cli/subcommands/pairing.py) — and
+// Hermes' own approve handler tells the operator to "delete the
+// '_lockout:<platform>' entry from ~/.hermes/platforms/pairing/
+// _rate_limits.json" when a lockout has to go early (hermes_cli/pairing.py). So
+// the file IS the mechanism, and it is edited in the shape of Hermes' own
+// `_secure_write`: whole-object read, fresh temp file, atomic rename, 0600.
+const RATE_LIMIT_FILE = "_rate_limits.json";
+
+/**
+ * Whether this reset owns a `_rate_limits.json` key.
+ *
+ * REQUEST stamps (`<platform>:<user_id>`) go for EVERY platform, because the
+ * reset cancels every platform's pending requests: `hermes pairing clear-pending`
+ * takes no platform argument (gateway/pairing.py `clear_pending(platform=None)`
+ * walks every `*-pending.json` in the dir). Dropping only Telegram's would leave
+ * a Discord or WhatsApp requester in exactly the hole described above, holding a
+ * code that no longer exists and unable to ask for another — and Hermes ships
+ * those adapters, so "Telegram is the only one configured" is an assumption, not
+ * an invariant.
+ *
+ * APPROVAL-side state — the lockout and its failure counter — is per platform and
+ * belongs to the bot being replaced, so only this platform's goes. Another
+ * platform's lockout was earned by mistyped codes there and is none of this
+ * reset's business.
+ */
+function isStampClearedByReset(key: string): boolean {
+  if (!key.startsWith("_")) return key.includes(":");
+  return key === `_lockout:${PLATFORM}` || key === `_failures:${PLATFORM}`;
+}
+
+/**
+ * A store read that means "no stamp is in force either", so there is nothing to
+ * clear and nothing to report: the file is absent, or it holds something Hermes
+ * itself reads as `{}` (`_load_json_file` swallows a JSONDecodeError). Any other
+ * failure is a real fault and gets logged by the caller.
+ */
+function isEmptyToHermes(err: unknown): boolean {
+  if (err instanceof SyntaxError) return true;
+  return (err as { code?: unknown } | null)?.code === "ENOENT";
+}
+
+/**
+ * Drop the pairing stamps this reset owns, so the next message from a stranger
+ * earns a fresh code at once.
+ *
+ * Best-effort: it never throws, because the token is saved right after it and a
+ * cleared stamp is not worth failing that save over. It does not fail SILENTLY —
+ * a reset that could not clear leaves someone denied with nothing to show them,
+ * which is the fault this whole function exists to prevent.
+ *
+ * Hermes re-reads the file on every check (`_limits()`), so a running gateway
+ * sees the cleared stamps with no restart.
+ */
+async function clearPairingRateLimitStamps(): Promise<void> {
+  await Promise.all(
+    pairingDirs().map(async (dir) => {
+      const file = path.join(dir, RATE_LIMIT_FILE);
+      let limits: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(await fs.readFile(file, "utf-8"));
+        if (!isRecord(parsed)) return;
+        limits = parsed;
+      } catch (err) {
+        // The MESSAGE only, here and below: this file names the people who asked
+        // to pair, and a thrown fs error carries its path but not its contents.
+        if (!isEmptyToHermes(err)) {
+          console.error(
+            "[telegram] Hermes' pairing rate limits could not be read, so a new request may be refused in silence:",
+            err instanceof Error ? err.message : err,
+          );
+        }
+        return;
+      }
+      const kept = Object.entries(limits).filter(([key]) => !isStampClearedByReset(key));
+      if (kept.length === Object.keys(limits).length) return;
+      // A fresh temp name per write: a shared one lets a second reset truncate
+      // this one's file between the write and the rename, and `writeFile`'s
+      // `mode` is ignored on a path that already exists — a stale 0644 temp from
+      // a crashed run would then carry its permissions over a store that names
+      // every requester. `wx` refuses an existing path outright; the chmod is the
+      // belt to that braces, as in config-store's writeConfig.
+      const tmp = path.join(dir, `.${RATE_LIMIT_FILE}.${randomUUID()}.tmp`);
+      try {
+        await fs.writeFile(tmp, JSON.stringify(Object.fromEntries(kept), null, 2), {
+          mode: 0o600,
+          flag: "wx",
+        });
+        await fs.chmod(tmp, 0o600).catch(() => {});
+        await fs.rename(tmp, file);
+      } catch (err) {
+        console.error(
+          "[telegram] Hermes' pairing rate limits could not be cleared, so a new request may be refused in silence:",
+          err instanceof Error ? err.message : err,
+        );
+        await fs.rm(tmp, { force: true }).catch(() => {});
+      }
+    }),
+  );
+}
+
 /**
  * Wipe Telegram pairing state, for when the bot token changes: approvals belong
  * to the old bot. Revokes each approved sender (so Hermes also drops it from any
- * TELEGRAM_ALLOWED_USERS mirror it maintains), clears pending codes, then removes
- * any store file left behind. Best-effort throughout: each step is a separate
- * `hermes` process that may be missing or refuse, and the store-file removal
- * at the end is the backstop.
+ * TELEGRAM_ALLOWED_USERS mirror it maintains), clears pending codes, removes any
+ * store file left behind, and drops the request rate-limit and lockout stamps it
+ * owns so everyone whose pending request this just cancelled can ask for a code
+ * straight away. Best-effort throughout: each step is a separate `hermes` process
+ * that may be missing or refuse, and the store-file removal at the end is the
+ * backstop.
  *
  * Note `hermes pairing clear-pending` takes no platform argument and clears every
- * platform's pending codes. On ClawBox Telegram is the only one configured.
+ * platform's pending codes — which is why the stamp clear above is not scoped to
+ * Telegram either (see `isStampClearedByReset`).
  */
 export async function clearHermesTelegramPairingState(): Promise<void> {
   let approved: HermesApprovedUser[] = [];
@@ -324,6 +447,7 @@ export async function clearHermesTelegramPairingState(): Promise<void> {
       ),
     ),
   );
+  await clearPairingRateLimitStamps();
 }
 
 // ── Token + gateway service ─────────────────────────────────────────────────
