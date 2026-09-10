@@ -49,11 +49,31 @@ import { clearPluginRepair } from "@/lib/plugin-repair";
  * and a channel ClawBox has no UI for has no business being installed by it.
  * `unsupported_channel` for anything else is the honest answer.
  *
- * The specs are unpinned on purpose. npm resolves `latest`, which is published
- * in lockstep with the host, and OpenClaw's installer then checks the plugin's
- * own `compat.pluginApi` against the running host and refuses a mismatch — a
- * refusal this module reports rather than swallows. A version pinned here would
- * go stale the first time the device updates openclaw.
+ * THE SPECS ARE UNPINNED ON PURPOSE, and that is load-bearing rather than
+ * merely tidy — measured read-only against the pinned core (2026.8.1) and the
+ * registry, because the pairing path can now reach this install on a box whose
+ * `latest` is ahead of its host:
+ *
+ *   * the installer validates the resolved package's `openclaw.compat.pluginApi`
+ *     and `openclaw.install.minHostVersion` against the running host, and
+ *   * when that fails it WALKS BACK — `resolveLatestCompatibleNpmResolution`
+ *     tries older stable versions and installs "the newest compatible" one —
+ *     but ONLY for a spec with no version selector, or the tag `latest`
+ *     (`shouldResolveLatestCompatibleNpmVersion`).
+ *
+ * So a version pinned here would not make the install safer; it would DISABLE
+ * the core's own compatible-version resolution and turn a mismatch into a hard
+ * refusal. Measured: `@openclaw/whatsapp@latest` is 2026.9.3 and wants
+ * `pluginApi >=2026.9.3`, so a 2026.8.1 box walks past 2026.8.2 (>=2026.8.2) to
+ * 2026.8.1 — exactly the version that core's own bundled
+ * `dist/channel-catalog.json` names for it. A pin would also go stale the first
+ * time the device updates openclaw.
+ *
+ * `clawbox_managed_plugin_spec` in `scripts/gateway-pre-start.sh` pins the same
+ * packages for its own reasons — a repair ROW is replayed long after it is
+ * written — which is a separate decision about a different question, not this
+ * one restated. `gateway-pre-start-managed-plugin-payload.test.ts` holds the
+ * values here to the bare `@openclaw/<id>` form.
  */
 export const OFFICIAL_CHANNEL_PLUGINS: Readonly<Record<string, string>> = Object.freeze({
   discord: "@openclaw/discord",

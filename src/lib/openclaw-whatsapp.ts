@@ -95,6 +95,26 @@ const RPC_HEADROOM_MS = 5_000;
 const GATEWAY_CATCHUP_ATTEMPTS = 3;
 const GATEWAY_CATCHUP_GAP_MS = 5_000;
 
+/**
+ * How long a repair that was refused may answer for the box.
+ *
+ * The refusal is real and worth remembering — it is what stops Retry bouncing
+ * the gateway once per press — but it is a MEASUREMENT of a box that people
+ * change: a compatible plugin installed by hand, a core the box has since been
+ * given. The gateway then still needs the reload only this remedy performs, so
+ * a verdict kept for the life of the web server is a box that can never be
+ * repaired from its own panel, and "a capability probed once and treated as
+ * fact for the process lifetime" is the exact shape this codebase keeps
+ * producing.
+ *
+ * Long enough that a flurry of presses, or a second panel, costs one repair;
+ * short enough that an owner who has just fixed the box by hand gets the remedy
+ * on their next press rather than after a restart of the web server. The window
+ * runs from the refusal and is never extended by a press it suppressed, or
+ * pressing Retry often enough would make it permanent again.
+ */
+const REPAIR_REFUSAL_TTL_MS = 10 * 60_000;
+
 /** What the repair answers: a code to report, or what it managed to do. */
 type RepairOutcome =
   | { ok: false; error: WhatsappPairErrorCode }
@@ -281,12 +301,16 @@ export class OpenclawWhatsappPairing {
   /** The plugin install in flight, shared by every start that is waiting on it. */
   private repairing: Promise<RepairOutcome> | null = null;
   /**
-   * The repair has already run in this process and the gateway still refuses.
+   * When the repair last ran, reloaded the gateway, and was still refused.
    *
-   * Latched so that Retry answers from what we know instead of reinstalling and
-   * restarting the device again; cleared the moment a login actually starts.
+   * A TIME, not a flag, and the difference is the whole point: this is what was
+   * MEASURED a moment ago, never a fact about the box. It keeps Retry from
+   * reinstalling and bouncing the device once per press while the answer is
+   * fresh; past {@link REPAIR_REFUSAL_TTL_MS} the box may have been changed
+   * under us and the press is owed a real attempt. Cleared outright the moment
+   * a login actually starts.
    */
-  private providerMissingAfterRepair = false;
+  private repairRefusedAt: number | null = null;
   private readonly now: () => number;
 
   constructor(deps: { now?: () => number } = {}) {
@@ -334,14 +358,14 @@ export class OpenclawWhatsappPairing {
       } catch (err) {
         if (!isProviderMissing(err)) throw err;
         if (epoch !== this.epoch) return this.peek();
-        // Already installed and reloaded once here, and the gateway still has
-        // no provider: a second npm install and a second gateway bounce cannot
-        // change that. Without this latch the red box's own Retry button
-        // restarts the whole device on every press — Telegram, the agent and
-        // every open session with it — for a failure that is now a fact about
-        // the box. `restartGateway` clears the unit's start-limit before each
-        // restart, so nothing else would stop that loop either.
-        if (this.providerMissingAfterRepair) {
+        // Installed and reloaded moments ago, and the gateway still has no
+        // provider: a second npm install and a second gateway bounce cannot
+        // change that inside the window. Without this the red box's own Retry
+        // button restarts the whole device on every press — Telegram, the agent
+        // and every open session with it — since `restartGateway` clears the
+        // unit's start-limit before each restart and nothing downstream would
+        // stop that loop either.
+        if (this.repairSuppressed()) {
           this.snap = { ...this.snap, phase: "error", error: "plugin_missing" };
           return this.peek();
         }
@@ -372,15 +396,15 @@ export class OpenclawWhatsappPairing {
       if (epoch !== this.epoch) return this.peek();
       // A login that started is proof the provider is there, whatever an
       // earlier attempt in this process concluded.
-      this.providerMissingAfterRepair = false;
+      this.repairRefusedAt = null;
       this.apply(result);
     } catch (err) {
       if (epoch !== this.epoch) return this.peek();
       const missing = isProviderMissing(err);
       // Refused again, after the plugin was installed and the gateway reloaded:
-      // this box genuinely has no WhatsApp bridge, and every later press should
-      // be told so without repeating the repair.
-      if (missing && repaired) this.providerMissingAfterRepair = true;
+      // this box has no WhatsApp bridge as it stands, and the presses that
+      // follow are answered from that rather than repeating the remedy.
+      if (missing && repaired) this.repairRefusedAt = this.now();
       this.snap = {
         ...this.snap,
         phase: "error",
@@ -398,6 +422,14 @@ export class OpenclawWhatsappPairing {
     this.clearTicking();
     this.snap = { ...IDLE };
     return this.peek();
+  }
+
+  /** Is the last refusal still recent enough to answer with? */
+  private repairSuppressed(): boolean {
+    return (
+      this.repairRefusedAt !== null &&
+      this.now() - this.repairRefusedAt < REPAIR_REFUSAL_TTL_MS
+    );
   }
 
   /** One `web.login.start`, with the budgets this module owes it. */
@@ -422,6 +454,15 @@ export class OpenclawWhatsappPairing {
   ): Promise<Record<string, unknown>> {
     const attempts = gatewayReady ? 1 : GATEWAY_CATCHUP_ATTEMPTS;
     for (let attempt = 1; ; attempt += 1) {
+      // Checked BEFORE every call, not only after one fails: this loop sleeps
+      // between attempts, and `stop()` or a newer `start()` lands inside that
+      // sleep. `web.login.start` is not a read — it stops the running channel to
+      // take the socket over, and with `force` it would tear down a login a
+      // later press has just begun — so waking up to issue one leaves a login
+      // running in the gateway that the cancelled session's keepalive is no
+      // longer there to reap. The caller discards a stale epoch before it reads
+      // this error, so it never reaches the panel.
+      if (epoch !== this.epoch) throw new Error("the pairing session was replaced");
       try {
         return await this.loginStart(force);
       } catch (err) {
@@ -448,8 +489,8 @@ export class OpenclawWhatsappPairing {
    * own bridge in `preparing`, by running the wizard's npm install itself; this
    * is that step for the harness whose installer is `openclaw plugins`.
    *
-   * Entered only from the gateway's refusal, and at most once per process (see
-   * `providerMissingAfterRepair`), so a healthy box pays nothing — not an extra
+   * Entered only from the gateway's refusal, and at most once per refusal
+   * window (see `repairRefusedAt`), so a healthy box pays nothing — not an extra
    * `plugins list`, and above all not a gateway restart, which would drop every
    * other channel mid-conversation.
    */

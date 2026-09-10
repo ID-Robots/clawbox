@@ -315,6 +315,37 @@ describe("OpenclawWhatsappPairing", () => {
     expect(mockEnsurePlugin).toHaveBeenCalledTimes(2);
   });
 
+  it("does not answer for the rest of the process from one refused repair", async () => {
+    // The other half of the same rule. A refusal that survived an install and a
+    // reload is a measurement, not a fact about the box: correct the plugin on
+    // disk — a compatible version installed by hand, a core the box has since
+    // been given — and the gateway still needs the reload only this remedy
+    // performs, so a verdict kept for the life of the web server is a box that
+    // can never be repaired from its own panel. Probe-once, one press wide.
+    vi.useFakeTimers();
+    try {
+      mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      const pairing = new lib.OpenclawWhatsappPairing();
+
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+
+      // Pressed again straight away: still answered from what was just measured,
+      // so Retry cannot bounce the gateway once per press.
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+
+      // An hour later the measurement is old enough that the owner may have
+      // changed the box under it, and the press is owed a real attempt.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      expect(mockEnsurePlugin).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not skip the reload a cancelled install still owes", async () => {
     // The DELETE that reaps a cancelled session cannot reach an npm install
     // already in flight. Restarting the gateway minutes after the owner closed
@@ -338,6 +369,42 @@ describe("OpenclawWhatsappPairing", () => {
     expect((await started).phase).toBe("idle");
 
     expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("does not start a login the owner cancelled while the gateway was coming back", async () => {
+    // The catch-up loop SLEEPS between attempts, and a cancel lands inside that
+    // sleep. `web.login.start` is not a read — it stops the running channel to
+    // take the socket over, and with `force` it would tear down a login a later
+    // press has just begun — so waking up to issue one is a login started after
+    // the owner closed the card, with the answer discarded upstream and the
+    // keepalive already gone: nothing left to reap it.
+    vi.useFakeTimers();
+    try {
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      mockRestart.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+      let starts = 0;
+      mockSpawn.mockImplementation(async (args: readonly string[]) => {
+        if (args[2] !== "web.login.start") return rpcOk({});
+        starts += 1;
+        if (starts === 1) throw new Error("web login provider is not available");
+        throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+      });
+
+      const pairing = new lib.OpenclawWhatsappPairing();
+      const started = pairing.start();
+      // The repair has run and the first post-reload attempt has hit a port
+      // nobody is listening on yet, so the loop is now in its catch-up gap.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(starts).toBe(2);
+
+      pairing.stop();
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS * 2);
+
+      expect((await started).phase).toBe("idle");
+      expect(starts).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("asks again while the gateway is still coming back, instead of calling the repair a failure", async () => {
