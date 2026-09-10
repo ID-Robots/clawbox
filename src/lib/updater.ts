@@ -74,7 +74,18 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // would actually deploy. Without this both sides diverged: the UI returned
 // null and reported "no update", while install.sh would still install
 // 2026.5.3-1 — confusing.
-const OPENCLAW_VERSION_FALLBACK = "2026.8.1";
+//
+// It is the THIRD copy of the pin (install.sh, install-x64.sh, here), and
+// nothing in the code can derive it: it exists precisely for the moment the file
+// the other two read cannot be read. So the guard is a test —
+// `install-node-engine-table.test.ts`, "pins the same core version everywhere it
+// is written down" — which fails if any of the four drifts. What drift costs,
+// measured on this value: with the pin file unreadable, install.sh falls back to
+// 2026.9.3 while this fell back to 2026.8.1, so `readUpdateStatus` answered
+// `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
+// box that has one, the false-success shape — and `reinstallManagedPluginPayload`
+// pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
+const OPENCLAW_VERSION_FALLBACK = "2026.9.3";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);

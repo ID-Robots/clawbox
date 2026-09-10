@@ -47,6 +47,8 @@ const mockEnsurePlugin = vi.mocked(ensureChannelPlugin);
 const mockRestart = vi.mocked(restartGateway);
 const mockReadConfig = vi.mocked(readConfig);
 const mockConfigSet = vi.mocked(runOpenclawConfigSet);
+/** Releases a config read held open by the absent-key cancellation case. */
+let finishAbsentRead: () => void = () => {};
 
 /**
  * The gateway ANSWERED. A `null` row from an answering gateway means "there is
@@ -247,6 +249,30 @@ describe("OpenclawWhatsappPairing", () => {
     finishWrite();
     await started;
 
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("does not bounce the gateway for a card closed while a box with no such key was read", async () => {
+    // THE CASE THE OUTER GUARD IS FOR, and the one the sibling below cannot
+    // cover: a config with NO `channels.whatsapp` at all — which is every box
+    // that never unpaired, i.e. the common path. The read still happens, the
+    // cancel can still land in it, and the inner guard is never reached because
+    // the key was not off. Reviewer's probe: with the outer guard deleted this
+    // fails and the sibling below still passes.
+    mockReadConfig.mockImplementation(
+      () => new Promise((resolve) => { finishAbsentRead = () => resolve({ channels: {} }); }),
+    );
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    const started = pairing.start();
+    await vi.waitFor(() => expect(mockReadConfig).toHaveBeenCalled());
+    pairing.stop();
+    finishAbsentRead();
+    await started;
+
+    expect(mockConfigSet).not.toHaveBeenCalled();
     expect(mockRestart).not.toHaveBeenCalled();
   });
 

@@ -226,15 +226,25 @@ describe("install.sh / install-x64.sh Node engine table", () => {
     expect(accepts("install-x64.sh", DIST_VERSION), DIST_VERSION).toBe(true);
   });
 
-  it("pins the same core version in both installers and in the pin file", () => {
-    // `OPENCLAW_VERSION` is only the fallback for a missing pin file, but it is
-    // the version a corrupted or partial install lands on, so a stale one there
-    // is a box quietly installed onto the previous core — with, now, the wrong
-    // Node floor behind it.
+  it("pins the same core version everywhere it is written down", () => {
+    // FOUR places, and every one of them is a fallback for the same moment: the
+    // pin file cannot be read. `OPENCLAW_VERSION` in each installer is the
+    // version a corrupted or partial install lands on; `OPENCLAW_VERSION_FALLBACK`
+    // in the updater is what the UI's "Latest" column and the managed-plugin
+    // reinstall use. They drifted once, and the cost was not a cosmetic one:
+    // install.sh fell back to the new pin while updater.ts fell back to the old,
+    // so the UI answered "no OpenClaw update available" over a box that had one
+    // (false success) and the channel plugins were pinned to the previous core's
+    // version on the new core. Nothing can derive these — they exist for the
+    // moment the shared file is unavailable — so this case is the guard.
     const pinned = readFileSync(path.join(REPO, "config/openclaw-target.txt"), "utf-8").trim();
     expect(pinned).toBe("2026.9.3");
     for (const [name, source] of Object.entries(INSTALLERS)) {
       expect(source, name).toContain(`OPENCLAW_VERSION="${pinned}"`);
     }
+    const updater = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
+    expect(updater, "src/lib/updater.ts").toContain(
+      `const OPENCLAW_VERSION_FALLBACK = "${pinned}";`,
+    );
   });
 });
