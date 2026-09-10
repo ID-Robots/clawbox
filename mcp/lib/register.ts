@@ -235,11 +235,22 @@ function installCallHandler(server: McpServer, entries: Map<string, CallEntry>):
     const name = request.params.name;
     const entry = entries.get(name);
     if (!entry) {
+      // NOT "there is no such tool on this edition", which is what this said
+      // while the list could not change: a WITHDRAWN name lands here too — the
+      // mailbox read tools follow Settings → Email — and that tool does exist on
+      // this edition, it is just not being offered now. The old wording sent a
+      // model looking for an edition problem, and it was the one refusal in this
+      // module's vocabulary that did not say "do not retry", while
+      // `toolErrorResult` stamps `isError: true` — which is exactly the chronic
+      // failure Hermes' per-server circuit breaker counts, and the thing the
+      // whole registration gate exists to avoid.
       return toolErrorResult(
         new ToolError(
           "NOT_FOUND",
-          `This ClawBox has no tool called "${name}".`,
-          "Use a tool from this server's tool list; the list depends on which edition this device runs.",
+          `This ClawBox is not offering a tool called "${name}".`,
+          "Do not retry this name. Read this server's tool list again and use a name from it:"
+            + " the list depends on which edition this device runs, and a few tools are withdrawn"
+            + " while the owner has switched off what they need.",
         ),
         name,
       );
@@ -291,8 +302,6 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
         // take the agent's whole tool surface down on a customer device.
         console.error(`[clawbox-mcp] TOOL CONTRACT: ${violation}`);
       }
-      registered.push(info);
-      entries.set(name, { shape, handler, maxChars });
 
       const wrapped = async (args: unknown) => {
         try {
@@ -317,6 +326,15 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see ToolHandler
         wrapped as any,
       );
+      // RECORDED ONLY ONCE THE SDK HAS TAKEN IT. `registerTool` throws on a name
+      // it already holds, and this used to push into `registered`/`entries`
+      // first: a throw then left a row for a tool that was never published, and
+      // — now that a family can be registered again later — one such row per
+      // attempt, with `list()` over-reporting and a later `remove()` clearing
+      // only the first of them. Nothing in the tree makes it throw today; the
+      // ordering is what keeps that true of the next caller as well.
+      registered.push(info);
+      entries.set(name, { shape, handler, maxChars });
       if (handle) handles.set(name, handle);
     },
     remove(name) {

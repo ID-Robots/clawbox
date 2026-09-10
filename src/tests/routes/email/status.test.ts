@@ -5,6 +5,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
   // email routes now reach) keeps its value.
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: vi.fn(),
+  getKnown: vi.fn(),
   setMany: vi.fn(),
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
@@ -14,12 +15,13 @@ vi.mock("@/lib/hermes-email", () => ({ hermesEmailState: vi.fn() }));
 // machine running the suite.
 vi.mock("@/lib/email-pending", () => ({ countPending: vi.fn() }));
 
-import { get } from "@/lib/config-store";
+import { get, getKnown } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { countPending } from "@/lib/email-pending";
 import { hermesEmailState } from "@/lib/hermes-email";
 
 const mockGet = vi.mocked(get);
+const mockGetKnown = vi.mocked(getKnown);
 const mockHarness = vi.mocked(getActiveHarness);
 const mockHermesState = vi.mocked(hermesEmailState);
 const mockCount = vi.mocked(countPending);
@@ -38,6 +40,8 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
   mockHarness.mockResolvedValue("openclaw");
   mockCount.mockReturnValue(0);
+  // The default is a store that WAS read and holds nothing.
+  mockGetKnown.mockResolvedValue({ value: undefined, known: true });
   storeWith({});
   GET = (await import("@/app/setup-api/email/status/route")).GET;
 });
@@ -68,7 +72,26 @@ describe("GET /setup-api/email/status", () => {
   });
 
   it("answers canRead false on a device with no account", async () => {
-    expect((await (await GET()).json()).canRead).toBe(false);
+    const data = await (await GET()).json();
+    expect(data.canRead).toBe(false);
+    // …and says nothing about the store, because there was nothing wrong with
+    // it. `storeUnreadable` is absent rather than false, so a build that
+    // predates the field cannot be read as "the store was fine".
+    expect(data.storeUnreadable).toBeUndefined();
+  });
+
+  it("says so when `configured: false` only means the store could not be READ", async () => {
+    // The ordinary config read answers `{}` to an EACCES, an EIO and a
+    // half-written JSON alike, so "no account" and "could not look" arrive here
+    // as the same 200. They are not the same answer: the MCP server WITHDRAWS
+    // email_list/email_read from a running agent on a definite no, and a
+    // root-owned data/config.json after an update would otherwise take a
+    // working mailbox away from it (mcp/lib/context.ts probeEmailReadStatus).
+    mockGetKnown.mockResolvedValue({ value: undefined, known: false });
+    const data = await (await GET()).json();
+    expect(data.configured).toBe(false);
+    expect(data.canRead).toBe(false);
+    expect(data.storeUnreadable).toBe(true);
   });
 
   it("carries the pending-draft count and the defaults the panel fills in with", async () => {

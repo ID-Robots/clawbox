@@ -409,7 +409,28 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
   //
   // Registered ONLY when the owner chose a mode that opens the mailbox. See the
   // circuit-breaker note on registerEmailTools.
+  //
+  // `ctx` decides where the list STARTS and not where it stays: the owner can
+  // change the mode under a running server, and `watchEmailReadability` below is
+  // what carries that to the agent.
   if (ctx.emailCanRead) registerEmailReadTools(reg);
+}
+
+/**
+ * Whether a server with THIS registrar has a mailbox surface to keep in step.
+ *
+ * Two things ride on it, which is why it is a named predicate and not an inline
+ * test at the call site. The obvious one: a `core` or `browser` profile
+ * registers no email tool at all, so there is nothing to poll for. The other is
+ * the SDK's: the FIRST `registerTool` on a server declares the `tools`
+ * capability, and `Server.registerCapabilities` throws once a transport is
+ * connected — so a post-`connect()` registration is only safe on a server that
+ * had already registered something before connecting. `email_send` is
+ * unconditional wherever the email family exists, so its presence answers both
+ * questions at once, from the gates that actually decided them.
+ */
+export function hasMailboxSurface(reg: Registrar): boolean {
+  return reg.list().some((tool) => tool.name === "email_send");
 }
 
 /**
@@ -538,16 +559,25 @@ export const EMAIL_READ_TOOL_NAMES = ["email_list", "email_read"] as const;
  * How often this server re-asks the device whether the agent may read the
  * mailbox.
  *
- * One loopback GET of `/setup-api/email/status` — a read of the device's own
- * config store, no network — per interval per MCP child, and there are one or
- * two of those. That is the whole cost, and it buys the only thing that reaches
- * a running gateway: without it the owner has to restart something before
- * Settings → Email means anything to the agent, which is the defect.
+ * One loopback GET of `/setup-api/email/status` per interval per MCP child, and
+ * there are one or two of those. On OpenClaw that route is a read of the config
+ * store, the pending-draft file and the edition lock, and nothing else. On a
+ * Hermes or dual box it is more than it looks — the same handler also asks
+ * `hermesEmailState()`, which re-reads and re-parses `~/.hermes/.env` once per
+ * value with no cache — so the cost there is a handful of small local reads, not
+ * one. Still local, still tiny beside a model turn, and it buys the only thing
+ * that reaches a running gateway: without it the owner has to restart something
+ * before Settings → Email means anything to the agent, which is the defect.
  *
  * Thirty seconds because of what the owner actually does: change the mode, then
  * ask the assistant to look at their mail. A minute would leave that first
  * request refused often enough to look broken; polling faster buys nothing,
  * since the harness only re-reads the tool list between turns anyway.
+ *
+ * A DIRECT NUDGE would be better than any interval, and there is none to use:
+ * the device's web server and this process share no channel, the OpenClaw
+ * gateway exposes no RPC that reaches its MCP children (see
+ * `registerEmailReadTools`), and `refreshNow` is here for the day one exists.
  */
 export const EMAIL_READABILITY_POLL_MS = 30_000;
 
@@ -577,6 +607,14 @@ export interface EmailReadabilityWatchOptions {
  *
  * The timer is `unref`ed: a stdio server exits when its transport closes, and a
  * poll must never be the reason a child outlives the harness that spawned it.
+ * (Measured under the Bun the box runs this with, rather than assumed: without
+ * `unref` the same script hangs on stdin EOF instead of exiting.)
+ *
+ * A flip emits TWO `tools/list_changed` — one per tool, which is the SDK's unit
+ * — where the argument above asks for as few as possible. Both land in one
+ * synchronous tick, so no host can observe the list with only half the pair in
+ * it, and the SDK offers no way to batch them; the cost worth avoiding was a
+ * notification every interval, and that is the one this does avoid.
  */
 export function watchEmailReadability(
   reg: Registrar,
@@ -590,6 +628,12 @@ export function watchEmailReadability(
   // thirty seconds, but a box under load can be slower than that, and two
   // in-flight probes could apply their answers out of order.
   let asking = false;
+  // Whether the LAST answer was "could not ask". Kept so that state is said
+  // once, each way, rather than per tick or never: a box whose bearer went
+  // stale, or whose status route answers 500 for good, otherwise looks exactly
+  // like a box where nothing changed — silence over a gate that has stopped
+  // working, which is the shape this module exists to remove.
+  let unreachable = false;
 
   async function refreshNow(): Promise<void> {
     if (asking) return;
@@ -598,7 +642,22 @@ export function watchEmailReadability(
       // `probeEmailReadStatus` never throws; a test double might, and a poll
       // that throws would take the whole server down through the interval.
       const answer = await probe().catch(() => null);
-      if (answer === null || answer === canRead) return;
+      if (answer === null) {
+        if (!unreachable) {
+          unreachable = true;
+          console.error(
+            "[clawbox-mcp] could not ask the device whether the mailbox is readable;"
+            + ` leaving ${EMAIL_READ_TOOL_NAMES.join(" and ")} as they are`,
+          );
+        }
+        return;
+      }
+      if (unreachable) {
+        unreachable = false;
+        console.error("[clawbox-mcp] the device is answering about the mailbox again");
+      }
+      if (answer === canRead) return;
+      const before = new Set(reg.list().map((tool) => tool.name));
       if (answer) registerEmailReadTools(reg);
       else for (const name of EMAIL_READ_TOOL_NAMES) reg.remove(name);
       // AFTER the change, never before it: the SDK refuses a second
@@ -608,9 +667,17 @@ export function watchEmailReadability(
       canRead = answer;
       // Worth a line: "the agent still cannot see my mailbox" is otherwise
       // invisible from the outside, and this is the moment that answers it.
+      //
+      // What actually MOVED, read off the registrar rather than assumed from
+      // `answer`: the profile gates inside `reg.tool` drop a tool silently, and
+      // `remove` is a no-op for a name that was never there, so "what was asked
+      // for" and "what the agent's list gained or lost" are two different facts.
+      // Only the second is worth writing down.
+      const after = new Set(reg.list().map((tool) => tool.name));
+      const moved = EMAIL_READ_TOOL_NAMES.filter((name) => before.has(name) !== after.has(name));
       console.error(
         `[clawbox-mcp] mailbox readable=${answer}; `
-        + `${answer ? "registered" : "withdrew"} ${EMAIL_READ_TOOL_NAMES.join(" and ")}`,
+        + `${answer ? "registered" : "withdrew"} ${moved.join(" and ") || "nothing"}`,
       );
     } finally {
       asking = false;

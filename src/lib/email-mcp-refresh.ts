@@ -55,10 +55,10 @@ import { MCP_RELOAD_ASKED, reloadMcpServers, reportMcpReloadRefused } from "@/li
  * Never throws and never reports. A box whose dashboard is down, or an OpenClaw
  * box that has no dashboard at all, must not have its email settings save turned
  * into an error by a best-effort refresh: the settings ARE saved, the gate is
- * still enforced route-side, and the tool list catches up at the next restart —
- * which is exactly the behaviour of every box before this existed. WHICH of
- * those two it was decides how it is said; `reportMcpReloadRefused` owns that
- * rule for all three refresh helpers.
+ * still enforced route-side, and — for THIS family since 2026-09-10 — the MCP
+ * server re-probes the gate on its own within its poll, so a refusal here costs
+ * the owner seconds rather than a restart. WHICH of those it was decides how it
+ * is said; `reportMcpReloadRefused` owns that rule for all five refresh helpers.
  */
 export async function refreshEmailToolsIfReadabilityChanged(before: boolean, after: boolean): Promise<void> {
   if (before === after) return;
@@ -76,7 +76,10 @@ export async function refreshEmailToolsIfReadabilityChanged(before: boolean, aft
     await reportMcpReloadRefused(
       "email/mcp-refresh",
       became,
-      "the MCP server re-probes the mailbox gate on its own within the minute",
+      // Hedged on purpose: the re-probe belongs to a RUNNING MCP server, and a
+      // box between sessions has none. Both halves are true as written.
+      "a running MCP server re-probes the mailbox gate on its own within the minute,"
+        + " and one started later re-probes as it boots",
     );
     return;
   }

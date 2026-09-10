@@ -1,9 +1,15 @@
-// Everything the tool modules need to know about THIS device, resolved once at
+// Everything the tool modules need to know about THIS device, resolved at
 // startup so no tool has to re-discover it per call.
 //
 // Capability probes follow the same principle as edition gating: a tool that
 // cannot work here (no screen grabber installed, no readable journal) is not
 // registered at all, rather than registered and failing.
+//
+// ONE of these answers does not stay put: `emailCanRead` is the only thing here
+// the owner changes with the agent already running, so it is the INITIAL value
+// of a question the server goes on asking (`watchEmailReadability`,
+// mcp/tools/email.ts). Everything else is settled before `connect()` and stays
+// settled for the process lifetime.
 
 import { capabilitiesFor, type HarnessFacts } from "../../src/lib/harness/capabilities";
 import { appExistsOnEdition } from "../../src/lib/desktop-app-editions";
@@ -162,8 +168,13 @@ export interface McpContext {
   /**
    * Whether the device has a mail account AND the owner picked a mode that
    * lets the agent open the mailbox. Decides whether email_list/email_read are
-   * registered at all — a tool that could only ever 409 is a tool that trips
-   * Hermes' circuit breaker and takes the whole server down with it.
+   * registered AT STARTUP — a tool that could only ever 409 is a tool that
+   * trips Hermes' circuit breaker and takes the whole server down with it.
+   *
+   * The one snapshot here that is refreshed afterwards, because it is the one
+   * an owner flips mid-session: `watchEmailReadability` (mcp/tools/email.ts)
+   * re-asks and registers or withdraws the pair on the live connection. So this
+   * field is where the tool list STARTS, not where it stays.
    *
    * Both editions, like sending: reading runs on ClawBox's own IMAP client and
    * needs nothing from Hermes.
@@ -210,6 +221,12 @@ interface EmailStatusPayload {
   configured?: boolean;
   /** The device's own answer to "may the agent read?" — see below. */
   canRead?: boolean;
+  /**
+   * `configured: false` because the device's config store could not be READ —
+   * an EACCES from a root-owned `data/config.json`, an EIO, a half-written
+   * file. See `storeUnreadable` in src/lib/email-config.ts.
+   */
+  storeUnreadable?: boolean;
 }
 
 /**
@@ -230,12 +247,24 @@ interface EmailStatusPayload {
  */
 export async function probeEmailReadStatus(): Promise<boolean | null> {
   const status = await apiTry<EmailStatusPayload>("/setup-api/email/status", { timeoutMs: 3_000 });
+  // Nothing answered at all.
   if (!status) return null;
+  // The device answered, and said its own store is the thing it could not read.
+  // A 200 carrying `configured: false` is otherwise indistinguishable from "no
+  // account", and on the RUNNING path that difference is the whole question: a
+  // root-owned `data/config.json` after an update, or one EIO off the eMMC,
+  // would otherwise read as the owner switching reading off and take the tools
+  // away from an agent whose mailbox is fine.
+  if (status.storeUnreadable === true) return null;
   if (!status.configured) return false;
+  // An account exists and the device did not answer the question — a web server
+  // rolled back to a build that predates the three-mode setting, under a live
+  // MCP child. Silence is not a "no".
+  if (typeof status.canRead !== "boolean") return null;
   // The device answers this itself (src/lib/email-config.ts modeAllowsReading).
   // Restating which modes allow reading here would be a second copy of the
   // rule, in the process least likely to be updated when a mode is added.
-  return status.canRead === true;
+  return status.canRead;
 }
 
 /** The startup gate: see `probeEmailReadStatus` for why unknown is `false` here. */

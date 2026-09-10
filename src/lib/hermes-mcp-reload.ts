@@ -57,7 +57,7 @@ const ACTED_STATUSES = new Set(["ok", "reloaded", "success", "completed", "done"
  * is a perfectly ordinary non-error reply that means NOTHING HAPPENED (see
  * `RELOAD_PARAMS`), and a `result !== null` test scored it as success. That is
  * the "reported from the fact that a call returned, not from what it returned"
- * shape, in the one helper all four refresh call sites depend on.
+ * shape, in the one helper all five refresh call sites depend on.
  *
  * A reply that names NO status stays a success: that is the historical reading,
  * and only a frame that names a state is allowed to contradict it — a dashboard
@@ -110,11 +110,17 @@ export const MCP_RELOAD_ALREADY = "the MCP servers were already reloaded for thi
  * what will actually happen next — and WHAT that is differs per family, which is
  * why a caller may supply the sentence (`noDashboardNote`). The MCP server
  * re-probes the mailbox gate on its own now (mcp/tools/email.ts), so the mailbox
- * catches up within its poll; nothing re-probes the other three, and for them
- * the honest answer is still "when the MCP server is next spawned". That is a
- * longer wait than it reads: measured on the owner's OpenClaw box (2026-09-10)
- * the child serving the chat had been up for 28 minutes across a settings
- * change, so an OpenClaw box is not quietly respawning these servers.
+ * catches up within its poll; nothing re-probes the other FOUR families, and for
+ * them the honest answer is still "when the MCP server is next spawned". That is
+ * a longer wait than it reads: measured on the owner's OpenClaw box
+ * (2026-09-10) the child serving the chat had been up for 28 minutes across a
+ * settings change, so an OpenClaw box is not quietly respawning these servers.
+ *
+ * The note rides on the REFUSAL line too, not just the no-dashboard one. A
+ * Hermes box whose dashboard answers `confirm_required` is a real refusal and
+ * stays an error — but for the family that repairs itself, an operator reading
+ * that line needs to know the tool list is not stuck, or the error is the same
+ * false alarm one branch further along.
  *
  * THE QUESTION IS THE EDITION, NOT THE ACTIVE HARNESS. Which agent serves the
  * owner right now and whether this box HAS a Hermes dashboard are different
@@ -165,5 +171,7 @@ export async function reportMcpReloadRefused(
   // Names the mechanism, like the success sentences above and for the same
   // reason: what was asked is Hermes' dashboard, whatever this box calls its
   // agent.
-  console.error(`${line}, but Hermes would not reload its MCP servers`);
+  console.error(
+    `${line}, but Hermes would not reload its MCP servers — ${logSafe(noDashboardNote, 160)}`,
+  );
 }

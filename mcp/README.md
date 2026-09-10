@@ -195,8 +195,9 @@ is to name the reason (ClawBox AI is not connected) and the fix (Settings → AI
 Providers) and to forbid improvising around it.
 
 The probe is `canGenerateImages` off `/setup-api/chat/capabilities`, resolved
-once at startup like the rest — so the same staleness the email tools had applies
-here, in both directions: after linking, the refusal must go, and the harness's
+once at startup and never re-asked — so unlike the mailbox gate, which the server
+now follows while it runs, the startup staleness still applies here, in both
+directions: after linking, the refusal must go, and the harness's
 own image tool must actually appear. Linking asks for both
 (`src/lib/hermes-image-refresh.ts`): `reload.env`, because the backend's
 credential lives in `~/.hermes/.env` and only reaches a running agent that way;
@@ -586,8 +587,10 @@ running forever.
 **Registered only when `GET /setup-api/coding-agent/status` answers
 `enabled && ready` at startup** (`mcp/lib/context.ts`): the owner's switch in
 the Coding Agent desktop app is on AND Claude Code, the wrapper and a
-ClawBox AI token are all present. Same rule as `email_list`, for the same
-circuit-breaker reason. The run route enforces the switch again — 409, which
+ClawBox AI token are all present. Same gate as `email_list`, for the same
+circuit-breaker reason — but not the same timing: this one is asked at startup
+and never again, so a switch flipped under a running server reaches the agent
+when that server is next spawned. The run route enforces the switch again — 409, which
 the tool maps to CONFLICT / do-not-retry — because the owner can flip it under
 a live server. `POST /setup-api/coding-agent/enable` is the second route in
 the API that **refuses the MCP bearer** (`src/lib/owner-session.ts`): the

@@ -11,7 +11,8 @@
 // agent will actually do.
 
 import { NextResponse } from "next/server";
-import { DEFAULT_IMAP_HOST, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, publicEmailStatus } from "@/lib/email-config";
+import { getKnown } from "@/lib/config-store";
+import { DEFAULT_IMAP_HOST, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, EMAIL_KEYS, publicEmailStatus } from "@/lib/email-config";
 import { countPending } from "@/lib/email-pending";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesEmailState } from "@/lib/hermes-email";
@@ -22,6 +23,25 @@ export async function GET() {
   try {
     const status = await publicEmailStatus();
     const harness = await getActiveHarness();
+    // WHY `configured: false` IS NOT ALWAYS "THERE IS NO ACCOUNT".
+    //
+    // `config-store`'s ordinary read answers `{}` to a missing file, an EACCES
+    // from a `data/config.json` an update left root-owned, an EIO and a
+    // half-written JSON alike — right for the settings it was written for, and
+    // a guess here. Nothing on a SCREEN needs the difference; the MCP server
+    // does, because it WITHDRAWS email_list/email_read from a running agent on
+    // a definite "no" (mcp/lib/context.ts probeEmailReadStatus), and one
+    // unreadable moment must not look like the owner switching reading off.
+    //
+    // Asked HERE rather than inside `publicEmailStatus`, which five other
+    // callers share and none of them needs this: the question is about the
+    // store, not about the account, and this is the one reader that acts on it.
+    // ONE strict read, and only when the answer is ambiguous — an account that
+    // resolved is itself proof the store was readable.
+    //
+    // Absent rather than `false` when all is well, so a build that predates the
+    // field cannot be read as one promising a readable store.
+    const storeUnreadable = status.configured ? false : !(await getKnown(EMAIL_KEYS.address)).known;
 
     // Only Hermes can receive mail; the UI hides the inbound fields otherwise
     // rather than offering a switch that does nothing.
@@ -29,6 +49,7 @@ export async function GET() {
 
     const base = {
       ...status,
+      ...(storeUnreadable ? { storeUnreadable: true } : {}),
       harness,
       inboundSupported,
       // The approvals strip needs a count even when the panel has not opened
