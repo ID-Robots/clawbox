@@ -219,13 +219,25 @@ export function chatgptSurface(): ChatgptSurface {
   // failure direction, not the list.
   for (const model of CODEX_MODELS) add(model.id);
 
-  // Never an empty picker. A manifest that parses but lists nothing we would
-  // offer is a shape this does not understand, and serving zero rows would
-  // refuse every model on a box whose ChatGPT account works — the false failure
-  // `core-model-lifecycle.ts` fails open to avoid, in the one direction that
-  // matters here. Unreachable now that the curated pass above runs
-  // unconditionally, unless the core suppresses every curated id on this route
-  // as well, and kept for exactly that case.
+  // Never an empty picker, and the list here is deliberately UNFILTERED — the
+  // one place this file does not honour a suppression, so the reason is worth
+  // spelling out.
+  //
+  // Since the widening pass above runs unconditionally, `models` already IS the
+  // curated list minus the core's `chatgpt.com` suppressions, unioned with the
+  // core's own rows. Reaching zero therefore means the core has suppressed EVERY
+  // curated id on this route, so filtering this fallback through the same
+  // suppressions would return the empty array — the same thing, spelled longer.
+  //
+  // And an empty surface is the one shape this module must not produce:
+  // `isCodexSupportedModelId` would refuse every model while naming none, and
+  // `chatgptDefaultModelId` would hand `configure` a default its own guard
+  // refuses, so a ChatGPT sign-in could not complete at all. A row that 400s
+  // upstream carrying the core's own error is the better of two bad answers in
+  // that corner, and it is the fail-open direction `core-model-lifecycle.ts`
+  // takes everywhere else. Pinned by
+  // `codex-picker-astra.test.ts > keeps a last-resort list rather than emptying
+  // the picker`.
   if (models.length === 0) return { models: CODEX_MODELS, source: "curated" };
   return { models, source: "core" };
 }

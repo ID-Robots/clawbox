@@ -208,6 +208,31 @@ describe("the ChatGPT-account surface follows the installed core", () => {
     expect(surface.models).toEqual(CODEX_MODELS);
   });
 
+  it("keeps a last-resort list rather than emptying the picker", () => {
+    // A core that has retired EVERY curated id from this route and lists nothing
+    // else. Because the widening pass runs unconditionally, this is the only way
+    // the derived list can come out empty — so filtering the fallback through the
+    // same suppressions would return nothing at all, and an empty surface is the
+    // one shape this module must not produce: the guard would refuse every model
+    // while naming none, and the cold-start default would be a model that same
+    // guard refuses, so a ChatGPT sign-in could not complete.
+    write({
+      modelCatalog: {
+        providers: { openai: { models: [] } },
+        suppressions: CODEX_MODELS.map((model) => ({
+          provider: "openai",
+          model: model.id,
+          when: { baseUrlHosts: ["chatgpt.com"] },
+        })),
+      },
+    });
+    const surface = chatgptSurface();
+    expect(surface.models).toEqual(CODEX_MODELS);
+    expect(surface.source).toBe("curated");
+    // The invariant the last resort exists to hold: setup can still finish.
+    expect(isCodexSupportedModelId(chatgptDefaultModelId())).toBe(true);
+  });
+
   it("never defaults a sign-in to a model its own write guard refuses", () => {
     // The invariant H-2 is about: `configure` computes the cold-start default
     // and then judges it with `offSurfaceCodexModelMessage` in the same request.
