@@ -201,9 +201,15 @@ const PROVIDERS: Record<string, ProviderConfig> = {
       // key of its own so it coexists with the API-key one, and the model is
       // `openai/<id>` — OpenClaw 2 has no `codex/` namespace and never
       // consults a `codex:*` profile for an openai route. Evidence in
-      // src/lib/chatgpt-subscription.ts. Newest model every ChatGPT tier can
-      // run, Free included; entitled accounts are moved up to gpt-5.6 by the
-      // sign-in probe below.
+      // src/lib/chatgpt-subscription.ts.
+      //
+      // A SEED that never reaches the config: the subscription branch below
+      // overwrites `config.defaultModel` with `chatgptDefaultModelId()` before
+      // the entitlement probe, and the explicit-pick branch overwrites it with
+      // what the owner named — so this constant is what the table needs to be
+      // shaped like, not what a box is written with. Which model the floor
+      // actually is, and what the probe is offered above it, are the installed
+      // core's answer now (src/lib/chatgpt-surface.ts), not this line's.
       defaultModel: chatgptModelRef(CHATGPT_DEFAULT_MODEL_ID),
       profileKey: CHATGPT_PROFILE_KEY,
     },
