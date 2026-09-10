@@ -155,7 +155,9 @@ describe("catalog — codex is never served from a cache the code cannot write",
     // manifest on disk -> `chatgptSurface()` -> this payload. Shaped like core
     // 2026.9.3's openai manifest, which lists `gpt-6-astra` first and suppresses
     // `gpt-5.4` on `chatgpt.com` ("retired from the ChatGPT-account Codex
-    // route"). Nothing here is curated: both answers come from the file.
+    // route"). Both of those answers come from the file: the curated list can
+    // only widen what follows them, never reorder the head or restore a row the
+    // core retired.
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "catalog-codex-manifest"));
     const saved = {
       HOME: process.env.HOME,
@@ -194,8 +196,15 @@ describe("catalog — codex is never served from a cache the code cannot write",
       const res = await GET(new NextRequest("http://clawbox.local/setup-api/ai-models/catalog?provider=codex"));
       const body = (await res.json()) as { models: Array<{ id: string; label: string }>; source?: string };
 
-      expect(body.models.map((m) => m.id)).toEqual(["gpt-6-astra", "gpt-5.5"]);
+      const ids = body.models.map((m) => m.id);
+      // The core's own rows first, in its order — a model this repo has never
+      // heard of reaches the payload, labelled by the core.
+      expect(ids.slice(0, 2)).toEqual(["gpt-6-astra", "gpt-5.5"]);
       expect(body.models[0].label).toBe("GPT-6 Astra");
+      // …and the row the core retired from THIS route is gone, though the
+      // curated fallback still carries it.
+      expect(ids).not.toContain("gpt-5.4");
+      expect(CODEX_MODELS.map((m) => m.id)).toContain("gpt-5.4");
       // Still not the box's own answer: the manifest says what the CORE routes,
       // not what this account is entitled to, so it is served unstamped like
       // every other list this route did not enumerate.

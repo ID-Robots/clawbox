@@ -86,6 +86,39 @@ const STAT_FLOOR_MS = 5_000;
 const PLATFORM_HOST = "api.openai.com";
 const CHATGPT_HOST = "chatgpt.com";
 
+/**
+ * The `api` the core gives the ChatGPT route's provider config
+ * (`buildOpenAICodexLiveProviderConfig` / `buildOpenAICodexStaticProviderConfig`
+ * both set `api: "openai-chatgpt-responses"`), for the OTHER condition its
+ * suppression matcher supports — `when.providerConfigApiIn`.
+ */
+const CHATGPT_ROUTE_API = "openai-chatgpt-responses";
+
+/** Lowercased, or "" for anything that is not a usable string. */
+function lower(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+/**
+ * The lowercased strings of a `when` condition array, as a SET; empty when there
+ * is none.
+ *
+ * A set, so every test below is an exact element match. A `.includes()` against
+ * a host string reads as substring sanitization — `js/incomplete-url-substring-
+ * sanitization`, and CodeQL is right to flag the shape even where the value is
+ * an array element rather than a URL: these are the core's own exact host and
+ * api tokens, never a URL to search inside, and `has()` is the only comparison
+ * that can be true of them.
+ */
+function conditionSet(value: unknown): ReadonlySet<string> {
+  if (!Array.isArray(value)) return EMPTY;
+  const out = new Set<string>();
+  for (const item of value) {
+    if (typeof item === "string" && item.trim()) out.add(item.trim().toLowerCase());
+  }
+  return out;
+}
+
 /** What the installed core says about one provider's ChatGPT (Codex) route. */
 export interface CoreChatgptRoute {
   /** The catalogue rows the manifest lists, in the order it lists them. */
@@ -112,6 +145,18 @@ interface ManifestFacts {
 interface CachedManifest extends ManifestFacts {
   /** The file this was read from, and what it looked like when it was read. */
   file: string;
+  /**
+   * Which candidate that file was, in `coreManifestPaths` order.
+   *
+   * Kept because the staleness check re-stats `file` alone: an answer cached
+   * from the beside-config manifest (the ordinary OpenClaw 2 layout, where the
+   * bundled path does not exist) would otherwise survive an upgrade that
+   * INSTALLS the bundled one — that file is not the one being watched, so a
+   * higher-priority manifest could appear and never be read for the life of the
+   * process. That was a stale retirement hint before; it now decides whether a
+   * model switch is accepted.
+   */
+  candidateIndex: number;
   mtimeMs: number;
   size: number;
   /** When the file was last stat'ed, so a burst of lookups costs one syscall. */
@@ -242,6 +287,13 @@ function catalogueFor(manifest: unknown, provider: string): unknown {
  *
  * Returns null when the manifest carries no catalogue for this provider at all.
  * An empty `models[]` with suppressions is still an answer; no block is not.
+ *
+ * `status` is deliberately NOT read here, though `collect()` harvests it from
+ * the same bytes two lines down: a `deprecated` row is upstream saying "prefer
+ * the newer one", and on this surface the newer one is plan-gated — see the
+ * ASYMMETRY note above `withoutRetiredModels` in the catalogue route. What a
+ * ChatGPT account can still run is stated by the route suppressions, and those
+ * are what this reads.
  */
 function chatgptRouteFrom(manifest: unknown, provider: string): CoreChatgptRoute | null {
   const modelCatalog = (manifest as { modelCatalog?: unknown } | null)?.modelCatalog;
@@ -265,18 +317,63 @@ function chatgptRouteFrom(manifest: unknown, provider: string): CoreChatgptRoute
   const subscriptionOnly: string[] = [];
   const suppressions = (modelCatalog as { suppressions?: unknown } | null)?.suppressions;
   if (Array.isArray(suppressions)) {
-    for (const entry of suppressions as Array<{ provider?: unknown; model?: unknown; when?: { baseUrlHosts?: unknown } | null }>) {
-      if (entry?.provider !== provider) continue;
+    type Suppression = {
+      provider?: unknown;
+      model?: unknown;
+      when?: { baseUrlHosts?: unknown; providerConfigApiIn?: unknown } | null;
+    };
+    for (const entry of suppressions as Suppression[]) {
+      // Case-insensitively, as the core's own matcher compares them
+      // (`normalizeProviderId` / `normalizeLowercaseStringOrEmpty` before the
+      // test): a manifest that spelled `"provider": "OpenAI"` would be honoured
+      // there and ignored here, and the picker would keep a row the core
+      // refuses.
+      if (lower(entry?.provider) !== provider.toLowerCase()) continue;
       const model = typeof entry?.model === "string" ? entry.model.trim() : "";
       if (!model) continue;
-      const hosts = entry?.when?.baseUrlHosts;
-      if (!Array.isArray(hosts)) continue;
-      const lower = hosts.filter((h): h is string => typeof h === "string").map((h) => h.trim().toLowerCase());
-      if (lower.includes(CHATGPT_HOST)) offRoute.add(model);
-      else if (lower.includes(PLATFORM_HOST) && !subscriptionOnly.includes(model)) subscriptionOnly.push(model);
+      const hosts = conditionSet(entry?.when?.baseUrlHosts);
+      // The core's suppression matcher compiles TWO conditions —
+      // `when.baseUrlHosts` and `when.providerConfigApiIn` — and the second is
+      // the natural spelling for this route once the transport, rather than the
+      // URL, is what identifies it. Reading only the host one would leave a
+      // model the core has taken off the ChatGPT route in the picker and in the
+      // write guard, with every turn dying on the core's own `Unknown model`.
+      const apis = conditionSet(entry?.when?.providerConfigApiIn);
+      if (hosts.size === 0 && apis.size === 0) continue; // unconditional: not a route claim
+      if (hosts.has(CHATGPT_HOST) || apis.has(CHATGPT_ROUTE_API)) offRoute.add(model);
+      else if (hosts.has(PLATFORM_HOST) && !subscriptionOnly.includes(model)) subscriptionOnly.push(model);
     }
   }
-  return { listed, offRoute, subscriptionOnly };
+  // FROZEN before it is cached: `coreChatgptRoute` hands the caller the cached
+  // object itself, and a caller that pushed a row onto `listed` would corrupt
+  // the answer for every other reader of the same manifest.
+  return Object.freeze({
+    listed: Object.freeze(listed),
+    offRoute: offRoute as ReadonlySet<string>,
+    subscriptionOnly: Object.freeze(subscriptionOnly),
+  }) as CoreChatgptRoute;
+}
+
+/**
+ * Has a manifest candidate BETTER than the cached one appeared since?
+ *
+ * Only asked on the same five-second floor as the stat above, and only when the
+ * cached answer did not come from the first candidate — on the ordinary layout
+ * (nothing bundled, the answer beside the config) that is one `existsSync` per
+ * provider per five seconds, and on a box where the bundled manifest is the
+ * answer it is never asked at all.
+ */
+function higherPriorityManifestAppeared(provider: string, candidateIndex: number): boolean {
+  if (candidateIndex <= 0) return false;
+  const candidates = coreManifestPaths(provider);
+  for (let i = 0; i < candidateIndex && i < candidates.length; i += 1) {
+    try {
+      if (fsSync.existsSync(candidates[i])) return true;
+    } catch {
+      // Unreadable is not "appeared": the full walk below is what decides.
+    }
+  }
+  return false;
 }
 
 function factsFor(provider: string): ManifestFacts {
@@ -293,7 +390,8 @@ function factsFor(provider: string): ManifestFacts {
     // otherwise pin "nothing is retired" for the rest of that process's life.
     try {
       const stat = fsSync.statSync(cached.file);
-      if (stat.mtimeMs === cached.mtimeMs && stat.size === cached.size) {
+      if (stat.mtimeMs === cached.mtimeMs && stat.size === cached.size
+        && !higherPriorityManifestAppeared(provider, cached.candidateIndex)) {
         cached.checkedAt = now;
         return cached;
       }
@@ -312,7 +410,8 @@ function factsFor(provider: string): ManifestFacts {
   // that is the ordinary shape of an OpenClaw 2 box, where the bundled path
   // never exists and the beside-config answer is the right one to cache.
   let degraded = false;
-  for (const file of coreManifestPaths(provider)) {
+  const candidates = coreManifestPaths(provider);
+  for (const [candidateIndex, file] of candidates.entries()) {
     // Opened ONCE and both stat and read taken from the descriptor. A
     // `statSync` followed by a `readFileSync` of the same path is two lookups
     // of a name that can change between them — and the whole point of the stat
@@ -374,7 +473,15 @@ function factsFor(provider: string): ManifestFacts {
       continue;
     }
     if (!degraded) {
-      cache.set(provider, { retired, chatgpt, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
+      cache.set(provider, {
+        retired,
+        chatgpt,
+        file,
+        candidateIndex,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        checkedAt: Date.now(),
+      });
     }
     return { retired, chatgpt };
   }

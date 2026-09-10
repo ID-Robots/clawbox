@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CODEX_MODELS } from "@/lib/provider-models";
-import { chatgptSurface } from "@/lib/chatgpt-surface";
+import { chatgptDefaultModelId, chatgptSurface, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
 import { resetCoreModelLifecycle } from "@/lib/core-model-lifecycle";
 import { chatgptSupportedModelsSentence, isCodexSupportedModelId } from "@/lib/subscription-surface";
 import { createManifestFixture, type ManifestFixture } from "@/tests/helpers/core-model-manifests";
@@ -182,14 +182,80 @@ describe("the ChatGPT-account surface follows the installed core", () => {
     expect(isCodexSupportedModelId("gpt-5.5")).toBe(true);
   });
 
-  it("falls back rather than emptying the picker when the manifest offers nothing", () => {
-    // A catalogue whose every row is off-surface is a shape this does not
-    // understand; serving zero rows would refuse every model on a box whose
-    // ChatGPT account works.
-    write({ modelCatalog: { providers: { openai: { models: [{ id: "gpt-9-pro" }] } } } });
+  it("never narrows below the curated list — the manifest is a seed, not the catalogue", () => {
+    // The core's manifest is its static seed (`modelCatalog.discovery` says the
+    // openai catalogue is resolved at runtime), so a chatgpt-route model can
+    // live outside it. If the derivation replaced the curated list, such a model
+    // would lose its row AND be refused by the write guard — the false failure
+    // this surface exists to remove, pointed the other way. It can only ADD.
+    write({ modelCatalog: { providers: { openai: { models: [{ id: "gpt-6-astra", name: "GPT-6 Astra" }] } } } });
+    const ids = chatgptSurface().models.map((m) => m.id);
+    expect(ids).toContain("gpt-6-astra");
+    for (const curated of CODEX_MODELS) {
+      expect(ids, `${curated.id} fell out of the manifest's seed and must still be offered`)
+        .toContain(curated.id);
+    }
+    // …and only the core's own retirement takes one away.
+    expect(isCodexSupportedModelId("gpt-5.5")).toBe(true);
+  });
+
+  it("still offers a curated row the manifest lists nothing about", () => {
+    // Not even a provider block for openai: that is "this manifest cannot say",
+    // which is UNKNOWN and never "the route is empty".
+    write({ modelCatalog: { providers: {} } });
     const surface = chatgptSurface();
     expect(surface.source).toBe("curated");
     expect(surface.models).toEqual(CODEX_MODELS);
+  });
+
+  it("never defaults a sign-in to a model its own write guard refuses", () => {
+    // The invariant H-2 is about: `configure` computes the cold-start default
+    // and then judges it with `offSurfaceCodexModelMessage` in the same request.
+    // A core that retires gpt-5.5 from the ChatGPT route — the move 2026.9.3
+    // made for gpt-5.4, on a model both manifests already mark deprecated —
+    // would otherwise 400 a fresh ChatGPT sign-in on its own default, with no
+    // other door out of setup.
+    write({
+      modelCatalog: {
+        providers: {
+          openai: {
+            models: [
+              { id: "gpt-6-astra", name: "GPT-6 Astra" },
+              { id: "gpt-5.5", name: "GPT-5.5" },
+            ],
+          },
+        },
+        suppressions: [
+          {
+            provider: "openai",
+            model: "gpt-5.5",
+            reason: "GPT-5.5 has retired from the ChatGPT-account Codex route.",
+            when: { baseUrlHosts: ["chatgpt.com"] },
+          },
+        ],
+      },
+    });
+    const fallbackDefault = chatgptDefaultModelId();
+    expect(fallbackDefault).not.toBe("gpt-5.5");
+    expect(isCodexSupportedModelId(fallbackDefault)).toBe(true);
+  });
+
+  it("keeps gpt-5.5 as the floor while the core still routes it", () => {
+    write(MANIFEST_2026_8_1);
+    expect(chatgptDefaultModelId()).toBe("gpt-5.5");
+    // …and the probe's candidates are the surface rows ABOVE that floor, which
+    // on this core is exactly the hand-kept preference list it replaces.
+    expect(chatgptUpgradeCandidates()).toEqual(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
+  });
+
+  it("lets the probe reach a model the core added", () => {
+    write(MANIFEST_2026_9_3);
+    // The other half of the same defect: with a hand-kept preference list a
+    // fresh sign-in on this core would land on gpt-5.5 while the picker offered
+    // Astra first — the complaint this change exists to answer, surviving in the
+    // one place that writes config.
+    expect(chatgptUpgradeCandidates()[0]).toBe(ASTRA);
+    expect(chatgptDefaultModelId()).toBe("gpt-5.5");
   });
 
   it("ignores a suppression that names another provider or no host", () => {
@@ -204,6 +270,68 @@ describe("the ChatGPT-account surface follows the installed core", () => {
         ],
       },
     });
-    expect(chatgptSurface().models.map((m) => m.id)).toEqual(["gpt-5.5"]);
+    // gpt-5.5 survives: neither suppression is a claim about THIS provider's
+    // ChatGPT route. The rest of the curated list is there because the seed is
+    // never allowed to narrow the surface.
+    const ids = chatgptSurface().models.map((m) => m.id);
+    expect(ids).toContain("gpt-5.5");
+    expect(isCodexSupportedModelId("gpt-5.5")).toBe(true);
+  });
+
+  it("reads the api-shaped suppression the core's matcher also compiles", () => {
+    // `when.providerConfigApiIn` is the core's OTHER condition, and the natural
+    // spelling once the transport rather than the URL identifies the route.
+    // Ignoring it would leave the row offered, the write guard accepting it, and
+    // every turn dying on the core's own `Unknown model`.
+    write({
+      modelCatalog: {
+        providers: {
+          openai: {
+            models: [{ id: "gpt-5.5", name: "GPT-5.5" }, { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" }],
+          },
+        },
+        suppressions: [
+          {
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            when: { providerConfigApiIn: ["openai-chatgpt-responses"] },
+          },
+        ],
+      },
+    });
+    expect(chatgptSurface().models.map((m) => m.id)).not.toContain("gpt-5.6-sol");
+    expect(isCodexSupportedModelId("gpt-5.6-sol")).toBe(false);
+  });
+
+  it("matches a suppression whose provider or model is spelled in another case", () => {
+    // The core normalises both sides before comparing; a manifest that spelled
+    // `"provider": "OpenAI"` would be honoured there and ignored here, leaving a
+    // row the core refuses in the picker.
+    write({
+      modelCatalog: {
+        providers: { openai: { models: [{ id: "gpt-5.5", name: "GPT-5.5" }, { id: "gpt-5.4", name: "GPT-5.4" }] } },
+        suppressions: [
+          { provider: "OpenAI", model: "gpt-5.4", when: { baseUrlHosts: ["ChatGPT.com"] } },
+        ],
+      },
+    });
+    expect(chatgptSurface().models.map((m) => m.id)).not.toContain("gpt-5.4");
+  });
+
+  it("keeps a subscription-only model whose name looks like an off-surface tier", () => {
+    // An `api.openai.com` suppression is the core stating that the PLATFORM
+    // route cannot reach the model — positive evidence that this surface is the
+    // only way to it — so it outranks the `-pro`/`-nano` tier narrowing, which
+    // is a guess made from the shape of a name.
+    write({
+      modelCatalog: {
+        providers: { openai: { models: [{ id: "gpt-5.5", name: "GPT-5.5" }] } },
+        suppressions: [
+          { provider: "openai", model: "gpt-6-astra-pro", when: { baseUrlHosts: ["api.openai.com"] } },
+        ],
+      },
+    });
+    expect(chatgptSurface().models.map((m) => m.id)).toContain("gpt-6-astra-pro");
+    expect(isCodexSupportedModelId("gpt-6-astra-pro")).toBe(true);
   });
 });

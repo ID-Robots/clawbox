@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
-import { chatgptSurface } from "@/lib/chatgpt-surface";
+import { CODEX_MODELS } from "@/lib/provider-models";
+import { chatgptDefaultModelId, chatgptSurface } from "@/lib/chatgpt-surface";
 import { coreManifestPaths, resetCoreModelLifecycle } from "@/lib/core-model-lifecycle";
 import { createManifestFixture, type ManifestFixture } from "@/tests/helpers/core-model-manifests";
 
@@ -89,6 +90,40 @@ function subscriptionOnlyIds(manifest: unknown, provider: string): string[] {
   return out;
 }
 
+/** The ids the manifest's provider block lists. */
+function listedIds(manifest: unknown, provider: string): string[] {
+  const block = (manifest as { modelCatalog?: { providers?: Record<string, unknown> } } | null)
+    ?.modelCatalog?.providers?.[provider];
+  const rows = (block as { models?: unknown } | null)?.models;
+  if (!Array.isArray(rows)) return [];
+  return (rows as Array<{ id?: unknown }>)
+    .map((row) => (typeof row?.id === "string" ? row.id.trim() : ""))
+    .filter((id) => id.length > 0);
+}
+
+/** Ids the manifest suppresses ON the ChatGPT route — retired from this surface. */
+function chatgptRouteSuppressedIds(manifest: unknown, provider: string): string[] {
+  const list = (manifest as { modelCatalog?: { suppressions?: unknown } } | null)
+    ?.modelCatalog?.suppressions;
+  if (!Array.isArray(list)) return [];
+  const out: string[] = [];
+  for (const entry of list as Array<Suppression & { when?: { providerConfigApiIn?: unknown } | null }>) {
+    if (String(entry?.provider ?? "").toLowerCase() !== provider.toLowerCase()) continue;
+    if (typeof entry.model !== "string" || !entry.model.trim()) continue;
+    const hosts = Array.isArray(entry?.when?.baseUrlHosts) ? entry.when?.baseUrlHosts : [];
+    const apis = Array.isArray(entry?.when?.providerConfigApiIn) ? entry.when?.providerConfigApiIn : [];
+    // A SET, so each test is an exact element match rather than a substring
+    // search over a host — see `conditionSet` in core-model-lifecycle.ts.
+    const conditions = new Set([...hosts, ...apis]
+      .filter((v): v is string => typeof v === "string")
+      .map((v) => v.trim().toLowerCase()));
+    if (conditions.has("chatgpt.com") || conditions.has("openai-chatgpt-responses")) {
+      out.push(entry.model.trim());
+    }
+  }
+  return out;
+}
+
 function readFirstManifest(paths: string[]): unknown {
   for (const file of paths) {
     try {
@@ -117,6 +152,50 @@ describe("the ChatGPT surface follows the installed core", () => {
       expect(offered, `the installed core routes ${id} on the ChatGPT account only, `
         + "but the picker does not offer it").toContain(id);
     }
+  });
+
+  /**
+   * The WHOLE derived list against the installed core, not just its
+   * subscription-only half — the case that would have noticed "the shipped core
+   * sees no change" stopping being true, which the hand-typed fixtures in
+   * `codex-picker-astra.test.ts` cannot.
+   *
+   * Written as invariants rather than as a second copy of the derivation: an
+   * expected list spelled here would be the hand-kept mirror this change
+   * removed, one file over.
+   */
+  it("offers a list the installed core's own manifest justifies, row by row", () => {
+    resetCoreModelLifecycle();
+    const manifest = readFirstManifest(coreManifestPaths("openai"));
+    if (!manifest) {
+      // No core installed (CI). Stated rather than skipped silently.
+      expect(manifest).toBeNull();
+      return;
+    }
+    const listed = new Set(listedIds(manifest, "openai"));
+    const subscriptionOnly = new Set(subscriptionOnlyIds(manifest, "openai"));
+    const offRoute = new Set(chatgptRouteSuppressedIds(manifest, "openai"));
+    const curated = new Set(CODEX_MODELS.map((m) => m.id));
+    const offered = chatgptSurface().models.map((m) => m.id);
+
+    expect(offered.length).toBeGreaterThan(0);
+    for (const id of offered) {
+      // Nothing is invented: every row came from the manifest or from the
+      // curated floor the derivation is not allowed to narrow past.
+      expect(listed.has(id) || subscriptionOnly.has(id) || curated.has(id),
+        `${id} is offered but the installed manifest and the curated list both omit it`).toBe(true);
+      // …and nothing the core retired from this route survives.
+      expect(offRoute.has(id), `${id} is suppressed on the ChatGPT route and must not be offered`).toBe(false);
+    }
+    // The widening rule, against the real file: a curated row the core has NOT
+    // retired from this route is still there.
+    for (const id of curated) {
+      if (offRoute.has(id)) continue;
+      expect(offered, `${id} is in no suppression of the installed manifest and must still be offered`)
+        .toContain(id);
+    }
+    // And the cold-start default is a row the write guard will accept.
+    expect(offered).toContain(chatgptDefaultModelId());
   });
 });
 

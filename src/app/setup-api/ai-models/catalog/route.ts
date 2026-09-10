@@ -768,15 +768,25 @@ function isOfferableModelId(provider: string, id: string): boolean {
  * payload named — and a `defaultModelId` outside `models` is a picker with
  * nothing selected.
  *
- * ASYMMETRY, deliberate and worth naming: the lookup is keyed on the CATALOGUE
- * provider, and the core ships no `codex` extension — so the openai picker
- * loses `gpt-5.5` while the codex picker keeps it as its default. That is the
- * same upstream model, hidden on one auth mode and offered on the other, and it
- * is the behaviour we want today: the core's replacement, `gpt-5.6-sol`, is
- * plan-gated, and a Free ChatGPT account handed it as the only row AND as the
- * saved default would 400 on every turn. If a `codex` manifest ever appears, or
- * the mapping is "fixed" to consult openai's, that default moves silently —
- * which is what `curated-defaults-offerable.test.ts` is there to notice.
+ * ASYMMETRY, deliberate and worth naming: the openai picker loses `gpt-5.5`
+ * while the codex picker keeps it as its default. That is the same upstream
+ * model, hidden on one auth mode and offered on the other, and it is the
+ * behaviour we want: the core's replacement, `gpt-5.6-sol`, is plan-gated, and a
+ * Free ChatGPT account handed it as the only row AND as the saved default would
+ * 400 on every turn.
+ *
+ * The REASON changed even though the behaviour did not, and the old one is worth
+ * correcting rather than leaving to mislead: the lookup is keyed on the
+ * catalogue provider and the core ships no `codex` extension — that used to be
+ * the whole story, but the codex surface now reads the OPENAI manifest
+ * (`chatgptSurface()`), so it is no longer true that nothing over there can see
+ * openai's lifecycle. It reads that file for the ROUTE and deliberately not for
+ * the retirement statuses in it: what the ChatGPT account can still run is
+ * stated by the route suppressions, and `status: "deprecated"` is upstream
+ * saying "prefer the newer one", which on a plan-gated replacement is advice
+ * this surface must not follow. Do not "fix" the asymmetry by feeding openai's
+ * retirements into the codex payload; `curated-defaults-offerable.test.ts` is
+ * there to notice a default that moves.
  */
 function withoutRetiredModels(payload: CatalogResponse): CatalogResponse {
   // Resolved ONCE. A payload can run to hundreds of rows (the OpenRouter

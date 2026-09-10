@@ -79,6 +79,7 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
+import { chatgptDefaultModelId, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   CHATGPT_DEFAULT_MODEL_ID,
@@ -2434,9 +2435,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // gpt-5.5, which every tier can use. Defaulting a non-entitled account
       // onto a gpt-5.6 model would be far worse than being conservative: the
       // upstream 400 is a surface error with no failover, so every turn fails.
+      // The FLOOR first, asked of the same surface that judges the result 90
+      // lines below (`offSurfaceCodexModelMessage`). `CHATGPT_DEFAULT_MODEL_ID`
+      // is a constant, and the day a core retires gpt-5.5 from the ChatGPT
+      // route a sign-in would 400 on its own default with no other door — see
+      // `chatgptDefaultModelId`. It answers gpt-5.5 on every core measured so
+      // far, so this is a no-op today and a floor that cannot be refused
+      // tomorrow.
+      config.defaultModel = chatgptModelRef(chatgptDefaultModelId());
       try {
         const entitled = await resolveEntitledCodexModel({
           accessToken: normalizedApiKey,
+          // The surface's own rows above the floor, newest first, instead of a
+          // second hand-kept list: on the pinned core that IS
+          // `CODEX_MODEL_PREFERENCE`, and on a core that adds a model the probe
+          // can now reach it — without one, a fresh sign-in would keep landing
+          // on gpt-5.5 while the picker offered something newer.
+          candidates: chatgptUpgradeCandidates(),
           onDiagnostic: (message) => console.log(`[configure] ${message}`),
         });
         if (entitled) {
