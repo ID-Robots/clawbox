@@ -310,6 +310,9 @@ describe("a box whose origin is not the update repository is not 'up to date'", 
     expect(info.remote?.reason).toContain(BUNDLE);
     // Not an anonymous refusal — nothing was refused, nothing was asked.
     expect(info.remote?.refusedAnonymously).toBeFalsy();
+    // And not worded as a network fault: "couldn't reach the update server"
+    // would send the owner to the router over a file on their own disk.
+    expect(info.remote?.cause).toBe("device");
   });
 
   it("reports no update as unknown rather than as absent", async () => {
@@ -332,6 +335,9 @@ describe("a box whose origin is not the update repository is not 'up to date'", 
     "https://github.com/ID-Robots/clawbox.git",
     "git@github.com:ID-Robots/clawbox.git",
     "ssh://git@github.com/ID-Robots/clawbox.git",
+    // No user: ~/.ssh/config supplies it, and a dev box is entitled to be set
+    // up that way. Refusing it would be the false failure this guard exists for.
+    "github.com:ID-Robots/clawbox.git",
   ])("still reports a reachable remote on a box whose origin is %s", async (origin) => {
     install({
       "remote get-url origin": { stdout: `${origin}\n`, stderr: "" },
@@ -376,6 +382,7 @@ describe("a pinned branch the box could not resolve is not 'up to date'", () => 
 
     expect(info.remote?.reachable).toBe(false);
     expect(info.remote?.reason).toMatch(/update branch \(beta\)/);
+    expect(info.remote?.cause).toBe("device");
     expect(info.clawbox.updateAvailable).toBeNull();
   });
 
@@ -398,6 +405,62 @@ describe("a pinned branch the box could not resolve is not 'up to date'", () => 
 
     expect(info.remote?.reachable).toBe(false);
     expect(info.clawbox.updateAvailable).toBeNull();
+  });
+});
+
+describe("a box with no update branch to compare against is not 'up to date'", () => {
+  /**
+   * The same unknown one step earlier. `.update-branch` unreadable, or a pinned
+   * value `isSafeBranch` refuses: nothing is compared against `origin/<branch>`
+   * at all, and the answer used to be "the remote is reachable, there is no
+   * delta" — after which the tag list, which between releases says "the latest
+   * tag is the one I have", supplied the green all-clear to a box dozens of
+   * commits behind its branch. Drift does not cover it: the `no-pin` state
+   * records a code and a reason but never sets `detected`.
+   */
+  function boxWithNoPin(pin: Result | Error): void {
+    install({
+      "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    mockReadFile.mockImplementation(async (file) => {
+      const p = String(file);
+      if (p.endsWith(".update-branch")) {
+        if (pin instanceof Error) throw pin;
+        return pin.stdout;
+      }
+      if (p.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+      if (p.endsWith("package.json")) return JSON.stringify({ version: "1.0.0" });
+      throw new Error("ENOENT");
+    });
+  }
+
+  it("says it has no branch to compare against when the pin file is unreadable", async () => {
+    boxWithNoPin(new Error("EACCES"));
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(false);
+    expect(info.remote?.cause).toBe("device");
+    expect(info.remote?.reason).toMatch(/no update branch/i);
+    expect(info.clawbox.updateAvailable).toBeNull();
+  });
+
+  it("says the same for a pinned branch name it refuses to use", async () => {
+    // `isSafeBranch` rejects it, so no fetch and no comparison can happen —
+    // which is a reason to say nothing is known, not to report no update.
+    boxWithNoPin({ stdout: "beta; rm -rf /\n", stderr: "" });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(false);
+    expect(info.clawbox.updateAvailable).toBeNull();
+    expect(countArgv("fetch --quiet origin")).toBe(0);
   });
 });
 

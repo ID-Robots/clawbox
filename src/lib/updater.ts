@@ -134,6 +134,21 @@ export interface RemoteReachability {
    * a ClawBox never has — so it is classified here rather than shown raw.
    */
   refusedAnonymously?: boolean;
+  /**
+   * Present — and only ever `"device"` — when the failure is HERE rather than on
+   * the network: an `origin` that is not the release remote, no update branch to
+   * compare against, or a local git read that did not answer. "Couldn't reach
+   * the update server" is the wrong sentence for those and sends the owner to
+   * the router instead of to the setting, which is the same distinction
+   * isMissingRef() draws for a deleted branch.
+   *
+   * ABSENT is the network case — a refusal, a timeout, no DNS — which is what
+   * every reason meant before this field existed, so an older client reads
+   * exactly as it did. There is deliberately no `"network"` value to test for:
+   * nothing writes one, and a surface comparing against it would take the wrong
+   * branch on every real network fault.
+   */
+  cause?: "device";
   /** One owner-facing sentence. Absent when the remote answered. */
   reason?: string;
 }
@@ -323,11 +338,14 @@ function refusalReason(err: unknown, text: string): string {
  */
 function isReleaseRemoteUrl(url: string): boolean {
   const u = url.trim();
-  if (!u) return false;
   const scheme = u.match(/^([A-Za-z][A-Za-z0-9+.-]*):\/\//)?.[1]?.toLowerCase();
   if (scheme) return scheme !== "file";
-  // git's other network spelling, which has no scheme: `user@host:path`.
-  return /^[^/\\:]+@[^/\\:]+:/.test(u);
+  // git's other network spelling, which has no scheme: `user@host:path`, and
+  // `host:path` — where the user comes from ~/.ssh/config, which a dev box is
+  // entitled to be set up with. Without the `user@` the part before the colon
+  // has to LOOK like a host (a dot, no slash) so a path does not pass as one.
+  if (/^[^/\\:]+@[^/\\:]+:/.test(u)) return true;
+  return /^[^/\\:.][^/\\:]*\.[^/\\:]*:/.test(u);
 }
 
 /**
@@ -339,18 +357,31 @@ function isReleaseRemoteUrl(url: string): boolean {
  * already says so in git's own words. Only positive evidence (an origin that
  * reads back and is not a network address) contradicts a fetch that
  * "succeeded".
+ *
+ * `remote get-url` and not `ls-remote --get-url`, which also answers locally
+ * and additionally expands `url.<base>.insteadOf`: for a remote that does not
+ * exist, `ls-remote --get-url` prints the NAME back ("origin") rather than
+ * failing, which would turn "this box has no origin" — the one case that must
+ * fail open to the fetch's own verdict — into a refusal worded about a remote
+ * called origin. Nothing on a ClawBox configures `insteadOf`; a person who
+ * does has deliberately pointed their box at a mirror.
+ *
+ * Only the FIRST line is judged: `remote.origin.url` can be multi-valued
+ * (`set-url --add`), and a second line must not ride in on the first one's
+ * scheme.
  */
 async function checkReleaseRemote(projectDir: string): Promise<RemoteReachability> {
   let url: string;
   try {
     const { stdout } = await execGit(projectDir, ["remote", "get-url", "origin"], { timeout: 10_000 });
-    url = String(stdout ?? "").trim();
+    url = String(stdout ?? "").split("\n")[0].trim();
   } catch {
     return REMOTE_REACHABLE;
   }
   if (!url || isReleaseRemoteUrl(url)) return REMOTE_REACHABLE;
   return {
     reachable: false,
+    cause: "device",
     reason: `This ClawBox's "origin" is not the update repository — it points at ${url}, which is not a `
       + "network address, so this check never reached GitHub and cannot say whether an update is waiting.",
   };
@@ -366,8 +397,33 @@ async function checkReleaseRemote(projectDir: string): Promise<RemoteReachabilit
 function unresolvedTargetReason(branch: string): RemoteReachability {
   return {
     reachable: false,
+    cause: "device",
     reason: `This ClawBox could not work out which commit its update branch (${branch}) points at, `
       + "so it cannot say whether an update is waiting.",
+  };
+}
+
+/**
+ * There is no branch to compare against at all.
+ *
+ * The same unknown one step earlier: an unreadable `.update-branch`, or a
+ * pinned value `isSafeBranch` refuses. Both used to answer "the remote is
+ * reachable" over a comparison that never happened — and then the tag list,
+ * which between releases says "the latest tag is the one I have", supplied the
+ * green all-clear to a box dozens of commits behind its branch.
+ *
+ * An update still RUNS on such a box: `resolveUpdateBranch()` falls back to the
+ * checked-out branch and its origin copy, all of it local. Making this check
+ * resolve the branch the same way is the better answer and a change to the
+ * branch-resolution module, not to this card's honesty; until then the check
+ * says it does not know rather than claiming the box is current.
+ */
+function noUpdateBranchReason(): RemoteReachability {
+  return {
+    reachable: false,
+    cause: "device",
+    reason: "This ClawBox records no update branch to compare itself against, so it cannot say whether "
+      + "an update is waiting. Set the update branch in System Update → Advanced options.",
   };
 }
 
@@ -3358,10 +3414,16 @@ interface ComponentVersionInfo {
   current: string | null;
   target: string | null;
   /**
-   * `null` where the check could not look — see `remote` below. A reader that
-   * treats it as a boolean gets the old behaviour: every consumer resolves it
-   * as `updateAvailable ?? <compare current against target>`, and null falls
-   * through to that comparison exactly as `false` did.
+   * `null` where the check could not look — see `remote` below.
+   *
+   * INVARIANT: null only ever travels with `target: null`, which is what makes
+   * it safe at every reader. They resolve the field as
+   * `updateAvailable ?? <compare current against target>`, and `??` does NOT
+   * treat null like false — false short-circuits, null falls through to the
+   * comparison — so the two agree only because a comparison against a null
+   * target is false as well. A null beside a real target would put the Update
+   * button on a box nobody compared, and `/update/status` and `device_status`
+   * would then disagree about it.
    */
   updateAvailable?: boolean | null;
 }
@@ -3517,9 +3579,9 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
   try {
     branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
   } catch {
-    return { target: null, remote: REMOTE_REACHABLE };
+    return { target: null, remote: noUpdateBranchReason() };
   }
-  if (!branch || !isSafeBranch(branch)) return { target: null, remote: REMOTE_REACHABLE };
+  if (!branch || !isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason() };
 
   const remote = await reachOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
     timeout: 20_000,
@@ -3622,8 +3684,9 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       // no update" and "I could not look" are different answers, and `false`
       // was being read as the first. A target found LOCALLY — a drift, a newer
       // tag already on disk — still stands, because that evidence did not come
-      // from the remote. Every reader falls through `?? <version comparison>`,
-      // so null behaves exactly as the old false did.
+      // from the remote, which is also what keeps the null to the no-target
+      // case the interface's invariant requires: one expression, so the two
+      // cannot drift apart.
       updateAvailable: clawboxTarget ? true : remote.reachable ? false : null,
     },
     openclaw: {

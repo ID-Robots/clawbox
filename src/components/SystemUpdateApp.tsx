@@ -36,7 +36,17 @@ export interface VersionInfo {
    * field must keep rendering exactly as it did, so ABSENT means "not known",
    * never "unreachable".
    */
-  remote?: { reachable: boolean; refusedAnonymously?: boolean; reason?: string };
+  remote?: {
+    reachable: boolean;
+    refusedAnonymously?: boolean;
+    /**
+     * `"device"` when the failure is the box's own — its `origin`, its update
+     * branch, a local git read. Absent is the network case, which is also what
+     * a server that predates the field sends.
+     */
+    cause?: "device";
+    reason?: string;
+  };
 }
 
 /**
@@ -433,7 +443,13 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       case "fetch-error":
         return {
           icon: "cloud_off", iconClass: "text-amber-300",
-          headline: tr("update.heroUnreachable", "Couldn't reach the update server"),
+          // Two headlines, because the device now reports two kinds of failure
+          // and "couldn't reach the update server" sends the owner to the
+          // router for a box whose `origin` is a file on its own disk. The
+          // reason below names the actual one either way.
+          headline: versions?.remote?.cause === "device"
+            ? tr("update.heroCouldNotCheck", "Couldn't check for updates")
+            : tr("update.heroUnreachable", "Couldn't reach the update server"),
           subhead: versionsError
             ?? versions?.remote?.reason
             ?? tr("update.heroUnreachableSub", "Check the device's internet connection and try again."),
