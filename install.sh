@@ -3369,8 +3369,11 @@ handover_legacy_updater() {
     systemctl is-active --quiet clawbox-gateway.service && gateway_was_active=1
     # /run masks cannot override the gold image's /etc unit. The root-held
     # drop-in works before the new launcher has been installed as well.
-    bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" enter || return 1
     mask_owned=1
+    if ! bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" enter; then
+      bash "$SRC_DIR/config/clawbox-gateway-maintenance.sh" leave || true
+      return 1
+    fi
     systemctl stop clawbox-gateway.service || rc=$?
   fi
   if [ "$rc" -eq 0 ]; then

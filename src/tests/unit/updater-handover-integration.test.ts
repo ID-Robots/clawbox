@@ -48,4 +48,11 @@ describe("bootstrap handover resumes the actual updater",()=>{
   expect(updater.getUpdateState().phase).toBe("failed");
   expect(mocks.lock).not.toHaveBeenCalled();
  });
+ it("reports malformed handover JSON as a failed upgrade and clears the marker",async()=>{
+  writeFileSync(`${dir}/data/updater-handover.json`, '{"version":');
+  expect(await updater.checkContinuation()).toBe(false);
+  expect(updater.getUpdateState().phase).toBe("failed");
+  expect(existsSync(`${dir}/data/updater-handover.json`)).toBe(false);
+  expect(mocks.lock).not.toHaveBeenCalled();
+ });
 });

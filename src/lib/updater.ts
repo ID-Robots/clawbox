@@ -3887,7 +3887,8 @@ async function resumeContinuation(): Promise<boolean> {
   try {
     if (existsSync(handoverFile)) handover = JSON.parse(await readFile(handoverFile, "utf8"));
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    if (err instanceof SyntaxError) handover = null;
+    else if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   if (handover !== undefined) {
     let bootstrapState: string | null = null;
@@ -3903,14 +3904,14 @@ async function resumeContinuation(): Promise<boolean> {
       runtime.state = createInitialState(applicableSteps());
       runtime.state.phase = "failed";
       runtime.state.error = "The legacy updater handover did not finish. Retry the upgrade; it is not complete.";
-      await rm(handoverFile);
+      await rm(handoverFile, { force: true });
       await clearUpdateLock();
       return false;
     }
     // The new app is real and the root bridge has settled. Resume from the
     // beginning: marking the pre-reboot steps completed here would skip core
     // installation and the very migration the bridge exists to serialize.
-    await rm(handoverFile);
+    await rm(handoverFile, { force: true });
     await setMany({ update_needs_continuation: undefined, [UPDATE_INTERRUPTED_KEY]: undefined });
     const steps = applicableSteps();
     runtime.running = true;

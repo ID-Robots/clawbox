@@ -13,10 +13,10 @@ function fn(name: string) {
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), "task789-")); });
 afterEach(() => { rmSync(dir, {recursive:true, force:true}); });
-function bridge({buildRc=0, swapRc=0, version="3.9.0", hermes=false, preMasked=false} = {}) {
+function bridge({buildRc=0, swapRc=0, enterRc=0, version="3.9.0", hermes=false, preMasked=false} = {}) {
   mkdirSync(`${dir}/.next/standalone`,{recursive:true}); mkdirSync(`${dir}/data`);
   mkdirSync(`${dir}/config`);
-  writeFileSync(`${dir}/config/clawbox-gateway-maintenance.sh`, 'echo "maintenance $1" >> "$PROJECT_DIR/events"');
+  writeFileSync(`${dir}/config/clawbox-gateway-maintenance.sh`, `echo "maintenance $1" >> "$PROJECT_DIR/events"\nif [ "$1" = enter ]; then exit ${enterRc}; fi`);
   writeFileSync(`${dir}/.next/standalone/package.json`,JSON.stringify({version}));
   writeFileSync(`${dir}/package.json`,JSON.stringify({version:"4.0.0"}));
   writeFileSync(`${dir}/.next/BUILD_ID`,"old-build");
@@ -59,6 +59,14 @@ describe("legacy bootstrap handover executes shipped shell functions",()=>{
   });
   it("refuses before stopping any service when swap cannot be provisioned",()=>{
     const r=bridge({swapRc:1}); expect(r.status).toBe(1); expect(r.events).toBe("swap\n");
+  });
+  it("cleans a partially installed guard when enter fails without rebuilding or revoking permissions",()=>{
+    const r=bridge({enterRc:1});expect(r.status,r.stderr).toBe(1);
+    expect(r.events).toContain("maintenance enter\nmaintenance leave");
+    expect(r.events).not.toContain("build\n");
+    expect(r.events).not.toContain("policy\n");
+    expect(r.events).not.toContain("systemctl stop");
+    expect(r.marker).toBe(false);
   });
   it("does not touch an absent Hermes gateway",()=>{
     const r=bridge({hermes:true}); expect(r.status,r.stderr).toBe(0);
