@@ -46,31 +46,55 @@ async function mountChatApp(): Promise<HTMLElement> {
 }
 
 /**
- * Mount and let every mount-effect request go out, without waiting on the
- * composer.
+ * Mount, and let the mount effects' requests go out.
  *
- * The two "never" assertions below have to be able to FAIL with a diff rather
- * than time out: a surface that opens the socket does so from its mount effect,
- * so what they need is for that effect to have run, not for the chat to become
- * usable.
+ * The first half of each "never" assertion below, and deliberately NOT a wait on
+ * the composer: a surface that opens the socket unconditionally does so from its
+ * mount effect, so stopping here is what lets those assertions FAIL WITH A DIFF
+ * rather than time out. `settleFully` is the second half — without it they could
+ * also pass merely because nothing had happened yet.
  */
-async function mountAndSettle(): Promise<void> {
-  render(<ChatApp />);
-  await screen.findByRole("textbox");
+async function mountAndSettle(): Promise<HTMLElement> {
+  const textarea = await (async () => {
+    render(<ChatApp />);
+    return screen.findByRole("textbox");
+  })();
   await waitFor(() => expect(box.fetchedUrls.length).toBeGreaterThan(0));
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
+  return textarea;
+}
+
+/**
+ * …and now wait until the surface really has resolved and connected, so a
+ * "never" assertion cannot be vacuous.
+ *
+ * The composer enabling is the signal that `useHarnessAdapter` committed and
+ * `adapter.connect()` ran; the capabilities request is the signal that both of
+ * the hook's mount fetches were actually made.
+ */
+async function settleFully(textarea: HTMLElement): Promise<void> {
+  await waitFor(() => expect(textarea).not.toBeDisabled());
+  await waitFor(() =>
+    expect(box.fetchedUrls.some((u) => u.includes("/setup-api/chat/capabilities"))).toBe(true),
+  );
 }
 
 describe("the full-page chat on the Hermes edition", () => {
   it("never asks for the gateway's websocket config", async () => {
-    await mountAndSettle();
+    const textarea = await mountAndSettle();
+    expect(box.fetchedUrls.filter((u) => u.includes("/setup-api/gateway/ws-config"))).toEqual([]);
+    // Again once the harness has really resolved and connected, so this cannot
+    // pass merely because the surface had not got that far yet.
+    await settleFully(textarea);
     expect(box.fetchedUrls.filter((u) => u.includes("/setup-api/gateway/ws-config"))).toEqual([]);
   });
 
   it("never opens a websocket on a box that runs no gateway", async () => {
-    await mountAndSettle();
+    const textarea = await mountAndSettle();
+    expect(box.socketsOpened).toBe(0);
+    await settleFully(textarea);
     expect(box.socketsOpened).toBe(0);
   });
 
@@ -285,9 +309,14 @@ describe("the full-page chat on the OpenClaw edition", () => {
     // shared history projection reads back as a picture. It used to be base64
     // on the socket, which replayed as nothing at all.
     expect(message).toContain(`[Attached file: ${STAGED_PATH}]`);
-    // …and the BYTES are not on the wire any more. The base64 shape rather than
-    // a string this test could never produce: inlining is what the turn used to
-    // do, and it is what a revert would bring back.
+    // …and the BYTES are not on the wire any more. Pinned on the field they used
+    // to ride in — `params.attachments[].content` — because that is what a revert
+    // brings back, and a check on `message` alone would not see it.
+    const chatSend = sent.find((f) =>
+      f.method === "chat.send"
+      && String((f.params as { message?: unknown }).message ?? "").includes("what is this?"),
+    );
+    expect((chatSend?.params as Record<string, unknown>).attachments).toBeUndefined();
     expect(message).not.toMatch(/[A-Za-z0-9+/]{100,}={0,2}/);
   });
 });

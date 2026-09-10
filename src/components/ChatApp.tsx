@@ -767,12 +767,18 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     stageFiles(imageFiles)
   }, [caps.canAttachImages, stageFiles])
 
-  const removePendingAttachment = useCallback((index: number) => {
-    setPendingAttachments(prev => {
-      const gone = prev[index]
-      if (gone) revokePreviews([gone])
-      return prev.filter((_, i) => i !== index)
-    })
+  // Takes the ATTACHMENT, not its index, and revokes OUTSIDE the updater.
+  //
+  // React may invoke an updater more than once or abandon an invocation, so a
+  // revoke inside one can release a thumbnail whose attachment stays committed —
+  // and the strip renders `previewUrl` directly, so that is a dead picture beside
+  // a file that is still attached. `revokePreviews` being idempotent does not
+  // help: the hazard is revoking too EARLY, not twice. Identity rather than
+  // position for the same reason `key` uses it — the staging route stamps a
+  // unique name per file — so two quick removals cannot take each other's entry.
+  const removePendingAttachment = useCallback((gone: ChatAttachment) => {
+    revokePreviews([gone])
+    setPendingAttachments(prev => prev.filter(a => a.path !== gone.path))
   }, [])
 
   // Release every thumbnail when the surface goes away: an object URL pins the
@@ -1103,10 +1109,14 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
         {status === 'connecting' && messages.length === 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.4)', fontSize: 13 }}>
             <div style={{ width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'chatapp-spin 0.8s linear infinite' }} />
-            {/* The label names the gateway, so only a box that runs one gets it.
-                Elsewhere the wait is the harness resolving and the spinner says
-                that much without claiming a component this SKU does not have. */}
-            {caps.hasLiveConnection && t("chat.connectingGateway")}
+            {/* Named for assistive tech either way, and the label names the
+                GATEWAY only on a box that runs one — elsewhere the wait is the
+                harness resolving, and `chat.connectingPlaceholder` is the word
+                the composer itself already carries in this exact state, so no
+                new string is invented for ten locales to chase. */}
+            <span role="status" aria-live="polite">
+              {caps.hasLiveConnection ? t("chat.connectingGateway") : t("chat.connectingPlaceholder")}
+            </span>
           </div>
         )}
 
@@ -1340,7 +1350,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
           background: 'rgba(0,0,0,0.2)',
           display: 'flex', gap: 6, overflowX: 'auto', flexShrink: 0,
         }}>
-          {pendingAttachments.map((item, i) => (
+          {pendingAttachments.map((item) => (
             <div key={item.path} style={{ position: 'relative', flexShrink: 0 }}>
               {/* A picture shows itself; anything else shows its name, because a
                   document has no thumbnail and an empty tile says nothing about
@@ -1360,7 +1370,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                 }}>{item.name}</div>
               )}
               <button
-                onClick={() => removePendingAttachment(i)}
+                onClick={() => removePendingAttachment(item)}
                 aria-label={t('chat.attachment.remove', { name: item.name })}
                 style={{
                   position: 'absolute', top: -6, right: -6,
