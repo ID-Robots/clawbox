@@ -547,6 +547,64 @@ describe("config-store", () => {
 
       await expect(configStore.getKnown("present")).resolves.toEqual({ value: undefined, known: false });
     });
+
+    it("never logs a window of the file it failed to parse", async () => {
+      // A SyntaxError from JSON.parse quotes a slice of its INPUT in its own
+      // message, and the input here holds the mailbox password and both bot
+      // tokens. The mailbox-readability poll reaches this path twice a minute
+      // while a store stays corrupt, and `logs_tail` hands the journal back to
+      // the agent — so the line carries the KIND of failure and nothing else.
+      const secret = "s3cret-app-password";
+      await fs.writeFile(CONFIG_PATH, `{"email_password": "${secret}", "x": }`, "utf-8");
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await expect(configStore.getKnown("email_password")).resolves.toEqual({
+        value: undefined,
+        known: false,
+      });
+
+      const said = logged.mock.calls.map((args) => args.join(" ")).join("\n");
+      logged.mockRestore();
+      expect(said).not.toContain(secret);
+      // Not a single character of it, either: the quoted window is a substring.
+      expect(said).not.toMatch(/s3cret|app-password/);
+      expect(said).toContain("invalid JSON");
+    });
+  });
+
+  describe("getKnownMany", () => {
+    it("answers every key from ONE read", async () => {
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ a: "1", b: 2 }), "utf-8");
+
+      await expect(configStore.getKnownMany(["a", "b", "absent"])).resolves.toEqual({
+        known: true,
+        values: { a: "1", b: 2, absent: undefined },
+      });
+    });
+
+    it("cannot answer a torn mixture when the store is unreadable", async () => {
+      // The reason this exists: three getKnown calls are three reads, and a
+      // store readable for the first key and unreadable for the third would
+      // answer a state of the disk that never existed.
+      await fs.writeFile(CONFIG_PATH, "{ half written", "utf-8");
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await expect(configStore.getKnownMany(["a", "b"])).resolves.toEqual({
+        known: false,
+        values: {},
+      });
+
+      logged.mockRestore();
+    });
+
+    it("inherits nothing from the prototype chain", async () => {
+      await fs.writeFile(CONFIG_PATH, JSON.stringify({ a: "1" }), "utf-8");
+
+      const { values, known } = await configStore.getKnownMany(["__proto__", "constructor"]);
+      expect(known).toBe(true);
+      expect(values["__proto__"]).toBeUndefined();
+      expect(values.constructor).toBeUndefined();
+    });
   });
 
   describe("DATA_DIR and CONFIG_ROOT exports", () => {
