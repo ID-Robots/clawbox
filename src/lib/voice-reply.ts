@@ -9,9 +9,12 @@
  *    message, through the same speech chain the Voice tab orders (cloud →
  *    Kokoro or the reverse). Off is `tts.auto: "off"`. Never "always": a typed
  *    question gets a typed answer.
- *  - a voice message in the DESKTOP chat is transcribed on the box and sent as
- *    text, so the gateway cannot know it was spoken. The chat asks
- *    /setup-api/tts/speak for the reply's audio itself and plays it.
+ *  - in the DESKTOP chat the gateway speaks nothing at all: a recording is
+ *    transcribed on the box and sent as text, so `inboundAudio` is never true
+ *    for a turn from this surface and `tts.auto: "inbound"` cannot fire on any
+ *    reply here, typed or spoken. The chat asks /setup-api/tts/speak for the
+ *    reply's audio itself — playing it when the question was spoken, and
+ *    putting it on the bubble to press when it was typed.
  *
  * The switch lives in ClawBox's own config store, like the transcription
  * preference: the Hermes edition has no openclaw.json and its desktop chat

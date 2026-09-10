@@ -434,16 +434,16 @@ async function settleTurn(
   // is a config-store read while the capability is a `hermes config get` and a
   // systemd probe on the chat turn.
   //
-  // ONE HALF OF THE SWITCH, and the comment must not claim the other. OFF now
-  // means off on both editions. ON does NOT mean the same thing on both:
-  // OpenClaw writes `tts.auto: "inbound"`, so a TYPED question there gets a
-  // typed answer, while this route speaks every reply because it has no
-  // inbound-voice signal to go on — the desktop chat transcribes on the box
-  // and posts text, exactly as `voice-reply.ts` describes. That behaviour
-  // predates this line and is pinned by the test above ("hands the chat a
-  // playable clip on the reply"); making it `inbound` here means carrying a
-  // "this turn was spoken" flag from the composer into this route and is a
-  // product decision, not a rider on the switch. Named in the PR body.
+  // ONE HALF OF THE SWITCH. OFF means off on both editions; ON means a clip on
+  // every reply in the desktop chat on both of them too, and this route is the
+  // half that makes it HERE — there is no inbound-voice signal to narrow it
+  // with, because the chat transcribes on the box and posts text, exactly as
+  // `voice-reply.ts` describes. OpenClaw reaches the same place from the other
+  // side: its gateway cannot speak a reply to a text turn either, so the chat
+  // asks `/setup-api/tts/speak` for the clip once the reply has landed
+  // (`spokenReplyTrigger: 'chat'`). The two editions differ only in WHO asks,
+  // which is the whole point of that flag — pinned by the test above ("hands
+  // the chat a playable clip on the reply").
   const spokenClip = (await getVoiceAutoReply()) && (await hermesSpeaksReplies())
     ? await speakHermesReply(splitEmailRefs(caption).text)
     : null;

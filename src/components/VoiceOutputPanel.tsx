@@ -188,7 +188,10 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const playerRef = useRef<HTMLAudioElement | null>(null);
   const clipUrlRef = useRef<string | null>(null);
 
-  const load = useCallback(async () => {
+  // Answers what it read, so a caller that CHANGED the box can publish the
+  // refreshed facts (see installVoiceNotes); null whenever nothing readable
+  // came back and the panel kept its last reading.
+  const load = useCallback(async (): Promise<VoiceStatusAnswer | null> => {
     try {
       const res = await fetch("/setup-api/tts", { cache: "no-store" });
       const data = await res.json();
@@ -196,12 +199,14 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       // Set before the guard, an error body — `res.ok` is never checked — would
       // read as `channelsUnavailable: false` and quietly clear a note the box
       // had already given us, while `status` correctly kept its last value.
-      if (!isVoiceStatus(data)) return;
+      if (!isVoiceStatus(data)) return null;
       setNoChannelSpeech(channelsUnavailable(data));
       setNoVoiceNotes(channelVoiceNotesMissing(data));
       setStatus(data);
+      return data;
     } catch {
       /* keep the last good reading rather than blanking the panel */
+      return null;
     }
   }, []);
 
@@ -213,12 +218,13 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   /**
    * Follow the switch when it is moved somewhere else.
    *
-   * The chat's composer now carries the same spoken-replies toggle and writes
-   * the same route, announcing the result on this event — the one this panel
-   * has always fired for the chat's benefit. Without the other half, a
-   * Settings tab left open behind the chat kept showing the old position of a
-   * switch that had already moved, and the next thing the owner pressed here
-   * would have written the stale value back.
+   * Nothing else writes it today — the chat composer's own toggle was taken
+   * back out (TASK-782), so this panel is the one writer and the chat is the
+   * one reader. The listener stays because the event is the contract between
+   * them, not this panel's private business: a second Settings surface, a
+   * phone on `/app/settings` beside a desktop, or the next writer to be added
+   * would otherwise leave a tab showing the old position of a switch that had
+   * already moved, and the next press here would write the stale value back.
    */
   useEffect(() => {
     const onChanged = (event: Event) => {
@@ -311,7 +317,17 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         }
       }
       setInstallFailed(!ok);
-      await load();
+      const refreshed = await load();
+      // This button INSTALLS the voice, so it changes the one fact the chat
+      // uses to decide whether to ask for a reply's clip at all: a chat told
+      // earlier that no engine was configured would have stayed silent until
+      // the page was reloaded. Only on a real success, and only with what the
+      // box answered afterwards — the same rule `post` follows below.
+      if (ok && refreshed) {
+        window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
+          detail: { autoReply: refreshed.autoReply !== false, engines: refreshed.engines },
+        }));
+      }
     } catch {
       setInstallFailed(true);
     } finally {
@@ -370,10 +386,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       }
       if (isVoiceStatus(data)) {
         setStatus(data);
-        // The open chat decides per reply whether to speak, and whether to
-        // OFFER the switch at all — so it hears about every write, not only
-        // about `autoReply`. `select` and the ffmpeg repair are what install
-        // or retire this box's voice, and a chat docked beside this page kept
+        // The open chat decides per reply whether to ask for a clip at all —
+        // from the switch AND from whether this box still has an engine to
+        // speak with — so it hears about every write, not only about
+        // `autoReply`. `select` and the ffmpeg repair are what install or
+        // retire this box's voice, and a chat docked beside this page kept
         // showing the old answer until it was closed and reopened.
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
           detail: { autoReply: data.autoReply !== false, engines: data.engines },
@@ -622,10 +639,14 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         )}
       </div>
 
-      {/* Spoken replies: a voice message — a Telegram voice note, the chat's
-          microphone — is answered with a voice. On by default. The gateway
-          answers the channels (`tts.auto: "inbound"`); the desktop chat
-          asks the box to speak the reply itself, on every harness. */}
+      {/* Spoken replies, and the ONLY control for them: the composer's speaker
+          button was taken back out at the owner's word (TASK-782). On by
+          default. The gateway answers the channels (`tts.auto: "inbound"`);
+          in the desktop chat the reply's clip is made on the box on every
+          harness — asked for by the chat on OpenClaw, attached by the chat
+          route on Hermes — so a typed question's reply has a player here too
+          and a spoken one plays on its own. The hint says exactly that, which
+          is why it is not the one-line label it looks like it could be. */}
       <div className={`${CARD} ${ROW}`}>
         <div className="min-w-0">
           <label htmlFor="voice-auto-reply" className={LABEL}>{t("settings.voice.autoReply")}</label>

@@ -8,10 +8,12 @@ import { refuse, speakReply, withSpeechQueue } from "@/lib/voice-speak";
 /**
  * POST /setup-api/tts/speak {text} → the reply, spoken, for the desktop chat.
  *
- * A voice message in the desktop chat is transcribed on the box and sent as
- * text, so the gateway never learns it was spoken and its own `tts.auto:
- * "inbound"` cannot answer it. The chat asks here instead, with the reply's
- * text, and plays what comes back beside the bubble. Through the CHAIN — the
+ * A message in the desktop chat reaches the gateway as TEXT — a recording is
+ * transcribed on the box first — so `tts.auto: "inbound"` can never fire on a
+ * reply to one, whether it was typed or spoken. The chat asks here instead,
+ * with the reply's text, and renders what comes back beside the bubble (played
+ * at once for a spoken question, left to press for a typed one). Through the
+ * CHAIN — the
  * engine the Voice tab put first, then the other — because the owner wants to
  * hear the answer, not audition an engine (that is `tts/sample`).
  *
