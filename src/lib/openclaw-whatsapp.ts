@@ -100,20 +100,31 @@ const GATEWAY_CATCHUP_GAP_MS = 5_000;
  *
  * The refusal is real and worth remembering — it is what stops Retry bouncing
  * the gateway once per press — but it is a MEASUREMENT of a box that people
- * change: a compatible plugin installed by hand, a core the box has since been
- * given. The gateway then still needs the reload only this remedy performs, so
- * a verdict kept for the life of the web server is a box that can never be
- * repaired from its own panel, and "a capability probed once and treated as
+ * change, and a verdict kept for the life of the web server is a box that can
+ * never be repaired from its own panel: "a capability probed once and treated as
  * fact for the process lifetime" is the exact shape this codebase keeps
  * producing.
  *
- * Long enough that a flurry of presses, or a second panel, costs one repair;
- * short enough that an owner who has just fixed the box by hand gets the remedy
- * on their next press rather than after a restart of the web server. The window
- * runs from the refusal and is never extended by a press it suppressed, or
- * pressing Retry often enough would make it permanent again.
+ * BE PRECISE ABOUT WHAT THE WINDOW BUYS, because it is narrower than it looks.
+ * Every press already begins with a bare `web.login.start` before any remedy,
+ * and a login that starts clears this outright — so an owner who fixed the
+ * plugin by hand AND bounced the gateway is served on the next press with no
+ * window involved. The one case it unlocks is "the plugin on disk is now right
+ * and the gateway has not been reloaded since", where the reload is the only
+ * thing left to do and this remedy is the only thing on the box that does it
+ * from the panel.
+ *
+ * AND WHAT IT COSTS: on a box where the plugin genuinely cannot load, an owner
+ * who keeps pressing pays one gateway restart per window — every other channel
+ * and every open session dropped. Half an hour is the compromise: at most two of
+ * those an hour against a press-by-press bounce on one side and a box that can
+ * only be repaired by restarting the web server on the other.
+ *
+ * The window runs from the refusal and is deliberately not extended by a press
+ * it suppressed — a sliding window would make frequent pressing permanent again,
+ * which is the bug this replaced.
  */
-const REPAIR_REFUSAL_TTL_MS = 10 * 60_000;
+const REPAIR_REFUSAL_TTL_MS = 30 * 60_000;
 
 /** What the repair answers: a code to report, or what it managed to do. */
 type RepairOutcome =
@@ -311,6 +322,16 @@ export class OpenclawWhatsappPairing {
    * a login actually starts.
    */
   private repairRefusedAt: number | null = null;
+  /**
+   * `startAfterReload` is asking a gateway that has not finished coming back.
+   *
+   * Read by the keepalive, which would otherwise spend that whole window — up to
+   * ~115 s, entered precisely because the port is known not to answer — firing a
+   * `web.login.wait` every tick, each a 10-12 s CLI cold start certain to fail,
+   * competing for a Jetson that has just finished an npm install. The reap still
+   * runs: a panel that closed mid-catch-up must still end the session.
+   */
+  private catchingUp = false;
   private readonly now: () => number;
 
   constructor(deps: { now?: () => number } = {}) {
@@ -391,7 +412,12 @@ export class OpenclawWhatsappPairing {
         // phone" button back, with no QR and nothing saying why.
         this.lastPollAt = this.now();
         this.snap = { ...this.snap, phase: "starting" };
-        result = await this.startAfterReload(opts.force === true, epoch, repair.gatewayReady);
+        this.catchingUp = true;
+        try {
+          result = await this.startAfterReload(opts.force === true, epoch, repair.gatewayReady);
+        } finally {
+          this.catchingUp = false;
+        }
       }
       if (epoch !== this.epoch) return this.peek();
       // A login that started is proof the provider is there, whatever an
@@ -458,10 +484,14 @@ export class OpenclawWhatsappPairing {
       // between attempts, and `stop()` or a newer `start()` lands inside that
       // sleep. `web.login.start` is not a read — it stops the running channel to
       // take the socket over, and with `force` it would tear down a login a
-      // later press has just begun — so waking up to issue one leaves a login
-      // running in the gateway that the cancelled session's keepalive is no
-      // longer there to reap. The caller discards a stale epoch before it reads
-      // this error, so it never reaches the panel.
+      // later press has just begun — so waking up to issue one starts a login in
+      // the gateway AFTER the owner cancelled, with the answer discarded here
+      // and nothing on this side that will ever mention it again. Cancelling
+      // tells the gateway nothing (there is no `web.login.stop`: `stop()` drops
+      // local state and the plugin's own TTL is what ends an abandoned login, the
+      // one real difference from the Hermes path, which kills its bridge), so the
+      // only way not to leave one behind is not to start it. The caller discards
+      // a stale epoch before it reads this error, so it never reaches the panel.
       if (epoch !== this.epoch) throw new Error("the pairing session was replaced");
       try {
         return await this.loginStart(force);
@@ -493,6 +523,27 @@ export class OpenclawWhatsappPairing {
    * window (see `repairRefusedAt`), so a healthy box pays nothing — not an extra
    * `plugins list`, and above all not a gateway restart, which would drop every
    * other channel mid-conversation.
+   *
+   * AND IT DELIBERATELY DOES NOT WRITE `channels.whatsapp`, which is the obvious
+   * thing to suspect when this repair "did everything and the gateway still said
+   * no". Measured in the pinned core (2026.8.1) so nobody has to suspect it
+   * again:
+   *
+   *     resolveWebLoginProvider = () => listChannelPlugins().find(p =>
+   *       [...p.gatewayMethods ?? [], ...(p.gatewayMethodDescriptors ?? [])
+   *         .map(d => d.name)].some(m => WEB_LOGIN_METHODS.has(m))) ?? null
+   *
+   * with `listChannelPlugins = () => listLoadedChannelPlugins()`. The question is
+   * "is a LOADED plugin publishing `web.login.*`" and nothing in it reads
+   * `config.channels`. So installing the plugin, writing `plugins.entries`, and
+   * reloading the gateway is exactly the remedy, and enabling the channel is
+   * still `/whatsapp/configure`'s job — the one the owner reaches after a phone
+   * is linked.
+   *
+   * The same measurement settles the sequence that looks worse: `/whatsapp/
+   * unpair` writes `channels.whatsapp.enabled = false`, and a re-link after it
+   * does NOT come back here — the plugin is still loaded, so the provider still
+   * resolves, there is no refusal, and this gateway restart never happens.
    */
   private repairWebLoginProvider(): Promise<RepairOutcome> {
     // Two panels — or one reopened while the first install is still running —
@@ -526,6 +577,14 @@ export class OpenclawWhatsappPairing {
       // true words for that one. `unsupported_channel` cannot happen for a
       // channel that is in OFFICIAL_CHANNEL_PLUGINS, and if it ever did it
       // would mean precisely that no plugin can be installed for it.
+      //
+      // `install_timeout` is folded in ON PURPOSE, unlike `/whatsapp/configure`,
+      // which keeps it apart as `plugin_install_timeout`: there the owner typed a
+      // save and can be told the download ran out of time, whereas the panel's
+      // one sentence here — "could not download what the bridge needs, check the
+      // network" — is already the right words for a download killed at its
+      // deadline, and a fourth code would need eleven new locale strings to say
+      // the same thing.
       return {
         ok: false,
         error: plugin.reason === "unsupported_channel" ? "plugin_missing" : "install_failed",
@@ -627,11 +686,24 @@ export class OpenclawWhatsappPairing {
     // reap while npm runs, and the caller is still blocked on the POST that
     // started it. The keepalive window restarts when the install ends, which is
     // what stops the first tick afterwards from reaping a healthy login.
-    if (this.snap.phase !== "waiting" && this.snap.phase !== "starting") return;
+    if (this.snap.phase !== "waiting" && this.snap.phase !== "starting") {
+      // `preparing` keeps the interval, because the phase goes back to
+      // `starting` when the install ends and the keepalive is what carries it
+      // from there. A TERMINAL phase does not: an `error` or `paired` snapshot
+      // would otherwise wake this every TICK_MS for the life of the web server
+      // only to return here, and on a box that cannot be repaired the error
+      // paths are now the expected outcome. A later `start()` re-arms it.
+      if (this.snap.phase !== "preparing") this.clearTicking();
+      return;
+    }
     if (this.now() - this.lastPollAt > REAP_AFTER_MS) {
       this.stop();
       return;
     }
+    // Deliberately after the reap and before the RPC: the catch-up loop already
+    // owns the conversation with a gateway that is not listening yet, and a
+    // second caller asking it the same question cannot help. See `catchingUp`.
+    if (this.catchingUp) return;
 
     this.waiting = true;
     const epoch = this.epoch;

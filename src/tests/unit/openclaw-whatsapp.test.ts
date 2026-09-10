@@ -407,6 +407,64 @@ describe("OpenclawWhatsappPairing", () => {
     }
   });
 
+  it("does not ask a gateway that is not listening yet for a QR as well", async () => {
+    // The catch-up window runs in `starting`, which is a phase the keepalive
+    // works in — so it spent that whole window (up to ~115 s, entered precisely
+    // because the port does not answer) firing a `web.login.wait` per tick, each
+    // a 10-12 s CLI cold start certain to fail, on a Jetson that has just
+    // finished an npm install. The retries own that conversation.
+    vi.useFakeTimers();
+    try {
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      mockRestart.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+      let starts = 0;
+      let waits = 0;
+      // Only the waits issued INSIDE the catch-up window are the defect: once a
+      // QR exists the keepalive is doing its job and is supposed to ask.
+      let waitsBeforeQr: number | null = null;
+      mockSpawn.mockImplementation(async (args: readonly string[]) => {
+        if (args[2] === "web.login.wait") {
+          waits += 1;
+          throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+        }
+        starts += 1;
+        if (starts === 1) throw new Error("web login provider is not available");
+        if (starts < 3) throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+        waitsBeforeQr ??= waits;
+        return rpcOk({ qrDataUrl: QR_A });
+      });
+
+      const pairing = new lib.OpenclawWhatsappPairing();
+      const started = pairing.start();
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS * 3);
+
+      expect((await started).phase).toBe("waiting");
+      expect(waitsBeforeQr).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops the keepalive once the session has nowhere left to go", async () => {
+    // `ensureTicking` is cleared by `stop()`, and a start that ends in `error`
+    // never calls it — so on a box that cannot be repaired, which is exactly
+    // where the new error paths lead, the interval woke every TICK_MS for the
+    // life of the web server only to return immediately.
+    vi.useFakeTimers();
+    try {
+      mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      const pairing = new lib.OpenclawWhatsappPairing();
+
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      // One tick to notice there is nothing to keep alive.
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS + 1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("asks again while the gateway is still coming back, instead of calling the repair a failure", async () => {
     // `restartGateway` gives up on its readiness wait after its own budget; a
     // Jetson that has just spent three minutes on npm can take longer to bind.
