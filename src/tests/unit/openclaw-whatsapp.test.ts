@@ -239,6 +239,50 @@ describe("OpenclawWhatsappPairing", () => {
     expect(mockRestart).toHaveBeenCalledTimes(1);
   });
 
+  it("does not reap the login it spent the whole install getting to", async () => {
+    // The keepalive reaps a login nobody is watching, and "watching" is a GET
+    // that renews it. A plugin install can run for minutes, during which the
+    // only thing the panel does is stay blocked on this POST — so the window
+    // has to start again when the install ends, or the first tick afterwards
+    // stops the login this very call is about to hand back.
+    vi.useFakeTimers();
+    try {
+      mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+      let finishRetry: (out: string) => void = () => {};
+      mockSpawn.mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          finishRetry = resolve;
+        }),
+      );
+      // Whatever the keepalive asks while the retry is in flight.
+      mockSpawn.mockResolvedValue(rpcOk({}));
+      let finishInstall: (result: { ok: true; installed: boolean }) => void = () => {};
+      mockEnsurePlugin.mockReturnValue(
+        new Promise((resolve) => {
+          finishInstall = resolve;
+        }),
+      );
+
+      const pairing = new lib.OpenclawWhatsappPairing();
+      const started = pairing.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockEnsurePlugin).toHaveBeenCalled();
+
+      // An npm install on a Jetson outlasts the reap window several times over.
+      await vi.advanceTimersByTimeAsync(lib.REAP_AFTER_MS + lib.TICK_MS * 2);
+      finishInstall({ ok: true, installed: true });
+      // One tick lands between the retry being issued and its answer arriving.
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS + 1);
+      finishRetry(rpcOk({ qrDataUrl: QR_A }));
+
+      const snap = await started;
+      expect(snap.phase).toBe("waiting");
+      expect(snap.qrImage).toBe(QR_A);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not install anything over a failure that is not the missing provider", async () => {
     // A gateway that is down is not a plugin that is absent, and an npm install
     // plus a service restart is not what a socket error asks for.

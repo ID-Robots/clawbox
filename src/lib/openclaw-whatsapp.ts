@@ -294,6 +294,12 @@ export class OpenclawWhatsappPairing {
           this.snap = { ...this.snap, phase: "error", error: failure };
           return this.peek();
         }
+        // The caller has been blocked on this POST for the whole install, so
+        // the panel is demonstrably still open. Without this the first tick
+        // after an install longer than REAP_AFTER_MS reaps the login start() is
+        // about to return — the owner waits two minutes and gets the "Link your
+        // phone" button back, with no QR and nothing saying why.
+        this.lastPollAt = this.now();
         this.snap = { ...this.snap, phase: "starting" };
         result = await this.loginStart(opts.force === true);
       }
