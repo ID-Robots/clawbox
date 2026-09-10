@@ -224,6 +224,32 @@ describe("OpenclawWhatsappPairing", () => {
     expect(snap.qrImage).toBe(QR_A);
   });
 
+  it("does not bounce the gateway for a card the owner closed while the key was being written", async () => {
+    // The window the new write opens: `config set` takes up to 45 s, and a
+    // cancel inside it used to reach the gateway restart anyway, because the
+    // phase was checked BEFORE the write and the epoch only AFTER the restart.
+    // Dropping the Telegram conversation the owner went back to is exactly what
+    // the phase check above this exists to prevent.
+    mockReadConfig.mockResolvedValue({ channels: { whatsapp: { enabled: false } } });
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: false });
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    let finishWrite: () => void = () => {};
+    mockConfigSet.mockImplementation(
+      () => new Promise<void>((resolve) => { finishWrite = () => resolve(); }),
+    );
+
+    const started = pairing.start();
+    await vi.waitFor(() => expect(mockConfigSet).toHaveBeenCalled());
+    // The owner closes the card while the write is in flight.
+    pairing.stop();
+    finishWrite();
+    await started;
+
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
   it("leaves the channel key alone on a box that never configured the channel", async () => {
     // ABSENT is not `false`. A box that has never had WhatsApp configured is
     // `/whatsapp/configure`'s business, and a repair entered from a refusal must

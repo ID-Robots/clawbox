@@ -651,6 +651,18 @@ export class OpenclawWhatsappPairing {
         // working bridge on an older core, where this key never gated loading.
         console.error("[openclaw-whatsapp] enabling channels.whatsapp before the reload failed:", err);
       }
+      // ASKED AGAIN, because the two awaits above are a window the cancel can
+      // land in: `stop()` sets the phase to `idle` (and bumps the epoch) while a
+      // config read or a 45 s `config set` is in flight, and the epoch check in
+      // `start()` only runs AFTER the restart. Without this, a pairing card the
+      // owner closed could still bounce the gateway and drop the Telegram
+      // conversation he went back to — the very outcome the check above exists
+      // to prevent. The key is left written: it is the owner's own channel
+      // switched back on, it is what `/whatsapp/configure` would write anyway,
+      // and the next pairing needs it.
+      if (this.snap.phase !== "preparing" && this.snap.phase !== "starting") {
+        return { ok: true, reloaded: false, gatewayReady: false };
+      }
     }
     let gatewayReady = true;
     try {
