@@ -996,17 +996,25 @@ exit 0
   });
 
   it("never imports a file the allow-list excludes, however small it is", () => {
-    // Why the search is an allow-list and not every file under `dist/`. This
-    // decoy is NAMED like a declaration file and written as a module that would
-    // answer WRONGLY if it were ever imported — it reports migrations that
-    // changed nothing, which is this arm's "stand down" answer — and it is the
-    // smallest candidate, so the extension filter is the only thing between it
-    // and the owner's diagnosis.
+    // Why the search is an allow-list of module extensions and not every file
+    // under `dist/`. Three decoys carrying the same declaration text, all
+    // smaller than the chunk so size ordering would reach them first: the two
+    // realistic ones are a declaration file and a source map, which carry it as
+    // DATA; the third is a CommonJS module that would be imported happily and
+    // answer WRONGLY — it reports migrations that changed nothing, which is this
+    // arm's wordless stand-down — and it is there so this case can fail. With
+    // the `--include` flags dropped it does: no remainder is printed at all.
     writeFileSync(
       path.join(coreDistDir, "legacy-decoy.d.ts"),
-      `function applyLegacyDoctorMigrations(raw) { return { next: null, changes: [] }; }
-export { applyLegacyDoctorMigrations as A };
-`,
+      "declare function applyLegacyDoctorMigrations(raw: unknown): unknown;\n",
+    );
+    writeFileSync(
+      path.join(coreDistDir, "legacy-pGW3ZP3t.js.map"),
+      JSON.stringify({ version: 3, sources: ["legacy.ts"], sourcesContent: ["function applyLegacyDoctorMigrations(raw) {}"] }),
+    );
+    writeFileSync(
+      path.join(coreDistDir, "legacy-decoy.cjs"),
+      "exports.applyLegacyDoctorMigrations = function applyLegacyDoctorMigrations(raw) { return { next: null, changes: [] }; };\n",
     );
     withRealApproval();
 
