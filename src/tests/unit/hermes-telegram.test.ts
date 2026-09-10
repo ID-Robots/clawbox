@@ -625,6 +625,110 @@ describe("clearHermesTelegramPairingState", () => {
     await expect(fs.access(path.join(storeDir, "telegram-pending.json"))).rejects.toThrow();
   });
 
+  // Hermes rate-limits pairing REQUESTS, not approvals, and `_rate_limits.json`
+  // outlives the bot — the mechanism, and why each key goes or stays, is in
+  // `isStampClearedByReset` and the comment above it.
+  //
+  // Left behind, the stamps leave the person whose pending request this reset
+  // just cancelled in a hole neither end can see: the request is gone, so "Check
+  // for requests" has nothing to show, and their next message is denied in
+  // silence — the gateway returns from `_hm_offer_pairing_code` before generating
+  // anything and logs one "Unauthorized user" warning, nothing else. Seen on a
+  // Hermes box: the bot issued a code and stamped the limit, the save 37 s later
+  // removed the pending entry, and the next two messages produced two warnings
+  // and no code.
+  //
+  // Both dirs, because Hermes merges them on start (`_migrate_split_pairing_dirs`),
+  // so a stamp left in the legacy copy comes straight back.
+  it("drops every requester's stamp and this platform's lockout, in both dirs", async () => {
+    const now = Date.now() / 1000;
+    const limits = {
+      "telegram:333": now,
+      "_lockout:telegram": now + 600,
+      "_failures:telegram": 3,
+      // `pairing clear-pending` takes no platform argument, so this requester's
+      // pending code is cancelled by the same reset: they have to be able to ask
+      // again too, or the bug just moves to another channel.
+      "discord:444": now,
+      // Earned by mistyped codes on Discord, not by this Telegram bot.
+      "_lockout:discord": now + 600,
+    };
+    const legacyDir = path.join(home, "pairing");
+    await fs.mkdir(legacyDir, { recursive: true });
+    for (const dir of [storeDir, legacyDir]) {
+      await fs.writeFile(path.join(dir, "_rate_limits.json"), JSON.stringify(limits), {
+        mode: 0o600,
+      });
+    }
+
+    const { clearHermesTelegramPairingState } = await import("@/lib/hermes-telegram");
+    await clearHermesTelegramPairingState();
+
+    for (const dir of [storeDir, legacyDir]) {
+      const file = path.join(dir, "_rate_limits.json");
+      expect(Object.keys(JSON.parse(await fs.readFile(file, "utf-8")))).toEqual([
+        "_lockout:discord",
+      ]);
+      // The file names the people who asked, so it stays 0600 as Hermes writes it.
+      expect((await fs.stat(file)).mode & 0o777).toBe(0o600);
+      // And no temp file is left beside it.
+      expect((await fs.readdir(dir)).filter((n) => n.endsWith(".tmp"))).toEqual([]);
+    }
+  });
+
+  it("leaves a store holding nothing of ours exactly as it was", async () => {
+    const file = path.join(storeDir, "_rate_limits.json");
+    const before = JSON.stringify({ "_lockout:discord": 1, "_failures:discord": 2 });
+    await fs.writeFile(file, before, { mode: 0o600 });
+
+    const { clearHermesTelegramPairingState } = await import("@/lib/hermes-telegram");
+    await clearHermesTelegramPairingState();
+
+    expect(await fs.readFile(file, "utf-8")).toBe(before);
+  });
+
+  // Best-effort like the rest of the reset: the token is saved right after this,
+  // and a store Hermes itself reads as `{}` holds no stamp in force either — so
+  // this one stays quiet.
+  it("leaves a corrupt rate-limit store alone, without a word", async () => {
+    const file = path.join(storeDir, "_rate_limits.json");
+    await fs.writeFile(file, "{not json", "utf-8");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { clearHermesTelegramPairingState } = await import("@/lib/hermes-telegram");
+    await expect(clearHermesTelegramPairingState()).resolves.toBeUndefined();
+    expect(await fs.readFile(file, "utf-8")).toBe("{not json");
+    expect(logged).not.toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  // A clear that could not happen must not pass as one: the route answers
+  // `reset: true` either way, the requester stays denied in silence, and without
+  // this line the service log holds nothing that explains it.
+  //
+  // The failure is stubbed rather than provoked with a 0500 dir: a suite running
+  // as uid 0 would write straight through the permissions and test nothing.
+  it("says so in the log when the store cannot be written", async () => {
+    const file = path.join(storeDir, "_rate_limits.json");
+    await fs.writeFile(file, JSON.stringify({ "telegram:333": Date.now() / 1000 }), {
+      mode: 0o600,
+    });
+    const write = vi
+      .spyOn(fs, "writeFile")
+      .mockRejectedValue(Object.assign(new Error("EROFS: read-only file system"), { code: "EROFS" }));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { clearHermesTelegramPairingState } = await import("@/lib/hermes-telegram");
+      await expect(clearHermesTelegramPairingState()).resolves.toBeUndefined();
+      expect(write).toHaveBeenCalled();
+      expect(logged.mock.calls.map((args) => String(args[0])).join("\n")).toContain(
+        "could not be cleared",
+      );
+    } finally {
+      logged.mockRestore();
+      write.mockRestore();
+    }
+  });
+
   // The token is already saved when this runs, so a CLI failure must not throw
   // out of the configure route and report a failed save.
   it("still wipes the store when the CLI fails outright", async () => {
