@@ -44,6 +44,9 @@ async function connectedServer(emailCanRead: boolean) {
       return (await client.listTools()).tools.map((t) => t.name);
     },
     changes: () => listChanged,
+    async call(name: string, args: Record<string, unknown>) {
+      return client.callTool({ name, arguments: args });
+    },
     async close() {
       await client.close();
       await server.close();
@@ -124,6 +127,21 @@ describe("mailbox readability, after the server is already running", () => {
     watch.stop();
 
     expect(h.changes()).toBe(before);
+  });
+
+  it("refuses a withdrawn tool at the dispatcher as well as in the list", async () => {
+    // The two halves live in different places — the SDK's registry answers
+    // tools/list, and mcp/lib/register.ts owns tools/call — so a withdrawal
+    // that only hid the tool would still RUN it for a host calling from a list
+    // it had not refreshed yet, with the mailbox gate gone from the one side
+    // that is not the route's.
+    const h = await harness(true);
+
+    const watch = watchEmailReadability(h.reg, true, { probe: async () => false });
+    await watch.refreshNow();
+    watch.stop();
+
+    expect(JSON.stringify(await h.call("email_list", { count: 1 }))).toContain("no tool called");
   });
 
   it("keeps asking on its own interval, and stop() ends it", async () => {
