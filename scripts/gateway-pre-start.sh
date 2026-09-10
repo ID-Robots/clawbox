@@ -1834,9 +1834,17 @@ if isinstance(channels, dict):
 # absent plugin, blocks on capability consent, and refuses gateway readiness.
 # Remove only that contradictory stale enablement. An enabled channel, or a
 # plugin entry the owner explicitly disabled, is preserved.
+#
+# WHATSAPP JOINED THE LIST WITH THE 2026.9.3 PIN (TASK-788), and unlike slack the
+# state is ours rather than a legacy config: `/whatsapp/unpair` writes
+# `channels.whatsapp.enabled = false` and leaves `plugins.entries.whatsapp`
+# saying true, which is exactly this contradiction. 2026.9.1 also stopped LOADING
+# a plugin whose channel is off (measured, both cores), so the entry describes a
+# plugin the core will not load however often it is asked — and the re-link path
+# that needs it back writes it itself (`ensureChannelPlugin`).
 plugin_entries = (cfg.get("plugins") or {}).get("entries") if isinstance(cfg.get("plugins"), dict) else None
 if isinstance(plugin_entries, dict) and isinstance(channels, dict):
-    for _channel_name in ("slack",):
+    for _channel_name in ("slack", "whatsapp"):
         _entry = plugin_entries.get(_channel_name)
         _channel = channels.get(_channel_name)
         if (

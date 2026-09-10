@@ -27,15 +27,23 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
       openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
-# Node.js 24 — matches what install.sh installs at runtime, and it has to
-# match: the pinned core's engines are `>=24.16.0 <25 || >=26.1.0`, so an image
-# baked with Node 22 would look to install.sh like a box that still has to take
-# the major upgrade, and would test a path no shipped unit is on. pipefail is
-# required so a silent `curl` failure doesn't leave `bash -` reading nothing
-# and exiting 0 (which would produce an image missing the nodesource apt
+# Node.js 22 — DELIBERATELY NOT the version install.sh ends up with.
+#
+# The pinned core (2026.9.3) needs `>=24.16.0 <25 || >=26.1.0`, so install.sh
+# performs a Node MAJOR upgrade on its way through (TASK-788). Baking 24 in here
+# would satisfy the engine guard on its first call, and `setup_24.x` plus
+# `apt-get install nodejs` would then never execute in CI on either path — a
+# broken channel, a lost apt lock or a host apt cannot move would leave
+# e2e-install green. Every field unit starts exactly here, on Node 22 from
+# NodeSource, so this image is the honest model of one and it is what makes CI
+# exercise the switch for real. `main`'s own pin (openclaw 2026.7.1) accepts both
+# 22 and 24, so the main → beta upgrade spec has a valid baseline either way.
+#
+# pipefail is required so a silent `curl` failure doesn't leave `bash -` reading
+# nothing and exiting 0 (which would produce an image missing the nodesource apt
 # list and then failing later in confusing ways).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 

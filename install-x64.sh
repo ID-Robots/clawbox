@@ -108,7 +108,9 @@ node_satisfies_openclaw_engine() {
   case "$major" in
     24) dpkg --compare-versions "$version" ge "24.16.0" ;;
     26) dpkg --compare-versions "$version" ge "26.1.0" ;;
-    2[7-9]|[3-9][0-9]) return 0 ;;
+    # Three digits and up as well: `[3-9][0-9]` alone made the open-ended half
+    # of the range stop at 99, which is a ceiling nobody wrote down.
+    2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
     *) return 1 ;;
   esac
 }

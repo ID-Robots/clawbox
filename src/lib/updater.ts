@@ -3042,7 +3042,16 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "apt_update",
     label: "Updating system packages",
-    timeoutMs: 120_000,
+    // 120 s was right while this step only refreshed apt and installed packages
+    // that were already there. With the 2026.9.3 pin it also performs a Node
+    // MAJOR upgrade on every unit's first update (TASK-788): a NodeSource repo
+    // rewrite with its own inner `apt update`, then a full nodejs download and
+    // unpack on a Jetson. The budget is advisory — `execAsRoot` stops waiting,
+    // the root unit runs on — so the cost of leaving it at 120 s is not a broken
+    // update but "was still running after 150 s — gave up waiting" on the screen
+    // of the one update that matters most, followed by the next steps burning
+    // their own budgets inside `wait_for_apt`.
+    timeoutMs: 600_000,
     requiresRoot: true,
   },
   {

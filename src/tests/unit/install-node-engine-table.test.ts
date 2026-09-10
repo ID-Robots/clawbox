@@ -39,11 +39,8 @@ const INSTALLERS = {
   "install-x64.sh": readFileSync(path.join(REPO, "install-x64.sh"), "utf-8"),
 } as const;
 
-const CAN_RUN =
-  process.platform !== "win32"
-  && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0
-  && spawnSync("dpkg", ["--version"], { stdio: "ignore" }).status === 0;
-const d = CAN_RUN ? describe : describe.skip;
+const HAS_BASH = spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
+const HAS_DPKG = spawnSync("dpkg", ["--version"], { stdio: "ignore" }).status === 0;
 
 /** A shell function lifted out of an installer, so the test cannot drift from it. */
 function shellFunction(source: string, name: string): string {
@@ -96,10 +93,22 @@ const ACCEPTED = [
   "24.21.0", // the LTS build the installers provision
   "26.1.0", // the floor of the other allowed line
   "26.8.2", // current 26.x
-  "27.0.0", // a future major above the open-ended `>=26.1.0`
+  "27.0.0", // the next major above the open-ended `>=26.1.0`
+  "100.0.0", // three digits: the case a two-digit-only pattern rejected
 ] as const;
 
-d("install.sh / install-x64.sh Node engine table", () => {
+describe("install.sh / install-x64.sh Node engine table", () => {
+  // ASSERTED, NOT SKIPPED ON, the way email-directive-parity.test.ts puts it:
+  // `describe.skip` on a missing tool turns the only proof of the engine floor
+  // into a green no-op, and the next edit to either `case` table would ship
+  // unmeasured with nothing saying so. Both are present on any Debian-family
+  // runner, which is every runner this repo uses, so this costs nothing where it
+  // runs and is loud where it would otherwise be silent.
+  it("has the bash and dpkg the shipped guard itself uses", () => {
+    expect(HAS_BASH).toBe(true);
+    expect(HAS_DPKG).toBe(true);
+  });
+
   for (const installer of Object.keys(INSTALLERS) as (keyof typeof INSTALLERS)[]) {
     describe(installer, () => {
       for (const version of REJECTED) {
@@ -133,9 +142,16 @@ d("install.sh / install-x64.sh Node engine table", () => {
       expect(source, name).toContain("deb.nodesource.com/setup_24.x");
       expect(source, name).not.toContain("setup_22.x");
     }
+  });
+
+  it("leaves the e2e image on the Node every field unit starts from", () => {
+    // The opposite of the rule above, on purpose: the e2e-install image models a
+    // box BEFORE the update, so it stays on 22 and CI performs the real switch.
+    // An image baked with 24 satisfies the guard on its first call and the apt
+    // transaction never runs in CI at all.
     const dockerfile = readFileSync(path.join(REPO, "e2e-install/Dockerfile"), "utf-8");
-    expect(dockerfile).toContain("deb.nodesource.com/setup_24.x");
-    expect(dockerfile).not.toContain("setup_22.x");
+    expect(dockerfile).toContain("deb.nodesource.com/setup_22.x");
+    expect(dockerfile).toContain("performs a Node MAJOR upgrade");
   });
 
   it("keeps install-x64's verified tarball above the floor", () => {

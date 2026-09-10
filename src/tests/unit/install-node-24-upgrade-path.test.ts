@@ -39,12 +39,11 @@ const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
 /** The pin the step will install, read where the step reads it. */
 const TARGET = readFileSync(path.join(REPO, "config/openclaw-target.txt"), "utf-8").trim();
 
-const CAN_RUN =
-  process.platform !== "win32"
-  && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0
-  && spawnSync("dpkg", ["--version"], { stdio: "ignore" }).status === 0
-  && spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
-const d = CAN_RUN ? describe : describe.skip;
+const HAS_BASH = spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
+const HAS_DPKG = spawnSync("dpkg", ["--version"], { stdio: "ignore" }).status === 0;
+// python3 is not decoration here: the sliced `step_openclaw_install` pipes
+// `plugins list --json` through a python program of its own.
+const HAS_PYTHON3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 
 /** A shell function lifted out of install.sh, so the test cannot drift from it. */
 function shellFunction(name: string): string {
@@ -91,6 +90,9 @@ function makeBox(opts: { node: string | null; core: string | null }): Box {
   mkdirSync(state, { recursive: true });
   mkdirSync(bin, { recursive: true });
   mkdirSync(path.join(npmPrefix, "bin"), { recursive: true });
+  // Where the core's own package.json lives, so the failure path can read the
+  // engines it declares — npm's layout, the same one install.sh derives.
+  mkdirSync(path.join(npmPrefix, "lib", "node_modules", "openclaw"), { recursive: true });
   if (opts.node) writeFileSync(path.join(state, "node-version"), opts.node);
   if (opts.core) writeFileSync(path.join(state, "core-version"), opts.core);
   writeFileSync(path.join(state, "calls"), "");
@@ -128,19 +130,35 @@ case "$url" in
 esac
 `);
 
+  // apt only ever moves a package UP unless it is told otherwise. NodeSource
+  // pins its repo at priority 600, under the 1000 apt wants before it will pick
+  // a lower version, so `apt-get install nodejs` on a host whose major is above
+  // the configured channel reports "already the newest version" and changes
+  // nothing. Modelled, because the new engine table has a ceiling and that is
+  // the one transition the installer can ask for and not get.
   write("apt-get", `
 printf 'apt-get %s\\n' "$*" >> "$ST/calls"
 case " $* " in
-  *" nodejs "*|*" nodejs")
+  *" nodejs "*|*" nodejs"*)
     channel="$(cat "$ST/channel" 2>/dev/null || true)"
     case "$channel" in
-      22) printf '22.23.2' > "$ST/node-version" ;;
-      24) printf '24.21.0' > "$ST/node-version" ;;
-      26) printf '26.8.2' > "$ST/node-version" ;;
+      22) offered='22.23.2' ;;
+      24) offered='24.21.0' ;;
+      26) offered='26.8.2' ;;
       # No NodeSource channel configured: apt serves the distro package, which
       # is what the comment in step_apt_update warns about.
-      *) printf '12.22.9' > "$ST/node-version" ;;
+      *) offered='12.22.9' ;;
     esac
+    have="$(cat "$ST/node-version" 2>/dev/null || true)"
+    allow=0
+    case " $* " in *" --allow-downgrades "*) allow=1 ;; esac
+    case " $* " in *"nodejs="*) allow=1 ;; esac
+    if [ -n "$have" ] && [ "$allow" -eq 0 ] \
+      && [ "\${have%%.*}" -gt "\${offered%%.*}" ] 2>/dev/null; then
+      printf 'apt-get: nodejs is already the newest version (%s).\\n' "$have"
+      exit 0
+    fi
+    printf '%s' "$offered" > "$ST/node-version"
     ;;
 esac
 exit 0
@@ -157,6 +175,12 @@ for a in "$@"; do
   esac
 done
 exit 0
+`);
+
+  // What apt is offering for nodejs, which the remedy quotes back in the one
+  // command that works. Stubbed so the case does not read this machine.
+  write("apt-cache", `
+printf 'nodejs:\\n  Installed: %s\\n  Candidate: 24.21.0-1nodesource1\\n' "$(cat "$ST/node-version" 2>/dev/null || echo none)"
 `);
 
   const openclawBin = path.join(npmPrefix, "bin", "openclaw");
@@ -188,6 +212,7 @@ const SHIPPED = [
   assignment("OPENCLAW_VERSION"),
   assignment("OPENCLAW_NODE_ENGINE"),
   shellFunction("node_satisfies_openclaw_engine"),
+  shellFunction("node_engine_remedy"),
   shellFunction("ensure_openclaw_node_engine"),
   shellFunction("openclaw_version_is_v2"),
   shellFunction("openclaw_is_v2"),
@@ -230,7 +255,16 @@ function at(calls: string[], needle: string): number {
   return calls.findIndex((c) => c.includes(needle));
 }
 
-d("the Node 22 → 24 switch inside the updater", () => {
+describe("the Node 22 → 24 switch inside the updater", () => {
+  // ASSERTED, NOT SKIPPED ON — same reason as the engine-table suite: the order
+  // of the switch is what this file exists to hold in place, and a silent skip
+  // would let it ship unmeasured.
+  it("has the bash, dpkg and python3 the shipped step itself uses", () => {
+    expect(HAS_BASH).toBe(true);
+    expect(HAS_DPKG).toBe(true);
+    expect(HAS_PYTHON3).toBe(true);
+  });
+
   it("installs Node 24 before it installs the pinned core", () => {
     // The customer path: a unit on the shipped image (Node 22.23.2, core
     // 2026.8.1) told to update. `bootstrap_updater` has already refreshed
@@ -304,6 +338,71 @@ d("the Node 22 → 24 switch inside the updater", () => {
     expect(calls.join("\n")).not.toContain("apt-get");
     // …and the core is not reinstalled either, because it is already at target.
     expect(at(calls, "npm install -g")).toBe(-1);
+  });
+
+  it("fails the step when the installed core refuses the Node it was put on", () => {
+    // FALSE SUCCESS, refused. Our engine table is a copy of `engines.node`, and
+    // the next pin whose floor moves again (or an OPENCLAW_PIN_VERSION override
+    // to a core with a different one) passes a stale table. The core then says so
+    // itself on its very first invocation — and that sentence used to go to
+    // /dev/null behind `|| echo 'unknown version'`, leaving the step to walk on
+    // into a WARN-only doctor and a gateway that never comes up.
+    const box = makeBox({ node: "24.21.0", core: "2026.8.1" });
+    // A core that rejects this Node the way a real one does: the banner on
+    // stderr and a non-zero exit on every subcommand.
+    writeFileSync(box.openclawBin, `#!/usr/bin/env bash
+ST=${JSON.stringify(box.state)}
+printf 'openclaw %s node=%s\n' "$*" "$(cat "$ST/node-version" 2>/dev/null || echo none)" >> "$ST/calls"
+echo "Node.js >=26.9.0 is required (current: v$(cat "$ST/node-version"))" >&2
+exit 1
+`);
+    chmodSync(box.openclawBin, 0o755);
+    writeFileSync(path.join(box.npmPrefix, "lib", "node_modules", "openclaw", "package.json"),
+      JSON.stringify({ name: "openclaw", version: TARGET, engines: { node: ">=26.9.0" } }));
+
+    const r = run(box, "step_openclaw_install");
+
+    expect(r.status).not.toBe(0);
+    // The core's own sentence reaches the log, and the disagreement is named.
+    expect(r.stderr).toContain("Node.js >=26.9.0 is required");
+    expect(r.stderr).toContain("refuses to run on");
+    expect(r.stderr).toContain("engines.node >=26.9.0");
+    // …and the step stopped there rather than running doctor over it.
+    expect(box.calls().join("\n")).not.toContain("openclaw doctor");
+  });
+
+  it("says what to do on a host apt cannot bring DOWN to the range", () => {
+    // The population the new ceiling creates: a dev or demo machine on Node 25.x
+    // (or 26.0.x), which the old table accepted and this one does not. apt will
+    // not lower the package, so the step cannot fix it by itself — and a bare
+    // "did not reach an OpenClaw-compatible version" would be a dead end on the
+    // one box where the operator has to choose. No shipped unit is here: the
+    // fleet is on 22 and moves up.
+    const box = makeBox({ node: "25.9.0", core: "2026.8.1" });
+
+    const r = run(box, "step_openclaw_install");
+
+    expect(r.status).not.toBe(0);
+    // The transaction was attempted and honestly got nowhere.
+    expect(box.calls().join("\n")).toContain("deb.nodesource.com/setup_24.x");
+    expect(box.nodeVersion()).toBe("25.9.0");
+    expect(r.stderr).toContain("is ABOVE the range");
+    expect(r.stderr).toContain("--allow-downgrades nodejs=");
+    // …and nothing was installed over it.
+    expect(box.calls().join("\n")).not.toContain("npm install -g openclaw@");
+    expect(box.coreVersion()).toBe("2026.8.1");
+  });
+
+  it("points a 26.0.x host up rather than down", () => {
+    // 26.1.0 is inside the range, so the cheap way out of 26.0.x is the 26
+    // channel — an upgrade apt CAN perform — and the message says so first.
+    const box = makeBox({ node: "26.0.0", core: "2026.8.1" });
+
+    const r = run(box, "step_openclaw_install");
+
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("deb.nodesource.com/setup_26.x");
+    expect(r.stderr).toContain("26.1.0 and newer are accepted");
   });
 
   it("fails loudly when the apt transaction lands on a Node the core refuses", () => {
