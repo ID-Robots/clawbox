@@ -4,6 +4,11 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
 
+// The same ceiling the sibling chat suites take: under a full-suite run every
+// worker gets a slice of the box's cores and the 5 s default expires on
+// whichever test mounted while it was busiest.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 /**
  * A voice message gets a voice back.
  *
@@ -27,6 +32,10 @@ let autoReplyAnswer = true;
 let replyText = "**Fine**, thanks.";
 /** When set, a turn is acked with "Sent." and the reply arrives from history instead. */
 let ackOnly = false;
+/** What `/setup-api/tts` says about the box's engines; `null` sends no list. */
+let ttsEngines: Array<Record<string, unknown>> | null = null;
+/** An audio attachment the harness put ON the reply, as the gateway does. */
+let replyAudio: string | null = null;
 
 class FakeGatewayWs {
   static readonly CONNECTING = 0;
@@ -82,7 +91,19 @@ class FakeGatewayWs {
         sessionKey: "agent:main:main",
         state: "final",
         stopReason: "stop",
-        message: { role: "assistant", content: [{ type: "text", text: ackOnly ? "Sent." : replyText }], timestamp: 1787260000000 },
+        message: {
+          role: "assistant",
+          content: [
+            { type: "text", text: ackOnly ? "Sent." : replyText },
+            ...(replyAudio
+              ? [{
+                type: "attachment",
+                attachment: { url: replyAudio, kind: "audio", label: "voice.wav", mimeType: "audio/wav" },
+              }]
+              : []),
+          ],
+          timestamp: 1787260000000,
+        },
       },
     }), 1);
   }
@@ -159,7 +180,14 @@ function installFetch() {
         };
       }
       if (url.includes("/setup-api/tts")) {
-        return { ok: true, json: async () => ({ choice: "auto", autoReply: autoReplyAnswer }) };
+        return {
+          ok: true,
+          json: async () => ({
+            choice: "auto",
+            autoReply: autoReplyAnswer,
+            ...(ttsEngines ? { engines: ttsEngines } : {}),
+          }),
+        };
       }
       return { ok: true, json: async () => ({}) };
     }),
@@ -202,6 +230,8 @@ describe("spoken replies in the desktop chat", () => {
     autoReplyAnswer = true;
     replyText = "**Fine**, thanks.";
     ackOnly = false;
+    ttsEngines = null;
+    replyAudio = null;
     resetHarnessCache();
     window.localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
@@ -237,19 +267,101 @@ describe("spoken replies in the desktop chat", () => {
     await waitFor(() => expect(play).toHaveBeenCalled());
   });
 
-  it("answers a typed question in text only", async () => {
-    replyText = "Fine, thanks.";
-    render(<ChatPopup isOpen onClose={() => {}} />);
+  /**
+   * Send a TYPED turn and wait for its reply to have landed.
+   *
+   * The chat opens with a turn of its own, so the send this waits for is the
+   * SECOND one; the settle is the reply's own bubble arriving, counted the
+   * same way. A test that asserted on `speakBodies` without it would be
+   * reading the array before the turn had finished and would pass on the very
+   * bug it is written for.
+   */
+  async function typeIntoTheChat(question = "how are you") {
     const textarea = await screen.findByRole("textbox");
     await waitFor(() => expect(textarea).not.toBeDisabled());
-    fireEvent.change(textarea, { target: { value: "how are you" } });
+    fireEvent.change(textarea, { target: { value: question } });
     fireEvent.keyDown(textarea, { key: "Enter" });
-    await waitFor(() => expect(sentFrames.some((f) => f.method === "chat.send")).toBe(true));
-    // The chat opens with a turn of its own ("hi"), so OUR reply is the second
-    // bubble with this text.
-    await waitFor(() => expect(screen.getAllByText("Fine, thanks.", { exact: false }).length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(sentFrames.filter((f) => f.method === "chat.send").length).toBeGreaterThanOrEqual(2));
+    // The turn is OVER — the running-turn line has gone — so an assertion on
+    // `speakBodies` is reading the finished state rather than racing it.
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
+  }
+
+  /**
+   * The OpenClaw half of the owner's switch, and the reason it looked broken
+   * on that edition while working on Hermes.
+   *
+   * Hermes speaks EVERY reply while the switch is on — its chat route makes
+   * the clip and hands it back on the answer. On OpenClaw nothing did: the
+   * gateway's `tts.auto: "inbound"` speaks only after an INBOUND VOICE
+   * message, and this chat transcribes on the box and posts text, so a typed
+   * question came back silent and with no player at all.
+   */
+  it("gives a typed question's reply a player too, without playing it out loud", async () => {
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    // The box was asked for the words, exactly as it is for a spoken question.
+    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    // ...and the clip is on the bubble, ready to press.
+    const player = await screen.findByTestId("chat-audio");
+    expect(player).toHaveAttribute("src", "blob:spoken-reply");
+    // A typed question is not answered ALOUD, though: that stays the reply to
+    // a spoken one, on both editions.
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ...but the chat's OWN opening turn is not the owner asking.
+   *
+   * `FIRST_CONVERSATION_OPENER` is sent by ClawBox to make the agent introduce
+   * itself on a box nobody has talked to yet — nobody is waiting to hear it,
+   * and a first boot is exactly when a cold Kokoro is at its slowest. So the
+   * greeting's reply gets no clip, and the count above stays the owner's own.
+   */
+  it("spends no synthesis on the greeting the chat sends itself", async () => {
+    replyText = "Hello there.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await screen.findByText("Hello there.", { exact: false });
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
     expect(speakBodies).toEqual([]);
     expect(screen.queryByTestId("chat-audio")).not.toBeInTheDocument();
+  });
+
+  it("leaves a typed question silent while the owner's switch is off", async () => {
+    autoReplyAnswer = false;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    expect(speakBodies).toEqual([]);
+    expect(screen.queryByTestId("chat-audio")).not.toBeInTheDocument();
+  });
+
+  it("asks for nothing on a box that has said it has no voice", async () => {
+    // The same rule the composer's attach and microphone buttons follow: a
+    // box that positively reports every engine unconfigured is not asked to
+    // speak, rather than asked and refused on every single reply.
+    ttsEngines = [{ id: "local", configured: false }, { id: "cloud", configured: false }];
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    expect(speakBodies).toEqual([]);
+  });
+
+  it("does not ask again for a reply something already spoke", async () => {
+    // The sibling case, and the one the Hermes edition is in permanently: when
+    // a clip arrives ON the reply — a box whose owner hand-edited
+    // `tts.auto: "always"` here, the Hermes chat route on that edition — the
+    // chat must render it and ask for nothing. Asking as well would spend a
+    // second synthesis on every reply and then replace a working clip with it.
+    replyText = "Fine, thanks.";
+    replyAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000000---aa.wav";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    // Both replies in this transcript carry one — the chat's opening turn and
+    // the typed one — and neither was synthesised here.
+    await waitFor(() => expect(screen.queryAllByTestId("chat-audio")).toHaveLength(2));
+    expect(speakBodies).toEqual([]);
   });
 
   it("stays silent while the owner's switch is off, and follows the switch live", async () => {

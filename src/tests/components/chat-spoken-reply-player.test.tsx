@@ -3,24 +3,21 @@ import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-ut
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { resetSpokenReplyPeakCache } from "@/components/SpokenReplyPlayer";
-import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
 
 /**
- * The ClawBox player for a spoken reply, and the switch that asks for one.
+ * The ClawBox player for a spoken reply.
  *
- * TASK-782, the owner's pick from the voice mockups (A2 + B1): the browser's
- * grey `<audio controls>` bar is replaced by a player this product draws — a
- * 36px play/pause button, a waveform read off the clip with the played part
- * filled, a clock and a download — and the composer grows a speaker button
- * that turns spoken replies on and off without a trip to Settings.
+ * TASK-782, the owner's pick from the voice mockups (A2): the browser's grey
+ * `<audio controls>` bar is replaced by a player this product draws — a 36px
+ * play/pause button, a waveform read off the clip with the played part filled,
+ * a clock and a download.
  *
  * What is pinned here is everything a screenshot cannot check: that the
  * control is operable from the keyboard, that its accessible name is still the
  * one `audioLabel` computes, that the waveform never blocks the reply from
  * rendering and degrades to a plain bar when a clip cannot be decoded, that a
- * silent reply grows no player at all, and — the part that would otherwise
- * quietly grow a second source of truth — that the toggle writes the EXISTING
- * spoken-replies setting through the same route Settings → Voice writes.
+ * silent reply grows no player at all, and that the composer has no
+ * spoken-replies control of its own — Settings → Voice is the one switch.
  */
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
@@ -32,17 +29,8 @@ const playerSrc = (p: string) => `/setup-api/chat/media?path=${encodeURIComponen
 let history: unknown[] = [];
 /** The answer `/setup-api/tts` gives, as the tests set it up. */
 let ttsAnswer: Record<string, unknown> = { choice: "auto", autoReply: true };
-/** ...and whether it answers at all. */
-let ttsOk = true;
 /** Every POST the component made, in order. */
 let posts: Array<{ url: string; body: unknown }> = [];
-/** What the `autoReply` POST answers with. */
-let postAnswer: { ok: boolean; status?: number; body: Record<string, unknown> } = {
-  ok: true,
-  body: { choice: "auto", autoReply: false },
-};
-/** The write never returns — a deadline, or the wire going away mid-flight. */
-let postThrows = false;
 
 function assistantMessage(text: string, timestamp: number, audioPath?: string) {
   const content: unknown[] = [{ type: "text", text }];
@@ -102,17 +90,6 @@ function installFetch() {
     const url = String(input);
     if (init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body ?? "null")) });
-      // The EXACT path: `/setup-api/tts/warm` and `/setup-api/tts/speak` are
-      // POSTs too, and a substring match would answer them with the switch's
-      // body and throw on them under `postThrows`.
-      if (new URL(url, "http://localhost").pathname === "/setup-api/tts") {
-        if (postThrows) throw new DOMException("The operation was aborted.", "TimeoutError");
-        return {
-          ok: postAnswer.ok,
-          status: postAnswer.status ?? (postAnswer.ok ? 200 : 403),
-          json: async () => postAnswer.body,
-        };
-      }
       return { ok: true, json: async () => ({}) };
     }
     if (url.includes("/setup-api/gateway/ws-config")) {
@@ -128,7 +105,7 @@ function installFetch() {
       return { ok: true, json: async () => ({ items: [] }) };
     }
     if (url.includes("/setup-api/tts")) {
-      return { ok: ttsOk, status: ttsOk ? 200 : 403, json: async () => ttsAnswer };
+      return { ok: true, status: 200, json: async () => ttsAnswer };
     }
     // The peak reader asks for the clip itself.
     if (url.includes("/setup-api/chat/media")) {
@@ -297,9 +274,6 @@ function freshBox() {
   // them, and would otherwise hand the next test the previous one's decode.
   resetSpokenReplyPeakCache();
   ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
-  postAnswer = { ok: true, body: { choice: "auto", autoReply: false } };
-  postThrows = false;
-  ttsOk = true;
   decodeMode = "ok";
   clipDuration = 21;
   visible = true;
@@ -520,163 +494,31 @@ describe("the ClawBox player for a spoken reply", () => {
   });
 });
 
-describe("the composer's spoken-replies toggle", () => {
+describe("the chat composer", () => {
   beforeEach(freshBox);
   afterEach(restoreBox);
 
-  it("shows the box's own setting, and writes it through the route Settings writes", async () => {
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    const toggle = await screen.findByTestId("chat-speak-toggle");
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
-    expect(toggle).toHaveAccessibleName("chat.spokenRepliesOn");
-
-    fireEvent.click(toggle);
-    // The EXISTING setting — one switch, not a second one beside it.
-    await waitFor(() => expect(posts).toEqual([
-      { url: "/setup-api/tts", body: { action: "autoReply", enabled: false } },
-    ]));
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "false"));
-    expect(toggle).toHaveAccessibleName("chat.spokenRepliesOff");
-    // Said in words, not only in colour, and politely announced.
-    const notice = await screen.findByTestId("chat-speak-notice");
-    expect(notice).toHaveTextContent("chat.spokenRepliesOffNotice");
-    expect(notice).toHaveAttribute("role", "status");
-    expect(notice).toHaveAttribute("aria-live", "polite");
-  });
-
-  it("keeps the switch where it was when the box refuses the write", async () => {
-    // The false-success trap: an owner-only route answers 403 to a session
-    // that cannot change it, and a toggle that flipped anyway would say the
-    // box was quiet while it went on speaking.
-    postAnswer = { ok: false, status: 403, body: { error: "owner only", code: "owner_only" } };
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    const toggle = await screen.findByTestId("chat-speak-toggle");
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
-    fireEvent.click(toggle);
-    await waitFor(() => expect(posts.length).toBe(1));
-    await waitFor(() => expect(screen.getByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesFailed"));
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
-  });
-
-  it("stays offered when an engine list says nothing about being configured", async () => {
-    // A list of entries, none of which states `configured`, is silence about
-    // the question — not an answer of "none". Reading it as "none" would hide
-    // the button, which is what the helper's own rule forbids.
-    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local" }, { id: "cloud" }] };
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
-  });
-
-  it("stays offered when only SOME of the engines have answered", async () => {
-    // Hiding it takes every engine saying no. One `false` beside one that says
-    // nothing is a partial answer, and treating it as a whole one would take a
-    // working control off a box on the strength of a field that never arrived.
-    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: false }, { id: "cloud" }] };
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
-  });
-
-  it("stays offered when the box says nothing about its engines", async () => {
-    // `null` is not "no". An unreachable route, or one too old to report its
-    // engines, says nothing about them — and hiding the switch on silence
-    // would take a working control off a box that speaks perfectly well.
-    ttsAnswer = { choice: "auto", autoReply: true };
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
-  });
-
-  it("follows the box's voice being installed while the chat is open", async () => {
-    // Probe-once: the engines were read only when the popup opened, so an
-    // owner who installed Kokoro in Settings beside a docked chat had no
-    // button until the chat was closed and reopened.
-    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: false }] };
+  /**
+   * NO spoken-replies control here, on either edition.
+   *
+   * There was one — a speaker button beside `+`, writing the same
+   * `POST /setup-api/tts {action:"autoReply"}` Settings → Voice writes. It is
+   * gone at the owner's word (TASK-782): Settings → Voice is the one switch,
+   * and a second control for it in the composer cost a width-critical row 36px
+   * to say what a settings page already says.
+   *
+   * Pinned rather than simply deleted, because "the composer grows a control
+   * for the voice feature" is exactly the change a later voice task would make
+   * again without knowing it had been asked for and taken back out.
+   */
+  it("offers no spoken-replies control of its own", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await screen.findByRole("textbox");
-    await waitFor(() => expect(screen.queryByTestId("chat-speak-toggle")).toBeNull());
-
-    act(() => {
-      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
-        detail: { autoReply: true, engines: [{ id: "local", configured: true }] },
-      }));
-    });
-    expect(await screen.findByTestId("chat-speak-toggle")).toBeInTheDocument();
-  });
-
-  it("never stays stuck when the write does not come back", async () => {
-    // The write can be an `openclaw config set` — 30 s an attempt, four
-    // attempts — so it has a deadline. What must NOT follow is the button
-    // staying disabled for the life of the page, or the chat claiming a
-    // failure over a write that may well have landed: it asks the box what it
-    // now does and shows that.
-    postThrows = true;
-    ttsAnswer = { choice: "auto", autoReply: true, engines: [{ id: "local", configured: true }] };
-    const heard: unknown[] = [];
-    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
-    window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, listener);
-    onTestEnd.push(() => window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, listener));
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    const toggle = await screen.findByTestId("chat-speak-toggle");
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
-
-    // The box says it is now OFF — the write did land after all.
-    ttsAnswer = { choice: "auto", autoReply: false, engines: [{ id: "local", configured: true }] };
-    fireEvent.click(toggle);
-
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "false"));
-    expect(toggle).not.toBeDisabled();
-    // What it must NOT say is that the change was made: the write may still be
-    // landing, so the read that answered can be one value out of date.
-    expect(await screen.findByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesUnconfirmed");
-    // ...and for the same reason it is not handed to Settings as this box's
-    // state, since nothing would correct it there afterwards.
-    expect(heard).toEqual([]);
-  });
-
-  it("says so, and stays usable, when the box cannot be asked either", async () => {
-    postThrows = true;
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    const toggle = await screen.findByTestId("chat-speak-toggle");
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "true"));
-    // Now nothing answers at all.
-    ttsAnswer = {};
-    fireEvent.click(toggle);
-
-    await waitFor(() => expect(screen.getByTestId("chat-speak-notice")).toHaveTextContent("chat.spokenRepliesFailed"));
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
-    expect(toggle).not.toBeDisabled();
-  });
-
-  it("does not read a refusal as the switch being on", async () => {
-    // The route answers an error OBJECT on a 403 or a 500, so `autoReply` is
-    // simply absent — and a `!== false` test reads that as ON. The box here
-    // has already said OFF; a later read that is refused must not turn the
-    // switch on behind the owner's back, nor make `speakReply` start
-    // synthesising for a state nothing ever confirmed.
-    ttsAnswer = { choice: "auto", autoReply: false, engines: [{ id: "local", configured: true }] };
-    const view = render(<ChatPopup isOpen onClose={() => {}} />);
-    const toggle = await screen.findByTestId("chat-speak-toggle");
-    await waitFor(() => expect(toggle).toHaveAttribute("aria-pressed", "false"));
-
-    // Closed and opened again — the read runs once per open — and this time
-    // the box refuses to answer.
-    view.rerender(<ChatPopup isOpen={false} onClose={() => {}} />);
-    ttsOk = false;
-    ttsAnswer = { error: "Not signed in", code: "owner_only" };
-    view.rerender(<ChatPopup isOpen onClose={() => {}} />);
-
-    const reopened = await screen.findByTestId("chat-speak-toggle");
+    expect(screen.queryByTestId("chat-speak-toggle")).toBeNull();
+    expect(screen.queryByTestId("chat-speak-notice")).toBeNull();
+    // And it does not WRITE the switch either — reading it is all this surface
+    // does with it now.
     await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(reopened).toHaveAttribute("aria-pressed", "false");
-    // And nothing was written on the strength of a state that was never read.
-    expect(posts.filter((p) => p.url.includes("/setup-api/tts"))).toEqual([]);
-  });
-
-  it("is not offered on a box with no voice to speak with", async () => {
-    ttsAnswer = { choice: "auto", autoReply: true, engines: [
-      { id: "local", configured: false }, { id: "cloud", configured: false },
-    ] };
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    await screen.findByRole("textbox");
-    await waitFor(() => expect(screen.queryByTestId("chat-speak-toggle")).toBeNull());
+    expect(posts.filter((post) => post.url.includes("/setup-api/tts"))).toEqual([]);
   });
 });

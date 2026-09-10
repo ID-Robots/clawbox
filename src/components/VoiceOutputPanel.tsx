@@ -622,10 +622,14 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         )}
       </div>
 
-      {/* Spoken replies: a voice message — a Telegram voice note, the chat's
-          microphone — is answered with a voice. On by default. The gateway
-          answers the channels (`tts.auto: "inbound"`); the desktop chat
-          asks the box to speak the reply itself, on every harness. */}
+      {/* Spoken replies, and the ONLY control for them: the composer's speaker
+          button was taken back out at the owner's word (TASK-782). On by
+          default. The gateway answers the channels (`tts.auto: "inbound"`);
+          in the desktop chat the reply's clip is made on the box on every
+          harness — asked for by the chat on OpenClaw, attached by the chat
+          route on Hermes — so a typed question's reply has a player here too
+          and a spoken one plays on its own. The hint says exactly that, which
+          is why it is not the one-line label it looks like it could be. */}
       <div className={`${CARD} ${ROW}`}>
         <div className="min-w-0">
           <label htmlFor="voice-auto-reply" className={LABEL}>{t("settings.voice.autoReply")}</label>

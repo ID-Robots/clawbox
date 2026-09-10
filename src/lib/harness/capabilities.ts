@@ -275,9 +275,31 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     // flag that keeps `generateImage` honest about rejecting here.
     imageGenerationTrigger: facts.hasClawaiToken ? "agent" : null,
     canSpeakReplies: true,
-    // The gateway speaks the reply itself and pushes it as a second message
-    // carrying the audio; nothing here has to ask for it.
-    spokenReplyTrigger: "harness",
+    // WHO speaks it, and the answer is NOT the gateway — which is what left
+    // this feature dead on the edition it was written for.
+    //
+    // Measured on the box's own core (2026.8.1, `maybeApplyTtsToPayloadCore`):
+    //
+    //   if (!explicitTts && autoMode === "inbound" && params.inboundAudio !== true)
+    //     return nextPayload;
+    //
+    // The owner's switch writes `tts.auto: "inbound"` (voice-reply.ts), and
+    // this chat transcribes on the box and posts TEXT through `chat.send` — so
+    // `inboundAudio` is never true here and the gateway attaches nothing, to a
+    // typed question or a spoken one. The modes that WOULD speak a reply in
+    // this session (`always`, `tagged`) cannot be scoped to this surface: the
+    // core layers TTS config global → agent → channel → account, and the
+    // box's own CLI refuses the web chat's id ("Unknown config path:
+    // channels.webchat.tts.auto"), so either one would put a voice note on
+    // every typed Telegram message too. The one per-session override
+    // (`sessionEntry.ttsAuto`) is resolved FIRST but is writable only by the
+    // in-chat `/tts` command — `sessions.patch` has no such field — which
+    // means a command message in the owner's transcript.
+    //
+    // So the chat asks, through the route it already asks with for a spoken
+    // question (`/setup-api/tts/speak`, which resolves the same `tts.providers`
+    // chain the core would have used).
+    spokenReplyTrigger: "chat",
     canAbortTurn: true,
     hasLiveConnection: true,
     modelStore: "openclaw-config",

@@ -121,18 +121,26 @@ export interface HarnessCapabilities {
    * WHO turns the reply into audio — the sibling of `imageGenerationTrigger`,
    * and a separate flag for the same reason:
    *
-   *   `'harness'`  the gateway speaks the reply itself and pushes a second
-   *                message carrying the audio part. OpenClaw. Nothing for the
-   *                chat to ask for.
-   *   `'box'`      the BOX asks, because the harness will not do it unbidden:
-   *                Hermes exposes `POST /api/audio/speak` but never speaks a
-   *                reply on its own, so the ClawBox chat route calls it and
-   *                attaches the clip in the same shape the gateway produces.
+   *   `'chat'`     the CHAT asks, after the reply has landed, because nothing
+   *                in the turn's path will: the OpenClaw gateway speaks a
+   *                reply only on the strength of an inbound VOICE message
+   *                (`tts.auto: "inbound"`), and this chat transcribes on the
+   *                box and posts text. See the note in capabilities.ts.
+   *   `'box'`      the BOX asks, inside the turn, because the harness will not
+   *                do it unbidden: Hermes exposes `POST /api/audio/speak` but
+   *                never speaks a reply on its own, so the ClawBox chat route
+   *                calls it and attaches the clip in the same shape the
+   *                gateway produces. Nothing for the chat to ask for.
    *   `null`       nothing here can speak. Always the value when
    *                `canSpeakReplies` is false, and never a value when it is
    *                true — the two are computed together.
+   *
+   * A `'harness'` value used to sit where `'chat'` is now, on the reading that
+   * the gateway speaks its own replies. It does not speak THIS surface's, and
+   * the chat believing it did is what left spoken replies dead on OpenClaw
+   * while they worked on Hermes.
    */
-  readonly spokenReplyTrigger: "harness" | "box" | null;
+  readonly spokenReplyTrigger: "chat" | "box" | null;
   /** The Stop button. */
   readonly canAbortTurn: boolean;
   /** There is a socket that can be down — i.e. a connection banner is honest. */

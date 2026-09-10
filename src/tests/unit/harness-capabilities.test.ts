@@ -170,10 +170,40 @@ describe("capabilitiesFor", () => {
     expect(speaking.spokenReplyTrigger).toBe("box");
   });
 
-  it("leaves the gateway to speak for itself on OpenClaw", () => {
+  /**
+   * The OpenClaw gateway will NOT speak a reply in this chat, and saying it
+   * does is what left the feature dead on that edition.
+   *
+   * Measured on the box's own core (2026.8.1), `maybeApplyTtsToPayloadCore`:
+   *
+   *   if (!explicitTts && autoMode === "inbound" && params.inboundAudio !== true)
+   *     return nextPayload;
+   *
+   * The switch writes `tts.auto: "inbound"`, and the desktop chat transcribes
+   * on the box and posts TEXT — so `inboundAudio` is never true here and the
+   * gateway attaches nothing. The modes that WOULD speak a typed turn
+   * (`always`, `tagged`) are not scopeable to this surface: the config's TTS
+   * layering is global/agent/channel/account and `channels.webchat` is refused
+   * by the schema ("unknown channel id: webchat"), the session-level `ttsAuto`
+   * override is settable only by the in-chat `/tts` command (never by
+   * `sessions.patch`, which does not take it), and the prefs-level switch
+   * (`tts.enable`) is global — each of them would put a voice note on every
+   * typed Telegram message too.
+   *
+   * So the CHAT asks, exactly as it already does for a spoken question.
+   */
+  it("does not leave the OpenClaw gateway to speak a reply it never speaks", () => {
     const caps = capabilitiesFor("openclaw", linked);
     expect(caps.canSpeakReplies).toBe(true);
-    expect(caps.spokenReplyTrigger).toBe("harness");
+    expect(caps.spokenReplyTrigger).toBe("chat");
+  });
+
+  it("keeps the Hermes reply spoken by its own route, not by the browser", () => {
+    // The two triggers are different actors and must not collapse into one:
+    // on Hermes a ClawBox route stands in the turn's path and attaches the
+    // clip itself, so the chat must NOT ask a second time.
+    const speaking = capabilitiesFor("hermes", { ...linked, hermesSpeaksReplies: true });
+    expect(speaking.spokenReplyTrigger).toBe("box");
   });
 
   it("claims streaming only where the box was found able to do it", () => {
