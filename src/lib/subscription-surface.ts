@@ -2,11 +2,11 @@ import { promises as fsp } from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
 import {
-  CODEX_MODELS,
   getProviderCatalog,
   subscriptionSurfaceLabel,
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
+import { chatgptSurface } from "@/lib/chatgpt-surface";
 import {
   isOauthProfile,
   profileProviderId,
@@ -165,42 +165,41 @@ export async function readKnownModelIds(provider: string): Promise<Set<string> |
  * Is this model id selectable while the device is on ChatGPT/Codex
  * subscription auth?
  *
- * THE CHATGPT CATALOGUE IS THE ANSWER — `CODEX_MODELS`, and nothing beside it.
- * This used to be a second spelling of that list as a GENERATION regex
- * (`/^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/`), and it
- * failed the way generation allowlists always fail here: the `openai` provider
- * carried the identical pattern until it hid the whole gpt-5.6 family and was
- * removed with "a generation allowlist cannot know what the next generation is
- * called"; the codex copy survived and hid `gpt-5.3-codex-spark`, a model the
- * installed core routes on THIS surface and on no other. One list cannot
- * disagree with itself, and a row added to the catalogue now reaches the
- * picker, both write guards and the refusal sentence together.
+ * THE CHATGPT SURFACE IS THE ANSWER — {@link chatgptSurface}, and nothing
+ * beside it. This used to be a second spelling of that list as a GENERATION
+ * regex (`/^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/`),
+ * and it failed the way generation allowlists always fail here: the `openai`
+ * provider carried the identical pattern until it hid the whole gpt-5.6 family
+ * and was removed with "a generation allowlist cannot know what the next
+ * generation is called"; the codex copy survived and hid
+ * `gpt-5.3-codex-spark`, a model the installed core routes on THIS surface and
+ * on no other. One list cannot disagree with itself, and a row the surface
+ * gains now reaches the picker, both write guards and the refusal sentence
+ * together.
  *
- * WHAT UPSTREAM SAYS, and why this is still a mirror. The core's own
- * `extensions/openai/model-route-contract` holds the truth as
- * `OPENAI_CHATGPT_MODERN_MODEL_IDS` — its dual-route ids plus the
- * subscription-only ones — and 2026.8.1 exposes it through no CLI and no RPC:
- * measured on the box, `openclaw models list --provider codex` and
- * `--provider openai-chatgpt` both answer `Unknown provider filter`, and the
- * `openai` enumeration carries no plan- or auth-scoped field to filter on
- * (`available` there answers the PLATFORM route — it reads `false` for
- * `gpt-5.3-codex-spark`, which runs fine on the ChatGPT one). So ClawBox
- * mirrors that contract, in ONE place, pinned by
- * `src/tests/unit/codex-supported-models.test.ts`.
+ * WHAT UPSTREAM SAYS, and why it is no longer a hand-kept mirror of it. The
+ * core's `extensions/openai` manifest states the route per model — the rows it
+ * ships, which of them are suppressed ON `chatgpt.com`, and which are
+ * suppressed on `api.openai.com` and therefore reachable on this route alone —
+ * so `chatgptSurface()` reads it from the INSTALLED core and the curated
+ * `CODEX_MODELS` is what it falls back to where there is no manifest to read.
+ * The mirror that was here answered for one core version: on 2026.9.3 it is
+ * wrong in both directions at once (no `gpt-6-astra`, and `gpt-5.4` plus
+ * `gpt-5.4-mini` retired from the route it still offers them on).
  *
- * The mirror is deliberately NARROWER than the core's set in one respect: the
- * `-pro` tiers are dual-route upstream but answer "model not supported when
- * using Codex with a ChatGPT account" on the subscription path
- * (developers.openai.com/codex/models), so they stay out of the catalogue and
- * therefore out of this rule. Plan gating is the opposite case and is NOT
- * filtered here — gpt-5.6 access varies per account, so the pick goes through
- * and the upstream access error is what the customer sees.
+ * The surface is deliberately NARROWER than everything the manifest lists, in
+ * the two respects `chatgpt-surface.ts` documents: the `-pro` tiers answer
+ * "model not supported when using Codex with a ChatGPT account" on the
+ * subscription path (developers.openai.com/codex/models), and `-nano` is in the
+ * core's platform set and not its ChatGPT one. Plan gating is the opposite case
+ * and is NOT filtered — gpt-5.6 access varies per account, so the pick goes
+ * through and the upstream access error is what the customer sees.
  *
  * It lives here, beside the Claude rule, for the same reason that one does:
  * both write paths to `agents.defaults.model.primary` have to apply it, and a
  * second copy in the second route is a copy that can drift.
- * `scripts/gateway-pre-start.sh` keeps a hand-maintained mirror of the
- * catalogue in `_CODEX_SUPPORTED`, pinned by
+ * `scripts/gateway-pre-start.sh` keeps a hand-maintained mirror of the CURATED
+ * fallback in `_CODEX_SUPPORTED`, pinned by
  * `src/tests/unit/gateway-pre-start-codex-models.test.ts`. That mirror is
  * OpenClaw 1 ONLY — its single consumer, `_openai_gpt_to_codex`, rewrites
  * `openai/<id>` into the retired namespace and is skipped on
@@ -208,31 +207,34 @@ export async function readKnownModelIds(provider: string): Promise<Set<string> |
  * branch; nothing on the pinned core reads it.
  */
 export function isCodexSupportedModelId(modelId: string): boolean {
-  // `CODEX_MODELS` directly, not `getProviderCatalog(CHATGPT_UI_PROVIDER)`: that
-  // lookup takes a plain string, answers `null` for a key nobody renamed it for
-  // — `openai-codex` already became `codex` once — and this guard would then
+  // `chatgptSurface()` directly, not `getProviderCatalog(CHATGPT_UI_PROVIDER)`:
+  // that lookup takes a plain string, answers `null` for a key nobody renamed it
+  // for — `openai-codex` already became `codex` once — and this guard would then
   // refuse EVERY model with "use a model the ChatGPT subscription supports",
   // naming none. A guard that fails CLOSED on an unreadable list is the one
-  // shape the rest of this file spends three docblocks forbidding, and the
-  // indirection bought nothing: `PROVIDER_CATALOGS.codex.models` IS this array.
+  // shape the rest of this file spends three docblocks forbidding, which is also
+  // why the surface itself answers the curated list rather than an empty one
+  // when the core cannot be read.
   // No `trim()` — the anchored regex this replaces did not trim either, and the
   // caller writes the id it passed in, not the one this judged.
-  return CODEX_MODELS.some((model) => model.id === modelId);
+  return chatgptSurface().models.some((model) => model.id === modelId);
 }
 
 /**
  * The models this box can name when it refuses one, as a sentence fragment.
  *
- * Built from the ChatGPT catalogue rather than hand-written, because the same
+ * Built from the ChatGPT surface rather than hand-written, because the same
  * list was spelled in three places and had already drifted: the chat route's
  * keyless refusal omitted the GPT-5.6 generation the allowlist accepts. A
- * model added to the catalogue now reaches every refusal by itself.
+ * model the surface gains now reaches every refusal by itself — including one
+ * that arrived with a core upgrade, which is the case a hand-written sentence
+ * could never have covered.
  */
 export function chatgptSupportedModelsSentence(): string {
-  const labels = CODEX_MODELS.map((model) => model.label);
+  const labels = chatgptSurface().models.map((model) => model.label);
   // Never an empty fragment: the callers embed this mid-sentence, and "Use ,
   // or switch OpenAI to API-key mode" is worse than naming the surface
-  // generically. Unreachable while the catalogue is the static CODEX_MODELS,
+  // generically. Unreachable while the surface falls back to the curated list,
   // which is exactly why it is cheap to make impossible.
   if (labels.length === 0) return "a model the ChatGPT subscription supports";
   if (labels.length === 1) return labels[0];
@@ -253,9 +255,11 @@ export function chatgptSupportedModelsSentence(): string {
  * answer it. Defaulting it would hand a caller that forgot the flag the
  * behaviour this PR retired instead of a type error.
  *
- * Unlike the Claude surface this is a static allowlist rather than a cache
- * read, so there is no UNKNOWN case: the ChatGPT route catalogue is fixed by
- * the plugin, not enumerated per box.
+ * Unlike the Claude surface there is no UNKNOWN case, even though the list is
+ * now read per box: the ChatGPT route comes from the installed core's own
+ * plugin manifest, and a box that cannot read one is answered the curated
+ * fallback rather than nothing — so this never refuses a model because a file
+ * was missing.
  */
 export function offSurfaceCodexModelMessage(
   provider: string | null | undefined,

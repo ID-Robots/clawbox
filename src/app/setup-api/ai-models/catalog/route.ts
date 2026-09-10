@@ -6,6 +6,8 @@ import path from "path";
 import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
 import { isCodexSupportedModelId } from "@/lib/subscription-surface";
+import { chatgptSurface } from "@/lib/chatgpt-surface";
+import { CHATGPT_UI_PROVIDER } from "@/lib/chatgpt-subscription";
 import { lastModelSegment } from "@/lib/chat-header-pills";
 import {
   CATALOG_PROVIDERS,
@@ -519,8 +521,8 @@ const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
 //
 // ONE entry, and it is a routing fact rather than curation.
 //
-// codex (ChatGPT-account auth): whatever the curated ChatGPT catalogue
-//   carries, asked through `isCodexSupportedModelId`. NO -pro variants — per
+// codex (ChatGPT-account auth): whatever the ChatGPT surface carries, asked
+//   through `isCodexSupportedModelId`. NO -pro variants — per
 //   developers.openai.com/codex/models the Pro models are API-key-only and the
 //   ChatGPT-account path 400s with "model not supported when using Codex with
 //   a ChatGPT account" — and plan gating is deliberately NOT applied: gpt-5.6
@@ -541,10 +543,13 @@ const DEPRECATED_MODEL_IDS: ReadonlySet<string> = new Set([
 // https://chatgpt.com/backend-api/codex/responses on the box, and unspellable
 // by that pattern.
 //
-// `codex` has no catalogue on this core to ask (see the note above
-// `NO_CLI_ENUMERATION_PROVIDERS`), so its list stays curated — but curated in
-// ONE place. `scripts/gateway-pre-start.sh` keeps a second, hand-maintained
-// mirror in `_CODEX_SUPPORTED` (it runs before node exists), pinned by
+// `codex` has no ENUMERATION on this core to ask (see the note above
+// `NO_CLI_ENUMERATION_PROVIDERS`), but it does have the installed core's own
+// plugin manifest, which states the route per model — so the list is derived
+// from that by `chatgptSurface()` rather than curated, and the curated array is
+// only what a box with no readable manifest falls back to. In ONE place either
+// way. `scripts/gateway-pre-start.sh` keeps a second, hand-maintained mirror of
+// that fallback in `_CODEX_SUPPORTED` (it runs before node exists), pinned by
 // src/tests/unit/gateway-pre-start-codex-models.test.ts. That one cannot
 // import; this one can, and does.
 const OFFERABLE_MODEL_ID_BY_PROVIDER: Record<string, (id: string) => boolean> = {
@@ -553,14 +558,15 @@ const OFFERABLE_MODEL_ID_BY_PROVIDER: Record<string, (id: string) => boolean> = 
   // refuses is a dead button, and the reverse is a model the customer cannot
   // reach.
   //
-  // Today it cannot FIRE: the only list that reaches `sanitizeCatalogModels`
-  // for codex is `staticCatalogModels("codex")`, which is the very array this
-  // predicate asks about — the disk cache that used to be the other input is
-  // dropped at the top of `GET`, and codex reaches neither `publish` nor
-  // `fetchSubscriptionSurfaceIds`. Kept because it is the entry that makes the
-  // property true BY CONSTRUCTION rather than by accident: the day this core
-  // grows a ChatGPT-surface enumeration, the rows it returns arrive here, and
-  // an unfiltered `codex` would then offer whatever upstream listed.
+  // It still cannot FIRE, for the same reason and one more: the only list that
+  // reaches `sanitizeCatalogModels` for codex is `staticCatalogModels("codex")`,
+  // which is now the same `chatgptSurface()` this predicate asks — the disk
+  // cache that used to be the other input is dropped at the top of `GET`, and
+  // codex reaches neither `publish` nor `fetchSubscriptionSurfaceIds`. Kept
+  // because it is the entry that makes the property true BY CONSTRUCTION rather
+  // than by accident: the day this route does enumerate the ChatGPT surface, the
+  // rows it returns arrive here, and an unfiltered `codex` would then offer
+  // whatever upstream listed.
   codex: isCodexSupportedModelId,
 };
 
@@ -887,18 +893,30 @@ function hintFor(provider: string, id: string): string | undefined {
  * can route; the harness's own catalogue can, and asking it again is cheap.
  * So this list is served only while there is no live answer, always marked
  * `fallback`, and never written to disk.
+ *
+ * `codex` is the one provider whose rows here are NOT hand-maintained, because
+ * it is the one provider this route cannot enumerate at all (see the note above
+ * `NO_CLI_ENUMERATION_PROVIDERS`): `chatgptSurface()` reads the ChatGPT route
+ * out of the installed core's own plugin manifest, and falls back to the curated
+ * array only where there is no manifest. It is still served unpersisted and
+ * unstamped — the manifest says what the CORE routes, not what this ACCOUNT is
+ * entitled to, so it is not the device answer `source: "live"` claims — and
+ * that is also why it is here rather than in a branch of its own: every rule
+ * this function applies to a curated list applies unchanged to it.
  */
 function staticCatalogModels(provider: string): CatalogModel[] {
   const staticEntry = getProviderCatalog(provider);
   if (!staticEntry) return [];
+  const models = provider === CHATGPT_UI_PROVIDER ? chatgptSurface().models : staticEntry.models;
   // NOT sorted. `compareCatalogModels` orders by context window and then
   // alphabetically, which is right for an enumeration — the device reports a
   // real window for every row — and wrong here: STATIC_MODEL_CONTEXT_WINDOWS
   // only carries the Anthropic ids, so every other curated row takes the
   // 200_000 default, ties, and falls back to alphabetical. CODEX_MODELS,
   // hand-ordered newest-first, would be served GPT-5.4 first. These arrays are
-  // curated in the order they should be read; that IS their metadata.
-  return staticEntry.models.map((sm) => ({
+  // curated in the order they should be read; that IS their metadata — and so is
+  // the manifest's own order for `codex`, which lists its newest model first.
+  return models.map((sm) => ({
     id: sm.id,
     label: sm.label,
     // Zero, not a guess. A curated row has no MEASURED window — the device is
@@ -1011,12 +1029,29 @@ function sanitizeCachedPayload(provider: string, cached: CatalogResponse): Catal
  *    soon as ANY openai profile exists — on the affected box that was the
  *    ClawBox AI image token, an API key that cannot chat.
  *
- * So this core exposes no enumeration of the ChatGPT surface, and that is a
- * finding, not a licence to synthesise one: replacing a hard-coded list with a
- * WRONG live list is the same defect pointed the other way. `codex` therefore
- * enumerates nothing, publishes nothing, and its picker is served the curated
- * list marked `fallback` — never persisted, never dressed up as the box's own
- * answer, and logged with the CLI's own refusal.
+ * MEASURED AGAIN on 2026-09-10, because the obvious move has a third failure
+ * mode that matters more than the two above. The core DOES build the ChatGPT
+ * route's real list, live and per account, from
+ * `chatgpt.com/backend-api/codex/models` — and it publishes it under the
+ * `openai` provider id, the SAME id as the platform catalogue, choosing between
+ * them by the credential its catalog hook resolves first. On a box that also
+ * holds an API key (an inline `models.providers.openai.apiKey` counts, and
+ * ClawBox writes one there for the image model) the published catalogue is the
+ * PLATFORM one: 30 rows including `gpt-5.6`, `o3` and the image models, with the
+ * subscription-only `gpt-5.3-codex-spark` marked `available: false`. Nothing in
+ * a row says which catalogue it came from — the JSON keys are `available,
+ * contextTokens, contextWindow, input, key, local, missing, name, tags` — and
+ * `models list` has no `--profile` to pin it with, so an enumeration cannot be
+ * told apart from the wrong one.
+ *
+ * So this core exposes no enumeration of the ChatGPT surface THIS ROUTE can
+ * trust, and that is a finding, not a licence to synthesise one: replacing a
+ * hard-coded list with a WRONG live list is the same defect pointed the other
+ * way. `codex` therefore enumerates nothing, publishes nothing, and its picker
+ * is served `chatgptSurface()` — the route read out of the installed core's own
+ * plugin manifest, which states it per model and needs no credential — marked
+ * `fallback` like the curated list it falls back to: never persisted, never
+ * dressed up as the box's own answer, and logged with the CLI's own refusal.
  *
  * The ChatGPT rendering belongs on the credential facts TASK-652 introduces —
  * `GET /setup-api/chat/model` rows carrying `provider: "codex"` with

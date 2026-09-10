@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
-import { CODEX_MODELS } from "@/lib/provider-models";
-import { coreManifestPaths } from "@/lib/core-model-lifecycle";
+import { chatgptSurface } from "@/lib/chatgpt-surface";
+import { coreManifestPaths, resetCoreModelLifecycle } from "@/lib/core-model-lifecycle";
 import { createManifestFixture, type ManifestFixture } from "@/tests/helpers/core-model-manifests";
 
 /**
@@ -24,12 +24,12 @@ vi.mock("@/lib/openclaw-config", async (importActual) => {
 /**
  * The drift detector for the ChatGPT (OpenAI Codex) list.
  *
- * `CODEX_MODELS` mirrors the core's `OPENAI_CHATGPT_MODERN_MODEL_IDS`
- * (`extensions/openai/model-route-contract` in the installed dist) because
- * 2026.8.1 publishes that set through no CLI and no provider filter —
- * `openclaw models list --provider codex` and `--provider openai-chatgpt` both
- * answer `Unknown provider filter`. A hand-kept mirror is how the picker fell
- * behind in the first place, so the mirror needs something to fail against.
+ * The surface is DERIVED from this manifest now (`chatgptSurface()`), so the
+ * case below is no longer a drift detector for a hand-kept mirror but the
+ * end-to-end proof of the derivation on whatever core is installed: a model this
+ * box's core says the ChatGPT account is the only way to reach must be a model
+ * this box's picker offers. `CODEX_MODELS` is what the surface answers where
+ * there is no manifest, and cannot be checked against one that is not there.
  *
  * The core DOES publish one half of it in a machine-readable file at a stable
  * path — the same `extensions/<provider>/openclaw.plugin.json` that
@@ -103,6 +103,7 @@ function readFirstManifest(paths: string[]): unknown {
 
 describe("the ChatGPT surface follows the installed core", () => {
   it("carries every openai model the installed core says is ChatGPT-only", () => {
+    resetCoreModelLifecycle();
     const manifest = readFirstManifest(coreManifestPaths("openai"));
     const ids = subscriptionOnlyIds(manifest, "openai");
     if (ids.length === 0) {
@@ -111,10 +112,10 @@ describe("the ChatGPT surface follows the installed core", () => {
       expect(ids).toEqual([]);
       return;
     }
-    const curated = CODEX_MODELS.map((m) => m.id);
+    const offered = chatgptSurface().models.map((m) => m.id);
     for (const id of ids) {
-      expect(curated, `the installed core routes ${id} on the ChatGPT account only, `
-        + "but CODEX_MODELS does not offer it").toContain(id);
+      expect(offered, `the installed core routes ${id} on the ChatGPT account only, `
+        + "but the picker does not offer it").toContain(id);
     }
   });
 });

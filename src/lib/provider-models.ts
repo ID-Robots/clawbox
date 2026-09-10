@@ -224,28 +224,41 @@ export const OPENAI_DEFAULT_MODEL_ID = "gpt-5.4";
 // src/lib/chatgpt-subscription.ts. Available when the user authenticates via
 // ChatGPT OAuth instead of pasting an API key.
 //
-// THIS ARRAY IS THE WHOLE ChatGPT SURFACE. The picker offers it, both write
-// paths to `agents.defaults.model.primary` accept exactly it
-// (`isCodexSupportedModelId`), and the refusal sentence is built from it —
-// there is no second spelling to keep in step. There was: a generation regex
-// in subscription-surface.ts, which could not spell `gpt-5.3-codex-spark` and
-// so hid it (TASK-786).
+// THIS ARRAY IS THE FALLBACK, and the labels, for the ChatGPT surface — not the
+// surface itself. `chatgptSurface()` (src/lib/chatgpt-surface.ts) derives that
+// from the INSTALLED core's `extensions/openai` manifest, which states the route
+// per model, and answers this array only where there is no manifest to read: CI,
+// a box with no core yet, a file half-written by an upgrade. The picker, both
+// write paths to `agents.defaults.model.primary` (`isCodexSupportedModelId`) and
+// the refusal sentence all read that one surface, so there is still no second
+// spelling to keep in step. There was: a generation regex in
+// subscription-surface.ts, which could not spell `gpt-5.3-codex-spark` and so
+// hid it (TASK-786).
 //
-// It mirrors the core's own `OPENAI_CHATGPT_MODERN_MODEL_IDS`
-// (`extensions/openai/model-route-contract` in the installed dist), because
-// 2026.8.1 publishes that set through no CLI and no RPC — `openclaw models
-// list --provider codex` answers `Unknown provider filter`, and the `openai`
-// enumeration has no auth-scoped field. Measured on the box, 2026-09-09:
-//   * gpt-5.6-sol      -> chatgpt.com/backend-api/codex/responses  200
-//   * gpt-5.3-codex-spark -> chatgpt.com/backend-api/codex/responses  200
-//   * gpt-6-astra      -> NOT on that route; the core sends it to
-//     api.openai.com/v1/responses on the API key instead, so it belongs to the
-//     `openai` surface and must not appear here.
+// It used to BE the surface, mirroring the core's
+// `OPENAI_CHATGPT_MODERN_MODEL_IDS` by hand, and a hand-kept mirror is wrong in
+// both directions the moment a core bump is measured: 2026.9.3 files
+// `gpt-6-astra` as a dual-route model and lists it FIRST in the openai manifest,
+// and suppresses `gpt-5.4` and `gpt-5.4-mini` on `chatgpt.com` — "retired from
+// the ChatGPT-account Codex route" — both of which this array still offers.
+//
+// Measured on the box, core 2026.8.1 (the route facts that still hold):
+//   * gpt-5.6-sol         -> chatgpt.com/backend-api/codex/responses  200
+//   * gpt-5.3-codex-spark -> chatgpt.com/backend-api/codex/responses  200, and
+//     `models list --provider openai` reports it `available: false` — the
+//     platform route is the one that excludes it.
+// What does NOT hold is the reading that `gpt-6-astra` is "not on the ChatGPT
+// route": measured 2026-09-10 on that same box, a turn on it goes to
+// api.openai.com — and so does a turn on the owner's own `openai/gpt-5.5`, which
+// 401s there and fails over. Both are the box's inline
+// `models.providers.openai.apiKey` deciding which catalogue the core publishes
+// for `openai`, not a property of either model.
 //
 // NO -pro variants — those are API-key only (they 400 with "model not
 // supported when using Codex with a ChatGPT account" on the OAuth path), even
-// though the core files them as dual-route. Plan gating is the opposite case
-// and is deliberately NOT applied: the gpt-5.6 models are gated upstream
+// though the core files them as dual-route; `chatgpt-surface.ts` applies that
+// narrowing to the manifest too. Plan gating is the opposite case and is
+// deliberately NOT applied: the gpt-5.6 models are gated upstream
 // (Plus/Pro/Max), there is no plan-scoped list on this core to filter by — the
 // catalog route's `WHY codex IS NOT ENUMERATED FROM openai` note is the whole
 // argument — so an unentitled account sees all three, the turn 400s upstream

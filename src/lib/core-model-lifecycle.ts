@@ -60,7 +60,7 @@ const RETIRED_STATUSES: ReadonlySet<string> = new Set(["deprecated", "disabled"]
  * How long a manifest read stands before the file is re-stat'ed.
  *
  * The re-stat exists because the in-app OpenClaw update runs inside this server
- * (see `retiredFor`), and that is a once-in-a-while event — while
+ * (see `factsFor`), and that is a once-in-a-while event — while
  * `withoutRetiredModels` asks about every row of a payload, and the OpenRouter
  * catalogue is ~423 rows. One `statSync` per row per request is a blocking
  * syscall storm on a Jetson for a file that changes when someone taps Update.
@@ -69,9 +69,47 @@ const RETIRED_STATUSES: ReadonlySet<string> = new Set(["deprecated", "disabled"]
  */
 const STAT_FLOOR_MS = 5_000;
 
-interface CachedManifest {
+/**
+ * The two hosts the manifest's `when.baseUrlHosts` names, and what each one
+ * means when a model is SUPPRESSED on it. They are the core's own strings, read
+ * out of the shipped manifest rather than chosen here:
+ *
+ *   * `api.openai.com` — suppressed on the PLATFORM route, i.e. reachable only
+ *     through the ChatGPT account. `gpt-5.3-codex-spark` carries this on both
+ *     measured cores, with the reason "available only through ChatGPT/Codex
+ *     OAuth … OpenAI API-key auth cannot use this model."
+ *   * `chatgpt.com` — suppressed on the CHATGPT route: retired FROM the
+ *     subscription surface while it still runs on an API key. 2026.9.3 carries
+ *     two ("GPT-5.4 has retired from the ChatGPT-account Codex route",
+ *     `replacedBy: gpt-5.6-terra`; the same for `gpt-5.4-mini`).
+ */
+const PLATFORM_HOST = "api.openai.com";
+const CHATGPT_HOST = "chatgpt.com";
+
+/** What the installed core says about one provider's ChatGPT (Codex) route. */
+export interface CoreChatgptRoute {
+  /** The catalogue rows the manifest lists, in the order it lists them. */
+  listed: ReadonlyArray<{ id: string; name?: string }>;
+  /** Ids the manifest suppresses ON that route — retired from the surface. */
+  offRoute: ReadonlySet<string>;
+  /** Ids suppressed on the platform host: this route reaches them and no other. */
+  subscriptionOnly: readonly string[];
+}
+
+interface ManifestFacts {
   /** Retired ids, indexed under BOTH the raw manifest id and its last segment. */
   retired: Set<string>;
+  /**
+   * The provider's ChatGPT-route facts, or null when this manifest cannot say —
+   * absent, unparsable, or carrying no catalogue for the provider asked about.
+   *
+   * Null is UNKNOWN and never "the route is empty": the caller renders the
+   * curated fallback for it, where an empty list would empty the picker.
+   */
+  chatgpt: CoreChatgptRoute | null;
+}
+
+interface CachedManifest extends ManifestFacts {
   /** The file this was read from, and what it looked like when it was read. */
   file: string;
   mtimeMs: number;
@@ -109,7 +147,11 @@ const SAFE_PROVIDER_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 export function coreManifestPaths(provider: string): string[] {
   const bin = findOpenclawBin();
   const paths: string[] = [];
-  if (path.isAbsolute(bin)) {
+  // `typeof` as well as `isAbsolute`, because this is now read from a WRITE
+  // GUARD and not only from the catalogue route: a suite that mocks
+  // `openclaw-config` without this function gets `undefined` here, `path.join`
+  // throws on it, and a model refusal that should be a 400 became a 500.
+  if (typeof bin === "string" && path.isAbsolute(bin)) {
     paths.push(path.join(
       path.dirname(bin), "..", "lib", "node_modules", "openclaw",
       "dist", "extensions", provider, "openclaw.plugin.json",
@@ -177,12 +219,72 @@ function catalogueFor(manifest: unknown, provider: string): unknown {
   return manifest;
 }
 
-function retiredFor(provider: string): Set<string> {
-  if (!SAFE_PROVIDER_RE.test(provider)) return new Set();
+/**
+ * The provider's ChatGPT-route catalogue, as the manifest states it.
+ *
+ * THREE facts, because the manifest states the surface in three pieces and two
+ * of them are suppressions rather than rows:
+ *
+ *   * `modelCatalog.providers.<provider>.models[]` — what the core ships for the
+ *     provider, in its own order (2026.9.3 lists `gpt-6-astra` first).
+ *   * a suppression on {@link CHATGPT_HOST} — a row that is NOT on this route.
+ *   * a suppression on {@link PLATFORM_HOST} — a model that is on this route
+ *     ONLY, and is therefore missing from `models[]` entirely
+ *     (`gpt-5.3-codex-spark` is in neither core's list).
+ *
+ * The suppressions sit at `modelCatalog.suppressions`, beside the provider
+ * blocks rather than inside them, and each names its own `provider` — the
+ * azure alias carries a `gpt-5.3-codex-spark` row of its own, which says nothing
+ * about this provider's routes. So they are filtered by `provider`, and a
+ * suppression with no `when.baseUrlHosts` is ignored: unconditional is not the
+ * same claim as "off this route", and reading it as one would drop a model the
+ * core still routes.
+ *
+ * Returns null when the manifest carries no catalogue for this provider at all.
+ * An empty `models[]` with suppressions is still an answer; no block is not.
+ */
+function chatgptRouteFrom(manifest: unknown, provider: string): CoreChatgptRoute | null {
+  const modelCatalog = (manifest as { modelCatalog?: unknown } | null)?.modelCatalog;
+  const providers = (modelCatalog as { providers?: unknown } | null)?.providers;
+  const block = providers && typeof providers === "object" && !Array.isArray(providers)
+    && Object.prototype.hasOwnProperty.call(providers, provider)
+    ? (providers as Record<string, unknown>)[provider]
+    : null;
+  const rows = (block as { models?: unknown } | null)?.models;
+  if (!Array.isArray(rows)) return null;
+
+  const listed: Array<{ id: string; name?: string }> = [];
+  for (const row of rows as Array<{ id?: unknown; name?: unknown }>) {
+    const id = typeof row?.id === "string" ? row.id.trim() : "";
+    if (!id) continue;
+    const name = typeof row?.name === "string" ? row.name.trim() : "";
+    listed.push(name ? { id, name } : { id });
+  }
+
+  const offRoute = new Set<string>();
+  const subscriptionOnly: string[] = [];
+  const suppressions = (modelCatalog as { suppressions?: unknown } | null)?.suppressions;
+  if (Array.isArray(suppressions)) {
+    for (const entry of suppressions as Array<{ provider?: unknown; model?: unknown; when?: { baseUrlHosts?: unknown } | null }>) {
+      if (entry?.provider !== provider) continue;
+      const model = typeof entry?.model === "string" ? entry.model.trim() : "";
+      if (!model) continue;
+      const hosts = entry?.when?.baseUrlHosts;
+      if (!Array.isArray(hosts)) continue;
+      const lower = hosts.filter((h): h is string => typeof h === "string").map((h) => h.trim().toLowerCase());
+      if (lower.includes(CHATGPT_HOST)) offRoute.add(model);
+      else if (lower.includes(PLATFORM_HOST) && !subscriptionOnly.includes(model)) subscriptionOnly.push(model);
+    }
+  }
+  return { listed, offRoute, subscriptionOnly };
+}
+
+function factsFor(provider: string): ManifestFacts {
+  if (!SAFE_PROVIDER_RE.test(provider)) return { retired: new Set(), chatgpt: null };
   const cached = cache.get(provider);
   if (cached) {
     const now = Date.now();
-    if (now - cached.checkedAt < STAT_FLOOR_MS) return cached.retired;
+    if (now - cached.checkedAt < STAT_FLOOR_MS) return cached;
     // Re-stat rather than trust the process lifetime. The in-app OpenClaw-only
     // update (`openclaw_install` → `openclaw_patch` → `gateway_restart`) runs
     // INSIDE this server and deliberately does not touch ClawBox, so a core
@@ -193,7 +295,7 @@ function retiredFor(provider: string): Set<string> {
       const stat = fsSync.statSync(cached.file);
       if (stat.mtimeMs === cached.mtimeMs && stat.size === cached.size) {
         cached.checkedAt = now;
-        return cached.retired;
+        return cached;
       }
     } catch {
       // The file went away: fall through and look again.
@@ -247,8 +349,14 @@ function retiredFor(provider: string): Set<string> {
       }
     }
     const retired = new Set<string>();
+    let chatgpt: CoreChatgptRoute | null = null;
     try {
-      collect(catalogueFor(JSON.parse(raw), provider), retired);
+      // ONE parse for both facts. They are read off the same bytes the stat
+      // above describes, so a second read here would reintroduce exactly the
+      // mid-upgrade window this function opens the file once to close.
+      const manifest: unknown = JSON.parse(raw);
+      collect(catalogueFor(manifest, provider), retired);
+      chatgpt = chatgptRouteFrom(manifest, provider);
     } catch {
       // A manifest we cannot parse is a manifest we know nothing from — but the
       // NEXT candidate may still be readable, and giving up on the lookup threw
@@ -266,13 +374,13 @@ function retiredFor(provider: string): Set<string> {
       continue;
     }
     if (!degraded) {
-      cache.set(provider, { retired, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
+      cache.set(provider, { retired, chatgpt, file, mtimeMs: stat.mtimeMs, size: stat.size, checkedAt: Date.now() });
     }
-    return retired;
+    return { retired, chatgpt };
   }
   // Nothing found. Deliberately NOT cached: on a box with no core yet, or one
   // mid-upgrade, the answer is "ask again", not "there is nothing".
-  return new Set();
+  return { retired: new Set(), chatgpt: null };
 }
 
 /**
@@ -306,7 +414,35 @@ export function coreModelRetired(provider: string, id: string): boolean {
  */
 export function coreRetiredModels(provider: string): ReadonlySet<string> {
   if (!provider) return EMPTY;
-  return retiredFor(provider);
+  return factsFor(provider).retired;
+}
+
+/**
+ * What the installed core says its ChatGPT (Codex) route carries for
+ * `provider` — or null when this box cannot say.
+ *
+ * The same manifest, the same read, the same fail-open rule as the retirement
+ * lookup above: a box with no core, an unreadable file or a manifest with no
+ * catalogue for this provider answers null, and the caller renders its curated
+ * fallback. What it must never do is answer "the route has no models".
+ *
+ * WHY THE MANIFEST and not the live Codex catalogue. The core builds the
+ * route's real list per ACCOUNT from `chatgpt.com/backend-api/codex/models`,
+ * and that list is the better answer — but on 2026.8.1 and 2026.9.3 alike
+ * nothing publishes it in a form ClawBox can ask for. Measured on a box:
+ * `models list --provider codex` answers `Unknown provider filter`; there is no
+ * `--profile` scoping; the catalogue the core publishes under `openai` flips
+ * WHOLESALE to the platform list as soon as any API key resolves first (an
+ * inline `models.providers.openai.apiKey` counts), and a row carries no `api`,
+ * `baseUrl` or profile field to tell the two apart — the JSON row keys are
+ * `available, contextTokens, contextWindow, input, key, local, missing, name,
+ * tags`. So an enumeration cannot be trusted to be the ChatGPT one, while this
+ * file says which route each model is on without a credential, a network call
+ * or a three-minute fork.
+ */
+export function coreChatgptRoute(provider: string): CoreChatgptRoute | null {
+  if (!provider) return null;
+  return factsFor(provider).chatgpt;
 }
 
 const EMPTY: ReadonlySet<string> = new Set();
