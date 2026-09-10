@@ -46,6 +46,9 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime mask    clawbox-gatewa
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime mask    clawbox-gateway
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gateway
+# Fixed arguments; the installed root-owned helper only gates this gateway.
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh enter
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh leave
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup
 # clawbox-ap deliberately has NO grant. Settings -> Hotspot restarts the AP

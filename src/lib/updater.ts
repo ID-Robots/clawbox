@@ -22,6 +22,7 @@ import { runHermesCli } from "./hermes-cli";
 import { waitForPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
+import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
 import { watchRootStepProgress } from "./root-step-follow";
 import { setUpdateLock, clearUpdateLock, isUpdateLocked, updateLockHeldByLiveProcess } from "./update-lock";
@@ -1775,14 +1776,14 @@ async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
   if (masked) {
     await execFile(
       "/usr/bin/sudo",
-      ["-n", "/usr/bin/systemctl", "--runtime", "mask", "clawbox-gateway.service"],
+      ["-n", "/usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh", "enter"],
       options,
     );
     return;
   }
   await execFile(
     "/usr/bin/sudo",
-    ["-n", "/usr/bin/systemctl", "--runtime", "unmask", "clawbox-gateway.service"],
+    ["-n", "/usr/local/libexec/clawbox/clawbox-gateway-maintenance.sh", "leave"],
     options,
   );
 }
@@ -1861,9 +1862,10 @@ async function waitForGatewayPreStart(): Promise<void> {
 
 /**
  * Keep systemd from starting the gateway while an OpenClaw writer is active.
- * Mask comes before stop so a root update step cannot race the stop with its
+ * A root-owned runtime drop-in condition works even for /etc units, unlike
+ * a /run unit mask (TASK-789). The guard comes before stop so a root update step cannot race the stop with its
  * own restart, and before the pre-start wait so no new activation can slip
- * into `start-pre` behind it. The runtime mask is always removed, including
+ * into `start-pre` behind it. The runtime guard is always removed, including
  * failure paths.
  */
 async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
@@ -1872,8 +1874,8 @@ async function withGatewayQuiesced<T>(operation: () => Promise<T>): Promise<T> {
   let masked = false;
   let outcome!: { ok: true; value: T } | { ok: false; error: unknown };
   try {
-    await setGatewayMaintenanceMask(true);
     masked = true;
+    await setGatewayMaintenanceMask(true);
     await waitForGatewayPreStart();
     await stopGatewayForMaintenance();
     outcome = { ok: true, value: await operation() };
@@ -3069,6 +3071,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   },
   {
     id: "openclaw_install",
+    failFast: true,
     label: "Updating OpenClaw",
     timeoutMs: OPENCLAW_INSTALL_TIMEOUT_MS,
     requiresRoot: true,
@@ -3085,6 +3088,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   },
   {
     id: "gateway_setup",
+    failFast: true,
     label: "Configuring gateway service",
     timeoutMs: 30_000,
     requiresRoot: true,
@@ -3878,6 +3882,45 @@ export function checkContinuation(): Promise<boolean> {
 }
 
 async function resumeContinuation(): Promise<boolean> {
+  const handoverFile = path.join(PROJECT_DIR, "data", "updater-handover.json");
+  let handover: unknown;
+  try {
+    if (existsSync(handoverFile)) handover = JSON.parse(await readFile(handoverFile, "utf8"));
+  } catch (err) {
+    if (err instanceof SyntaxError) handover = null;
+    else if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (handover !== undefined) {
+    let bootstrapState: string | null = null;
+    try {
+      const { stdout } = await execFile("/usr/bin/systemctl", [
+        "show", rootStepUnit("bootstrap_updater"), "-p", "ActiveState", "--value",
+      ], { timeout: 10_000 });
+      bootstrapState = stdout.trim() || null;
+    } catch { /* a later status/boot probe can retry */ }
+    const verdict = classifyUpdaterHandover(handover, await readBuildId(), bootstrapState);
+    if (verdict === "wait") return false;
+    if (verdict === "failed") {
+      runtime.state = createInitialState(applicableSteps());
+      runtime.state.phase = "failed";
+      runtime.state.error = "The legacy updater handover did not finish. Retry the upgrade; it is not complete.";
+      await rm(handoverFile, { force: true });
+      await clearUpdateLock();
+      return false;
+    }
+    // The new app is real and the root bridge has settled. Resume from the
+    // beginning: marking the pre-reboot steps completed here would skip core
+    // installation and the very migration the bridge exists to serialize.
+    await rm(handoverFile, { force: true });
+    await setMany({ update_needs_continuation: undefined, [UPDATE_INTERRUPTED_KEY]: undefined });
+    const steps = applicableSteps();
+    runtime.running = true;
+    runtime.state = createInitialState(steps);
+    runtime.state.phase = "running";
+    launchUpdate(steps, 0, { markCompleted: true });
+    return true;
+  }
+
   const needsContinuation = await get("update_needs_continuation");
   if (!needsContinuation) {
     // Boot safety. A run that died between setting the lock and writing its
@@ -4069,6 +4112,7 @@ export function startUpdate(): { started: boolean; error?: string } {
 const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "openclaw_install",
+    failFast: true,
     label: "Updating OpenClaw",
     timeoutMs: OPENCLAW_INSTALL_TIMEOUT_MS,
     requiresRoot: true,

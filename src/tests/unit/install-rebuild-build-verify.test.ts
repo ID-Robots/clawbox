@@ -379,6 +379,7 @@ function run(scenario: Scenario = {}): Run {
     "# can be told from the arm that starts them. Both are stubbed",
     "# unconditionally: an unstubbed one would be a 127 inside the updater's",
     "# own rebuild step with every suite still green.",
+    "ensure_build_swap() { return 0; }",
     "free_memory_for_build() { :; }",
     'resume_paused_engines() { echo "RESUMED"; }',
     'forget_paused_engines() { echo "FORGOT"; }',
