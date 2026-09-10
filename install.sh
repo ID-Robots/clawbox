@@ -3494,6 +3494,9 @@ step_build() {
 }
 
 step_openclaw_setup() {
+  # Bash locals are visible to nested steps; defer their standalone restart
+  # until all required config/patch/voice work in this composite step succeeds.
+  local _oc_defer_gateway_start=1 _oc_gateway_restore_pending=0
   # NOTE (here and at every other early-return below): plain `echo`, never
   # `log`. log() is only defined at the very bottom of this file, AFTER the
   # `--step` dispatch block exits — so a `log` call inside a step function is a
@@ -3543,6 +3546,10 @@ step_openclaw_setup() {
     14) echo "  Warning: the TTS install did not complete (recorded above; provisioning continues)" ;;
     *) return "$TTS_STEP_RC" ;;
   esac
+  if [ "$_oc_gateway_restore_pending" -eq 1 ]; then
+    systemctl start clawbox-gateway.service 2>/dev/null || true
+  fi
+
 }
 
 # One [WARN] line plus the marker the updater raises on the update's own status.
@@ -4952,9 +4959,9 @@ step_openclaw_install() {
       CORE_NEEDS_INSTALL=0
     fi
   fi
+  stop_openclaw_gateways_for_migration || return 1
+  _oc_gateway_stopped=1
   if [ "$CORE_NEEDS_INSTALL" -eq 1 ]; then
-    stop_openclaw_gateways_for_migration || return 1
-    _oc_gateway_stopped=1
     mkdir -p "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
@@ -4990,14 +4997,6 @@ step_openclaw_install() {
       return 1
     fi
 
-  fi
-
-  # This step is also callable on its own. Restore the system gateway after
-  # successful maintenance for BOTH core generations, including a v1 rollback
-  # pin. Never restart after a failed stop, replacement or migration. A fresh
-  # install may have no unit yet, and an outer maintenance guard may defer start.
-  if [ "$_oc_gateway_stopped" -eq 1 ]; then
-    systemctl start clawbox-gateway.service 2>/dev/null || true
   fi
 
   # Force-reinstall every externally-installed plugin so they're bumped
@@ -5113,6 +5112,16 @@ for p in d.get("plugins", []):
   else
     echo "  No external plugins to refresh"
   fi
+  # Standalone installs restore only after plugin refresh. The composite setup
+  # step owns restoration after its remaining patch/config/voice operations.
+  if [ "$_oc_gateway_stopped" -eq 1 ]; then
+    if [ "${_oc_defer_gateway_start:-0}" -eq 1 ]; then
+      _oc_gateway_restore_pending=1
+    else
+      systemctl start clawbox-gateway.service 2>/dev/null || true
+    fi
+  fi
+
 }
 
 step_clawkeep_install() {
