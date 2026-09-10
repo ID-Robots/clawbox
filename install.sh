@@ -4932,6 +4932,7 @@ step_openclaw_install() {
   fi
   local TARGET="${PINNED:-$OPENCLAW_VERSION}"
   local CORE_NEEDS_INSTALL=1
+  local _oc_gateway_stopped=0
 
   # Keep this guard inside the OpenClaw step too, not only in apt_update:
   # update retries can start from this step, and old images with Node v22.22.2
@@ -4953,6 +4954,7 @@ step_openclaw_install() {
   fi
   if [ "$CORE_NEEDS_INSTALL" -eq 1 ]; then
     stop_openclaw_gateways_for_migration || return 1
+    _oc_gateway_stopped=1
     mkdir -p "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
@@ -4975,6 +4977,7 @@ step_openclaw_install() {
     # The sessions-to-SQLite move must not race a still-running v1 gateway
     # writing the very files being migrated; gateway_setup restarts it later.
     stop_openclaw_gateways_for_migration || return 1
+    _oc_gateway_stopped=1
     local _oc_doctor_out
     local _oc_doctor_rc=0
     _oc_doctor_out="$(as_clawbox -H env \
@@ -4987,11 +4990,13 @@ step_openclaw_install() {
       return 1
     fi
 
-    # The stop above was for doctor's benefit. A FULL install restarts the
-    # gateway later (gateway_setup), but this step is also on the standalone
-    # run-step allow-list, where nothing follows — leaving it down would turn
-    # a UI-triggered core update into an outage. Best effort: a box where the
-    # unit does not exist yet (first install) has nothing to start.
+  fi
+
+  # This step is also callable on its own. Restore the system gateway after
+  # successful maintenance for BOTH core generations, including a v1 rollback
+  # pin. Never restart after a failed stop, replacement or migration. A fresh
+  # install may have no unit yet, and an outer maintenance guard may defer start.
+  if [ "$_oc_gateway_stopped" -eq 1 ]; then
     systemctl start clawbox-gateway.service 2>/dev/null || true
   fi
 

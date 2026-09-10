@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { spawnSync } from "node:child_process";
 vi.setConfig({ testTimeout: 30000 });
 const source = readFileSync("install.sh", "utf8");
@@ -11,12 +13,17 @@ function fn(name: string) {
 // Execute the real installer step, not a mirrored caller. Doctor deliberately
 // exits nonzero after emitting its marker so no downstream plugin work runs.
 function run(scenario: string, needsInstall = false) {
+  const dir = mkdtempSync(path.join(tmpdir(), "migration-stop-"));
+  const core = path.join(dir, "openclaw");
+  const v1 = scenario === "v1-replacement";
+  writeFileSync(core, `#!/bin/sh\necho 'OpenClaw ${v1 ? "2026.7.0" : needsInstall ? "2026.7.1" : "2026.8.1"}'\n`, { mode: 0o755 });
+  try {
   return spawnSync("bash", ["-c", `
 set -euo pipefail
 CLAWBOX_USER=test
 SRC_DIR=/nonexistent
-OPENCLAW_BIN=/bin/true
-OPENCLAW_PIN_VERSION=2026.8.1
+OPENCLAW_BIN="${core}"
+OPENCLAW_PIN_VERSION=${v1 ? "2026.7.1" : "2026.8.1"}
 OPENCLAW_VERSION=2026.8.1
 NPM_PREFIX=/nonexistent
 CLAWBOX_HOME=/nonexistent
@@ -24,21 +31,22 @@ id() { echo 1000; }
 is_hermes_edition() { return 1; }
 ensure_clawbox_bashrc_path() { :; }
 ensure_openclaw_node_engine() { :; }
-openclaw_version_is_v2() { return 0; }
-# The executable version probe yields an exact match unless replacement is tested.
-/bin/true() { echo 'OpenClaw ${needsInstall ? "2026.7.1" : "2026.8.1"}'; }
-mkdir() { echo CORE_REPLACEMENT; return 99; }
+openclaw_version_is_v2() { [[ "$1" == 2026.8.* ]]; }
+mkdir() { echo CORE_REPLACEMENT; case "$SCENARIO" in v1-replacement|v2-replacement) return 0 ;; *) return 99 ;; esac; }
+chown() { :; }
 systemctl() { ctl system "$@"; }
 as_clawbox() {
   case "$*" in
     *'systemctl --user'*) shift 5; ctl user "$@" ;;
-    *'doctor --fix'*) echo DOCTOR_CALLED; return 42 ;;
+    *'doctor --fix'*) echo DOCTOR_CALLED; case "$SCENARIO" in v2-replacement|v2-current) return 0 ;; *) return 42 ;; esac ;;
+    *'npm install'*) echo NPM_CALLED; return 0 ;;
     *) echo UNEXPECTED_COMMAND >&2; return 99 ;;
   esac
 }
 ctl() {
   local scope="$1"; shift
   echo "CTL $scope $*" >&2
+  if [ "$1" = start ]; then echo GATEWAY_RESTARTED; exit 0; fi
   if [[ "$*" == *user@1000.service* ]]; then
     case "$SCENARIO" in
       manager-absent) echo inactive ;;
@@ -72,6 +80,9 @@ ${fn("openclaw_migration_complete")}
 ${fn("step_openclaw_install")}
 step_openclaw_install
 `, "test"], { encoding: "utf8", env: { ...process.env, SCENARIO: scenario } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 describe("OpenClaw stopped-writer prerequisite", () => {
   for (const scenario of ["system-stop-failure", "user-stop-failure", "inspect-failure", "user-bus-failure", "manager-query-failure", "manager-activating", "still-active", "user-still-active", "verify-failure"]) {
@@ -99,4 +110,16 @@ describe("OpenClaw stopped-writer prerequisite", () => {
       expect(r.stdout).not.toContain("DOCTOR_CALLED");
     });
   }
+  for (const scenario of ["v1-replacement", "v2-replacement", "v2-current"]) {
+    it(`restores the gateway after successful ${scenario}`, () => {
+      const r = run(scenario, scenario !== "v2-current");
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toContain("GATEWAY_RESTARTED");
+      if (scenario === "v1-replacement") expect(r.stdout).not.toContain("DOCTOR_CALLED");
+      else expect(r.stdout).toContain("DOCTOR_CALLED");
+      if (scenario !== "v2-current") expect(r.stdout).toContain("NPM_CALLED");
+      else expect(r.stdout).not.toContain("NPM_CALLED");
+    });
+  }
+
 });
