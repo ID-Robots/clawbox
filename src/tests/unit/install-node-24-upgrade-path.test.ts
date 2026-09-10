@@ -240,6 +240,10 @@ const SHIPPED = [
   shellFunction("ensure_openclaw_node_engine"),
   shellFunction("openclaw_version_is_v2"),
   shellFunction("openclaw_is_v2"),
+  // The migration verdict is pure rc-and-text logic (#818), so it is lifted
+  // rather than stubbed: whether doctor is judged to have completed decides
+  // whether this step goes on, and that judgement must be the shipped one.
+  shellFunction("openclaw_migration_complete"),
 ];
 
 /** The ambient helpers the sliced steps call, stubbed to do nothing of note. */
@@ -251,6 +255,12 @@ const AMBIENT = [
   'systemctl() { printf "systemctl %s\\n" "$*" >> "$ST/calls"; }',
   // `as_clawbox -H cmd …` runs cmd as the service user; here it just runs it.
   'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
+  // #818 stops both gateway units before the core install and restores them at
+  // the end. Stubbed, not lifted: it is systemd and user-manager bookkeeping,
+  // nothing to do with which Node the core lands on, and lifting it would drag
+  // `systemctl show`, `id` and the user bus into a suite about ordering. Logged,
+  // so a case can still see that it happened before the npm install.
+  'stop_openclaw_gateways_for_migration() { printf "stop-gateways-for-migration\\n" >> "$ST/calls"; }',
 ];
 
 function run(box: Box, step: "step_openclaw_install" | "step_apt_update"): SpawnSyncReturns<string> {
@@ -306,6 +316,12 @@ describe("the Node 22 → 24 switch inside the updater", () => {
       .toBeGreaterThanOrEqual(0);
     expect(apt).toBeGreaterThan(channel);
     expect(core, `the core was never installed:\n${calls.join("\n")}`).toBeGreaterThan(apt);
+    // Where the two changes meet: #818 stops both gateway units before the core
+    // install, and the Node switch happens before that — a running gateway keeps
+    // its mapped binary until the reboot, so the apt transaction does not need it
+    // down, and bringing the stop forward would only lengthen the outage.
+    expect(at(calls, "stop-gateways-for-migration")).toBeGreaterThan(apt);
+    expect(at(calls, "stop-gateways-for-migration")).toBeLessThan(core);
     // The pair that matters: the core went on under Node 24, not under 22.
     expect(calls[core]).toContain(`openclaw@${TARGET}`);
     expect(calls[core]).toContain("node=24.21.0");
@@ -391,7 +407,9 @@ exit 1
     expect(r.stderr).toContain("Node.js >=26.9.0 is required");
     expect(r.stderr).toContain("refuses to run on");
     expect(r.stderr).toContain("engines.node >=26.9.0");
-    // …and the step stopped there rather than running doctor over it.
+    // …and the step stopped there rather than running doctor over it, saying so
+    // rather than leaving the operator to discover a parked gateway.
+    expect(r.stderr).toContain("The gateway is left stopped");
     expect(box.calls().join("\n")).not.toContain("openclaw doctor");
   });
 

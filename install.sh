@@ -5105,7 +5105,14 @@ step_openclaw_install() {
       echo "       this installer was holding the box to $OPENCLAW_NODE_ENGINE, so the two disagree and" >&2
       echo "       the table in install.sh is what needs correcting for this pin." >&2
       node_engine_remedy
-      exit 1
+      # `return 1`, not `exit 1`, and the gateway is LEFT STOPPED — the same
+      # shape as the migration blocker below, which this step's own
+      # `_oc_gateway_stopped` bookkeeping was built for: starting a gateway whose
+      # core refuses to run would only produce a restart loop, and `set -e` makes
+      # this return abort the run either way. Said out loud so the operator knows
+      # the box is parked rather than guessing.
+      echo "       The gateway is left stopped. Fix the Node, then Retry this step." >&2
+      return 1
     fi
     echo "  OpenClaw installed: $_oc_version_out"
   fi
