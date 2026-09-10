@@ -250,6 +250,29 @@ describe("OpenclawWhatsappPairing", () => {
     expect(mockRestart).not.toHaveBeenCalled();
   });
 
+  it("does not bounce the gateway for a card closed while the config was being READ", async () => {
+    // The same window on the path every box takes: the read happens whether or
+    // not the key turns out to be off, so a guard that sat inside the "it was
+    // off" branch left the common case unprotected.
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: false });
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    let finishRead: () => void = () => {};
+    mockReadConfig.mockImplementation(
+      () => new Promise((resolve) => { finishRead = () => resolve({}); }),
+    );
+
+    const started = pairing.start();
+    await vi.waitFor(() => expect(mockReadConfig).toHaveBeenCalled());
+    pairing.stop();
+    finishRead();
+    await started;
+
+    expect(mockConfigSet).not.toHaveBeenCalled();
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
   it("leaves the channel key alone on a box that never configured the channel", async () => {
     // ABSENT is not `false`. A box that has never had WhatsApp configured is
     // `/whatsapp/configure`'s business, and a repair entered from a refusal must
