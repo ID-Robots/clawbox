@@ -28,6 +28,16 @@ vi.mock("@/lib/hermes-telegram", () => ({ hermesGatewayStatus: vi.fn() }));
 vi.mock("@/lib/hermes-whatsapp", () => ({ readHermesWhatsappStatus: vi.fn() }));
 vi.mock("@/lib/whatsapp-pairing", () => ({ getPairingManager: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
+  // A REAL class, not undefined: `src/lib/openclaw-whatsapp.ts` narrows on
+  // `instanceof GatewayNotReadyError` when it reloads the gateway after
+  // installing the WhatsApp plugin, and `instanceof undefined` throws a
+  // TypeError the first time a test makes the mocked restart reject.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
   openclawIsAbsent: vi.fn(() => false),
   gatewayRestartGeneration: vi.fn(() => 0),
   readConfig: vi.fn(async () => ({})),

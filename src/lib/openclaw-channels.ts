@@ -49,11 +49,50 @@ import { clearPluginRepair } from "@/lib/plugin-repair";
  * and a channel ClawBox has no UI for has no business being installed by it.
  * `unsupported_channel` for anything else is the honest answer.
  *
- * The specs are unpinned on purpose. npm resolves `latest`, which is published
- * in lockstep with the host, and OpenClaw's installer then checks the plugin's
- * own `compat.pluginApi` against the running host and refuses a mismatch — a
- * refusal this module reports rather than swallows. A version pinned here would
- * go stale the first time the device updates openclaw.
+ * THE SPECS ARE UNPINNED, and what protects the box is the NPM install path's
+ * own version walk — which only an unpinned spec can reach. Measured read-only
+ * against the pinned core (2026.8.1) and the registry, because the pairing path
+ * can now reach this install on a box whose `latest` is ahead of its host:
+ *
+ *   * the installer validates the resolved package's `openclaw.compat.pluginApi`
+ *     and `openclaw.install.minHostVersion` against the running host, and
+ *   * when that fails, `resolveLatestCompatibleNpmResolution` walks older stable
+ *     versions and installs "the newest compatible" one — but ONLY for a spec
+ *     with no version selector, or the tag `latest`
+ *     (`shouldResolveLatestCompatibleNpmVersion`).
+ *
+ * Measured end to end: `@openclaw/whatsapp@latest` is 2026.9.3 and declares
+ * `compat.pluginApi >=2026.9.3`, so a 2026.8.1 box walks past 2026.9.2
+ * (>=2026.9.2) and 2026.8.2 (>=2026.8.2) to 2026.8.1 — exactly the version that
+ * core's own bundled `dist/channel-catalog.json` names for it. Four stable
+ * versions sit above 2026.8.1, so the walk is three registry reads.
+ *
+ * WHY THE DEEPSEEK OUTAGE IS NOT A COUNTER-EXAMPLE, since it looks like one and
+ * is the reason this note is long. There, an unpinned spec resolved a build
+ * declaring `pluginApi >=2026.8.2`, the 2026.8.1 runtime refused it and every
+ * fresh install parked at a gateway that never reported ready — so that spec is
+ * now pinned (`DEEPSEEK_PROVIDER_PLUGIN_SPEC`). But it is a `clawhub:` spec, and
+ * the walk above is in the core's NPM installer: the ClawHub path validates the
+ * same compatibility and fails closed with no walk at all
+ * (`buildClawHubInstallFailure`, `INCOMPATIBLE_PLUGIN_API` — the exact sentence
+ * that incident recorded). npm specs walk back; `clawhub:` specs do not. That is
+ * the whole difference between the two policies.
+ *
+ * THE OTHER TWO PATHS THAT INSTALL THESE SAME PACKAGES, so the division of
+ * labour is on the record rather than inferred:
+ *   * `reinstallManagedPluginPayload` (`src/lib/updater.ts`) installs
+ *     `<pkg>@<core target>` FIRST and falls back to the unpinned spec, because a
+ *     republished release (2026.7.1 -> 2026.7.1-2) 404s on a pin carrying the
+ *     base version. Pinned-first is about finding a payload at all; the unpinned
+ *     fallback is the same safety net as here.
+ *   * `clawbox_managed_plugin_spec` (`scripts/gateway-pre-start.sh`) pins,
+ *     because its spec is also recorded in a repair ROW and replayed long after
+ *     it is written, where "newest compatible" is a question about a different
+ *     box than the one that wrote it.
+ * Neither contradicts this: a pin here would remove the walk from the one path
+ * that is entered by the owner pressing a button, with nothing else behind it.
+ * `gateway-pre-start-managed-plugin-payload.test.ts` holds the values here to
+ * the bare `@openclaw/<id>` form.
  */
 export const OFFICIAL_CHANNEL_PLUGINS: Readonly<Record<string, string>> = Object.freeze({
   discord: "@openclaw/discord",

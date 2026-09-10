@@ -14,18 +14,26 @@ vi.mock("@/lib/openclaw-config", async () => {
   const actual = await vi.importActual<typeof import("@/lib/openclaw-config")>(
     "@/lib/openclaw-config",
   );
-  return { ...actual, openclawIsAbsent: () => false, spawnOpenclawCli: vi.fn() };
+  return {
+    ...actual,
+    openclawIsAbsent: () => false,
+    spawnOpenclawCli: vi.fn(),
+    restartGateway: vi.fn(),
+  };
 });
 vi.mock("@/lib/openclaw-channels", () => ({
   invalidateChannelStatus: vi.fn(),
   readCachedChannelRowResult: vi.fn(),
+  ensureChannelPlugin: vi.fn(),
 }));
 
-import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { readCachedChannelRowResult } from "@/lib/openclaw-channels";
+import { GatewayNotReadyError, restartGateway, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { ensureChannelPlugin, readCachedChannelRowResult } from "@/lib/openclaw-channels";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
 const mockChannelResult = vi.mocked(readCachedChannelRowResult);
+const mockEnsurePlugin = vi.mocked(ensureChannelPlugin);
+const mockRestart = vi.mocked(restartGateway);
 
 /**
  * The gateway ANSWERED. A `null` row from an answering gateway means "there is
@@ -56,6 +64,10 @@ describe("OpenclawWhatsappPairing", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // The plugin is present on a healthy box, so the repair path below is
+    // never entered by the tests that are not about it.
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: false });
+    mockRestart.mockResolvedValue(undefined);
     lib = await import("@/lib/openclaw-whatsapp");
   });
 
@@ -71,6 +83,10 @@ describe("OpenclawWhatsappPairing", () => {
     expect(snap.qr).toBeNull();
     expect(snap.qrCount).toBe(1);
     expect(mockSpawn.mock.calls[0][0].slice(0, 3)).toEqual(["gateway", "call", "web.login.start"]);
+    // A healthy box pays nothing for the repair path: no `plugins list`, and
+    // above all no gateway restart, which would drop every other channel.
+    expect(mockEnsurePlugin).not.toHaveBeenCalled();
+    expect(mockRestart).not.toHaveBeenCalled();
   });
 
   /** `--timeout <ms>` as it was handed to the CLI, and the method's own budget. */
@@ -146,13 +162,409 @@ describe("OpenclawWhatsappPairing", () => {
     expect((await new lib.OpenclawWhatsappPairing().start()).qrImage).toBeNull();
   });
 
-  it("names a missing plugin, because that one is fixed by saving, not rescanning", async () => {
+  it("installs the plugin the gateway says is missing, then asks again", async () => {
+    // The deadlock this breaks is written up in repairWebLoginProvider(): a box
+    // with no `@openclaw/whatsapp` on disk could not pair, and the only thing
+    // that installed the plugin was a channel save the panel kept behind a
+    // pairing. The gateway names the one failure with a remedy, so it runs.
     mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(mockEnsurePlugin).toHaveBeenCalledWith("whatsapp");
+    // Installed is not loaded: `plugins install` says so itself.
+    expect(mockRestart).toHaveBeenCalled();
+    expect(snap.phase).toBe("waiting");
+    expect(snap.qrImage).toBe(QR_A);
+    expect(snap.error).toBeNull();
+  });
+
+  it("recognises the refusal in the shape the CLI really rejects with", async () => {
+    // On a box the CLI exits 1 and the spawn rejects with its raw error payload
+    // as text, not with an exit-0 `{ok:false}` body — which the module's own
+    // comment calls the belt-and-braces path. This is the one the device
+    // produced, so the remedy has to fire on it too.
+    mockSpawn.mockRejectedValueOnce(
+      new Error(
+        '{\n "ok": false,\n "error": {\n  "code": "INVALID_REQUEST",\n' +
+          '  "message": "web login provider is not available"\n }\n}',
+      ),
+    );
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(mockEnsurePlugin).toHaveBeenCalledWith("whatsapp");
+    expect(snap.phase).toBe("waiting");
+  });
+
+  it("reports an install that failed as an install failure, not as a missing plugin", async () => {
+    // The panel has words for this one — "check the network connection" — and
+    // they are the true ones: the plugin is an npm download on a device.
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: false, reason: "install_failed" });
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(snap.phase).toBe("error");
+    expect(snap.error).toBe("install_failed");
+    // Nothing was installed, so there is nothing for a gateway restart to load.
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("names a missing plugin only once the install and the reload have both run", async () => {
+    // Still refused after OpenClaw installed its own plugin and the gateway
+    // reloaded: this box really has no WhatsApp bridge, and saying so is the
+    // one honest answer left.
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
 
     const snap = await new lib.OpenclawWhatsappPairing().start();
 
     expect(snap.phase).toBe("error");
     expect(snap.error).toBe("plugin_missing");
+  });
+
+  it("ignores a second press while the install is running", async () => {
+    // Without this the second press rewrites the phase back to `starting`, so
+    // the first panel's poller reads "Starting the bridge…" with minutes of npm
+    // still to run, and spends a whole `web.login.start` budget on a call that
+    // is certain to be refused.
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockReturnValue(new Promise(() => {}));
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    void pairing.start();
+    await vi.waitFor(() => expect(mockEnsurePlugin).toHaveBeenCalled());
+    const callsDuringInstall = mockSpawn.mock.calls.length;
+
+    expect((await pairing.start()).phase).toBe("preparing");
+    expect(mockSpawn.mock.calls.length).toBe(callsDuringInstall);
+  });
+
+  it("runs one install behind two starts that overlap inside it", async () => {
+    // The epoch discards the RESULT of a start a newer one replaced; it does
+    // not cancel an npm install already in flight. `force` is the one press the
+    // guard above lets through, so two clients forcing a relink would otherwise
+    // drive `plugins install` into the same plugin store twice, concurrently —
+    // which is how a store ends up half-written.
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    let finishInstall: (result: { ok: true; installed: boolean }) => void = () => {};
+    mockEnsurePlugin.mockReturnValue(
+      new Promise((resolve) => {
+        finishInstall = resolve;
+      }),
+    );
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    const first = pairing.start();
+    // The first refusal has landed and the install is running.
+    await vi.waitFor(() => expect(mockEnsurePlugin).toHaveBeenCalled());
+    const second = pairing.start({ force: true });
+    await vi.waitFor(() => expect(mockSpawn.mock.calls.length).toBeGreaterThan(1));
+
+    finishInstall({ ok: true, installed: true });
+    await Promise.all([first, second]);
+
+    expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+    expect(mockRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reinstall and re-restart the box on every Retry press", async () => {
+    // `restartGateway` clears the unit's start limit before each restart, so
+    // nothing downstream would stop this: an unlatched repair turns the red
+    // box's own Retry button into "bounce the gateway, drop Telegram and every
+    // open session, report the same failure" — once per press, for a failure
+    // that is now a fact about the box.
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+    const pairing = new lib.OpenclawWhatsappPairing();
+
+    expect((await pairing.start()).error).toBe("plugin_missing");
+    expect(mockRestart).toHaveBeenCalledTimes(1);
+
+    // The owner presses Retry twice.
+    expect((await pairing.start()).error).toBe("plugin_missing");
+    expect((await pairing.start()).error).toBe("plugin_missing");
+
+    expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+    expect(mockRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it("repairs again once a login has actually started", async () => {
+    // The latch is about what we know, not a permanent verdict: a login that
+    // started proves the provider is there, so a later refusal deserves the
+    // remedy again.
+    mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+    const pairing = new lib.OpenclawWhatsappPairing();
+
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    expect((await pairing.start()).error).toBe("plugin_missing");
+
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
+    expect((await pairing.start({ force: true })).phase).toBe("waiting");
+
+    mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_B }));
+    expect((await pairing.start({ force: true })).phase).toBe("waiting");
+    expect(mockEnsurePlugin).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not answer for the rest of the process from one refused repair", async () => {
+    // The other half of the same rule. A refusal that survived an install and a
+    // reload is a measurement, not a fact about the box: correct the plugin on
+    // disk — a compatible version installed by hand, a core the box has since
+    // been given — and the gateway still needs the reload only this remedy
+    // performs, so a verdict kept for the life of the web server is a box that
+    // can never be repaired from its own panel. Probe-once, one press wide.
+    vi.useFakeTimers();
+    try {
+      mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      const pairing = new lib.OpenclawWhatsappPairing();
+
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+
+      // Pressed again straight away: still answered from what was just measured,
+      // so Retry cannot bounce the gateway once per press.
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+
+      // Still pressing five minutes later: the measurement is fresh enough, and
+      // this is the half that keeps a flurry of presses down to one repair.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      expect(mockEnsurePlugin).toHaveBeenCalledTimes(1);
+
+      // An hour after the refusal the measurement is old enough that the owner
+      // may have changed the box under it, and the press is owed a real attempt.
+      // Deliberately a wall-clock contract rather than the module's own constant:
+      // a test that reads REPAIR_REFUSAL_TTL_MS would follow any future change to
+      // it and stop asserting the policy — that a press soon after is answered
+      // from the measurement and a press much later is not.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      expect(mockEnsurePlugin).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not skip the reload a cancelled install still owes", async () => {
+    // The DELETE that reaps a cancelled session cannot reach an npm install
+    // already in flight. Restarting the gateway minutes after the owner closed
+    // the card would drop the Telegram conversation they went back to, with
+    // nothing anywhere saying why — and the package is on disk, so the next
+    // start pays that restart with someone watching.
+    mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+    let finishInstall: (result: { ok: true; installed: boolean }) => void = () => {};
+    mockEnsurePlugin.mockReturnValue(
+      new Promise((resolve) => {
+        finishInstall = resolve;
+      }),
+    );
+
+    const pairing = new lib.OpenclawWhatsappPairing();
+    const started = pairing.start();
+    await vi.waitFor(() => expect(mockEnsurePlugin).toHaveBeenCalled());
+
+    pairing.stop();
+    finishInstall({ ok: true, installed: true });
+    expect((await started).phase).toBe("idle");
+
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("does not start a login the owner cancelled while the gateway was coming back", async () => {
+    // The catch-up loop SLEEPS between attempts, and a cancel lands inside that
+    // sleep. `web.login.start` is not a read — it stops the running channel to
+    // take the socket over, and with `force` it would tear down a login a later
+    // press has just begun — so waking up to issue one is a login started after
+    // the owner closed the card, with the answer discarded upstream and the
+    // keepalive already gone: nothing left to reap it.
+    vi.useFakeTimers();
+    try {
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      mockRestart.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+      let starts = 0;
+      mockSpawn.mockImplementation(async (args: readonly string[]) => {
+        if (args[2] !== "web.login.start") return rpcOk({});
+        starts += 1;
+        if (starts === 1) throw new Error("web login provider is not available");
+        throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+      });
+
+      const pairing = new lib.OpenclawWhatsappPairing();
+      const started = pairing.start();
+      // The repair has run and the first post-reload attempt has hit a port
+      // nobody is listening on yet, so the loop is now in its catch-up gap.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(starts).toBe(2);
+
+      pairing.stop();
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS * 2);
+
+      expect((await started).phase).toBe("idle");
+      expect(starts).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not ask a gateway that is not listening yet for a QR as well", async () => {
+    // The catch-up window runs in `starting`, which is a phase the keepalive
+    // works in — so it spent that whole window (up to ~115 s, entered precisely
+    // because the port does not answer) firing a `web.login.wait` per tick, each
+    // a 10-12 s CLI cold start certain to fail, on a Jetson that has just
+    // finished an npm install. The retries own that conversation.
+    vi.useFakeTimers();
+    try {
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      mockRestart.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+      let starts = 0;
+      let waits = 0;
+      // Only the waits issued INSIDE the catch-up window are the defect: once a
+      // QR exists the keepalive is doing its job and is supposed to ask.
+      let waitsBeforeQr: number | null = null;
+      mockSpawn.mockImplementation(async (args: readonly string[]) => {
+        if (args[2] === "web.login.wait") {
+          waits += 1;
+          throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+        }
+        starts += 1;
+        if (starts === 1) throw new Error("web login provider is not available");
+        if (starts < 3) throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+        waitsBeforeQr ??= waits;
+        return rpcOk({ qrDataUrl: QR_A });
+      });
+
+      const pairing = new lib.OpenclawWhatsappPairing();
+      const started = pairing.start();
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS * 3);
+
+      expect((await started).phase).toBe("waiting");
+      expect(waitsBeforeQr).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops the keepalive once the session has nowhere left to go", async () => {
+    // `ensureTicking` is cleared by `stop()`, and a start that ends in `error`
+    // never calls it — so on a box that cannot be repaired, which is exactly
+    // where the new error paths lead, the interval woke every TICK_MS for the
+    // life of the web server only to return immediately.
+    vi.useFakeTimers();
+    try {
+      mockSpawn.mockResolvedValue(rpcError("web login provider is not available"));
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      const pairing = new lib.OpenclawWhatsappPairing();
+
+      expect((await pairing.start()).error).toBe("plugin_missing");
+      // One tick to notice there is nothing to keep alive.
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS + 1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks again while the gateway is still coming back, instead of calling the repair a failure", async () => {
+    // `restartGateway` gives up on its readiness wait after its own budget; a
+    // Jetson that has just spent three minutes on npm can take longer to bind.
+    // One immediate shot at a closed port is a connection error, not a verdict
+    // on the repair, and reporting it handed the owner the least informative
+    // sentence the card has over a plugin that was about to work.
+    vi.useFakeTimers();
+    try {
+      mockEnsurePlugin.mockResolvedValue({ ok: true, installed: true });
+      mockRestart.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+      // Keyed on the METHOD, not on call order: the keepalive fires its own
+      // `web.login.wait` while the catch-up waits, and a queue would hand the
+      // QR to whichever call happened to arrive first.
+      let starts = 0;
+      mockSpawn.mockImplementation(async (args: readonly string[]) => {
+        if (args[2] !== "web.login.start") return rpcOk({});
+        starts += 1;
+        if (starts === 1) throw new Error("web login provider is not available");
+        // The gateway took the restart and has not finished binding yet.
+        if (starts === 2) throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+        return rpcOk({ qrDataUrl: QR_A });
+      });
+
+      const pairing = new lib.OpenclawWhatsappPairing();
+      const started = pairing.start();
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS * 3);
+      const snap = await started;
+
+      expect(snap.phase).toBe("waiting");
+      expect(snap.qrImage).toBe(QR_A);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+
+  it("does not reap the login it spent the whole install getting to", async () => {
+    // The keepalive reaps a login nobody is watching, and "watching" is a GET
+    // that renews it. A plugin install can run for minutes, during which the
+    // only thing the panel does is stay blocked on this POST — so the window
+    // has to start again when the install ends, or the first tick afterwards
+    // stops the login this very call is about to hand back.
+    vi.useFakeTimers();
+    try {
+      mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
+      let finishRetry: (out: string) => void = () => {};
+      mockSpawn.mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          finishRetry = resolve;
+        }),
+      );
+      // Whatever the keepalive asks while the retry is in flight.
+      mockSpawn.mockResolvedValue(rpcOk({}));
+      let finishInstall: (result: { ok: true; installed: boolean }) => void = () => {};
+      mockEnsurePlugin.mockReturnValue(
+        new Promise((resolve) => {
+          finishInstall = resolve;
+        }),
+      );
+
+      const pairing = new lib.OpenclawWhatsappPairing();
+      const started = pairing.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockEnsurePlugin).toHaveBeenCalled();
+
+      // An npm install on a Jetson outlasts the reap window several times over.
+      await vi.advanceTimersByTimeAsync(lib.REAP_AFTER_MS + lib.TICK_MS * 2);
+      finishInstall({ ok: true, installed: true });
+      // One tick lands between the retry being issued and its answer arriving.
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS + 1);
+      finishRetry(rpcOk({ qrDataUrl: QR_A }));
+
+      const snap = await started;
+      expect(snap.phase).toBe("waiting");
+      expect(snap.qrImage).toBe(QR_A);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not install anything over a failure that is not the missing provider", async () => {
+    // A gateway that is down is not a plugin that is absent, and an npm install
+    // plus a service restart is not what a socket error asks for.
+    mockSpawn.mockResolvedValueOnce(rpcError("connect ECONNREFUSED"));
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(snap.error).toBe("start_failed");
+    expect(mockEnsurePlugin).not.toHaveBeenCalled();
+    expect(mockRestart).not.toHaveBeenCalled();
   });
 
   it("reports any other start failure as a code, never as the gateway's sentence", async () => {

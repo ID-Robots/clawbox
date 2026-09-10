@@ -17,7 +17,22 @@ vi.mock("@/lib/openclaw-whatsapp", () => ({
   logoutOpenclawWhatsapp: openclawLogout,
   setOpenclawWhatsappEnabled: openclawSetEnabled,
 }));
-vi.mock("@/lib/openclaw-config", () => ({ restartGateway: vi.fn(async () => {}) }));
+vi.mock("@/lib/openclaw-config", () => ({
+  // Defensive, and required: `openclaw-config-mock-completeness.test.ts` fails
+  // any suite that replaces this module without the class while importing a
+  // module that narrows on `instanceof GatewayNotReadyError` — which
+  // `openclaw-whatsapp.ts` now does when it reloads the gateway after installing
+  // the plugin. This file mocks `openclaw-whatsapp` wholesale, so the narrowing
+  // never runs HERE; the class is what keeps that true of the file rather than
+  // of the mock, for the day a test stops mocking the module.
+  GatewayNotReadyError: class GatewayNotReadyError extends Error {
+    constructor(message = "gateway did not come back") {
+      super(message);
+      this.name = "GatewayNotReadyError";
+    }
+  },
+  restartGateway: vi.fn(async () => {}),
+}));
 
 const start = vi.fn();
 const poll = vi.fn();
