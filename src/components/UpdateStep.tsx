@@ -201,8 +201,11 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
   const [state, setState] = useState<UpdateState | null>(null);
 
   const [versions, setVersions] = useState<{
-    clawbox: { current: string; target: string | null; updateAvailable?: boolean };
-    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+    // `updateAvailable` is `boolean | null`: null is the device saying it
+    // could not look, and both fallbacks below read it as the version
+    // comparison, exactly as an absent field.
+    clawbox: { current: string; target: string | null; updateAvailable?: boolean | null };
+    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean | null };
     // Optional: a payload from a server that predates the field must keep
     // behaving exactly as before, so ABSENT is "not known", never "unreachable".
     remote?: { reachable: boolean; refusedAnonymously?: boolean; reason?: string };

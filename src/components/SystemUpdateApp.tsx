@@ -13,7 +13,13 @@ import { cleanVersion } from "@/lib/version-utils";
 export interface ComponentVersion {
   current: string | null;
   target: string | null;
-  updateAvailable?: boolean;
+  /**
+   * `null` where the device could not look — see `remote` below. It resolves
+   * through `componentNeedsUpdate`, which falls back to the version comparison
+   * for both null and absent, so nothing here changes behaviour on its own:
+   * `remote.reachable === false` is what the screen renders the unknown from.
+   */
+  updateAvailable?: boolean | null;
 }
 
 export interface VersionInfo {
@@ -92,7 +98,7 @@ function isUpdateAvailable(current: string | null | undefined, target: string | 
   return compareSemver(target, current) > 0;
 }
 
-export function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean }): boolean {
+export function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean | null }): boolean {
   return component.updateAvailable ?? isUpdateAvailable(component.current, component.target);
 }
 

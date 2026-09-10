@@ -18,7 +18,8 @@ import type { McpContext } from "./context";
 interface ComponentVersion {
   current?: string | null;
   target?: string | null;
-  updateAvailable?: boolean;
+  /** `null` where the device could not check — see `remote` below. */
+  updateAvailable?: boolean | null;
 }
 
 export interface VersionsPayload {

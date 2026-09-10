@@ -111,11 +111,20 @@ function execGit(
 const GIT_NO_PROMPT_ENV: Record<string, string> = { GIT_TERMINAL_PROMPT: "0" };
 
 /**
- * How this device's network reach to the update remote actually went.
+ * Whether this check actually compared the device against the RELEASE remote.
  *
  * `reachable: false` is the fact /update/versions used to lose: the fetch was
  * swallowed, HEAD was compared against a STALE `origin/<branch>` and the box
  * told its owner "You're up to date" while it had not managed to ask.
+ *
+ * It is the payload's one "I could not look" channel, and every surface that
+ * renders the verdict already reads it — the System Update screen and card, the
+ * Settings sidebar subtitle, the setup wizard's auto-advance, /update/status's
+ * synthesised "completed", and `device_status`'s `waiting`. So it covers every
+ * way the check can fail to land, not only a refused network call: a remote
+ * that was never the release remote (an `origin` pointing at a bundle on this
+ * device) and a target the box could not resolve are the same unknown, and
+ * rendering either as a green all-clear is the bug.
  */
 export interface RemoteReachability {
   reachable: boolean;
@@ -293,6 +302,73 @@ function refusalReason(err: unknown, text: string): string {
   // `Command failed: git -c safe.directory=…`: an argv is not an explanation,
   // so only its last line goes out, and only when there is nothing better.
   return `Could not reach the update repository: ${text.split("\n").pop() || "unknown error"}`;
+}
+
+/**
+ * Whether `origin` is an address a release could have been fetched FROM.
+ *
+ * The bundle deploy path repoints `origin` at a git bundle it copies onto the
+ * device and restores the GitHub remote when it finishes — so a box whose
+ * deploy has not finished has an `origin` that is a file on its own disk.
+ * Every git call against it succeeds, and the bundle by construction contains
+ * exactly the commit the box already has, so the version check found no delta
+ * and the card rendered a green "You're up to date — Every component is on the
+ * latest release" over a box a merge behind its pinned branch (measured
+ * 2026-09-10). `reachable: true` was true of a FILE.
+ *
+ * Written so an unfamiliar transport reads as a NETWORK one: flagging a real
+ * remote would be the false failure on the other side of the same card. Only
+ * what is positively on this device — a path, a bundle, a `file://` URL — is
+ * refused.
+ */
+function isReleaseRemoteUrl(url: string): boolean {
+  const u = url.trim();
+  if (!u) return false;
+  const scheme = u.match(/^([A-Za-z][A-Za-z0-9+.-]*):\/\//)?.[1]?.toLowerCase();
+  if (scheme) return scheme !== "file";
+  // git's other network spelling, which has no scheme: `user@host:path`.
+  return /^[^/\\:]+@[^/\\:]+:/.test(u);
+}
+
+/**
+ * Whether this device's `origin` is the update repository at all.
+ *
+ * Asks git for the one fact the check was missing, locally and without the
+ * network: `git remote get-url origin`. An unreadable origin is NOT downgraded
+ * here — a box with no usable `origin` fails the fetch too, and that verdict
+ * already says so in git's own words. Only positive evidence (an origin that
+ * reads back and is not a network address) contradicts a fetch that
+ * "succeeded".
+ */
+async function checkReleaseRemote(projectDir: string): Promise<RemoteReachability> {
+  let url: string;
+  try {
+    const { stdout } = await execGit(projectDir, ["remote", "get-url", "origin"], { timeout: 10_000 });
+    url = String(stdout ?? "").trim();
+  } catch {
+    return REMOTE_REACHABLE;
+  }
+  if (!url || isReleaseRemoteUrl(url)) return REMOTE_REACHABLE;
+  return {
+    reachable: false,
+    reason: `This ClawBox's "origin" is not the update repository — it points at ${url}, which is not a `
+      + "network address, so this check never reached GitHub and cannot say whether an update is waiting.",
+  };
+}
+
+/**
+ * The remote answered, and the box still has no commit to compare against.
+ *
+ * A verdict the check does not have, rather than a verdict of "no update":
+ * `target: null` beside a reachable remote is what every surface renders as
+ * "you have the latest".
+ */
+function unresolvedTargetReason(branch: string): RemoteReachability {
+  return {
+    reachable: false,
+    reason: `This ClawBox could not work out which commit its update branch (${branch}) points at, `
+      + "so it cannot say whether an update is waiting.",
+  };
 }
 
 /**
@@ -3281,7 +3357,13 @@ const CLAWBOX_PKG = path.join(PROJECT_DIR, "package.json");
 interface ComponentVersionInfo {
   current: string | null;
   target: string | null;
-  updateAvailable?: boolean;
+  /**
+   * `null` where the check could not look — see `remote` below. A reader that
+   * treats it as a boolean gets the old behaviour: every consumer resolves it
+   * as `updateAvailable ?? <compare current against target>`, and null falls
+   * through to that comparison exactly as `false` did.
+   */
+  updateAvailable?: boolean | null;
 }
 
 interface VersionInfo {
@@ -3444,6 +3526,13 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
     attempts: REMOTE_CHECK_ATTEMPTS,
     retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS,
   });
+  // The fetch landed but the comparison did not, so this check has NO verdict —
+  // a different answer from "no update", and the only one the device is
+  // entitled to give. A fetch that failed already carries the better reason.
+  const unresolved = (): PinnedBranchCheck => ({
+    target: null,
+    remote: remote.reachable ? unresolvedTargetReason(branch) : remote,
+  });
   try {
     const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
       execGit(projectDir, ["rev-parse", "HEAD"], { timeout: 10_000 }),
@@ -3451,10 +3540,14 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
     ]);
     const currentSha = currentOut.trim();
     const targetSha = targetOut.trim();
-    if (!currentSha || !targetSha || currentSha === targetSha) return { target: null, remote };
+    // A missing sha is not parity: `rev-parse` exiting 0 with nothing to say
+    // compared empty against empty and read as "equal", so a box with no refs
+    // reported itself converged.
+    if (!currentSha || !targetSha) return unresolved();
+    if (currentSha === targetSha) return { target: null, remote };
     return { target: { branch, currentSha, targetSha }, remote };
   } catch {
-    return { target: null, remote };
+    return unresolved();
   }
 }
 
@@ -3494,13 +3587,19 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // hermes binary, so this must never spawn there.
     hasHermes ? readHermesVersion() : Promise.resolve(null),
   ]);
-  const { target: pinnedBranchTarget, remote: pinnedRemote } = await getPinnedBranchTarget(PROJECT_DIR);
-  // Two independent reads of the same remote — the tag list (getTargetVersion's
-  // `ls-remote`, a GET to /info/refs) and the pinned branch's fetch (a POST to
-  // /git-upload-pack). BOTH can be refused; the POST far more often, which is
-  // what the card measured. Either failing means this check did not see the
-  // remote, so the worse of the two is what the device reports.
-  const remote = !pinnedRemote.reachable ? pinnedRemote : lastTagRemote;
+  const [{ target: pinnedBranchTarget, remote: pinnedRemote }, releaseRemote] = await Promise.all([
+    getPinnedBranchTarget(PROJECT_DIR),
+    checkReleaseRemote(PROJECT_DIR),
+  ]);
+  // THREE reads of the same question, none of which may be overruled by
+  // another one's success. The tag list (getTargetVersion's `ls-remote`, a GET
+  // to /info/refs) and the pinned branch's fetch (a POST to /git-upload-pack)
+  // can both be refused; the POST far more often, which is what the card
+  // measured. And both of them succeed against an `origin` that is a bundle on
+  // this device, which is why the address is checked too. Any one of them
+  // failing means this check did not see the releases, so the worst answer is
+  // what the device reports.
+  const remote = [releaseRemote, pinnedRemote, lastTagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -3519,7 +3618,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     clawbox: {
       current: rawVersion,
       target: clawboxTarget,
-      updateAvailable: !!clawboxTarget,
+      // `null`, not `false`, when this check never saw the releases: "there is
+      // no update" and "I could not look" are different answers, and `false`
+      // was being read as the first. A target found LOCALLY — a drift, a newer
+      // tag already on disk — still stands, because that evidence did not come
+      // from the remote. Every reader falls through `?? <version comparison>`,
+      // so null behaves exactly as the old false did.
+      updateAvailable: clawboxTarget ? true : remote.reachable ? false : null,
     },
     openclaw: {
       current: openclawCurrent,
