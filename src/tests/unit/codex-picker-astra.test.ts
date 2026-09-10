@@ -330,6 +330,61 @@ describe("the ChatGPT-account surface follows the installed core", () => {
     expect(isCodexSupportedModelId("gpt-5.6-sol")).toBe(true);
   });
 
+  it("ignores a host suppression that an unreachable api condition is ANDed with", () => {
+    // The core requires EVERY condition present to match, and it resolves
+    // `providerConfigApiIn` against the owner's `models.providers.openai.api`,
+    // which this repo never writes — so an entry carrying it does not fire in the
+    // core at all and the model keeps running. Reading the host half on its own
+    // would take the row off the picker and out of the write guard: a false
+    // failure over a model the box can still use.
+    write({
+      modelCatalog: {
+        providers: {
+          openai: {
+            models: [{ id: "gpt-5.5", name: "GPT-5.5" }, { id: "gpt-5.6-sol", name: "GPT-5.6 Sol" }],
+          },
+        },
+        suppressions: [
+          {
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            when: {
+              baseUrlHosts: ["chatgpt.com"],
+              providerConfigApiIn: ["openai-chatgpt-responses"],
+            },
+          },
+        ],
+      },
+    });
+    expect(chatgptSurface().models.map((m) => m.id)).toContain("gpt-5.6-sol");
+    expect(isCodexSupportedModelId("gpt-5.6-sol")).toBe(true);
+  });
+
+  it("still honours a host-only suppression beside one the api condition guards", () => {
+    // The pair above must not become a blanket excuse: an entry with hosts alone
+    // is still a route claim, judged on its own.
+    write({
+      modelCatalog: {
+        providers: {
+          openai: {
+            models: [{ id: "gpt-5.5", name: "GPT-5.5" }, { id: "gpt-5.4", name: "GPT-5.4" }],
+          },
+        },
+        suppressions: [
+          {
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            when: { baseUrlHosts: ["chatgpt.com"], providerConfigApiIn: ["openai-chatgpt-responses"] },
+          },
+          { provider: "openai", model: "gpt-5.4", when: { baseUrlHosts: ["chatgpt.com"] } },
+        ],
+      },
+    });
+    const ids = chatgptSurface().models.map((m) => m.id);
+    expect(ids).not.toContain("gpt-5.4");
+    expect(ids).toContain("gpt-5.5");
+  });
+
   it("matches a suppression whose provider, model or host is spelled in another case", () => {
     // The core keys suppressions by
     // `normalizeProviderId(provider) + "::" + normalizeLowercaseStringOrEmpty(id)`

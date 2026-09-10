@@ -165,18 +165,6 @@ interface ManifestFacts {
 interface CachedManifest extends ManifestFacts {
   /** The file this was read from, and what it looked like when it was read. */
   file: string;
-  /**
-   * Which candidate that file was, in `coreManifestPaths` order.
-   *
-   * Kept because the staleness check re-stats `file` alone: an answer cached
-   * from the beside-config manifest (the ordinary OpenClaw 2 layout, where the
-   * bundled path does not exist) would otherwise survive an upgrade that
-   * INSTALLS the bundled one — that file is not the one being watched, so a
-   * higher-priority manifest could appear and never be read for the life of the
-   * process. That was a stale retirement hint before; it now decides whether a
-   * model switch is accepted.
-   */
-  candidateIndex: number;
   mtimeMs: number;
   size: number;
   /** When the file was last stat'ed, so a burst of lookups costs one syscall. */
@@ -338,7 +326,11 @@ function chatgptRouteFrom(manifest: unknown, provider: string): CoreChatgptRoute
   const subscriptionOnly: string[] = [];
   const suppressions = (modelCatalog as { suppressions?: unknown } | null)?.suppressions;
   if (Array.isArray(suppressions)) {
-    type Suppression = { provider?: unknown; model?: unknown; when?: { baseUrlHosts?: unknown } | null };
+    type Suppression = {
+      provider?: unknown;
+      model?: unknown;
+      when?: { baseUrlHosts?: unknown; providerConfigApiIn?: unknown } | null;
+    };
     for (const entry of suppressions as Suppression[]) {
       // Provider AND model case-insensitively, as the core's own matcher
       // compares them: it keys suppressions by
@@ -350,8 +342,17 @@ function chatgptRouteFrom(manifest: unknown, provider: string): CoreChatgptRoute
       if (lower(entry?.provider) !== provider.toLowerCase()) continue;
       const model = lower(entry?.model);
       if (!model) continue;
+      // The core ANDs every condition that is present, and the OTHER one it
+      // supports — `when.providerConfigApiIn` — is resolved against the owner's
+      // `models.providers.<id>.api`, which this repo never writes. So on a box
+      // this repo configures that condition can never be satisfied, and an entry
+      // carrying it does not fire in the core AT ALL, whatever its hosts say.
+      // Reading the host half on its own would drop a row the box still runs:
+      // the false failure, arriving from the opposite side to the one the note
+      // above `lower` describes.
+      if (conditionSet(entry?.when?.providerConfigApiIn).size > 0) continue;
       const hosts = conditionSet(entry?.when?.baseUrlHosts);
-      if (hosts.size === 0) continue; // unconditional, or a condition this does not read: not a route claim
+      if (hosts.size === 0) continue; // unconditional: not a route claim
       if (hosts.has(CHATGPT_HOST)) offRoute.add(model);
       else if (hosts.has(PLATFORM_HOST) && !subscriptionOnly.includes(model)) subscriptionOnly.push(model);
     }
@@ -372,16 +373,31 @@ function chatgptRouteFrom(manifest: unknown, provider: string): CoreChatgptRoute
 /**
  * Has a manifest candidate BETTER than the cached one appeared since?
  *
- * Only asked on the same five-second floor as the stat above, and only when the
- * cached answer did not come from the first candidate — on the ordinary layout
- * (nothing bundled, the answer beside the config) that is one `existsSync` per
- * provider per five seconds, and on a box where the bundled manifest is the
- * answer it is never asked at all.
+ * The staleness check re-stats the cached `file` alone, so an answer cached from
+ * the beside-config manifest (the ordinary OpenClaw 2 layout, where the bundled
+ * path does not exist) would otherwise survive an upgrade that INSTALLS the
+ * bundled one: that file is not the one being watched, so a higher-priority
+ * manifest could appear and never be read for the life of the process. That was
+ * a stale retirement hint before; it now decides whether a model switch is
+ * accepted.
+ *
+ * The position is re-derived from the cached path rather than remembered with it,
+ * because the candidate LIST itself grows: `findOpenclawBin()` answers the bare
+ * name `"openclaw"` where no binary is installed, and `coreManifestPaths` then
+ * omits the bundled candidate entirely — so an install that completes under a
+ * live server moves the cached file from index 0 to index 1, and a remembered
+ * index of 0 would report "nothing better" forever. A cached path that is no
+ * longer a candidate at all is itself stale, which is the `< 0` answer.
+ *
+ * Only asked on the same five-second floor as the stat above: on the ordinary
+ * layout that is one `existsSync` per provider per five seconds, and on a box
+ * where the bundled manifest IS the answer it costs nothing.
  */
-function higherPriorityManifestAppeared(provider: string, candidateIndex: number): boolean {
-  if (candidateIndex <= 0) return false;
+function higherPriorityManifestAppeared(provider: string, cachedFile: string): boolean {
   const candidates = coreManifestPaths(provider);
-  for (let i = 0; i < candidateIndex && i < candidates.length; i += 1) {
+  const candidateIndex = candidates.indexOf(cachedFile);
+  if (candidateIndex < 0) return true;
+  for (let i = 0; i < candidateIndex; i += 1) {
     try {
       if (fsSync.existsSync(candidates[i])) return true;
     } catch {
@@ -406,7 +422,7 @@ function factsFor(provider: string): ManifestFacts {
     try {
       const stat = fsSync.statSync(cached.file);
       if (stat.mtimeMs === cached.mtimeMs && stat.size === cached.size
-        && !higherPriorityManifestAppeared(provider, cached.candidateIndex)) {
+        && !higherPriorityManifestAppeared(provider, cached.file)) {
         cached.checkedAt = now;
         return cached;
       }
@@ -426,7 +442,7 @@ function factsFor(provider: string): ManifestFacts {
   // never exists and the beside-config answer is the right one to cache.
   let degraded = false;
   const candidates = coreManifestPaths(provider);
-  for (const [candidateIndex, file] of candidates.entries()) {
+  for (const file of candidates) {
     // Opened ONCE and both stat and read taken from the descriptor. A
     // `statSync` followed by a `readFileSync` of the same path is two lookups
     // of a name that can change between them — and the whole point of the stat
@@ -492,7 +508,6 @@ function factsFor(provider: string): ManifestFacts {
         retired,
         chatgpt,
         file,
-        candidateIndex,
         mtimeMs: stat.mtimeMs,
         size: stat.size,
         checkedAt: Date.now(),
