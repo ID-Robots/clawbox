@@ -13,7 +13,7 @@ function fn(name: string) {
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), "task789-")); });
 afterEach(() => { rmSync(dir, {recursive:true, force:true}); });
-function bridge({buildRc=0, swapRc=0, version="3.9.0"} = {}) {
+function bridge({buildRc=0, swapRc=0, version="3.9.0", hermes=false, preMasked=false} = {}) {
   mkdirSync(`${dir}/.next/standalone`,{recursive:true}); mkdirSync(`${dir}/data`);
   writeFileSync(`${dir}/.next/standalone/package.json`,JSON.stringify({version}));
   writeFileSync(`${dir}/package.json`,JSON.stringify({version:"4.0.0"}));
@@ -22,9 +22,10 @@ function bridge({buildRc=0, swapRc=0, version="3.9.0"} = {}) {
 PROJECT_DIR='${dir}'
 systemctl() {
   echo "systemctl $*" >> "$PROJECT_DIR/events"
-  if [ "$1" = is-enabled ]; then echo enabled; fi
+  if [ "$1" = is-enabled ]; then echo ${preMasked ? "masked-runtime" : "enabled"}; fi
   return 0
 }
+is_hermes_edition() { return ${hermes ? 0 : 1}; }
 as_clawbox() { "$@"; }
 ensure_build_swap() { echo swap >> "$PROJECT_DIR/events"; return ${swapRc}; }
 do_rebuild() { echo build >> "$PROJECT_DIR/events"; return ${buildRc}; }
@@ -55,6 +56,14 @@ describe("legacy bootstrap handover executes shipped shell functions",()=>{
   });
   it("refuses before stopping any service when swap cannot be provisioned",()=>{
     const r=bridge({swapRc:1}); expect(r.status).toBe(1); expect(r.events).toBe("swap\n");
+  });
+  it("does not touch an absent Hermes gateway",()=>{
+    const r=bridge({hermes:true}); expect(r.status,r.stderr).toBe(0);
+    expect(r.events).not.toContain("clawbox-gateway.service"); expect(r.marker).toBe(true);
+  });
+  it("does not remove an existing gateway maintenance mask",()=>{
+    const r=bridge({preMasked:true});expect(r.status,r.stderr).toBe(0);
+    expect(r.events).not.toContain("systemctl unmask");
   });
   it("leaves the current 4.x updater alone",()=>{
     const r=bridge({version:"4.0.0"});expect(r.status).toBe(0);expect(r.events).toBe("");

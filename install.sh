@@ -3365,12 +3365,14 @@ handover_legacy_updater() {
   local previous_id mask_owned=0 gateway_was_active=0 rc=0
   previous_id=$(cat "$PROJECT_DIR/.next/BUILD_ID") || return 1
   [ -n "$previous_id" ] || return 1
-  systemctl is-active --quiet clawbox-gateway.service && gateway_was_active=1
-  if [ "$(systemctl is-enabled clawbox-gateway.service 2>/dev/null || true)" != masked ]; then
-    systemctl mask --runtime clawbox-gateway.service || return 1
-    mask_owned=1
+  if ! is_hermes_edition; then
+    systemctl is-active --quiet clawbox-gateway.service && gateway_was_active=1
+    case "$(systemctl is-enabled clawbox-gateway.service 2>/dev/null || true)" in
+      masked|masked-runtime) ;;
+      *) systemctl mask --runtime clawbox-gateway.service || return 1; mask_owned=1 ;;
+    esac
+    systemctl stop clawbox-gateway.service || rc=$?
   fi
-  systemctl stop clawbox-gateway.service || rc=$?
   if [ "$rc" -eq 0 ]; then
     # do_rebuild restores the OLD app on failure. Do not revoke that app's
     # existing authorisation until a new build has actually been verified.
