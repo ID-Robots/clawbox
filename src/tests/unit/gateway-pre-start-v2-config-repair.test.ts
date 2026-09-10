@@ -724,6 +724,45 @@ export { applyLegacyDoctorMigrations as A };
     );
   }
 
+  /**
+   * The core's OTHER file carrying that declaration: the worker entry point.
+   *
+   * Measured on both published cores — 2026.8.1 and 2026.9.3 — the declaration
+   * text is in exactly two files, the library chunk above and
+   * `dist/worker/worker.mjs`, a 44 MB ENTRY POINT that exports nothing and does
+   * its work at import (the real one awaits `runWorkerProcess`, which exits
+   * non-zero on a closed stdin and blocks on an open one until the block's own
+   * `timeout -k 5 30` kills it). On 2026.8.1 it was out of reach by accident of
+   * its extension; searching `*.mjs` admits it, so the pick must not be the
+   * first hit `grep` happens to emit.
+   *
+   * Written BEFORE the library chunk and padded well past it, because both
+   * things the block relies on are measured here: creation order is what tilts
+   * grep's traversal order, and size is what orders the candidates.
+   */
+  function stubWorkerEntryChunk(): string {
+    const dir = path.join(coreDistDir, "worker");
+    mkdirSync(dir, { recursive: true });
+    // Importing it leaves a mark BEFORE it fails, so the assertion can be that
+    // it was never imported at all — not merely that the run recovered from
+    // importing it. On a box the cost of touching it is the 30 s the block's own
+    // timeout takes to kill a blocked worker, which no assertion about the
+    // outcome would show.
+    const marker = path.join(dir, "imported");
+    writeFileSync(
+      path.join(dir, "worker.mjs"),
+      `// ${"padding so this entry point is far larger than the chunk. ".repeat(4000)}
+import { writeFileSync as mark } from "node:fs";
+mark(${JSON.stringify(marker)}, "imported\\n");
+function applyLegacyDoctorMigrations(raw, context, options) {
+  return { next: null, changes: [] };
+}
+throw new Error("worker launch descriptor is required on stdin");
+`,
+    );
+    return marker;
+  }
+
   /** An `openclaw` that judges the FILE it is pointed at, like the real one. */
   function stubContentAwareOpenclaw() {
     const p = path.join(binDir, "openclaw");
@@ -929,6 +968,74 @@ exit 0
     expect(r.stderr).toContain("after the core's own migrations these remain");
     expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
     expect(r.stderr).not.toContain("migration table could not be read");
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("picks the chunk that EXPORTS the table, not the first file grep emits", () => {
+    // The two-candidate layout both real cores have. Which of them `grep -rl`
+    // emits first is inode and readdir order — any reinstall, rsync, image copy
+    // or restore can change it — so a first-hit pick is a coin toss between the
+    // answer and a 30 s timeout on an entry point, on the core every box runs
+    // today as much as on the new one. Here the hazard is stacked in its
+    // favour: created first, far larger, and it throws when imported.
+    rmSync(coreDistDir, { recursive: true, force: true });
+    const workerImported = stubWorkerEntryChunk();
+    stubCoreMigrationChunk("legacy-pGW3ZP3t.mjs");
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("after the core's own migrations these remain");
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(r.stderr).not.toContain("migration table could not be");
+    // …and the entry point was never imported, which is the half a correct
+    // answer alone would not prove: on a box that import is the 30 s this arm
+    // is allowed before it is killed, paid on every restart of an exit-78 loop.
+    expect(existsSync(workerImported)).toBe(false);
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("never imports a file the allow-list excludes, however small it is", () => {
+    // Why the search is an allow-list and not every file under `dist/`. This
+    // decoy is NAMED like a declaration file and written as a module that would
+    // answer WRONGLY if it were ever imported — it reports migrations that
+    // changed nothing, which is this arm's "stand down" answer — and it is the
+    // smallest candidate, so the extension filter is the only thing between it
+    // and the owner's diagnosis.
+    writeFileSync(
+      path.join(coreDistDir, "legacy-decoy.d.ts"),
+      `function applyLegacyDoctorMigrations(raw) { return { next: null, changes: [] }; }
+export { applyLegacyDoctorMigrations as A };
+`,
+    );
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("after the core's own migrations these remain");
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("says WHY the table could not be run, naming the candidate it tried", () => {
+    // The block's own rule, applied to the one path that used to be silent: a
+    // chunk found and not runnable looked exactly like a box with nothing to
+    // report. Every future core that moves the declaration into a file that
+    // does not export it lands here, and the log has to say so.
+    rmSync(coreDistDir, { recursive: true, force: true });
+    mkdirSync(coreDistDir, { recursive: true });
+    writeFileSync(
+      path.join(coreDistDir, "legacy-pGW3ZP3t.mjs"),
+      "function applyLegacyDoctorMigrations(raw) { return { next: null, changes: [] }; }\nexport const other = 1;\n",
+    );
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("the installed core's own migration table could not be run");
+    expect(r.stderr).toContain("exports no applyLegacyDoctorMigrations");
+    expect(r.stderr).toContain("legacy-pGW3ZP3t.mjs");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
     expect(previewFiles()).toEqual([]);
   });
 
