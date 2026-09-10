@@ -62,14 +62,16 @@ else
   BUN=""
 fi
 
-OPENCLAW_VERSION="2026.8.1"
+OPENCLAW_VERSION="2026.9.3"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 OPENCLAW_HOME="$CLAWBOX_HOME/.openclaw"
 UI_SERVICE="clawbox-setup.service"
 GATEWAY_SERVICE="clawbox-gateway.service"
-NODE_DIST_VERSION="24.15.0"
+# Must satisfy $OPENCLAW_NODE_ENGINE below — 24.15.0 no longer does, and this
+# fallback exists precisely for the machines where apt cannot deliver one.
+NODE_DIST_VERSION="24.21.0"
 NODE_DIST_ROOT="/opt/clawbox/node"
 export PATH="$NODE_DIST_ROOT/bin:$PATH"
 
@@ -92,16 +94,21 @@ as_user_login() {
   sudo -iu "$CLAWBOX_USER" bash -lc "export HOME=\"$CLAWBOX_HOME\" CLAWBOX_ROOT=\"$PROJECT_DIR\" PATH=\"$NODE_DIST_ROOT/bin:$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $1"
 }
 
+# The pinned core's `engines.node`, and the same table install.sh carries: with
+# 2026.9.3 that became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is rejected and
+# 24 must be at least 24.16.0 (`node:sqlite` truncates TEXT at an embedded NUL
+# below those builds).
+OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
+
 node_satisfies_openclaw_engine() {
   local version major
   version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
   [ -n "$version" ] || return 1
   major="${version%%.*}"
   case "$major" in
-    22) dpkg --compare-versions "$version" ge "22.22.3" ;;
-    24) dpkg --compare-versions "$version" ge "24.15.0" ;;
-    25) dpkg --compare-versions "$version" ge "25.9.0" ;;
-    2[6-9]|[3-9][0-9]) return 0 ;;
+    24) dpkg --compare-versions "$version" ge "24.16.0" ;;
+    26) dpkg --compare-versions "$version" ge "26.1.0" ;;
+    2[7-9]|[3-9][0-9]) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -127,11 +134,11 @@ ensure_openclaw_node_engine() {
     echo "  Node.js $(node --version) satisfies OpenClaw engine requirements"
     return 0
   fi
-  echo "  Installing/upgrading Node.js 22 for OpenClaw $OPENCLAW_VERSION..."
+  echo "  Installing/upgrading Node.js 24 for OpenClaw $OPENCLAW_VERSION..."
   wait_for_apt
   local nodesource_script
   nodesource_script=$(mktemp)
-  if ! curl -fsSL -o "$nodesource_script" https://deb.nodesource.com/setup_22.x; then
+  if ! curl -fsSL -o "$nodesource_script" https://deb.nodesource.com/setup_24.x; then
     rm -f "$nodesource_script"
     echo "Error: failed to download the NodeSource setup script." >&2
     exit 1
@@ -172,6 +179,7 @@ ensure_openclaw_node_engine() {
   hash -r
   if ! node_satisfies_openclaw_engine; then
     echo "Error: isolated Node install failed; found $(node --version 2>/dev/null || echo missing)." >&2
+    echo "       OpenClaw $OPENCLAW_VERSION requires Node $OPENCLAW_NODE_ENGINE." >&2
     exit 1
   fi
   echo "  Node.js $(node --version) installed at $NODE_DIST_ROOT"

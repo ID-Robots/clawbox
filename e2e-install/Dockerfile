@@ -27,12 +27,15 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
       openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
-# Node.js 22 — matches what install.sh installs at runtime. pipefail is
+# Node.js 24 — matches what install.sh installs at runtime, and it has to
+# match: the pinned core's engines are `>=24.16.0 <25 || >=26.1.0`, so an image
+# baked with Node 22 would look to install.sh like a box that still has to take
+# the major upgrade, and would test a path no shipped unit is on. pipefail is
 # required so a silent `curl` failure doesn't leave `bash -` reading nothing
 # and exiting 0 (which would produce an image missing the nodesource apt
 # list and then failing later in confusing ways).
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
  && apt-get install -y --no-install-recommends nodejs \
  && rm -rf /var/lib/apt/lists/*
 
