@@ -213,12 +213,13 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   /**
    * Follow the switch when it is moved somewhere else.
    *
-   * The chat's composer now carries the same spoken-replies toggle and writes
-   * the same route, announcing the result on this event — the one this panel
-   * has always fired for the chat's benefit. Without the other half, a
-   * Settings tab left open behind the chat kept showing the old position of a
-   * switch that had already moved, and the next thing the owner pressed here
-   * would have written the stale value back.
+   * Nothing else writes it today — the chat composer's own toggle was taken
+   * back out (TASK-782), so this panel is the one writer and the chat is the
+   * one reader. The listener stays because the event is the contract between
+   * them, not this panel's private business: a second Settings surface, a
+   * phone on `/app/settings` beside a desktop, or the next writer to be added
+   * would otherwise leave a tab showing the old position of a switch that had
+   * already moved, and the next press here would write the stale value back.
    */
   useEffect(() => {
     const onChanged = (event: Event) => {
@@ -370,10 +371,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       }
       if (isVoiceStatus(data)) {
         setStatus(data);
-        // The open chat decides per reply whether to speak, and whether to
-        // OFFER the switch at all — so it hears about every write, not only
-        // about `autoReply`. `select` and the ffmpeg repair are what install
-        // or retire this box's voice, and a chat docked beside this page kept
+        // The open chat decides per reply whether to ask for a clip at all —
+        // from the switch AND from whether this box still has an engine to
+        // speak with — so it hears about every write, not only about
+        // `autoReply`. `select` and the ffmpeg repair are what install or
+        // retire this box's voice, and a chat docked beside this page kept
         // showing the old answer until it was closed and reopened.
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
           detail: { autoReply: data.autoReply !== false, engines: data.engines },

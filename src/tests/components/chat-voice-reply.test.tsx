@@ -34,8 +34,19 @@ let replyText = "**Fine**, thanks.";
 let ackOnly = false;
 /** What `/setup-api/tts` says about the box's engines; `null` sends no list. */
 let ttsEngines: Array<Record<string, unknown>> | null = null;
-/** An audio attachment the harness put ON the reply, as the gateway does. */
+/** How many times the chat has read `/setup-api/tts` — the settle signal. */
+let ttsReads = 0;
+/** A clip the harness put ON the reply itself (Hermes, and an older gateway). */
 let replyAudio: string | null = null;
+/**
+ * A clip the gateway speaks ITSELF, delivered the way it really delivers one:
+ * a SECOND message repeating the reply's text and carrying the attachment,
+ * `supplementDelayMs` after the final. That is the shape ChatPopup's merge is
+ * written for ("the spoken half arrives as a SECOND message"), and the shape a
+ * box whose owner hand-edited `tts.auto: "always"` produces.
+ */
+let supplementAudio: string | null = null;
+let supplementDelayMs = 3;
 
 class FakeGatewayWs {
   static readonly CONNECTING = 0;
@@ -106,6 +117,26 @@ class FakeGatewayWs {
         },
       },
     }), 1);
+    if (supplementAudio) {
+      setTimeout(() => this.emit({
+        type: "event",
+        event: "chat",
+        payload: {
+          runId,
+          sessionKey: "agent:main:main",
+          state: "final",
+          stopReason: "stop",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: replyText },
+              { type: "attachment", attachment: { url: supplementAudio, kind: "audio", label: "voice.wav", mimeType: "audio/wav" } },
+            ],
+            timestamp: 1787260000500,
+          },
+        },
+      }), 1 + supplementDelayMs);
+    }
   }
 
   close() { this.readyState = FakeGatewayWs.CLOSED; }
@@ -180,6 +211,7 @@ function installFetch() {
         };
       }
       if (url.includes("/setup-api/tts")) {
+        ttsReads += 1;
         return {
           ok: true,
           json: async () => ({
@@ -231,7 +263,10 @@ describe("spoken replies in the desktop chat", () => {
     replyText = "**Fine**, thanks.";
     ackOnly = false;
     ttsEngines = null;
+    ttsReads = 0;
     replyAudio = null;
+    supplementAudio = null;
+    supplementDelayMs = 3;
     resetHarnessCache();
     window.localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
@@ -328,32 +363,52 @@ describe("spoken replies in the desktop chat", () => {
     expect(screen.queryByTestId("chat-audio")).not.toBeInTheDocument();
   });
 
+  /**
+   * Every "asks for nothing" test below settles first.
+   *
+   * The ask is a `fetch` behind an awaited queue, so it lands at least a
+   * microtask after the turn does: an assertion taken the instant the turn
+   * settles would pass with the bug present. Waiting for a POSITIVE fact that
+   * cannot precede the ask — the switch having been read, a clip having been
+   * rendered — is what makes the silence mean something.
+   */
+  async function settleAfterTheTurn() {
+    await waitFor(() => expect(ttsReads).toBeGreaterThan(0));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+
   it("leaves a typed question silent while the owner's switch is off", async () => {
     autoReplyAnswer = false;
     replyText = "Fine, thanks.";
     render(<ChatPopup isOpen onClose={() => {}} />);
     await typeIntoTheChat();
+    await settleAfterTheTurn();
     expect(speakBodies).toEqual([]);
     expect(screen.queryByTestId("chat-audio")).not.toBeInTheDocument();
   });
 
   it("asks for nothing on a box that has said it has no voice", async () => {
-    // The same rule the composer's attach and microphone buttons follow: a
-    // box that positively reports every engine unconfigured is not asked to
-    // speak, rather than asked and refused on every single reply.
+    // The same rule the attach and microphone buttons follow: a box that
+    // positively reports every engine unconfigured is not asked to speak,
+    // rather than asked and refused on every single reply.
     ttsEngines = [{ id: "local", configured: false }, { id: "cloud", configured: false }];
     replyText = "Fine, thanks.";
     render(<ChatPopup isOpen onClose={() => {}} />);
+    // The engines answer BEFORE the turn, or the chat would still be at
+    // `null` — "nothing known", which asks — and the test would be pinning
+    // its own timing rather than the rule.
+    await waitFor(() => expect(ttsReads).toBeGreaterThan(0));
     await typeIntoTheChat();
+    await settleAfterTheTurn();
     expect(speakBodies).toEqual([]);
   });
 
-  it("does not ask again for a reply something already spoke", async () => {
-    // The sibling case, and the one the Hermes edition is in permanently: when
-    // a clip arrives ON the reply — a box whose owner hand-edited
-    // `tts.auto: "always"` here, the Hermes chat route on that edition — the
-    // chat must render it and ask for nothing. Asking as well would spend a
-    // second synthesis on every reply and then replace a working clip with it.
+  it("does not ask for a reply that arrived with its own clip", async () => {
+    // A clip carried ON the reply: the Hermes edition permanently (its chat
+    // route attaches one inside the turn) and an older OpenClaw gateway, which
+    // pushed its TTS supplement inside the final. The chat renders it and asks
+    // for nothing — asking as well would spend a synthesis per reply and then
+    // have nowhere to put the result.
     replyText = "Fine, thanks.";
     replyAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000000---aa.wav";
     render(<ChatPopup isOpen onClose={() => {}} />);
@@ -361,7 +416,30 @@ describe("spoken replies in the desktop chat", () => {
     // Both replies in this transcript carry one — the chat's opening turn and
     // the typed one — and neither was synthesised here.
     await waitFor(() => expect(screen.queryAllByTestId("chat-audio")).toHaveLength(2));
+    await settleAfterTheTurn();
     expect(speakBodies).toEqual([]);
+  });
+
+  it("keeps ONE player when the gateway speaks the reply itself, late", async () => {
+    // The shape the OpenClaw gateway really uses when its `tts.auto` has been
+    // hand-edited to "always": a SECOND message repeating the reply's text,
+    // carrying the clip, after the final. It is made by the same engine as
+    // ours, so it can land either side of the synthesis this chat started —
+    // which is why the race is not claimed to be closed. What IS pinned is the
+    // outcome the owner sees: one reply, one player, never two.
+    replyText = "Fine, thanks.";
+    supplementAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000500---bb.wav";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await settleAfterTheTurn();
+    // One per reply in this transcript (the chat's opening turn and the typed
+    // one), and every one of them the GATEWAY'S clip — not a `blob:` this
+    // chat made. A synthesis this chat may also have started has nowhere to go
+    // and is released by the ring; what must never happen is the owner being
+    // shown two players for one answer.
+    const srcs = screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src") ?? "");
+    expect(srcs).toHaveLength(2);
+    expect(srcs.every((src) => src.includes("/setup-api/chat/media"))).toBe(true);
   });
 
   it("stays silent while the owner's switch is off, and follows the switch live", async () => {

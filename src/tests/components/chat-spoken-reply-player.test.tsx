@@ -289,12 +289,7 @@ function freshBox() {
   stubViewport();
 }
 
-/** Teardown a single test asked for. */
-let onTestEnd: Array<() => void> = [];
-
 function restoreBox() {
-  for (const undo of onTestEnd) undo();
-  onTestEnd = [];
   restoreMediaElement();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
@@ -517,8 +512,11 @@ describe("the chat composer", () => {
     expect(screen.queryByTestId("chat-speak-toggle")).toBeNull();
     expect(screen.queryByTestId("chat-speak-notice")).toBeNull();
     // And it does not WRITE the switch either — reading it is all this surface
-    // does with it now.
+    // does with it now. Matched on the EXACT path: `/setup-api/tts/warm` and
+    // `/setup-api/tts/speak` are POSTs to this surface's own voice work, and a
+    // substring would report one of those as "the composer wrote the switch".
     await new Promise((resolve) => setTimeout(resolve, 150));
-    expect(posts.filter((post) => post.url.includes("/setup-api/tts"))).toEqual([]);
+    const switchWrites = posts.filter((post) => new URL(post.url, "http://localhost").pathname === "/setup-api/tts");
+    expect(switchWrites).toEqual([]);
   });
 });

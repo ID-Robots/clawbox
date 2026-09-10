@@ -183,9 +183,10 @@ describe("capabilitiesFor", () => {
    * on the box and posts TEXT — so `inboundAudio` is never true here and the
    * gateway attaches nothing. The modes that WOULD speak a typed turn
    * (`always`, `tagged`) are not scopeable to this surface: the config's TTS
-   * layering is global/agent/channel/account and `channels.webchat` is refused
-   * by the schema ("unknown channel id: webchat"), the session-level `ttsAuto`
-   * override is settable only by the in-chat `/tts` command (never by
+   * layering is global/agent/channel/account and the box's own CLI refuses the
+   * web chat's id — `openclaw config get channels.webchat.tts.auto` answers
+   * "Unknown config path: channels.webchat.tts.auto" — the session-level
+   * `ttsAuto` override is settable only by the in-chat `/tts` command (never by
    * `sessions.patch`, which does not take it), and the prefs-level switch
    * (`tts.enable`) is global — each of them would put a voice note on every
    * typed Telegram message too.
