@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
-import { settledMemoryRun } from "@/tests/helpers/memory-run-state";
+import { IDLE_MEMORY_RUN, settledMemoryRun } from "@/tests/helpers/memory-run-state";
 import path from "node:path";
 
 /**
@@ -55,21 +55,11 @@ async function lib() {
   return await import("@/lib/clawkeep-memory");
 }
 
-const IDLE_RUN = {
-  status: "idle" as const,
-  mode: "" as const,
-  trigger: "" as const,
-  startedAtMs: 0,
-  finishedAtMs: 0,
-  durationMs: 0,
-  error: "",
-  errorCode: "" as const,
-};
 
 describe("reading the real memory status", () => {
   it("reports a local embedder as on-device, not as cloud", async () => {
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
-    const status = await parseMemoryStatus(REAL_STATUS, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const status = await parseMemoryStatus(REAL_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     // The whole privacy claim rests on this one field being right.
     expect(status.provider).toBe("ollama");
     expect(status.model).toBe("qwen3-embedding:0.6b");
@@ -85,13 +75,13 @@ describe("reading the real memory status", () => {
     // red "Failed: 1" on a healthy new device.
     const raw = REAL_STATUS as Array<{ scan: { issues: string[] } }>;
     expect(raw[0].scan.issues.length).toBe(1);
-    const status = await parseMemoryStatus(REAL_STATUS, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const status = await parseMemoryStatus(REAL_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     expect(status.failedItems).toBe(0);
   });
 
   it("never leaks a path, a model file or CLI text into what the UI renders", async () => {
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
-    const status = await parseMemoryStatus(REAL_STATUS, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const status = await parseMemoryStatus(REAL_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     const rendered = JSON.stringify(status);
     // Everything in the captured payload that must not reach a customer.
     expect(rendered).not.toContain("/home/");
@@ -106,7 +96,7 @@ describe("reading the real memory status", () => {
     const rows = JSON.parse(JSON.stringify(REAL_STATUS)) as Array<Record<string, never>>;
     (rows[0] as unknown as { status: { custom: { indexIdentity: { status: string } } } })
       .status.custom.indexIdentity.status = "mismatched";
-    const status = await parseMemoryStatus(rows, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     expect(status.indexIdentity).toBe("mismatched");
     expect(status.error).toContain("full reindex");
   });
@@ -125,7 +115,7 @@ describe("reading the real memory status", () => {
       const rows = JSON.parse(JSON.stringify(REAL_STATUS)) as unknown;
       (rows as Array<{ status: { custom: { indexIdentity: { status: string } } } }>)[0]
         .status.custom.indexIdentity.status = identity;
-      const status = await parseMemoryStatus(rows, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+      const status = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
       expect(status.indexIdentity).toBe(identity);
       expect(status.health).toBe("degraded");
       expect(status.errorCode).toBe(code);
@@ -135,7 +125,7 @@ describe("reading the real memory status", () => {
 
   it("leaves a healthy index healthy, with no code beside an empty message", async () => {
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
-    const status = await parseMemoryStatus(REAL_STATUS, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const status = await parseMemoryStatus(REAL_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     expect(status.health).toBe("healthy");
     expect(status.error).toBe("");
     expect(status.errorCode).toBe("");
@@ -143,20 +133,20 @@ describe("reading the real memory status", () => {
 
   it("keeps the fingerprint stable for a configuration and changes it with the model", async () => {
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
-    const a = await parseMemoryStatus(REAL_STATUS, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
-    const again = await parseMemoryStatus(REAL_STATUS, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const a = await parseMemoryStatus(REAL_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const again = await parseMemoryStatus(REAL_STATUS, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     expect(a.fingerprint).toBe(again.fingerprint);
     expect(a.fingerprint).not.toBe("");
 
     const rows = JSON.parse(JSON.stringify(REAL_STATUS)) as unknown;
     (rows as Array<{ status: { model: string } }>)[0].status.model = "text-embedding-3-large";
-    const other = await parseMemoryStatus(rows, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const other = await parseMemoryStatus(rows, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     expect(other.fingerprint).not.toBe(a.fingerprint);
   });
 
   it("says unavailable rather than pretending, when the CLI says nothing", async () => {
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
-    const status = await parseMemoryStatus([{ agentId: "main", status: {} }], IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const status = await parseMemoryStatus([{ agentId: "main", status: {} }], IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     expect(status.available).toBe(false);
     expect(status.health).toBe("unavailable");
     expect(status.location).toBe("unknown");
@@ -835,7 +825,7 @@ describe("an openai-compatible embedder is on device only at the loopback proxy"
   it("reads ClawBox's own embedder behind the proxy as local", async () => {
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
     const status = await parseMemoryStatus(
-      row("openai-compatible"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(),
+      row("openai-compatible"), IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(),
       "http://127.0.0.1/setup-api/local-ai/embed/v1",
     );
     expect(status.provider).toBe("openai-compatible");
@@ -845,7 +835,7 @@ describe("an openai-compatible embedder is on device only at the loopback proxy"
   it("reads the same provider id at another host as cloud", async () => {
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
     const status = await parseMemoryStatus(
-      row("openai-compatible"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), "http://192.168.1.50:8081/v1",
+      row("openai-compatible"), IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(), "http://192.168.1.50:8081/v1",
     );
     expect(status.location).toBe("cloud");
   });
@@ -855,7 +845,7 @@ describe("an openai-compatible embedder is on device only at the loopback proxy"
     // rests on this field, and a guess in the flattering direction is the
     // one that lies.
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
-    const status = await parseMemoryStatus(row("openai-compatible"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    const status = await parseMemoryStatus(row("openai-compatible"), IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
     expect(status.location).toBe("unknown");
   });
 
@@ -864,7 +854,7 @@ describe("an openai-compatible embedder is on device only at the loopback proxy"
     // happens to carry a remote address is still embedding on this box.
     const { parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
     const status = await parseMemoryStatus(
-      row("ollama", "qwen3-embedding:0.6b"), IDLE_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(),
+      row("ollama", "qwen3-embedding:0.6b"), IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE, new Date(),
       "http://192.168.1.50:8081/v1",
     );
     expect(status.location).toBe("local");
