@@ -78,6 +78,11 @@ PY
   echo "System timezone verified: $zone"
 }
 
+install_coding_harness() {
+  as_owner /bin/bash "$MIRROR/scripts/x64-migration/install-coding-harness.sh" \
+    "$MIRROR/scripts/claude-ds" "$PROJECT_DIR"
+}
+
 update_openclaw() {
   local target current
   target=$(head -n 1 "$MIRROR/config/openclaw-target.txt")
@@ -188,7 +193,12 @@ PY
 
 cd "$PROJECT_DIR"
 case "$step" in
-  bootstrap_updater) refresh_trusted_source ;;
+  bootstrap_updater)
+    refresh_trusted_source
+    # Deliver the harness before the core step restarts the user gateway, so
+    # its MCP server discovers the newly available coding tools on that start.
+    install_coding_harness
+    ;;
   set_timezone) apply_timezone ;;
   chpasswd)
     as_owner /usr/bin/python3 - "$PROJECT_DIR/data/.chpasswd-input" <<'PY' | /usr/bin/python3 -I -c '
@@ -246,6 +256,7 @@ PY
   post_update)
     "$MANIFEST" --verify
     "$MANIFEST" --mirror
+    install_coding_harness
     apply_timezone
     echo 'x64 root integration and trusted updater source verified'
     ;;

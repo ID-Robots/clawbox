@@ -7,13 +7,13 @@ reviewed source, inspect the package, then install it with the normal Debian
 package manager.
 
 ```sh
-python3 scripts/x64-migration/test_integration.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/x64-migration -p 'test_*.py'
 python3 scripts/x64-migration/build-package.py \
   --staging /tmp/clawbox-x64-integration-stage \
-  --output /tmp/clawbox-x64-integration_1.0.0_amd64.deb
-dpkg-deb --info /tmp/clawbox-x64-integration_1.0.0_amd64.deb
-dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.0_amd64.deb
-sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.0_amd64.deb
+  --output /tmp/clawbox-x64-integration_1.0.3_amd64.deb
+dpkg-deb --info /tmp/clawbox-x64-integration_1.0.3_amd64.deb
+dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.3_amd64.deb
+sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.3_amd64.deb
 ```
 
 The default host is `nexus0`, project `/home/nexus0/clawbox`, interpreter
@@ -47,7 +47,29 @@ Post-update checks leave a healthy gateway running. If it is unavailable,
 verification tries its existing service once and reports failure if it stays
 unavailable; it does not run the appliance pre-start/doctor repair chain.
 The UI is unavailable during its rebuild; this desktop does not reboot.
-The existing integration package 1.0.2 supports this dashboard change.
+Install integration package **1.0.3** as well as this dashboard update. Older
+packages retain their installed adapter and do not gain coding-harness delivery
+merely by fetching beta.
+
+Bootstrap and post-update install the `claude-ds` wrapper from the verified
+mirror as the desktop owner, preserving an existing Claude Code installation.
+If Claude is missing, its HTTPS installer also runs as the owner. Installation
+failure fails the update visibly. The copied wrapper defaults to this desktop's
+checkout, so the Coding app and an interactive shell use the same ClawBox AI
+configuration. Bootstrap delivers it before the core step restarts the gateway,
+allowing the agent's MCP server to discover the coding tools on that start.
+Neither the Codex CLI nor the appliance's network/service setup is installed
+by this step.
+
+For a wrapper repair without a full update, run the owner-only helper from the
+reviewed checkout (without sudo):
+
+```sh
+bash scripts/x64-migration/install-coding-harness.sh scripts/claude-ds "$PWD"
+```
+
+The Coding app checks readiness on its next status request. A running agent's
+MCP server discovers newly installed tools on its next restart.
 
 The already-installed OpenClaw version is validated without running migrations.
 The owner's idempotent backup compatibility patch is reapplied as that owner.

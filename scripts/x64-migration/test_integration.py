@@ -91,6 +91,40 @@ esac
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual((root/'applied').read_text(),'Europe/Sofia')
 
+    def test_update_steps_deliver_coding_harness_from_mirror_as_owner(self):
+        for step in ['bootstrap_updater', 'post_update']:
+            with self.subTest(step=step):
+                root,worker=self.fixture()
+                mirror=root/'mirror'
+                (mirror/'scripts/x64-migration').mkdir(parents=True)
+                installer=(HERE/'install-coding-harness.sh').read_text()
+                installer=installer.replace('[ "$(/usr/bin/id -u)" -ne 0 ]','[ 1000 -ne 0 ]')
+                (mirror/'scripts/x64-migration/install-coding-harness.sh').write_text(installer)
+                (mirror/'scripts/claude-ds').write_text((HERE.parent/'claude-ds').read_text())
+                (root/'.local/bin').mkdir(parents=True)
+                cli=root/'.local/bin/claude'
+                cli.write_text('#!/bin/sh\nexit 0\n'); cli.chmod(0o755)
+                # The mutable checkout is deliberately not executable source.
+                (root/'scripts/x64-migration').mkdir(parents=True)
+                (root/'scripts/x64-migration/install-coding-harness.sh').write_text('exit 99\n')
+                manifest=root/'manifest'
+                manifest.write_text(f'#!/bin/sh\nprintf "manifest-%s\\n" "$1" >> "{root}/events"\n')
+                manifest.chmod(0o755)
+                source=worker.read_text().replace('MIRROR=/var/lib/clawbox/root-exec-mirror',f'MIRROR={mirror}')
+                source=source.replace('MANIFEST=/usr/local/libexec/clawbox/clawbox-root-manifest.sh',f'MANIFEST={manifest}')
+                source=source.replace('    refresh_trusted_source\n',f'    printf "refresh-source\\n" >> "{root}/events"\n')
+                worker.write_text(source)
+                result=self.run_worker(worker,step)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertTrue(os.access(root/'.local/bin/claude-ds',os.X_OK))
+                events=(root/'events').read_text().splitlines()
+                self.assertEqual(events,['refresh-source'] if step=='bootstrap_updater' else ['manifest---verify','manifest---mirror'])
+                # A bad/missing verified wrapper must fail the update, rather
+                # than silently leaving the Coding app unusable again.
+                (mirror/'scripts/claude-ds').unlink()
+                result=self.run_worker(worker,step)
+                self.assertNotEqual(result.returncode,0)
+
     def test_timezone_rejects_symlinks_fifo_shell_and_invalid_values(self):
         for kind in ['symlink','fifo','shell','unknown','oversize','multiple']:
             with self.subTest(kind=kind):
