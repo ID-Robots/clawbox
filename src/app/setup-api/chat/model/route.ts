@@ -8,6 +8,7 @@ import {
   readConfig,
   readConfigStrict,
   restartGateway,
+  repairClawboxAiFlashModelPolicy,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
   runOpenclawConfigUnset,
@@ -19,11 +20,8 @@ import {
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import {
-  CLAWBOX_AI_CHAT_MODEL_IDS,
-  CLAWBOX_AI_MODEL_BY_TIER,
-  CLAWBOX_AI_DEFAULT_TIER,
-} from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
+import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { chatgptDefaultModelId } from "@/lib/chatgpt-surface";
 import {
@@ -42,11 +40,8 @@ import {
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
 import {
-  explicitPicksFrom,
   forgetClawboxAiPickIfMovedOff,
-  pickedClawboxAiModelIdAmong,
   recordExplicitModelPick,
-  EXPLICIT_MODEL_PICKS_KEY,
 } from "@/lib/explicit-model-pick";
 import { isClawboxAiImageModelId, isClawboxAiImageModelRef } from "@/lib/clawbox-ai-models";
 import {
@@ -121,13 +116,11 @@ const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter"]
 // the chosen id or the gateway silently falls back, so the chat-header switch
 // below auto-extends that list when a freshly-picked model isn't seeded.
 const OPENAI_COMPAT_PROVIDERS = new Set<string>(["openrouter", "google", "anthropic"]);
-// Imported from `@/lib/clawbox-ai-models` so this fallback can't drift away
-// from the configure route's tier→model mapping. Used only when a legacy
-// install has no explicit `models.providers.deepseek.models` entry; new
-// installs surface every tier directly via the provider definition.
+// ClawBox AI chat uses the existing Flash alias. The former Pro alias also
+// serves Flash 4.1, so remembered plan choices do not select another model.
 const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
-  clawai: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
-  deepseek: CLAWBOX_AI_MODEL_BY_TIER[CLAWBOX_AI_DEFAULT_TIER],
+  clawai: CLAWBOX_AI_MODEL_BY_TIER.flash,
+  deepseek: CLAWBOX_AI_MODEL_BY_TIER.flash,
   anthropic: `anthropic/${ANTHROPIC_DEFAULT_MODEL_ID}`,
   openai: `openai/${OPENAI_DEFAULT_MODEL_ID}`,
   google: `google/${GOOGLE_DEFAULT_MODEL_ID}`,
@@ -163,6 +156,12 @@ function normalizeProviderFromModel(model: string | null | undefined): string | 
   if (typeof model !== "string" || !model.trim()) return null;
   const [provider] = model.split("/", 1);
   return normalizeProvider(provider);
+}
+
+function canonicalChatModel(model: string): string {
+  return normalizeProviderFromModel(model) === "clawai"
+    ? CLAWBOX_AI_MODEL_BY_TIER.flash
+    : model;
 }
 
 function defaultModelForProvider(provider: string | null): string | null {
@@ -482,9 +481,6 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     sqliteGet(PRIMARY_MODEL_KEY).catch(() => null),
   ]);
   const authProfiles = openclawConfig.auth?.profiles ?? {};
-  // Off the store `getAll()` has already returned — the same read
-  // `ai-models/configure` does for the same map, and no second file read.
-  const explicitPicks = explicitPicksFrom(configStore[EXPLICIT_MODEL_PICKS_KEY]);
   // Subscription-only providers, computed ONCE: the row attribution below and
   // the `subscriptionProviders` the answer carries are the same walk of the
   // same profile map, and doing it twice per GET on a Jetson is a walk that
@@ -536,13 +532,13 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     : null;
 
   let primaryModel = typeof storedPrimaryModel === "string" && storedPrimaryModel.trim()
-    ? storedPrimaryModel
+    ? canonicalChatModel(storedPrimaryModel)
     : null;
 
   if (!isLocalModel(activeModel) && activeModel) {
-    primaryModel = activeModel;
-    if (storedPrimaryModel !== activeModel) {
-      await sqliteSet(PRIMARY_MODEL_KEY, activeModel);
+    primaryModel = canonicalChatModel(activeModel);
+    if (storedPrimaryModel !== primaryModel) {
+      await sqliteSet(PRIMARY_MODEL_KEY, primaryModel);
     }
   }
 
@@ -553,8 +549,8 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     ? uiProviderForModel(activeModel)
     : null) ?? normalizeProvider(configStore.ai_model_provider);
   // Keyed by *provider* (not by model id) so each provider gets ONE
-  // row in the chat dropdown. Model variants (ClawBox AI Flash/Pro,
-  // Claude Haiku/Sonnet/Opus, GPT-5.4 / -mini, etc.) are surfaced via
+  // row in the chat dropdown. Model variants (Claude Haiku/Sonnet/Opus,
+  // GPT-5.4 / -mini, etc.) are surfaced via
   // the secondary model picker in ChatPopup, not as independent rows.
   // The first call wins — subsequent rememberPrimaryOption calls for
   // a provider that already has an entry are no-ops, with the active
@@ -564,7 +560,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     model: string | null | undefined,
     providerHint?: string | null,
   ) => {
-    const trimmedModel = typeof model === "string" ? model.trim() : "";
+    const trimmedModel = typeof model === "string" ? canonicalChatModel(model.trim()) : "";
     if (!trimmedModel || isLocalModel(trimmedModel)) return;
     // The ClawBox AI image entry, written as the primary by an older build,
     // must not own the provider's row: the profile loop below then picks a
@@ -609,13 +605,11 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     const provider = normalizeProvider(rawProvider);
     if (!provider || provider === "ollama" || provider === "llamacpp") continue;
 
-    // Pick which model represents this provider in the dropdown:
+    // ClawBox AI always resolves to Flash. For other providers:
     //  1. activeModel if it belongs to this provider (so the row's
     //     "model" field matches what the gateway is actually using).
-    //  2. For the ClawBox AI row only: the model the owner picked, while the
-    //     row still offers it (`pickedClawboxAiModelIdAmong`, TASK-769).
-    //  3. The first model in the openclaw provider definition.
-    //  4. The hard-coded default for this provider.
+    //  2. The first model in the openclaw provider definition.
+    //  3. The hard-coded default for this provider.
     const providerDef = providerDefinitions[rawProvider];
     // Minus the ClawBox AI image entry, and nothing else: `models.providers
     // .openai.models[]` carries it on every paired box, and on a box with an
@@ -634,18 +628,6 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
         typeof m?.id === "string" && m.id.trim().length > 0 && !isClawboxAiImageModelId(m.id),
     );
 
-    // The owner's own ClawBox AI pick, judged against what the row still
-    // offers: the configured list where there is one, and otherwise the closed
-    // set itself, so a legacy install carrying no `models.providers.deepseek`
-    // entry — the case `DEFAULT_PROVIDER_MODELS` exists for — keeps the choice
-    // too. `pickedClawboxAiModelIdAmong` says why this is the one slot read.
-    const pickedModelId = provider === "clawai"
-      ? pickedClawboxAiModelIdAmong(
-          explicitPicks,
-          definedModels.length > 0 ? definedModels.map((m) => m.id) : CLAWBOX_AI_CHAT_MODEL_IDS,
-        )
-      : null;
-
     let model: string | null = null;
     // `!isClawboxAiImageModelRef` matters here, not only in the filter above:
     // this branch wins whenever the primary belongs to this provider, so on
@@ -656,8 +638,6 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     // provider" is what lets the owner's configured rows be consulted.
     if (activeModel && !isClawboxAiImageModelRef(activeModel) && uiProviderForModel(activeModel) === provider) {
       model = activeModel;
-    } else if (pickedModelId) {
-      model = `${rawProvider}/${pickedModelId}`;
     } else if (!isChatgptSignIn && definedModels.length > 0) {
       model = `${rawProvider}/${definedModels[0].id}`;
     } else {
@@ -780,7 +760,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
   // an `available: false` beside it.
   const activeOption = activeModel
     ? options.find(
-        (option) => option.model === activeModel
+        (option) => option.model === canonicalChatModel(activeModel)
           && (!activeUiProvider || option.provider === activeUiProvider),
       ) ?? options.find((option) => option.model === activeModel) ?? null
     : null;
@@ -791,6 +771,9 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     activeSource,
     activeLabel,
     activeModel,
+    ...(activeUiProvider === "clawai" && needsClawboxAiFlashPolicyRepair(openclawConfig)
+      ? { needsFlashModelMigration: true as const }
+      : {}),
     options,
     primary: {
       available: !!summaryPrimaryOption?.available,
@@ -970,19 +953,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    // "The BOX resolved this model, the owner did not name it." Two callers set
-    // it, both in-process: the chat's entitlement guard, which drops a Max model
-    // the portal refuses down to Flash so chat keeps working, and
-    // `/setup-api/providers/default`, where the owner named a PROVIDER and this
-    // route's own state supplied the model. It changes nothing about the write —
-    // only whether the result is remembered as the owner's own pick (TASK-713).
-    //
-    // Caller-supplied because on the wire a resolved model and a chosen one are
-    // the same field, and this route cannot tell them apart; the Hermes twin can
-    // (`if (namedModel)`) only because there a provider-only switch arrives with
-    // no model at all. It is not a permission: the caller is the authenticated
-    // owner, it cannot change WHAT is written, and the worst it can do is lose
-    // its own bookkeeping — one later badge overwrite, undone by re-picking.
+    // The chat's Flash normalization and provider-only switches resolve a
+    // model automatically. They retire an obsolete ClawBox AI pick without
+    // recording the result as a new explicit model choice.
     const automaticSwitch = body.automatic === true;
 
     // One read of openclaw.json for the request: the state below and every
@@ -1075,8 +1048,8 @@ export async function POST(request: Request) {
             { status: 400 },
           );
         }
-        let effectiveModel = requestedModel;
-        let effectiveProvider = parsed.provider;
+        let effectiveModel = canonicalChatModel(requestedModel);
+        let effectiveProvider = normalizeProvider(parsed.provider) === "clawai" ? "deepseek" : parsed.provider;
         const effectiveModelId = parsed.modelId;
         const chatgptPick = resolveChatgptPick(requestedModel, parsed, openAiCredentials, pickedChatgptRow);
         if (chatgptPick && "refusal" in chatgptPick) return chatgptPick.refusal;
@@ -1282,21 +1255,22 @@ export async function POST(request: Request) {
     );
     if (targetOffSurface) return targetOffSurface;
 
+    // Read/recheck/append under the native config lock. Never serialize an
+    // allowlist from the earlier request snapshot into a retryable CLI batch.
+    // The equivalent Flash permission remains if primary validation later fails.
+    const policyRepaired = targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash
+      ? await repairClawboxAiFlashModelPolicy()
+      : false;
+
     if (state.activeModel === targetModel) {
       // Naming the model the box already runs is still a choice, and the write
       // being a no-op does not make it less of one (TASK-713) — so it is
       // recorded here as the Hermes picker records it.
       //
-      // NOT reachable from the chat header, and the claim is not made: ChatPopup
-      // short-circuits a pick of the active model before the POST
-      // (`switchChatModel`, ChatPopup.tsx), so an owner deliberately settling on
-      // the model they are already on has no surface that says so. This branch
-      // exists for a caller that does arrive — an API client, a future picker
-      // that stops short-circuiting — and is honest for it.
+      // The header skips explicit picks of the active model, while automatic
+      // normalization and API clients can still arrive here.
       if (!automaticSwitch) await recordExplicitModelPick(targetModel);
-      // ...and its mirror: a switch the BOX made to a different ClawBox AI
-      // model retires the pick it moved off, so the entitlement guard's
-      // recovery cannot leave a refused Max id on the row for ever (TASK-769).
+      // Retire a previous ClawBox AI pick when normalization moved off it.
       else await forgetClawboxAiPickIfMovedOff(targetModel);
       // Already the primary — but a ChatGPT pick can arrive as `codex/<id>`
       // and remap onto a primary that IS `openai/<id>` already, on a box whose
@@ -1314,7 +1288,7 @@ export async function POST(request: Request) {
       //     a same-model pick is free only when they already agree.
       let sameModelWarning: string | undefined;
       const armed = chatgptRuntimeArmed(preloadedConfig, targetModel);
-      const wrote = chatgptRouted !== armed;
+      const wrote = chatgptRouted !== armed || policyRepaired;
       if (chatgptRouted && !armed) {
         await runOpenclawConfigSet(chatgptRuntimeArmOp(targetModel));
       } else if (!chatgptRouted && armed) {
@@ -1325,7 +1299,12 @@ export async function POST(request: Request) {
       // the model belongs to the ChatGPT row. Answering with that would tell
       // the owner they are on the subscription in the same response that took
       // them off it. A branch that wrote nothing keeps the snapshot it has.
-      const settledState = wrote ? await loadChatModelState() : state;
+      // Another lock holder may have already repaired or removed the Pro
+      // permission. Re-read a previously flagged policy even if we wrote
+      // nothing, so the response does not keep a stale migration flag.
+      const settledState = wrote || state.needsFlashModelMigration
+        ? await loadChatModelState()
+        : state;
       const sameModelOption = settledState.options.find((option) =>
         option.model === targetModel
         && (!pickedUiProvider || option.provider === pickedUiProvider));
@@ -1339,10 +1318,13 @@ export async function POST(request: Request) {
     }
 
     if (!isLocalModel(state.activeModel) && state.activeModel) {
-      await sqliteSet(PRIMARY_MODEL_KEY, state.activeModel);
+      await sqliteSet(PRIMARY_MODEL_KEY, canonicalChatModel(state.activeModel));
     }
 
     const parsed = parseFullyQualifiedModel(targetModel);
+    const automaticClawboxAliasNormalization = automaticSwitch
+      && normalizeProviderFromModel(state.activeModel) === "clawai"
+      && normalizeProviderFromModel(targetModel) === "clawai";
 
     // 1. Update the agent-level default so any *future* session starts
     //    with the user's chosen model — in ONE batch with the plugin enable
@@ -1429,20 +1411,10 @@ export async function POST(request: Request) {
     const pluginSwitchedOn = providerPluginSwitchedOnBy([targetModel], configBeforeBatch);
     if (pluginSwitchedOn) notifyProviderSetChanged(pluginSwitchedOn);
 
-    // 1b-2. The owner chose this model, so nothing that fills in a DEFAULT may
-    //       overwrite it later — that is the whole of TASK-713, and this is
-    //       where the choice is made. Recorded after the write landed, so a
-    //       refused batch records nothing.
-    //
-    //       `automatic` is the one exemption: the chat's entitlement guard
-    //       drops a refused Max model to Flash by posting HERE, and recording
-    //       that as a choice would pin the box to Flash for good — the box's
-    //       own recovery, read back as the owner's decision.
+    // Record explicit choices only after the write lands, so a refused batch
+    // records nothing. Automatic normalization retires the previous ClawBox
+    // AI choice without creating a new one.
     if (!automaticSwitch) await recordExplicitModelPick(targetModel);
-    //       And its mirror, for the same reason the exemption exists: the
-    //       guard's drop to Flash must also RETIRE the Max pick it moved off,
-    //       or the row this card teaches to honour a pick would offer a model
-    //       the portal refuses and leave ClawBox AI unreachable (TASK-769).
     else await forgetClawboxAiPickIfMovedOff(targetModel);
 
     // 1c. The other side of the arm: a pick that is NOT the subscription's, on
@@ -1459,7 +1431,9 @@ export async function POST(request: Request) {
     //    user's current pick, so prior tags shouldn't make repeat
     //    clicks no-op. The soft-sweep "parallel chats deliberately
     //    running different models" use case has no UI today.
-    if (parsed) {
+    //    Automatic ClawBox alias normalization preserves unrelated session
+    //    pins; the chat patches its own session to Flash when it connects.
+    if (parsed && !automaticClawboxAliasNormalization) {
       try {
         await applyModelOverrideToAllAgentSessions(
           {
@@ -1475,6 +1449,8 @@ export async function POST(request: Request) {
         // the open chat. Log and continue.
         console.error("[chat/model] Failed to sweep session overrides:", err);
       }
+    }
+    if (parsed) {
       // 3. The OFF half of the gate: switch the anthropic plugin off only
       //    when nothing on the box could use it — the primary is elsewhere
       //    AND no usable Anthropic credential remains (see setProviderPlugins).

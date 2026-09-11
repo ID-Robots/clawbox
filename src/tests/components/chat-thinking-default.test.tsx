@@ -5,10 +5,8 @@ import { resetHarnessCache } from "@/lib/client-harness";
 import { PERSIST_KEY_PREFIX } from "@/lib/chat-reasoning";
 
 /**
- * The reasoning-effort default the chat pushes to the gateway, per ClawBox AI
- * tier. Product decision (2026-08-24): the Max tier (DeepSeek V4 Pro) reasons
- * by default; Flash stays fast. The default is a property of the MODEL the
- * chat is on, and a level the user picked themselves still wins over it.
+ * Both legacy ClawBox AI model ids now serve Flash 4.1 and start with reasoning
+ * off. A level the user picked themselves still wins over that default.
  *
  * Mounts the real ChatPopup against a fake gateway socket and asserts the
  * first `sessions.patch{thinkingLevel}` frame — the wire value is what the
@@ -62,7 +60,10 @@ class FakeGatewayWs {
     this.respond(id, { runId: "r1", status: "started" });
   }
 
-  close() {}
+  close() {
+    this.readyState = 3;
+    this.onclose?.();
+  }
 
   private respond(id: string, payload: unknown) {
     setTimeout(() => this.emit({ type: "res", id, ok: true, payload }), 0);
@@ -73,10 +74,9 @@ class FakeGatewayWs {
   }
 }
 
-/** ClawBox AI on the given tier model, for a Max-plan account so the
- *  entitlement guard in ChatPopup leaves the Pro model alone. */
+/** A Max-plan account whose legacy aliases both serve Flash 4.1. */
 function installFetch(model: string) {
-  vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+  vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/setup-api/gateway/ws-config")) {
       return { ok: true, json: async () => ({ token: "t", wsUrl: "ws://localhost/gw" }) };
@@ -88,10 +88,8 @@ function installFetch(model: string) {
       return { ok: true, json: async () => ({ harness: "openclaw", facts: { hasClawaiToken: true, hermesSupportsImages: false } }) };
     }
     if (url.includes("/setup-api/ai-models/status")) {
-      // `clawaiAllowedModels` is what the entitlement guard reads — without it
-      // the guard is quiet because the question was unanswered, not because
-      // this account is entitled, and the fixture would stop meaning what its
-      // comment says.
+      // A Max subscription still allows both legacy ids, but neither should
+      // make chat opt into reasoning when the user has not selected it.
       return { ok: true, json: async () => ({
         clawaiAccountTier: "pro",
         clawaiTier: "pro",
@@ -101,15 +99,18 @@ function installFetch(model: string) {
       }) };
     }
     if (url.includes("/setup-api/chat/model")) {
+      if (init?.method === "POST") {
+        model = (JSON.parse(String(init.body)) as { model: string }).model;
+      }
       return {
         ok: true,
         json: async () => ({
-          activeOptionId: "primary",
+          activeOptionId: "clawai",
           activeModel: model,
           activeSource: "primary",
           activeLabel: "ClawBox AI",
           options: [{
-            id: "primary", label: "ClawBox AI", model,
+            id: "clawai", label: "ClawBox AI", model,
             provider: "clawai", available: true, settingsSection: "ai", isLocal: false,
           }],
           primary: { available: true, label: "ClawBox AI", model },
@@ -134,10 +135,12 @@ async function firstPushedThinkingLevel(model: string): Promise<unknown> {
   await waitFor(() => expect(framesFor("sessions.patch").length).toBeGreaterThan(0));
   const params = framesFor("sessions.patch")[0].params as Record<string, unknown>;
   expect(params.key).toBe("agent:main:main");
+  expect(params.model).toBe(FLASH_MODEL);
+  expect(framesFor("sessions.reset")).toHaveLength(0);
   return params.thinkingLevel;
 }
 
-describe("chat reasoning default per ClawBox AI tier", () => {
+describe("chat reasoning default for ClawBox AI Flash 4.1", () => {
   beforeEach(() => {
     history = [{ role: "assistant", content: [{ type: "text", text: SEED_TEXT }], timestamp: 500 }];
     sent.length = 0;
@@ -154,23 +157,23 @@ describe("chat reasoning default per ClawBox AI tier", () => {
     resetHarnessCache();
   });
 
-  it("starts the Max tier (DeepSeek V4 Pro) at medium", async () => {
-    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("medium");
+  it("starts the legacy V4 Pro alias at off", async () => {
+    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("off");
   });
 
   it("keeps Flash fast — off — on the same provider", async () => {
     await expect(firstPushedThinkingLevel(FLASH_MODEL)).resolves.toBe("off");
   });
 
-  it("lets a level the user picked earlier override the Max-tier default", async () => {
-    window.localStorage.setItem(`${PERSIST_KEY_PREFIX}:clawai`, "off");
-    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("off");
+  it.each([PRO_MODEL, FLASH_MODEL])("keeps the user's selected effort on %s", async (model) => {
+    window.localStorage.setItem(`${PERSIST_KEY_PREFIX}:clawai`, "high");
+    await expect(firstPushedThinkingLevel(model)).resolves.toBe("high");
   });
 
-  it("never pushes a level the tier's ladder does not offer, even if one was persisted", async () => {
+  it("never pushes a level the provider's ladder does not offer, even if one was persisted", async () => {
     // A stale `xhigh` from an older picker is not on the uniform ladder; the
-    // persisted read ignores it and the tier default applies.
+    // persisted read ignores it and the off default applies.
     window.localStorage.setItem(`${PERSIST_KEY_PREFIX}:clawai`, "xhigh");
-    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("medium");
+    await expect(firstPushedThinkingLevel(PRO_MODEL)).resolves.toBe("off");
   });
 });

@@ -283,6 +283,7 @@ interface HermesChatProvider {
 }
 
 interface ChatModelState {
+  needsFlashModelMigration?: boolean
   activeOptionId: string | null
   activeModel: string | null
   activeSource: 'primary' | 'local' | null
@@ -399,9 +400,7 @@ import {
   type HermesReasoningLevel,
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
-import { useClawboxLogin } from '@/lib/use-clawbox-login'
-import { isClawboxAiProModel, portalDeniesClawboxAiModel, clawboxAiTierTextKeys, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_TIER_TEXT_KEYS } from '@/lib/clawbox-ai-models'
-import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
+import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_CHAT_MODEL_LABEL } from '@/lib/clawbox-ai-models'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard' 
@@ -1283,9 +1282,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     )
     return activeOption?.provider ?? null
   }, [chatModelState])
-  // Fully-qualified model behind the active option. The reasoning default is
-  // tier-aware for ClawBox AI (the Max tier reasons by default, Flash does
-  // not), and the tier is a property of the MODEL, not the provider.
+  // Fully-qualified model behind the active option.
   const headerModel = useMemo<string | null>(() => {
     if (!chatModelState) return null
     const activeOption = chatModelState.options.find(
@@ -1307,7 +1304,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const effectiveThinkingLevel: ThinkingLevel = visibleThinkingLevels.includes(thinkingLevel)
     ? thinkingLevel
     : reasoningConfig.default
-  const chatProviderCatalog = useProviderCatalog(headerProvider)
+  const isClawboxAiChat = headerProvider === 'clawai' || headerProvider === 'deepseek'
+  const chatProviderCatalog = useProviderCatalog(isClawboxAiChat ? null : headerProvider)
   // Does the greying-out rule apply to THIS box? `chatModelState` is refetched
   // whenever the provider changes or a configure lands, so this follows the
   // device rather than being sampled once at mount — a box that swaps a Claude
@@ -1317,16 +1315,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       && !!chatModelState?.subscriptionProviders?.includes(headerProvider),
     [headerProvider, chatModelState],
   )
-  // Pull the account state so the chat-model picker can refuse a ClawBox AI
-  // model the PORTAL says this account may not run. Without it a Free user
-  // could pick deepseek-v4-pro, see a "Switched chat to
-  // deepseek/deepseek-v4-pro" success message, and then get nothing but
-  // "[assistant turn failed]" — the proxy answers such a turn
-  // `400 "Model not allowed: …"` (measured 2026-09-04), which no chat surface
-  // can render as anything the owner could act on. `tier` is the device
-  // DEFAULT and never the gate; `allowedModels` is the gate.
-  const clawboxLogin = useClawboxLogin()
-
   // ── Hermes header: provider-scoped model list ──
   //
   // The scoping is SERVER-side (src/lib/hermes-model-options.ts): the hook asks
@@ -1352,7 +1340,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // models landed. Two layout shifts where none is needed.
   //
   // `hadModelPill` remembers that the pill was showing a moment ago, so a
-  // provider that genuinely has one model (ClawBox AI) still never grows a
+  // provider that has one model still never grows a
   // pointless picker.
   const hadModelPill = useRef(false)
   const hermesModelCount = hermesScope?.models.length ?? 0
@@ -1365,6 +1353,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // doesn't serve is dropped on the spot, so the pill can never sit on a
   // foreign vendor's id — not even for a single frame.
   const hermesModel = useMemo(() => {
+    if (hermesProvider === 'clawai') return CLAWBOX_AI_FLASH_MODEL_ID
     const models = hermesScope?.models ?? []
     const picked = hermesPicks[hermesProvider]
     if (picked && models.some(m => m.id === picked)) return picked
@@ -1822,7 +1811,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
   const hasEverConnectedRef = useRef(false)
-  const pendingModelSwitchResetRef = useRef<{ model: string; label: string } | null>(null)
+  const pendingModelSwitchResetRef = useRef<{ model: string; label: string; automatic?: boolean } | null>(null)
   // Sends queued while the WS handshake hasn't completed yet. Drained by
   // a useEffect when status flips to 'connected' so the user can type and
   // hit Enter before the gateway is ready without seeing a hard error.
@@ -1958,6 +1947,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // could only ever reject with 'Not connected' — see the predicate for why
     // the capability is checked outright rather than left to the key guard.
     if (!shouldPatchSessionDefaults({ capabilities: caps, status, sessionKey: sessionKeyRef.current })) return
+    // Let the model route repair a legacy Pro-only policy before asking the
+    // gateway to pin this session to Flash.
+    if (chatModelState?.needsFlashModelMigration) return
     // Never push a level the ACTIVE model doesn't support. `resolveWireThinkingLevel`
     // clamps to the provider's config (so a stale `high` carried over from a
     // reasoning-capable model is folded to the local model's `off`) and returns
@@ -1965,10 +1957,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // push rather than sending a speculative value the gateway would reject.
     const wireLevel = resolveWireThinkingLevel(headerProvider, thinkingLevel, headerModel)
     if (wireLevel === null) return
-    const wireValue: string = wireLevel
+    // Reconcile legacy Pro session pins even when the device default is
+    // already Flash. The gateway owns this write and preserves the transcript.
+    const model = isClawboxAiChat ? CLAWBOX_AI_MODEL_BY_TIER.flash : undefined
+    const wireValue = `${wireLevel}:${model ?? ''}`
     if (wireValue === lastSentThinkingRef.current) return
     lastSentThinkingRef.current = wireValue
-    void adapter.patchSessionDefaults({ thinkingLevel: wireValue }).catch((err: unknown) => {
+    void adapter.patchSessionDefaults({ thinkingLevel: wireLevel, ...(model ? { model } : {}) }).catch((err: unknown) => {
       // Reset so a reconnect or next user change retries.
       lastSentThinkingRef.current = undefined
       // The gateway itself tells us the level to fall back to when a model
@@ -2000,7 +1995,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }])
     })
   // `sessionEpoch` is bumped by switchSession so a new tab's session gets the level too.
-  }, [status, headerProvider, headerModel, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
+  }, [status, headerProvider, headerModel, isClawboxAiChat, chatModelState?.needsFlashModelMigration, thinkingLevel, adapter, caps, sessionEpoch, applyThinkingLevel])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -2010,9 +2005,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // state still said xhigh — confusing and racey when the user then
   // tries to change levels.
   //
-  // Keyed on the model as well: within ClawBox AI the default moves with the
-  // tier (Max reasons by default, Flash does not), so a Flash↔Max switch has
-  // to re-snap too. A persisted user choice is per provider and still wins.
+  // A persisted user choice is per provider and still wins.
   useEffect(() => {
     if (!headerProvider) return
     const cfg = getProviderReasoningConfig(headerProvider, headerModel)
@@ -2221,6 +2214,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // nothing about the conversation at all.
           if (skillInstalledRef.current) {
             const wasProviderChange = reloadReasonRef.current === 'provider'
+            // Alias normalization may finish before the first connection.
+            // Load the existing transcript just as a normal first hello does.
+            if (wasProviderChange && pendingModelSwitchResetRef.current?.automatic) loadHistory()
             skillInstalledRef.current = false
             reloadReasonRef.current = 'skill' // reset for next reload
             skillEventRef.current = null
@@ -2240,7 +2236,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               if (wasProviderChange) {
                 const pendingModelSwitch = pendingModelSwitchResetRef.current
                 pendingModelSwitchResetRef.current = null
-                if (pendingModelSwitch) {
+                if (pendingModelSwitch && !pendingModelSwitch.automatic) {
                   try {
                     // The fresh chat belongs to MAIN — the pre-tabs contract,
                     // and the session every other surface shares. With a side
@@ -2266,6 +2262,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
                   const state = await res.json() as ChatModelState
                   setChatModelState(state)
+                  if (pendingModelSwitch?.automatic) return
                   const label = state.activeLabel ?? state.primary?.label ?? 'the new AI provider'
                   setMessages(prev => [...prev, {
                     role: 'system',
@@ -4896,46 +4893,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // than the API key: on a box holding both credentials the two rows offer the
   // same reference, and the server cannot tell them apart from the model alone.
   const switchChatModel = useCallback(async (target: { model: string; label: string; provider?: string | null; automatic?: boolean }): Promise<boolean> => {
-    if (switchingModel || chatModelState?.activeModel === target.model) return false
-    // Intercept a ClawBox AI pick the portal POSITIVELY refuses, and say so
-    // here rather than letting every turn on it come back as the opaque
-    // "[assistant turn failed]" — measured against the live proxy on
-    // 2026-09-04, an id outside the account's list answers
-    // `400 {"error":{"message":"Model not allowed: …"}}`. The portal URL is
-    // wrapped as `[text](url)` so chat-markdown renders it as a clickable link
-    // instead of a bare string.
-    //
-    // Gated on the portal's own entitlement list, never on the tier badge: the
-    // badge follows the portal's `deviceTier`, which is a device DEFAULT — a
-    // Max subscriber may deliberately run Flash on this box — and a default is
-    // not something to veto an explicit pick with. An unanswered entitlement
-    // (portal unreachable, poll failed) is not a refusal either: the pick goes
-    // through and the proxy has the last word.
-    //
-    // `target.label` is what the picker SHOWED for the row — the tier's name
-    // in the owner's language for a ClawBox AI row — never the bare id: the
-    // sentence is worded in the desktop's language like the automatic drop's
-    // (`chat.maxTierDowngraded`), and "deepseek-v4-pro requires …" in English
-    // under a menu that said "Max-Tarif" named a model the menu never showed.
-    if (portalDeniesClawboxAiModel(target.model, clawboxLogin.allowedModels)) {
-      setMessages(prev => [...prev, {
-        role: 'system',
-        text: isClawboxAiProModel(target.model)
-          ? tr(
-            'chat.modelNeedsMax',
-            '{model} requires a Max subscription. [Upgrade in the ClawBox portal]({url}) to unlock it. Staying on the current model.',
-            { model: target.label, url: PORTAL_DASHBOARD_URL },
-          )
-          : tr(
-            'chat.modelNotInPlan',
-            '{model} is not included in your ClawBox AI plan. [Manage it in the ClawBox portal]({url}). Staying on the current model.',
-            { model: target.label, url: PORTAL_DASHBOARD_URL },
-          ),
-        timestamp: Date.now(),
-        variant: 'error',
-      }])
-      return false
-    }
+    if (switchingModel || (!target.automatic && chatModelState?.activeModel === target.model)) return false
     setSwitchingModel(true)
     setErrorMsg('')
     try {
@@ -4992,89 +4950,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel, clawboxLogin.allowedModels, tr])
+  }, [chatModelState, connect, switchingModel])
 
-  // The dropdown gate above only catches picks the user *clicks*. An account
-  // the portal refuses can also boot with the Max model already saved as the
-  // default (picked during setup, chosen from the Telegram `/model` keyboard,
-  // or left over after a plan downgrade). The portal gateway then silently
-  // rejects every turn — the user only sees the opaque "[assistant turn
-  // failed]". Catch that on load: explain it with an upgrade link and drop to
-  // the Pro tier the plan supports so chat works.
-  //
-  // This one WRITES: it moves the box off the model the owner chose. So it
-  // fires only on a positive refusal from the portal's entitlement list. On
-  // the badge it fired for "tier unknown" too — a single failed status poll
-  // was enough to rewrite a Max box's primary model to flash and tell its
-  // owner to buy the subscription he already had (TASK-691).
-  //
-  // WHAT THE LATCH BELOW REMEMBERS, and why it is not a boolean. `switchChatModel`
-  // writes `switchingModel`, which is one of its own useCallback deps, so calling
-  // it changes its identity — and this effect depends on that identity. A boolean
-  // latch released on failure therefore re-armed the guard with nothing about the
-  // box changed, and any repeatable failure of `/setup-api/chat/model` (400
-  // "provider is not configured", 409, 500, a proxy's non-JSON body) became a POST
-  // loop against the box's own setup server with two system messages per turn of
-  // it. A boolean latch never released is the other error: `page.tsx` keeps this
-  // component mounted for the whole session and only toggles `isOpen`, so one
-  // failed attempt would leave the box on a refused model until a page reload —
-  // a capability probed once and treated as settled, which is the shape this
-  // codebase keeps producing.
-  //
-  // So it remembers the INPUTS the last attempt was made for. Re-entry on the
-  // same box state buys nothing; a changed active model or a changed entitlement
-  // list buys exactly one more attempt, and so does closing and re-opening the
-  // chat, which is the retry an owner reaches for. `allowedModels` keeps its
-  // array identity across polls that bring the same ids back (`sameIds` in
-  // use-clawbox-login.ts), so `===` here means "the answer has not changed".
-  const tierGuardAttemptRef = useRef<{ model: string; allowed: readonly string[] | null } | null>(null)
+  // The old Pro and Flash aliases now serve the same Flash model. Move a
+  // saved chat choice to the Flash alias once, without clearing its history.
+  // Remember failed attempts until the model changes or chat reopens, so a
+  // failed request cannot become a render-triggered retry loop.
+  const flashModelAttemptRef = useRef<string | null>(null)
   useEffect(() => {
     if (!isOpen) {
-      tierGuardAttemptRef.current = null
+      flashModelAttemptRef.current = null
       return
     }
-    if (clawboxLogin.loading) return
+    if (!harnessLoaded || harnessId !== 'openclaw') return
     const active = chatModelState?.activeModel
-    // The Max tier and nothing else: it is the only ClawBox AI model with a
-    // tier below it to fall back to, and the message below says so by name.
-    if (!active || !isClawboxAiProModel(active)) return
-    if (!portalDeniesClawboxAiModel(active, clawboxLogin.allowedModels)) return
-    // The recovery is "drop to the Flash tier", so only run it when the portal
-    // allows that one. Switching to a second refused model would move the
-    // error rather than fix it.
-    if (portalDeniesClawboxAiModel(CLAWBOX_AI_MODEL_BY_TIER.flash, clawboxLogin.allowedModels)) return
-    const attempted = tierGuardAttemptRef.current
-    if (attempted && attempted.model === active && attempted.allowed === clawboxLogin.allowedModels) return
-    // `switchChatModel` early-returns without attempting anything while another
-    // switch is in flight, so wait rather than record an attempt that was never
-    // made. `switchingModel` is a dep, so the effect comes back by itself when
-    // that other switch finishes.
-    if (switchingModel) return
-    tierGuardAttemptRef.current = { model: active, allowed: clawboxLogin.allowedModels }
-    // The tiers by the names Settings gives them, in the owner's language —
-    // this notice said "Max Tier" on a desktop whose Settings page called the
-    // same plan "Max-Tarif" (the UI sweep of 2026-09-07).
-    const maxTier = tr(CLAWBOX_AI_TIER_TEXT_KEYS.pro.labelKey, 'Max plan')
-    const flashTier = tr(CLAWBOX_AI_TIER_TEXT_KEYS.flash.labelKey, 'Free/Pro plan')
-    void switchChatModel({ model: CLAWBOX_AI_MODEL_BY_TIER.flash, label: flashTier, automatic: true })
-      .then(switched => {
-        // Posted from the SUCCESS path only. This sentence says the box was
-        // moved, and until the POST comes back that is not known — announcing
-        // it first left a failed switch under a message claiming it had
-        // happened, above the `Error:` line saying it had not.
-        if (!switched) return
-        setMessages(prev => [...prev, {
-          role: 'system',
-          text: tr(
-            'chat.maxTierDowngraded',
-            '{max} needs a Max subscription. [Upgrade in the ClawBox portal]({url}) to unlock it — switched you to {flash} so chat keeps working.',
-            { max: maxTier, flash: flashTier, url: PORTAL_DASHBOARD_URL },
-          ),
-          timestamp: Date.now(),
-          variant: 'error',
-        }])
-      })
-  }, [isOpen, chatModelState?.activeModel, clawboxLogin.allowedModels, clawboxLogin.loading, switchChatModel, switchingModel, tr])
+    if (!isClawboxAiChat || (active === CLAWBOX_AI_MODEL_BY_TIER.flash && !chatModelState?.needsFlashModelMigration)) {
+      flashModelAttemptRef.current = null
+      return
+    }
+    if (!active) return
+    if (switchingModel || flashModelAttemptRef.current === active) return
+    flashModelAttemptRef.current = active
+    void switchChatModel({
+      model: CLAWBOX_AI_MODEL_BY_TIER.flash,
+      label: CLAWBOX_AI_CHAT_MODEL_LABEL,
+      automatic: true,
+    })
+  }, [isOpen, harnessLoaded, harnessId, isClawboxAiChat, chatModelState?.activeModel, chatModelState?.needsFlashModelMigration, switchChatModel, switchingModel])
 
   const handleChatSourceChange = useCallback(async (optionId: string) => {
     const target = chatModelState?.options.find(option => option.id === optionId)
@@ -6909,10 +6811,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   triggerMaxWidth={130}
                   popoverWidth={220}
                 />
-                {/* Hidden at a single option, matching the OpenClaw rule — a
-                    one-entry picker is noise. That is today's ClawBox AI case:
-                    its proxy serves exactly the one model of the active tier. */}
-                {showModelPill && (
+                {/* ClawBox AI always uses Flash; other providers retain their model picker. */}
+                {hermesProvider === 'clawai' && (
+                  <span className="header-dropdown-trigger" style={{ cursor: 'default' }}>{CLAWBOX_AI_CHAT_MODEL_LABEL}</span>
+                )}
+                {hermesProvider !== 'clawai' && showModelPill && (
                   <HeaderDropdown
                     ariaLabel={tr('chat.pillHermesModel', 'Hermes model')}
                     /* While the new provider's list loads there is no model to
@@ -7044,6 +6947,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               (option) => option.id === chatModelState.activeOptionId,
             )
             if (!activeOption?.provider) return null
+            if (isClawboxAiChat) {
+              return <span className="header-dropdown-trigger" style={{ cursor: 'default' }}>{CLAWBOX_AI_CHAT_MODEL_LABEL}</span>
+            }
             const catalog = chatProviderCatalog
             if (!catalog) return null
             // Show the dropdown when there are multiple models to pick OR
@@ -7064,13 +6970,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // model" on every ChatGPT box and took this dropdown — the only
             // way to move between GPT-5.5 / GPT-5.4 / GPT-5.6 after setup —
             // off the screen entirely.
-            let activeModelId = extractProviderModelId(
+            const activeModelId = extractProviderModelId(
               chatModelState.activeModel,
               chatgptReferenceProvider(activeOption.provider),
             )
-            if (!activeModelId && activeOption.provider === 'clawai') {
-              activeModelId = extractProviderModelId(chatModelState.activeModel, 'deepseek')
-            }
             if (!activeModelId) return null
             const curatedHasActive = catalog.models.some(
               (option) => option.id === activeModelId,
@@ -7081,42 +6984,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   { id: activeModelId, label: activeModelId, hint: 'Custom model' },
                   ...catalog.models,
                 ]
-            // ClawBox AI's rows reach this picker with English words on them
-            // ("Max Tier"), from the static list and the catalogue route
-            // alike, whatever the desktop's language. The tier is named HERE,
-            // from the keys Settings already draws the plan with, so the chip
-            // and the Providers page cannot call one plan two things (the UI
-            // sweep of 2026-09-07). Every other provider's rows are the
-            // catalogue's own — a model's name is not a word to translate.
-            // The catalogue's own words are the floor under each key, so a
-            // render with no locale above it (a test with no I18nProvider)
-            // draws "Max Tier" rather than "ai.planNameMax".
-            const rowText = (option: { id: string; label: string; hint?: string }) => {
-              const keys = activeOption.provider === 'clawai' ? clawboxAiTierTextKeys(option.id) : null
-              return keys
-                ? { label: tr(keys.labelKey, option.label), hint: tr(keys.hintKey, option.hint ?? '') }
-                : { label: option.label, hint: option.hint }
-            }
-            // Same de-duplication as the Hermes branch: the provider pill to
-            // the left already says "Claude", so this pill shows "Sonnet 4.6",
-            // not "Claude Sonnet 4.6". The popover keeps the full label.
-            //
-            // A ClawBox AI TIER is handed to the pill whole. Its name is a
-            // plan ("Free/Pro plan"), not a `vendor/model` slug, and
-            // `shortModelPillLabel` reads that slash as the path separator it
-            // strips — the chip said "Pro plan" (and "Pro Tier" before the
-            // words were the locale's) for the Flash tier, which on a Free
-            // box names a plan the owner is not on. There is nothing to
-            // de-duplicate against the provider pill in it either.
             const activeRow = modelOptions.find(o => o.id === activeModelId)
-            const activeModelLabel = activeRow ? rowText(activeRow).label : activeModelId
-            const activeIsTier = !!activeRow && activeOption.provider === 'clawai'
-              && clawboxAiTierTextKeys(activeRow.id) !== null
+            const activeModelLabel = activeRow?.label ?? activeModelId
             return (
               <HeaderDropdown
                 ariaLabel={tr('chat.pillProviderModel', '{provider} model', { provider: activeOption.label })}
                 value={activeModelId}
-                triggerLabel={activeIsTier ? activeModelLabel : shortModelPillLabel(
+                triggerLabel={shortModelPillLabel(
                   activeModelLabel,
                   getProviderPillText(activeOption),
                 )}
@@ -7127,11 +7001,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 // be the same lie in the other direction.
                 options={modelOptions.map(option => {
                   const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
-                  const text = rowText(option)
                   return {
                     id: option.id,
-                    label: text.label,
-                    hint: text.hint,
+                    label: option.label,
+                    hint: option.hint,
                     disabled: blocked,
                     unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
                   }
@@ -7145,26 +7018,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   // the same screen just told them the box cannot run.
                   const next = modelOptions.find(option => option.id === nextId)
                   if (next && !isModelUsableOnSubscription(next, headerOnSubscription)) return
-                  // Wire-format provider for ClawBox AI is `deepseek`
-                  // (Mike's gateway routes via DeepSeek). Sending
-                  // `clawai/...` would be rejected by the gateway as
-                  // an unknown provider.
                   // The ChatGPT row's models are written `openai/<id>`: its
                   // UI id `codex` is a label, not a namespace. Posting
                   // `codex/<id>` from the product's own daily switcher made the
                   // server's legacy-ref shim — written for a stale tab — the
                   // happy path, and the row signal below the thing that was
-                  // never exercised. `clawai`/`deepseek` pass through unchanged.
-                  const wireProvider = activeOption.provider === 'clawai'
-                    ? 'deepseek'
-                    : chatgptReferenceProvider(activeOption.provider)
+                  // never exercised.
+                  const wireProvider = chatgptReferenceProvider(activeOption.provider)
                   void switchChatModel({
                     provider: activeOption.provider,
                     model: `${wireProvider}/${nextId}`,
-                    // The words the row was drawn with, so a refusal names
-                    // the tier the owner picked rather than its id; `next`
-                    // is only ever missing for an id the list never held.
-                    label: next ? rowText(next).label : nextId,
+                    label: next?.label ?? nextId,
                   })
                 }}
                 onPointerDown={stopHeaderDrag}

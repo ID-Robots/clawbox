@@ -45,6 +45,7 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
+  repairClawboxAiFlashModelPolicy: vi.fn(async () => false),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigSetBatch: vi.fn(),
   runOpenclawConfigUnset: vi.fn(),

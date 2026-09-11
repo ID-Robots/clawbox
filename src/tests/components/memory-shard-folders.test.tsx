@@ -186,7 +186,7 @@ describe("MemoryShardFolders", () => {
 
     gate.release();
     await waitFor(() => expect(removeButtons()).toHaveLength(1));
-    expect(onBusyChange).toHaveBeenLastCalledWith(false);
+    await waitFor(() => expect(onBusyChange).toHaveBeenLastCalledWith(false));
   });
 
   it("keeps the picker open and shows the route's own sentence when the add is refused", async () => {

@@ -23,6 +23,10 @@ export const CLAWBOX_AI_PROVIDER = "deepseek" as const;
 export const CLAWBOX_AI_FLASH_MODEL_ID =
   process.env.CLAWBOX_AI_FLASH_MODEL_ID?.trim() || "deepseek-v4-flash";
 
+// The proxy serves Flash 4.1 through the existing V4 Flash and Pro aliases.
+// Chat uses the Flash alias; keep the wire IDs and subscription tiers stable.
+export const CLAWBOX_AI_CHAT_MODEL_LABEL = "Flash 4.1";
+
 export const CLAWBOX_AI_PRO_MODEL_ID =
   process.env.CLAWBOX_AI_PRO_MODEL_ID?.trim() || "deepseek-v4-pro";
 

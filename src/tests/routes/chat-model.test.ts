@@ -34,6 +34,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
+  repairClawboxAiFlashModelPolicy: vi.fn(async () => false),
   // The route tells "the gateway has not come back" apart from every other
   // restart failure with `instanceof`, so the mock owes a real class: a plain
   // `vi.fn()` here would make the check itself throw, and leaving the export
@@ -87,7 +88,7 @@ vi.mock("@/lib/ollama-capabilities", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, repairClawboxAiFlashModelPolicy, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
@@ -162,19 +163,17 @@ describe("/setup-api/chat/model", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    // After consolidating ClawBox AI into one provider row (model
-    // variants live in the secondary picker), the active option's id
-    // is the active model id and the row's label is the bare provider
-    // name — Flash/Pro distinction is no longer encoded in the option's
-    // label.
-    expect(body.activeOptionId).toBe("deepseek/deepseek-v4-pro");
+    // Keep the actual primary visible to the caller so it can migrate it,
+    // while the provider row and restore target always name Flash.
+    expect(body.activeModel).toBe("deepseek/deepseek-v4-pro");
+    expect(body.activeOptionId).toBe("deepseek/deepseek-v4-flash");
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
     expect(body.options).toEqual([
       {
-        id: "deepseek/deepseek-v4-pro",
+        id: "deepseek/deepseek-v4-flash",
         label: "ClawBox AI",
-        model: "deepseek/deepseek-v4-pro",
+        model: "deepseek/deepseek-v4-flash",
         provider: "clawai",
         available: true,
         settingsSection: "ai",
@@ -195,7 +194,8 @@ describe("/setup-api/chat/model", () => {
       label: "Gemma 4 Local",
       model: "llamacpp/gemma4-e2b-it-q4_0",
     });
-    expect(sqliteSet).toHaveBeenCalledWith("chat:primary-provider-model", "deepseek/deepseek-v4-pro");
+    expect(body.primary.model).toBe("deepseek/deepseek-v4-flash");
+    expect(sqliteSet).toHaveBeenCalledWith("chat:primary-provider-model", "deepseek/deepseek-v4-flash");
   });
 
   it("lists every configured cloud provider alongside Local AI", async () => {
@@ -437,7 +437,7 @@ describe("/setup-api/chat/model", () => {
     expect(armed).toBe(false);
   });
 
-  it("switches back to the stored primary provider model", async () => {
+  it("switches back to Flash from a legacy stored primary provider model", async () => {
     vi.mocked(getAll).mockResolvedValue({
       ai_model_provider: "clawai",
       local_ai_provider: "llamacpp",
@@ -486,10 +486,243 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(200);
     expect(runOpenclawConfigSet).toHaveBeenCalledWith([
       "agents.defaults.model.primary",
-      "deepseek/deepseek-chat",
+      "deepseek/deepseek-v4-flash",
     ]);
     expect(body.activeSource).toBe("primary");
     expect(body.activeLabel).toBe("ClawBox AI");
+  });
+
+  it.each([
+    "deepseek/deepseek-v4-pro",
+    "clawai/deepseek-v4-pro",
+    "deepseek/deepseek-v4-flash",
+    "clawai/deepseek-v4-flash",
+  ])("normalizes %s to Flash without sweeping unrelated sessions", async (model) => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, automatic: true }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary", "deepseek/deepseek-v4-flash",
+    ]);
+    expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+    expect(vi.mocked(runOpenclawConfigSet).mock.calls.some(([args]) => args[0].startsWith("models.providers."))).toBe(false);
+  });
+
+  it("restores Flash when the remembered primary was Pro", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+      agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+    } as never);
+    vi.mocked(sqliteGet).mockResolvedValue("deepseek/deepseek-v4-pro");
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "primary", automatic: true }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary", "deepseek/deepseek-v4-flash",
+    ]);
+    expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      { provider: "deepseek", modelId: "deepseek-v4-flash", source: "user" },
+      { skipUserTagged: false },
+    );
+  });
+
+  it("keeps the session sweep for an explicit ClawBox AI model choice", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "deepseek/deepseek-v4-flash" }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      { provider: "deepseek", modelId: "deepseek-v4-flash", source: "user" },
+      { skipUserTagged: false },
+    );
+  });
+
+  it("keeps the session sweep when an automatic switch changes provider", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "local", automatic: true }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(applyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
+      { provider: "llamacpp", modelId: "gemma4-e2b-it-q4_0", source: "user" },
+      { skipUserTagged: false },
+    );
+  });
+
+  describe("migrating an explicit former-Pro model policy", () => {
+    const FLASH = "deepseek/deepseek-v4-flash";
+    const PRO = "deepseek/deepseek-v4-pro";
+
+    function withPolicy(primary: string, allow?: string[]) {
+      const config = {
+        auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+        agents: { defaults: {
+          model: { primary },
+          modelPolicy: { allow, deny: ["openai/private-model"] },
+        } },
+      };
+      vi.mocked(readConfig).mockResolvedValue(config);
+      vi.mocked(readConfigStrict).mockResolvedValue(config);
+      return config;
+    }
+
+    async function normalizeFlash() {
+      return POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: FLASH, automatic: true }),
+      }));
+    }
+
+    it.each([PRO, "clawai/deepseek-v4-pro"])("flags an already-Flash primary with only %s explicitly allowed", async (allowedPro) => {
+      withPolicy(FLASH, [allowedPro, "anthropic/claude-opus-5"]);
+
+      const body = await (await GET()).json();
+
+      expect(body.activeModel).toBe(FLASH);
+      expect(body.needsFlashModelMigration).toBe(true);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["absent allowlist", undefined],
+      ["empty allowlist", []],
+      ["another provider only", ["openrouter/deepseek/deepseek-v4-pro"]],
+      ["wildcard only", ["deepseek/*"]],
+      ["Flash already allowed", [PRO, FLASH, "anthropic/*"]],
+    ])("does not broaden a policy with %s", async (_label, allow) => {
+      withPolicy(FLASH, allow);
+
+      expect((await (await GET()).json()).needsFlashModelMigration).toBeUndefined();
+      expect((await normalizeFlash()).status).toBe(200);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    });
+
+    it("does not flag or rewrite another provider's active model", async () => {
+      const config = withPolicy("openai/gpt-5.4", [PRO]);
+      vi.mocked(readConfig).mockResolvedValue({
+        ...config,
+        auth: { profiles: {
+          ...config.auth.profiles,
+          "openai:default": { provider: "openai", mode: "api_key" },
+        } },
+      });
+
+      expect((await (await GET()).json()).needsFlashModelMigration).toBeUndefined();
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "openai/gpt-5.4", automatic: true }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(repairClawboxAiFlashModelPolicy).not.toHaveBeenCalled();
+    });
+
+    it("repairs the policy under its own lock before validating the primary switch", async () => {
+      withPolicy(PRO, [PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
+
+      expect((await normalizeFlash()).status).toBe(200);
+
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
+      expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([
+        ["agents.defaults.model.primary", FLASH],
+      ]);
+      expect(vi.mocked(repairClawboxAiFlashModelPolicy).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(runOpenclawConfigSetBatch).mock.invocationCallOrder[0]);
+      expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+    });
+
+    it("repairs an already-Flash primary and clears the migration flag without a restart", async () => {
+      const config = withPolicy(FLASH, ["anthropic/*", PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
+      vi.mocked(readConfig)
+        .mockResolvedValueOnce(config)
+        .mockResolvedValue({
+          ...config,
+          agents: { defaults: {
+            ...config.agents.defaults,
+            modelPolicy: { ...config.agents.defaults.modelPolicy, allow: ["anthropic/*", PRO, FLASH] },
+          } },
+        });
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(200);
+      expect((await response.json()).needsFlashModelMigration).toBeUndefined();
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+      expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("reports a policy repair failure without recording a successful choice", async () => {
+      withPolicy(FLASH, [PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockRejectedValue(new Error("model policy write failed"));
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(500);
+      await expect(response.json()).resolves.toEqual({ error: "model policy write failed" });
+      expect(setMany).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+      expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("clears a stale migration flag when a concurrent writer removed Pro permission", async () => {
+      const config = withPolicy(FLASH, [PRO]);
+      vi.mocked(readConfig)
+        .mockResolvedValueOnce(config)
+        .mockResolvedValue({
+          ...config,
+          agents: { defaults: {
+            ...config.agents.defaults,
+            modelPolicy: { allow: ["anthropic/*"] },
+          } },
+        });
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(false);
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(200);
+      expect((await response.json()).needsFlashModelMigration).toBeUndefined();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("does not overwrite the repaired policy when primary validation fails", async () => {
+      withPolicy(PRO, [PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("primary validation failed"));
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(500);
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
+      expect(runOpenclawConfigSet).toHaveBeenCalledExactlyOnceWith(["agents.defaults.model.primary", FLASH]);
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+      expect(setMany).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
   });
 
   describe("remembering that the OWNER chose this model", () => {
@@ -523,13 +756,13 @@ describe("/setup-api/chat/model", () => {
       }));
     }
 
-    it("records the pick after the write lands", async () => {
+    it("records Flash when an older client posts the former Pro choice", async () => {
       boxWithClawaiAndAnthropic();
 
       expect((await post({ model: "deepseek/deepseek-v4-pro" })).status).toBe(200);
 
       expect(setMany).toHaveBeenCalledWith({
-        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-flash" },
       });
     });
 
@@ -567,16 +800,13 @@ describe("/setup-api/chat/model", () => {
     });
 
     it("leaves the pick alone when the automatic switch lands ON it", async () => {
-      // `/setup-api/providers/default` also posts `automatic` — it resolves the
-      // ROW's own model, which with this card's fix IS the pick. Same id, so
-      // there is nothing to retire and the owner's choice must survive.
       boxWithClawaiAndAnthropic();
       vi.mocked(getKnown).mockResolvedValue({
-        value: { clawai: "deepseek/deepseek-v4-pro" },
+        value: { clawai: "deepseek/deepseek-v4-flash" },
         known: true,
       });
 
-      expect((await post({ model: "deepseek/deepseek-v4-pro", automatic: true })).status).toBe(200);
+      expect((await post({ model: "deepseek/deepseek-v4-flash", automatic: true })).status).toBe(200);
 
       expect(setMany).not.toHaveBeenCalledWith(
         expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
@@ -584,10 +814,6 @@ describe("/setup-api/chat/model", () => {
     });
 
     it("records NOTHING for a switch the box made for itself", async () => {
-      // The chat's entitlement guard drops a Max model the portal refuses down
-      // to Flash so chat keeps working. Remembering the box's own recovery as
-      // the owner's decision would pin the box to Flash for good — the tier
-      // badge could never move it again, which is the opposite of the fix.
       boxWithClawaiAndAnthropic();
 
       expect((await post({ model: "deepseek/deepseek-v4-pro", automatic: true })).status).toBe(200);
@@ -596,20 +822,19 @@ describe("/setup-api/chat/model", () => {
         expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
       );
     });
+
+    it("does not sweep sessions when Flash is already the primary", async () => {
+      boxWithClawaiAndAnthropic();
+
+      expect((await post({ model: "deepseek/deepseek-v4-flash", automatic: true })).status).toBe(200);
+
+      expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
   });
 
-  describe("offering back the model the OWNER chose (TASK-769)", () => {
-    /**
-     * The READ half of TASK-713's ruling, and the half that was missing.
-     *
-     * A provider's row is built from `models.providers.<p>.models[0]` whenever
-     * the primary belongs to some OTHER provider — and the ClawBox AI list is
-     * ordered Flash first (`CLAWBOX_AI_CHAT_MODEL_IDS`, and the live list on a
-     * paired box: `deepseek-v4-flash`, `deepseek-v4-pro`, ...). So one switch
-     * to Anthropic turned the ClawBox AI row from the Max model the owner had
-     * picked into Flash, and clicking "ClawBox AI" to come back landed on
-     * Flash with no notice and no way back to Max from the picker at all.
-     */
+  describe("offering Flash regardless of the previous ClawBox AI choice", () => {
     function boxOnAnthropicAfterPickingMax(store: Record<string, unknown>) {
       vi.mocked(getAll).mockResolvedValue(store);
       vi.mocked(readConfig).mockResolvedValue({
@@ -634,21 +859,19 @@ describe("/setup-api/chat/model", () => {
       );
     }
 
-    it("keeps the recorded pick on the row while another provider is active", async () => {
+    it("offers Flash over a remembered Pro pick while another provider is active", async () => {
       boxOnAnthropicAfterPickingMax({
         ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
       });
 
       expect(await clawaiRow()).toMatchObject({
-        id: "deepseek/deepseek-v4-pro",
-        model: "deepseek/deepseek-v4-pro",
+        id: "deepseek/deepseek-v4-flash",
+        model: "deepseek/deepseek-v4-flash",
         label: "ClawBox AI",
       });
     });
 
-    it("falls back to the provider's first model when the owner never picked one", async () => {
-      // The other half of the ruling: a default still FILLS a gap. Nothing
-      // recorded is nothing to honour, and the row is beta's answer.
+    it("offers Flash when the owner never picked a model", async () => {
       boxOnAnthropicAfterPickingMax({});
 
       expect(await clawaiRow()).toMatchObject({
@@ -657,12 +880,7 @@ describe("/setup-api/chat/model", () => {
       });
     });
 
-    it("honours the pick on a legacy install that declares no models at all", async () => {
-      // `models.providers.deepseek.models` is absent on an install that
-      // predates the explicit V4 aliases — the case `DEFAULT_PROVIDER_MODELS`
-      // exists for. ClawBox AI's own closed set is what the pick is judged
-      // against there, so such a box keeps the choice too instead of falling
-      // to the tier default.
+    it("offers Flash on a legacy install that declares no models at all", async () => {
       vi.mocked(getAll).mockResolvedValue({
         ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
       });
@@ -678,15 +896,11 @@ describe("/setup-api/chat/model", () => {
       } as never);
 
       expect(await clawaiRow()).toMatchObject({
-        model: "deepseek/deepseek-v4-pro",
+        model: "deepseek/deepseek-v4-flash",
       });
     });
 
     it("ignores a recorded pick the row no longer offers", async () => {
-      // Judged against what the surface still lists — a retired alias, a
-      // provider row rewritten by hand — so the row can never name a model
-      // there is no entry for. NOT an entitlement check: both tiers are
-      // declared on every box whatever the plan, and the portal gates them.
       boxOnAnthropicAfterPickingMax({
         ai_model_explicit_picks: { clawai: "deepseek/deepseek-v3-retired" },
       });
@@ -696,12 +910,7 @@ describe("/setup-api/chat/model", () => {
       });
     });
 
-    it("reads the ClawBox AI slot and no other", async () => {
-      // Hermes records model ids BARE, so `pickSlotFor` files an OpenRouter
-      // save of `openai/gpt-5.4` under `openai` and drops a slashless
-      // `claude-opus-4-8` entirely; and only the clawai slot is dropped when
-      // the account's token changes. Honouring another slot would let one
-      // account's choice become another's row.
+    it("preserves how other providers resolve their own models", async () => {
       vi.mocked(getAll).mockResolvedValue({
         ai_model_explicit_picks: { anthropic: "anthropic/claude-haiku-4.5" },
       });
@@ -721,10 +930,7 @@ describe("/setup-api/chat/model", () => {
       expect(anthropic).toMatchObject({ model: "anthropic/claude-opus-5" });
     });
 
-    it("survives the round trip through the surface that records the pick", async () => {
-      // The fixtures above inject the map by hand. This one records through
-      // `recordExplicitModelPick` the way a picker click does, then reads the
-      // row back — so the two halves cannot drift apart in spelling.
+    it("offers Flash after another surface records a Pro pick", async () => {
       boxOnAnthropicAfterPickingMax({});
       vi.mocked(setMany).mockImplementation(async (patch: Record<string, unknown>) => {
         vi.mocked(getAll).mockResolvedValue(patch);
@@ -732,7 +938,7 @@ describe("/setup-api/chat/model", () => {
 
       await recordExplicitModelPick("deepseek/deepseek-v4-pro");
 
-      expect(await clawaiRow()).toMatchObject({ model: "deepseek/deepseek-v4-pro" });
+      expect(await clawaiRow()).toMatchObject({ model: "deepseek/deepseek-v4-flash" });
     });
   });
 
