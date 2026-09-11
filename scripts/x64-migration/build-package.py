@@ -33,6 +33,7 @@ def replace_once(text, old, new):
 
 
 def build(args):
+    """Stage reviewed source and host adapters in an inspectable root-owned deb."""
     account = pwd.getpwnam(args.user)
     for value in [args.user, args.project, args.node_dir, args.npm_prefix, account.pw_dir]:
         if not re.fullmatch(r'[A-Za-z0-9_./-]+', value) or '..' in value:
@@ -149,7 +150,7 @@ exec /usr/local/bin/cloudflared "$@"
 Version: {args.version}
 Architecture: amd64
 Maintainer: Local ClawBox operator
-Depends: bash, coreutils, findutils, git, python3, sudo, systemd, util-linux
+Depends: bash, ca-certificates, coreutils, curl, findutils, git, python3, sudo, systemd, util-linux
 Description: Host integration for this existing ClawBox x64 desktop
  Root-owned updater, verified vendor source mirror, timezone support,
  and service bridge for an existing OpenClaw user gateway.
@@ -196,7 +197,7 @@ if __name__=='__main__':
     parser.add_argument('--project',default='/home/nexus0/clawbox')
     parser.add_argument('--node-dir',default='/usr/bin')
     parser.add_argument('--npm-prefix',default='/home/nexus0/.nvm/versions/node/v24.0.0')
-    parser.add_argument('--version',default='1.0.0')
+    parser.add_argument('--version',default='1.0.4')
     parser.add_argument('--staging',required=True)
     parser.add_argument('--output',required=True)
     build(parser.parse_args())

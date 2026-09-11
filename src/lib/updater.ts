@@ -26,6 +26,7 @@ import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
 import { watchRootStepProgress } from "./root-step-follow";
 import { setUpdateLock, clearUpdateLock, isUpdateLocked, updateLockHeldByLiveProcess } from "./update-lock";
+import { hasX64DesktopIntegration } from "./x64-integration";
 
 /**
  * "An update was accepted and then lost its process" — written where the lock
@@ -3075,7 +3076,18 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
   });
 }
 
+/** Recover gateway readiness using the installed desktop or appliance contract. */
 async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
+  if (hasX64DesktopIntegration(PROJECT_DIR)) {
+    // The desktop package restores its existing user gateway before its core
+    // step returns, including failures. It must not inherit the appliance's
+    // doctor/pre-start migrations or rewrite the owner's providers/sessions.
+    gatewayNeedsRecovery = false;
+    if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
+    await restartGateway({ awaitReady: false });
+    if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+    throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
+  }
   const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
   gatewayNeedsRecovery = false;
   if (!recoverImmediately && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
@@ -4347,7 +4359,13 @@ async function checkInternet(): Promise<boolean> {
   return false;
 }
 
+/** Execute or resume update steps, recording failure and respecting host maintenance ownership. */
 async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): Promise<void> {
+  // The root-owned desktop adapter serializes its own core writers and
+  // restores the gateway on both outcomes. An outer appliance guard made it
+  // leave Telegram stopped until gateway_verify, which a failed rebuild or
+  // rejected core pin never reaches. Resolve once for this run/continuation.
+  const desktopIntegration = hasX64DesktopIntegration(PROJECT_DIR);
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -4467,16 +4485,34 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (step.customRun) {
         await step.customRun();
       } else if (step.requiresRoot) {
-        if (GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
-          await execAsRootWithGatewayQuiesced(step.id, step.timeoutMs);
+        // Desktop bootstrap also installs a missing Claude CLI. Its HTTPS
+        // download alone allows five minutes; use the system-fixup budget.
+        const timeoutMs = desktopIntegration && step.id === "bootstrap_updater" ? 900_000 : step.timeoutMs;
+        if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
+          await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
         } else {
-          await execAsRoot(step.id, step.timeoutMs);
+          await execAsRoot(step.id, timeoutMs);
         }
       } else if (step.command) {
         await execShell(step.command, {
           timeout: step.timeoutMs,
           maxBuffer: 2 * 1024 * 1024,
         });
+      }
+      if (desktopIntegration && step.id === "apt_update") {
+        // Existing desktop adapters already refresh the verified mirror and
+        // install these dependencies. Deliver the user-owned harness here as
+        // well, so updating the UI never requires replacing a host's installed
+        // root adapter (which can contain additional workstation repairs).
+        // Match the coding runner's capability drop: the web server can carry
+        // ambient network capabilities that its installer must not inherit.
+        await execFile("/usr/bin/setpriv", [
+          "--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--",
+          "/bin/bash",
+          "/var/lib/clawbox/root-exec-mirror/scripts/x64-migration/install-coding-harness.sh",
+          "/var/lib/clawbox/root-exec-mirror/scripts/claude-ds",
+          PROJECT_DIR,
+        ], { timeout: 900_000, maxBuffer: 2 * 1024 * 1024 });
       }
       // A root step that SUCCEEDED can still have skipped a fixup: install.sh's
       // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
@@ -4515,7 +4551,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);
       failed = true;
-      if (step.failFast) {
+      if (step.failFast || (desktopIntegration && step.id === "apt_update")) {
         runtime.state.error = message;
         break;
       }

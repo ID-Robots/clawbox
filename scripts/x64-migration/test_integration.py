@@ -91,6 +91,41 @@ esac
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual((root/'applied').read_text(),'Europe/Sofia')
 
+    def test_update_steps_deliver_coding_harness_from_mirror_as_owner(self):
+        """Both update phases use verified source even when the checkout differs."""
+        for step in ['bootstrap_updater', 'post_update']:
+            with self.subTest(step=step):
+                root,worker=self.fixture()
+                mirror=root/'mirror'
+                (mirror/'scripts/x64-migration').mkdir(parents=True)
+                installer=(HERE/'install-coding-harness.sh').read_text()
+                installer=installer.replace('[ "$(/usr/bin/id -u)" -ne 0 ]','[ 1000 -ne 0 ]')
+                (mirror/'scripts/x64-migration/install-coding-harness.sh').write_text(installer)
+                (mirror/'scripts/claude-ds').write_text((HERE.parent/'claude-ds').read_text())
+                (root/'.local/bin').mkdir(parents=True)
+                cli=root/'.local/bin/claude'
+                cli.write_text('#!/bin/sh\nexit 0\n'); cli.chmod(0o755)
+                # The mutable checkout is deliberately not executable source.
+                (root/'scripts/x64-migration').mkdir(parents=True)
+                (root/'scripts/x64-migration/install-coding-harness.sh').write_text('exit 99\n')
+                manifest=root/'manifest'
+                manifest.write_text(f'#!/bin/sh\nprintf "manifest-%s\\n" "$1" >> "{root}/events"\n')
+                manifest.chmod(0o755)
+                source=worker.read_text().replace('MIRROR=/var/lib/clawbox/root-exec-mirror',f'MIRROR={mirror}')
+                source=source.replace('MANIFEST=/usr/local/libexec/clawbox/clawbox-root-manifest.sh',f'MANIFEST={manifest}')
+                source=source.replace('    refresh_trusted_source\n',f'    printf "refresh-source\\n" >> "{root}/events"\n')
+                worker.write_text(source)
+                result=self.run_worker(worker,step)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertTrue(os.access(root/'.local/bin/claude-ds',os.X_OK))
+                events=(root/'events').read_text().splitlines()
+                self.assertEqual(events,['refresh-source'] if step=='bootstrap_updater' else ['manifest---verify','manifest---mirror'])
+                # A bad/missing verified wrapper must fail the update, rather
+                # than silently leaving the Coding app unusable again.
+                (mirror/'scripts/claude-ds').unlink()
+                result=self.run_worker(worker,step)
+                self.assertNotEqual(result.returncode,0)
+
     def test_timezone_rejects_symlinks_fifo_shell_and_invalid_values(self):
         for kind in ['symlink','fifo','shell','unknown','oversize','multiple']:
             with self.subTest(kind=kind):
@@ -212,12 +247,71 @@ exit {code}
         self.assertFalse((root/'guard').exists())
 
     def test_changed_core_pin_is_refused_before_any_core_command(self):
+        """A refused migration must release maintenance and restore the gateway."""
         root,worker,_=self.core_fixture()
         (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
         result=self.run_worker(worker,'openclaw_install')
         self.assertEqual(result.returncode,78,result.stderr)
         self.assertNotIn('doctor-start',(root/'events').read_text())
         self.assertIn('reviewed state snapshot',result.stderr)
+        self.assertFalse((root/'guard').exists())
+        self.assertIn('system-start',(root/'events').read_text())
+
+    def rebuild_fixture(self,fail_at=None):
+        """Model dependency/build failures with an old UI and owner-state sentinels."""
+        root,worker,_=self.core_fixture()
+        (root/'.next/standalone').mkdir(parents=True)
+        (root/'.next/BUILD_ID').write_text('old-build')
+        (root/'.next/standalone/server.js').write_text('old-server')
+        (root/'.env').write_text('FIXTURE_CONFIG=preserve\n')
+        (root/'data/owner-state').write_text('preserve sessions and configuration')
+        (root/'.bun/bin').mkdir(parents=True)
+        bun=root/'.bun/bin/bun'
+        bun.write_text(f'''#!/bin/sh
+printf 'bun-%s\\n' "$1" >> '{root}/events'
+if [ "$1" = install ]; then
+  [ '{fail_at}' != install ] || exit 37
+  exit 0
+fi
+mkdir -p .next/standalone
+printf new-build > .next/BUILD_ID
+printf new-server > .next/standalone/server.js
+[ '{fail_at}' != build ] || exit 41
+''')
+        bun.chmod(0o755)
+        return root,worker
+
+    def test_full_update_rebuild_failure_restores_ui_after_gateway_was_restored(self):
+        """A failed rebuild must retain the UI without stranding Telegram offline."""
+        for failure in ['install','build']:
+            with self.subTest(failure=failure):
+                root,worker=self.rebuild_fixture(failure)
+                core=self.run_worker(worker,'openclaw_install')
+                self.assertEqual(core.returncode,0,core.stderr)
+                before=(root/'events').read_text().splitlines()
+                self.assertIn('system-start',before)
+                self.assertFalse((root/'guard').exists())
+                result=self.run_worker(worker,'rebuild_reboot')
+                self.assertEqual(result.returncode,37 if failure=='install' else 41,result.stderr)
+                self.assertEqual((root/'.next/BUILD_ID').read_text(),'old-build')
+                self.assertEqual((root/'.next/standalone/server.js').read_text(),'old-server')
+                after=(root/'events').read_text().splitlines()[len(before):]
+                self.assertNotIn('gateway-stop',after)
+                self.assertEqual(after[-1],'system-restart')
+                self.assertFalse((root/'guard').exists())
+                self.assertEqual((root/'.env').read_text(),'FIXTURE_CONFIG=preserve\n')
+                self.assertEqual((root/'data/owner-state').read_text(),'preserve sessions and configuration')
+
+    def test_successful_ui_rebuild_restarts_only_ui_and_keeps_new_build(self):
+        """A successful desktop rebuild replaces assets without cycling the gateway."""
+        root,worker=self.rebuild_fixture()
+        result=self.run_worker(worker,'rebuild_reboot')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual((root/'.next/BUILD_ID').read_text(),'new-build')
+        self.assertEqual((root/'.next/standalone/server.js').read_text(),'new-server')
+        events=(root/'events').read_text().splitlines()
+        self.assertEqual(events,['system-stop','bun-install','bun-run','system-restart'])
+        self.assertFalse((root/'guard').exists())
 
     def test_initial_bridge_activation_preserves_running_user_service(self):
         postinst=(self.stage/'DEBIAN/postinst').read_text()
