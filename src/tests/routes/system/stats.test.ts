@@ -154,6 +154,47 @@ SwapFree:        1500000 kB`;
     }
   });
 
+  it("sends no per-core row on the first call of the process, then real figures", async () => {
+    // HL-1: every restart of the web server makes the next stats call the first
+    // of a new process, with no previous /proc/stat sample to diff against. The
+    // payload used to carry a zero for each core, so Settings → System drew six
+    // idle bars beside a CPU tile reading 19% — seen on the box 23 minutes
+    // after a restart, on the first stats call since it.
+    let reads = 0;
+    mockFs.readFileSync.mockImplementation((path: fs.PathOrFileDescriptor) => {
+      const pathStr = path.toString();
+      if (pathStr === "/proc/stat") {
+        // Two reads per request — the aggregate figure and the per-core one —
+        // so the counters move once per REQUEST, which is what the route's
+        // callers see.
+        reads += 1;
+        const tick = Math.ceil(reads / 2) - 1;
+        const user = 100 + 50 * tick;
+        const idle = 800 + 50 * tick;
+        return [
+          `cpu  ${user * 4} 0 0 ${idle * 4} 0 0 0 0 0 0`,
+          ...[0, 1, 2, 3].map((n) => `cpu${n} ${user} 0 0 ${idle} 0 0 0 0 0 0`),
+          "intr 12345",
+          "",
+        ].join("\n");
+      }
+      if (pathStr === "/proc/meminfo") return "MemTotal: 8000000 kB\nMemFree: 2000000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB";
+      if (pathStr === "/proc/net/dev") return "Inter-|   Receive\n face |bytes\n  eth0: 1000 10 0 0 0 0 0 0 500 5 0 0 0 0 0 0";
+      if (pathStr.includes("/sys/devices/virtual/thermal/thermal_zone")) return "55000";
+      throw new Error(`File not found: ${pathStr}`);
+    });
+
+    const first = await (await systemStatsGet()).json();
+    expect(first.cpu.perCore).toEqual([]);
+
+    const second = await (await systemStatsGet()).json();
+    expect(second.cpu.perCore).toHaveLength(4);
+    for (const core of second.cpu.perCore) {
+      expect(core).toBeGreaterThanOrEqual(0);
+      expect(core).toBeLessThanOrEqual(100);
+    }
+  });
+
   it("returns the busiest processes by MEMORY as well as by CPU", async () => {
     // Both matter on this box and for different reasons: CPU is what a slow
     // desktop looks like, and memory is what an OOM-killed update looks like on

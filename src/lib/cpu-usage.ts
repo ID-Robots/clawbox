@@ -115,17 +115,31 @@ export function getCpuUsage(now: number = Date.now()): number {
   return usage;
 }
 
+/** Percent busy of one core between two of its samples, or null if they do not diff. */
+function coreBusy(then: CpuSample, current: CpuSample): number | null {
+  const dTotal = current.total - then.total;
+  const dIdle = current.idle - then.idle;
+  // A counter that went backwards means /proc/stat was re-read across a
+  // suspend/rollover — not that the core went idle.
+  if (dTotal <= 0 || dIdle < 0) return null;
+  return Math.min(100, Math.max(0, Math.round(((dTotal - dIdle) / dTotal) * 100)));
+}
+
 /**
  * Percent busy per core since the previous call, one entry per `cpuN` line.
  *
  * The htop-style bars on Settings → System. Same delta discipline as the
- * aggregate: no sleep, no block, and a first call (or a stale previous sample,
- * or a counter that went backwards over a suspend) answers the last figures it
- * had rather than a fabricated zero — a row of empty bars is a claim about the
- * box, and "not measured yet" is not that claim.
+ * aggregate: no sleep, no block, and a call with nothing to diff (a stale
+ * previous sample, or a counter that went backwards over a suspend) answers the
+ * last figures it had rather than a fabricated zero — a row of empty bars is a
+ * claim about the box, and "not measured yet" is not that claim.
  *
- * Empty when /proc/stat cannot be read at all, which the caller renders as no
- * per-core row rather than as a machine with no cores.
+ * Empty where there is no figure to give: /proc/stat unreadable, or — the first
+ * call of the process, which every server restart creates — no previous sample
+ * and no earlier figures to stand in for it. Empty for the WHOLE row, never a
+ * row that is measured for some cores and carried for others, because a
+ * six-entry row reads as six measurements. The caller renders that as no
+ * per-core row at all, and the next poll 3 s later has real figures.
  */
 export function getCpuCoreUsage(now: number = Date.now()): number[] {
   let current: (CpuSample | null)[];
@@ -137,6 +151,8 @@ export function getCpuCoreUsage(now: number = Date.now()): number[] {
   if (current.length === 0) return lastCoreUsage ?? [];
 
   const previous = lastCoreSamples;
+  // Set before any early return: whatever this call could not answer, the next
+  // one has a sample to diff against.
   lastCoreSamples = current;
   // A core count that changed (a hotplug, or a first call) has nothing to diff
   // against; so does a sample too old to be about "now".
@@ -144,19 +160,14 @@ export function getCpuCoreUsage(now: number = Date.now()): number[] {
 
   const usage: number[] = [];
   for (let i = 0; i < current.length; i += 1) {
-    const now_ = current[i];
+    const sample = current[i];
     const then = comparable ? previous[i] : null;
-    if (!now_ || !then || now - then.at > MAX_SAMPLE_AGE_MS) {
-      usage.push(lastCoreUsage?.[i] ?? 0);
-      continue;
-    }
-    const dTotal = now_.total - then.total;
-    const dIdle = now_.idle - then.idle;
-    if (dTotal <= 0 || dIdle < 0) {
-      usage.push(lastCoreUsage?.[i] ?? 0);
-      continue;
-    }
-    usage.push(Math.min(100, Math.max(0, Math.round(((dTotal - dIdle) / dTotal) * 100))));
+    const measured =
+      sample && then && now - then.at <= MAX_SAMPLE_AGE_MS ? coreBusy(then, sample) : null;
+    // `??`, so a genuine 0% measurement stands as itself.
+    const busy = measured ?? lastCoreUsage?.[i];
+    if (typeof busy !== "number") return [];
+    usage.push(busy);
   }
   lastCoreUsage = usage;
   return usage;

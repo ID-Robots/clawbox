@@ -172,6 +172,53 @@ describe("getCpuCoreUsage", () => {
     expect(cpuUsage.getCpuCoreUsage()).toEqual([100, 0, 50, 50]);
   });
 
+  it("answers nothing on the very first call, rather than a row of idle cores", () => {
+    // HL-1: every server restart makes the next /setup-api/system/stats call the
+    // first call of a new process, with no previous sample to diff against. A
+    // `0` per core is not "not measured yet" — it is a row of empty bars
+    // claiming an idle box, which is what Settings → System drew while the
+    // aggregate tile on the same card read 19% off the load average.
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900], [100, 900], [100, 900]]));
+    expect(cpuUsage.getCpuCoreUsage(1_000)).toEqual([]);
+    // …and the call after it is the one that has real figures, so the row
+    // appears on the next 3 s poll rather than being lost.
+    mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000], [150, 950], [150, 950]]));
+    expect(cpuUsage.getCpuCoreUsage(4_000)).toEqual([100, 0, 50, 50]);
+  });
+
+  it("goes back to answering nothing when the cache is dropped under it", () => {
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900]]));
+    cpuUsage.getCpuCoreUsage(1_000);
+    mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000]]));
+    expect(cpuUsage.getCpuCoreUsage(4_000)).toEqual([100, 0]);
+    // A restarted server is exactly this state: real figures, then none.
+    cpuUsage.__resetCpuUsageCache();
+    expect(cpuUsage.getCpuCoreUsage(7_000)).toEqual([]);
+  });
+
+  it("answers nothing when its only sample is too old to be about now", () => {
+    // Nothing opened System for five minutes: the pair exists but averaging
+    // over minutes and calling it "now" is the reason MAX_SAMPLE_AGE_MS is
+    // there, and there is no earlier figure to stand in.
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900]]));
+    cpuUsage.getCpuCoreUsage(1_000);
+    mockFs.readFileSync.mockReturnValue(cores([[500, 2000], [400, 2100]]));
+    expect(cpuUsage.getCpuCoreUsage(301_000)).toEqual([]);
+  });
+
+  it("withholds the whole row rather than mixing measured figures with carried ones", () => {
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900]]));
+    cpuUsage.getCpuCoreUsage(1_000);
+    mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000]]));
+    expect(cpuUsage.getCpuCoreUsage(4_000)).toEqual([100, 0]);
+    // A hotplug leaves cores 0 and 1 with last call's figures and core 2 with
+    // none. A three-entry row reads as three measurements, so a row that is
+    // part measurement and part invention is a second, subtler lie than the
+    // zero: nothing is the honest answer for one poll.
+    mockFs.readFileSync.mockReturnValue(cores([[300, 900], [100, 1100], [100, 1000]]));
+    expect(cpuUsage.getCpuCoreUsage(7_000)).toEqual([]);
+  });
+
   it("answers nothing at all when /proc/stat cannot be read", () => {
     // Not a row of zeros: an empty list is "no reading", and a row of zeros
     // would be a claim that every core on the box is idle.
@@ -194,9 +241,10 @@ describe("getCpuCoreUsage", () => {
     mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900]]));
     cpuUsage.getCpuCoreUsage();
     // A hotplug leaves nothing comparable; the next call is the one with a
-    // real figure, and this one must not diff core 2 against core 1's history.
+    // real figure, and this one must not diff core 2 against core 1's history
+    // — nor answer the zeros that diffing nothing used to produce.
     mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000], [100, 1000]]));
-    expect(cpuUsage.getCpuCoreUsage()).toEqual([0, 0, 0]);
+    expect(cpuUsage.getCpuCoreUsage()).toEqual([]);
   });
 
   it("skips a core line it cannot parse rather than calling it idle", () => {

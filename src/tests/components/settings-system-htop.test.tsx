@@ -178,6 +178,19 @@ describe("Settings → System against a server that predates the new figures", (
     expect(screen.queryByTestId("settings-per-core")).toBeNull();
   });
 
+  it("draws no per-core row when the reading itself is empty", async () => {
+    // The wire shape of a just-restarted box: no previous /proc/stat sample to
+    // diff, so the server sends `perCore: []` rather than a zero per core. The
+    // aggregate tile still shows its load-average figure — 19% here — which is
+    // exactly the pairing that made six 0% bars read as a lie.
+    serve(statsResponse({
+      cpu: { usage: 19, model: "ARMv8", cores: 6, loadAvg: ["1.15", "1.02", "0.98"], speed: 1800, perCore: [] },
+    }));
+    await openSection("system");
+    await screen.findByTestId("settings-processes");
+    expect(screen.queryByTestId("settings-per-core")).toBeNull();
+  });
+
   it("offers no ordering toggle when only one ordering was sent", async () => {
     serve(statsResponse());
     await openSection("system");
