@@ -268,6 +268,20 @@ describe("what the first Index now click actually runs", () => {
     expect(await resolveIndexMode("incremental")).toBe("incremental");
   });
 
+  it("uses the server Node runtime when the CLI lives beside an obsolete Node", async () => {
+    const cli = path.join(tmpDir, "openclaw");
+    await fs.writeFile(path.join(tmpDir, "node"), "#!/bin/sh\nexit 42\n", { mode: 0o755 });
+    await fs.writeFile(cli,
+      `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(JSON.stringify(REAL_STATUS))});\n`,
+      { mode: 0o755 },
+    );
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = cli;
+    const { getMemoryStatus } = await lib();
+    const status = await getMemoryStatus();
+    expect(status.available).toBe(true);
+    expect(status.health).toBe("healthy");
+  });
+
   it("does not turn a failed status probe into a full reindex", async () => {
     // getMemoryStatus() answers with the unavailable status when the probe
     // fails, and that fallback also reports zero chunks. Promoting on chunks
