@@ -78,6 +78,7 @@ PY
   echo "System timezone verified: $zone"
 }
 
+# Install the verified coding harness with the desktop owner's privileges.
 install_coding_harness() {
   as_owner /bin/bash "$MIRROR/scripts/x64-migration/install-coding-harness.sh" \
     "$MIRROR/scripts/claude-ds" "$PROJECT_DIR"
