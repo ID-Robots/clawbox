@@ -8,6 +8,7 @@ import {
   readConfig,
   readConfigStrict,
   restartGateway,
+  repairClawboxAiFlashModelPolicy,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
   runOpenclawConfigUnset,
@@ -15,12 +16,12 @@ import {
   parseFullyQualifiedModel,
   setProviderPlugins,
   type OpenClawConfig,
-  type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
 import { enableProviderPluginOps, providerPluginSwitchedOnBy } from "@/lib/provider-plugin-ops";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import { CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_PRO_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
+import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { chatgptDefaultModelId } from "@/lib/chatgpt-surface";
 import {
@@ -161,21 +162,6 @@ function canonicalChatModel(model: string): string {
   return normalizeProviderFromModel(model) === "clawai"
     ? CLAWBOX_AI_MODEL_BY_TIER.flash
     : model;
-}
-
-/** Extend an explicit former-Pro permission to the equivalent Flash alias. */
-function flashModelPolicyRepair(config: OpenClawConfig | null | undefined): OpenclawConfigSetArgs | null {
-  const allow = config?.agents?.defaults?.modelPolicy?.allow;
-  if (!Array.isArray(allow) || !allow.every((model) => typeof model === "string")) return null;
-  if (allow.includes(CLAWBOX_AI_MODEL_BY_TIER.flash)) return null;
-  if (!allow.includes(CLAWBOX_AI_MODEL_BY_TIER.pro) && !allow.includes(`clawai/${CLAWBOX_AI_PRO_MODEL_ID}`)) {
-    return null;
-  }
-  return [
-    "agents.defaults.modelPolicy.allow",
-    JSON.stringify([...allow, CLAWBOX_AI_MODEL_BY_TIER.flash]),
-    "--json",
-  ];
 }
 
 function defaultModelForProvider(provider: string | null): string | null {
@@ -785,7 +771,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig) {
     activeSource,
     activeLabel,
     activeModel,
-    ...(activeUiProvider === "clawai" && flashModelPolicyRepair(openclawConfig)
+    ...(activeUiProvider === "clawai" && needsClawboxAiFlashPolicyRepair(openclawConfig)
       ? { needsFlashModelMigration: true as const }
       : {}),
     options,
@@ -1269,13 +1255,14 @@ export async function POST(request: Request) {
     );
     if (targetOffSurface) return targetOffSurface;
 
+    // Read/recheck/append under the native config lock. Never serialize an
+    // allowlist from the earlier request snapshot into a retryable CLI batch.
+    // The equivalent Flash permission remains if primary validation later fails.
+    const policyRepaired = targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash
+      ? await repairClawboxAiFlashModelPolicy()
+      : false;
+
     if (state.activeModel === targetModel) {
-      // Updating the primary does not update OpenClaw 2's independent model
-      // allowlist. A device already on Flash can still carry a Pro-only entry.
-      const policyRepair = targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash
-        ? flashModelPolicyRepair(preloadedConfig)
-        : null;
-      if (policyRepair) await runOpenclawConfigSet(policyRepair);
       // Naming the model the box already runs is still a choice, and the write
       // being a no-op does not make it less of one (TASK-713) — so it is
       // recorded here as the Hermes picker records it.
@@ -1301,7 +1288,7 @@ export async function POST(request: Request) {
       //     a same-model pick is free only when they already agree.
       let sameModelWarning: string | undefined;
       const armed = chatgptRuntimeArmed(preloadedConfig, targetModel);
-      const wrote = chatgptRouted !== armed || !!policyRepair;
+      const wrote = chatgptRouted !== armed || policyRepaired;
       if (chatgptRouted && !armed) {
         await runOpenclawConfigSet(chatgptRuntimeArmOp(targetModel));
       } else if (!chatgptRouted && armed) {
@@ -1312,7 +1299,12 @@ export async function POST(request: Request) {
       // the model belongs to the ChatGPT row. Answering with that would tell
       // the owner they are on the subscription in the same response that took
       // them off it. A branch that wrote nothing keeps the snapshot it has.
-      const settledState = wrote ? await loadChatModelState() : state;
+      // Another lock holder may have already repaired or removed the Pro
+      // permission. Re-read a previously flagged policy even if we wrote
+      // nothing, so the response does not keep a stale migration flag.
+      const settledState = wrote || state.needsFlashModelMigration
+        ? await loadChatModelState()
+        : state;
       const sameModelOption = settledState.options.find((option) =>
         option.model === targetModel
         && (!pickedUiProvider || option.provider === pickedUiProvider));
@@ -1375,13 +1367,9 @@ export async function POST(request: Request) {
     // EACCES exactly as it does to a box with no config at all. An absent flag
     // IS enabled, so `{}` must stay silent; "could not read" must not.
     const configBeforeBatch = await readConfigStrict().catch(() => null);
-    const policyRepair = targetModel === CLAWBOX_AI_MODEL_BY_TIER.flash
-      ? flashModelPolicyRepair(configBeforeBatch ?? preloadedConfig)
-      : null;
     try {
       await runOpenclawConfigSetBatch([
         ...enableProviderPluginOps([targetModel]),
-        ...(policyRepair ? [policyRepair] : []),
         ["agents.defaults.model.primary", targetModel],
         ...armOps,
       ]);

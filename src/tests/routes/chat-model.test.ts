@@ -34,6 +34,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
+  repairClawboxAiFlashModelPolicy: vi.fn(async () => false),
   // The route tells "the gateway has not come back" apart from every other
   // restart failure with `instanceof`, so the mock owes a real class: a plain
   // `vi.fn()` here would make the check itself throw, and leaving the export
@@ -87,7 +88,7 @@ vi.mock("@/lib/ollama-capabilities", () => ({
 }));
 
 import { getAll } from "@/lib/config-store";
-import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { GatewayNotReadyError, inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, repairClawboxAiFlashModelPolicy, runOpenclawConfigSet, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel, setProviderPlugins, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
@@ -565,7 +566,6 @@ describe("/setup-api/chat/model", () => {
   describe("migrating an explicit former-Pro model policy", () => {
     const FLASH = "deepseek/deepseek-v4-flash";
     const PRO = "deepseek/deepseek-v4-pro";
-    const POLICY_KEY = "agents.defaults.modelPolicy.allow";
 
     function withPolicy(primary: string, allow?: string[]) {
       const config = {
@@ -632,32 +632,28 @@ describe("/setup-api/chat/model", () => {
 
       expect(response.status).toBe(200);
       expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(repairClawboxAiFlashModelPolicy).not.toHaveBeenCalled();
     });
 
-    it("adds only Flash to the current allowlist in the primary-switch batch", async () => {
+    it("repairs the policy under its own lock before validating the primary switch", async () => {
       withPolicy(PRO, [PRO]);
-      // A separate edit added these entries after the request first read the
-      // config. The batch must extend that newer list, keeping wildcards too.
-      const latest = {
-        agents: { defaults: {
-          model: { primary: PRO },
-          modelPolicy: { allow: [PRO, "anthropic/*", "openrouter/custom"], deny: ["openai/private-model"] },
-        } },
-      };
-      vi.mocked(readConfigStrict).mockResolvedValue(latest);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
 
       expect((await normalizeFlash()).status).toBe(200);
 
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
       expect(runOpenclawConfigSetBatch).toHaveBeenCalledWith([
-        [POLICY_KEY, JSON.stringify([PRO, "anthropic/*", "openrouter/custom", FLASH]), "--json"],
         ["agents.defaults.model.primary", FLASH],
       ]);
+      expect(vi.mocked(repairClawboxAiFlashModelPolicy).mock.invocationCallOrder[0])
+        .toBeLessThan(vi.mocked(runOpenclawConfigSetBatch).mock.invocationCallOrder[0]);
       expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
       expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
     });
 
     it("repairs an already-Flash primary and clears the migration flag without a restart", async () => {
       const config = withPolicy(FLASH, ["anthropic/*", PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
       vi.mocked(readConfig)
         .mockResolvedValueOnce(config)
         .mockResolvedValue({
@@ -672,9 +668,8 @@ describe("/setup-api/chat/model", () => {
 
       expect(response.status).toBe(200);
       expect((await response.json()).needsFlashModelMigration).toBeUndefined();
-      expect(runOpenclawConfigSet).toHaveBeenCalledExactlyOnceWith([
-        POLICY_KEY, JSON.stringify(["anthropic/*", PRO, FLASH]), "--json",
-      ]);
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
       expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
       expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
       expect(restartGateway).not.toHaveBeenCalled();
@@ -682,14 +677,50 @@ describe("/setup-api/chat/model", () => {
 
     it("reports a policy repair failure without recording a successful choice", async () => {
       withPolicy(FLASH, [PRO]);
-      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("model policy write failed"));
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockRejectedValue(new Error("model policy write failed"));
 
       const response = await normalizeFlash();
 
       expect(response.status).toBe(500);
       await expect(response.json()).resolves.toEqual({ error: "model policy write failed" });
       expect(setMany).not.toHaveBeenCalled();
+      expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
       expect(applyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("clears a stale migration flag when a concurrent writer removed Pro permission", async () => {
+      const config = withPolicy(FLASH, [PRO]);
+      vi.mocked(readConfig)
+        .mockResolvedValueOnce(config)
+        .mockResolvedValue({
+          ...config,
+          agents: { defaults: {
+            ...config.agents.defaults,
+            modelPolicy: { allow: ["anthropic/*"] },
+          } },
+        });
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(false);
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(200);
+      expect((await response.json()).needsFlashModelMigration).toBeUndefined();
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    });
+
+    it("does not overwrite the repaired policy when primary validation fails", async () => {
+      withPolicy(PRO, [PRO]);
+      vi.mocked(repairClawboxAiFlashModelPolicy).mockResolvedValue(true);
+      vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("primary validation failed"));
+
+      const response = await normalizeFlash();
+
+      expect(response.status).toBe(500);
+      expect(repairClawboxAiFlashModelPolicy).toHaveBeenCalledExactlyOnceWith();
+      expect(runOpenclawConfigSet).toHaveBeenCalledExactlyOnceWith(["agents.defaults.model.primary", FLASH]);
+      expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+      expect(setMany).not.toHaveBeenCalled();
       expect(restartGateway).not.toHaveBeenCalled();
     });
   });

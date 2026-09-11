@@ -31,6 +31,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(async () => ({})),
   readConfig: vi.fn(),
   restartGateway: vi.fn(),
+  repairClawboxAiFlashModelPolicy: vi.fn(async () => false),
   // A real class, not a vi.fn(): the route narrows a restart failure with
   // `instanceof`, and an undefined export there throws instead of narrowing.
   GatewayNotReadyError: class GatewayNotReadyError extends Error {},

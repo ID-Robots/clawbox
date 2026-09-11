@@ -101,13 +101,14 @@ describe("chat-reasoning", () => {
       expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", FLASH))).toBe("off");
     });
 
-    it("honours a level the user picked themselves with either legacy alias", () => {
-      const store: Record<string, string> = { "clawbox:chat:thinkingLevel:clawai": "off" };
+    it.each(["clawai", "deepseek"])("honours a saved %s level with either legacy model alias", (provider) => {
+      const key = `clawbox:chat:thinkingLevel:${provider}`;
+      const store: Record<string, string> = { [key]: "off" };
       vi.stubGlobal("window", { localStorage: { getItem: (k: string) => store[k] ?? null } });
-      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", PRO))).toBe("off");
-      store["clawbox:chat:thinkingLevel:clawai"] = "high";
-      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", PRO))).toBe("high");
-      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", FLASH))).toBe("high");
+      expect(readPersistedThinkingLevel(provider, getProviderReasoningConfig(provider, PRO))).toBe("off");
+      store[key] = "high";
+      expect(readPersistedThinkingLevel(provider, getProviderReasoningConfig(provider, PRO))).toBe("high");
+      expect(readPersistedThinkingLevel(provider, getProviderReasoningConfig(provider, FLASH))).toBe("high");
     });
 
     it("clamps an unsupported wire level to off for both legacy aliases", () => {

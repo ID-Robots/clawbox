@@ -18,6 +18,8 @@ import { isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
+import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
+import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 
 const exec = promisify(execFile);
 
@@ -1744,8 +1746,8 @@ async function releaseOwnedLock(lockPath: string, heldStat: FileStat | null, own
 /**
  * Run one direct config mutation under OpenClaw 2's cross-process sidecar
  * lock. The core CLI uses an exclusive `openclaw.json.lock` regular file for
- * the same purpose, so holding it serializes this exceptional unvalidated
- * write with gateway and CLI mutations as well as concurrent setup requests.
+ * the same purpose, so holding it serializes direct writes with gateway and
+ * CLI mutations as well as other setup writers that acquire this lock.
  */
 async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promise<T> {
   const lockPath = `${CONFIG_PATH}.lock`;
@@ -1834,6 +1836,27 @@ export async function setPrimaryModelWithoutCatalogValidation(modelRef: string):
     const model = (defaults.model ??= {}) as Record<string, unknown>;
     model.primary = modelRef;
     await writeConfig(config);
+  });
+}
+
+/**
+ * Grant the equivalent Flash alias only while the policy explicitly allows
+ * former Pro. The native cross-process lock covers the read, permission check,
+ * append and atomic write, so concurrent CLI/gateway edits cannot be replaced
+ * by an allowlist captured earlier in the chat request.
+ *
+ * This narrow repair completes before the separate, validated primary-model
+ * CLI write. If that later write fails, the added Flash permission remains;
+ * no existing permissions or restrictions are removed.
+ */
+export async function repairClawboxAiFlashModelPolicy(): Promise<boolean> {
+  return withOpenclawConfigSidecarLock(async () => {
+    const config = await readConfigStrict();
+    const allow = config.agents?.defaults?.modelPolicy?.allow;
+    if (!allow || !needsClawboxAiFlashPolicyRepair(config)) return false;
+    allow.push(CLAWBOX_AI_MODEL_BY_TIER.flash);
+    await writeConfig(config);
+    return true;
   });
 }
 
