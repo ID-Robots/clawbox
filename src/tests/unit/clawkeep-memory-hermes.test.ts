@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { settledMemoryRun } from "@/tests/helpers/memory-run-state";
+import { IDLE_MEMORY_RUN, settledMemoryRun } from "@/tests/helpers/memory-run-state";
 
 /**
  * Memory Shard's Hermes arm, at the seam.
@@ -113,14 +113,24 @@ async function lib() {
   return await import("@/lib/clawkeep-memory");
 }
 
-/** Build a small real index in the temp DATA_DIR. */
-async function buildIndex(): Promise<void> {
+/**
+ * Build a real index in the temp DATA_DIR over the registered temp folder.
+ *
+ * With no `notes` it is the stock box — folders registered, nothing in them yet,
+ * one finished pass; `keepFolder: false` is the state the captured OpenClaw
+ * payload is in, a registered folder that is not on disk at all.
+ */
+async function buildIndex(
+  { notes, keepFolder = true }: { notes?: string; keepFolder?: boolean } = {},
+): Promise<void> {
   const local = await import("@/lib/memory-index-local");
-  fs.writeFileSync(path.join(source, "notes.md"), "The deposit is two months' rent.");
+  if (notes) fs.writeFileSync(path.join(source, "notes.md"), notes);
   await local.writeLocalSources([source]);
+  if (!keepFolder) fs.rmSync(source, { recursive: true, force: true });
   await local.runLocalIndexPass("full");
 }
 
+const NOTES = "The deposit is two months' rent.";
 
 /** Every value `MemoryStatusErrorCode` allows, which is every value a locale
  *  pack words. A status carrying anything else is English on a German desktop. */
@@ -139,7 +149,7 @@ describe("what ClawBox's own index tells the shared parser", () => {
     // providerLocation() reports "unknown" — an embedder running on loopback,
     // drawn as one the box cannot account for. The local arm passes its own
     // proxy URL instead.
-    await buildIndex();
+    await buildIndex({ notes: NOTES });
     const { getMemoryStatus } = await lib();
     const status = await getMemoryStatus();
     expect(status.location).toBe("local");
@@ -148,7 +158,7 @@ describe("what ClawBox's own index tells the shared parser", () => {
   });
 
   it("is healthy, with real counts and a fingerprint", async () => {
-    await buildIndex();
+    await buildIndex({ notes: NOTES });
     const { getMemoryStatus } = await lib();
     const status = await getMemoryStatus();
     expect(status.available).toBe(true);
@@ -166,7 +176,7 @@ describe("what ClawBox's own index tells the shared parser", () => {
     // The whole reason for impersonating the CLI's JSON rather than writing a
     // second status producer. A new code here would be English on a German
     // desktop, and nothing in this repo would have failed.
-    await buildIndex();
+    await buildIndex({ notes: NOTES });
     const status = await (await lib()).getMemoryStatus();
     expect(MEMORY_STATUS_CODES).toContain(status.errorCode);
     expect(status.errorCode).toBe("");
@@ -179,8 +189,56 @@ describe("what ClawBox's own index tells the shared parser", () => {
     expect(status.errorCode).toBe("index_identity_missing");
   });
 
-  it("draws the existing amber banner when the embedder it was built for changed", async () => {
+  it("draws no attention badge and no remedy on a box with nothing to index", async () => {
+    // What the card showed on the box: "Memory index ON … Needs attention — the
+    // index fingerprint is missing. Run a full reindex" over FILES 0 · CHUNKS 0
+    // and, underneath, the honest "Nothing to index yet". Three statements, two
+    // of them contradicting the third, and the remedy was the full reindex that
+    // had already run by hand four hours earlier and finished in 19 ms.
     await buildIndex();
+    const { getMemoryStatus, invalidateMemoryStatusCache } = await lib();
+    invalidateMemoryStatusCache();
+    const status = await getMemoryStatus();
+    expect(status.files).toBe(0);
+    expect(status.chunks).toBe(0);
+    expect(status.indexIdentity).toBe("valid");
+    expect(status.health).toBe("healthy");
+    expect(status.errorCode).toBe("");
+    expect(status.error).toBe("");
+  });
+
+  it("says about an empty index exactly what the captured OpenClaw box says", async () => {
+    // The parity this arm exists for, on the one state every new box is in. The
+    // fixture is `openclaw memory status --agent main --deep --json` taken from a
+    // real OpenClaw box that had never written a memory file: zero files, zero
+    // chunks, a scan whose only issue is that the memory DIRECTORY IS NOT THERE
+    // — and `indexIdentity: valid`. So the OpenClaw edition has always shown
+    // that box as healthy, and the nag was this arm's alone. Both editions draw
+    // the same card, so the Hermes side is driven into the fixture's own state,
+    // a registered folder that does not exist, and has to agree about it.
+    const real = JSON.parse(
+      await fsp.readFile(new URL("../fixtures/openclaw-memory-status.json", import.meta.url), "utf8"),
+    ) as Array<{
+      scan: { totalFiles: number; issues: string[] };
+      status: { custom: { indexIdentity: { status: string } } };
+    }>;
+    expect(real[0].scan.totalFiles).toBe(0);
+    expect(real[0].scan.issues.length).toBe(1);
+    expect(real[0].status.custom.indexIdentity.status).toBe("valid");
+
+    const { getMemoryStatus, invalidateMemoryStatusCache, parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const openclaw = await parseMemoryStatus(real, IDLE_MEMORY_RUN, DEFAULT_MEMORY_SCHEDULE);
+    await buildIndex({ keepFolder: false });
+    invalidateMemoryStatusCache();
+    const hermes = await getMemoryStatus();
+    expect(hermes.indexIdentity).toBe(openclaw.indexIdentity);
+    expect(hermes.health).toBe(openclaw.health);
+    expect(hermes.errorCode).toBe(openclaw.errorCode);
+    expect(hermes.error).toBe(openclaw.error);
+  });
+
+  it("draws the existing amber banner when the embedder it was built for changed", async () => {
+    await buildIndex({ notes: NOTES });
     const { LOCAL_INDEX_PATH } = await import("@/lib/memory-index-local");
     const { openSqlite } = await import("@/lib/openclaw-session-store");
     const db = openSqlite(LOCAL_INDEX_PATH, false);

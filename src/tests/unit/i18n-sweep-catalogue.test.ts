@@ -25,7 +25,7 @@ const NON_EN: Exclude<Locale, "en">[] = ["bg", "de", "es", "fr", "it", "ja", "nl
 /** The System Update page — every string of it (sweep: update #4, #5, #8, #9). */
 const UPDATE_KEYS = [
   "update.heroChecking", "update.heroCheckingSub", "update.heroUnreachable",
-  "update.heroUnreachableSub", "update.heroCurrent", "update.heroCurrentSub",
+  "update.heroUnreachableSub", "update.heroCouldNotCheck", "update.heroCurrent", "update.heroCurrentSub",
   "update.heroAvailableOne", "update.heroAvailableMany", "update.heroAvailableSub",
   "update.componentJoin", "update.heroUpdating", "update.heroUpdatingSub",
   "update.heroComplete", "update.heroCompleteRestart", "update.heroCompleteSub",

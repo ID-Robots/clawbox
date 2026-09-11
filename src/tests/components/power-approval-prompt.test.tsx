@@ -14,7 +14,8 @@ describe("desktop power confirmation", () => {
   it("never confirms from rendering or polling; the owner's click submits the exact displayed action", async () => {
     render(<PowerApprovalPrompt />);
     await screen.findByText(prompt.reason);
-    expect(screen.getByRole("button", { name: "chat.approval.deny" })).toHaveFocus();
+    // The prompt can render before its focus effect has run.
+    await waitFor(() => expect(screen.getByRole("button", { name: "chat.approval.deny" })).toHaveFocus());
     expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
     fireEvent.click(screen.getByRole("button", { name: "chat.approval.allowOnce" }));
     await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1));

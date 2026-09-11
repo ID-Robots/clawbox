@@ -499,7 +499,7 @@ clawbox_node_bin() {
 # the file on disk is not the whole config, so a preview built from it alone
 # would name keys an included file may already answer for.
 clawbox_core_residual_issues() {
-  local node_bin core_dist core_chunk preview_dir preview verdict remembered fingerprint
+  local node_bin core_dist core_chunks preview_dir preview preview_why verdict remembered fingerprint child_rc child_why
 
   fingerprint="$(clawbox_config_fingerprint)"
   remembered="$(head -n1 "$CLAWBOX_POST_MIGRATION_ISSUES" 2>/dev/null || true)"
@@ -534,11 +534,31 @@ clawbox_core_residual_issues() {
   # `grep -rl` rather than a chunk name: every one of them is content-hashed and
   # changes with each core build. Bounded, and a SIGPIPE from `head` closing the
   # pipe is not a failure to report.
-  core_chunk=""
+  #
+  # BOTH module extensions, because which one a chunk gets is the bundler's
+  # decision and it has already changed once. Counted over the whole `dist/`
+  # tree: 2026.8.1 is 7,219 `*.js` and 1 `*.mjs`; 2026.9.3 is 1,731 `*.js` and
+  # 5,383 `*.mjs`, with this declaration in no `.js` file at all. Still an
+  # allow-list rather than every file, so a `.d.ts` declaration or a `.map`
+  # carrying the same text as DATA is never a candidate to import.
+  #
+  # A LIST, not a first hit, because the declaration is in TWO files on both
+  # cores: the library chunk that exports it, and `dist/worker/worker.mjs` — a
+  # 44 MB worker ENTRY POINT that exports nothing and runs the worker at import
+  # (it exits non-zero on a closed stdin and blocks on an open one). With
+  # `--include='*.js'` alone that file was out of reach by accident of its
+  # extension; now that both extensions are searched, which of the two `grep`
+  # emits first is filesystem traversal order — inode and readdir, changed by
+  # any reinstall, rsync, image copy or restore — so a first-hit pick would be
+  # a coin toss between the answer and a 30 s timeout, on 2026.8.1 as much as on
+  # 2026.9.3. The child below settles it by what a module actually EXPORTS and
+  # tries the smallest file first, so an entry point is never imported while a
+  # library chunk can answer.
+  core_chunks=""
   if [ -d "$core_dist" ]; then
-    core_chunk="$(timeout -k 5 20 grep -rlF --include='*.js' 'function applyLegacyDoctorMigrations(' "$core_dist" 2>/dev/null | head -n1 || true)"
+    core_chunks="$(timeout -k 5 20 grep -rlF --include='*.js' --include='*.mjs' 'function applyLegacyDoctorMigrations(' "$core_dist" 2>/dev/null | head -n 5 || true)"
   fi
-  if [ -z "$core_chunk" ]; then
+  if [ -z "$core_chunks" ]; then
     echo "  NOTE: the installed core's own migration table could not be read from $core_dist, so what it still refuses AFTER those migrations could not be worked out here" >&2
     return 1
   fi
@@ -556,20 +576,71 @@ clawbox_core_residual_issues() {
   # `cp -p`, so the preview carries the config's own mode: it holds the same
   # secrets for as long as it exists.
   cp -p "$OPENCLAW_CONFIG" "$preview" 2>/dev/null || { rm -rf "$preview_dir"; return 1; }
-  if ! CLAWBOX_PREVIEW_CHUNK="$core_chunk" \
+  # Why the child could not answer, written by the child INSIDE the same 0700
+  # directory and removed with it. Two outcomes are deliberately wordless (exit
+  # 3): a `$include`, and migrations that changed nothing — both are this arm
+  # standing down over a box that is not broken. Everything else that stops the
+  # table from RUNNING is a thing nobody would otherwise know to ask about.
+  preview_why="$preview_dir/why"
+  child_rc=0
+  CLAWBOX_PREVIEW_CHUNKS="$core_chunks" \
     CLAWBOX_PREVIEW_IN="$OPENCLAW_CONFIG" \
     CLAWBOX_PREVIEW_OUT="$preview" \
+    CLAWBOX_PREVIEW_WHY="$preview_why" \
     timeout -k 5 30 env -u OPENCLAW_HOME -u OPENCLAW_CONFIG_PATH -u OPENCLAW_STATE_DIR \
     "$node_bin" --input-type=module -e '
-    import { readFileSync, writeFileSync } from "node:fs";
+    import { readFileSync, statSync, writeFileSync } from "node:fs";
     import { pathToFileURL } from "node:url";
+    const why = (text) => {
+      try {
+        writeFileSync(process.env.CLAWBOX_PREVIEW_WHY, String(text).replace(/\s+/g, " ").slice(0, 400));
+      } catch { /* the NOTE degrades to a bare one; the exit code still stands */ }
+    };
+    // SMALLEST FILE FIRST, and the pick settled by what a module EXPORTS rather
+    // than by the order the filesystem handed the candidates back. The library
+    // chunk that exports the function is kilobytes; the worker entry point that
+    // merely inlines it is tens of megabytes and runs the worker when imported,
+    // so this order means it is never imported while a real chunk can answer,
+    // and a chunk that does not export it is skipped instead of ending the run.
+    const candidates = (process.env.CLAWBOX_PREVIEW_CHUNKS || "")
+      .split("\n")
+      .filter(Boolean)
+      .map((file) => {
+        let size = Number.POSITIVE_INFINITY;
+        try { size = statSync(file).size; } catch { /* unreadable: try it last */ }
+        return { file, size };
+      })
+      .sort((a, b) => a.size - b.size);
+    let apply;
+    const rejected = [];
+    for (const candidate of candidates) {
+      try {
+        const mod = await import(pathToFileURL(candidate.file).href);
+        const found = Object.values(mod).find(
+          (value) => typeof value === "function" && value.name === "applyLegacyDoctorMigrations",
+        );
+        if (found) { apply = found; break; }
+        rejected.push(candidate.file + ": exports no applyLegacyDoctorMigrations");
+      } catch (error) {
+        rejected.push(candidate.file + ": " + ((error && error.message) || String(error)));
+      }
+    }
+    if (!apply) {
+      why("no candidate chunk could be run: " + rejected.join("; "));
+      process.exit(1);
+    }
+    // Read APART from the arm below, so a config that is not JSON is never
+    // reported as the core migration table throwing: it never ran. (No
+    // apostrophes anywhere in this child: it is a single-quoted shell string,
+    // and one would end it mid-program.)
+    let raw;
     try {
-      const mod = await import(pathToFileURL(process.env.CLAWBOX_PREVIEW_CHUNK).href);
-      const apply = Object.values(mod).find(
-        (value) => typeof value === "function" && value.name === "applyLegacyDoctorMigrations",
-      );
-      if (!apply) throw new Error("the chunk exports no applyLegacyDoctorMigrations");
-      const raw = JSON.parse(readFileSync(process.env.CLAWBOX_PREVIEW_IN, "utf8"));
+      raw = JSON.parse(readFileSync(process.env.CLAWBOX_PREVIEW_IN, "utf8"));
+    } catch (error) {
+      why("the config could not be read as JSON: " + ((error && error.message) || String(error)));
+      process.exit(1);
+    }
+    try {
       // The same test `containsConfigIncludeDirective` makes in the core, on
       // the DECODED document: a `$include` may be written `"\u0024include"` in
       // JSON, which the shell pre-filter cannot see, and a preview built from
@@ -580,7 +651,7 @@ clawbox_core_residual_issues() {
         if (Object.hasOwn(value, "$include")) return true;
         return Object.values(value).some(hasInclude);
       };
-      if (hasInclude(raw)) throw new Error("the config carries a $include directive");
+      if (hasInclude(raw)) process.exit(3);
       const result = apply(raw, { authoredRaw: raw, resolvedRaw: raw });
       // `{next: null, changes: []}` is the core saying it changed NOTHING, and
       // it says it in no other case. A preview built from the file anyway would
@@ -588,17 +659,29 @@ clawbox_core_residual_issues() {
       // can only repeat the issues the caller printed one line earlier — a
       // second, longer copy of the sentence this whole arm exists to shorten,
       // bought with another 65 s of a blocking ExecStartPre.
-      if (!result || !result.next) throw new Error("the core migrations changed nothing");
+      if (!result || !result.next) process.exit(3);
       writeFileSync(process.env.CLAWBOX_PREVIEW_OUT, JSON.stringify(result.next, null, 2) + "\n");
       // Exited explicitly rather than by letting the loop drain: this imports a
       // real bundle chunk and everything it pulls in, and the day one of those
       // registers a timer at module scope the bound above would fire over an
       // answer that was already written.
       process.exit(0);
-    } catch {
+    } catch (error) {
+      why("the core migration table threw: " + ((error && error.message) || String(error)));
       process.exit(1);
     }
-  ' >/dev/null 2>&1; then
+  ' >/dev/null 2>&1 || child_rc=$?
+  if [ "$child_rc" -ne 0 ]; then
+    if [ "$child_rc" -ne 3 ]; then
+      child_why="$(head -c 400 "$preview_why" 2>/dev/null | tr '\n\t' '  ' || true)"
+      # `timeout` kills the child before it can write a reason, and that case is
+      # the one worth naming out of all of them: it is what an entry point or a
+      # chunk that blocks at module scope looks like from out here.
+      case "$child_rc" in
+        124|137) child_why="${child_why:-killed after 30 s without answering}" ;;
+      esac
+      echo "  NOTE: the installed core's own migration table could not be run${child_why:+ ($child_why)}, so what it still refuses AFTER those migrations could not be worked out here" >&2
+    fi
     rm -rf "$preview_dir"
     return 1
   fi
@@ -865,8 +948,9 @@ export CLAWBOX_LAN_IPS
 
 # Trusted control UI origins — a narrow escape hatch for genuinely
 # cross-origin/custom-origin Control UI deployments (see README and
-# scripts/gateway_origins.py). Same-origin access via `<hostname>.local`,
-# `.ts.net`, or a private LAN IP already works without any entry here.
+# scripts/gateway_origins.py). Same-origin access via the box's own hostname —
+# bare (`http://clawbox/`) or `<hostname>.local` — a `.ts.net` name, or a private
+# LAN IP already works without any entry here.
 # Loaded from CLAWBOX_CONTROL_UI_ORIGINS_FILE (or the module's default
 # path) via scripts/gateway_origins.py. Missing helper module or missing
 # config file both fall through to "no extras" — defaults still boot.

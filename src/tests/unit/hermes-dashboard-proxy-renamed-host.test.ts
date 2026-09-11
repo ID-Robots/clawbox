@@ -15,23 +15,26 @@ import { createSessionCookie } from "@/lib/auth";
  * restarts the gateway (src/app/setup-api/system/hostname/route.ts). Nothing
  * equivalent runs on Hermes, and nothing needs to:
  *
- *   - Hermes 0.20.5 has no allowed-origins list to update. Its dashboard guard
- *     (`_ws_host_origin_reason` in hermes_cli/web_server.py, read on a v0.20.5
- *     device 2026-09-04) compares Host and Origin against
- *     `app.state.bound_host` — the address the dashboard was bound to — and
- *     takes no configuration. ClawBox binds it to 127.0.0.2 and the proxy
- *     rewrites Host/Origin/Referer to that authority, so the box's LAN name
- *     never reaches Hermes at all.
+ *   - Hermes has no allowed-origins list a rename could invalidate. Its
+ *     dashboard guard (`_is_accepted_host` in hermes_cli/web_server.py, read in
+ *     hermes-agent 0.21.1) compares Host and Origin against
+ *     `app.state.bound_host` — the address the dashboard was bound to — plus
+ *     `trusted_public_hosts`, which `_dashboard_public_hosts()` fills from the
+ *     ONE hostname in `dashboard.public_url` (the same value Hermes uses as its
+ *     OAuth redirect base). That is a single exact name, not the set of names a
+ *     LAN box answers to, and ClawBox sets it nowhere, so on a device the set is
+ *     empty and the guard reduces to `bound_host`. ClawBox binds the dashboard to
+ *     127.0.0.2 and the proxy rewrites Host/Origin/Referer to that authority, so
+ *     the box's LAN name never reaches Hermes at all.
  *   - The proxy's own guard (scripts/hermes-dashboard-proxy.js,
  *     `isAllowedHostname`) accepts ANY well-formed `<label>.local` and any raw
  *     IP literal, so it needs no list either — a renamed box is accepted the
- *     moment it is renamed, with no restart and no config write. That generic
- *     rule also SUBSUMES the cached `systemMdnsHost()` branch above it: every
- *     non-null value that branch can return is a `<label>.local` the generic
- *     rule accepts anyway, so the process-lifetime cache decides no request and
- *     cannot go stale into a lockout. The cache is not a fast path worth
- *     keeping — deleting the generic rule and keeping it would break every
- *     renamed box.
+ *     moment it is renamed, with no restart and no config write. The branch
+ *     above it, `systemHostnames()`, is what carries the names that generic rule
+ *     CANNOT cover — the box's own BARE hostname and an FQDN nodename (TASK-808,
+ *     hermes-dashboard-proxy-bare-hostname.test.ts) — and it is therefore read
+ *     per request rather than cached for the process lifetime: a bare name
+ *     captured at startup would be a lockout on the new hostname after a rename.
  *
  * What is pinned here is that second property, which nothing tested before:
  * `ALLOWED_HOSTS` below deliberately holds neither name used in the requests.

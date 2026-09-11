@@ -231,9 +231,9 @@ describe("a refused anonymous fetch is not 'up to date'", () => {
 
     const info = await updater.getVersionInfo();
 
-    // The lie today: `updateAvailable: false` with nothing anywhere in the
-    // payload saying the device never managed to ask.
-    expect(info.clawbox.updateAvailable).toBe(false);
+    // `false` here was the lie on its own: it reads as "there is no update",
+    // over a device that never managed to ask. `null` is the third state.
+    expect(info.clawbox.updateAvailable).toBeNull();
     expect(info.remote).toBeDefined();
     expect(info.remote?.reachable).toBe(false);
     expect(info.remote?.refusedAnonymously).toBe(true);
@@ -263,6 +263,204 @@ describe("a refused anonymous fetch is not 'up to date'", () => {
 
     expect(info.remote?.reachable).toBe(true);
     expect(countArgv("fetch --quiet origin beta")).toBe(1);
+  });
+});
+
+describe("a box whose origin is not the update repository is not 'up to date'", () => {
+  /**
+   * Measured on a Hermes box, 2026-09-10. The bundle deploy path repoints
+   * `origin` at a git bundle it copies onto the device and restores the GitHub
+   * remote when it finishes — so a box whose deploy has not finished has an
+   * `origin` that is A FILE ON ITS OWN DISK. Every git call against it
+   * SUCCEEDS, and the bundle by construction contains exactly the commit the
+   * box already has, so the check found no delta and the card rendered a green
+   * "You're up to date — Every component is on the latest release" while the
+   * pinned branch was a merge ahead. `remote.reachable: true` was true of a
+   * file on the device, and `?force=1` answered the same.
+   *
+   * The device never asked the update repository, so it has no verdict to
+   * report — which is what every consumer already renders from
+   * `remote.reachable === false`.
+   */
+  const BUNDLE = "/home/clawbox/clawbox-beta.bundle";
+
+  function boxPointedAtABundle(): void {
+    install({
+      "remote get-url origin": { stdout: `${BUNDLE}\n`, stderr: "" },
+      // A bundle answers all of these, and answers them fast.
+      "fetch --quiet origin beta": { stdout: "", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
+      // The bundle cannot be ahead of the box: it was cut from this commit.
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+  }
+
+  it("says the check never reached the update repository", async () => {
+    boxPointedAtABundle();
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(false);
+    // Names the origin it found: that one line is what tells the owner their
+    // box is pointed at a leftover bundle rather than at GitHub.
+    expect(info.remote?.reason).toContain(BUNDLE);
+    // Not an anonymous refusal — nothing was refused, nothing was asked.
+    expect(info.remote?.refusedAnonymously).toBeFalsy();
+    // And not worded as a network fault: "couldn't reach the update server"
+    // would send the owner to the router over a file on their own disk.
+    expect(info.remote?.cause).toBe("device");
+  });
+
+  it("reports no update as unknown rather than as absent", async () => {
+    boxPointedAtABundle();
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    // `false` here is the false-success shape: it is read as "there is no
+    // update", and the only other thing the payload says is that the remote
+    // answered. `null` is the third state — "I could not look".
+    expect(info.clawbox.updateAvailable).toBeNull();
+    expect(info.clawbox.target).toBeNull();
+  });
+
+  // The guard must not fire on the fleet — flagging a real remote is the false
+  // failure on the other side of the same card. Every box fetches over https;
+  // a dev box or a private fork can be on either ssh spelling.
+  it.each([
+    "https://github.com/ID-Robots/clawbox.git",
+    "git@github.com:ID-Robots/clawbox.git",
+    "ssh://git@github.com/ID-Robots/clawbox.git",
+    // No user: ~/.ssh/config supplies it, and a dev box is entitled to be set
+    // up that way. Refusing it would be the false failure this guard exists for.
+    "github.com:ID-Robots/clawbox.git",
+  ])("still reports a reachable remote on a box whose origin is %s", async (origin) => {
+    install({
+      "remote get-url origin": { stdout: `${origin}\n`, stderr: "" },
+      "fetch --quiet origin beta": { stdout: "", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      "rev-parse origin/beta": { stdout: `${SHA}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(true);
+    expect(info.clawbox.updateAvailable).toBe(false);
+  });
+});
+
+describe("a pinned branch the box could not resolve is not 'up to date'", () => {
+  /**
+   * The other half of the same lie. The fetch landed, so the remote answered —
+   * but `origin/<branch>` would not resolve, so there is no commit to compare
+   * HEAD against and therefore NO verdict. That returned `target: null` beside
+   * a reachable remote, which every surface renders as "you have the latest".
+   */
+  it("says it could not work out the target instead of reporting no update", async () => {
+    install({
+      "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
+      "fetch --quiet origin beta": { stdout: "", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      "rev-parse origin/beta": new Error(
+        "fatal: ambiguous argument 'origin/beta': unknown revision or path not in the working tree.",
+      ),
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(false);
+    expect(info.remote?.reason).toMatch(/update branch \(beta\)/);
+    expect(info.remote?.cause).toBe("device");
+    expect(info.clawbox.updateAvailable).toBeNull();
+  });
+
+  it("reports an empty commit the same way, not as parity with HEAD", async () => {
+    // `rev-parse` exiting 0 with nothing to say is the quieter version: an
+    // empty string compared against an empty string is "equal", which is how a
+    // box with no refs at all reported itself converged.
+    install({
+      "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
+      "fetch --quiet origin beta": { stdout: "", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
+      "rev-parse HEAD": { stdout: "\n", stderr: "" },
+      "rev-parse origin/beta": { stdout: "\n", stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(false);
+    expect(info.clawbox.updateAvailable).toBeNull();
+  });
+});
+
+describe("a box with no update branch to compare against is not 'up to date'", () => {
+  /**
+   * The same unknown one step earlier. `.update-branch` unreadable, or a pinned
+   * value `isSafeBranch` refuses: nothing is compared against `origin/<branch>`
+   * at all, and the answer used to be "the remote is reachable, there is no
+   * delta" — after which the tag list, which between releases says "the latest
+   * tag is the one I have", supplied the green all-clear to a box dozens of
+   * commits behind its branch. Drift does not cover it: the `no-pin` state
+   * records a code and a reason but never sets `detected`.
+   */
+  function boxWithNoPin(pin: Result | Error): void {
+    install({
+      "remote get-url origin": { stdout: "https://github.com/ID-Robots/clawbox.git\n", stderr: "" },
+      "fetch --quiet --tags origin": { stdout: "", stderr: "" },
+      "ls-remote": { stdout: `${SHA}\trefs/tags/v1.0.0\n`, stderr: "" },
+      "rev-parse HEAD": { stdout: `${SHA}\n`, stderr: "" },
+      openclaw: { stdout: "1.0.0", stderr: "" },
+    });
+    mockReadFile.mockImplementation(async (file) => {
+      const p = String(file);
+      if (p.endsWith(".update-branch")) {
+        if (pin instanceof Error) throw pin;
+        return pin.stdout;
+      }
+      if (p.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+      if (p.endsWith("package.json")) return JSON.stringify({ version: "1.0.0" });
+      throw new Error("ENOENT");
+    });
+  }
+
+  it("says it has no branch to compare against when the pin file is unreadable", async () => {
+    boxWithNoPin(new Error("EACCES"));
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(false);
+    expect(info.remote?.cause).toBe("device");
+    expect(info.remote?.reason).toMatch(/no update branch/i);
+    expect(info.clawbox.updateAvailable).toBeNull();
+  });
+
+  it("says the same for a pinned branch name it refuses to use", async () => {
+    // `isSafeBranch` rejects it, so no fetch and no comparison can happen —
+    // which is a reason to say nothing is known, not to report no update.
+    boxWithNoPin({ stdout: "beta; rm -rf /\n", stderr: "" });
+    const updater = await import("@/lib/updater");
+
+    const info = await updater.getVersionInfo();
+
+    expect(info.remote?.reachable).toBe(false);
+    expect(info.clawbox.updateAvailable).toBeNull();
+    expect(countArgv("fetch --quiet origin")).toBe(0);
   });
 });
 

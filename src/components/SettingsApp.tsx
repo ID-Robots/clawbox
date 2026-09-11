@@ -6059,9 +6059,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     switches left (2026-09-09) and this is what System is for.
 
                     Both degrade rather than lie: a server that predates the
-                    per-core reading sends no `perCore`, and one that cannot
-                    read /proc/stat sends an empty list — either way the row is
-                    absent, never a row of zeros claiming an idle machine. */}
+                    per-core reading sends no `perCore`, and one with no reading
+                    to give sends an empty list — it could not read /proc/stat,
+                    or has nothing to diff it against yet, which is every first
+                    request after a restart. Either way the row is absent until
+                    the next 3 s poll, never a row of zeros claiming an idle
+                    machine. */}
                 {stats.cpu.perCore && stats.cpu.perCore.length > 0 && (
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-per-core">
                     <div className="flex items-center gap-2 mb-4">

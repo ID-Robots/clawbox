@@ -54,6 +54,9 @@ jobs:
       - name: Sudoers allow-list coverage
         run: bun run check:sudoers
 
+      - name: Existing x64 desktop integration fixtures
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/x64-migration -p 'test_*.py'
+
       # The MCP server's tree is EXCLUDED from the root tsconfig (see its
       # `exclude`), so `tsc --noEmit` — wherever it runs — has never covered
       # mcp/**, and no workflow ran this project. Three errors sat on beta

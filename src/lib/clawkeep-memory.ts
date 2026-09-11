@@ -36,6 +36,7 @@ import {
   runLocalIndexPass,
 } from "@/lib/memory-index-local";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
+import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
 
 export type MemoryScheduleFrequency = "daily" | "weekly";
 export type MemoryIndexMode = "incremental" | "full";
@@ -172,7 +173,7 @@ const RUN_LOCK_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index.lock");
 // inventory every five seconds, so a short TTL here is a background OpenClaw
 // boot every few polls.
 const STATUS_CACHE_MS = 120_000;
-const STATUS_TIMEOUT_MS = 90_000;
+const STATUS_TIMEOUT_MS = memoryStatusTimeoutMs(process.env.CLAWKEEP_MEMORY_STATUS_TIMEOUT_MS);
 const INDEX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const LOCK_START_GRACE_MS = 30_000;
 const MAX_STATUS_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -401,6 +402,10 @@ function openclawBin(): string {
 function openclawEnv(): NodeJS.ProcessEnv {
   const bin = openclawBin();
   const dirs = new Set<string>();
+  // The package can remain in an older nvm prefix after Node is upgraded.
+  // Its env-node shebang must use the server's runtime: respawn is disabled
+  // below so OpenClaw cannot recover from selecting that prefix's old Node.
+  dirs.add(path.dirname(process.execPath));
   if (bin !== "openclaw") dirs.add(path.dirname(bin));
   dirs.add(path.join(os.homedir(), ".npm-global", "bin"));
   dirs.add(path.join(os.homedir(), ".local", "bin"));

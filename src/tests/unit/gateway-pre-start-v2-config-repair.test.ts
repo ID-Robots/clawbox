@@ -685,10 +685,10 @@ json.dump(doc, open(CFG, "w"), indent=2)
    * that only worked on a matching export name fails. It performs the moves and
    * NOT the strip, exactly as the real one does.
    */
-  function stubCoreMigrationChunk() {
+  function stubCoreMigrationChunk(chunkName = "legacy-pGW3ZP3t.js") {
     mkdirSync(coreDistDir, { recursive: true });
     writeFileSync(
-      path.join(coreDistDir, "legacy-pGW3ZP3t.js"),
+      path.join(coreDistDir, chunkName),
       `function applyLegacyDoctorMigrations(raw, context, options) {
   if (!raw || typeof raw !== "object") return { next: null, changes: [] };
   const next = structuredClone(raw);
@@ -722,6 +722,45 @@ json.dump(doc, open(CFG, "w"), indent=2)
 export { applyLegacyDoctorMigrations as A };
 `,
     );
+  }
+
+  /**
+   * The core's OTHER file carrying that declaration: the worker entry point.
+   *
+   * Measured on both published cores — 2026.8.1 and 2026.9.3 — the declaration
+   * text is in exactly two files, the library chunk above and
+   * `dist/worker/worker.mjs`, a 44 MB ENTRY POINT that exports nothing and does
+   * its work at import (the real one awaits `runWorkerProcess`, which exits
+   * non-zero on a closed stdin and blocks on an open one until the block's own
+   * `timeout -k 5 30` kills it). On 2026.8.1 it was out of reach by accident of
+   * its extension; searching `*.mjs` admits it, so the pick must not be the
+   * first hit `grep` happens to emit.
+   *
+   * Written BEFORE the library chunk and padded well past it, because both
+   * things the block relies on are measured here: creation order is what tilts
+   * grep's traversal order, and size is what orders the candidates.
+   */
+  function stubWorkerEntryChunk(): string {
+    const dir = path.join(coreDistDir, "worker");
+    mkdirSync(dir, { recursive: true });
+    // Importing it leaves a mark BEFORE it fails, so the assertion can be that
+    // it was never imported at all — not merely that the run recovered from
+    // importing it. On a box the cost of touching it is the 30 s the block's own
+    // timeout takes to kill a blocked worker, which no assertion about the
+    // outcome would show.
+    const marker = path.join(dir, "imported");
+    writeFileSync(
+      path.join(dir, "worker.mjs"),
+      `// ${"padding so this entry point is far larger than the chunk. ".repeat(4000)}
+import { writeFileSync as mark } from "node:fs";
+mark(${JSON.stringify(marker)}, "imported\\n");
+function applyLegacyDoctorMigrations(raw, context, options) {
+  return { next: null, changes: [] };
+}
+throw new Error("worker launch descriptor is required on stdin");
+`,
+    );
+    return marker;
   }
 
   /** An `openclaw` that judges the FILE it is pointed at, like the real one. */
@@ -909,6 +948,103 @@ exit 0
     delete fixed.messages.tts.voiceId;
     writeFileSync(configPath, JSON.stringify(fixed, null, 2));
     expect(run().stderr).not.toContain("after the core's own migrations these remain");
+  });
+
+  it("reads the migration table out of a bundle whose chunks are .mjs", () => {
+    // TASK-788, measured on the published 2026.9.3 tarball: that dist is 275
+    // `*.js` and 5,380 `*.mjs`, and `applyLegacyDoctorMigrations` is declared
+    // only in a `.mjs` chunk (0 `.js` hits). A discovery grep restricted to
+    // `*.js` therefore finds nothing on the new core, and this arm takes its
+    // fail-closed branch on every boot of every box — the diagnosis stops
+    // being produced without anything failing. Which extension a bundler
+    // picks for a chunk is its business; the declaration text is what this
+    // looks for, so both extensions have to be in the search.
+    rmSync(coreDistDir, { recursive: true, force: true });
+    stubCoreMigrationChunk("legacy-pGW3ZP3t.mjs");
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("after the core's own migrations these remain");
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(r.stderr).not.toContain("migration table could not be read");
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("picks the chunk that EXPORTS the table, not the first file grep emits", () => {
+    // The two-candidate layout both real cores have. Which of them `grep -rl`
+    // emits first is inode and readdir order — any reinstall, rsync, image copy
+    // or restore can change it — so a first-hit pick is a coin toss between the
+    // answer and a 30 s timeout on an entry point, on the core every box runs
+    // today as much as on the new one. Here the hazard is stacked in its
+    // favour: created first, far larger, and it throws when imported.
+    rmSync(coreDistDir, { recursive: true, force: true });
+    const workerImported = stubWorkerEntryChunk();
+    stubCoreMigrationChunk("legacy-pGW3ZP3t.mjs");
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("after the core's own migrations these remain");
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(r.stderr).not.toContain("migration table could not be");
+    // …and the entry point was never imported, which is the half a correct
+    // answer alone would not prove: on a box that import is the 30 s this arm
+    // is allowed before it is killed, paid on every restart of an exit-78 loop.
+    expect(existsSync(workerImported)).toBe(false);
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("never imports a file the allow-list excludes, however small it is", () => {
+    // Why the search is an allow-list of module extensions and not every file
+    // under `dist/`. Three decoys carrying the same declaration text, all
+    // smaller than the chunk so size ordering would reach them first: the two
+    // realistic ones are a declaration file and a source map, which carry it as
+    // DATA; the third is a CommonJS module that would be imported happily and
+    // answer WRONGLY — it reports migrations that changed nothing, which is this
+    // arm's wordless stand-down — and it is there so this case can fail. With
+    // the `--include` flags dropped it does: no remainder is printed at all.
+    writeFileSync(
+      path.join(coreDistDir, "legacy-decoy.d.ts"),
+      "declare function applyLegacyDoctorMigrations(raw: unknown): unknown;\n",
+    );
+    writeFileSync(
+      path.join(coreDistDir, "legacy-pGW3ZP3t.js.map"),
+      JSON.stringify({ version: 3, sources: ["legacy.ts"], sourcesContent: ["function applyLegacyDoctorMigrations(raw) {}"] }),
+    );
+    writeFileSync(
+      path.join(coreDistDir, "legacy-decoy.cjs"),
+      "exports.applyLegacyDoctorMigrations = function applyLegacyDoctorMigrations(raw) { return { next: null, changes: [] }; };\n",
+    );
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("after the core's own migrations these remain");
+    expect(r.stderr).toContain('tts: Unrecognized key: "voiceId"');
+    expect(previewFiles()).toEqual([]);
+  });
+
+  it("says WHY the table could not be run, naming the candidate it tried", () => {
+    // The block's own rule, applied to the one path that used to be silent: a
+    // chunk found and not runnable looked exactly like a box with nothing to
+    // report. Every future core that moves the declaration into a file that
+    // does not export it lands here, and the log has to say so.
+    rmSync(coreDistDir, { recursive: true, force: true });
+    mkdirSync(coreDistDir, { recursive: true });
+    writeFileSync(
+      path.join(coreDistDir, "legacy-pGW3ZP3t.mjs"),
+      "function applyLegacyDoctorMigrations(raw) { return { next: null, changes: [] }; }\nexport const other = 1;\n",
+    );
+    withRealApproval();
+
+    const r = run();
+
+    expect(r.stderr).toContain("the installed core's own migration table could not be run");
+    expect(r.stderr).toContain("exports no applyLegacyDoctorMigrations");
+    expect(r.stderr).toContain("legacy-pGW3ZP3t.mjs");
+    expect(r.stderr).not.toContain("after the core's own migrations these remain");
+    expect(previewFiles()).toEqual([]);
   });
 
   it("says nothing about a remainder when the core's own table cannot be read", () => {

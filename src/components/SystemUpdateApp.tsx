@@ -5,7 +5,7 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { useBuildIdentity } from "@/components/BuildIdentityPanel";
-import type { StepStatus, UpdateState } from "@/lib/updater";
+import type { RemoteReachability, StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
@@ -13,7 +13,13 @@ import { cleanVersion } from "@/lib/version-utils";
 export interface ComponentVersion {
   current: string | null;
   target: string | null;
-  updateAvailable?: boolean;
+  /**
+   * `null` where the device could not look — see `remote` below. It resolves
+   * through `componentNeedsUpdate`, which falls back to the version comparison
+   * for both null and absent, so nothing here changes behaviour on its own:
+   * `remote.reachable === false` is what the screen renders the unknown from.
+   */
+  updateAvailable?: boolean | null;
 }
 
 export interface VersionInfo {
@@ -25,12 +31,13 @@ export interface VersionInfo {
   hermes?: ComponentVersion;
   edition?: "openclaw" | "hermes" | "dual";
   /**
-   * Whether the device actually reached its update remote. Optional for the
-   * same reason as the two above — a payload from a server that predates the
+   * Whether the device actually reached its update remote — the producer's own
+   * type, so a field added there (`cause`) cannot be missed here. Optional for
+   * the same reason as the two above: a payload from a server that predates the
    * field must keep rendering exactly as it did, so ABSENT means "not known",
    * never "unreachable".
    */
-  remote?: { reachable: boolean; refusedAnonymously?: boolean; reason?: string };
+  remote?: RemoteReachability;
 }
 
 /**
@@ -92,7 +99,7 @@ function isUpdateAvailable(current: string | null | undefined, target: string | 
   return compareSemver(target, current) > 0;
 }
 
-export function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean }): boolean {
+export function componentNeedsUpdate(component: { current: string | null; target: string | null; updateAvailable?: boolean | null }): boolean {
   return component.updateAvailable ?? isUpdateAvailable(component.current, component.target);
 }
 
@@ -427,7 +434,13 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       case "fetch-error":
         return {
           icon: "cloud_off", iconClass: "text-amber-300",
-          headline: tr("update.heroUnreachable", "Couldn't reach the update server"),
+          // Two headlines, because the device now reports two kinds of failure
+          // and "couldn't reach the update server" sends the owner to the
+          // router for a box whose `origin` is a file on its own disk. The
+          // reason below names the actual one either way.
+          headline: versions?.remote?.cause === "device"
+            ? tr("update.heroCouldNotCheck", "Couldn't check for updates")
+            : tr("update.heroUnreachable", "Couldn't reach the update server"),
           subhead: versionsError
             ?? versions?.remote?.reason
             ?? tr("update.heroUnreachableSub", "Check the device's internet connection and try again."),

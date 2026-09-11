@@ -452,8 +452,8 @@ describe("the index knows what it was built for", () => {
     // identity with no rows behind it is not evidence of anything: reported
     // `valid` it reaches the shared parser as `healthy` with zero chunks — a
     // green panel over a search that finds nothing — and a rebuild whose first
-    // embed failed leaves exactly the same shape. The OpenClaw arm says
-    // `missing` at that point, and it is also what makes the next pass rebuild.
+    // embed failed leaves exactly the same shape. No pass has recorded a scan
+    // here, so nothing yet says the folders are empty.
     await stampLocalEmbeddingIdentity();
     const status = await localMemoryStatusJson() as {
       status: { custom: { indexIdentity: { status: string } }; files: number; chunks: number };
@@ -479,6 +479,99 @@ describe("the index knows what it was built for", () => {
     };
     expect(status.status.chunks).toBe(0);
     expect(status.status.custom.indexIdentity.status).toBe("missing");
+  });
+
+  it("calls an index a finished pass found NOTHING to fill valid, not missing", async () => {
+    // The Memory Shard card on a box whose folders hold no memory file yet said
+    // "Memory index ON … Needs attention — the index fingerprint is missing. Run
+    // a full reindex", four hours after a full reindex that had succeeded in
+    // 19 ms. The remedy it named could not work: another full pass scans the
+    // same zero files and leaves the same zero chunks, so the banner came back
+    // unchanged every time. Zero chunks is TWO states and the pass that ended
+    // wrote down which one this is — an index that is empty because there was
+    // nothing to put in it is correct and up to date.
+    await runLocalIndexPass("full");
+    const row = await localMemoryStatusJson() as {
+      scan: { totalFiles: number };
+      status: { files: number; chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    expect(row.scan.totalFiles).toBe(0);
+    expect(row.status.files).toBe(0);
+    expect(row.status.chunks).toBe(0);
+    expect(row.status.custom.indexIdentity.status).toBe("valid");
+  });
+
+  it("keeps MISSING when the pass DID scan files and the index came out empty", async () => {
+    // The other empty, and the one the zero-chunk rule exists for: there were
+    // documents to index and none of them made it in. The reindex the panel
+    // offers is the right advice there, so it has to stay.
+    write("blank.md", "   \n\n  ");
+    write("also-blank.md", "\t\n");
+    const result = await runLocalIndexPass("full");
+    expect(result.chunks).toBe(0);
+    const row = await localMemoryStatusJson() as {
+      scan: { totalFiles: number };
+      status: { custom: { indexIdentity: { status: string } } };
+    };
+    expect(row.scan.totalFiles).toBe(2);
+    expect(row.status.custom.indexIdentity.status).toBe("missing");
+  });
+
+  it("still calls it empty when a registered folder is not there any more", async () => {
+    // The state the captured OpenClaw payload is in — its memory directory does
+    // not exist and it reports `valid` with no failed items. A folder that
+    // cannot be opened IS a fault, but it is not a fault of the fingerprint and
+    // no reindex can clear it, so it must not come back as "run a full
+    // reindex"; the pass counts it where the card has a Failed tile.
+    fs.rmSync(source, { recursive: true, force: true });
+    const result = await runLocalIndexPass("full");
+    const row = await localMemoryStatusJson() as {
+      status: { chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    expect(result.failures).toBeGreaterThan(0);
+    expect(row.status.chunks).toBe(0);
+    expect(row.status.custom.indexIdentity.status).toBe("valid");
+  });
+
+  it("stops calling it up to date once the owner adds a folder the pass never saw", async () => {
+    // "There is nothing to index" is a claim about NOW, and the count behind it
+    // is one a finished pass wrote down. Adding a folder starts no pass and the
+    // schedule is off until the owner arms it, so trusting that count would
+    // leave a folder of documents reading as healthy and empty indefinitely.
+    await runLocalIndexPass("full");
+    const added = fs.mkdtempSync(path.join(os.tmpdir(), "memory-index-added-"));
+    try {
+      fs.writeFileSync(path.join(added, "lease.md"), "The deposit is two months' rent.");
+      await writeLocalSources([source, added]);
+      const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+      expect(status.status.custom.indexIdentity.status).toBe("missing");
+    } finally {
+      fs.rmSync(added, { recursive: true, force: true });
+    }
+  });
+
+  it("counts a document it could not convert instead of reporting nothing to index", async () => {
+    // A PDF the converter refuses never becomes an indexable file, so the walk
+    // is complete, the index is empty and — counted nowhere — the card said
+    // "Nothing to index yet" over a document the box could not read. The
+    // extractor's own notes are dropped here, so the pass is the only place
+    // that can carry it: once as a failure, and once as work this pass had to
+    // account for and did not, which is what keeps the empty index from calling
+    // itself up to date.
+    write("scan.pdf", "this is not a PDF");
+    const result = await runLocalIndexPass("full");
+    expect(result.failures).toBe(1);
+    const row = await localMemoryStatusJson() as {
+      scan: { totalFiles: number };
+      status: { files: number; chunks: number; batch: { failures: number }; custom: { indexIdentity: { status: string } } };
+    };
+    expect(row.status.batch.failures).toBe(1);
+    // `pendingFiles` on the card is totalFiles - files, so this is PENDING 1,
+    // which is what takes "Nothing to index yet" off the panel.
+    expect(row.scan.totalFiles).toBe(1);
+    expect(row.status.files).toBe(0);
+    expect(row.status.chunks).toBe(0);
+    expect(row.status.custom.indexIdentity.status).toBe("missing");
   });
 });
 
