@@ -142,6 +142,18 @@ function storedMtime(file: string): number {
   }
 }
 
+/** Write one `meta` row, the way the identity tests below rewrite `identity`. */
+async function setMeta(key: string, value: string): Promise<void> {
+  const { openSqlite } = await import("@/lib/openclaw-session-store");
+  const db = openSqlite(LOCAL_INDEX_PATH, false);
+  try {
+    db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(key, value);
+  } finally {
+    db.close();
+  }
+}
+
 /** Move a file's mtime forward, since two writes in one millisecond do not. */
 function touchLater(file: string): void {
   const when = new Date(Date.now() + 5_000);
@@ -452,8 +464,9 @@ describe("the index knows what it was built for", () => {
     // identity with no rows behind it is not evidence of anything: reported
     // `valid` it reaches the shared parser as `healthy` with zero chunks — a
     // green panel over a search that finds nothing — and a rebuild whose first
-    // embed failed leaves exactly the same shape. The OpenClaw arm says
-    // `missing` at that point, and it is also what makes the next pass rebuild.
+    // embed failed leaves exactly the same shape. No pass has recorded a scan
+    // here, so nothing yet says the folders are empty; it is also what makes
+    // the next pass rebuild.
     await stampLocalEmbeddingIdentity();
     const status = await localMemoryStatusJson() as {
       status: { custom: { indexIdentity: { status: string } }; files: number; chunks: number };
@@ -478,6 +491,46 @@ describe("the index knows what it was built for", () => {
       status: { chunks: number; custom: { indexIdentity: { status: string } } };
     };
     expect(status.status.chunks).toBe(0);
+    expect(status.status.custom.indexIdentity.status).toBe("missing");
+  });
+
+  it("calls an index a finished pass found NOTHING to fill valid, not missing", async () => {
+    // The Memory Shard card on a box whose folders hold no memory file yet said
+    // "Memory index ON … Needs attention — the index fingerprint is missing. Run
+    // a full reindex", four hours after a full reindex that had succeeded in
+    // 19 ms. The remedy it named could not work: another full pass scans the
+    // same zero files and leaves the same zero chunks, so the banner came back
+    // unchanged every time. Zero chunks is TWO states and the pass that ended
+    // wrote down which one this is — an index that is empty because there was
+    // nothing to put in it is correct and up to date.
+    await runLocalIndexPass("full");
+    const row = await localMemoryStatusJson() as {
+      scan: { totalFiles: number };
+      status: { files: number; chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    expect(row.scan.totalFiles).toBe(0);
+    expect(row.status.files).toBe(0);
+    expect(row.status.chunks).toBe(0);
+    expect(row.status.custom.indexIdentity.status).toBe("valid");
+  });
+
+  it("keeps MISSING when the pass DID scan files and the index came out empty", async () => {
+    // The other empty, and the one the zero-chunk rule exists for: there were
+    // documents to index and none of them made it in. The reindex the panel
+    // offers is the right advice there, so it has to stay.
+    await runLocalIndexPass("full");
+    await setMeta("scan_total_files", "3");
+    const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+    expect(status.status.custom.indexIdentity.status).toBe("missing");
+  });
+
+  it("keeps MISSING when a source folder could not be read", async () => {
+    // Zero files scanned because the WALK failed is not "nothing to index":
+    // called valid it would be a green panel over an index that is empty
+    // because the folder could not be opened.
+    await runLocalIndexPass("full");
+    await setMeta("failures", "1");
+    const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
     expect(status.status.custom.indexIdentity.status).toBe("missing");
   });
 });

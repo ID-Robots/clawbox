@@ -121,6 +121,25 @@ async function buildIndex(): Promise<void> {
   await local.runLocalIndexPass("full");
 }
 
+/** The stock box: folders registered, nothing in them yet, one finished pass. */
+async function buildEmptyIndex(): Promise<void> {
+  const local = await import("@/lib/memory-index-local");
+  await local.writeLocalSources([source]);
+  await local.runLocalIndexPass("full");
+}
+
+/** A run record the status parser can be handed directly. */
+const IDLE_RUN = {
+  status: "idle" as const,
+  mode: "" as const,
+  trigger: "" as const,
+  startedAtMs: 0,
+  finishedAtMs: 0,
+  durationMs: 0,
+  error: "",
+  errorCode: "" as const,
+};
+
 
 /** Every value `MemoryStatusErrorCode` allows, which is every value a locale
  *  pack words. A status carrying anything else is English on a German desktop. */
@@ -177,6 +196,49 @@ describe("what ClawBox's own index tells the shared parser", () => {
     const status = await (await lib()).getMemoryStatus();
     expect(MEMORY_STATUS_CODES).toContain(status.errorCode);
     expect(status.errorCode).toBe("index_identity_missing");
+  });
+
+  it("draws no attention badge and no remedy on a box with nothing to index", async () => {
+    // What the card showed on the box: "Memory index ON … Needs attention — the
+    // index fingerprint is missing. Run a full reindex" over FILES 0 · CHUNKS 0
+    // and, underneath, the honest "Nothing to index yet". Three statements, two
+    // of them contradicting the third, and the remedy was the full reindex that
+    // had already run by hand four hours earlier and finished in 19 ms.
+    await buildEmptyIndex();
+    const { getMemoryStatus, invalidateMemoryStatusCache } = await lib();
+    invalidateMemoryStatusCache();
+    const status = await getMemoryStatus();
+    expect(status.files).toBe(0);
+    expect(status.chunks).toBe(0);
+    expect(status.indexIdentity).toBe("valid");
+    expect(status.health).toBe("healthy");
+    expect(status.errorCode).toBe("");
+    expect(status.error).toBe("");
+  });
+
+  it("says about an empty index exactly what the captured OpenClaw box says", async () => {
+    // The parity this arm exists for, on the one state every new box is in. The
+    // fixture is `openclaw memory status --agent main --deep --json` taken from
+    // a real OpenClaw box that had never written a memory file: zero files, zero
+    // chunks, a scan that found nothing — and `indexIdentity: valid`. So the
+    // OpenClaw edition has always shown that box as healthy, and the nag was
+    // this arm's alone. Both editions draw the same card, so they cannot be
+    // allowed to disagree about it.
+    const real = JSON.parse(
+      await fsp.readFile(new URL("../fixtures/openclaw-memory-status.json", import.meta.url), "utf8"),
+    ) as Array<{ scan: { totalFiles: number }; status: { custom: { indexIdentity: { status: string } } } }>;
+    expect(real[0].scan.totalFiles).toBe(0);
+    expect(real[0].status.custom.indexIdentity.status).toBe("valid");
+
+    const { getMemoryStatus, invalidateMemoryStatusCache, parseMemoryStatus, DEFAULT_MEMORY_SCHEDULE } = await lib();
+    const openclaw = await parseMemoryStatus(real, IDLE_RUN, DEFAULT_MEMORY_SCHEDULE);
+    await buildEmptyIndex();
+    invalidateMemoryStatusCache();
+    const hermes = await getMemoryStatus();
+    expect(hermes.indexIdentity).toBe(openclaw.indexIdentity);
+    expect(hermes.health).toBe(openclaw.health);
+    expect(hermes.errorCode).toBe(openclaw.errorCode);
+    expect(hermes.error).toBe(openclaw.error);
   });
 
   it("draws the existing amber banner when the embedder it was built for changed", async () => {

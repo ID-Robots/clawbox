@@ -370,13 +370,29 @@ function identityOf(db: IndexDb): "valid" | "missing" | "mismatched" {
   const stored = metaGet(db, "identity");
   if (!stored) return "missing";
   if (stored !== localEmbeddingIdentity()) return "mismatched";
-  // An identity over an EMPTY index is not evidence of anything: the wizard
-  // stamps one before the first pass, and a rebuild whose first embed failed
-  // leaves exactly the same shape. Reported `valid`, the shared parser reads
-  // both as `healthy` — a green panel over a search that finds nothing. The
-  // OpenClaw arm says `missing` at that point and so does this one, which is
-  // also what gets the next pass to rebuild rather than to do nothing.
-  return countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0 ? "valid" : "missing";
+  if (countOf(db, "SELECT COUNT(*) AS n FROM chunks") > 0) return "valid";
+  // ZERO CHUNKS IS TWO DIFFERENT STATES, and only one of them is wrong. An
+  // index emptied by a rebuild whose first embed failed must not read `valid`,
+  // which the shared parser calls `healthy` — a green panel over a search that
+  // finds nothing. But on a box whose folders hold no memory file yet, empty is
+  // the FINISHED state, and reporting `missing` there put a permanent "Needs
+  // attention — the index fingerprint is missing. Run a full reindex" on it:
+  // the reindex scans the same zero files and leaves the same zero chunks, so
+  // the remedy the card named could never clear the banner. A real OpenClaw box
+  // in that state reports `valid` (the captured payload in
+  // `src/tests/fixtures/openclaw-memory-status.json`), so this arm was the only
+  // one of the two nagging, on a card both editions draw.
+  //
+  // The pass that ended wrote down which empty this is, in the same transaction
+  // as the identity: how many documents it found, and how many folders it could
+  // not look inside. Nothing found and nothing refused is an index that is
+  // empty and up to date. Files found with no chunks to show for them, a walk
+  // that failed, or no recorded scan at all — the wizard's stamp before the
+  // first pass, an index older than these rows — stay `missing`, which is also
+  // what gets the next pass to rebuild.
+  const scanned = metaGet(db, "scan_total_files");
+  const refused = Number(metaGet(db, "failures") ?? 0);
+  return scanned !== null && Number(scanned) === 0 && refused === 0 ? "valid" : "missing";
 }
 
 // ─── embedding ───────────────────────────────────────────────────────────────
@@ -1053,9 +1069,11 @@ export async function localMemoryStatusJson(): Promise<unknown> {
         batch: { failures: db ? Number(metaGet(db, "failures") ?? 0) : 0 },
         custom: {
           providerState: { mode: ready ? "active" : "degraded" },
-          // No store at all is the same answer as a store with nothing in it:
-          // the wizard stamps an identity before the first pass, and until
-          // something has been built "missing" is what the OpenClaw box says.
+          // No store at all is not the same answer as a store a pass has
+          // finished with: nothing here has ever been looked at, the state the
+          // wizard's own stamp leaves too. `identityOf` is what tells an index
+          // that is empty because there was nothing to index from one that is
+          // empty because the work did not happen.
           indexIdentity: { status: db ? identityOf(db) : "missing" },
         },
       },
