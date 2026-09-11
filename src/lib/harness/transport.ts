@@ -486,7 +486,7 @@ export interface HarnessAdapter {
    * `reasoningScope` is `'per-turn'` puts the level on the `TurnRequest`
    * instead — see `shouldPatchSessionDefaults` in ./capabilities.
    */
-  patchSessionDefaults(patch: { thinkingLevel?: string | null }): Promise<void>;
+  patchSessionDefaults(patch: { thinkingLevel?: string | null; model?: string | null }): Promise<void>;
 
   /**
    * Draw one picture and answer with what to render it from.

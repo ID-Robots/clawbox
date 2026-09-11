@@ -419,11 +419,12 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     return projectGatewayHistory(msgs, spokenPayload, { imageWaitFrom: options?.imageWaitFrom });
   }
 
-  async patchSessionDefaults(patch: { thinkingLevel?: string | null }): Promise<void> {
+  async patchSessionDefaults(patch: { thinkingLevel?: string | null; model?: string | null }): Promise<void> {
     try {
       await this.link.request("sessions.patch", {
         key: this.link.sessionKey(),
         thinkingLevel: patch.thinkingLevel,
+        ...(patch.model !== undefined ? { model: patch.model } : {}),
       });
     } catch (err) {
       throw gatewayError(err);

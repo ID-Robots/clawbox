@@ -1184,6 +1184,8 @@ export interface OpenClawConfig {
       // TASK-755 and none of them was measured, so widening the type would only
       // scatter narrowing over code this card did not test. Its own card.
       model?: { primary?: string; fallbacks?: string[] };
+      /** OpenClaw 2's explicit model restrictions, independent of the primary. */
+      modelPolicy?: { allow?: string[]; [key: string]: unknown };
       // Which model the `image_generate` tool draws with. Same shape as
       // `model`, entirely separate key — and distinct again from `imageModel`,
       // which selects the vision (image *understanding*) model.

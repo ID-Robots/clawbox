@@ -26,7 +26,7 @@ describe("the chat's model pill across a provider switch", () => {
   it("keeps its place while the new provider's models load", () => {
     // Not `models.length > 1` directly — that is false during the fetch and is
     // what made the pill vanish.
-    expect(CHAT).toMatch(/\{showModelPill && \(/);
+    expect(CHAT).toMatch(/\{hermesProvider !== 'clawai' && showModelPill && \(/);
     expect(CHAT).toMatch(/showModelPill = hermesModelsLoading \? hadModelPill\.current : hermesModelCount > 1/);
   });
 
@@ -41,7 +41,6 @@ describe("the chat's model pill across a provider switch", () => {
   });
 
   it("still hides the pill for a provider that really has one model", () => {
-    // ClawBox AI serves exactly one model per tier; a one-entry picker is noise.
     // hadModelPill is only updated once loading settles, so a single-model
     // provider never inherits the previous provider's pill permanently.
     expect(CHAT).toMatch(/if \(!hermesModelsLoading\) hadModelPill\.current = hermesModelCount > 1/);

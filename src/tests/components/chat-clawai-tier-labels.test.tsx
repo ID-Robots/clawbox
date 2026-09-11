@@ -1,17 +1,12 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { translations } from "@/lib/translations";
-import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 
-// The GERMAN table, deliberately. The defect was English words on a German
-// desktop — the chip said "Max Tier" while Settings said "Max-Tarif" (the UI
-// sweep of 2026-09-07) — and a test resolving against the English table would
-// pass with the literals still in place. One test swaps in an EMPTY table —
-// every key answered as itself, which is what `useT` does with no
-// I18nProvider above the component — to pin the English floor.
+// The model name is the same across locales. The switch overlay still follows
+// the desktop's language, with readable English when no dictionary answers.
 const dictionary = vi.hoisted(() => ({ table: null as Record<string, string> | null }));
 vi.mock("@/lib/i18n", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/i18n")>();
@@ -25,9 +20,8 @@ vi.mock("@/lib/i18n", async (importOriginal) => {
 const DE = translations.de;
 
 /**
- * The catalogue route's own rows for ClawBox AI — English words and all,
- * exactly as `CLAWAI_STATIC_MODELS` serves them. The picker has to translate
- * these itself: the route knows no locale.
+ * An older catalogue still advertises both tiers. Chat no longer fetches this
+ * list or offers either subscription tier as a model choice.
  */
 const CLAWAI_CATALOG = {
   provider: "clawai",
@@ -88,8 +82,9 @@ const REFUSED_STATUS = {
 
 type FetchCall = { url: string; init?: RequestInit };
 
-function installFetch(status: unknown) {
+function installFetch(status: unknown, initialModel = ON_PRO) {
   const calls: FetchCall[] = [];
+  let activeModel = initialModel;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -105,10 +100,10 @@ function installFetch(status: unknown) {
         return { ok: true, json: async () => status };
       }
       if (url.includes("/setup-api/chat/model")) {
-        // The boot guard's write lands the box on Flash; every read before it
-        // reports the Max model the box booted on.
-        if (init?.method === "POST") return { ok: true, json: async () => chatModelState(ON_FLASH) };
-        return { ok: true, json: async () => chatModelState(ON_PRO) };
+        if (init?.method === "POST") {
+          activeModel = (JSON.parse(String(init.body)) as { model: string }).model;
+        }
+        return { ok: true, json: async () => chatModelState(activeModel) };
       }
       if (url.includes("/setup-api/chat/history")) {
         return { ok: true, json: async () => ({ messages: [] }) };
@@ -157,51 +152,25 @@ afterEach(() => {
   dictionary.table = null;
 });
 
-/**
- * The halves of a transcript notice around its `[text](url)` link — the link
- * renders as its text, so the words on either side are what the body shows.
- */
-function aroundLink(notice: string): { before: string; after: string } {
-  return {
-    before: notice.slice(0, notice.indexOf("[")).trim(),
-    after: notice.slice(notice.indexOf(")") + 1).trim(),
-  };
-}
-
 describe("the chat composer's ClawBox AI model chip on a German desktop", () => {
-  it("names the active tier the way Settings does, not with the catalogue's English words", async () => {
-    installFetch(ENTITLED_STATUS);
+  it.each([ON_PRO, ON_FLASH])("shows Flash 4.1 without a tier picker for %s", async (model) => {
+    const calls = installFetch(ENTITLED_STATUS, model);
     render(<ChatPopup isOpen onClose={() => {}} />);
 
-    const trigger = await screen.findByRole("button", { name: /ClawBox AI-Modell/ });
-    await waitFor(() => expect(trigger.textContent).toContain(DE["ai.planNameMax"]));
-    expect(trigger.textContent).not.toContain("Max Tier");
-  });
-
-  it("draws both rows of the menu, label and hint, in the desktop's language", async () => {
-    installFetch(ENTITLED_STATUS);
-    render(<ChatPopup isOpen onClose={() => {}} />);
-
-    const trigger = await screen.findByRole("button", { name: /ClawBox AI-Modell/ });
-    await waitFor(() => expect(trigger.textContent).toContain(DE["ai.planNameMax"]));
-    fireEvent.click(trigger);
-    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
-
-    const rows = screen.getAllByRole("option").map((row) => ({
-      label: row.querySelector(".header-dropdown-option-label")?.textContent,
-      hint: row.querySelector(".header-dropdown-option-hint")?.textContent,
-    }));
-    expect(rows).toEqual([
-      { label: DE["ai.clawboxTierFlash"], hint: DE["ai.clawboxTierFlashHint"] },
-      { label: DE["ai.planNameMax"], hint: DE["ai.clawboxTierMaxHint"] },
-    ]);
+    const label = await screen.findByText("Flash 4.1");
+    expect(label.closest("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: /ClawBox AI-Modell/ })).toBeNull();
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(calls.filter((call) => call.url.includes("/setup-api/ai-models/catalog"))).toHaveLength(0);
     expect(document.body.textContent).not.toMatch(/Free\/Pro Tier|Max Tier|Max plan only/);
+    expect(document.body.textContent).not.toContain(DE["ai.planNameMax"]);
+    await waitFor(() => expect(modelWrites(calls)).toBe(model === ON_PRO ? 1 : 0));
   });
 });
 
 describe("the provider-switch overlay on a German desktop", () => {
   it("says what it is doing in the desktop's language", async () => {
-    // The boot guard's automatic drop to Flash raises the overlay, and with a
+    // The automatic switch to the Flash alias raises the overlay, and with a
     // socket that never answers it stays up — which is where the owner reads it.
     const calls = installFetch(REFUSED_STATUS);
     render(<ChatPopup isOpen onClose={() => {}} />);
@@ -232,61 +201,19 @@ describe("the provider-switch overlay on a German desktop", () => {
   });
 });
 
-describe("a pick of the Max row the portal refuses, on a German desktop", () => {
-  it("refuses in the desktop's language, naming the tier the row showed rather than its id", async () => {
+describe("the automatic switch to Flash on a German desktop", () => {
+  it("shows the current model without a Max subscription upsell", async () => {
     vi.stubGlobal("WebSocket", RefusedSocket);
     const calls = installFetch(REFUSED_STATUS);
     render(<ChatPopup isOpen onClose={() => {}} />);
-    // The boot guard has moved the box to Flash: the chip says so, and the
-    // Max row is now a pick rather than the active model.
     await waitFor(() => expect(modelWrites(calls)).toBe(1));
-    const trigger = await screen.findByRole("button", { name: /ClawBox AI-Modell/ });
-    await waitFor(() => expect(trigger.textContent).toContain(DE["ai.clawboxTierFlash"]));
-
-    fireEvent.click(trigger);
-    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
-    const maxRow = screen.getAllByRole("option").find(
-      (row) => row.querySelector(".header-dropdown-option-label")?.textContent === DE["ai.planNameMax"],
-    );
-    expect(maxRow).toBeTruthy();
-    fireEvent.click(maxRow!);
-
-    // The refusal as the catalogue words it, with the tier the row was drawn
-    // with in the {model} slot — never "deepseek-v4-pro", which the menu
-    // never showed — and no write, because the pick was refused HERE.
-    const { before, after } = aroundLink(
-      DE["chat.modelNeedsMax"].replaceAll("{model}", DE["ai.planNameMax"]).replaceAll("{url}", PORTAL_DASHBOARD_URL),
-    );
-    expect(before).toContain(DE["ai.planNameMax"]);
-    await waitFor(() => expect(document.body.textContent).toContain(before));
-    expect(document.body.textContent).toContain(after);
+    await screen.findByText("Flash 4.1");
+    const write = calls.find((call) => call.init?.method === "POST" && call.url.includes("/setup-api/chat/model"));
+    expect(JSON.parse(String(write?.init?.body))).toEqual({ model: ON_FLASH, automatic: true });
+    expect(screen.queryByRole("button", { name: /ClawBox AI-Modell/ })).toBeNull();
+    expect(document.body.textContent).not.toContain(DE["ai.planNameMax"]);
     expect(document.body.textContent).not.toContain("deepseek-v4-pro");
     expect(document.body.textContent).not.toMatch(/requires a Max subscription|Staying on the current model/);
     expect(modelWrites(calls)).toBe(1);
-  });
-});
-
-describe("the automatic drop to Flash on a German desktop", () => {
-  it("explains itself with the tiers' Settings names", async () => {
-    vi.stubGlobal("WebSocket", RefusedSocket);
-    const calls = installFetch(REFUSED_STATUS);
-    render(<ChatPopup isOpen onClose={() => {}} />);
-    await waitFor(() => expect(modelWrites(calls)).toBe(1));
-
-    // The sentence as the catalogue words it, with the tiers filled in; the
-    // portal link renders as its text, so the halves around it are what the
-    // transcript shows.
-    const { before, after } = aroundLink(
-      DE["chat.maxTierDowngraded"]
-        .replaceAll("{max}", DE["ai.planNameMax"])
-        .replaceAll("{flash}", DE["ai.clawboxTierFlash"])
-        .replaceAll("{url}", PORTAL_DASHBOARD_URL),
-    );
-    expect(before).toContain(DE["ai.planNameMax"]);
-    expect(after).toContain(DE["ai.clawboxTierFlash"]);
-
-    await waitFor(() => expect(document.body.textContent).toContain(before));
-    expect(document.body.textContent).toContain(after);
-    expect(document.body.textContent).not.toMatch(/Max Tier|Pro Tier/);
   });
 });
