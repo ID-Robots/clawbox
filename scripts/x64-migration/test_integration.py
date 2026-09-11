@@ -92,6 +92,7 @@ esac
         self.assertEqual((root/'applied').read_text(),'Europe/Sofia')
 
     def test_update_steps_deliver_coding_harness_from_mirror_as_owner(self):
+        """Both update phases use verified source even when the checkout differs."""
         for step in ['bootstrap_updater', 'post_update']:
             with self.subTest(step=step):
                 root,worker=self.fixture()
@@ -246,6 +247,7 @@ exit {code}
         self.assertFalse((root/'guard').exists())
 
     def test_changed_core_pin_is_refused_before_any_core_command(self):
+        """A refused migration must release maintenance and restore the gateway."""
         root,worker,_=self.core_fixture()
         (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
         result=self.run_worker(worker,'openclaw_install')
@@ -256,6 +258,7 @@ exit {code}
         self.assertIn('system-start',(root/'events').read_text())
 
     def rebuild_fixture(self,fail_at=None):
+        """Model dependency/build failures with an old UI and owner-state sentinels."""
         root,worker,_=self.core_fixture()
         (root/'.next/standalone').mkdir(parents=True)
         (root/'.next/BUILD_ID').write_text('old-build')
@@ -279,6 +282,7 @@ printf new-server > .next/standalone/server.js
         return root,worker
 
     def test_full_update_rebuild_failure_restores_ui_after_gateway_was_restored(self):
+        """A failed rebuild must retain the UI without stranding Telegram offline."""
         for failure in ['install','build']:
             with self.subTest(failure=failure):
                 root,worker=self.rebuild_fixture(failure)
@@ -299,6 +303,7 @@ printf new-server > .next/standalone/server.js
                 self.assertEqual((root/'data/owner-state').read_text(),'preserve sessions and configuration')
 
     def test_successful_ui_rebuild_restarts_only_ui_and_keeps_new_build(self):
+        """A successful desktop rebuild replaces assets without cycling the gateway."""
         root,worker=self.rebuild_fixture()
         result=self.run_worker(worker,'rebuild_reboot')
         self.assertEqual(result.returncode,0,result.stderr)

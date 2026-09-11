@@ -2394,9 +2394,11 @@ describe("updater", () => {
   describe("existing x64 desktop updates", () => {
     beforeEach(() => { mockX64Integration.mockReturnValue(true); });
 
+    /** Inspect the host commands requested by the real updater orchestration. */
     const commands = () => mockExecFile.mock.calls.map(([cmd, args]) =>
       `${cmd} ${(args as string[]).join(" ")}`,
     );
+    /** Keep generic migrations and outer maintenance out of the desktop path. */
     const expectNoApplianceMaintenance = () => {
       expect(commands().some((call) =>
         call.includes("clawbox-gateway-maintenance.sh")

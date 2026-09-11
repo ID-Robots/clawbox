@@ -12,7 +12,10 @@ HERE = Path(__file__).resolve().parent
 
 
 class CodingHarnessTest(unittest.TestCase):
+    """Run the shipped installer with an isolated home and vendor stand-ins."""
+
     def setUp(self):
+        """Prevent fixture runs from finding or replacing the host's CLIs."""
         self.tmp = tempfile.TemporaryDirectory(prefix='clawbox-x64-coding-')
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
@@ -34,16 +37,19 @@ class CodingHarnessTest(unittest.TestCase):
         self.write_bin('curl', '#!/bin/sh\necho unexpected-download >&2\nexit 99\n')
 
     def write_bin(self, name, source):
+        """Place an executable stand-in on this fixture's private PATH."""
         p = self.bin / name
         p.write_text(source)
         p.chmod(0o755)
         return p
 
     def install(self, wrapper=None):
+        """Capture a bounded installer run without inheriting host settings."""
         return subprocess.run(['/bin/bash', str(self.installer), str(wrapper or HERE.parent / 'claude-ds'), str(self.project)],
                               env={'HOME': str(self.home), 'PATH': '/usr/bin:/bin'}, capture_output=True, text=True, timeout=10)
 
     def test_existing_cli_and_codex_preserved_wrapper_runs_with_desktop_default(self):
+        """Exercise an interactive wrapper launch from a path needing quoting."""
         claude = self.write_bin('claude', '#!/bin/sh\nprintf "%s" "$ANTHROPIC_AUTH_TOKEN" > "$HOME/claude-token"\n')
         codex = self.write_bin('codex', '#!/bin/sh\nexit 17\n')
         before = (claude.read_bytes(), codex.read_bytes())
@@ -60,6 +66,7 @@ class CodingHarnessTest(unittest.TestCase):
         self.assertEqual((self.home / 'claude-token').read_text(), 'fixture-token')
 
     def test_wrapper_symlink_is_replaced_without_modifying_its_target(self):
+        """An old launcher link must not redirect the installer's write."""
         self.write_bin('claude', '#!/bin/sh\nexit 0\n')
         outside = self.home / 'old-wrapper'
         outside.write_text('preserve')
@@ -70,6 +77,7 @@ class CodingHarnessTest(unittest.TestCase):
         self.assertEqual(outside.read_text(), 'preserve')
 
     def fake_download(self, body, status=0, valid_checksum=True):
+        """Substitute a vendor payload while enforcing the HTTPS curl contract."""
         payload = self.home / 'vendor.sh'
         payload.write_text(body)
         # The real helper has no environment override for the trusted digest.
@@ -85,6 +93,7 @@ cp "$HOME/vendor.sh" "$3"
 ''' + f'exit {status}\n')
 
     def test_missing_cli_installed_as_owner_from_https_then_verified(self):
+        """Require the pinned native install command to produce a usable CLI."""
         self.fake_download('#!/bin/sh\ntest "$1 $2" = "install 2.1.268" || exit 96\nmkdir -p "$HOME/.local/bin"\nprintf "#!/bin/sh\\nexit 0\\n" > "$HOME/.local/bin/claude"\nchmod 755 "$HOME/.local/bin/claude"\n')
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -92,6 +101,7 @@ cp "$HOME/vendor.sh" "$3"
         self.assertTrue(os.access(self.bin / 'claude-ds', os.X_OK))
 
     def test_download_failure_invalid_response_and_missing_cli_fail_explicitly(self):
+        """Failures at each installation stage must propagate to the updater."""
         cases = [('exit 0\n', 22), ('', 0), ('<html>region blocked</html>', 0),
                  ('unavailable in region', 0), ('exit 41\n', 0), ('exit 0\n', 0)]
         for body, status in cases:
@@ -102,6 +112,7 @@ cp "$HOME/vendor.sh" "$3"
                 self.assertFalse((self.bin / 'claude-ds').exists())
 
     def test_checksum_mismatch_never_executes_payload_and_cleans_download(self):
+        """Prove that the digest gate precedes execution and leaves no download."""
         self.fake_download('#!/bin/sh\ntouch "$HOME/payload-executed"\n', valid_checksum=False)
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
@@ -111,6 +122,7 @@ cp "$HOME/vendor.sh" "$3"
         self.assertEqual(list((self.home / '.cache/clawbox').iterdir()), [])
 
     def test_missing_or_changed_wrapper_fails_without_replacing_old_wrapper(self):
+        """Retain the last wrapper if verified source cannot produce its replacement."""
         self.write_bin('claude', '#!/bin/sh\nexit 0\n')
         old = self.write_bin('claude-ds', '#!/bin/sh\nexit 17\n')
         source = self.home / 'wrapper-source'
@@ -121,6 +133,7 @@ cp "$HOME/vendor.sh" "$3"
             self.assertEqual(old.read_text(), '#!/bin/sh\nexit 17\n')
 
     def test_root_invocation_is_refused_before_home_writes(self):
+        """A caller must drop privileges before entering the owner installer."""
         source = (HERE / 'install-coding-harness.sh').read_text()
         self.installer.write_text(source.replace('$(/usr/bin/id -u)', '0'))
         result = self.install()

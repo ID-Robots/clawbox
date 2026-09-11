@@ -33,6 +33,7 @@ def replace_once(text, old, new):
 
 
 def build(args):
+    """Stage reviewed source and host adapters in an inspectable root-owned deb."""
     account = pwd.getpwnam(args.user)
     for value in [args.user, args.project, args.node_dir, args.npm_prefix, account.pw_dir]:
         if not re.fullmatch(r'[A-Za-z0-9_./-]+', value) or '..' in value:

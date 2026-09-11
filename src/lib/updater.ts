@@ -3076,6 +3076,7 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
   });
 }
 
+/** Recover gateway readiness using the installed desktop or appliance contract. */
 async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
   if (hasX64DesktopIntegration(PROJECT_DIR)) {
     // The desktop package restores its existing user gateway before its core
@@ -4358,6 +4359,7 @@ async function checkInternet(): Promise<boolean> {
   return false;
 }
 
+/** Execute or resume update steps, recording failure and respecting host maintenance ownership. */
 async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): Promise<void> {
   // The root-owned desktop adapter serializes its own core writers and
   // restores the gateway on both outcomes. An outer appliance guard made it
