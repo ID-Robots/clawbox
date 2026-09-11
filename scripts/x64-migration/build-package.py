@@ -156,7 +156,9 @@ Description: Host integration for this existing ClawBox x64 desktop
 ''')
     write(root,'/DEBIAN/postinst',f'''#!/bin/sh
 set -eu
+{(HERE/'ensure-ollama-home.sh').read_text()}
 if [ "$1" = configure ]; then
+  ensure_ollama_home
   /usr/sbin/visudo -cf /etc/sudoers.d/clawbox-x64-integration
   install -d -o root -g root -m 0755 /var/lib/clawbox /etc/clawbox
   {lib}clawbox-root-manifest.sh --write

@@ -229,5 +229,79 @@ exit {code}
         condition=(self.stage/'etc/systemd/user/openclaw-gateway.service.d/90-clawbox-maintenance.conf').read_text()
         self.assertIn('ConditionPathExists=!/run/clawbox-gateway-maintenance',condition)
 
+    def ollama_home_fixture(self,mode):
+        temp=tempfile.TemporaryDirectory(prefix='ollama-home-',dir=self.base)
+        self.addCleanup(temp.cleanup)
+        root=Path(temp.name)
+        home=root/'ollama'
+        getent=root/'getent'
+        getent.write_text(f'#!/bin/sh\nprintf "ollama:x:{os.getuid()}:{os.getgid()}::{home}:/bin/false\\n"\n')
+        getent.chmod(0o755)
+        identity=root/'id'
+        identity.write_text(f'#!/bin/sh\ncase "$1" in -u) echo {os.getuid()} ;; -g) echo {os.getgid()} ;; *) exit 64 ;; esac\n')
+        identity.chmod(0o755)
+        install=root/'install'
+        install.write_text(f'''#!/bin/sh
+test "$1 $2 $3 $4 $5 $6 $7" = '-d -o ollama -g ollama -m 0755' || exit 64
+printf 'created\\n' > '{root}/installed'
+exec /usr/bin/install -d -m 0755 "$8"
+''')
+        install.chmod(0o755)
+        source=(HERE/'ensure-ollama-home.sh').read_text()
+        source=source.replace('/usr/share/ollama',str(home))
+        source=source.replace('/usr/bin/getent',str(getent)).replace('/usr/bin/id',str(identity)).replace('/usr/bin/install',str(install))
+        if mode=='existing':
+            home.mkdir(mode=0o700)
+            (home/'model-sentinel').write_text('preserve this model')
+        elif mode=='symlink':
+            (root/'outside').mkdir()
+            home.symlink_to(root/'outside')
+        elif mode=='wrong-owner':
+            home.mkdir()
+            fake_stat=root/'stat'
+            fake_stat.write_text('#!/bin/sh\necho 999999:999999\n'); fake_stat.chmod(0o755)
+            source=source.replace('/usr/bin/stat',str(fake_stat))
+        worker=root/'postinst-home.sh'
+        worker.write_text('set -eu\n'+source+'\nensure_ollama_home\n')
+        return root,home,worker
+
+    def test_ollama_missing_home_created_with_requested_owner_and_mode(self):
+        root,home,worker=self.ollama_home_fixture('missing')
+        result=subprocess.run(['/bin/sh',str(worker)],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(home.is_dir())
+        self.assertEqual(home.stat().st_mode & 0o777,0o755)
+        self.assertTrue((root/'installed').exists())
+
+    def test_ollama_existing_home_preserves_contents_and_permissions(self):
+        root,home,worker=self.ollama_home_fixture('existing')
+        result=subprocess.run(['/bin/sh',str(worker)],capture_output=True,text=True,timeout=5)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual((home/'model-sentinel').read_text(),'preserve this model')
+        self.assertEqual(home.stat().st_mode & 0o777,0o700)
+        self.assertFalse((root/'installed').exists())
+
+    def test_ollama_symlink_and_wrong_owner_are_refused(self):
+        for kind in ['symlink','wrong-owner']:
+            with self.subTest(kind=kind):
+                root,home,worker=self.ollama_home_fixture(kind)
+                result=subprocess.run(['/bin/sh',str(worker)],capture_output=True,text=True,timeout=5)
+                self.assertNotEqual(result.returncode,0)
+                self.assertFalse((root/'installed').exists())
+                if kind=='symlink': self.assertTrue(home.is_symlink())
+
+    def test_ollama_missing_account_and_custom_home_are_untouched(self):
+        for kind in ['missing-account','custom-home']:
+            with self.subTest(kind=kind):
+                root,home,worker=self.ollama_home_fixture('missing')
+                getent=root/'getent'
+                if kind=='missing-account': getent.write_text('#!/bin/sh\nexit 2\n')
+                else: getent.write_text(getent.read_text().replace(str(home),str(root/'custom-home')))
+                result=subprocess.run(['/bin/sh',str(worker)],capture_output=True,text=True,timeout=5)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertFalse(home.exists())
+                self.assertFalse((root/'custom-home').exists())
+                self.assertFalse((root/'installed').exists())
+
 
 if __name__=='__main__': unittest.main()
