@@ -366,7 +366,18 @@ export async function stampLocalEmbeddingIdentity(): Promise<void> {
   }
 }
 
-function identityOf(db: IndexDb): "valid" | "missing" | "mismatched" {
+/**
+ * The folder list a pass covered, as one short row it can be compared against.
+ *
+ * Sorted, because the order the owner's list happens to be in is not part of
+ * what was looked at, and hashed because the alternative is every one of the
+ * owner's paths a second time in the store.
+ */
+function sourceListKey(sources: readonly string[]): string {
+  return crypto.createHash("sha256").update(JSON.stringify([...sources].sort())).digest("hex").slice(0, 16);
+}
+
+function identityOf(db: IndexDb, sources: readonly string[]): "valid" | "missing" | "mismatched" {
   const stored = metaGet(db, "identity");
   if (!stored) return "missing";
   if (stored !== localEmbeddingIdentity()) return "mismatched";
@@ -383,16 +394,27 @@ function identityOf(db: IndexDb): "valid" | "missing" | "mismatched" {
   // `src/tests/fixtures/openclaw-memory-status.json`), so this arm was the only
   // one of the two nagging, on a card both editions draw.
   //
-  // The pass that ended wrote down which empty this is, in the same transaction
-  // as the identity: how many documents it found, and how many folders it could
-  // not look inside. Nothing found and nothing refused is an index that is
-  // empty and up to date. Files found with no chunks to show for them, a walk
-  // that failed, or no recorded scan at all — the wizard's stamp before the
-  // first pass, an index older than these rows — stay `missing`, which is also
-  // what gets the next pass to rebuild.
+  // Three things have to hold before an empty index may call itself correct,
+  // and the pass that ended recorded the first two in the same transaction as
+  // the identity. A pass has to have LOOKED (no row at all is the wizard's
+  // stamp before the first pass, and an index older than these rows); it has to
+  // have found NOTHING, since files found with no chunks to show for them are
+  // work that did not happen; and what it looked at has to still be what the
+  // owner has registered — "there is nothing to index" is a claim about now,
+  // and a folder added after that pass makes it false. An index from before
+  // this row is trusted on that last point only when nothing is registered at
+  // all, which is the one configuration that cannot have gone stale under it.
+  //
+  // A folder the walk could not open is deliberately NOT part of this: it is a
+  // real fault, but the fault is the folder and not the fingerprint, a reindex
+  // cannot clear it, and the pass already counts it where the card has a
+  // "Failed" tile for it. `missing` is not what makes the next pass rebuild
+  // either — that is `resolveIndexMode`, on the chunk count.
   const scanned = metaGet(db, "scan_total_files");
-  const refused = Number(metaGet(db, "failures") ?? 0);
-  return scanned !== null && Number(scanned) === 0 && refused === 0 ? "valid" : "missing";
+  if (scanned === null || Number(scanned) !== 0) return "missing";
+  const covered = metaGet(db, "scan_sources");
+  const stillTrue = covered === null ? sources.length === 0 : covered === sourceListKey(sources);
+  return stillTrue ? "valid" : "missing";
 }
 
 // ─── embedding ───────────────────────────────────────────────────────────────
@@ -675,7 +697,7 @@ export async function runLocalIndexPass(
     const sources = await readLocalSources();
     const scan = await scanSources(sources, signal);
 
-    const identity = identityOf(db);
+    const identity = identityOf(db, sources);
     const schema = metaGet(db, "schema_version");
     const rebuild = mode === "full" || identity === "mismatched" || schema !== SCHEMA_VERSION;
     if (rebuild) {
@@ -691,7 +713,11 @@ export async function runLocalIndexPass(
     metaSet(db, "schema_version", SCHEMA_VERSION);
 
     let chunkCount = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
-    let failures = scan.unreadableSources.size;
+    // A document the extractor could not read is a failure of the same kind as
+    // a file this pass cannot open below, and it was counted nowhere: its notes
+    // are the extractor's own and are dropped here. Without it a folder of
+    // PDFs none of which convert is a silently empty index.
+    let failures = scan.unreadableSources.size + scan.unusableDocuments;
     let capped = false;
     let wrote = false;
 
@@ -892,6 +918,10 @@ export async function runLocalIndexPass(
       metaSet(db, "identity", localEmbeddingIdentity());
       metaSet(db, "built_at", String(Date.now()));
       metaSet(db, "scan_total_files", String(scan.files.length));
+      // WHICH folders that count is about. Without it, "the last pass found
+      // nothing" outlives the configuration it was true of, and a folder the
+      // owner added afterwards reads as nothing to index — see `identityOf`.
+      metaSet(db, "scan_sources", sourceListKey(sources));
       metaSet(db, "failures", String(failures));
       metaSet(db, "capped", capped ? "1" : "");
       // What the vector cache keys on. A file mtime cannot do this job under
@@ -941,6 +971,15 @@ interface ScanResult {
    * and only one of them means the documents are gone.
    */
   unreadableSources: Set<string>;
+  /**
+   * Documents the extractor could not turn into text — too large to read, gone
+   * mid-scan, or a conversion that failed. Per-DOCUMENT faults, so they are
+   * counted with the file failures the pass counts and not with the
+   * folder-level shortfall above, and nothing else on the box reports them: a
+   * folder of PDFs that every one of them refused to convert leaves an index
+   * that is empty, and it must not read as "there was nothing to index".
+   */
+  unusableDocuments: number;
 }
 
 /** Find everything there is to index, and be honest about what could not be looked at. */
@@ -948,6 +987,7 @@ async function scanSources(sources: readonly string[], signal: AbortSignal | und
   const files: PendingFile[] = [];
   const seen = new Set<string>();
   const unreadableSources = new Set<string>();
+  let unusableDocuments = 0;
 
   for (const source of sources) {
     throwIfAborted(signal);
@@ -963,6 +1003,7 @@ async function scanSources(sources: readonly string[], signal: AbortSignal | und
       const extraction = await extractDocuments(source, signal);
       origins = extraction.origins;
       derived = extraction.derived;
+      unusableDocuments += extraction.skipped;
       // The extractor's own notes are about a scan that fell short — a folder
       // it could not open, a budget it ran out of — so they carry the same
       // "do not delete from this source" meaning the walk below does.
@@ -996,7 +1037,7 @@ async function scanSources(sources: readonly string[], signal: AbortSignal | und
       }
     }
   }
-  return { files, seen, unreadableSources };
+  return { files, seen, unreadableSources, unusableDocuments };
 }
 
 function errorText(err: unknown): string {
@@ -1074,7 +1115,7 @@ export async function localMemoryStatusJson(): Promise<unknown> {
           // wizard's own stamp leaves too. `identityOf` is what tells an index
           // that is empty because there was nothing to index from one that is
           // empty because the work did not happen.
-          indexIdentity: { status: db ? identityOf(db) : "missing" },
+          indexIdentity: { status: db ? identityOf(db, sources) : "missing" },
         },
       },
     };

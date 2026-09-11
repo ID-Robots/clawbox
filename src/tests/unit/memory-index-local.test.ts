@@ -142,18 +142,6 @@ function storedMtime(file: string): number {
   }
 }
 
-/** Write one `meta` row, the way the identity tests below rewrite `identity`. */
-async function setMeta(key: string, value: string): Promise<void> {
-  const { openSqlite } = await import("@/lib/openclaw-session-store");
-  const db = openSqlite(LOCAL_INDEX_PATH, false);
-  try {
-    db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-      .run(key, value);
-  } finally {
-    db.close();
-  }
-}
-
 /** Move a file's mtime forward, since two writes in one millisecond do not. */
 function touchLater(file: string): void {
   const when = new Date(Date.now() + 5_000);
@@ -465,8 +453,7 @@ describe("the index knows what it was built for", () => {
     // `valid` it reaches the shared parser as `healthy` with zero chunks — a
     // green panel over a search that finds nothing — and a rebuild whose first
     // embed failed leaves exactly the same shape. No pass has recorded a scan
-    // here, so nothing yet says the folders are empty; it is also what makes
-    // the next pass rebuild.
+    // here, so nothing yet says the folders are empty.
     await stampLocalEmbeddingIdentity();
     const status = await localMemoryStatusJson() as {
       status: { custom: { indexIdentity: { status: string } }; files: number; chunks: number };
@@ -518,20 +505,62 @@ describe("the index knows what it was built for", () => {
     // The other empty, and the one the zero-chunk rule exists for: there were
     // documents to index and none of them made it in. The reindex the panel
     // offers is the right advice there, so it has to stay.
-    await runLocalIndexPass("full");
-    await setMeta("scan_total_files", "3");
-    const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
-    expect(status.status.custom.indexIdentity.status).toBe("missing");
+    write("blank.md", "   \n\n  ");
+    write("also-blank.md", "\t\n");
+    const result = await runLocalIndexPass("full");
+    expect(result.chunks).toBe(0);
+    const row = await localMemoryStatusJson() as {
+      scan: { totalFiles: number };
+      status: { custom: { indexIdentity: { status: string } } };
+    };
+    expect(row.scan.totalFiles).toBe(2);
+    expect(row.status.custom.indexIdentity.status).toBe("missing");
   });
 
-  it("keeps MISSING when a source folder could not be read", async () => {
-    // Zero files scanned because the WALK failed is not "nothing to index":
-    // called valid it would be a green panel over an index that is empty
-    // because the folder could not be opened.
+  it("still calls it empty when a registered folder is not there any more", async () => {
+    // The state the captured OpenClaw payload is in — its memory directory does
+    // not exist and it reports `valid` with no failed items. A folder that
+    // cannot be opened IS a fault, but it is not a fault of the fingerprint and
+    // no reindex can clear it, so it must not come back as "run a full
+    // reindex"; the pass counts it where the card has a Failed tile.
+    fs.rmSync(source, { recursive: true, force: true });
+    const result = await runLocalIndexPass("full");
+    const row = await localMemoryStatusJson() as {
+      status: { chunks: number; custom: { indexIdentity: { status: string } } };
+    };
+    expect(result.failures).toBeGreaterThan(0);
+    expect(row.status.chunks).toBe(0);
+    expect(row.status.custom.indexIdentity.status).toBe("valid");
+  });
+
+  it("stops calling it up to date once the owner adds a folder the pass never saw", async () => {
+    // "There is nothing to index" is a claim about NOW, and the count behind it
+    // is one a finished pass wrote down. Adding a folder starts no pass and the
+    // schedule is off until the owner arms it, so trusting that count would
+    // leave a folder of documents reading as healthy and empty indefinitely.
     await runLocalIndexPass("full");
-    await setMeta("failures", "1");
-    const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
-    expect(status.status.custom.indexIdentity.status).toBe("missing");
+    const added = fs.mkdtempSync(path.join(os.tmpdir(), "memory-index-added-"));
+    try {
+      fs.writeFileSync(path.join(added, "lease.md"), "The deposit is two months' rent.");
+      await writeLocalSources([source, added]);
+      const status = await localMemoryStatusJson() as { status: { custom: { indexIdentity: { status: string } } } };
+      expect(status.status.custom.indexIdentity.status).toBe("missing");
+    } finally {
+      fs.rmSync(added, { recursive: true, force: true });
+    }
+  });
+
+  it("counts a document it could not convert instead of reporting nothing to index", async () => {
+    // A PDF the converter refuses leaves the derived folder empty, the walk
+    // complete and the index with nothing in it — so the emptiness is correct
+    // and says nothing about the documents behind it. The extractor's own notes
+    // are dropped here, so unless the pass counts the document the card claims
+    // "Nothing to index yet" over a folder the box could not read.
+    write("scan.pdf", "this is not a PDF");
+    const result = await runLocalIndexPass("full");
+    expect(result.failures).toBe(1);
+    const row = await localMemoryStatusJson() as { status: { batch: { failures: number } } };
+    expect(row.status.batch.failures).toBe(1);
   });
 });
 

@@ -25,6 +25,22 @@ export interface SettledMemoryRun {
   mode?: string;
 }
 
+/**
+ * A run record for a box that has never indexed, to hand `parseMemoryStatus`
+ * directly. Here rather than in each suite for the same reason the waiter is:
+ * both arms' suites need one, and two copies of a ten-field literal drift.
+ */
+export const IDLE_MEMORY_RUN = {
+  status: "idle" as const,
+  mode: "" as const,
+  trigger: "" as const,
+  startedAtMs: 0,
+  finishedAtMs: 0,
+  durationMs: 0,
+  error: "",
+  errorCode: "" as const,
+};
+
 export async function settledMemoryRun(
   clawkeepDir: string,
   { tries = 300, everyMs = 20 }: { tries?: number; everyMs?: number } = {},
