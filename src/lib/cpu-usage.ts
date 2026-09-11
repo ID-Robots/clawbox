@@ -34,7 +34,7 @@ const MAX_SAMPLE_AGE_MS = 60_000;
 
 let lastSample: CpuSample | null = null;
 let lastUsage: number | null = null;
-let lastCoreSamples: (CpuSample | null)[] = [];
+let lastCoreSamples: CoreSample[] = [];
 let lastCoreUsage: number[] | null = null;
 /** When `lastCoreUsage` was measured — a carried row ages out like a sample. */
 let lastCoreUsageAt = 0;
@@ -57,20 +57,35 @@ export function parseProcStat(raw: string, now: number): CpuSample | null {
   return sampleFromLine(raw.split("\n")[0], now);
 }
 
+/** One `cpuN` line of /proc/stat: which core it is, and its sample. */
+export interface CoreSample {
+  /**
+   * The `N` of `cpuN`.
+   *
+   * Kept rather than implied by the position, because Linux prints a line per
+   * ONLINE cpu: offline a middle core and every line after it shifts up, so two
+   * readings of the same LENGTH can still be about different cores.
+   */
+  id: number;
+  /** null where the line could not be read as a sample. */
+  sample: CpuSample | null;
+}
+
 /**
- * The PER-CORE lines, `cpu0`…`cpuN`, in order.
+ * The PER-CORE lines, `cpu0`…`cpuN`, in the order the file lists them.
  *
  * The same file and the same arithmetic as the aggregate above — /proc/stat
  * carries both, so a per-core reading costs no extra read and no extra sleep.
- * A core whose line is unusable is `null` rather than 0: on a six-core Orin the
- * difference between "this core is idle" and "this core could not be read" is
- * the difference between a reassuring picture and a wrong one.
+ * A core whose line is unusable has a `null` sample rather than 0: on a
+ * six-core Orin the difference between "this core is idle" and "this core could
+ * not be read" is the difference between a reassuring picture and a wrong one.
  */
-export function parseProcStatCores(raw: string, now: number): (CpuSample | null)[] {
-  const out: (CpuSample | null)[] = [];
+export function parseProcStatCores(raw: string, now: number): CoreSample[] {
+  const out: CoreSample[] = [];
   for (const line of raw.split("\n")) {
-    if (!/^cpu\d+\s/.test(line)) continue;
-    out.push(sampleFromLine(line, now));
+    const cpu = /^cpu(\d+)\s/.exec(line);
+    if (!cpu) continue;
+    out.push({ id: Number(cpu[1]), sample: sampleFromLine(line, now) });
   }
   return out;
 }
@@ -139,7 +154,13 @@ function isRecent(now: number, at: number): boolean {
  * wrong claim as a zero.
  */
 function carriedCoreUsage(now: number): number[] {
-  if (!lastCoreUsage || !isRecent(now, lastCoreUsageAt)) return [];
+  if (!lastCoreUsage) return [];
+  if (!isRecent(now, lastCoreUsageAt)) {
+    // Forgotten, not merely withheld: a row this call refused as too old must
+    // not become eligible again when the clock next steps backwards.
+    lastCoreUsage = null;
+    return [];
+  }
   return lastCoreUsage;
 }
 
@@ -166,13 +187,13 @@ function coreBusy(then: CpuSample, current: CpuSample): number | null {
  * call of the process, which every server restart creates — no previous sample
  * and no recent figures to stand in for it. Empty for the WHOLE row, never a
  * row that is measured for some cores and carried for others, and never a row
- * carried across a change in core count (a hotplug, or an nvpmodel mode that
- * offlines cores): a six-entry row reads as six measurements of these six
- * cores. The caller renders empty as no per-core row at all, and the next poll
- * 3 s later has real figures.
+ * carried across a change in which cores are online (a hotplug, or an nvpmodel
+ * mode that offlines some): a six-entry row reads as six measurements of these
+ * six cores. The caller renders empty as no per-core row at all, and the next
+ * poll 3 s later has real figures.
  */
 export function getCpuCoreUsage(now: number = Date.now()): number[] {
-  let current: (CpuSample | null)[];
+  let current: CoreSample[];
   try {
     current = parseProcStatCores(fs.readFileSync("/proc/stat", "utf-8"), now);
   } catch {
@@ -184,13 +205,16 @@ export function getCpuCoreUsage(now: number = Date.now()): number[] {
   // Set before any early return: whatever this call could not answer, the next
   // one has a sample to diff against.
   lastCoreSamples = current;
-  // A core count that changed (a hotplug, or a first call) has nothing to diff
-  // against; so does a sample too old to be about "now".
-  const comparable = previous.length === current.length;
+  // Comparable means "about the same cores", by id — a first call has nothing to
+  // diff against, and so does a reading of a different set of cores, even one
+  // that happens to be the same size (offline cpu1 while cpu2 comes back and
+  // the count is unchanged while every position has moved).
+  const comparable =
+    previous.length === current.length && previous.every((core, i) => core.id === current[i].id);
 
-  const measured = current.map((sample, i) => {
-    const then = comparable ? previous[i] : null;
-    return sample && then && isRecent(now, then.at) ? coreBusy(then, sample) : null;
+  const measured = current.map((core, i) => {
+    const then = comparable ? previous[i].sample : null;
+    return core.sample && then && isRecent(now, then.at) ? coreBusy(then, core.sample) : null;
   });
   if (measured.every((busy): busy is number => busy !== null)) {
     lastCoreUsage = measured;
@@ -205,7 +229,7 @@ export function getCpuCoreUsage(now: number = Date.now()): number[] {
   // about these cores: it is withheld whole, and forgotten so a later call
   // cannot index it.
   const carried = carriedCoreUsage(now);
-  if (measured.some((busy) => busy !== null) || carried.length !== current.length) {
+  if (measured.some((busy) => busy !== null) || !comparable || carried.length !== current.length) {
     lastCoreUsage = null;
     return [];
   }

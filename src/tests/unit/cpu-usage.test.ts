@@ -153,6 +153,17 @@ describe("parseProcStat", () => {
  * must not be drawn as an idle one.
  */
 describe("getCpuCoreUsage", () => {
+  /** `cpuN` lines for the given core ids, under an aggregate line. */
+  function idCores(cores_: [number, [number, number]][]): string {
+    const total = cores_.reduce((a, [, [u, i]]) => [a[0] + u, a[1] + i] as [number, number], [0, 0]);
+    return [
+      `cpu  ${total[0]} 0 0 ${total[1]} 0 0 0 0 0 0`,
+      ...cores_.map(([id, [user, idle]]) => `cpu${id} ${user} 0 0 ${idle} 0 0 0 0 0 0`),
+      "intr 12345",
+      "",
+    ].join("\n");
+  }
+
   /** Four cores, each with its own user/idle pair, under the aggregate line. */
   function cores(pairs: [number, number][]): string {
     const total = pairs.reduce((a, [u, i]) => [a[0] + u, a[1] + i] as [number, number], [0, 0]);
@@ -272,6 +283,33 @@ describe("getCpuCoreUsage", () => {
     expect(cpuUsage.getCpuCoreUsage(7_000)).toEqual([]);
   });
 
+  it("forgets a row it has already refused as too old, so a clock rollback cannot revive it", () => {
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900]]));
+    cpuUsage.getCpuCoreUsage(1_000);
+    mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000]]));
+    expect(cpuUsage.getCpuCoreUsage(4_000)).toEqual([100, 0]);
+    // Five minutes later the file cannot be read: the cached row is too old to
+    // stand in, so it is dropped rather than kept for a later comparison…
+    mockFs.readFileSync.mockImplementation(() => { throw new Error("EACCES"); });
+    expect(cpuUsage.getCpuCoreUsage(305_000)).toEqual([]);
+    // …because the clock can step backwards under it, which would otherwise
+    // make figures from before the correction look seconds old.
+    expect(cpuUsage.getCpuCoreUsage(5_000)).toEqual([]);
+  });
+
+  it("refuses to pair cores by position when the lines are about different cores", () => {
+    // Linux prints one line per ONLINE cpu, so offlining cpu1 makes cpu2 the
+    // second line. Two readings of the same LENGTH can be about different cores,
+    // and diffing cpu2's counters against cpu1's answers a figure about neither.
+    mockFs.readFileSync.mockReturnValue(idCores([[0, [100, 900]], [2, [100, 900]]]));
+    cpuUsage.getCpuCoreUsage(1_000);
+    mockFs.readFileSync.mockReturnValue(idCores([[0, [200, 900]], [1, [500, 600]]]));
+    expect(cpuUsage.getCpuCoreUsage(4_000)).toEqual([]);
+    // The poll after it has two samples of cpu0 and cpu1, and measures them.
+    mockFs.readFileSync.mockReturnValue(idCores([[0, [300, 900]], [1, [600, 700]]]));
+    expect(cpuUsage.getCpuCoreUsage(7_000)).toEqual([100, 50]);
+  });
+
   it("answers nothing at all when /proc/stat cannot be read", () => {
     // Not a row of zeros: an empty list is "no reading", and a row of zeros
     // would be a claim that every core on the box is idle.
@@ -303,6 +341,9 @@ describe("getCpuCoreUsage", () => {
   it("skips a core line it cannot parse rather than calling it idle", () => {
     mockFs.readFileSync.mockReturnValue("cpu  100 0 0 900 0\ncpu0 1 2\ncpu1 100 0 0 900 0\n");
     expect(cpuUsage.parseProcStatCores("cpu  1 0 0 1\ncpu0 1 2\ncpu1 100 0 0 900\n", 1_000))
-      .toEqual([null, { idle: 900, total: 1000, at: 1_000 }]);
+      .toEqual([
+        { id: 0, sample: null },
+        { id: 1, sample: { idle: 900, total: 1000, at: 1_000 } },
+      ]);
   });
 });
