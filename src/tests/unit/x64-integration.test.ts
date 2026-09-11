@@ -2,13 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import { hasX64DesktopIntegration } from "@/lib/x64-integration";
 
-vi.mock("fs", async (original) => ({
-  ...(await original<typeof import("fs")>()),
-  default: {
-    ...(await original<typeof import("fs")>()).default,
-    openSync: vi.fn(), fstatSync: vi.fn(), readFileSync: vi.fn(), closeSync: vi.fn(),
-  },
-}));
+vi.mock("fs", async (original) => {
+  const actual = await original<typeof import("fs")>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      openSync: vi.fn(), fstatSync: vi.fn(), readFileSync: vi.fn(), closeSync: vi.fn(),
+    },
+  };
+});
 
 describe("installed x64 desktop integration", () => {
   beforeEach(() => {
