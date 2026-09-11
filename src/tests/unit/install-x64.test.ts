@@ -113,6 +113,13 @@ function preflightBlock(): string {
   return SOURCE.slice(start, end);
 }
 
+function unitUserBlock(unitDir: string): string {
+  const start = SOURCE.indexOf("unit_user() {");
+  const end = SOURCE.indexOf("\npid_in_unit() {", start);
+  if (start < 0 || end < 0) throw new Error("unit_user block not found");
+  return SOURCE.slice(start, end).replaceAll("/etc/systemd/system", unitDir);
+}
+
 function systemdHelperBlock(): string {
   const start = SOURCE.indexOf("x64_sudoers_rule() {");
   const end = SOURCE.indexOf("step_systemd_services() {", start);
@@ -221,6 +228,50 @@ describe("install-x64.sh shared-host preflight", () => {
     const r = runPreflight([], { PORT: "3005", GATEWAY_PORT: "3005" });
     expect(r.status).toBe(1);
     expect(r.out).toContain("must be three different ports");
+  });
+
+  it.each([
+    ["PORT", "5900"],
+    ["PORT", "6080"],
+    ["PORT", "18800"],
+    ["GATEWAY_PORT", "5900"],
+    ["GATEWAY_PORT", "6080"],
+    ["GATEWAY_PORT", "18800"],
+    ["TERMINAL_WS_PORT", "5900"],
+    ["TERMINAL_WS_PORT", "6080"],
+    ["TERMINAL_WS_PORT", "18800"],
+  ])("refuses managed-desktop port collision %s=%s", (key, value) => {
+    const r = runPreflight([], { [key]: value });
+    expect(r.status).toBe(1);
+    expect(r.out).toContain(`${key === "PORT" ? "CLAWBOX_PORT" : `CLAWBOX_${key}`} (${value}) conflicts with a managed desktop service port`);
+
+    const skipped = runPreflight([], { [key]: value, SKIP_DESKTOP_SERVICES: "1" });
+    expect(skipped.status).toBe(0);
+  });
+
+  it("treats an installed system unit without User= as root", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "clawbox-x64-unit-user-"));
+    try {
+      writeFileSync(path.join(root, "default-root.service"), "[Service]\nExecStart=/bin/true\n");
+      writeFileSync(path.join(root, "owned.service"), "[Service]\nUser=clawbox\nExecStart=/bin/true\n");
+      const r = spawnSync("bash", ["-c", [
+        "set -euo pipefail",
+        unitUserBlock(root),
+        "unit_user missing.service",
+        "unit_user default-root.service",
+        "unit_user owned.service",
+      ].join("\n")], { encoding: "utf-8", timeout: 30_000 });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe("root\nclawbox\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to replace an existing root-run unit", () => {
+    const r = runPreflight(['unit_user() { if [ "$1" = "clawbox-setup.service" ]; then echo root; fi; }']);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("clawbox-setup.service currently runs as 'root'");
   });
 
   it("dispatches --preflight and runs full-install preflight before the first counted step", () => {

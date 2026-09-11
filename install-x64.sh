@@ -1496,10 +1496,12 @@ step_start_ui() {
 # written. Each failure names the knob that resolves it.
 
 unit_user() {
-  # `User=` of an installed unit, or empty when the unit is not installed.
-  local unit="$1"
+  # Effective `User=` of an installed system unit. systemd defaults to root
+  # when the directive is absent; empty means only that the unit is not installed.
+  local unit="$1" owner
   [ -f "/etc/systemd/system/$unit" ] || return 0
-  sed -n 's/^User=\(.*\)$/\1/p' "/etc/systemd/system/$unit" | head -1
+  owner=$(sed -n 's/^User=\(.*\)$/\1/p' "/etc/systemd/system/$unit" | head -1)
+  printf '%s\n' "${owner:-root}"
 }
 
 pid_in_unit() {
@@ -1540,6 +1542,19 @@ preflight_host() {
   if [ "$PORT" = "$GATEWAY_PORT" ] || [ "$PORT" = "$TERMINAL_WS_PORT" ] || [ "$GATEWAY_PORT" = "$TERMINAL_WS_PORT" ]; then
     echo "PREFLIGHT FAIL: CLAWBOX_PORT ($PORT), CLAWBOX_GATEWAY_PORT ($GATEWAY_PORT) and CLAWBOX_TERMINAL_WS_PORT ($TERMINAL_WS_PORT) must be three different ports" >&2
     failed=1
+  fi
+  if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
+    local -a configured_port_names=(CLAWBOX_PORT CLAWBOX_GATEWAY_PORT CLAWBOX_TERMINAL_WS_PORT)
+    local -a configured_port_values=("$PORT" "$GATEWAY_PORT" "$TERMINAL_WS_PORT")
+    local i
+    for i in "${!configured_port_names[@]}"; do
+      case "${configured_port_values[$i]}" in
+        5900|6080|18800)
+          echo "PREFLIGHT FAIL: ${configured_port_names[$i]} (${configured_port_values[$i]}) conflicts with a managed desktop service port (VNC 5900, websockify 6080, browser CDP 18800). Pick another port or set CLAWBOX_SKIP_DESKTOP_SERVICES=1 to leave the desktop units alone." >&2
+          failed=1
+          ;;
+      esac
+    done
   fi
   local port
   for port in "${!port_owner_unit[@]}"; do
