@@ -10,7 +10,7 @@ import { collectBuildIdentity, type DriftReport } from "@/lib/build-identity";
 
 export const dynamic = "force-dynamic";
 
-function needsUpdate(component: { updateAvailable?: boolean; target: string | null }): boolean {
+function needsUpdate(component: { updateAvailable?: boolean | null; target: string | null }): boolean {
   return component.updateAvailable ?? !!component.target;
 }
 

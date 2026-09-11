@@ -1886,8 +1886,11 @@ function ChromeDesktopInner() {
   // Dismissals persist per exact target-version pair via SQLite so the user
   // isn't pestered across browsers or after a cache wipe.
   const [updateAvailable, setUpdateAvailableState] = useState<{
-    clawbox: { current: string | null; target: string | null; updateAvailable?: boolean };
-    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+    // `updateAvailable` is `boolean | null` — null is "the device could not
+    // check", which this card treats as the absent field it already handled:
+    // no notice, because there is nothing it can honestly offer.
+    clawbox: { current: string | null; target: string | null; updateAvailable?: boolean | null };
+    openclaw: { current: string | null; target: string | null; updateAvailable?: boolean | null };
   } | null>(null);
   // Mirrors `updateAvailable` so the dismiss handler can read the notice it is
   // dismissing WITHOUT an updater. Every writer advances it on the line before

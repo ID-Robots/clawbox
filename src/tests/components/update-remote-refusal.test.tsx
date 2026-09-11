@@ -49,6 +49,18 @@ const HEALTHY_IDENTITY = {
   drift: { buildVsCheckout: "match", checkoutVsPin: "match", detected: false, reasons: [], codes: [] },
 };
 
+/**
+ * `clawbox.updateAvailable` as the DEVICE answers it: `null` — not `false` —
+ * wherever the check did not land, beside `target: null` (the invariant
+ * `getVersionInfo` keeps). A fixture that pins `false` there is a payload no box
+ * can produce, and these mounts are the only coverage the readers of the
+ * widened field have.
+ */
+function clawboxVerdict(remote: unknown): null | false {
+  const reachable = (remote as { reachable?: boolean } | undefined)?.reachable;
+  return reachable === false ? null : false;
+}
+
 function mountWith(remote: unknown) {
   vi.stubGlobal(
     "fetch",
@@ -56,7 +68,7 @@ function mountWith(remote: unknown) {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("/setup-api/update/versions")) {
         return jsonResponse({
-          clawbox: { current: "v3.9.0", target: null, updateAvailable: false },
+          clawbox: { current: "v3.9.0", target: null, updateAvailable: clawboxVerdict(remote) },
           openclaw: { current: "2026.8.1", target: null, updateAvailable: false },
           edition: "openclaw",
           ...(remote === undefined ? {} : { remote }),
@@ -109,7 +121,7 @@ describe("SystemUpdateApp — a remote it could not reach is not 'up to date'", 
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/setup-api/update/versions")) {
           return jsonResponse({
-            clawbox: { current: "v3.9.0", target: null, updateAvailable: false },
+            clawbox: { current: "v3.9.0", target: null, updateAvailable: null },
             openclaw: { current: "2026.8.1", target: null, updateAvailable: false },
             edition: "openclaw",
             remote: { reachable: false, refusedAnonymously: true, reason: REFUSAL_REASON },
@@ -177,7 +189,7 @@ function stubSettingsFetch(remote: unknown): void {
     const url = String(input ?? "");
     if (url.startsWith("/setup-api/update/versions")) {
       return Promise.resolve(jsonResponse({
-        clawbox: { current: "v4.0.0", target: null, updateAvailable: false },
+        clawbox: { current: "v4.0.0", target: null, updateAvailable: clawboxVerdict(remote) },
         openclaw: { current: "2026.8.1", target: null, updateAvailable: false },
         edition: "openclaw",
         ...(remote === undefined ? {} : { remote }),
@@ -233,7 +245,7 @@ function stubWizardStatus(remote: unknown) {
         steps: [],
         currentStepIndex: -1,
         versions: {
-          clawbox: { current: "v4.0.0", target: null, updateAvailable: false },
+          clawbox: { current: "v4.0.0", target: null, updateAvailable: clawboxVerdict(remote) },
           openclaw: { current: "2026.8.1", target: null, updateAvailable: false },
           ...(remote === undefined ? {} : { remote }),
         },

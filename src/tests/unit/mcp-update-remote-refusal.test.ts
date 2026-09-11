@@ -44,9 +44,15 @@ const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
   canGenerateImages: true,
 });
 
-/** What a refused box's /update/versions really answers: no delta anywhere. */
+/**
+ * What a refused box's /update/versions really answers: no target anywhere, and
+ * `clawbox.updateAvailable: null` — the device says "I could not look" rather
+ * than "there is no update" (HL-2). The OpenClaw and Hermes verdicts stay plain
+ * booleans because they are derived locally, from the pin file and the
+ * installed binary, not from the remote.
+ */
 const refusedPayload = (edition: "openclaw" | "hermes") => ({
-  clawbox: { current: "v4.0.0", target: null, updateAvailable: false },
+  clawbox: { current: "v4.0.0", target: null, updateAvailable: null },
   openclaw: { current: "2026.8.1", target: null, updateAvailable: false },
   ...(edition === "hermes" ? { hermes: { current: "0.20.5", target: null, updateAvailable: false } } : {}),
   edition,
