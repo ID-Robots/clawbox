@@ -2395,18 +2395,20 @@ describe("updater", () => {
     beforeEach(() => { mockX64Integration.mockReturnValue(true); });
 
     /** Inspect the host commands requested by the real updater orchestration. */
-    const commands = () => mockExecFile.mock.calls.map(([cmd, args]) =>
-      `${cmd} ${(args as string[]).join(" ")}`,
-    );
+    function commands() {
+      return mockExecFile.mock.calls.map(([cmd, args]) =>
+        `${cmd} ${(args as string[]).join(" ")}`,
+      );
+    }
     /** Keep generic migrations and outer maintenance out of the desktop path. */
-    const expectNoApplianceMaintenance = () => {
+    function expectNoApplianceMaintenance() {
       expect(commands().some((call) =>
         call.includes("clawbox-gateway-maintenance.sh")
           || call.includes("systemctl stop clawbox-gateway.service")
           || call.includes("scripts/gateway-pre-start.sh")
           || call.includes("doctor --fix"),
       )).toBe(false);
-    };
+    }
 
     it("lets the desktop root step restore the gateway when the core pin is rejected", async () => {
       setupExecFileMock({

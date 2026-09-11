@@ -17,7 +17,9 @@ describe("installed x64 desktop integration", () => {
   beforeEach(() => {
     vi.mocked(fs.openSync).mockReturnValue(42);
     vi.mocked(fs.fstatSync).mockReturnValue({
-      isFile: () => true, uid: 0, mode: 0o100644, size: 200,
+      /** Model a plain file accepted by the inode-type gate. */
+      isFile() { return true; },
+      uid: 0, mode: 0o100644, size: 200,
     } as ReturnType<typeof fs.fstatSync>);
     vi.mocked(fs.readFileSync).mockReturnValue("INSTALL_USER=fixture\nPROJECT_DIR=/fixture/clawbox\n");
   });
@@ -45,10 +47,15 @@ describe("installed x64 desktop integration", () => {
   });
 
   it.each([
-    { uid: 1000 }, { mode: 0o100664 }, { size: 4097 }, { isFile: () => false },
+    { uid: 1000 }, { mode: 0o100664 }, { size: 4097 }, {
+      /** Model a special inode that must not be read as configuration. */
+      isFile() { return false; },
+    },
   ])("rejects an unsafe host file: %o", (override) => {
     vi.mocked(fs.fstatSync).mockReturnValue({
-      isFile: () => true, uid: 0, mode: 0o100644, size: 200, ...override,
+      /** Keep the inode valid unless this case overrides its type. */
+      isFile() { return true; },
+      uid: 0, mode: 0o100644, size: 200, ...override,
     } as ReturnType<typeof fs.fstatSync>);
     expect(() => hasX64DesktopIntegration("/fixture/clawbox")).toThrow("root-owned file");
     expect(fs.closeSync).toHaveBeenCalledWith(42);
