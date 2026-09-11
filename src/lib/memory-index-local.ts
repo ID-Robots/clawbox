@@ -917,7 +917,13 @@ export async function runLocalIndexPass(
     try {
       metaSet(db, "identity", localEmbeddingIdentity());
       metaSet(db, "built_at", String(Date.now()));
-      metaSet(db, "scan_total_files", String(scan.files.length));
+      // Everything this pass had to ACCOUNT FOR, which is not the same as what
+      // it could open: a document the extractor refused never becomes an
+      // indexable file, and counted only among the failures it left the card
+      // saying "Nothing to index yet" over the owner's PDFs. Counted here it is
+      // owed work — `pendingFiles` on the card — and an index that is empty
+      // because of it is not an index with nothing to index.
+      metaSet(db, "scan_total_files", String(scan.files.length + scan.unusableDocuments));
       // WHICH folders that count is about. Without it, "the last pass found
       // nothing" outlives the configuration it was true of, and a folder the
       // owner added afterwards reads as nothing to index — see `identityOf`.
@@ -974,10 +980,11 @@ interface ScanResult {
   /**
    * Documents the extractor could not turn into text — too large to read, gone
    * mid-scan, or a conversion that failed. Per-DOCUMENT faults, so they are
-   * counted with the file failures the pass counts and not with the
-   * folder-level shortfall above, and nothing else on the box reports them: a
-   * folder of PDFs that every one of them refused to convert leaves an index
-   * that is empty, and it must not read as "there was nothing to index".
+   * counted with the file failures and not with the folder-level shortfall
+   * above, and nothing else on the box reports them: one of them never becomes
+   * an indexable file, so a folder of PDFs that every one of them refused to
+   * convert leaves an index that is empty and must not read as "there was
+   * nothing to index".
    */
   unusableDocuments: number;
 }

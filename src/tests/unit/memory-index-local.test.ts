@@ -551,16 +551,27 @@ describe("the index knows what it was built for", () => {
   });
 
   it("counts a document it could not convert instead of reporting nothing to index", async () => {
-    // A PDF the converter refuses leaves the derived folder empty, the walk
-    // complete and the index with nothing in it — so the emptiness is correct
-    // and says nothing about the documents behind it. The extractor's own notes
-    // are dropped here, so unless the pass counts the document the card claims
-    // "Nothing to index yet" over a folder the box could not read.
+    // A PDF the converter refuses never becomes an indexable file, so the walk
+    // is complete, the index is empty and — counted nowhere — the card said
+    // "Nothing to index yet" over a document the box could not read. The
+    // extractor's own notes are dropped here, so the pass is the only place
+    // that can carry it: once as a failure, and once as work this pass had to
+    // account for and did not, which is what keeps the empty index from calling
+    // itself up to date.
     write("scan.pdf", "this is not a PDF");
     const result = await runLocalIndexPass("full");
     expect(result.failures).toBe(1);
-    const row = await localMemoryStatusJson() as { status: { batch: { failures: number } } };
+    const row = await localMemoryStatusJson() as {
+      scan: { totalFiles: number };
+      status: { files: number; chunks: number; batch: { failures: number }; custom: { indexIdentity: { status: string } } };
+    };
     expect(row.status.batch.failures).toBe(1);
+    // `pendingFiles` on the card is totalFiles - files, so this is PENDING 1,
+    // which is what takes "Nothing to index yet" off the panel.
+    expect(row.scan.totalFiles).toBe(1);
+    expect(row.status.files).toBe(0);
+    expect(row.status.chunks).toBe(0);
+    expect(row.status.custom.indexIdentity.status).toBe("missing");
   });
 });
 
