@@ -32,11 +32,6 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-const PORT = parseInt(process.env.HERMES_DASH_PROXY_PORT || "8090", 10);
-// Port the main ClawBox web server (and therefore /login) listens on. The proxy
-// serves EVERY path on its own port, so a relative `Location: /login` would
-// bounce back into the proxy — an infinite redirect loop. We always redirect to
-// the ClawBox origin explicitly.
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // script is standalone CommonJS and cannot import the TypeScript helper: an
 // integer in 1-65535 or the default. `parseInt` alone yields NaN on a typo and
@@ -45,6 +40,13 @@ function envPort(value, fallback) {
   const port = Number(value);
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : fallback;
 }
+// This port is also compared against the Referer's port in isTrustedPeer(), so
+// a NaN from `parseInt` cost the guard a comparison as well as the socket.
+const PORT = envPort(process.env.HERMES_DASH_PROXY_PORT, 8090);
+// Port the main ClawBox web server (and therefore /login) listens on. The proxy
+// serves EVERY path on its own port, so a relative `Location: /login` would
+// bounce back into the proxy — an infinite redirect loop. We always redirect to
+// the ClawBox origin explicitly.
 const CLAWBOX_WEB_PORT = envPort(process.env.CLAWBOX_WEB_PORT, 80);
 // Host-local, non-loopback: puts the dashboard in gated cookie-auth mode
 // (see file header) while staying off the LAN.
@@ -157,24 +159,47 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean),
 );
 
-// Single mDNS label — letters/digits/hyphens, no dots. The REGEX is shared with
-// src/lib/gateway-proxy.ts (and with the rename route's own HOSTNAME_RE, so
-// every name a rename can produce is a label this accepts). The POLICY around
-// it deliberately is not the same: this proxy accepts any `<label>.local`
-// because nothing restarts it on a rename, while the gateway path reflects only
-// a configured or cached host. TASK-553.
+// Single hostname label — letters/digits/hyphens, no dots. The REGEX is shared
+// with src/lib/gateway-proxy.ts (and with the rename route's own HOSTNAME_RE, so
+// every name a rename can produce is a label this accepts). The POLICY around it
+// deliberately is not the same: this proxy accepts any `<label>.local` because
+// nothing restarts it on a rename, while the gateway path reflects the box's own
+// name or a configured origin. TASK-553.
 const MDNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-let cachedMdnsHost; // undefined = not computed yet, null = unusable hostname
-function systemMdnsHost() {
-  if (cachedMdnsHost !== undefined) return cachedMdnsHost;
+// The name this box calls ITSELF, from the kernel's nodename: the BARE hostname,
+// `clawbox` — what a router that registers the DHCP name, or a LAN with a DNS
+// search domain, hands the browser. The desktop's Hermes tile builds its URL
+// from `window.location.hostname`, so the Host arriving here is whatever name
+// the owner typed, and a name good enough to serve the desktop has to be good
+// enough to serve the desktop's own tile. TASK-808.
+//
+// The bare label, and only this box's own. `<label>.local` is admitted
+// generically below; a BARE label cannot be, because any single label
+// ("intranet", "router") can be aimed at this box by a search domain or a hosts
+// file nobody here controls. The LAN-DOMAIN form (`clawbox.lan`,
+// `clawbox.fritz.box`) is deliberately NOT derived: its only source is the
+// DHCP-supplied search domain, so admitting `<nodename>.<whatever DHCP says>`
+// would let a hostile DHCP server nominate a publicly registrable name as a
+// rebind target. A box reached that way still has `.local`, its IP and the bare
+// name.
+//
+// Read per request, never cached for the process lifetime. `Settings → System →
+// rename` writes data/hostname.env and runs the set_hostname root step, which
+// ends in `hostnamectl set-hostname` (apply_hostname in install.sh), and nothing
+// restarts this service — so a name captured at startup would go on admitting
+// the old hostname and 403 the new one until the next reboot. os.hostname() is a
+// uname(2) call, and the check below is ordered last so the two addresses the
+// docs advertise never pay for it.
+function systemHostname() {
+  let label;
   try {
-    const label = os.hostname().trim().toLowerCase();
-    cachedMdnsHost = MDNS_LABEL_RE.test(label) ? `${label}.local` : null;
+    // A nodename carrying a domain (`clawbox.lan`) still yields `clawbox`.
+    label = os.hostname().trim().toLowerCase().split(".")[0];
   } catch {
-    cachedMdnsHost = null;
+    return null;
   }
-  return cachedMdnsHost;
+  return MDNS_LABEL_RE.test(label) ? label : null;
 }
 
 // Split a Host header into { hostname, port, authority }. Handles `[::1]:8090`.
@@ -196,12 +221,14 @@ function splitHost(raw) {
 function isAllowedHostname(hostname) {
   if (!hostname) return false;
   if (ALLOWED_HOSTS.has(hostname)) return true;
-  if (hostname === systemMdnsHost()) return true;
   // The box can be renamed after install (mDNS label changes without this
   // service restarting), so accept any well-formed `<label>.local` — .local is
   // mDNS-only and cannot be registered by a remote attacker.
   if (hostname.endsWith(".local") && MDNS_LABEL_RE.test(hostname.slice(0, -".local".length))) return true;
   if (net.isIP(hostname)) return true; // raw LAN address
+  // The box addressed by its own bare hostname. Last of the four, so a request
+  // on `<name>.local` or the LAN IP is answered without the uname(2) call.
+  if (hostname === systemHostname()) return true;
   return false;
 }
 

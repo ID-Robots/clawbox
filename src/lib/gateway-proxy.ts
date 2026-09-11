@@ -29,21 +29,37 @@ const ALLOWED_HOSTS = new Set(
     .filter(Boolean)
 );
 
-// Single mDNS label — letters/digits/hyphens, no dots, no leading/trailing
-// hyphen. We append `.local` ourselves; allowing dots in the input would
-// let a host header like `evil..local` slip through host comparison.
+// Single hostname label — letters/digits/hyphens, no dots, no leading/trailing
+// hyphen. It validates the nodename's first label below, and we append `.local`
+// to that ourselves; allowing dots in the input would let a host header like
+// `evil..local` slip through host comparison. Same regex as MDNS_LABEL_RE in
+// scripts/hermes-dashboard-proxy.js, and as HOSTNAME_RE in the rename route, so
+// every name a rename can produce is a label all three accept.
 const MDNS_LABEL_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-let cachedMdnsHost: string | null | undefined; // undefined = not loaded yet
-function getSystemMdnsHost(): string | null {
-  if (cachedMdnsHost !== undefined) return cachedMdnsHost;
+// The names this box calls itself, from the kernel's nodename: the BARE hostname
+// and its `<label>.local` form. The bare one is what this missed — a router that
+// registers the DHCP hostname, or a LAN with a DNS search domain, serves the
+// desktop on `http://clawbox/`, and reflecting `clawbox.local` at that browser
+// is the same dead end the rename case was. TASK-808. The LAN-domain form
+// (`clawbox.lan`) is deliberately not derived, for the reason written out beside
+// systemHostname() in scripts/hermes-dashboard-proxy.js: the DHCP search domain
+// is not ours to trust. Reflection here also stays narrower than that proxy's
+// guard — this box's two names or a configured origin, never any `<label>.local`.
+//
+// Read per call, never cached for the process lifetime: a rename applies
+// `hostnamectl set-hostname` without restarting this server, so a name captured
+// at first use would reflect the old one for the rest of the process's life.
+function systemHostnames(): string[] {
+  let label: string;
   try {
-    const label = os.hostname().trim().toLowerCase();
-    cachedMdnsHost = MDNS_LABEL_RE.test(label) ? `${label}.local` : null;
+    // A nodename carrying a domain (`clawbox.lan`) still yields `clawbox`.
+    label = os.hostname().trim().toLowerCase().split(".")[0];
   } catch {
-    cachedMdnsHost = null;
+    return [];
   }
-  return cachedMdnsHost;
+  if (!MDNS_LABEL_RE.test(label)) return [];
+  return [label, `${label}.local`];
 }
 
 // Without renamed-host support, ALLOWED_HOSTS was frozen to `clawbox.local`
@@ -51,8 +67,9 @@ function getSystemMdnsHost(): string | null {
 // the gateway was busy and we fell back to CANONICAL_ORIGIN.
 function isReflectableHost(rawHost: string): boolean {
   if (ALLOWED_HOSTS.has(rawHost)) return true;
-  if (rawHost === getSystemMdnsHost()) return true;
   if (net.isIPv4(rawHost)) return true;
+  // Last, so a listed name or a LAN IP is answered without the uname(2) call.
+  if (systemHostnames().includes(rawHost)) return true;
   return false;
 }
 
