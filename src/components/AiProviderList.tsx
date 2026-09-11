@@ -89,9 +89,9 @@ export default function AiProviderList() {
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="ai-provider-list">
       <div className="flex items-center gap-2 mb-1">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
-        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+        <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
           {t("settings.providers.title")}
-        </label>
+        </h3>
       </div>
       <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">
         {t("settings.providers.hint")}
@@ -297,9 +297,9 @@ export default function AiProviderList() {
               appearing in his provider list with no explanation. The plugin id
               itself is not translated: it is what `openclaw plugins` calls it
               and what the core's own sentence beside it names. */}
-          <label className="block mb-2 text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+          <h4 className="block mb-2 text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
             {t("settings.providers.strandedPlugins")}
-          </label>
+          </h4>
           <ul className="space-y-2 list-none p-0 m-0">
             {(summary?.unattachedRepairs ?? []).map((repair) => (
               <li key={repair.pluginId} className="rounded-xl border border-white/[0.08] px-3 py-2">

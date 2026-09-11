@@ -709,7 +709,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
               voice_over_off
             </span>
-            <h2 className="font-semibold text-[var(--text-primary)]">{t("settings.voice.channelsUnavailable.title")}</h2>
+            <h3 className="font-semibold text-[var(--text-primary)]">{t("settings.voice.channelsUnavailable.title")}</h3>
           </div>
           <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
             {t("settings.voice.channelsUnavailable.body")}

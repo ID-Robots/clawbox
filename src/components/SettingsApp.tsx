@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useId, useRef, useCallback } from "react";
 import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo } from "@/components/SystemUpdateApp";
 import Image from "next/image";
 import { createPortal } from "react-dom";
@@ -68,6 +68,20 @@ export interface UISettings {
 
 interface SettingsAppProps {
   ui: UISettings;
+  /**
+   * Is Settings the whole PAGE (the standalone `/app/settings` route), or one
+   * window on the desktop?
+   *
+   * It decides which landmark the panel region may claim. The desktop mounts
+   * every open window in ONE document and six of its apps draw an `h1` of their
+   * own (ClawKeep, the App Store, Coding Agent, Memory Shard, the Hermes skills
+   * store, System Update), so a window may claim neither the document's title
+   * nor its `main`: "skip to main content" read from ClawKeep would otherwise
+   * land inside the Settings window behind it. As a window the panel is a
+   * REGION named after the panel; as a page it is the `main` under the window
+   * title's `h1`. Either way the cards' captions are the `h3`s beneath.
+   */
+  asPage?: boolean;
 }
 
 /** Exactly what /setup-api/email/status returns. The address is already
@@ -458,7 +472,7 @@ function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) =
 
 type SectionStatus = { subtitle: string | null };
 
-export default function SettingsApp({ ui }: SettingsAppProps) {
+export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
   // English is the floor for a key the locale packs do not carry yet: `t`
   // answers with the raw key when it is missing, so a string keyed here before
@@ -3008,6 +3022,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     ? "channels"
     : activeSection === "localModels" ? "localAi" : activeSection;
   const visibleNavItems = NAV_ITEMS;
+  // The panel's own heading. Taken from the entry that already names it — the
+  // channels list for a channel pane, the sidebar for every other section — so
+  // a heading needs no new translation key and cannot drift from the row the
+  // owner clicked. `navSection` is what it reads for the non-channel case, so
+  // any section folded onto another's page (localModels onto Local AI) takes
+  // that page's name. Every reachable section has an entry; the fallback is
+  // there so a section added without one renders a named heading rather than an
+  // empty one.
+  const panelTitleKey =
+    CHANNEL_ITEMS.find(item => item.id === activeSection)?.labelKey
+    ?? NAV_ITEMS.find(item => item.id === navSection)?.labelKey
+    ?? "settings.title";
+  // Per instance: the desktop can have this window open beside the standalone
+  // page in another tab, and the region's name is resolved by id.
+  const panelTitleId = useId();
   const resetProgressSteps = [
     {
       id: "erase",
@@ -3221,6 +3250,27 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     </div>
   );
 
+  /**
+   * The headings a panel owes a reader who navigates by heading, and that a
+   * sighted reader already has elsewhere: the name of the panel that is open
+   * (the lit sidebar row) and, where Settings is the whole page, the window's
+   * title (its title bar). Both are `sr-only` — drawing them a second time
+   * would change the page — and the cards' own captions are the visible `h3`s
+   * beneath them. The `h1` is the page's alone, for the reason on `asPage`.
+   */
+  const panelHeadings = (
+    <>
+      {asPage && <h1 className="sr-only">{t("settings.title")}</h1>}
+      <h2 id={panelTitleId} className="sr-only">{t(panelTitleKey)}</h2>
+    </>
+  );
+  /** `main` where Settings IS the page, a named region where it is a window. */
+  const PanelRegion = asPage ? "main" : "section";
+  /** The phone's nav-list title, for the same reason. */
+  const MobileTitle = asPage ? "h1" : "h2";
+  /** What names that region when it is a section: the panel's own heading. */
+  const panelRegionProps = asPage ? {} : { "aria-labelledby": panelTitleId };
+
   const renderContent = () => (
     <>
         {/* ─── Appearance ─── */}
@@ -3233,9 +3283,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>translate</span>
                 {/* A <label> named this card and pointed at nothing: htmlFor
                     only binds to form controls, and the control here is a
-                    button. A span the button names itself after is what
-                    actually reaches the accessibility tree. */}
-                <span id="settings-language-label" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</span>
+                    button. The heading is what reaches the accessibility tree,
+                    and the button still names itself after it by id. */}
+                <h3 id="settings-language-label" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.language")}</h3>
               </div>
               <div className="relative" ref={langRef}>
                 <button
@@ -3309,7 +3359,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>wallpaper</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.wallpaper")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.wallpaper")}</h3>
               </div>
               <div className="grid grid-cols-3 sm:grid-cols-4 gap-3">
                 {ui.wallpapers.map(wp => {
@@ -3401,7 +3451,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 space-y-5">
               <div className="flex items-center gap-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>tune</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.display")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.display")}</h3>
               </div>
 
               {/* Fit mode */}
@@ -3473,7 +3523,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>auto_awesome</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.extras")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.extras")}</h3>
               </div>
               <Toggle on={!ui.mascotHidden} onToggle={v => {
                 const hidden = !v;
@@ -3496,7 +3546,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>wifi</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</h3>
               </div>
               {connectedSSID ? (
                 <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5">
@@ -3549,7 +3599,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="mt-4 rounded-xl border px-4 py-3 border-white/[0.06] bg-white/[0.03]">
                   <div className="flex items-center gap-2 mb-1.5">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }}>link</span>
-                    <span className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{tr("settings.accessDeviceAt", "Access this device at")}</span>
+                    <h4 className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">{tr("settings.accessDeviceAt", "Access this device at")}</h4>
                   </div>
                   <div className="flex items-center gap-2">
                     <a href={primaryUrl} className="flex-1 min-w-0 text-sm font-mono text-[var(--text-primary)] hover:text-[var(--coral-bright)] truncate underline-offset-2 hover:underline">{primaryLabel}</a>
@@ -3703,7 +3753,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>link</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.localUrl")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.localUrl")}</h3>
               </div>
               <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">{t("settings.localUrlDesc")}</p>
               <div className="flex items-stretch gap-2">
@@ -3734,7 +3784,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>bookmark</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Saved Networks</label>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Saved Networks</h3>
                 </div>
                 <div className="space-y-2">
                   {savedNetworks.map(net => {
@@ -3780,7 +3830,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.connectToNetworkBtn")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.connectToNetworkBtn")}</h3>
               </div>
 
               {/* Network list */}
@@ -3802,7 +3852,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <>
                   <div className="border border-white/[0.08] rounded-xl overflow-hidden mb-3">
                     <div className="flex items-center justify-between px-3.5 py-2 border-b border-white/[0.06]">
-                      <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.availableNetworks")}</span>
+                      <h4 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.availableNetworks")}</h4>
                       <button
                         onClick={scanWifiNetworks}
                         disabled={wifiScanning}
@@ -3961,9 +4011,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-1">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>forum</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
                   {t("settings.channelsConnect")}
-                </label>
+                </h3>
               </div>
               <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">{t("settings.channelsHelper")}</p>
               <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
@@ -4134,7 +4184,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="#f97316"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.96 6.504-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.479.33-.913.492-1.302.48-.428-.012-1.252-.242-1.865-.44-.751-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</h3>
               </div>
               {tgConfigured === null ? (
                 <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
@@ -4248,7 +4298,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">group</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.pairingTitle")}</label>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.pairingTitle")}</h3>
                 </div>
                 <p className="text-xs text-[var(--text-secondary)] mb-4">{t("settings.pairingHint")}</p>
 
@@ -4387,9 +4437,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className={tgConfiguring ? "invisible h-0 overflow-hidden" : ""}>
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
                     {tgReconfigure ? t("settings.reconfigureBot") : t("settings.setupBot")}
-                  </label>
+                  </h3>
                 </div>
 
                 {/* Instructions with QR */}
@@ -4488,7 +4538,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">mail</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</h3>
               </div>
 
               {emailStatus === null ? (
@@ -4590,7 +4640,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-approvals">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">outgoing_mail</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailPending")}</label>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailPending")}</h3>
                   <span className="ml-auto text-xs font-mono text-[var(--coral-bright)]/70 bg-orange-500/10 px-2 py-0.5 rounded-md">
                     {t("settings.emailPendingCount", { count: String(emailPending.length) })}
                   </span>
@@ -4639,7 +4689,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-handled">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">history</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailHandled")}</label>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailHandled")}</h3>
                 </div>
                 <div className="space-y-3">
                   {emailHandled.map((entry) => (
@@ -4707,7 +4757,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-chat-approval">
                 <div className="flex items-center gap-2 mb-2">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailChatApproval")}</label>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailChatApproval")}</h3>
                 </div>
                 <p className="text-xs text-[var(--text-secondary)] mb-4">{t("settings.emailChatApprovalHelp")}</p>
 
@@ -4775,7 +4825,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center gap-2 mb-3">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">add_circle</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailAccount")}</label>
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailAccount")}</h3>
                 </div>
 
                 {/* The 3-step Gmail guide, in the panel rather than behind a docs link */}
@@ -5456,7 +5506,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[#5865F2]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
-                <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</span>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</h3>
               </div>
               {dcConfigured === null ? (
                 <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
@@ -5596,9 +5646,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5"
                 data-testid="discord-members"
               >
-                <span className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
+                <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
                   {t("settings.discordMembersTitle")}
-                </span>
+                </h3>
                 <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
                   {t("settings.discordMembersHint")}
                 </p>
@@ -5665,9 +5715,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
-                  <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                  <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
                     {dcReconfigure ? t("settings.reconfigureBot") : t("settings.discordGuideTitle")}
-                  </span>
+                  </h3>
                 </div>
 
                 <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
@@ -5812,7 +5862,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.security.passwordLabel")}</label>
+                <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.security.passwordLabel")}</h3>
               </div>
               {/* Split around the font-mono span: markup can't live in a catalogue
                   value, and `sudo` is a command name that must not be translated. */}
@@ -5927,7 +5977,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>computer</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.device")}</label>
+                    <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.device")}</h3>
                     <span className="ml-auto text-xs font-mono text-[var(--coral-bright)]/70 bg-orange-500/10 px-2 py-0.5 rounded-md">{stats.overview.uptime}</span>
                   </div>
                   <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
@@ -5942,7 +5992,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>speed</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.resources")}</label>
+                    <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.resources")}</h3>
                   </div>
 
                   {/* CPU bar */}
@@ -6005,7 +6055,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                     <div className="flex items-center gap-2 mb-4">
                       <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>thermostat</span>
-                      <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.temperature")}</label>
+                      <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.temperature")}</h3>
                     </div>
                     <div className="flex items-end gap-3">
                       <span className="text-3xl font-mono font-bold" style={{ color: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee" }}>
@@ -6034,7 +6084,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>hard_drive</span>
-                    <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.storage")}</label>
+                    <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.storage")}</h3>
                   </div>
                   <div className="space-y-3">
                     {stats.storage.filter(m => m.mountpoint !== "/boot/efi").map(m => (
@@ -6069,7 +6119,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-per-core">
                     <div className="flex items-center gap-2 mb-4">
                       <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>view_module</span>
-                      <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.perCore")}</label>
+                      <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.perCore")}</h3>
                       <span className="ml-auto text-[10px] font-mono text-[var(--text-muted)] opacity-60">
                         {t("settings.load")} {stats.cpu.loadAvg.map(v => formatLoad(v, locale)).join(" · ")}
                       </span>
@@ -6092,7 +6142,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-processes">
                     <div className="flex items-center gap-2 mb-4">
                       <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>list_alt</span>
-                      <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.busiestProcesses")}</label>
+                      <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.busiestProcesses")}</h3>
                       {/* The ordering matters as much as the list: CPU is what a
                           slow desktop looks like, memory is what an OOM-killed
                           update looks like. The toggle is only offered when the
@@ -6173,7 +6223,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {activeSection === "about" && (<>
           <div className="max-w-xl space-y-6">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h2>
+            <h3 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h3>
 
             <div className="bg-white/5 rounded-xl p-5 space-y-4">
               <div className="flex items-center gap-4">
@@ -6503,10 +6553,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return (
       <div className="flex flex-col h-full bg-[var(--bg-deep)]">
         {mobileSection === null ? (
-          /* Nav list — iOS-style grouped rows with status subtitles */
+          /* Nav list — iOS-style grouped rows with status subtitles. The title
+             is the page's `h1` only where Settings IS the page (see `asPage`);
+             in a window it is the list screen's own heading. Both tags paint
+             identically: the size and weight are in the class. */
           <div className="flex-1 overflow-y-auto px-4 pt-4 pb-6">
-            <h2 className="text-2xl font-bold text-[var(--text-primary)] px-1 mb-4">{t("settings.title")}</h2>
-            <nav className="bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden divide-y divide-white/[0.06]">
+            <MobileTitle className="text-2xl font-bold text-[var(--text-primary)] px-1 mb-4">{t("settings.title")}</MobileTitle>
+            <nav aria-label={t("settings.title")} className="bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden divide-y divide-white/[0.06]">
               {visibleNavItems.map(item => {
                 const { subtitle } = sectionStatus(item.id);
                 return (
@@ -6547,9 +6600,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 <span>{t("settings.title")}</span>
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-4">
+            <PanelRegion {...panelRegionProps} className="flex-1 overflow-y-auto p-4">
+              {panelHeadings}
               {renderContent()}
-            </div>
+            </PanelRegion>
           </>
         )}
 
@@ -6620,13 +6674,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     <div className="flex h-full min-h-0 overflow-hidden bg-[var(--bg-deep)]">
       {/* Sidebar. The nav scrolls on its own so a long section list can never
           grow the row past the window body and paint outside the frame. */}
-      <nav className="w-60 shrink-0 min-h-0 overflow-y-auto bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
+      <nav aria-label={t("settings.title")} className="w-60 shrink-0 min-h-0 overflow-y-auto bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
         {visibleNavItems.map(item => {
           const active = navSection === item.id;
           const status = sectionStatus(item.id);
           return (
             <button
               key={item.id}
+              // The lit row is how a sighted owner knows where they are; this is
+              // the same fact for everyone else. Announced, not merely coloured.
+              aria-current={active ? "page" : undefined}
               onClick={() => setSectionGated(item.id)}
               className={`flex shrink-0 items-center gap-3 px-2.5 py-2 rounded-xl text-[15px] border-none cursor-pointer transition-colors text-left ${
                 active
@@ -6650,11 +6707,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         <div className="flex-1" />
       </nav>
 
-      {/* Content */}
+      {/* Content. The panel is a landmark of its own — the `main` the standalone
+          page's "skip to content" can skip to, a named region inside a desktop
+          window — where a screen reader's landmark list had nothing before. */}
       <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-6 flex flex-col items-center">
-        <div className="w-full max-w-3xl flex flex-col items-stretch [&>div]:mx-auto [&>div]:w-full">
+        <PanelRegion {...panelRegionProps} className="w-full max-w-3xl flex flex-col items-stretch [&>div]:mx-auto [&>div]:w-full">
+          {panelHeadings}
           {renderContent()}
-        </div>
+        </PanelRegion>
       </div>
 
       <ClawBoxLoginModal
