@@ -315,8 +315,13 @@ export async function GET() {
         cores: cpus.length,
         loadAvg: os.loadavg().map((v) => v.toFixed(2)),
         speed: cpus[0]?.speed || 0,
-        // One entry per core, or empty where /proc/stat could not be read —
-        // never a row of zeros, which would be a claim that the box is idle.
+        // One entry per core, or empty where there is no reading to give:
+        // /proc/stat unreadable, or nothing to diff it against yet — the first
+        // request of a process, which every server restart (so every in-app
+        // update) creates. Never a row of zeros, which would be a claim that
+        // the box is idle, and never a partly-carried row. Readers draw no
+        // per-core row on an empty list; a polling one has real figures on its
+        // next 3 s request.
         perCore: cpuCores,
       },
       memory: {

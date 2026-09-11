@@ -189,6 +189,9 @@ describe("Settings → System against a server that predates the new figures", (
     await openSection("system");
     await screen.findByTestId("settings-processes");
     expect(screen.queryByTestId("settings-per-core")).toBeNull();
+    // The aggregate figure is still there — withholding the per-core row is not
+    // withholding the card.
+    expect(screen.getByText("19%")).toBeInTheDocument();
   });
 
   it("offers no ordering toggle when only one ordering was sent", async () => {

@@ -39,16 +39,25 @@ describe("GET /setup-api/system/stats", () => {
       }],
     });
 
-    // Mock fs.readFileSync for /proc files
-    let readCount = 0;
+    // Mock fs.readFileSync for /proc files.
+    //
+    // /proc/stat carries the aggregate line AND one line per core, and its
+    // counters advance on every read — so a second request always has
+    // something to diff against whatever the first one sampled, without the
+    // fixture having to know how many times one request reads the file.
+    let jiffies = 0;
     mockFs.readFileSync.mockImplementation((path: fs.PathOrFileDescriptor) => {
       const pathStr = path.toString();
       if (pathStr === "/proc/stat") {
-        readCount++;
-        if (readCount === 1) {
-          return "cpu  100 50 100 800 10 5 5 0 0 0\n";
-        }
-        return "cpu  110 55 110 810 12 6 6 0 0 0\n";
+        const user = 100 + 50 * jiffies;
+        const idle = 800 + 50 * jiffies;
+        jiffies += 1;
+        return [
+          `cpu  ${user * 4} 50 100 ${idle * 4} 10 5 5 0 0 0`,
+          ...[0, 1, 2, 3].map((n) => `cpu${n} ${user} 0 0 ${idle} 0 0 0 0 0 0`),
+          "intr 12345",
+          "",
+        ].join("\n");
       }
       if (pathStr === "/proc/net/dev") {
         return `Inter-|   Receive                                                |  Transmit
@@ -140,53 +149,17 @@ SwapFree:        1500000 kB`;
     expect(Array.isArray(body.processes)).toBe(true);
   });
 
-  it("returns a per-core CPU reading beside the aggregate one", async () => {
-    const res = await systemStatsGet();
-    const body = await res.json();
-
-    // One entry per `cpuN` line in the mocked /proc/stat above, and an array
-    // either way — the panel draws no per-core row rather than a row of zeros
-    // when the file could not be read.
-    expect(Array.isArray(body.cpu.perCore)).toBe(true);
-    for (const core of body.cpu.perCore) {
-      expect(core).toBeGreaterThanOrEqual(0);
-      expect(core).toBeLessThanOrEqual(100);
-    }
-  });
-
-  it("sends no per-core row on the first call of the process, then real figures", async () => {
+  it("sends no per-core row on the first call of the process, then one figure per core", async () => {
     // HL-1: every restart of the web server makes the next stats call the first
     // of a new process, with no previous /proc/stat sample to diff against. The
     // payload used to carry a zero for each core, so Settings → System drew six
-    // idle bars beside a CPU tile reading 19% — seen on the box 23 minutes
-    // after a restart, on the first stats call since it.
-    let reads = 0;
-    mockFs.readFileSync.mockImplementation((path: fs.PathOrFileDescriptor) => {
-      const pathStr = path.toString();
-      if (pathStr === "/proc/stat") {
-        // Two reads per request — the aggregate figure and the per-core one —
-        // so the counters move once per REQUEST, which is what the route's
-        // callers see.
-        reads += 1;
-        const tick = Math.ceil(reads / 2) - 1;
-        const user = 100 + 50 * tick;
-        const idle = 800 + 50 * tick;
-        return [
-          `cpu  ${user * 4} 0 0 ${idle * 4} 0 0 0 0 0 0`,
-          ...[0, 1, 2, 3].map((n) => `cpu${n} ${user} 0 0 ${idle} 0 0 0 0 0 0`),
-          "intr 12345",
-          "",
-        ].join("\n");
-      }
-      if (pathStr === "/proc/meminfo") return "MemTotal: 8000000 kB\nMemFree: 2000000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB";
-      if (pathStr === "/proc/net/dev") return "Inter-|   Receive\n face |bytes\n  eth0: 1000 10 0 0 0 0 0 0 500 5 0 0 0 0 0 0";
-      if (pathStr.includes("/sys/devices/virtual/thermal/thermal_zone")) return "55000";
-      throw new Error(`File not found: ${pathStr}`);
-    });
-
+    // idle bars beside a CPU tile reading 19% off the load average — seen on the
+    // box 23 minutes after a restart, on the first stats call since it.
     const first = await (await systemStatsGet()).json();
     expect(first.cpu.perCore).toEqual([]);
 
+    // One entry per `cpuN` line of the mocked /proc/stat, in range, once there
+    // are two samples to diff.
     const second = await (await systemStatsGet()).json();
     expect(second.cpu.perCore).toHaveLength(4);
     for (const core of second.cpu.perCore) {

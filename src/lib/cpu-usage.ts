@@ -36,6 +36,8 @@ let lastSample: CpuSample | null = null;
 let lastUsage: number | null = null;
 let lastCoreSamples: (CpuSample | null)[] = [];
 let lastCoreUsage: number[] | null = null;
+/** When `lastCoreUsage` was measured — a carried row ages out like a sample. */
+let lastCoreUsageAt = 0;
 
 /** One `cpu…` line of /proc/stat as a sample, or null if it is not one. */
 function sampleFromLine(line: string | undefined, now: number): CpuSample | null {
@@ -115,6 +117,17 @@ export function getCpuUsage(now: number = Date.now()): number {
   return usage;
 }
 
+/**
+ * The row published last time, where it is still recent enough to stand in for
+ * a measurement of "now" — held to the same window as the samples themselves,
+ * because figures from five minutes ago under a fresh timestamp are the same
+ * wrong claim as a zero.
+ */
+function carriedCoreUsage(now: number): number[] {
+  if (!lastCoreUsage || now - lastCoreUsageAt > MAX_SAMPLE_AGE_MS) return [];
+  return lastCoreUsage;
+}
+
 /** Percent busy of one core between two of its samples, or null if they do not diff. */
 function coreBusy(then: CpuSample, current: CpuSample): number | null {
   const dTotal = current.total - then.total;
@@ -136,19 +149,21 @@ function coreBusy(then: CpuSample, current: CpuSample): number | null {
  *
  * Empty where there is no figure to give: /proc/stat unreadable, or — the first
  * call of the process, which every server restart creates — no previous sample
- * and no earlier figures to stand in for it. Empty for the WHOLE row, never a
- * row that is measured for some cores and carried for others, because a
- * six-entry row reads as six measurements. The caller renders that as no
- * per-core row at all, and the next poll 3 s later has real figures.
+ * and no recent figures to stand in for it. Empty for the WHOLE row, never a
+ * row that is measured for some cores and carried for others, and never a row
+ * carried across a change in core count (a hotplug, or an nvpmodel mode that
+ * offlines cores): a six-entry row reads as six measurements of these six
+ * cores. The caller renders empty as no per-core row at all, and the next poll
+ * 3 s later has real figures.
  */
 export function getCpuCoreUsage(now: number = Date.now()): number[] {
   let current: (CpuSample | null)[];
   try {
     current = parseProcStatCores(fs.readFileSync("/proc/stat", "utf-8"), now);
   } catch {
-    return lastCoreUsage ?? [];
+    return carriedCoreUsage(now);
   }
-  if (current.length === 0) return lastCoreUsage ?? [];
+  if (current.length === 0) return carriedCoreUsage(now);
 
   const previous = lastCoreSamples;
   // Set before any early return: whatever this call could not answer, the next
@@ -158,19 +173,28 @@ export function getCpuCoreUsage(now: number = Date.now()): number[] {
   // against; so does a sample too old to be about "now".
   const comparable = previous.length === current.length;
 
-  const usage: number[] = [];
-  for (let i = 0; i < current.length; i += 1) {
-    const sample = current[i];
+  const measured = current.map((sample, i) => {
     const then = comparable ? previous[i] : null;
-    const measured =
-      sample && then && now - then.at <= MAX_SAMPLE_AGE_MS ? coreBusy(then, sample) : null;
-    // `??`, so a genuine 0% measurement stands as itself.
-    const busy = measured ?? lastCoreUsage?.[i];
-    if (typeof busy !== "number") return [];
-    usage.push(busy);
+    return sample && then && now - then.at <= MAX_SAMPLE_AGE_MS ? coreBusy(then, sample) : null;
+  });
+  if (measured.every((busy): busy is number => busy !== null)) {
+    lastCoreUsage = measured;
+    lastCoreUsageAt = now;
+    return measured;
   }
-  lastCoreUsage = usage;
-  return usage;
+
+  // Not every core was measured. The row published last time stands in only
+  // when it is the whole answer — nothing measured now, the same cores as then,
+  // and recent — which is the suspend/rollover case the aggregate handles the
+  // same way. A part-measured row, or one from a different core count, is not
+  // about these cores: it is withheld whole, and forgotten so a later call
+  // cannot index it.
+  const carried = carriedCoreUsage(now);
+  if (measured.some((busy) => busy !== null) || carried.length !== current.length) {
+    lastCoreUsage = null;
+    return [];
+  }
+  return carried;
 }
 
 /** Test seam — drops the cached sample so each test starts cold. */
@@ -179,4 +203,5 @@ export function __resetCpuUsageCache(): void {
   lastUsage = null;
   lastCoreSamples = [];
   lastCoreUsage = null;
+  lastCoreUsageAt = 0;
 }
