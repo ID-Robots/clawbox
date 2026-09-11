@@ -313,9 +313,9 @@ Additional options (OAuth client IDs, ClawBox AI, llama.cpp tuning) live in `.en
 
 This is only for genuine cross-origin/custom-origin deployments — for example,
 a reverse proxy that serves the Control UI from a different hostname or port.
-Same-origin access via `<hostname>.local`, a
-Tailscale `.ts.net` name, or a private LAN IP already works out of the box
-(see `ALLOWED_HOSTS` above and the mDNS/IP handling in
+Same-origin access via the box's own hostname — bare (`http://clawbox/`) or
+`<hostname>.local` — a Tailscale `.ts.net` name, or a private LAN IP already
+works out of the box (see `ALLOWED_HOSTS` above and the hostname/IP handling in
 `src/lib/gateway-proxy.ts`) and normally needs no entry here.
 
 To trust an additional origin, put a JSON array of exact `http`/`https`

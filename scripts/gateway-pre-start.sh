@@ -948,8 +948,9 @@ export CLAWBOX_LAN_IPS
 
 # Trusted control UI origins — a narrow escape hatch for genuinely
 # cross-origin/custom-origin Control UI deployments (see README and
-# scripts/gateway_origins.py). Same-origin access via `<hostname>.local`,
-# `.ts.net`, or a private LAN IP already works without any entry here.
+# scripts/gateway_origins.py). Same-origin access via the box's own hostname —
+# bare (`http://clawbox/`) or `<hostname>.local` — a `.ts.net` name, or a private
+# LAN IP already works without any entry here.
 # Loaded from CLAWBOX_CONTROL_UI_ORIGINS_FILE (or the module's default
 # path) via scripts/gateway_origins.py. Missing helper module or missing
 # config file both fall through to "no extras" — defaults still boot.

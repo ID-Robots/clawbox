@@ -2,10 +2,10 @@
 
 This is a narrow escape hatch for genuinely cross-origin or custom-origin
 Control UI deployments (for example, a reverse proxy on a different
-hostname or port). Same-origin access via `<hostname>.local`,
-Tailscale `.ts.net` names, or a private LAN IP already works without any
-entry here — see gateway-proxy.ts's isReflectableHost() and
-gateway-pre-start.sh's LAN_IPS enumeration.
+hostname or port). Same-origin access via the box's own hostname — bare
+(`http://clawbox/`) or `<hostname>.local` — a Tailscale `.ts.net` name, or a
+private LAN IP already works without any entry here — see gateway-proxy.ts's
+isReflectableHost() and gateway-pre-start.sh's LAN_IPS enumeration.
 
 Contract: a JSON array of strings at CLAWBOX_CONTROL_UI_ORIGINS_FILE (or the
 default path below) is read, validated, and merged into the gateway's
