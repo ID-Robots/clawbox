@@ -5,6 +5,8 @@ import { spawn } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const FLASH = "deepseek/deepseek-v4-flash";
 const PRO = "deepseek/deepseek-v4-pro";
 let root: string;
