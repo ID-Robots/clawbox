@@ -10,10 +10,10 @@ package manager.
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/x64-migration -p 'test_*.py'
 python3 scripts/x64-migration/build-package.py \
   --staging /tmp/clawbox-x64-integration-stage \
-  --output /tmp/clawbox-x64-integration_1.0.3_amd64.deb
-dpkg-deb --info /tmp/clawbox-x64-integration_1.0.3_amd64.deb
-dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.3_amd64.deb
-sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.3_amd64.deb
+  --output /tmp/clawbox-x64-integration_1.0.4_amd64.deb
+dpkg-deb --info /tmp/clawbox-x64-integration_1.0.4_amd64.deb
+dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.4_amd64.deb
+sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.4_amd64.deb
 ```
 
 The default host is `nexus0`, project `/home/nexus0/clawbox`, interpreter
@@ -47,19 +47,29 @@ Post-update checks leave a healthy gateway running. If it is unavailable,
 verification tries its existing service once and reports failure if it stays
 unavailable; it does not run the appliance pre-start/doctor repair chain.
 The UI is unavailable during its rebuild; this desktop does not reboot.
-Install integration package **1.0.3** as well as this dashboard update. Older
+Install integration package **1.0.4** as well as this dashboard update. Older
 packages retain their installed adapter and do not gain coding-harness delivery
 merely by fetching beta.
 
 Bootstrap and post-update install the `claude-ds` wrapper from the verified
 mirror as the desktop owner, preserving an existing Claude Code installation.
-If Claude is missing, its HTTPS installer also runs as the owner. Installation
-failure fails the update visibly. The copied wrapper defaults to this desktop's
+If Claude is missing, download the pinned Linux x64 native release over HTTPS,
+verify its pinned SHA-256, then run its native installer as the owner. A checksum
+mismatch or installation failure fails the update visibly. The copied wrapper defaults to this desktop's
 checkout, so the Coding app and an interactive shell use the same ClawBox AI
 configuration. Bootstrap delivers it before the core step restarts the gateway,
 allowing the agent's MCP server to discover the coding tools on that start.
 Neither the Codex CLI nor the appliance's network/service setup is installed
 by this step.
+
+The first-install pin is Claude Code **2.1.268**, with the `linux-x64` checksum
+from its [release manifest](https://downloads.claude.ai/claude-code-releases/2.1.268/manifest.json).
+Before changing the pin, verify that manifest's detached signature using the
+[vendor's verification procedure](https://code.claude.com/docs/en/installation#verify-the-manifest-signature)
+and key fingerprint `31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF 1A7E CACE`.
+Both the version and digest are committed in the installer; runtime environment
+variables cannot override them. Existing Claude installations keep their own
+version and update policy.
 
 For a wrapper repair without a full update, run the owner-only helper from the
 reviewed checkout (without sudo):

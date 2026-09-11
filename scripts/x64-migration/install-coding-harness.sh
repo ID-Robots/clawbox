@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run as the desktop owner. The root adapter supplies the verified wrapper;
-# Claude's installer and all writes into HOME run without root privileges.
+# Claude's verified native installer and all HOME writes run without root.
 set -euo pipefail
 [ "$(/usr/bin/id -u)" -ne 0 ] || { echo 'Run the coding harness installer as the desktop owner, not root.' >&2; exit 77; }
 [ "$#" -eq 2 ] || { echo 'Usage: install-coding-harness.sh WRAPPER_SOURCE PROJECT_DIR' >&2; exit 64; }
@@ -11,16 +11,25 @@ test -s "$wrapper_source"
 export PATH="$HOME/.bun/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin"
 
 if ! command -v claude >/dev/null 2>&1; then
-  installer=$(mktemp)
-  trap 'rm -f "$installer"' EXIT
+  # Pin the executable, not a mutable curl-to-shell bootstrap. This checksum
+  # is from Anthropic's signed 2.1.268 manifest, verified against fingerprint
+  # 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE (see README). This package targets
+  # Debian/Ubuntu amd64; an existing CLI on any supported PATH is untouched.
+  readonly CLAUDE_VERSION=2.1.268
+  readonly CLAUDE_SHA256=9691a2b7bd796712ca8cffb8e32e54ff7fc45b662540233171a16a94a0425653
+  mkdir -p "$HOME/.cache/clawbox"
+  download_dir=$(mktemp -d "$HOME/.cache/clawbox/coding-installer.XXXXXX")
+  trap 'rm -rf -- "$download_dir"' EXIT
+  installer="$download_dir/claude"
   curl -fsSL --proto '=https' --proto-redir '=https' \
-    --connect-timeout 15 --max-time 300 https://claude.ai/install.sh -o "$installer"
-  if [ ! -s "$installer" ] || head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region'; then
-    echo 'Claude Code installer unavailable or region-blocked; coding harness installation failed.' >&2
+    --connect-timeout 15 --max-time 300 \
+    "https://downloads.claude.ai/claude-code-releases/$CLAUDE_VERSION/linux-x64/claude" -o "$installer"
+  if ! printf '%s  %s\n' "$CLAUDE_SHA256" "$installer" | sha256sum --check --status; then
+    echo 'Claude Code checksum mismatch; refusing to execute the download.' >&2
     exit 1
   fi
-  /bin/bash -n "$installer"
-  /bin/bash "$installer" </dev/null
+  chmod 700 "$installer"
+  "$installer" install "$CLAUDE_VERSION" </dev/null
   command -v claude >/dev/null 2>&1 || { echo 'Claude Code is still missing after installation.' >&2; exit 1; }
 fi
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Owner-only installer fixtures; no vendor downloads or real coding runs."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -28,6 +29,7 @@ class CodingHarnessTest(unittest.TestCase):
         source = source.replace('export PATH="$HOME/.bun/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/snap/bin"',
                                 'export PATH="$HOME/.local/bin:/usr/bin:/bin"')
         self.installer = self.home / 'installer.sh'
+        self.installer_source = source
         self.installer.write_text(source)
         self.write_bin('curl', '#!/bin/sh\necho unexpected-download >&2\nexit 99\n')
 
@@ -67,18 +69,23 @@ class CodingHarnessTest(unittest.TestCase):
         self.assertFalse((self.bin / 'claude-ds').is_symlink())
         self.assertEqual(outside.read_text(), 'preserve')
 
-    def fake_download(self, body, status=0):
+    def fake_download(self, body, status=0, valid_checksum=True):
         payload = self.home / 'vendor.sh'
         payload.write_text(body)
+        # The real helper has no environment override for the trusted digest.
+        # Only this fixture copy substitutes a reviewed stand-in executable.
+        checksum = hashlib.sha256(payload.read_bytes()).hexdigest() if valid_checksum else '0' * 64
+        self.installer.write_text(self.installer_source.replace(
+            '9691a2b7bd796712ca8cffb8e32e54ff7fc45b662540233171a16a94a0425653', checksum))
         self.write_bin('curl', '''#!/bin/sh
 test "$1 $2 $3 $4 $5 $6 $7 $8 $9" = '-fsSL --proto =https --proto-redir =https --connect-timeout 15 --max-time 300' || exit 98
 shift 9
-test "$1 $2" = 'https://claude.ai/install.sh -o' || exit 97
+test "$1 $2" = 'https://downloads.claude.ai/claude-code-releases/2.1.268/linux-x64/claude -o' || exit 97
 cp "$HOME/vendor.sh" "$3"
 ''' + f'exit {status}\n')
 
     def test_missing_cli_installed_as_owner_from_https_then_verified(self):
-        self.fake_download('mkdir -p "$HOME/.local/bin"\nprintf "#!/bin/sh\\nexit 0\\n" > "$HOME/.local/bin/claude"\nchmod 755 "$HOME/.local/bin/claude"\n')
+        self.fake_download('#!/bin/sh\ntest "$1 $2" = "install 2.1.268" || exit 96\nmkdir -p "$HOME/.local/bin"\nprintf "#!/bin/sh\\nexit 0\\n" > "$HOME/.local/bin/claude"\nchmod 755 "$HOME/.local/bin/claude"\n')
         result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(os.access(self.bin / 'claude', os.X_OK))
@@ -93,6 +100,15 @@ cp "$HOME/vendor.sh" "$3"
                 result = self.install()
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((self.bin / 'claude-ds').exists())
+
+    def test_checksum_mismatch_never_executes_payload_and_cleans_download(self):
+        self.fake_download('#!/bin/sh\ntouch "$HOME/payload-executed"\n', valid_checksum=False)
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('checksum mismatch', result.stderr)
+        self.assertFalse((self.home / 'payload-executed').exists())
+        self.assertFalse((self.bin / 'claude-ds').exists())
+        self.assertEqual(list((self.home / '.cache/clawbox').iterdir()), [])
 
     def test_missing_or_changed_wrapper_fails_without_replacing_old_wrapper(self):
         self.write_bin('claude', '#!/bin/sh\nexit 0\n')
