@@ -2416,6 +2416,12 @@ describe("updater", () => {
       await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
       expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("failed");
       expect(updater.getUpdateState().steps.find((s) => s.id === "restart")?.status).toBe("pending");
+      const bootstrap = mockExecFile.mock.calls.find(([, args]) =>
+        (args as string[]).includes("bootstrap_updater"),
+      );
+      // A first CLI installation must outlive the installer's five-minute
+      // download allowance instead of inheriting a three-minute fetch budget.
+      expect(bootstrap?.[2]).toEqual(expect.objectContaining({ timeout: 930_000 }));
       expectNoApplianceMaintenance();
     });
 

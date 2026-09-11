@@ -4483,10 +4483,13 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (step.customRun) {
         await step.customRun();
       } else if (step.requiresRoot) {
+        // Desktop bootstrap also installs a missing Claude CLI. Its HTTPS
+        // download alone allows five minutes; use the system-fixup budget.
+        const timeoutMs = desktopIntegration && step.id === "bootstrap_updater" ? 900_000 : step.timeoutMs;
         if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
-          await execAsRootWithGatewayQuiesced(step.id, step.timeoutMs);
+          await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
         } else {
-          await execAsRoot(step.id, step.timeoutMs);
+          await execAsRoot(step.id, timeoutMs);
         }
       } else if (step.command) {
         await execShell(step.command, {
