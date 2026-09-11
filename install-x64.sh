@@ -1214,7 +1214,44 @@ step_fix_git_perms() {
   echo "  Fixed .git ownership"
 }
 
+x64_sudoers_rule() {
+  printf '%s' "$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl --runtime mask $GATEWAY_SERVICE, /usr/bin/systemctl --runtime unmask $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE"
+  if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
+    printf '%s' ", /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service"
+  fi
+  printf '%s\n' ", /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service"
+}
+
+reserved_port_env_keys() {
+  local env_file="$PROJECT_DIR/.env"
+  [ -f "$env_file" ] || return 0
+  awk '
+    /^[[:space:]]*(PORT|GATEWAY_PORT|TERMINAL_WS_PORT)[[:space:]]*=/ {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*=.*/, "", key)
+      print key
+    }
+  ' "$env_file" | sort -u
+}
+
+validate_reserved_port_env() {
+  local conflicting_keys
+  if ! conflicting_keys=$(reserved_port_env_keys); then
+    echo "Error: unable to inspect $PROJECT_DIR/.env for installer-managed port variables" >&2
+    return 1
+  fi
+  if [ -n "$conflicting_keys" ]; then
+    echo "Error: $PROJECT_DIR/.env defines installer-managed port variable(s): $(printf '%s\n' "$conflicting_keys" | paste -sd, -). Remove them and use CLAWBOX_PORT, CLAWBOX_GATEWAY_PORT, or CLAWBOX_TERMINAL_WS_PORT when running the installer." >&2
+    return 1
+  fi
+}
+
 step_systemd_services() {
+  # Recheck here as well as in preflight so --step systemd_services and a file
+  # changed during a full install cannot bypass the selected-port contract.
+  validate_reserved_port_env
+
   local gateway_unit="/etc/systemd/system/$GATEWAY_SERVICE"
   local ui_unit="/etc/systemd/system/$UI_SERVICE"
   local vnc_unit="/etc/systemd/system/clawbox-vnc.service"
@@ -1358,9 +1395,7 @@ EOF
   # with an exact unmask grant and always removed in a finally path.
   local sudoers_tmp
   sudoers_tmp=$(mktemp)
-  cat > "$sudoers_tmp" <<EOF
-$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl --runtime mask $GATEWAY_SERVICE, /usr/bin/systemctl --runtime unmask $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE, /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service, /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service
-EOF
+  x64_sudoers_rule > "$sudoers_tmp"
   chmod 440 "$sudoers_tmp"
   if ! visudo -cf "$sudoers_tmp" >/dev/null; then
     rm -f "$sudoers_tmp"
@@ -1475,7 +1510,17 @@ pid_in_unit() {
 
 port_listener_pids() {
   # PIDs listening on a TCP port, any address family. Empty when nothing does.
-  ss -Hltnp "sport = :$1" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+  local listeners
+  listeners=$(ss -Hltnp "sport = :$1" 2>/dev/null) || return
+  printf '%s\n' "$listeners" | awk '
+    {
+      line = $0
+      while (match(line, /pid=[0-9]+/)) {
+        print substr(line, RSTART + 4, RLENGTH - 4)
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+  ' | sort -u
 }
 
 preflight_host() {
@@ -1498,7 +1543,11 @@ preflight_host() {
   fi
   local port
   for port in "${!port_owner_unit[@]}"; do
-    pids=$(port_listener_pids "$port")
+    if ! pids=$(port_listener_pids "$port"); then
+      echo "PREFLIGHT FAIL: could not inspect TCP port $port with ss; refusing to assume it is free." >&2
+      failed=1
+      continue
+    fi
     [ -n "$pids" ] || continue
     for pid in $pids; do
       if pid_in_unit "$pid" "${port_owner_unit[$port]}"; then
@@ -1551,6 +1600,13 @@ preflight_host() {
   fi
   if [ -f "/etc/systemd/system/$GATEWAY_SERVICE.disabled" ]; then
     echo "PREFLIGHT NOTE: /etc/systemd/system/$GATEWAY_SERVICE.disabled exists (an operator parked the gateway unit earlier). The install writes a fresh $GATEWAY_SERVICE next to it and leaves the parked copy in place." >&2
+  fi
+
+  # EnvironmentFile entries override Environment= in systemd units. Reject
+  # reserved keys without exposing values so the ports checked above remain
+  # the ports used by the UI service.
+  if ! validate_reserved_port_env; then
+    failed=1
   fi
 
   # 4. A checkout that cannot be fast-forwarded is installed as-is; say so

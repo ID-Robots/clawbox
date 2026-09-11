@@ -113,6 +113,13 @@ function preflightBlock(): string {
   return SOURCE.slice(start, end);
 }
 
+function systemdHelperBlock(): string {
+  const start = SOURCE.indexOf("x64_sudoers_rule() {");
+  const end = SOURCE.indexOf("step_systemd_services() {", start);
+  if (start < 0 || end < 0) throw new Error("systemd helper block not found");
+  return SOURCE.slice(start, end);
+}
+
 describe("install-x64.sh shared-host preflight", () => {
   /**
    * Run `preflight_host` with the host probes replaced by stubs. Bash resolves
@@ -121,20 +128,21 @@ describe("install-x64.sh shared-host preflight", () => {
    */
   function runPreflight(stubs: string[], env: Record<string, string> = {}): { status: number | null; out: string } {
     const r = spawnSync("bash", ["-c", [
-      "set -uo pipefail",
+      "set -euo pipefail",
       "CLAWBOX_USER=clawbox",
       "CLAWBOX_HOME=/home/clawbox",
       'OPENCLAW_HOME="${OPENCLAW_HOME:-/home/clawbox/.openclaw}"',
-      "PROJECT_DIR=/nonexistent/clawbox",
+      'PROJECT_DIR="${PROJECT_DIR:-/nonexistent/clawbox}"',
       "UI_SERVICE=clawbox-setup.service",
       "GATEWAY_SERVICE=clawbox-gateway.service",
       'PORT="${PORT:-3005}"',
       'GATEWAY_PORT="${GATEWAY_PORT:-18789}"',
       'TERMINAL_WS_PORT="${TERMINAL_WS_PORT:-3006}"',
       'SKIP_DESKTOP_SERVICES="${SKIP_DESKTOP_SERVICES:-0}"',
+      systemdHelperBlock(),
       preflightBlock(),
       // Clean-host defaults; a case overrides what it needs.
-      "port_listener_pids() { :; }",
+      "ss() { :; }",
       "pid_in_unit() { return 1; }",
       "unit_user() { :; }",
       "pgrep() { :; }",
@@ -154,7 +162,7 @@ describe("install-x64.sh shared-host preflight", () => {
   });
 
   it("refuses a port held by a process outside the ClawBox units and names the knob", () => {
-    const r = runPreflight(['port_listener_pids() { [ "$1" = "18789" ] && echo 4242 || true; }']);
+    const r = runPreflight([`ss() { case "$2" in *:18789) echo 'LISTEN users:(("gateway",pid=4242,fd=3))' ;; esac; }`]);
     expect(r.status).toBe(1);
     expect(r.out).toContain("port 18789 is already taken by PID 4242");
     expect(r.out).toContain("CLAWBOX_GATEWAY_PORT=<port>");
@@ -163,10 +171,17 @@ describe("install-x64.sh shared-host preflight", () => {
 
   it("accepts a port held by our own unit", () => {
     const r = runPreflight([
-      'port_listener_pids() { [ "$1" = "18789" ] && echo 4242 || true; }',
+      `ss() { case "$2" in *:18789) echo 'LISTEN users:(("gateway",pid=4242,fd=3))' ;; esac; }`,
       'pid_in_unit() { [ "$1" = "4242" ] && [ "$2" = "clawbox-gateway.service" ]; }',
     ]);
     expect(r.status).toBe(0);
+  });
+
+  it("fails closed when ss cannot inspect a port", () => {
+    const r = runPreflight(["ss() { return 42; }"]);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("could not inspect TCP port");
+    expect(r.out).toContain("refusing to assume it is free");
   });
 
   it("refuses to reconfigure a user whose OpenClaw gateway runs outside clawbox-gateway.service", () => {
@@ -208,11 +223,16 @@ describe("install-x64.sh shared-host preflight", () => {
     expect(r.out).toContain("must be three different ports");
   });
 
-  it("runs before the first counted step and exposes --preflight", () => {
-    expect(SOURCE).toContain('if [ "${1:-}" = "--preflight" ]; then');
-    const preflightCall = SOURCE.indexOf("\npreflight_host\n");
-    const firstLog = SOURCE.indexOf('\nlog "');
-    expect(preflightCall).toBeGreaterThan(0);
+  it("dispatches --preflight and runs full-install preflight before the first counted step", () => {
+    const dispatchStart = SOURCE.indexOf('if [ "${1:-}" = "--preflight" ]; then');
+    const dispatchEnd = SOURCE.indexOf("\nfi", dispatchStart);
+    expect(dispatchStart).toBeGreaterThan(0);
+    expect(SOURCE.slice(dispatchStart, dispatchEnd)).toContain("  preflight_host");
+
+    const fullInstall = SOURCE.indexOf("# ── Full Install Mode");
+    const preflightCall = SOURCE.indexOf("\npreflight_host\n", fullInstall);
+    const firstLog = SOURCE.indexOf('\nlog "', fullInstall);
+    expect(preflightCall).toBeGreaterThan(fullInstall);
     expect(preflightCall).toBeLessThan(firstLog);
   });
 
@@ -222,6 +242,54 @@ describe("install-x64.sh shared-host preflight", () => {
     expect(SOURCE).toContain("Environment=TERMINAL_WS_PORT=$TERMINAL_WS_PORT");
     expect(SOURCE).toContain('wait_for_http "http://127.0.0.1:$GATEWAY_PORT"');
     expect(SOURCE).not.toContain('wait_for_http "http://127.0.0.1:18789"');
+  });
+
+  it("checks reserved .env keys before --step systemd_services can write units", () => {
+    const functionStart = SOURCE.indexOf("step_systemd_services() {");
+    const firstUnitPath = SOURCE.indexOf('  local gateway_unit="/etc/systemd/system/$GATEWAY_SERVICE"', functionStart);
+    const validation = SOURCE.indexOf("  validate_reserved_port_env", functionStart);
+    expect(SOURCE).toContain("  systemd_services start_gateway start_ui");
+    expect(validation).toBeGreaterThan(functionStart);
+    expect(validation).toBeLessThan(firstUnitPath);
+  });
+
+  it("rejects reserved .env port keys without exposing their values", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "clawbox-x64-reserved-env-"));
+    try {
+      writeFileSync(path.join(root, ".env"), "SAFE_KEY=kept\nPORT=secret-ui-port\n  TERMINAL_WS_PORT = secret-terminal-port\n");
+      const r = runPreflight([], { PROJECT_DIR: root });
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("PORT,TERMINAL_WS_PORT");
+      expect(r.out).toContain("CLAWBOX_GATEWAY_PORT");
+      expect(r.out).not.toContain("secret-ui-port");
+      expect(r.out).not.toContain("secret-terminal-port");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps browser sudoers grants only when desktop services are managed", () => {
+    const runRule = (skip: string) => spawnSync("bash", ["-c", [
+      "set -euo pipefail",
+      "CLAWBOX_USER=clawbox",
+      "GATEWAY_SERVICE=clawbox-gateway.service",
+      `SKIP_DESKTOP_SERVICES=${skip}`,
+      systemdHelperBlock(),
+      "x64_sudoers_rule",
+    ].join("\n")], { encoding: "utf-8", timeout: 30_000 });
+
+    const managed = runRule("0");
+    expect(managed.status).toBe(0);
+    expect(managed.stdout).toContain("systemctl start clawbox-browser.service");
+    expect(managed.stdout).toContain("systemctl stop clawbox-browser.service");
+    expect(managed.stdout).toContain("systemctl --runtime mask clawbox-gateway.service");
+    expect(managed.stdout).toContain("systemctl enable --now ollama.service");
+
+    const skipped = runRule("1");
+    expect(skipped.status).toBe(0);
+    expect(skipped.stdout).not.toContain("clawbox-browser.service");
+    expect(skipped.stdout).toContain("systemctl --runtime mask clawbox-gateway.service");
+    expect(skipped.stdout).toContain("systemctl enable --now ollama.service");
   });
 });
 
