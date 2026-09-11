@@ -6,6 +6,7 @@
 # Usage:
 #   sudo bash install-x64.sh              — full install
 #   sudo bash install-x64.sh --step NAME  — run a single step
+#   sudo bash install-x64.sh --preflight  — check the host, change nothing
 #
 # Environment variables:
 #   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main)
@@ -13,6 +14,18 @@
 #   CLAWBOX_PORT         — port for ClawBox UI (default: 3005)
 #   CLAWBOX_DIR          — checkout to install (default: ~/clawbox)
 #   OPENCLAW_PIN_VERSION — QA override for config/openclaw-target.txt
+#   CLAWBOX_GATEWAY_PORT — OpenClaw gateway port (default: 18789). Set it when
+#                          another OpenClaw gateway already owns 18789 on the host.
+#   CLAWBOX_TERMINAL_WS_PORT — terminal websocket port (default: 3006)
+#   CLAWBOX_SKIP_DESKTOP_SERVICES=1 — leave clawbox-vnc / clawbox-websockify /
+#                          clawbox-browser units exactly as they are (for hosts
+#                          where another user already owns the virtual desktop)
+#
+# Shared-host safety: the full install runs `preflight_host` first and refuses
+# to continue when a port it needs belongs to a foreign process, when
+# ~/.openclaw of the install user is already served by a gateway outside
+# clawbox-gateway.service, or when the desktop units belong to another user.
+# Nothing is changed before that check passes.
 set -euo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
@@ -52,6 +65,16 @@ if [ -z "$CLAWBOX_HOME" ]; then
 fi
 PROJECT_DIR="${CLAWBOX_DIR:-$CLAWBOX_HOME/clawbox}"
 PORT="${CLAWBOX_PORT:-3005}"
+GATEWAY_PORT="${CLAWBOX_GATEWAY_PORT:-18789}"
+TERMINAL_WS_PORT="${CLAWBOX_TERMINAL_WS_PORT:-3006}"
+SKIP_DESKTOP_SERVICES="${CLAWBOX_SKIP_DESKTOP_SERVICES:-0}"
+for _port_var in PORT GATEWAY_PORT TERMINAL_WS_PORT; do
+  if ! [[ "${!_port_var}" =~ ^[0-9]+$ ]] || [ "${!_port_var}" -lt 1 ] || [ "${!_port_var}" -gt 65535 ]; then
+    echo "Error: $_port_var must be a TCP port number, got '${!_port_var}'" >&2
+    exit 1
+  fi
+done
+unset _port_var
 
 # Detect bun location
 if [ -x "$CLAWBOX_HOME/.bun/bin/bun" ]; then
@@ -1191,7 +1214,44 @@ step_fix_git_perms() {
   echo "  Fixed .git ownership"
 }
 
+x64_sudoers_rule() {
+  printf '%s' "$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl --runtime mask $GATEWAY_SERVICE, /usr/bin/systemctl --runtime unmask $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE"
+  if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
+    printf '%s' ", /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service"
+  fi
+  printf '%s\n' ", /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service"
+}
+
+reserved_port_env_keys() {
+  local env_file="$PROJECT_DIR/.env"
+  [ -f "$env_file" ] || return 0
+  awk '
+    /^[[:space:]]*(PORT|GATEWAY_PORT|TERMINAL_WS_PORT)[[:space:]]*=/ {
+      key = $0
+      sub(/^[[:space:]]*/, "", key)
+      sub(/[[:space:]]*=.*/, "", key)
+      print key
+    }
+  ' "$env_file" | sort -u
+}
+
+validate_reserved_port_env() {
+  local conflicting_keys
+  if ! conflicting_keys=$(reserved_port_env_keys); then
+    echo "Error: unable to inspect $PROJECT_DIR/.env for installer-managed port variables" >&2
+    return 1
+  fi
+  if [ -n "$conflicting_keys" ]; then
+    echo "Error: $PROJECT_DIR/.env defines installer-managed port variable(s): $(printf '%s\n' "$conflicting_keys" | paste -sd, -). Remove them and use CLAWBOX_PORT, CLAWBOX_GATEWAY_PORT, or CLAWBOX_TERMINAL_WS_PORT when running the installer." >&2
+    return 1
+  fi
+}
+
 step_systemd_services() {
+  # Recheck here as well as in preflight so --step systemd_services and a file
+  # changed during a full install cannot bypass the selected-port contract.
+  validate_reserved_port_env
+
   local gateway_unit="/etc/systemd/system/$GATEWAY_SERVICE"
   local ui_unit="/etc/systemd/system/$UI_SERVICE"
   local vnc_unit="/etc/systemd/system/clawbox-vnc.service"
@@ -1213,6 +1273,8 @@ Environment=USER=$CLAWBOX_USER
 Environment=CLAWBOX_HOME_DIR=$CLAWBOX_HOME
 Environment=CLAWBOX_ROOT=$PROJECT_DIR
 Environment=CLAWBOX_PORT=$PORT
+Environment=GATEWAY_PORT=$GATEWAY_PORT
+Environment=OPENCLAW_GATEWAY_PORT=$GATEWAY_PORT
 Environment=NODE_ENV=production
 Environment=PATH=$NPM_PREFIX/bin:$NODE_DIST_ROOT/bin:$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStartPre=$PROJECT_DIR/scripts/gateway-pre-start.sh
@@ -1228,6 +1290,9 @@ TimeoutStopSec=30
 WantedBy=multi-user.target
 EOF
 
+  if [ "$SKIP_DESKTOP_SERVICES" = "1" ]; then
+    echo "  CLAWBOX_SKIP_DESKTOP_SERVICES=1: leaving clawbox-vnc, clawbox-websockify and clawbox-browser units untouched"
+  else
   cat > "$vnc_unit" <<EOF
 [Unit]
 Description=ClawBox x64 virtual desktop
@@ -1290,6 +1355,7 @@ KillMode=control-group
 [Install]
 WantedBy=multi-user.target
 EOF
+  fi
 
   cat > "$ui_unit" <<EOF
 [Unit]
@@ -1309,6 +1375,8 @@ Environment=CLAWBOX_OPENCLAW_HOME=$OPENCLAW_HOME
 Environment=NODE_ENV=production
 Environment=BUN_ENV=production
 Environment=PORT=$PORT
+Environment=GATEWAY_PORT=$GATEWAY_PORT
+Environment=TERMINAL_WS_PORT=$TERMINAL_WS_PORT
 Environment=HOSTNAME=0.0.0.0
 Environment=PATH=$NPM_PREFIX/bin:$NODE_DIST_ROOT/bin:$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=-$PROJECT_DIR/.env
@@ -1327,9 +1395,7 @@ EOF
   # with an exact unmask grant and always removed in a finally path.
   local sudoers_tmp
   sudoers_tmp=$(mktemp)
-  cat > "$sudoers_tmp" <<EOF
-$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl --runtime mask $GATEWAY_SERVICE, /usr/bin/systemctl --runtime unmask $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE, /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service, /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service
-EOF
+  x64_sudoers_rule > "$sudoers_tmp"
   chmod 440 "$sudoers_tmp"
   if ! visudo -cf "$sudoers_tmp" >/dev/null; then
     rm -f "$sudoers_tmp"
@@ -1340,8 +1406,12 @@ EOF
   rm -f "$sudoers_tmp"
 
   systemctl daemon-reload
-  systemctl enable "$GATEWAY_SERVICE" "$UI_SERVICE" clawbox-vnc.service clawbox-websockify.service
-  systemctl restart clawbox-vnc.service clawbox-websockify.service
+  if [ "$SKIP_DESKTOP_SERVICES" = "1" ]; then
+    systemctl enable "$GATEWAY_SERVICE" "$UI_SERVICE"
+  else
+    systemctl enable "$GATEWAY_SERVICE" "$UI_SERVICE" clawbox-vnc.service clawbox-websockify.service
+    systemctl restart clawbox-vnc.service clawbox-websockify.service
+  fi
   echo "  Persistent x64 services installed"
 }
 
@@ -1377,7 +1447,7 @@ step_start_gateway() {
     return 1
   fi
   systemctl restart "$GATEWAY_SERVICE"
-  wait_for_http "http://127.0.0.1:18789" "OpenClaw gateway" "$GATEWAY_SERVICE"
+  wait_for_http "http://127.0.0.1:$GATEWAY_PORT" "OpenClaw gateway" "$GATEWAY_SERVICE"
 }
 
 step_clawkeep_install() {
@@ -1416,6 +1486,175 @@ step_start_ui() {
   systemctl restart "$UI_SERVICE"
   wait_for_http "http://127.0.0.1:$PORT" "ClawBox UI" "$UI_SERVICE"
 }
+
+# ── Host preflight ──────────────────────────────────────────────────────────
+#
+# Every check here is read-only. The full install runs it before step 1 and
+# `--preflight` runs only this, so an operator can see what the installer would
+# collide with on a host that already runs other things (another OpenClaw
+# gateway, a shared VNC desktop, a second ClawBox checkout) before anything is
+# written. Each failure names the knob that resolves it.
+
+unit_user() {
+  # Effective service user after vendor units and drop-ins are resolved.
+  # systemd defaults to root when User= is empty; empty output means not installed.
+  local unit="$1" load_state owner
+  load_state=$(systemctl show "$unit" --property=LoadState --value 2>/dev/null) || return 1
+  [ "$load_state" != "not-found" ] || return 0
+  owner=$(systemctl show "$unit" --property=User --value 2>/dev/null) || return 1
+  printf '%s\n' "${owner:-root}"
+}
+
+pid_in_unit() {
+  # True when PID belongs to the cgroup of the given systemd unit.
+  local pid="$1" unit="$2"
+  grep -q "/${unit}\$" "/proc/$pid/cgroup" 2>/dev/null
+}
+
+port_listener_pids() {
+  # PIDs listening on a TCP port, any address family. Empty when nothing does.
+  local listeners
+  listeners=$(ss -Hltnp "sport = :$1" 2>/dev/null) || return
+  printf '%s\n' "$listeners" | awk '
+    {
+      line = $0
+      while (match(line, /pid=[0-9]+/)) {
+        print substr(line, RSTART + 4, RLENGTH - 4)
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+  ' | sort -u
+}
+
+preflight_host() {
+  local failed=0 pid pids unit_owner
+
+  # 1. Ports this install will bind must be free or already ours.
+  local -A port_owner_unit=(
+    ["$PORT"]="$UI_SERVICE"
+    ["$GATEWAY_PORT"]="$GATEWAY_SERVICE"
+    ["$TERMINAL_WS_PORT"]="$UI_SERVICE"
+  )
+  local -A port_knob=(
+    ["$PORT"]="CLAWBOX_PORT"
+    ["$GATEWAY_PORT"]="CLAWBOX_GATEWAY_PORT"
+    ["$TERMINAL_WS_PORT"]="CLAWBOX_TERMINAL_WS_PORT"
+  )
+  if [ "$PORT" = "$GATEWAY_PORT" ] || [ "$PORT" = "$TERMINAL_WS_PORT" ] || [ "$GATEWAY_PORT" = "$TERMINAL_WS_PORT" ]; then
+    echo "PREFLIGHT FAIL: CLAWBOX_PORT ($PORT), CLAWBOX_GATEWAY_PORT ($GATEWAY_PORT) and CLAWBOX_TERMINAL_WS_PORT ($TERMINAL_WS_PORT) must be three different ports" >&2
+    failed=1
+  fi
+  if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
+    local -a configured_port_names=(CLAWBOX_PORT CLAWBOX_GATEWAY_PORT CLAWBOX_TERMINAL_WS_PORT)
+    local -a configured_port_values=("$PORT" "$GATEWAY_PORT" "$TERMINAL_WS_PORT")
+    local i
+    for i in "${!configured_port_names[@]}"; do
+      case "${configured_port_values[$i]}" in
+        5900|6080|18800)
+          echo "PREFLIGHT FAIL: ${configured_port_names[$i]} (${configured_port_values[$i]}) conflicts with a managed desktop service port (VNC 5900, websockify 6080, browser CDP 18800). Pick another port or set CLAWBOX_SKIP_DESKTOP_SERVICES=1 to leave the desktop units alone." >&2
+          failed=1
+          ;;
+      esac
+    done
+  fi
+  local port
+  for port in "${!port_owner_unit[@]}"; do
+    if ! pids=$(port_listener_pids "$port"); then
+      echo "PREFLIGHT FAIL: could not inspect TCP port $port with ss; refusing to assume it is free." >&2
+      failed=1
+      continue
+    fi
+    [ -n "$pids" ] || continue
+    for pid in $pids; do
+      if pid_in_unit "$pid" "${port_owner_unit[$port]}"; then
+        continue
+      fi
+      echo "PREFLIGHT FAIL: port $port is already taken by PID $pid ($(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | cut -c1-120)), which is not ${port_owner_unit[$port]}. Pick another port with ${port_knob[$port]}=<port>." >&2
+      failed=1
+    done
+  done
+
+  # 2. The install user's OpenClaw home must not be served by a gateway we do
+  #    not manage. Running `openclaw doctor --fix` and the config seed against a
+  #    live foreign gateway's config is how a shared host loses its assistant.
+  local foreign_gw=""
+  for pid in $(pgrep -u "$CLAWBOX_USER" -f 'openclaw.*gateway' 2>/dev/null || true); do
+    pid_in_unit "$pid" "$GATEWAY_SERVICE" && continue
+    foreign_gw="$pid"
+    break
+  done
+  if [ -n "$foreign_gw" ]; then
+    echo "PREFLIGHT FAIL: user '$CLAWBOX_USER' already runs an OpenClaw gateway (PID $foreign_gw) outside $GATEWAY_SERVICE, most likely from $OPENCLAW_HOME. This installer would rewrite that gateway's config. Install ClawBox as a dedicated user instead: CLAWBOX_USER=clawbox." >&2
+    failed=1
+  fi
+  if [ -f "$OPENCLAW_HOME/openclaw.json" ]; then
+    local cfg_owner
+    cfg_owner=$(stat -c %U "$OPENCLAW_HOME/openclaw.json" 2>/dev/null || echo "")
+    if [ -n "$cfg_owner" ] && [ "$cfg_owner" != "$CLAWBOX_USER" ]; then
+      echo "PREFLIGHT FAIL: $OPENCLAW_HOME/openclaw.json is owned by '$cfg_owner', not '$CLAWBOX_USER'. Refusing to reconfigure another user's OpenClaw." >&2
+      failed=1
+    fi
+  fi
+
+  # 3. Existing units must belong to the install user, unless the desktop
+  #    units are explicitly left alone.
+  for unit in "$GATEWAY_SERVICE" "$UI_SERVICE"; do
+    if ! unit_owner=$(unit_user "$unit"); then
+      echo "PREFLIGHT FAIL: could not inspect the effective systemd user for $unit; refusing to overwrite it." >&2
+      failed=1
+      continue
+    fi
+    if [ -n "$unit_owner" ] && [ "$unit_owner" != "$CLAWBOX_USER" ]; then
+      echo "PREFLIGHT FAIL: /etc/systemd/system/$unit currently runs as '$unit_owner'; this install would re-point it to '$CLAWBOX_USER'. Stop and disable that unit first if that is intended (its ExecStart and WorkingDirectory tell you what it serves)." >&2
+      failed=1
+    fi
+  done
+  if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
+    for unit in clawbox-vnc.service clawbox-websockify.service clawbox-browser.service; do
+      if ! unit_owner=$(unit_user "$unit"); then
+        echo "PREFLIGHT FAIL: could not inspect the effective systemd user for $unit; refusing to overwrite it." >&2
+        failed=1
+        continue
+      fi
+      if [ -n "$unit_owner" ] && [ "$unit_owner" != "$CLAWBOX_USER" ]; then
+        echo "PREFLIGHT FAIL: /etc/systemd/system/$unit runs as '$unit_owner'. Rewriting it would take the virtual desktop (:99, VNC 5900/6080, CDP 18800) away from that user. Set CLAWBOX_SKIP_DESKTOP_SERVICES=1 to leave the desktop units alone." >&2
+        failed=1
+      fi
+    done
+  fi
+  if [ -f "/etc/systemd/system/$GATEWAY_SERVICE.disabled" ]; then
+    echo "PREFLIGHT NOTE: /etc/systemd/system/$GATEWAY_SERVICE.disabled exists (an operator parked the gateway unit earlier). The install writes a fresh $GATEWAY_SERVICE next to it and leaves the parked copy in place." >&2
+  fi
+
+  # EnvironmentFile entries override Environment= in systemd units. Reject
+  # reserved keys without exposing values so the ports checked above remain
+  # the ports used by the UI service.
+  if ! validate_reserved_port_env; then
+    failed=1
+  fi
+
+  # 4. A checkout that cannot be fast-forwarded is installed as-is; say so
+  #    before the build spends minutes on it.
+  if [ -d "$PROJECT_DIR/.git" ]; then
+    local dirty
+    dirty=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" status --porcelain 2>/dev/null | wc -l)
+    if [ "$dirty" -gt 0 ]; then
+      echo "PREFLIGHT NOTE: $PROJECT_DIR has $dirty uncommitted change(s); git_pull will not fast-forward over them and the build will use the tree as it is." >&2
+    fi
+  fi
+
+  if [ "$failed" -ne 0 ]; then
+    echo "" >&2
+    echo "Preflight failed; nothing was changed. Fix the items above and rerun." >&2
+    return 1
+  fi
+  echo "  Preflight OK: user=$CLAWBOX_USER home=$CLAWBOX_HOME project=$PROJECT_DIR ui=$PORT gateway=$GATEWAY_PORT terminal-ws=$TERMINAL_WS_PORT desktop-units=$([ "$SKIP_DESKTOP_SERVICES" = "1" ] && echo skip || echo manage)"
+}
+
+if [ "${1:-}" = "--preflight" ]; then
+  preflight_host
+  exit $?
+fi
 
 # ── Single-step mode ────────────────────────────────────────────────────────
 
@@ -1459,9 +1698,11 @@ log() {
 echo "=== ClawBox x64 Desktop Installer ==="
 echo "  User: $CLAWBOX_USER"
 echo "  Project: $PROJECT_DIR"
-echo "  Port: $PORT"
+echo "  Port: $PORT (gateway $GATEWAY_PORT, terminal-ws $TERMINAL_WS_PORT)"
 echo "  Skipping: hostname, WiFi AP, JetPack, performance mode, jtop"
 echo ""
+echo "Checking the host before changing anything..."
+preflight_host
 
 log "Installing system packages..."
 step_apt_update
@@ -1518,7 +1759,7 @@ echo ""
 echo "=== ClawBox x64 Setup Complete ==="
 echo ""
 echo "  Dashboard:    http://${LOCAL_IP}:${PORT}"
-echo "  OpenClaw:     http://${LOCAL_IP}:18789"
+echo "  OpenClaw:     http://127.0.0.1:${GATEWAY_PORT} (loopback; the UI proxies it)"
 echo "  UI Logs:      journalctl -u $UI_SERVICE"
 echo "  Gateway Logs: journalctl -u $GATEWAY_SERVICE"
 echo ""
