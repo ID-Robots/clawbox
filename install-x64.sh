@@ -1496,11 +1496,12 @@ step_start_ui() {
 # written. Each failure names the knob that resolves it.
 
 unit_user() {
-  # Effective `User=` of an installed system unit. systemd defaults to root
-  # when the directive is absent; empty means only that the unit is not installed.
-  local unit="$1" owner
-  [ -f "/etc/systemd/system/$unit" ] || return 0
-  owner=$(sed -n 's/^User=\(.*\)$/\1/p' "/etc/systemd/system/$unit" | head -1)
+  # Effective service user after vendor units and drop-ins are resolved.
+  # systemd defaults to root when User= is empty; empty output means not installed.
+  local unit="$1" load_state owner
+  load_state=$(systemctl show "$unit" --property=LoadState --value 2>/dev/null) || return 1
+  [ "$load_state" != "not-found" ] || return 0
+  owner=$(systemctl show "$unit" --property=User --value 2>/dev/null) || return 1
   printf '%s\n' "${owner:-root}"
 }
 
@@ -1598,7 +1599,11 @@ preflight_host() {
   # 3. Existing units must belong to the install user, unless the desktop
   #    units are explicitly left alone.
   for unit in "$GATEWAY_SERVICE" "$UI_SERVICE"; do
-    unit_owner=$(unit_user "$unit")
+    if ! unit_owner=$(unit_user "$unit"); then
+      echo "PREFLIGHT FAIL: could not inspect the effective systemd user for $unit; refusing to overwrite it." >&2
+      failed=1
+      continue
+    fi
     if [ -n "$unit_owner" ] && [ "$unit_owner" != "$CLAWBOX_USER" ]; then
       echo "PREFLIGHT FAIL: /etc/systemd/system/$unit currently runs as '$unit_owner'; this install would re-point it to '$CLAWBOX_USER'. Stop and disable that unit first if that is intended (its ExecStart and WorkingDirectory tell you what it serves)." >&2
       failed=1
@@ -1606,7 +1611,11 @@ preflight_host() {
   done
   if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
     for unit in clawbox-vnc.service clawbox-websockify.service clawbox-browser.service; do
-      unit_owner=$(unit_user "$unit")
+      if ! unit_owner=$(unit_user "$unit"); then
+        echo "PREFLIGHT FAIL: could not inspect the effective systemd user for $unit; refusing to overwrite it." >&2
+        failed=1
+        continue
+      fi
       if [ -n "$unit_owner" ] && [ "$unit_owner" != "$CLAWBOX_USER" ]; then
         echo "PREFLIGHT FAIL: /etc/systemd/system/$unit runs as '$unit_owner'. Rewriting it would take the virtual desktop (:99, VNC 5900/6080, CDP 18800) away from that user. Set CLAWBOX_SKIP_DESKTOP_SERVICES=1 to leave the desktop units alone." >&2
         failed=1

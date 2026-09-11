@@ -113,11 +113,11 @@ function preflightBlock(): string {
   return SOURCE.slice(start, end);
 }
 
-function unitUserBlock(unitDir: string): string {
+function unitUserBlock(): string {
   const start = SOURCE.indexOf("unit_user() {");
   const end = SOURCE.indexOf("\npid_in_unit() {", start);
   if (start < 0 || end < 0) throw new Error("unit_user block not found");
-  return SOURCE.slice(start, end).replaceAll("/etc/systemd/system", unitDir);
+  return SOURCE.slice(start, end);
 }
 
 function systemdHelperBlock(): string {
@@ -249,29 +249,44 @@ describe("install-x64.sh shared-host preflight", () => {
     expect(skipped.status).toBe(0);
   });
 
-  it("treats an installed system unit without User= as root", () => {
-    const root = mkdtempSync(path.join(tmpdir(), "clawbox-x64-unit-user-"));
-    try {
-      writeFileSync(path.join(root, "default-root.service"), "[Service]\nExecStart=/bin/true\n");
-      writeFileSync(path.join(root, "owned.service"), "[Service]\nUser=clawbox\nExecStart=/bin/true\n");
-      const r = spawnSync("bash", ["-c", [
-        "set -euo pipefail",
-        unitUserBlock(root),
-        "unit_user missing.service",
-        "unit_user default-root.service",
-        "unit_user owned.service",
-      ].join("\n")], { encoding: "utf-8", timeout: 30_000 });
-      expect(r.status).toBe(0);
-      expect(r.stdout).toBe("root\nclawbox\n");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+  it("uses systemd's effective user for vendor units, defaults, and drop-in overrides", () => {
+    const r = spawnSync("bash", ["-c", [
+      "set -euo pipefail",
+      unitUserBlock(),
+      `systemctl() {
+        case "$2:$3" in
+          missing.service:--property=LoadState) echo not-found ;;
+          default-root.service:--property=LoadState|owned.service:--property=LoadState|drop-in-override.service:--property=LoadState) echo loaded ;;
+          default-root.service:--property=User) : ;;
+          owned.service:--property=User) echo clawbox ;;
+          drop-in-override.service:--property=User) echo nexus0 ;;
+          *) return 1 ;;
+        esac
+      }`,
+      "unit_user missing.service",
+      "unit_user default-root.service",
+      "unit_user owned.service",
+      "unit_user drop-in-override.service",
+    ].join("\n")], { encoding: "utf-8", timeout: 30_000 });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("root\nclawbox\nnexus0\n");
   });
 
-  it("refuses to replace an existing root-run unit", () => {
-    const r = runPreflight(['unit_user() { if [ "$1" = "clawbox-setup.service" ]; then echo root; fi; }']);
+  it("refuses to replace existing root-run and drop-in-overridden units", () => {
+    const rootRun = runPreflight(['unit_user() { if [ "$1" = "clawbox-setup.service" ]; then echo root; fi; }']);
+    expect(rootRun.status).toBe(1);
+    expect(rootRun.out).toContain("clawbox-setup.service currently runs as 'root'");
+
+    const overridden = runPreflight(['unit_user() { if [ "$1" = "clawbox-setup.service" ]; then echo nexus0; fi; }']);
+    expect(overridden.status).toBe(1);
+    expect(overridden.out).toContain("clawbox-setup.service currently runs as 'nexus0'");
+  });
+
+  it("fails closed when systemd cannot resolve a unit's effective user", () => {
+    const r = runPreflight(['unit_user() { if [ "$1" = "clawbox-setup.service" ]; then return 42; fi; }']);
     expect(r.status).toBe(1);
-    expect(r.out).toContain("clawbox-setup.service currently runs as 'root'");
+    expect(r.out).toContain("could not inspect the effective systemd user for clawbox-setup.service");
+    expect(r.out).toContain("refusing to overwrite it");
   });
 
   it("dispatches --preflight and runs full-install preflight before the first counted step", () => {
