@@ -64,6 +64,8 @@ vi.mock("@/lib/port-probe", async (orig) => ({
 // is the seam: nothing in these tests may spawn a real `hermes`.
 const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
+const { mockX64Integration } = vi.hoisted(() => ({ mockX64Integration: vi.fn(() => false) }));
+vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: mockX64Integration }));
 
 // The TASK-606 marker, mocked so the clears the repair paths owe can be seen.
 // `readPluginRepairs` answers `{}`, which is what the real one answers under
@@ -250,6 +252,7 @@ describe("updater", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    mockX64Integration.mockReturnValue(false);
     process.env.GATEWAY_HEALTH_WAIT_MS = "1";
     process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
     process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
@@ -2385,6 +2388,71 @@ describe("updater", () => {
       const aptStep = state.steps.find((step) => step.id === "apt_update");
       expect(aptStep?.status).toBe("pending");
       expect(state.error).toBe("fatal: invalid branch name in .update-branch");
+    });
+  });
+
+  describe("existing x64 desktop updates", () => {
+    beforeEach(() => { mockX64Integration.mockReturnValue(true); });
+
+    const commands = () => mockExecFile.mock.calls.map(([cmd, args]) =>
+      `${cmd} ${(args as string[]).join(" ")}`,
+    );
+    const expectNoApplianceMaintenance = () => {
+      expect(commands().some((call) =>
+        call.includes("clawbox-gateway-maintenance.sh")
+          || call.includes("systemctl stop clawbox-gateway.service")
+          || call.includes("scripts/gateway-pre-start.sh")
+          || call.includes("doctor --fix"),
+      )).toBe(false);
+    };
+
+    it("lets the desktop root step restore the gateway when the core pin is rejected", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh openclaw_install": new Error("A changed core needs a reviewed migration"),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("failed");
+      expect(updater.getUpdateState().steps.find((s) => s.id === "restart")?.status).toBe("pending");
+      expectNoApplianceMaintenance();
+    });
+
+    it("finishes the post-rebuild continuation without stopping a healthy gateway", async () => {
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().some((call) => call.includes("clawbox-run-root-step.sh post_update"))).toBe(true);
+      expect(commands().some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
+      expectNoApplianceMaintenance();
+    });
+
+    it("restarts a stopped desktop gateway through its bridge without rewriting its state", async () => {
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockImplementation(async () => commands().some((call) => call.includes("restart clawbox-gateway")));
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().filter((call) => call.includes("restart clawbox-gateway"))).toHaveLength(1);
+      expectNoApplianceMaintenance();
+    });
+
+    it("reports an unavailable desktop gateway without attempting appliance migrations", async () => {
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockResolvedValue(false);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(updater.getUpdateState().error).toContain("existing OpenClaw user gateway");
+      expectNoApplianceMaintenance();
+    });
+
+    it("reports a rolled-back rebuild without stopping the restored gateway", async () => {
+      mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "same-build" : undefined);
+      mockRebuiltBox("same-build");
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().phase).toBe("failed");
+      expect(commands().some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
+      expectNoApplianceMaintenance();
     });
   });
 

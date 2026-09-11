@@ -37,6 +37,18 @@ adapter remains installed across beta resets. Git fetches/builds in the live
 desktop checkout run as its owner. UI rebuilds preserve the previous build,
 restore it on failure, and restart only the UI to resume the existing updater.
 
+Both **Update** and **Force full update** use this desktop contract when the
+dashboard checkout matches `PROJECT_DIR` in the root-owned integration file.
+The adapter owns the maintenance guard for each core step and restores an
+already-running gateway before returning, even when the step refuses a new
+core pin or fails validation. A later UI rebuild failure therefore cannot
+strand Telegram waiting for a verification step that will never run.
+Post-update checks leave a healthy gateway running. If it is unavailable,
+verification tries its existing service once and reports failure if it stays
+unavailable; it does not run the appliance pre-start/doctor repair chain.
+The UI is unavailable during its rebuild; this desktop does not reboot.
+The existing integration package 1.0.2 supports this dashboard change.
+
 The already-installed OpenClaw version is validated without running migrations.
 The owner's idempotent backup compatibility patch is reapplied as that owner.
 A changed core pin is deliberately refused before package/database modification:

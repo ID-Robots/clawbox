@@ -26,6 +26,7 @@ import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
 import { watchRootStepProgress } from "./root-step-follow";
 import { setUpdateLock, clearUpdateLock, isUpdateLocked, updateLockHeldByLiveProcess } from "./update-lock";
+import { hasX64DesktopIntegration } from "./x64-integration";
 
 /**
  * "An update was accepted and then lost its process" — written where the lock
@@ -3076,6 +3077,16 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
 }
 
 async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
+  if (hasX64DesktopIntegration(PROJECT_DIR)) {
+    // The desktop package restores its existing user gateway before its core
+    // step returns, including failures. It must not inherit the appliance's
+    // doctor/pre-start migrations or rewrite the owner's providers/sessions.
+    gatewayNeedsRecovery = false;
+    if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
+    await restartGateway({ awaitReady: false });
+    if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+    throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
+  }
   const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
   gatewayNeedsRecovery = false;
   if (!recoverImmediately && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
@@ -4348,6 +4359,11 @@ async function checkInternet(): Promise<boolean> {
 }
 
 async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOptions): Promise<void> {
+  // The root-owned desktop adapter serializes its own core writers and
+  // restores the gateway on both outcomes. An outer appliance guard made it
+  // leave Telegram stopped until gateway_verify, which a failed rebuild or
+  // rejected core pin never reaches. Resolve once for this run/continuation.
+  const desktopIntegration = hasX64DesktopIntegration(PROJECT_DIR);
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -4467,7 +4483,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (step.customRun) {
         await step.customRun();
       } else if (step.requiresRoot) {
-        if (GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
+        if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
           await execAsRootWithGatewayQuiesced(step.id, step.timeoutMs);
         } else {
           await execAsRoot(step.id, step.timeoutMs);

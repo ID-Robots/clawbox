@@ -218,6 +218,61 @@ exit {code}
         self.assertEqual(result.returncode,78,result.stderr)
         self.assertNotIn('doctor-start',(root/'events').read_text())
         self.assertIn('reviewed state snapshot',result.stderr)
+        self.assertFalse((root/'guard').exists())
+        self.assertIn('system-start',(root/'events').read_text())
+
+    def rebuild_fixture(self,fail_at=None):
+        root,worker,_=self.core_fixture()
+        (root/'.next/standalone').mkdir(parents=True)
+        (root/'.next/BUILD_ID').write_text('old-build')
+        (root/'.next/standalone/server.js').write_text('old-server')
+        (root/'.env').write_text('FIXTURE_CONFIG=preserve\n')
+        (root/'data/owner-state').write_text('preserve sessions and configuration')
+        (root/'.bun/bin').mkdir(parents=True)
+        bun=root/'.bun/bin/bun'
+        bun.write_text(f'''#!/bin/sh
+printf 'bun-%s\\n' "$1" >> '{root}/events'
+if [ "$1" = install ]; then
+  [ '{fail_at}' != install ] || exit 37
+  exit 0
+fi
+mkdir -p .next/standalone
+printf new-build > .next/BUILD_ID
+printf new-server > .next/standalone/server.js
+[ '{fail_at}' != build ] || exit 41
+''')
+        bun.chmod(0o755)
+        return root,worker
+
+    def test_full_update_rebuild_failure_restores_ui_after_gateway_was_restored(self):
+        for failure in ['install','build']:
+            with self.subTest(failure=failure):
+                root,worker=self.rebuild_fixture(failure)
+                core=self.run_worker(worker,'openclaw_install')
+                self.assertEqual(core.returncode,0,core.stderr)
+                before=(root/'events').read_text().splitlines()
+                self.assertIn('system-start',before)
+                self.assertFalse((root/'guard').exists())
+                result=self.run_worker(worker,'rebuild_reboot')
+                self.assertEqual(result.returncode,37 if failure=='install' else 41,result.stderr)
+                self.assertEqual((root/'.next/BUILD_ID').read_text(),'old-build')
+                self.assertEqual((root/'.next/standalone/server.js').read_text(),'old-server')
+                after=(root/'events').read_text().splitlines()[len(before):]
+                self.assertNotIn('gateway-stop',after)
+                self.assertEqual(after[-1],'system-restart')
+                self.assertFalse((root/'guard').exists())
+                self.assertEqual((root/'.env').read_text(),'FIXTURE_CONFIG=preserve\n')
+                self.assertEqual((root/'data/owner-state').read_text(),'preserve sessions and configuration')
+
+    def test_successful_ui_rebuild_restarts_only_ui_and_keeps_new_build(self):
+        root,worker=self.rebuild_fixture()
+        result=self.run_worker(worker,'rebuild_reboot')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual((root/'.next/BUILD_ID').read_text(),'new-build')
+        self.assertEqual((root/'.next/standalone/server.js').read_text(),'new-server')
+        events=(root/'events').read_text().splitlines()
+        self.assertEqual(events,['system-stop','bun-install','bun-run','system-restart'])
+        self.assertFalse((root/'guard').exists())
 
     def test_initial_bridge_activation_preserves_running_user_service(self):
         postinst=(self.stage/'DEBIAN/postinst').read_text()
