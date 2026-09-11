@@ -6557,8 +6557,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
              is the page's `h1` only where Settings IS the page (see `asPage`);
              in a window it is the list screen's own heading. Both tags paint
              identically: the size and weight are in the class. */
-          <div className="flex-1 overflow-y-auto px-4 pt-4 pb-6">
-            <MobileTitle className="text-2xl font-bold text-[var(--text-primary)] px-1 mb-4">{t("settings.title")}</MobileTitle>
+          <PanelRegion {...panelRegionProps} className="flex-1 overflow-y-auto px-4 pt-4 pb-6">
+            <MobileTitle id={panelTitleId} className="text-2xl font-bold text-[var(--text-primary)] px-1 mb-4">{t("settings.title")}</MobileTitle>
             <nav aria-label={t("settings.title")} className="bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden divide-y divide-white/[0.06]">
               {visibleNavItems.map(item => {
                 const { subtitle } = sectionStatus(item.id);
@@ -6586,7 +6586,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 );
               })}
             </nav>
-          </div>
+          </PanelRegion>
         ) : (
           /* Content — chrome back closes window in one tap. A small "All settings"
               link at the top lets the user switch sections without leaving. */

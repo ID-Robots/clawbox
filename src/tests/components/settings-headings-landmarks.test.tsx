@@ -160,6 +160,22 @@ describe("Settings exposes a heading structure and a landmark", () => {
     expect(await within(region).findByRole("heading", { level: 2, name: "Connect AI Provider" })).toBeInTheDocument();
   });
 
+  // A phone lands on the section LIST, and that screen is the whole content
+  // while it is up — so it is the page's landmark, or the standalone page has
+  // none until a panel is opened.
+  it("makes the phone's section list the landmark too", async () => {
+    const width = window.innerWidth;
+    try {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+      render(<SettingsApp ui={ui} asPage />);
+      const main = await screen.findByRole("main");
+      expect(within(main).getByRole("heading", { level: 1, name: "settings.title" })).toBeInTheDocument();
+      expect(within(main).getByRole("navigation", { name: "settings.title" })).toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+    }
+  });
+
   // Settings → System Update draws SystemUpdateApp inside this window, and that
   // pane opens on an <h1> of its own wherever it is the window itself.
   it("keeps the embedded System Update hero out of the document's h1", async () => {
