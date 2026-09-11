@@ -118,13 +118,28 @@ export function getCpuUsage(now: number = Date.now()): number {
 }
 
 /**
+ * Is a sample — or a row already published — recent enough to describe "now"?
+ *
+ * A NEGATIVE age is not "very recent": it means the wall clock moved backwards
+ * under us, which a box with no RTC does every boot once NTP answers. The age
+ * is then not a fact, so the window cannot be claimed to be a short one. The
+ * per-core row is the half of this module that can fabricate a reading, so it is
+ * the half held to an age it can trust; the aggregate's fallback is the load
+ * average, a real figure whichever way the clock jumped.
+ */
+function isRecent(now: number, at: number): boolean {
+  const age = now - at;
+  return age >= 0 && age <= MAX_SAMPLE_AGE_MS;
+}
+
+/**
  * The row published last time, where it is still recent enough to stand in for
  * a measurement of "now" — held to the same window as the samples themselves,
  * because figures from five minutes ago under a fresh timestamp are the same
  * wrong claim as a zero.
  */
 function carriedCoreUsage(now: number): number[] {
-  if (!lastCoreUsage || now - lastCoreUsageAt > MAX_SAMPLE_AGE_MS) return [];
+  if (!lastCoreUsage || !isRecent(now, lastCoreUsageAt)) return [];
   return lastCoreUsage;
 }
 
@@ -175,7 +190,7 @@ export function getCpuCoreUsage(now: number = Date.now()): number[] {
 
   const measured = current.map((sample, i) => {
     const then = comparable ? previous[i] : null;
-    return sample && then && now - then.at <= MAX_SAMPLE_AGE_MS ? coreBusy(then, sample) : null;
+    return sample && then && isRecent(now, then.at) ? coreBusy(then, sample) : null;
   });
   if (measured.every((busy): busy is number => busy !== null)) {
     lastCoreUsage = measured;

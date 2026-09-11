@@ -226,6 +226,22 @@ describe("getCpuCoreUsage", () => {
     expect(cpuUsage.getCpuCoreUsage(10_000)).toEqual([50, 50]);
   });
 
+  it("withholds the row when the clock moved backwards, so the age is not a fact", () => {
+    // A box with no RTC boots at the wrong time and NTP corrects it — backwards
+    // as well as forwards. A sample stamped in the future is not "very recent":
+    // the window between the two reads is then unknown, and neither the pair nor
+    // the row already published can be claimed to be about now.
+    mockFs.readFileSync.mockReturnValue(cores([[100, 900], [100, 900]]));
+    cpuUsage.getCpuCoreUsage(4_000);
+    mockFs.readFileSync.mockReturnValue(cores([[200, 900], [100, 1000]]));
+    expect(cpuUsage.getCpuCoreUsage(7_000)).toEqual([100, 0]);
+    mockFs.readFileSync.mockReturnValue(cores([[300, 900], [100, 1100]]));
+    expect(cpuUsage.getCpuCoreUsage(5_000)).toEqual([]);
+    // The poll after the correction measures normally again.
+    mockFs.readFileSync.mockReturnValue(cores([[400, 900], [100, 1200]]));
+    expect(cpuUsage.getCpuCoreUsage(8_000)).toEqual([100, 0]);
+  });
+
   it("withholds the row when one core line alone cannot be parsed", () => {
     // The mixed case with figures already cached: core 0 has a real delta and
     // core 1 has only last poll's number. Two entries read as two
