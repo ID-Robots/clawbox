@@ -4499,6 +4499,21 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           maxBuffer: 2 * 1024 * 1024,
         });
       }
+      if (desktopIntegration && step.id === "apt_update") {
+        // Existing desktop adapters already refresh the verified mirror and
+        // install these dependencies. Deliver the user-owned harness here as
+        // well, so updating the UI never requires replacing a host's installed
+        // root adapter (which can contain additional workstation repairs).
+        // Match the coding runner's capability drop: the web server can carry
+        // ambient network capabilities that its installer must not inherit.
+        await execFile("/usr/bin/setpriv", [
+          "--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--",
+          "/bin/bash",
+          "/var/lib/clawbox/root-exec-mirror/scripts/x64-migration/install-coding-harness.sh",
+          "/var/lib/clawbox/root-exec-mirror/scripts/claude-ds",
+          PROJECT_DIR,
+        ], { timeout: 900_000, maxBuffer: 2 * 1024 * 1024 });
+      }
       // A root step that SUCCEEDED can still have skipped a fixup: install.sh's
       // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
       // that reaches the owner instead of only the journal.
@@ -4536,7 +4551,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);
       failed = true;
-      if (step.failFast) {
+      if (step.failFast || (desktopIntegration && step.id === "apt_update")) {
         runtime.state.error = message;
         break;
       }

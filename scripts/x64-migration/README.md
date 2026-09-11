@@ -47,12 +47,18 @@ Post-update checks leave a healthy gateway running. If it is unavailable,
 verification tries its existing service once and reports failure if it stays
 unavailable; it does not run the appliance pre-start/doctor repair chain.
 The UI is unavailable during its rebuild; this desktop does not reboot.
-Install integration package **1.0.4** as well as this dashboard update. Older
-packages retain their installed adapter and do not gain coding-harness delivery
-merely by fetching beta.
+Existing integration packages **1.0.2 and 1.0.3** support this dashboard update.
+After the adapter refreshes the verified mirror and installs system dependencies,
+the dashboard runs the mirrored coding installer as its own user with ambient
+and inheritable capabilities cleared and privilege escalation disabled. This
+happens before core maintenance; a failed dependency or coding install stops
+the update before the gateway is cycled. No root package replacement is needed,
+so additional repairs in an installed desktop adapter remain intact.
 
-Bootstrap and post-update install the `claude-ds` wrapper from the verified
-mirror as the desktop owner, preserving an existing Claude Code installation.
+For new package installations, **1.0.4** additionally delivers the same harness
+from bootstrap and post-update root steps, dropping to the desktop owner.
+The installer preserves an existing Claude Code installation and installs the
+`claude-ds` wrapper from the verified mirror.
 If Claude is missing, download the pinned Linux x64 native release over HTTPS,
 verify its pinned SHA-256, then run its native installer as the owner. A checksum
 mismatch or installation failure fails the update visibly. The copied wrapper defaults to this desktop's

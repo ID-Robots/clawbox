@@ -2424,6 +2424,26 @@ describe("updater", () => {
       // A first CLI installation must outlive the installer's five-minute
       // download allowance instead of inheriting a three-minute fetch budget.
       expect(bootstrap?.[2]).toEqual(expect.objectContaining({ timeout: 930_000 }));
+      const calls = commands();
+      const harnessIndex = calls.findIndex((call) => call.includes("/usr/bin/setpriv"));
+      expect(harnessIndex).toBeGreaterThan(calls.findIndex((call) => call.includes("clawbox-run-root-step.sh apt_update")));
+      expect(harnessIndex).toBeLessThan(calls.findIndex((call) => call.includes("clawbox-run-root-step.sh openclaw_install")));
+      expect(calls[harnessIndex]).toContain("--ambient-caps=-all --inh-caps=-all --no-new-privs -- /bin/bash /var/lib/clawbox/root-exec-mirror/scripts/x64-migration/install-coding-harness.sh");
+      expect(calls[harnessIndex]).toContain("/var/lib/clawbox/root-exec-mirror/scripts/claude-ds");
+      expectNoApplianceMaintenance();
+    });
+
+    it("reports a coding installer failure before cycling the desktop gateway", async () => {
+      setupExecFileMock({
+        "/usr/bin/setpriv": new Error("Claude Code checksum mismatch"),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(updater.getUpdateState().error).toContain("checksum mismatch");
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("pending");
+      expect(commands().some((call) => call.includes("clawbox-run-root-step.sh openclaw_install"))).toBe(false);
       expectNoApplianceMaintenance();
     });
 
