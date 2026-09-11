@@ -176,6 +176,26 @@ exit {doctor_exit}
         self.assertEqual(events,['doctor-start','doctor-end','doctor-start','doctor-end'])
         self.assertFalse((root/'guard').exists())
 
+    def test_memory_patch_failure_propagates_after_backup_hook_and_cleanup(self):
+        root,worker,_=self.core_fixture()
+        for name,code in [('backup-sqlite',0),('memory-maintenance',65)]:
+            hook=root/'bin'/f'openclaw-patch-{name}'
+            hook.write_text(f'''#!/bin/sh
+test "$1" = '{root}/lib/node_modules/openclaw' || exit 99
+printf 'patch-{name}\\n' >> '{root}/events'
+exit {code}
+''')
+            hook.chmod(0o755)
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertEqual(result.returncode,65,result.stderr)
+        self.assertIn('memory maintenance compatibility repair refused',result.stderr)
+        self.assertFalse((root/'guard').exists())
+        events=(root/'events').read_text().splitlines()
+        self.assertLess(events.index('patch-backup-sqlite'),events.index('patch-memory-maintenance'))
+        self.assertNotIn('doctor-start',events)
+        self.assertIn('system-start',events)
+        self.assertNotIn('configuration accepted',result.stdout)
+
     def test_external_maintenance_leave_waits_for_active_core_writer(self):
         root,worker,maintenance=self.core_fixture()
         process=subprocess.Popen(['/bin/bash',str(worker),'openclaw_install'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)

@@ -93,6 +93,14 @@ update_openclaw() {
     as_owner "$INSTALL_HOME/bin/openclaw-patch-backup-sqlite" \
       "$NPM_PREFIX/lib/node_modules/openclaw" || return $?
   fi
+  if [ -x "$INSTALL_HOME/bin/openclaw-patch-memory-maintenance" ]; then
+    as_owner "$INSTALL_HOME/bin/openclaw-patch-memory-maintenance" \
+      "$NPM_PREFIX/lib/node_modules/openclaw" || {
+        local repair_rc=$?
+        echo 'Error: the memory maintenance compatibility repair refused; stopping the core step.' >&2
+        return "$repair_rc"
+      }
+  fi
   # Already on the requested core: validate without rewriting configuration or
   # running a second migration. The existing SQLite state stays untouched.
   as_owner "$NPM_PREFIX/bin/openclaw" config validate --json </dev/null || return $?
