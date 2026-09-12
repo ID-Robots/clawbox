@@ -119,9 +119,25 @@ function pasteImage(textarea: HTMLElement) {
 }
 
 /** Every image inside the transcript, ignoring the composer's own strip. */
+/**
+ * The pictures a TURN carries — never the composer's staging strip, and never
+ * the empty-transcript placeholder.
+ *
+ * That placeholder is the crab (`ChatPopup.tsx`, the `messages.length === 0`
+ * block) and it is on screen for exactly as long as the turn has not arrived,
+ * which is the window this file's waits live in: a `waitFor` asking for one
+ * image was satisfied by the crab alone and then asserted the crab's `src`
+ * against the media route (seen on beta, 2026-09-12, in a full parallel run —
+ * on an idle machine the history lands before the first poll and the crab is
+ * already gone).
+ */
+const EMPTY_TRANSCRIPT_PLACEHOLDER = "/clawbox-crab.png";
+
 function transcriptImages(): HTMLImageElement[] {
   const strip = screen.queryByTestId("chat-attachments");
-  return [...document.querySelectorAll("img")].filter(img => !strip?.contains(img)) as HTMLImageElement[];
+  return ([...document.querySelectorAll("img")] as HTMLImageElement[]).filter(
+    img => !strip?.contains(img) && img.getAttribute("src") !== EMPTY_TRANSCRIPT_PLACEHOLDER,
+  );
 }
 
 const mediaRoute = (p: string) => `/setup-api/chat/media?path=${encodeURIComponent(p)}`;
