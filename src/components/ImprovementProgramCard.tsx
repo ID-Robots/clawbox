@@ -91,9 +91,33 @@ function normalize(payload: unknown): ProgramState {
     },
     // Rows the card can actually draw, and nothing else: a malformed entry
     // must not be the thing that blanks the page.
-    incidents: (Array.isArray(raw.incidents) ? raw.incidents : []).filter(
-      (i): i is IncidentRow => typeof i === "object" && i !== null && typeof (i as IncidentRow).id === "string",
-    ),
+    incidents: (Array.isArray(raw.incidents) ? raw.incidents : []).map(toRow).filter((r): r is IncidentRow => r !== null),
+  };
+}
+
+/**
+ * One incident row, or null if it is not one.
+ *
+ * EVERY rendered field is checked, not just `id`. `{ id: "inc-bad", source: {} }`
+ * passed an id-only guard, and rendering an object as a React child throws —
+ * which is the same defect, in the same component, that took the whole Settings
+ * window down before: a card must not be able to do that whatever the route
+ * hands it. The three fields that are DRAWN as text must be strings or the row
+ * is dropped; the numbers are coerced, because a bad count is worth showing as
+ * zero rather than losing the fault it belongs to.
+ */
+function toRow(value: unknown): IncidentRow | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.id !== "string" || !v.id) return null;
+  if (typeof v.source !== "string" || typeof v.message !== "string") return null;
+  return {
+    id: v.id,
+    source: v.source,
+    message: v.message,
+    count: typeof v.count === "number" && Number.isFinite(v.count) ? v.count : 0,
+    lastSeen: typeof v.lastSeen === "number" && Number.isFinite(v.lastSeen) ? v.lastSeen : 0,
+    issueNumber: typeof v.issueNumber === "number" && Number.isInteger(v.issueNumber) ? v.issueNumber : null,
   };
 }
 

@@ -322,6 +322,37 @@ describe("a payload the card did not expect", () => {
     expect(screen.getByTestId("improvement-counts").textContent).toBe(t("improvement.none"));
   });
 
+  /**
+   * An id-only guard is not enough: `{ id: "inc-bad", source: {} }` passed it,
+   * and rendering an object as a React child throws and unmounts Settings —
+   * the same defect, in the same component, that the e2e specs caught.
+   */
+  it.each([
+    ["a source that is not a string", { id: "inc-bad", source: {}, message: "m", count: 1, lastSeen: 0, issueNumber: null }],
+    ["a message that is not a string", { id: "inc-bad", source: "update", message: { a: 1 }, count: 1, lastSeen: 0, issueNumber: null }],
+    ["a source that is an array", { id: "inc-bad", source: ["x"], message: "m", count: 1, lastSeen: 0, issueNumber: null }],
+    ["an empty id", { id: "", source: "update", message: "m", count: 1, lastSeen: 0, issueNumber: null }],
+    ["nothing but an id", { id: "inc-bad" }],
+  ])("drops a row with %s rather than throwing while rendering it", async (_name, row) => {
+    mockFetch([() => json(state({ mode: "ask", incidents: [row, INCIDENT] }))]);
+    render(<ImprovementProgramCard />);
+    const list = await screen.findByTestId("improvement-recent");
+    // The good row is still drawn; the bad one is simply not there.
+    expect(list.textContent).toContain(INCIDENT.message);
+    expect(screen.queryByTestId("improvement-report-inc-bad")).toBeNull();
+  });
+
+  it("coerces a figure it cannot read instead of losing the fault it belongs to", async () => {
+    const row = { ...INCIDENT, count: "many", lastSeen: null, issueNumber: "912" };
+    mockFetch([() => json(state({ mode: "ask", incidents: [row] }))]);
+    render(<ImprovementProgramCard />);
+    const list = await screen.findByTestId("improvement-recent");
+    expect(list.textContent).toContain(INCIDENT.message);
+    expect(list.textContent).toContain(t("improvement.seen", { n: 0 }));
+    // An unreadable issue number is "not reported", so the row stays actionable.
+    expect(screen.getByTestId(`improvement-report-${INCIDENT.id}`)).toBeTruthy();
+  });
+
   it("falls back to OFF for a mode it does not recognise — never to a sending one", async () => {
     mockFetch([() => json(state({ mode: "everything" }))]);
     render(<ImprovementProgramCard />);
