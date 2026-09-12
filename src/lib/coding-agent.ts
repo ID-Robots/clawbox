@@ -1789,8 +1789,13 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
   return readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY]);
 }
 
-/** The readiness probe proper, given the ClawBox AI token the caller already read. */
-async function readinessWith(token: unknown, faultRaw?: unknown): Promise<CodingHarnessReadiness> {
+/**
+ * The readiness probe proper, given the two config values the caller already
+ * read. Both are REQUIRED, including the fault: optional, a caller that forgot
+ * it would silently report a box as healthy, which is the one wrong answer
+ * this whole field exists to stop.
+ */
+async function readinessWith(token: unknown, faultRaw: unknown): Promise<CodingHarnessReadiness> {
   const [wrapperInstalled, claudePath, setprivPath] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
