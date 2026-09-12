@@ -5,6 +5,16 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { translations } from "@/lib/translations";
 
+// Mounts the chat/provider surface and then waits on several sub-5 s
+// `waitFor`s in series — the family `test-timeout-hygiene.test.ts` keeps a
+// list of, for the reason it gives there. Measured 2026-09-12 with all 216
+// component files running fully parallel on a 12-core machine: the slowest
+// case here ("still offers the model dropdown when the active model is openai/…")
+// took 3,106 ms, i.e. under 2 s of headroom below vitest's 5 s default. It
+// duly timed out when the machine was loaded further.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+
 vi.mock("@/lib/i18n", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/i18n")>();
   return {

@@ -287,6 +287,16 @@ const ALSO_REQUIRED = [
   "src/tests/components/chat-email-refs-surfaces.test.tsx",
   "src/tests/components/chat-clawbox-ai-model-pill.test.tsx",
   "src/tests/components/chat-popup-dismiss-and-geometry.test.tsx",
+  // The rest of the chat/provider mount family, added 2026-09-12 from measured
+  // worst cases in a clean full parallel run of all 216 component files: each
+  // of these five has under 2 s of headroom below the 5 s default
+  // (3,456 / 3,199 / 3,175 / 3,106 / 3,031 ms), and the first two timed out
+  // when the machine was loaded further. Each file states its own number.
+  "src/tests/components/chat-header-seed-race.test.tsx",
+  "src/tests/components/chat-voice-recording.test.tsx",
+  "src/tests/components/chat-hermes-stale-catalogue.test.tsx",
+  "src/tests/components/chat-header-chatgpt-row.test.tsx",
+  "src/tests/components/ai-provider-list.test.tsx",
   // Starts no process either: it drives the Files route 3 000 times over a
   // generated corpus, with real fs behind it, inside ONE case. 4,562 ms on an
   // idle machine (2026-09-12) — 91% of the default before any contention, and

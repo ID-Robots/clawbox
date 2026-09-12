@@ -4,6 +4,16 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { MAX_RECORDING_MS } from "@/lib/chat-voice-input";
 
+// Mounts the chat/provider surface and then waits on several sub-5 s
+// `waitFor`s in series — the family `test-timeout-hygiene.test.ts` keeps a
+// list of, for the reason it gives there. Measured 2026-09-12 with all 216
+// component files running fully parallel on a 12-core machine: the slowest
+// case here ("does not push the deadline back as the recording clock re-renders")
+// took 3,199 ms, i.e. under 2 s of headroom below vitest's 5 s default. It
+// duly timed out when the machine was loaded further.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+
 /**
  * What a capture must not do to the person holding the microphone.
  *

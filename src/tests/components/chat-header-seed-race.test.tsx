@@ -5,6 +5,16 @@ import { resetHarnessCache } from "@/lib/client-harness";
 import { HERMES_MODEL_STATE_EVENT } from "@/hooks/useHermesModelOptions";
 import { PROVIDER_SIGNAL_DEBOUNCE_MS } from "@/lib/ui-events";
 
+// Mounts the chat/provider surface and then waits on several sub-5 s
+// `waitFor`s in series — the family `test-timeout-hygiene.test.ts` keeps a
+// list of, for the reason it gives there. Measured 2026-09-12 with all 216
+// component files running fully parallel on a 12-core machine: the slowest
+// case here ("keeps the newest provider when an earlier seed resolves last")
+// took 3,456 ms, i.e. under 2 s of headroom below vitest's 5 s default. It
+// duly timed out when the machine was loaded further.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+
 /**
  * The chat header re-seeds whenever a provider is configured, and there are now
  * several places that can fire that signal within a second of each other (a
