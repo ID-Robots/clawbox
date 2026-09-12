@@ -44,6 +44,31 @@ const NOTHING: AnthropicAnswer = { connected: false, hasKey: false, hasLogin: fa
 const VIA_KEY: AnthropicAnswer = { ...NOTHING, connected: true, hasKey: true, source: "key" };
 const VIA_LOGIN: AnthropicAnswer = { ...NOTHING, connected: true, hasLogin: true, source: "login" };
 
+/** The status route's answer, as the panel reads it. */
+function basePayload(provider: string, extra: Record<string, unknown> = {}) {
+  return {
+    enabled: true,
+    ready: true,
+    readiness: {
+      ready: true, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: true,
+      capabilityDropAvailable: true, problems: [] as string[],
+      ...(extra.readiness ?? {}),
+    },
+    running: 0,
+    harnessCommand: "claude-ds",
+    maxTaskChars: 4000,
+    defaultDirectory: "/home/clawbox/Projects",
+    effort: "max",
+    effortLevels: ["low", "xhigh", "max"],
+    provider,
+    providers: ["clawbox-ai", "anthropic"],
+    subagents: true,
+    maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000,
+    tokenLimit: null, minTokenLimit: 10_000,
+    reviewPass: false, generateImages: true, generateAudio: true, realBrowser: true,
+  };
+}
+
 let posts: { url: string; body: unknown }[];
 let deletes: string[];
 
@@ -163,6 +188,72 @@ describe("the provider picker", () => {
     render(<CodingAgentSettingsPanel />);
     await screen.findByTestId("coding-agent-provider");
     expect(screen.queryByTestId("coding-agent-provider-unconnected")).toBeNull();
+  });
+
+  it("does not read the status back while a provider write is still in flight", async () => {
+    // `loadStatus` ends in the same `publish` the writes do, so it is a writer
+    // of what the panel and the sidebar show. Fired straight from the
+    // Anthropic card while a provider write was still on the wire, its GET
+    // could be answered from BEFORE that write landed and put the old account
+    // back on screen with the box already saved to the new one — the exact
+    // ordering `writeChain` exists to prevent, arriving by the one path that
+    // was not on it.
+    //
+    // Asserted on the wire rather than on the pixels, because the damage is
+    // the overlap itself: whether a given overlap happens to resolve in the
+    // harmful order is the server's timing, not the panel's to rely on.
+    let provider = "clawbox-ai";
+    let releaseWrite: (() => void) | null = null;
+    const events: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/status")) {
+        events.push("status");
+        return json(basePayload(provider));
+      }
+      if (url.startsWith("/setup-api/coding-agent/permissions")) return json({ allowRules: [], maxAllowRules: 32 });
+      if (url.startsWith("/setup-api/coding-agent/git")) return json({ installed: false, connected: false, login: null, loginCommand: "gh auth login" });
+      if (url.startsWith("/setup-api/coding-agent/anthropic")) {
+        if (init?.method === "DELETE") {
+          events.push("delete");
+          return json(NOTHING);
+        }
+        return json(VIA_KEY);
+      }
+      if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { provider?: string };
+        events.push("write:start");
+        await new Promise<void>((resolve) => { releaseWrite = resolve; });
+        if (typeof body.provider === "string") provider = body.provider;
+        events.push("write:end");
+        return json(basePayload(provider));
+      }
+      return json({ error: "unexpected" }, 404);
+    }));
+
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-provider");
+
+    fireEvent.click(screen.getByTestId("coding-agent-provider-anthropic"));
+    await waitFor(() => expect(releaseWrite).not.toBeNull());
+
+    // The card reports a change while that write is still open, and everything
+    // it triggers is given room to run before the write is allowed to finish.
+    // Arm, then confirm — the card asks twice before it disconnects.
+    const removeBtn = await screen.findByTestId("coding-agent-anthropic-remove");
+    fireEvent.click(removeBtn);
+    fireEvent.click(removeBtn);
+    await waitFor(() => expect(events).toContain("delete"));
+    for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const opened = events.indexOf("write:start");
+    expect(events.slice(opened).includes("status")).toBe(false);
+
+    releaseWrite!();
+    await waitFor(() => expect(events).toContain("write:end"));
+    // And the queued read does happen, once the write is done with.
+    await waitFor(() => expect(events.slice(events.indexOf("write:end"))).toContain("status"));
+    expect(screen.getByTestId("coding-agent-provider-anthropic").getAttribute("aria-pressed")).toBe("true");
   });
 
   it("says nothing about it when the account IS connected", async () => {

@@ -465,6 +465,24 @@ export default function CodingAgentSettingsPanel({
     return next;
   };
 
+  /**
+   * A status re-read, behind whatever write is in flight.
+   *
+   * `loadStatus` ends in the same `publish` the writes do, so it is a writer
+   * of the panel's state and the sidebar's in every sense that matters here.
+   * Fired straight from the Anthropic card while a provider write was still
+   * on the wire, its GET could be ANSWERED from before that write landed and
+   * then overwrite the newer provider on screen — the exact ordering
+   * `writeChain` exists to prevent, arriving through the one path that was
+   * not on it. `loadStatus` catches its own failures, so the chain cannot be
+   * poisoned by queueing this.
+   */
+  const refreshStatus = (): Promise<unknown> => {
+    const next = writeChain.current.then(() => loadStatus());
+    writeChain.current = next;
+    return next;
+  };
+
   const toggle = (next: boolean) => saveSetting({ enabled: next }, "switch", t("codingAgent.toggleFailed"));
 
   const saveDirectory = async () => {
@@ -974,7 +992,7 @@ export default function CodingAgentSettingsPanel({
           has to do BEFORE switching, so hiding it behind the switch would
           leave the owner nothing to press. */}
       {(status?.providers?.length ?? 0) > 1 && (
-        <CodingAgentAnthropicCard onChanged={() => void loadStatus()} />
+        <CodingAgentAnthropicCard onChanged={() => void refreshStatus()} />
       )}
 
       {/* GitHub. gh keeps the token and lends it to git; ClawBox never
