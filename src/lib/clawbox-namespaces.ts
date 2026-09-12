@@ -86,13 +86,14 @@ export const CLAWBOX_PAGE_ROOTS = [
  * paths as backtick template literals, so a grep for double-quoted `"/apps"`
  * finds nothing — and finds nothing for `/chat` either, which is how a grep
  * that could not see its own positives got read as proof of a negative. Run in
- * the pinned OPENCLAW_VERSION's bundle (2026.8.1, install.sh) — on a box that
+ * the pinned OPENCLAW_VERSION's bundle (2026.8.1, the pin when this was run) — on
+ * a box that
  * is `/home/clawbox/.npm-global/lib/node_modules/openclaw/dist/control-ui/assets`,
  * NOT the `npm root -g` of `/usr/lib/node_modules`, which is where this said to
  * look and where openclaw is not installed (and `openclaw` is not on the
  * `clawbox` user's PATH either, so `dirname $(which openclaw)` does not find it):
  *
- *     grep -ohE '\bpath:`/[^`]{0,50}`' *.js | sed 's/path://; s/`//g' | sort -u
+ *     grep -ohE '\bpath:`/[^`]{0,50}`' *.js *.mjs | sed 's/path://; s/`//g' | sort -u
  *
  * That is 55 routes. `/apps` is among them (and `apps-page-*.js/.css` ship with
  * it); `/setup`, `/login`, `/portal`, `/updating`, `/app`, `/setup-api` and

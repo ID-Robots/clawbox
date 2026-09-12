@@ -139,7 +139,9 @@ function strippedPayload(payload) {
  * `resolveChatSendOriginatingRoute` (`:355/365/382`) makes `OriginatingChannel`
  * the same for every send that is not an explicit deliver route. On a reply
  * arriving from a channel all three are that channel id
- * (`channel-inbound-CxNf-7n7.js:153-162`), and a routed outbound send builds
+ * (`channel-inbound-CxNf-7n7.js:153-162`, read on 2026.8.1 — 2026.9.3 ships that
+ * code as a content-hashed `.mjs`, so the chunk name is a record of where it was
+ * measured and not a path to look for on a box), and a routed outbound send builds
  * both fields from the destination (`route-reply-B6JDR0Lx.js:194-197`,
  * `delivery.runtime-Dz8vF_W2.js:619-622`).
  *

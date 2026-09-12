@@ -897,7 +897,7 @@ SWAPFILE_PRIORITY=1
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.8.1"
+OPENCLAW_VERSION="2026.9.3"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -1294,19 +1294,101 @@ PATHEOF
   dedupe_vendor_bashrc_path_blocks "$BASHRC"
 }
 
-node_satisfies_openclaw_engine() {
-  local version major
-  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+# The core's `engines.node`, in one place, because two copies of it drift: this
+# sentence is what the failures below print and the case table under it is what
+# they test.
+#
+# It moved with the pin. 2026.8.1 accepted `>=22.22.3 <23 || >=24.15.0 <25 ||
+# >=25.9.0`; 2026.9.3 accepts `>=24.16.0 <25 || >=26.1.0` and nothing else, so
+# Node 22 is now REJECTED rather than merely no longer preferred — every
+# openclaw command exits 1 under it with a requirement banner. The reason is
+# upstream's: `node:sqlite` truncates a TEXT value at an embedded NUL on
+# 22.23.x, 24.15.0, 25.9.0 and 26.0.0, and the first fixed builds are 24.16.0
+# and 26.1.0. ClawBox's own stores (src/lib/openclaw-session-store.ts,
+# src/lib/harness/hermes-turn-record.ts) use `node:sqlite` too, so the box wants
+# that fix regardless of the core.
+OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
+
+# The table itself, over a VERSION STRING rather than over whatever `node` is on
+# PATH — because two callers need it: the guard below asks about the installed
+# Node, and `node_engine_remedy` asks about each version apt is OFFERING. A
+# Debian revision (`24.21.0-1nodesource1`) compares correctly here: dpkg reads
+# the upstream part first.
+node_version_satisfies_openclaw_engine() {
+  local version="$1" major
   [ -n "$version" ] || return 1
   major="${version%%.*}"
 
   case "$major" in
-    22) dpkg --compare-versions "$version" ge "22.22.3" ;;
-    24) dpkg --compare-versions "$version" ge "24.15.0" ;;
-    25) dpkg --compare-versions "$version" ge "25.9.0" ;;
-    2[6-9]|[3-9][0-9]) return 0 ;;
+    24) dpkg --compare-versions "$version" ge "24.16.0" ;;
+    26) dpkg --compare-versions "$version" ge "26.1.0" ;;
+    # Three digits and up as well: `[3-9][0-9]` alone made the open-ended half
+    # of the range stop at 99, which is a ceiling nobody wrote down.
+    2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+node_satisfies_openclaw_engine() {
+  node_version_satisfies_openclaw_engine "$(node -p 'process.versions.node' 2>/dev/null || echo "")"
+}
+
+# What to do about a Node the apt transaction CANNOT reach, said rather than
+# implied.
+#
+# The old table accepted every major above its floor, so the install line only
+# ever had to move Node UP and apt was always able to. The new one has a ceiling
+# (`<25`), and `apt-get install nodejs` never moves a package DOWN: NodeSource
+# pins its own repository at priority 600, under the 1000 apt wants before it
+# will choose a lower version, so a host already on 25.x or 26.0.x keeps the Node
+# it has and the guard refuses it for ever.
+#
+# A SENTENCE, NOT AN AUTOMATIC DOWNGRADE. No shipped unit is in that state — the
+# whole fleet is on 22 and moves up — so the population this can reach is a dev
+# or demo machine someone moved to a newer channel by hand, and silently
+# replacing the Node runtime of such a machine during an update is not a decision
+# an installer should take on its own. It prints the one command that works
+# instead, with the version apt itself is offering.
+node_engine_remedy() {
+  local version major offered pick
+  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+  case "$version" in ""|*[!0-9.]*) return 0 ;; esac
+  major="${version%%.*}"
+  [ "$major" -ge 25 ] 2>/dev/null || return 0
+  echo "       Node $version is ABOVE the range that core accepts, and apt does not move a" >&2
+  echo "       package down (NodeSource pins its repo at priority 600, below the 1000 apt" >&2
+  echo "       needs to pick a lower version), so this host keeps the Node it has until" >&2
+  echo "       somebody chooses one:" >&2
+  if [ "$major" = "26" ]; then
+    echo "         curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && apt-get install -y nodejs" >&2
+    echo "           (26.1.0 and newer are accepted, so moving UP is the cheaper way out here)" >&2
+  fi
+  # `apt-cache madison`, NOT `apt-cache policy`. On this very host the candidate
+  # IS the broken runtime: apt will not select a LOWER version at NodeSource's
+  # priority, so `Candidate:` still reads the installed 25.x and a command built
+  # from it would reinstall exactly what the core refuses. madison lists every
+  # version the configured repositories actually offer — including the Node 24
+  # channel this step has just configured — and each one goes through the same
+  # engine table the guard uses, so what is printed is a version the box will
+  # accept afterwards. Newest acceptable wins.
+  pick=""
+  while read -r offered; do
+    [ -n "$offered" ] || continue
+    node_version_satisfies_openclaw_engine "$offered" || continue
+    if [ -z "$pick" ] || dpkg --compare-versions "$offered" gt "$pick"; then
+      pick="$offered"
+    fi
+  done <<EOF
+$(apt-cache madison nodejs 2>/dev/null | awk -F'|' '{gsub(/ /, "", $2); if ($2 != "") print $2}')
+EOF
+  if [ -n "$pick" ]; then
+    echo "         apt-get install -y --allow-downgrades nodejs=$pick" >&2
+  else
+    # Nothing acceptable is on offer, so naming a version would be inventing
+    # one: say what is missing instead.
+    echo "         (no nodejs version satisfying $OPENCLAW_NODE_ENGINE is on offer on this host —" >&2
+    echo "          configure the NodeSource 24 channel first, then re-run this step)" >&2
+  fi
 }
 
 ensure_openclaw_node_engine() {
@@ -1317,16 +1399,29 @@ ensure_openclaw_node_engine() {
 
   local got
   got=$(node --version 2>/dev/null || echo "missing")
-  echo "  Node.js $got does not satisfy OpenClaw 2026.8.1 engine requirements; upgrading Node.js 22..."
+  echo "  Node.js $got does not satisfy the pinned OpenClaw core's engine requirements; installing Node.js 24..."
+  # WHERE THIS SITS IN THE UPDATE, because the major switch only works in this
+  # order: step_openclaw_install calls this BEFORE `npm install -g openclaw@…`,
+  # so the new core's very first invocation (doctor) already runs on the Node
+  # its engines demand. bootstrap_updater has refreshed this script first, so a
+  # box mid-upgrade runs the NEW table here, and the `restart` step rebuilds
+  # node-pty, bun and the Next build under the new Node before the reboot.
+  #
+  # NodeSource's own channel, not a tarball of our own: it is where this box's
+  # nodejs package already comes from (nodistro/main, pinned by
+  # /etc/apt/preferences.d/nodejs) and where OpenClaw's own Linux installer gets
+  # Node, so `apt-get install nodejs` replaces 22 with 24 in place and every
+  # path on the box keeps pointing at one apt-managed /usr/bin/node.
   wait_for_apt
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
 
   if ! node_satisfies_openclaw_engine; then
     got=$(node --version 2>/dev/null || echo "missing")
     echo "Error: Node.js upgrade did not reach an OpenClaw-compatible version — got $got." >&2
-    echo "       OpenClaw 2026.8.1 requires Node >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0." >&2
+    echo "       The pinned OpenClaw core requires Node $OPENCLAW_NODE_ENGINE." >&2
+    node_engine_remedy
     exit 1
   fi
 
@@ -2621,13 +2716,24 @@ step_apt_update() {
   # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
   # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
-  # Node.js for production server and OpenClaw. OpenClaw 2026.8.1 tightened
-  # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
-  # looks like "Node 22" but crashes the OpenClaw CLI after npm install.
+  # Node.js for production server and OpenClaw. The floor is the pinned core's
+  # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
+  # so an older ClawBox image — every one of which shipped Node 22 — takes the
+  # major upgrade here on the way through. A version that merely "looks like
+  # Node 24" is not enough either: 24.15.0 is below the floor.
+  #
+  # THIS STEP HAS NO EDITION GATE, DELIBERATELY, so a Hermes box takes the same
+  # Node — and it has its own reason to: the floor exists because `node:sqlite`
+  # truncates a TEXT value at an embedded NUL below 24.16.0 / 26.1.0, and both of
+  # ClawBox's own stores use it (src/lib/openclaw-session-store.ts on every
+  # edition, src/lib/harness/hermes-turn-record.ts on Hermes). A Hermes unit that
+  # cannot reach a satisfying Node fails this step like any other: the Next.js
+  # server it runs is the dashboard, and a dashboard writing truncated turn
+  # records is not a better outcome than a named failure.
   if node_satisfies_openclaw_engine; then
     echo "  Node.js $(node --version) already satisfies OpenClaw engine requirements"
   else
-    echo "  Installing/upgrading Node.js 22..."
+    echo "  Installing/upgrading Node.js 24..."
     # NodeSource's setup script will silently exit 0 even when its inner
     # `apt update` fails because of an apt-lock conflict (e.g. packagekitd on
     # first boot), and apt-get install nodejs then falls back to Ubuntu's
@@ -2635,14 +2741,19 @@ step_apt_update() {
     # confusing optional-chaining parse error inside node-gyp. Wait for the
     # lock first, then validate the installed version.
     wait_for_apt
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
     wait_for_apt
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
     if ! node_satisfies_openclaw_engine; then
       local got
       got=$(node --version 2>/dev/null || echo "missing")
       echo "Error: Node.js install failed — \`node --version\` reports $got." >&2
-      echo "       Likely the NodeSource setup script lost a race for the apt lock" >&2
+      echo "       Node $OPENCLAW_NODE_ENGINE is required — by the pinned OpenClaw core on an" >&2
+      echo "       OpenClaw or dual box, and by ClawBox's own node:sqlite stores on every" >&2
+      echo "       edition including Hermes (a TEXT value is truncated at an embedded NUL" >&2
+      echo "       below 24.16.0 / 26.1.0)." >&2
+      node_engine_remedy
+      echo "       Otherwise, likely the NodeSource setup script lost a race for the apt lock" >&2
       echo "       (commonly held by packagekitd or unattended-upgrades on first boot)" >&2
       echo "       or apt kept an older Node.js build. flash.sh's Phase 0 should" >&2
       echo "       mask packagekit.service and unattended-upgrades.service in the" >&2
@@ -4942,8 +5053,10 @@ step_openclaw_install() {
   local _oc_gateway_stopped=0
 
   # Keep this guard inside the OpenClaw step too, not only in apt_update:
-  # update retries can start from this step, and old images with Node v22.22.2
-  # otherwise install the npm package but fail as soon as the OpenClaw CLI runs.
+  # update retries can start from this step, and EVERY Node 22 — not just the
+  # v22.22.2 this comment was written for — otherwise installs the npm package
+  # and fails as soon as the OpenClaw CLI runs, because 2026.9.3 refuses the
+  # whole major.
   ensure_openclaw_node_engine
 
   if [ -x "$OPENCLAW_BIN" ]; then
@@ -4970,7 +5083,38 @@ step_openclaw_install() {
       echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found"
       exit 1
     fi
-    echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
+    # THE CORE IS THE AUTHORITY ON ITS OWN ENGINES, so its first word is a GATE
+    # and not a log line. `|| echo 'unknown version'` swallowed exactly the
+    # banner that says a runtime is unacceptable ("Node.js >=24.16.0 <25, or
+    # >=26.1.0 is required (current: v22.23.2)", exit 1 on every subcommand), and
+    # the step then walked on into a `doctor --fix` whose failure is a WARN and a
+    # `gateway_setup` that cannot come up — a box reporting a finished update with
+    # no assistant. The table above is OUR copy of `engines.node`; this is the
+    # core's own answer, and it is the one that decides.
+    local _oc_version_out _oc_engines
+    if ! _oc_version_out="$("$OPENCLAW_BIN" --version 2>&1)"; then
+      printf '%s\n' "$_oc_version_out" >&2
+      # python3, not node: this arm exists because the Node on this box is the
+      # problem, and asking it to read the file that says so is how a diagnosis
+      # disappears. python3 is a dependency of this step already (the plugin
+      # refresh below parses `plugins list --json` with it).
+      _oc_engines="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("engines") or {}).get("node") or "")' \
+        "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null || true)"
+      echo "Error: openclaw@$TARGET is installed but refuses to run on $(node --version 2>/dev/null || echo 'this Node')." >&2
+      echo "       The line above is the core's own answer. It declares engines.node ${_oc_engines:-<unreadable>};" >&2
+      echo "       this installer was holding the box to $OPENCLAW_NODE_ENGINE, so the two disagree and" >&2
+      echo "       the table in install.sh is what needs correcting for this pin." >&2
+      node_engine_remedy
+      # `return 1`, not `exit 1`, and the gateway is LEFT STOPPED — the same
+      # shape as the migration blocker below, which this step's own
+      # `_oc_gateway_stopped` bookkeeping was built for: starting a gateway whose
+      # core refuses to run would only produce a restart loop, and `set -e` makes
+      # this return abort the run either way. Said out loud so the operator knows
+      # the box is parked rather than guessing.
+      echo "       The gateway is left stopped. Fix the Node, then Retry this step." >&2
+      return 1
+    fi
+    echo "  OpenClaw installed: $_oc_version_out"
   fi
 
   # OpenClaw 2 (>= 2026.8) refuses gateway readiness while legacy state is

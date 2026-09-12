@@ -219,7 +219,7 @@ async function installedOpenclawVersion(): Promise<string | null> {
  * script keeps the legacy names because it also runs on a Hermes box that has
  * no core (and no binary to accept either spelling); this path is reached only
  * by the OpenClaw wizard, so it assumes the generation ClawBox pins instead
- * (config/openclaw-target.txt, 2026.8.x) — the write fails loudly either way
+ * (config/openclaw-target.txt, 2026.9.x) — the write fails loudly either way
  * if that guess is wrong, and every shipping OpenClaw box is on it.
  */
 export function embeddingConfigHome(version: string | null): "memory.search" | "agents.defaults.memorySearch" {

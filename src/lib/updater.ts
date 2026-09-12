@@ -75,7 +75,18 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // would actually deploy. Without this both sides diverged: the UI returned
 // null and reported "no update", while install.sh would still install
 // 2026.5.3-1 — confusing.
-const OPENCLAW_VERSION_FALLBACK = "2026.8.1";
+//
+// It is the THIRD copy of the pin (install.sh, install-x64.sh, here), and
+// nothing in the code can derive it: it exists precisely for the moment the file
+// the other two read cannot be read. So the guard is a test —
+// `install-node-engine-table.test.ts`, "pins the same core version everywhere it
+// is written down" — which fails if any of the four drifts. What drift costs,
+// measured on this value: with the pin file unreadable, install.sh falls back to
+// 2026.9.3 while this fell back to 2026.8.1, so `readUpdateStatus` answered
+// `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
+// box that has one, the false-success shape — and `reinstallManagedPluginPayload`
+// pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
+const OPENCLAW_VERSION_FALLBACK = "2026.9.3";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
@@ -3186,7 +3197,16 @@ const UPDATE_STEPS: UpdateStepDef[] = [
   {
     id: "apt_update",
     label: "Updating system packages",
-    timeoutMs: 120_000,
+    // 120 s was right while this step only refreshed apt and installed packages
+    // that were already there. With the 2026.9.3 pin it also performs a Node
+    // MAJOR upgrade on every unit's first update (TASK-788): a NodeSource repo
+    // rewrite with its own inner `apt update`, then a full nodejs download and
+    // unpack on a Jetson. The budget is advisory — `execAsRoot` stops waiting,
+    // the root unit runs on — so the cost of leaving it at 120 s is not a broken
+    // update but "was still running after 150 s — gave up waiting" on the screen
+    // of the one update that matters most, followed by the next steps burning
+    // their own budgets inside `wait_for_apt`.
+    timeoutMs: 600_000,
     requiresRoot: true,
   },
   {
