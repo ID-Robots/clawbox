@@ -24,6 +24,7 @@ const setEffort = vi.hoisted(() => vi.fn());
 const setGenerateImages = vi.hoisted(() => vi.fn());
 const setGenerateAudio = vi.hoisted(() => vi.fn());
 const setRealBrowser = vi.hoisted(() => vi.fn());
+const clearHarnessFault = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   setCodingAgentEnabled: setEnabled,
@@ -32,6 +33,7 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   setGenerateImages,
   setGenerateAudio,
   setRealBrowser,
+  clearHarnessFault,
 }));
 
 // The reload is mocked at its own seam rather than at the refresh helper's, so
@@ -81,6 +83,7 @@ beforeEach(async () => {
   setGenerateImages.mockResolvedValue(false);
   setGenerateAudio.mockResolvedValue(false);
   setRealBrowser.mockResolvedValue(false);
+  clearHarnessFault.mockResolvedValue(undefined);
   const route = await import("@/app/setup-api/coding-agent/enable/route");
   POST = route.POST;
 });
@@ -169,6 +172,31 @@ describe("the body", () => {
     expect(setRealBrowser).not.toHaveBeenCalled();
   });
 
+  it("clears a recorded harness fault on the owner's say-so, and only on `true`", async () => {
+    // The fault is what makes the box refuse runs after the harness proved it
+    // could not get a model to answer. It expires on its own and a completed
+    // run drops it, but an owner who has just signed in again or changed plan
+    // should not have to wait out a clock to prove it.
+    const cleared = await POST(request({ cookie: ownerCookie(), body: { clearHarnessFault: true } }));
+    expect(cleared.status).toBe(200);
+    expect(clearHarnessFault).toHaveBeenCalledTimes(1);
+
+    // `false` is not the other half of a switch: there is no way to ASSERT a
+    // fault from outside, which would be a way to disable the coding agent by
+    // POST. A body carrying only that is a body the route knows nothing in.
+    clearHarnessFault.mockClear();
+    const asserted = await POST(request({ cookie: ownerCookie(), body: { clearHarnessFault: false } }));
+    expect(asserted.status).toBe(400);
+    expect(clearHarnessFault).not.toHaveBeenCalled();
+    expect((await asserted.json()).error as string).toContain("{ clearHarnessFault: true }");
+  });
+
+  it("refuses the agent this one too — it is the party the refusal is protecting the owner from", async () => {
+    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { clearHarnessFault: true } }));
+    expect(res.status).toBe(403);
+    expect(clearHarnessFault).not.toHaveBeenCalled();
+  });
+
   it("rejects non-JSON", async () => {
     const res = await POST(request({ cookie: ownerCookie(), raw: "not json" }));
     expect(res.status).toBe(400);
@@ -223,6 +251,29 @@ describe("telling the running agent", () => {
     // agent can see, and the owner must not pay for that.
     readyGoes(false, false);
     const res = await POST(request({ cookie: ownerCookie(), body: { enabled: true } }));
+    expect(res.status).toBe(200);
+    expect(reloadMcp).not.toHaveBeenCalled();
+  });
+
+  it("reloads when clearing a harness fault makes the family available again", async () => {
+    // A remembered fault makes `readiness.ready` false, so clearing one can
+    // flip the family from unavailable to available — the same move the switch
+    // makes, and it has to reach the running child the same way. Without this
+    // the owner presses Try again, the panel says ready, and the agent still
+    // has no coding_agent_run until something unrelated respawns it.
+    readyGoes(false, true);
+    const res = await POST(request({ cookie: ownerCookie(), body: { clearHarnessFault: true } }));
+    expect(res.status).toBe(200);
+    expect(clearHarnessFault).toHaveBeenCalledTimes(1);
+    expect(reloadMcp).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT reload when clearing a fault changed no verdict", async () => {
+    // Clearing a fault on a box that was already refusing runs for another
+    // reason — no harness installed, ClawBox AI not connected — moves nothing
+    // the agent can see, and a reload respawns every MCP child.
+    readyGoes(false, false);
+    const res = await POST(request({ cookie: ownerCookie(), body: { clearHarnessFault: true } }));
     expect(res.status).toBe(200);
     expect(reloadMcp).not.toHaveBeenCalled();
   });

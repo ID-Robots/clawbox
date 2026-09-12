@@ -41,6 +41,12 @@ export interface Readiness {
    *  Not given a row of its own: it is present on every ClawBox, and when it
    *  is not, `problems` says so in the owner's words. */
   capabilityDropAvailable: boolean;
+  /** False while a failed run's "the harness could not get a model to answer"
+   *  is still remembered. Unlike its siblings it is a memory rather than a
+   *  look at the disk, and it is what makes the box refuse the NEXT run
+   *  instead of letting it die the same way. Optional: a server that predates
+   *  it sends nothing, and absent must read as healthy. */
+  harnessHealthy?: boolean;
   problems: string[];
 }
 

@@ -518,6 +518,98 @@ describe("CodingAgentApp", () => {
     expect(await screen.findByText(translations.en["codingAgent.claudeCode"])).toBeInTheDocument();
     expect(screen.queryByText(translations.en["codingAgent.clawai"])).not.toBeInTheDocument();
     expect(screen.getByRole("alert").textContent).toMatch(/Claude Code is not installed/);
+    // The harness row is fine here, so it is not listed either — the
+    // checklist only ever shows what is actually wrong.
+    expect(screen.queryByText(translations.en["codingAgent.harness"])).not.toBeInTheDocument();
+  });
+
+  /**
+   * The state nothing on the box could describe: everything installed,
+   * everything connected, and runs dying on arrival because the model the
+   * harness asks for is not one this plan can have.
+   */
+  describe("the harness itself", () => {
+    const HARNESS_BROKEN = {
+      ready: false, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: true, harnessHealthy: false,
+      problems: ["The coding harness on this ClawBox is not ready: it could not get a model to answer."],
+    };
+
+    it("gets a row of its own, with every check above it ticked", async () => {
+      stubFetch({ enabled: true, readiness: HARNESS_BROKEN });
+      render(<CodingAgentApp />);
+      expect(await screen.findByText(translations.en["codingAgent.harness"])).toBeInTheDocument();
+      expect(screen.getByText(`· ${translations.en["codingAgent.harnessNotReady"]}`)).toBeInTheDocument();
+      // The three that look at the disk are all fine, which is exactly why
+      // this needed a row rather than a line in someone else's.
+      expect(screen.queryByText(translations.en["codingAgent.claudeCode"])).not.toBeInTheDocument();
+      expect(screen.queryByText(translations.en["codingAgent.wrapper"])).not.toBeInTheDocument();
+      expect(screen.getByRole("alert").textContent).toMatch(/could not get a model to answer/);
+    });
+
+    it("claims nothing on a server that predates the field", async () => {
+      // An older device answers no harnessHealthy at all. Absent must read as
+      // healthy: inventing a failure the box never reported would be worse
+      // than the silence it replaced.
+      stubFetch({ enabled: true, readiness: NOT_READY });
+      render(<CodingAgentApp />);
+      await screen.findByText(translations.en["codingAgent.claudeCode"]);
+      expect(screen.queryByText(translations.en["codingAgent.harness"])).not.toBeInTheDocument();
+    });
+
+    it("offers a way out, because a refusal nobody can retry is a dead end", async () => {
+      // The fault expires on its own and a completed run drops it — neither
+      // helps the owner who has JUST signed in again or changed plan and is
+      // being told to wait out a clock for a problem that is already gone.
+      stubFetch({ enabled: true, readiness: HARNESS_BROKEN });
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-harness-retry"));
+      await waitFor(() => expect(posts).toContainEqual({
+        url: "/setup-api/coding-agent/enable", body: { clearHarnessFault: true },
+      }));
+    });
+
+    it("offers it for nothing else, since no other row is clearable from here", async () => {
+      // The other rows name something to install or a plan to connect. A
+      // button that re-read the same disk would only say no again.
+      stubFetch({ enabled: true, readiness: NOT_READY });
+      render(<CodingAgentApp />);
+      await screen.findByText(translations.en["codingAgent.claudeCode"]);
+      expect(screen.queryByTestId("coding-agent-harness-retry")).toBeNull();
+    });
+
+    it("says on the run's page that the device is at fault, above the line the harness printed", async () => {
+      const dead = {
+        ...RUN,
+        id: "run-harness01",
+        status: "failed",
+        summary: null,
+        failureKind: "harness_not_ready",
+        error: "The coding harness on this ClawBox is not ready: it could not get a model to answer."
+          + "\n\nWhat the harness reported: [claude-code:unrecognized_model] {\"model\":\"deepseek-v4-pro[1m]\"}",
+      };
+      stubFetch({ enabled: true, readiness: READY }, [dead], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-harness01"));
+      const page = await screen.findByTestId("coding-agent-run-page");
+      // The owner's own language first...
+      expect(within(page).getByTestId("coding-agent-run-harness-not-ready"))
+        .toHaveTextContent("could not get a model to answer");
+      // ...and the model that was refused still there for whoever has to
+      // look into it.
+      expect(within(page).getByTestId("coding-agent-run-error")).toHaveTextContent("deepseek-v4-pro[1m]");
+    });
+
+    it("adds nothing to an ordinary failure of the work", async () => {
+      const dead = { ...RUN, id: "run-ordinary1", status: "failed", summary: null, error: "Stopped after 60 turns without finishing." };
+      stubFetch({ enabled: true, readiness: READY }, [dead], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-details-run-ordinary1"));
+      const page = await screen.findByTestId("coding-agent-run-page");
+      expect(within(page).queryByTestId("coding-agent-run-harness-not-ready")).toBeNull();
+      expect(within(page).getByTestId("coding-agent-run-error")).toHaveTextContent("Stopped after 60 turns");
+    });
   });
 
   describe("recent runs", () => {

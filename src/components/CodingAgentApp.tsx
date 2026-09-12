@@ -83,6 +83,10 @@ interface Run {
   completedAt: number | null;
   summary: string | null;
   error: string | null;
+  /** Set when the run died because the DEVICE's harness could not get a model
+   *  to answer, rather than because of anything about the task. Absent on a
+   *  record written before it was kept. */
+  failureKind?: "harness_not_ready" | null;
   numTurns: number;
   /** The run's plan, as it last wrote it with TodoWrite. */
   todos?: { content?: string; status?: string; activeForm?: string }[];
@@ -682,6 +686,35 @@ export default function CodingAgentApp() {
     }
   };
 
+  /**
+   * Forget a recorded harness fault and re-read the box.
+   *
+   * The fault is what makes the device refuse runs after the harness proved
+   * it could not get a model to answer — see coding-harness-fault.ts. It
+   * expires on its own and a completed run drops it, but neither helps the
+   * owner who has JUST fixed what the message named (signed in again, changed
+   * plan): without this they would be told to wait out a clock for a problem
+   * that is already gone. A refusal that cannot be retried is a dead end, and
+   * the route has accepted this since it existed — nothing on screen asked.
+   */
+  const retryHarness = async () => {
+    setBusy("harness-fault");
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/enable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clearHarnessFault: true }),
+      });
+      if (!res.ok) throw new Error(t("codingAgent.harnessRetryFailed"));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.harnessRetryFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   /** Open the live view once the run's transcript exists — the session id
    *  lands a few seconds after spawn, and the poll above (`load` every
    *  POLL_MS while a run is live) is already watching for it. A run that
@@ -932,6 +965,12 @@ export default function CodingAgentApp() {
       { label: t("codingAgent.claudeCode"), ok: readiness.claudeInstalled, badText: t("codingAgent.missing") },
       { label: t("codingAgent.wrapper"), ok: readiness.wrapperInstalled, badText: t("codingAgent.missing") },
       { label: t("codingAgent.clawai"), ok: readiness.clawaiConnected, badText: t("codingAgent.notConnected") },
+      // A row of its own rather than a line in `problems` alone, because this
+      // is the one entry the owner can be looking at while everything above
+      // it is ticked: Claude Code is installed, the wrapper is there, the
+      // token is saved — and runs still die on arrival. `!== false` so a
+      // server that predates the field never draws a failure it never sent.
+      { label: t("codingAgent.harness"), ok: readiness.harnessHealthy !== false, badText: t("codingAgent.harnessNotReady") },
     ]
     : [];
 
@@ -1594,6 +1633,20 @@ export default function CodingAgentApp() {
                 {readiness.problems.join(" ")}
               </p>
             )}
+            {/* Only for the one problem the owner can clear from here. The
+                other rows name something to install or a plan to connect, and
+                a button that re-read the same disk would just say no again. */}
+            {readiness.harnessHealthy === false && (
+              <button
+                type="button"
+                onClick={() => void retryHarness()}
+                disabled={busy === "harness-fault"}
+                data-testid="coding-agent-harness-retry"
+                className="mt-2 text-[11px] rounded-lg border border-amber-400/40 text-amber-300 px-2.5 py-1 hover:bg-amber-400/10 disabled:opacity-50"
+              >
+                {busy === "harness-fault" ? t("codingAgent.harnessRetrying") : t("codingAgent.harnessRetry")}
+              </button>
+            )}
           </div>
         )}
 
@@ -2245,6 +2298,18 @@ export default function CodingAgentApp() {
               {run.error && (
                 <div className="mt-3 rounded-xl bg-red-500/[0.06] border border-red-500/30 px-4 py-3" data-testid="coding-agent-run-error">
                   <p className="text-[11px] font-medium text-red-300">{t("codingAgent.errorTitle")}</p>
+                  {/* The device's verdict FIRST, in the owner's own language,
+                      and only where the record says so — never guessed at from
+                      the English below. What the harness actually printed is
+                      an error code wrapped in JSON; it stays, because it names
+                      the model that was refused and that is what anyone
+                      looking into this needs, but it is no longer the first
+                      and only thing the owner is handed. */}
+                  {run.failureKind === "harness_not_ready" && (
+                    <p className="mt-1 text-xs text-amber-300 leading-relaxed" data-testid="coding-agent-run-harness-not-ready">
+                      {t("codingAgent.harnessNotReadyDetail")}
+                    </p>
+                  )}
                   <pre className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">{run.error}</pre>
                 </div>
               )}

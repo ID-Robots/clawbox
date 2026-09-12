@@ -742,6 +742,25 @@ async function codingAgentReady(): Promise<boolean | undefined> {
   }
 }
 
+/**
+ * Forget a remembered coding-harness fault, if there is one.
+ *
+ * Dynamically imported, like `codingAgentReady` above and for the same
+ * reason: `@/lib/coding-agent` is a heavy graph — it captures stores at
+ * evaluation and pulls in child_process, the app proxy, git and the browser
+ * sessions — and this route must not pay for it on every save of every
+ * provider. Never throws: the credential has already landed, and a fault that
+ * survives this still expires on its own and still has its own button.
+ */
+async function forgetCodingHarnessFault(): Promise<void> {
+  try {
+    const { clearHarnessFault } = await import("@/lib/coding-agent");
+    await clearHarnessFault();
+  } catch (err) {
+    console.warn("[ai-models/configure] could not clear the coding harness fault:", err instanceof Error ? err.message : err);
+  }
+}
+
 async function getConfiguredClawboxAiToken(preferredToken?: string) {
   const trimmedPreferred = preferredToken?.trim();
   if (trimmedPreferred) {
@@ -2535,6 +2554,16 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           return NextResponse.json({ success: true });
         }
         if (isClawAI) {
+          // No harness-fault clear here, deliberately: on this SKU the apply
+          // below is what WRITES the credential, so it is the only place that
+          // knows the write landed, and it clears the fault itself the moment
+          // it does — inside its own before/after readiness pair, which is
+          // where the clear has to happen for the MCP refresh to notice. A
+          // clear here would fire even when the apply throws, taking the
+          // refusal away over a save that never happened. See
+          // `applyClawaiToHermes`; the OpenClaw/dual branch further down keeps
+          // its own clear because there the ROUTE writes the credential and
+          // the apply may never be called at all.
           const applied = await applyClawaiToHermes(
             clawboxAiToken,
             resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER,
@@ -3266,6 +3295,27 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       });
       // The cloud save has landed — see `forgetLocalWasDefault`.
       await forgetLocalWasDefault();
+      // A ClawBox AI save is the owner doing the thing a harness fault told
+      // them to do.
+      //
+      // When a run dies because the harness could not get a model to answer,
+      // the device remembers it and refuses new runs for a while so they do
+      // not die the same way — and the message sent the owner HERE ("check
+      // ClawBox AI is connected and that your plan covers the model the
+      // harness asks for"). Landing back on a box that still refuses runs,
+      // over a clock they were never shown, would make this route the one
+      // place its own advice does not work. The fault is only evidence, and a
+      // fresh credential is newer evidence.
+      //
+      // HERE, and not beside the refresh further down, because of the Hermes
+      // hand-off immediately below: `applyClawaiToHermes` takes its OWN
+      // before/after readiness pair and does its own refresh, and a fault
+      // still standing when it reads "after" keeps readiness false — so it
+      // asks for no reload, and `appliedToHermes` then suppresses the fallback
+      // refresh as well. The save would report a ready box whose agent has
+      // none of the three coding_agent_* tools. Clearing first means both
+      // paths see the same box.
+      if (isClawAI) await forgetCodingHarnessFault();
       // THE DUAL SKU, where OpenClaw exists and HERMES is the harness actually
       // answering. Everything above configured OpenClaw, exactly as it does on
       // the flagship box — and on this one that left the credential invisible

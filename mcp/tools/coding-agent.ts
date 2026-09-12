@@ -142,6 +142,8 @@ interface RunPayload {
   thinkingTokens?: number;
   lastActivityAt?: number;
   resumable: boolean;
+  /** Set when the DEVICE's harness failed, not the task. Absent on an older record. */
+  failureKind?: "harness_not_ready" | null;
   /** Why a paused run is paused. Absent on a record written before it was kept. */
   pauseReason?: CodingPauseReason | null;
   progress: string[];
@@ -251,6 +253,19 @@ function describeRun(run: RunPayload, tail: number): string {
         + " do not start a fresh run for the same task.",
       );
     }
+  } else if (run.status === "failed" && run.failureKind === "harness_not_ready") {
+    // The device, not the task. Said first so the two advice branches below
+    // cannot claim this one: "start a fresh run" is the worst possible answer
+    // here, because the fresh run asks for the same model and dies the same
+    // way — which is exactly what happened on the box this comes from, three
+    // runs in a row.
+    parts.push(
+      "This failed because the ClawBox's own coding harness could not get a model to answer — a fault in the DEVICE,"
+      + " not in the task. Do NOT start another run or resume this one: the box refuses new runs for a while precisely"
+      + " because they would fail the same way. Tell the user what the error says and that the fix is in"
+      + " Settings → AI Models on the ClawBox: check ClawBox AI is connected and that their plan covers the model the"
+      + " harness asks for.",
+    );
   } else if (run.status === "failed" && run.resumable && run.sessionId) {
     // Only where a resume can actually help — a turn or cost ceiling. Advising
     // it for an authentication or transport failure is what turned one

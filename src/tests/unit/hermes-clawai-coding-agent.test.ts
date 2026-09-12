@@ -58,7 +58,8 @@ vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
 }));
 // The coding-agent module owns a runs store keyed off DATA_DIR; only its verdict
 // is wanted here, and `checkReadiness` has its own suite.
-vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: statusMock }));
+const clearFaultMock = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: statusMock, clearHarnessFault: clearFaultMock }));
 // A Hermes box, so the refresh helpers report in Hermes' words.
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 // NOT mocked, deliberately: `hermes-image-refresh`, `coding-agent-mcp-refresh`
@@ -98,6 +99,7 @@ beforeEach(() => {
   rpcMock.mockReset();
   bounceMock.mockReset();
   resolveVisionMock.mockReset();
+  clearFaultMock.mockReset();
   cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   resolveVisionMock.mockResolvedValue({
     id: CLAWBOX_AI_VISION_MODEL_ID,
@@ -124,6 +126,58 @@ describe("applyClawaiToHermes and the coding-agent tool list", () => {
     // `confirm` is not decoration: `reload.mcp` is gated by
     // approvals.mcp_reload_confirm, which defaults to true.
     expect(rpcMock).toHaveBeenCalledWith("reload.mcp", { confirm: true });
+  });
+
+  /**
+   * A remembered harness fault — the record that makes the device refuse new
+   * runs after one died because the harness could not get a model to answer —
+   * is cleared HERE, on the credential write itself.
+   *
+   * Not in the callers: only this function knows the write landed, and only
+   * here is the clear inside the before/after pair the MCP refresh is computed
+   * from. A caller clearing beforehand makes this function read an
+   * already-ready box and skip the reload; a caller clearing afterwards leaves
+   * the fault standing while `codingReadyAfter` is read, which skips it too.
+   */
+  describe("the remembered harness fault", () => {
+    it("is cleared when the credential write lands", async () => {
+      // The refusal message sends the owner to Settings → AI Models. A
+      // credential that has just landed is newer evidence than the fault.
+      box({ drawsBefore: true, drawsAfter: true, readyBefore: false, readyAfter: true });
+      await applyClawaiToHermes("claw_token_abc", "flash");
+      expect(clearFaultMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("is left standing when the write fails", async () => {
+      // Nothing was fixed, so the refusal still describes the box. Clearing
+      // optimistically would hand back a 502 with the guard already gone.
+      cliMock.mockImplementation(async (args: string[]) =>
+        args[2]?.endsWith(".api_key")
+          ? { code: 1, stdout: "", stderr: "hermes: could not write" }
+          : { code: 0, stdout: "", stderr: "" },
+      );
+      box({ drawsBefore: true, drawsAfter: true, readyBefore: false, readyAfter: true });
+      await expect(applyClawaiToHermes("claw_token_abc", "flash")).rejects.toThrow();
+      expect(clearFaultMock).not.toHaveBeenCalled();
+    });
+
+    it("is cleared even when the same token is pasted again", async () => {
+      // Unlike the credential-refusal record beside it, this one is NOT gated
+      // on the bytes changing: the PLAN behind an unchanged token can have
+      // moved upstream, and an upgrade to Max is exactly the fix the refusal
+      // message asks for while moving no bytes on this box.
+      box({ drawsBefore: true, drawsAfter: true, readyBefore: true, readyAfter: true });
+      await applyClawaiToHermes("claw_token_abc", "flash", { previousClawaiToken: "claw_token_abc" });
+      expect(clearFaultMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not fail the link when the clear throws", async () => {
+      // The credential has landed; a bookkeeping write that would not go must
+      // not turn a save that worked into an error.
+      clearFaultMock.mockRejectedValue(new Error("disk full"));
+      box({ drawsBefore: true, drawsAfter: true, readyBefore: false, readyAfter: true });
+      await expect(applyClawaiToHermes("claw_token_abc", "flash")).resolves.toBeTruthy();
+    });
   });
 
   it("costs ONE respawn when the same link moves drawing and the coding agent together", async () => {

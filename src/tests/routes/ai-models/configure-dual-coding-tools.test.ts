@@ -180,7 +180,10 @@ vi.mock("@/lib/harness", async (importOriginal) => ({
   getActiveHarness: vi.fn(),
 }));
 
-vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn() }));
+// `clearHarnessFault` belongs in the factory, not just the type: omitted, the
+// route's call is `undefined()` and falls into its own catch, so the case
+// below would pass over a clear that never happened.
+vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(), clearHarnessFault: vi.fn(async () => undefined) }));
 
 // The Hermes apply, which on this SKU is what tells the agent anything at all.
 // Partial, so `ClawaiApplyError` stays the real class the route catches.
@@ -215,7 +218,7 @@ import {
   parseFullyQualifiedModel,
 } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
-import { getCodingAgentStatus } from "@/lib/coding-agent";
+import { clearHarnessFault, getCodingAgentStatus } from "@/lib/coding-agent";
 import { reloadMcpServers } from "@/lib/hermes-mcp-reload";
 
 
@@ -370,6 +373,62 @@ describe("POST /setup-api/ai-models/configure — the coding agent's tool list o
     // mock could be trimmed back to `getAll`/`setMany` and every case here
     // would go on passing over an image-ops gate that never ran (TASK-727).
     expect(vi.mocked(configGet)).toHaveBeenCalledWith("clawai_credential_refused_at");
+  });
+
+  it("forgets a remembered harness fault, because this save is what the fault told the owner to do", async () => {
+    // When a run dies because the harness could not get a model to answer, the
+    // device remembers it and refuses new runs for a while — and the message
+    // sends the owner HERE ("check ClawBox AI is connected and that your plan
+    // covers the model the harness asks for"). Landing back on a box that
+    // still refuses runs, over a clock they were never shown, would make this
+    // route the one place that advice does not work. A fresh credential is
+    // newer evidence than the fault.
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+    expect(res.status).toBe(200);
+    expect(vi.mocked(clearHarnessFault)).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves the fault alone for a save that is not ClawBox AI", async () => {
+    // The harness only ever speaks to ClawBox AI, so another provider's
+    // credential is no evidence at all about whether it can get a model.
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-not-a-real-key-0000000000" }));
+    expect(res.status).toBe(200);
+    expect(vi.mocked(clearHarnessFault)).not.toHaveBeenCalled();
+  });
+
+  it("clears the fault BEFORE the Hermes hand-off, so the apply sees the box the save made", async () => {
+    // Ordering, and it is the whole finding. `applyClawaiToHermes` takes its
+    // OWN before/after readiness pair and does its own refresh. A fault still
+    // standing when it reads "after" keeps readiness false, so it asks for no
+    // reload — and `appliedToHermes` then suppresses this route's fallback
+    // refresh too. The save would report a ready box whose agent has none of
+    // the three coding_agent_* tools.
+    const order: string[] = [];
+    vi.mocked(clearHarnessFault).mockImplementation(async () => { order.push("clear"); });
+    applyClawaiToHermesMock.mockImplementation(async () => { order.push("hermes"); });
+
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+    expect(res.status).toBe(200);
+    expect(order).toEqual(["clear", "hermes"]);
+  });
+
+  it("leaves the HERMES-ONLY clear to the apply, which is what writes the credential there", async () => {
+    // On this SKU `applyClawaiToHermes` IS the credential write, so it is the
+    // only thing that knows the write landed — and it clears the fault itself,
+    // inside its own before/after readiness pair, which is where the clear has
+    // to happen for the MCP refresh to notice. Clearing from the route would
+    // fire even when the apply throws, taking the refusal away over a save
+    // that never happened. (`hermes-clawai-coding-agent.test.ts` pins the
+    // other half: that the apply really does clear, and only on a write that
+    // succeeded.)
+    const oc = await import("@/lib/openclaw-config");
+    vi.mocked(oc.openclawIsAbsent).mockReturnValue(true);
+    applyClawaiToHermesMock.mockResolvedValue({});
+
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
+    expect(res.status).toBe(200);
+    expect(applyClawaiToHermesMock).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(clearHarnessFault)).not.toHaveBeenCalled();
   });
 
   it("hands the credential to HERMES, which is the agent answering on this box", async () => {

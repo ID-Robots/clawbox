@@ -81,6 +81,14 @@ import {
   isLive,
   parsePauseReason,
 } from "@/lib/coding-agent-status";
+import {
+  HARNESS_FAULT_CONFIG_KEY,
+  type HarnessFault,
+  harnessFaultMessage,
+  harnessFaultProblem,
+  isHarnessFault,
+  parseHarnessFault,
+} from "@/lib/coding-harness-fault";
 // The runner writes its fixed lines from this table so the surfaces that draw
 // them can recognise each one and say it in the owner's language.
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
@@ -924,6 +932,22 @@ export interface CodingRun {
    */
   resumable: boolean;
   /**
+   * WHY this run failed, when the answer is about the DEVICE rather than the
+   * task.
+   *
+   * `error` is a sentence, and a sentence is all a person needs — but a
+   * surface that wants to say it in the owner's own language, or to offer the
+   * one thing that helps (Settings → AI Models), cannot pattern-match English
+   * to find out whether it may. So the verdict is recorded once, here, where
+   * it is actually known.
+   *
+   * `"harness_not_ready"` means the harness could not get a model to answer:
+   * see coding-harness-fault.ts for what qualifies and, just as importantly,
+   * what does not. Null for every other ending, including every ordinary
+   * failure of the work itself, and on a record written before this existed.
+   */
+  failureKind: "harness_not_ready" | null;
+  /**
    * WHY this run is paused — persisted, because the answer outlives the
    * process that knew it.
    *
@@ -1057,6 +1081,16 @@ export interface CodingHarnessReadiness {
    * capabilities off the run. False means no run may start: see the header.
    */
   capabilityDropAvailable: boolean;
+  /**
+   * Whether the harness has just proved it cannot get a model to answer.
+   *
+   * False ONLY while a fault recorded by a failed run is still inside its
+   * TTL — see coding-harness-fault.ts. Unlike its siblings this is a memory
+   * rather than a look at the disk, because the fact it reports (does the
+   * plan cover the model the harness asks for?) is upstream's to give and the
+   * box only ever learns it by being refused.
+   */
+  harnessHealthy: boolean;
   /** Owner-facing sentences, one per missing piece. Empty when ready. */
   problems: string[];
 }
@@ -1984,12 +2018,74 @@ export async function findExecutableOnPath(binary: string, pathValue: string = r
   return null;
 }
 
-export async function checkReadiness(): Promise<CodingHarnessReadiness> {
-  return readinessWith(await configGet("clawai_token"));
+/**
+ * The fault THIS PROCESS knows about, beside the persisted one.
+ *
+ * Two copies of one fact, and both are needed, for two reasons that have
+ * nothing to do with each other:
+ *
+ *  - finishRun cannot await, so the write is fired and forgotten. Between the
+ *    call and the file landing there is a real window in which a second run —
+ *    the agent starting a follow-up the moment the first settles — reads a
+ *    config that says nothing is wrong and spawns straight into the same wall.
+ *    This is set SYNCHRONOUSLY, before the first await, so that window is
+ *    closed.
+ *  - a write that rejects (a full disk, a permissions change) would otherwise
+ *    lose the fault silently and take the whole pre-flight with it.
+ *
+ * The persisted copy is the durable one and outlives a restart; this one does
+ * not, which is right — a web server that has just come up has seen nothing.
+ * Both are read through `parseHarnessFault`, so the TTL is one rule rather
+ * than two, and `clearHarnessFault` drops both.
+ */
+let liveHarnessFault: HarnessFault | null = null;
+
+/**
+ * Remember that the harness could not get a model to answer, so the next run
+ * is refused before it spawns instead of dying the same way.
+ *
+ * Written from finishRun, which cannot await: the caller voids it. Nothing
+ * here throws upward — a failed write costs the durable copy and nothing
+ * else, because the in-memory one above is already set by then.
+ */
+async function rememberHarnessFault(): Promise<void> {
+  // Synchronous, ahead of the await: see liveHarnessFault.
+  liveHarnessFault = { at: Date.now() };
+  await configSet(HARNESS_FAULT_CONFIG_KEY, { at: liveHarnessFault.at });
 }
 
-/** The readiness probe proper, given the ClawBox AI token the caller already read. */
-async function readinessWith(token: unknown): Promise<CodingHarnessReadiness> {
+/**
+ * Forget a recorded harness fault.
+ *
+ * Three callers, and they are the three ways a box gets out of refusing runs:
+ * a run that COMPLETED (the only proof that matters), the owner saying so
+ * through the enable route, and — without coming through here at all — the
+ * fault simply ageing past its TTL.
+ *
+ * The key is DELETED rather than set to a falsy value: `parseHarnessFault`
+ * would read either as "no fault", but a config file that accumulates dead
+ * keys is one more thing for the next reader of it to wonder about.
+ */
+export async function clearHarnessFault(): Promise<void> {
+  // First, and unconditionally: this is the copy that can refuse a run on its
+  // own, so an early return over an absent config key must not leave it set.
+  liveHarnessFault = null;
+  if ((await configGet(HARNESS_FAULT_CONFIG_KEY)) === undefined) return;
+  await configSet(HARNESS_FAULT_CONFIG_KEY, undefined);
+}
+
+export async function checkReadiness(): Promise<CodingHarnessReadiness> {
+  const config = await configGetAll();
+  return readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY]);
+}
+
+/**
+ * The readiness probe proper, given the two config values the caller already
+ * read. Both are REQUIRED, including the fault: optional, a caller that forgot
+ * it would silently report a box as healthy, which is the one wrong answer
+ * this whole field exists to stop.
+ */
+async function readinessWith(token: unknown, faultRaw: unknown): Promise<CodingHarnessReadiness> {
   const [wrapperInstalled, claudePath, setprivPath] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
@@ -2011,12 +2107,24 @@ async function readinessWith(token: unknown): Promise<CodingHarnessReadiness> {
   if (!capabilityDropAvailable) {
     problems.push(`${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`);
   }
+  // The pieces above are all "is it installed" — answerable by looking at the
+  // disk. This one is not: whether the plan covers the model the harness asks
+  // for is upstream's to say, and the only honest way to know is that a run
+  // has just been told no. So the probe reports what the box has SEEN, which
+  // is what turns a column of identical dead runs into one clear refusal.
+  // Either copy refuses. Both go through the same parser, so one TTL rule
+  // governs them and an expired in-memory fault ages out exactly as the
+  // persisted one does.
+  const fault: HarnessFault | null = parseHarnessFault(faultRaw) ?? parseHarnessFault(liveHarnessFault);
+  const harnessHealthy = fault === null;
+  if (fault) problems.push(harnessFaultProblem(fault));
   return {
     ready: problems.length === 0,
     wrapperInstalled,
     claudeInstalled,
     clawaiConnected,
     capabilityDropAvailable,
+    harnessHealthy,
     problems,
   };
 }
@@ -2029,7 +2137,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
   const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
   const [readiness, projectFolders] = await Promise.all([
-    readinessWith(config.clawai_token),
+    readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY]),
     defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
   ]);
   return {
@@ -2220,6 +2328,9 @@ function normalizeRun(raw: CodingRun): CodingRun {
     retries: typeof raw.retries === "number" ? raw.retries : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
+    // Only the one verdict this code writes counts; anything else on a
+    // hand-edited record is no verdict at all.
+    failureKind: raw.failureKind === "harness_not_ready" ? "harness_not_ready" : null,
     // Only a reason this code could have written counts: anything else on a
     // hand-edited record is no reason at all, not a new kind of pause.
     pauseReason: parsePauseReason(raw.pauseReason),
@@ -5068,6 +5179,41 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     }
   }
 
+  // THE HARNESS ITSELF, once the retry above has had its turn.
+  //
+  // Deliberately here and not in the branches that set `error`: a fault is
+  // only a fault after the one automatic retry has failed to shake it off.
+  // Before that, the very same line is how an entitlement flap looks, which
+  // is why `unrecognized_model` is in the transient set and stays there — the
+  // retry is what tells the two apart.
+  //
+  // The owner used to be handed the CLI's own line whole
+  // ('[claude-code:unrecognized_model] {"model":…}') and nothing else, and
+  // the next run walked into the identical wall. So the record gets a
+  // sentence a person can act on with the raw line kept after it, the verdict
+  // is recorded as a FIELD so the card can word it in the owner's language,
+  // and the fault is remembered long enough to refuse the next run before it
+  // spawns rather than after it dies.
+  //
+  // Not resumable, whatever the result event claimed: the session holds no
+  // work, and Claude Code replays a failure that is in the session.
+  if (run.status === "failed" && isHarnessFault(run.error)) {
+    run.failureKind = "harness_not_ready";
+    run.error = harnessFaultMessage(run.error);
+    run.resumable = false;
+    void rememberHarnessFault().catch((err: unknown) => {
+      // Said, not swallowed: the durable copy is gone and only this process
+      // will refuse the next run, which is exactly the kind of degraded state
+      // that should be in the log rather than inferred from behaviour.
+      console.warn("[coding-agent] could not persist the harness fault:", err instanceof Error ? err.message : err);
+    });
+  } else if (run.status === "completed") {
+    // The only proof that matters. A box that was refusing runs because of a
+    // fault is plainly working now, so the fault goes rather than waiting out
+    // its clock.
+    void clearHarnessFault().catch(() => {});
+  }
+
   // The closing message becomes report.md beside the run's screenshots — for
   // a run that did not finish too, when it said anything, because a partial
   // account is what the owner reads before deciding whether to resume. After
@@ -5461,6 +5607,8 @@ function newRunRecord(fields: {
     lastActivityAt: now,
     retries: 0,
     resumable: false,
+    // Nothing has failed yet, so there is no verdict to carry.
+    failureKind: null,
     // Nothing has paused it, so there is nothing to explain yet.
     pauseReason: null,
     reviewOf: fields.reviewOf ?? null,
@@ -5877,5 +6025,8 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   }
   dirty = false;
   runs = null;
+  // Module state like the rest: left set, it would refuse the next test file's
+  // runs from a fault the box under test never had.
+  liveHarnessFault = null;
   return settleWork(killed, SETTLE_DRAIN_BUDGET_MS);
 }
