@@ -116,9 +116,29 @@ const LIVE = {
 /** Every catalog URL the component asked for, in order. */
 const catalogUrls: string[] = [];
 
+/**
+ * Whether the box has finished enumerating yet — the TEST decides, not the
+ * call count.
+ *
+ * It used to be `catalogCalls === 1 ? WARMING : LIVE`, which assumed the
+ * picker would not ask twice before the test told it to. It does: "keeps
+ * asking while the box is still enumerating" below is the behaviour that says
+ * so. On an idle machine the second poll landed after the cold-start
+ * assertion; in a full parallel run it landed before it, and "the curated
+ * three" was answered with all eleven (seen on beta, 2026-09-12). A flag makes
+ * the warming window last exactly as long as the case needs it to, and the
+ * re-read is still the thing under test — it is what carries the eleven.
+ */
+let catalogIsLive = false;
+
+/** The enumeration has landed; the NEXT read gets the live rows. */
+function goLive() {
+  catalogIsLive = true;
+}
+
 function stubFetch() {
   catalogUrls.length = 0;
-  let catalogCalls = 0;
+  catalogIsLive = false;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
     if (url.includes("/setup-api/ai-models/oauth/providers")) {
@@ -126,10 +146,9 @@ function stubFetch() {
     }
     if (url.includes("/setup-api/ai-models/catalog")) {
       catalogUrls.push(url);
-      catalogCalls += 1;
       // The box is still warming when the picker first mounts; the enumeration
-      // lands a moment later, exactly as it does after a provider connect.
-      return { ok: true, json: async () => (catalogCalls === 1 ? WARMING : LIVE) } as Response;
+      // lands when the case says it has.
+      return { ok: true, json: async () => (catalogIsLive ? LIVE : WARMING) } as Response;
     }
     if (url.includes("harness")) {
       return { ok: true, json: async () => ({ edition: "openclaw" }) } as Response;
@@ -176,6 +195,7 @@ describe("model picker — live catalogue", () => {
     expect(within(listbox).getAllByRole("option")).toHaveLength(3);
 
     // A provider connect is the moment the catalogue becomes enumerable.
+    goLive();
     await act(async () => {
       notifyProvidersChanged();
       await new Promise((resolve) => setTimeout(resolve, 250));
@@ -211,6 +231,9 @@ describe("model picker — live catalogue", () => {
     // happened three minutes too early.
     await renderStep();
     await openModelList();
+    // Nothing connects; the enumeration simply finishes on the box, and the
+    // picker has to ask again of its own accord to see it.
+    goLive();
 
     await waitFor(() => expect(catalogUrls.length).toBeGreaterThan(1), { timeout: 5000 });
     await waitFor(() => {

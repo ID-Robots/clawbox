@@ -127,10 +127,28 @@ describe("the built-in toolsets a slim turn keeps", () => {
  * the models endpoint reports, so the parser owns this.
  */
 describe("reading a size out of a model id is linear in its length", () => {
-  const timeMs = (input: string): number => {
+  /**
+   * Enough parses that each side of the ratio is tens of milliseconds rather
+   * than hundredths of one. The whole case costs well under a second.
+   */
+  const REPEATS = 50;
+
+  /**
+   * Milliseconds for ONE parse, averaged over `repeats`.
+   *
+   * Averaging is not decoration: a single linear parse of 50 000 characters is
+   * a few hundredths of a millisecond, which is at the resolution of
+   * `performance.now()` and well inside one scheduler slice. The ratio below
+   * used to divide by `Math.max(small, 0.05)`, so a small case that measured
+   * at or under that floor turned a perfectly linear large case into a ratio
+   * of 70 and reported the quadratic as back (beta, 2026-09-12, in a full
+   * parallel run on a loaded machine). Repeating until each side is tens of
+   * milliseconds makes both numbers mean something, and needs no floor.
+   */
+  const timeMs = (input: string, repeats = 1): number => {
     const started = performance.now();
-    parseModelParamBillions(input);
-    return performance.now() - started;
+    for (let i = 0; i < repeats; i++) parseModelParamBillions(input);
+    return (performance.now() - started) / repeats;
   };
 
   it("does not blow up on a long run of digits", () => {
@@ -143,9 +161,9 @@ describe("reading a size out of a model id is linear in its length", () => {
 
   it("scales linearly rather than quadratically", () => {
     // Warm the JIT so the first call's compile time is not read as cost.
-    timeMs("0".repeat(50_000));
-    const small = Math.max(timeMs("0".repeat(50_000)), 0.05);
-    const large = timeMs("0".repeat(400_000));
+    timeMs("0".repeat(50_000), REPEATS);
+    const small = timeMs("0".repeat(50_000), REPEATS);
+    const large = timeMs("0".repeat(400_000), REPEATS);
     // 8x the input. Linear predicts ~8x the time; quadratic predicts ~64x.
     expect(large / small).toBeLessThan(32);
   });

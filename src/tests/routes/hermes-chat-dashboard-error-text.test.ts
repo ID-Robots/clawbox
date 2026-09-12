@@ -48,7 +48,10 @@ vi.mock("@/lib/harness/hermes-turn-record", () => ({
 }));
 vi.mock("@/lib/harness/media-root", () => ({
   resolveInMediaRoot: vi.fn(async (p: string) => p),
-  chatMediaRoot: vi.fn(async () => "/tmp/clawbox-dashboard-error-media"),
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
+  chatMediaRoot: vi.fn(async () => `/tmp/clawbox-dashboard-error-media-${process.pid}`),
 }));
 vi.mock("@/lib/hermes-model-options", () => ({
   getModelOptions: vi.fn(async () => null),

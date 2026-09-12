@@ -55,7 +55,10 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 }));
 vi.mock("@/lib/harness/media-root", () => ({
   resolveInMediaRoot: vi.fn(async (p: string) => p),
-  chatMediaRoot: vi.fn(async () => "/tmp/clawbox-served-model-dashboard-media"),
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
+  chatMediaRoot: vi.fn(async () => `/tmp/clawbox-served-model-dashboard-media-${process.pid}`),
 }));
 // `cachedModelOptions` is what the settle path reads, and the pure judges around
 // it (`shouldEnforcePairing` / `isPairAllowed`) stay real — a hand-written

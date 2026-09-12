@@ -9,8 +9,12 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+// A per-PROCESS data root, and here it is not a precaution: `/tmp/test-data`
+// was the root of FOUR suites that run in parallel, each wiping it in its own
+// `beforeEach`. The same suffix `vitest.config.ts` already gives
+// `CLAWBOX_ROOT` and `OPENCLAW_HOME`, for the same reason.
 vi.mock("@/lib/config-store", () => ({
-  DATA_DIR: "/tmp/test-data",
+  DATA_DIR: `/tmp/test-data-${process.pid}`,
   getAll: vi.fn().mockResolvedValue({}),
 }));
 
@@ -112,7 +116,8 @@ describe("/setup-api/apps/icon/[appId]", () => {
     await icon();
     await settle();
     expect(fs.writeFile).toHaveBeenCalledTimes(1);
-    expect(String(vi.mocked(fs.writeFile).mock.calls[0][0])).toBe("/tmp/test-data/icons/test.png");
+    expect(String(vi.mocked(fs.writeFile).mock.calls[0][0]))
+      .toBe(`/tmp/test-data-${process.pid}/icons/test.png`);
   });
 
   it("remembers an icon the store does not have and stops asking for it", async () => {

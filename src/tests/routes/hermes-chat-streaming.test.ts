@@ -54,7 +54,10 @@ vi.mock("@/lib/harness/hermes-turn-record", () => ({
 // this file would be exercising that fallback instead of the real path.
 vi.mock("@/lib/harness/media-root", () => ({
   resolveInMediaRoot: vi.fn(async (p: string) => p),
-  chatMediaRoot: vi.fn(async () => "/tmp/clawbox-streaming-media"),
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
+  chatMediaRoot: vi.fn(async () => `/tmp/clawbox-streaming-media-${process.pid}`),
 }));
 vi.mock("@/lib/hermes-model-options", () => ({
   // No catalogue: the route falls back to its static allowlist and lets hermes

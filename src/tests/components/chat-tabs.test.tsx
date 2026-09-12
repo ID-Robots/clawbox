@@ -6,6 +6,15 @@ import { translations } from "@/lib/translations";
 import { describeChatFailure } from "@/lib/chat-error-text";
 import type { ReactNode } from "react";
 
+// A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
+// the transcript — costs seconds under a full parallel run, and a case does it
+// once and then waits on several sub-5 s `waitFor`s in series. Every component
+// suite that mounts it declares both ceilings; `test-timeout-hygiene.test.ts`
+// is the rule, and says there why 5 s is the wrong budget here and 30 s still
+// fails a test that has genuinely hung.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+
 // Resolve against the REAL tables rather than a hand-written map, so these
 // break if a label stops reading the catalogue or a key goes away. The
 // provider itself loads its tables through a dynamic import that never

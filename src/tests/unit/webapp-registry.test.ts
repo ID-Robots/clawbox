@@ -3,7 +3,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("@/lib/config-store", () => ({
   // DATA_DIR is pulled in through webapp-icon, which the registry now calls to
   // draw a picture for every app that reaches the desktop.
-  DATA_DIR: "/tmp/clawbox-webapp-registry-test",
+// A per-PROCESS data root. A fixed `/tmp/<name>` is shared by every vitest
+// worker on the machine and by every checkout of this repo on it — the same
+// reason `vitest.config.ts` suffixes `CLAWBOX_ROOT` and `OPENCLAW_HOME`.
+  DATA_DIR: `/tmp/clawbox-webapp-registry-test-${process.pid}`,
   getAll: vi.fn(),
   setMany: vi.fn(),
 }));

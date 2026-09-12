@@ -5,6 +5,15 @@ import path from "path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
+// The generated-corpus case drives the route 3 000 times with real fs behind
+// it, and that is the thing under test — the ROUTE's verdict, not a copy of
+// the predicate. Measured 2026-09-12 on an idle 12-core machine, the file
+// alone: 4,562 ms, i.e. 91% of vitest's 5 s default spent before any
+// contention at all. It duly timed out in a full parallel run of the unit
+// project and passed in the next one, which is the definition of a test
+// running on the wrong budget.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 /**
  * TASK-742 — the Files API's containment check, and the equivalence that had
  * to hold while its SHAPE changed.

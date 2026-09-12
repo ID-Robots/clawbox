@@ -27,7 +27,11 @@ vi.mock("@/lib/openclaw-config", () => ({
 const getAllMock = vi.fn();
 vi.mock("@/lib/config-store", () => ({
   getAll: (...args: unknown[]) => getAllMock(...args),
-  DATA_DIR: "/tmp/clawbox-test-data",
+// A per-PROCESS data root, and here it is not a precaution: `/tmp/test-data`
+// was the root of FOUR suites that run in parallel, each wiping it in its own
+// `beforeEach`. The same suffix `vitest.config.ts` already gives
+// `CLAWBOX_ROOT` and `OPENCLAW_HOME`, for the same reason.
+  DATA_DIR: `/tmp/clawbox-test-data-${process.pid}`,
   CONFIG_ROOT: "/tmp/clawbox-test-root",
 }));
 

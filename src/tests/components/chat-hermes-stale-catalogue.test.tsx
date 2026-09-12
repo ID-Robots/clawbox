@@ -4,6 +4,16 @@ import { installHermesBox, mountHermesChat, type HermesBox } from "@/tests/helpe
 import { resetHarnessCache } from "@/lib/client-harness";
 import { notifyHermesModelState } from "@/hooks/useHermesModelOptions";
 
+// Mounts the chat/provider surface and then waits on several sub-5 s
+// `waitFor`s in series — the family `test-timeout-hygiene.test.ts` keeps a
+// list of, for the reason it gives there. Measured 2026-09-12 with all 216
+// component files running fully parallel on a 12-core machine: the slowest
+// case here ("recovers from a dropped connection, not only from a tidy 200")
+// took 3,175 ms, i.e. under 2 s of headroom below vitest's 5 s default. It
+// duly timed out when the machine was loaded further.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+
 /**
  * TASK-677 — the Hermes chat header rendered a DEGRADED catalogue as if it were
  * the box's answer, and never went back for the real one.
