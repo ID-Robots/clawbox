@@ -8,10 +8,12 @@
  * Null when the run has none of that yet (a run that has not written its
  * first line).
  *
- * Client-safe: strings only. The run page embeds a terminal on it, and the
- * "Open in Terminal" buttons hand it to a Terminal window.
+ * Client-safe: strings only, and the root comes from the build-time inlined
+ * NEXT_PUBLIC_CLAWBOX_ROOT — this runs in the browser, where a runtime
+ * process.env read is not available. The run page embeds a terminal on it, and
+ * the "Open in Terminal" buttons hand it to a Terminal window.
  */
-const CLAWBOX_ROOT = "/home/clawbox/clawbox";
+const CLAWBOX_ROOT = process.env.NEXT_PUBLIC_CLAWBOX_ROOT || "/home/clawbox/clawbox";
 
 function quoted(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;

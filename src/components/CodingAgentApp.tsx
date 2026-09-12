@@ -199,8 +199,6 @@ function elapsedShort(from: number, to: number): string {
 /** How many pictures a run's evidence card shows before it asks to be unfolded. */
 const ARTIFACT_PREVIEW = 4;
 const RUNS_PAGE = 10;
-/** Where the preview script lives on the device. */
-const CLAWBOX_ROOT = "/home/clawbox/clawbox";
 const POLL_MS = 5_000;
 /** How long a two-tap confirmation stays armed before the offer is taken back. */
 const CONFIRM_MS = 5_000;
