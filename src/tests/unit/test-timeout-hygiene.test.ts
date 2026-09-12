@@ -277,6 +277,21 @@ const ALSO_REQUIRED = [
   // Same family, same mount, same reason: it drives the chat popup through a
   // fake gateway and waits on a spoken reply landing in a bubble.
   "src/tests/components/chat-spoken-reply-player.test.tsx",
+  // The rest of that family, added 2026-09-12 after the three of them were the
+  // only component files reporting "Test timed out in 5000ms" in a full
+  // parallel run of all 215. Each mounts `ChatPopup` and then waits on several
+  // sub-5 s `waitFor`s in series; the slowest PASSING case among them measured
+  // 4,558 ms, i.e. 442 ms of headroom under the default. (The races those
+  // timeouts were hiding are fixed separately — the point of the ceiling is
+  // that the next one reports the element it could not find instead.)
+  "src/tests/components/chat-email-refs-surfaces.test.tsx",
+  "src/tests/components/chat-clawbox-ai-model-pill.test.tsx",
+  "src/tests/components/chat-popup-dismiss-and-geometry.test.tsx",
+  // Starts no process either: it drives the Files route 3 000 times over a
+  // generated corpus, with real fs behind it, inside ONE case. 4,562 ms on an
+  // idle machine (2026-09-12) — 91% of the default before any contention, and
+  // it duly timed out in a full parallel run.
+  "src/tests/routes/files/safe-path-containment.test.ts",
   // Starts its processes through @/lib/coding-agent rather than importing
   // child_process itself, so the rule above cannot see it — and CI has seen it
   // both ways in one day: "pauses a live run…" timed out on one PR, and on

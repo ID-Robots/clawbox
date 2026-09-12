@@ -22,6 +22,18 @@ import ChatPopup from "@/components/ChatPopup";
 import { installHermesBox, mountHermesChat } from "@/tests/helpers/hermes-chat-box";
 import { resetHarnessCache } from "@/lib/client-harness";
 
+// A jsdom mount of `ChatPopup` is the expensive thing here — the fake gateway
+// handshake, the model seed, the transcript — and a case does it once and then
+// waits on several sub-5 s `waitFor`s in series. That is exactly what
+// `testTimeout` governs, and what `test-timeout-hygiene.test.ts` documents.
+// Measured on beta, 2026-09-12, with all 215 component files running fully
+// parallel on a 12-core machine: the slowest passing case in this family was
+// 4,558 ms — 442 ms under vitest's default, which is why these three suites
+// were the ones reporting "Test timed out in 5000ms" over races that had
+// nothing to do with the budget.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+
 const VIEWPORT = { w: 1440, h: 900 };
 /** The gutter the popup keeps from every edge; mirrored from the component. */
 const MARGIN = 8;
