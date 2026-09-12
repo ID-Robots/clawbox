@@ -77,6 +77,11 @@ export type ProgressLabelKey =
   | "leftoverRunning"
   | "endedLeftovers"
   | "ownerEndedLeftovers"
+  // The deliverable gate: what the box looked for when the harness said it was
+  // done, and what it did about not finding it (src/lib/coding-deliverable.ts).
+  | "deliverableMet"
+  | "deliverableMissing"
+  | "anotherAttempt"
   | "droppedSteps";
 
 export interface ProgressDescription {
@@ -197,6 +202,8 @@ export const RUNNER_STEP = {
     "Something this run started is still running — a server it left listening? The run's page can end it.",
   endedLeftovers: "Ended what the run had left running",
   ownerEndedLeftovers: "The owner ended what the run had left running",
+  /** The deliverable the run was held to was there, so "completed" is honest. */
+  deliverableMet: "The deliverable is there",
 
   started: (model: string | null | undefined) => (model ? `Started with ${model}` : "Started"),
   reviewPass: (id: string) => `Automatic review pass of ${id}`,
@@ -219,6 +226,12 @@ export const RUNNER_STEP = {
   onDesktop: (name: string, id: string, port: number) => `On the desktop as "${name}", served at /apps/${id}/ from port ${port}`,
   notOnDesktop: (port: number, reason: string) => `Not on the desktop yet: clawbox.json names port ${port}, but ${reason}`,
   finished: (status: string) => `Finished: ${status}`,
+  /** What the harness reported done did not include; `reason` is the box's own
+   *  sentence, except for a command deliverable, where it ends in a bounded
+   *  tail of that command's output. */
+  deliverableMissing: (reason: string) => `Not finished yet: ${reason}`,
+  /** Going back in for another go at the deliverable, same record, same session. */
+  anotherAttempt: (attempt: number, attempts: number) => `Attempt ${attempt} of ${attempts} at the deliverable`,
   /** A helper going out: the type in parentheses, its own description after a colon. */
   helperStarted: (opts: { workflow: boolean; type: string; what: string }) =>
     opts.workflow
@@ -302,6 +315,9 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Something this run started is still running .*$/, labelKey: "leftoverRunning", icon: "dns" },
   { re: /^Ended what the run had left running$/, labelKey: "endedLeftovers", icon: "power_settings_new" },
   { re: /^The owner ended what the run had left running$/, labelKey: "ownerEndedLeftovers", icon: "power_settings_new" },
+  { re: /^The deliverable is there$/, labelKey: "deliverableMet", icon: "task_alt" },
+  { re: /^Not finished yet: (.+)$/, labelKey: "deliverableMissing", icon: "pending", params: (m) => ({ reason: m[1] }) },
+  { re: /^Attempt (\d+) of (\d+) at the deliverable$/, labelKey: "anotherAttempt", icon: "replay", params: (m) => ({ attempt: Number(m[1]), attempts: Number(m[2]) }) },
   { re: /^… (\d+) earlier steps are not kept$/, labelKey: "droppedSteps", icon: "more_horiz", params: (m) => ({ count: Number(m[1]) }) },
 ];
 

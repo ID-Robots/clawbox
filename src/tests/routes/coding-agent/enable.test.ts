@@ -51,7 +51,7 @@ vi.mock("@/lib/hermes-mcp-reload", async (importOriginal) => ({
   reloadMcpServers: reloadMcp,
 }));
 
-import { get as configGet } from "@/lib/config-store";
+import { get as configGet, set as configSet } from "@/lib/config-store";
 
 const SESSION_SECRET = "a".repeat(64);
 const STATUS = { enabled: true, ready: false, readiness: { ready: false, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: false, problems: ["ClawBox AI is not connected."] }, running: 0, harnessCommand: "claude-ds", maxTaskChars: 4000 };
@@ -205,6 +205,49 @@ describe("the body", () => {
       expect(res.status, String(bad)).toBe(400);
       expect((await res.json()).error as string).toContain("whole number");
     }
+  });
+
+  /**
+   * How many goes a run with a deliverable gets at it.
+   *
+   * `setCompletionAttempts` is deliberately left REAL in this file's mocks, like
+   * `setReviewRounds`: the range refusal is the thing under test, and a mock
+   * would pin the route's plumbing rather than what a caller is actually told.
+   */
+  it("takes the attempt count, and names it in the refusal too", async () => {
+    const res = await POST(request({ cookie: ownerCookie(), body: { completionAttempts: 5 } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_completion_attempts", 5);
+
+    const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
+    expect((await empty.json()).error as string).toContain("{ completionAttempts: number }");
+  });
+
+  it("takes 1 — check it and spend nothing more is a real setting", async () => {
+    const res = await POST(request({ cookie: ownerCookie(), body: { completionAttempts: 1 } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_completion_attempts", 1);
+  });
+
+  it("REFUSES an attempt count outside the range, and a fractional one", async () => {
+    // Refused rather than clamped, the rule the rounds above follow: a caller
+    // that asked for 20 meant something this box does not offer.
+    for (const bad of [0, -1, 7, 100]) {
+      const res = await POST(request({ cookie: ownerCookie(), body: { completionAttempts: bad } }));
+      expect(res.status, String(bad)).toBe(400);
+      expect((await res.json()).error as string).toContain("between 1 and 6");
+    }
+    for (const bad of [1.5, 2.0001]) {
+      const res = await POST(request({ cookie: ownerCookie(), body: { completionAttempts: bad } }));
+      expect(res.status, String(bad)).toBe(400);
+      expect((await res.json()).error as string).toContain("whole number");
+    }
+  });
+
+  it("refuses the AGENT the attempt count, like every other setting here", async () => {
+    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { completionAttempts: 6 } }));
+    expect(res.status).toBe(403);
+    expect(configSet).not.toHaveBeenCalled();
   });
 
   it("refuses the agent the merge switch — a consent it must not give itself", async () => {

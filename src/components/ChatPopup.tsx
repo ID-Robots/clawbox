@@ -1002,6 +1002,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         stopped: t("codingAgent.chatStopped"),
         paused: t("codingAgent.chatPaused"),
         draft: t("codingAgent.chatDraft"),
+        // A run that worked and did not leave the deliverable behind: its own
+        // word, because "did not finish" would read as a fault and the one
+        // thing that helps here is opening it and resuming.
+        gave_up: t("codingAgent.chatGaveUp"),
         timeLeft: t("codingAgent.timeLeft"),
         // A template, not a sentence: the card fills in the count.
         agents: t("codingAgent.chatAgents"),

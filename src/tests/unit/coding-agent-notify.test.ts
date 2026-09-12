@@ -92,6 +92,10 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     pgid: null,
     leftover: false,
     commitError: null,
+    deliverable: null,
+    deliverableCheck: null,
+    attempts: [],
+    completionAttempts: 3,
     ...over,
   };
 }

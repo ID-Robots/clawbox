@@ -81,12 +81,15 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   leftoverRunning: "codingAgent.stepLeftoverRunning",
   endedLeftovers: "codingAgent.stepEndedLeftovers",
   ownerEndedLeftovers: "codingAgent.stepOwnerEndedLeftovers",
+  deliverableMet: "codingAgent.stepDeliverableMet",
+  deliverableMissing: "codingAgent.stepDeliverableMissing",
+  anotherAttempt: "codingAgent.stepAnotherAttempt",
   droppedSteps: "codingAgent.stepDropped",
 };
 
 /**
  * "Finished: completed" — the status word is the runner's, and the run's own
- * chip already says it in the owner's language. Same six statuses as
+ * chip already says it in the owner's language. The same statuses as
  * RUN_STATUSES; anything else is shown as the runner wrote it.
  */
 const STATUS_KEY: Record<string, string> = {
@@ -96,6 +99,9 @@ const STATUS_KEY: Record<string, string> = {
   stopped: "codingAgent.statusStopped",
   paused: "codingAgent.statusPaused",
   draft: "codingAgent.statusDraft",
+  // The wire format's own snake_case; the catalogue key is camelCase, the way
+  // `reviewState.needsOwner` is — translations.test.ts forbids an underscore.
+  gave_up: "codingAgent.statusGaveUp",
 };
 
 /** The chat card's chip tones, as the app's classes. */

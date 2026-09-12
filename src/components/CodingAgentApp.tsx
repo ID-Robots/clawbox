@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
 import { isHeld, isLive, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
+import type { Deliverable, DeliverableVerdict, RunAttempt } from "@/lib/coding-deliverable";
 import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
@@ -153,6 +154,16 @@ interface Run {
   /** WHY a paused run is paused. Absent on a record written before it was
    *  kept, which reads the same as an ordinary pause: nothing to explain. */
   pauseReason?: CodingPauseReason | null;
+  /** What the run had to leave behind before the box would call it finished.
+   *  Absent on a record written before deliverables existed, and on a run
+   *  nobody set one for — which is most of them. */
+  deliverable?: Deliverable | null;
+  /** The last verdict on it: there, or what is missing. */
+  deliverableCheck?: DeliverableVerdict | null;
+  /** Every go at it, the run's own first turn included. */
+  attempts?: RunAttempt[];
+  /** The ceiling that applied to this run. */
+  completionAttempts?: number;
 }
 
 /**
@@ -373,6 +384,9 @@ type RunOutcome = "working" | "completed" | "unfinished" | "waiting";
 function runOutcome(status: CodingRunStatus): RunOutcome {
   if (isLive(status)) return "working";
   if (status === "completed") return "completed";
+  // A run that gave up lands in "unfinished" through isSettled, which is right:
+  // it did not deliver. The deliverable card beside it is what says so in
+  // words, and the chip's own amber keeps it apart from a failure.
   return isSettled(status) ? "unfinished" : "waiting";
 }
 
@@ -396,6 +410,11 @@ const RUN_BUTTON = "text-xs px-2.5 py-1 rounded-lg border disabled:opacity-50";
 const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | "start"; label: string; failed: string; className: string }>> = {
   running: { route: "pause", label: "codingAgent.pause", failed: "codingAgent.pauseFailed", className: "border-white/10 text-[var(--text-primary)] hover:bg-white/5" },
   paused: { route: "resume", label: "codingAgent.resume", failed: "codingAgent.resumeFailed", className: "border-sky-300/40 text-sky-300 hover:bg-sky-300/10" },
+  // A run that gave up offers the same gesture, and for the same reason: its
+  // session is intact and Resume carries on in it. Without this the one thing
+  // that helps was offered nowhere, and the only way on was a fresh run that
+  // would start the task over.
+  gave_up: { route: "resume", label: "codingAgent.resume", failed: "codingAgent.resumeFailed", className: "border-amber-300/40 text-amber-300 hover:bg-amber-300/10" },
   draft: { route: "start", label: "codingAgent.startDraft", failed: "codingAgent.startFailed", className: "border-violet-300/40 text-violet-300 hover:bg-violet-300/10" },
 };
 
@@ -989,7 +1008,14 @@ export default function CodingAgentApp() {
     ]
     : [];
 
-  const statusLabel = (s: Run["status"]) => t(`codingAgent.status${s.charAt(0).toUpperCase()}${s.slice(1)}`);
+  // The key is built from the status EXCEPT where the wire format's snake_case
+  // would produce one the catalogue cannot hold (translations.test.ts forbids an
+  // underscore in a key), which is the same exception `reviewState.needsOwner`
+  // makes. A table of one, rather than a camelCase-ifying helper nothing else
+  // needs.
+  const STATUS_LABEL_KEY: Partial<Record<Run["status"], string>> = { gave_up: "codingAgent.statusGaveUp" };
+  const statusLabel = (s: Run["status"]) =>
+    t(STATUS_LABEL_KEY[s] ?? `codingAgent.status${s.charAt(0).toUpperCase()}${s.slice(1)}`);
 
   /** Open a run's page — from its row, a review chip, or the desktop. */
   const showRun = (id: string) => {
@@ -1113,6 +1139,48 @@ export default function CodingAgentApp() {
     );
   };
 
+  /**
+   * What the run had to DELIVER, and whether it got there.
+   *
+   * Drawn for every run that was held to a bar, settled or live — the bar is a
+   * fact about the run from the moment it starts, and on a run that gave up it
+   * is the only thing on the page that says what is actually wrong. The Resume
+   * button is not here: it is the run's own control (RUN_ACTION), in the row of
+   * controls where every other action on a run lives.
+   */
+  const deliverableCard = (run: Run) => {
+    const deliverable = run.deliverable;
+    if (!deliverable) return null;
+    const check = run.deliverableCheck;
+    const attempts = run.attempts?.length ?? 0;
+    const what = deliverable.kind === "pr"
+      ? t("codingAgent.deliverablePr")
+      : deliverable.kind === "paths"
+        ? t("codingAgent.deliverablePaths", { files: deliverable.paths.join(", ") })
+        : t("codingAgent.deliverableCommand", { command: deliverable.command });
+    return (
+      <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-deliverable" data-state={check ? (check.ok ? "met" : "missing") : "pending"}>
+        <p className={SECTION_LABEL}>{t("codingAgent.deliverableTitle")}</p>
+        <p className="mt-1.5 text-xs text-[var(--text-secondary)] break-words" data-testid="coding-agent-deliverable-what">{what}</p>
+        <p
+          className={`mt-1.5 text-[11px] break-words ${check && !check.ok ? "text-amber-300/90" : "text-[var(--text-secondary)]"}`}
+          data-testid="coding-agent-deliverable-verdict"
+        >
+          {!check
+            ? t("codingAgent.deliverablePending")
+            : check.ok
+              ? t("codingAgent.deliverableMet")
+              : t("codingAgent.deliverableMissing", { reason: check.missing ?? "" })}
+        </p>
+        {attempts > 0 && run.completionAttempts != null && (
+          <p className="mt-1 text-[10px] text-[var(--text-muted)]" data-testid="coding-agent-deliverable-attempts">
+            {t("codingAgent.deliverableAttempts", { n: attempts, max: run.completionAttempts })}
+          </p>
+        )}
+      </div>
+    );
+  };
+
   /** Why a pull request is waiting on the owner, in the record's own words —
    *  on the run's page, where there is room for a sentence. The chip says the
    *  owner is needed; without this nothing on the box said what for. */
@@ -1151,7 +1219,12 @@ export default function CodingAgentApp() {
             {t(action.label)}
           </button>
         )}
-        {action && (run.status === "draft" ? (
+        {/* Stop belongs to a run that can still TRANSITION: a live one it ends, a
+            paused one it closes the book on, a draft offers Discard instead. A
+            run that gave up is already settled — `stopRun` returns it unchanged
+            — so a Stop button there is a control that does nothing, next to the
+            Resume that is the actual way on. */}
+        {action && isHeld(run.status) && (run.status === "draft" ? (
           <button
             type="button"
             onClick={() => runAction(run.id, "draft", t("codingAgent.discardFailed"), { method: "DELETE" })}
@@ -2198,6 +2271,7 @@ export default function CodingAgentApp() {
               })()}
               {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} />}
 
+              {deliverableCard(run)}
               {reviewCard(run)}
 
               {/* The summary is the run's closing message, and that is

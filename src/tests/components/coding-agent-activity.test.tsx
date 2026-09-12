@@ -45,6 +45,7 @@ const LABELS = {
   stopped: en["codingAgent.chatStopped"],
   paused: en["codingAgent.chatPaused"],
   draft: en["codingAgent.chatDraft"],
+  gave_up: en["codingAgent.chatGaveUp"],
   timeLeft: en["codingAgent.timeLeft"],
   tokensWord: en["codingAgent.tokensWord"],
   liveWork: en["codingAgent.chatLiveWork"],

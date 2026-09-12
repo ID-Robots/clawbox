@@ -18,7 +18,7 @@
  * to one and not the other used to compile, and the mismatch was found at
  * the restart that dropped the record.
  */
-export const RUN_STATUSES = ["running", "completed", "failed", "stopped", "paused", "draft"] as const;
+export const RUN_STATUSES = ["running", "completed", "failed", "stopped", "paused", "draft", "gave_up"] as const;
 
 export type CodingRunStatus = (typeof RUN_STATUSES)[number];
 
@@ -151,6 +151,23 @@ export function pauseResetClock(resetsAt: string | null): string | null {
   return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
 }
 
+/**
+ * A run that WORKED, reported itself finished, and did not leave the
+ * deliverable behind — after every attempt this box gives it.
+ *
+ * Its own ending rather than `failed`, because the two need different things
+ * said and offer different next steps. `failed` means the harness could not
+ * finish: it hit a ceiling, the provider refused, the process died, and `error`
+ * carries a device fault the owner may have to fix. `gave_up` means the harness
+ * finished and what it produced is not what was asked for — the session is
+ * intact, the work so far is on disk, and the one thing that helps is Resume.
+ * Folded into `failed` it read as a broken box, and the Resume that would have
+ * fixed it was offered nowhere (see CodingRun.deliverable).
+ */
+export function isGaveUp(status: CodingRunStatus): boolean {
+  return status === "gave_up";
+}
+
 /** A process exists for this run right now. */
 export function isLive(status: CodingRunStatus): boolean {
   return status === "running";
@@ -168,4 +185,25 @@ export function isHeld(status: CodingRunStatus): boolean {
 /** Over, one way or another — what the history list and the review pass look at. */
 export function isSettled(status: CodingRunStatus): boolean {
   return !isHeld(status);
+}
+
+/**
+ * Holds a session the owner can still carry on in.
+ *
+ * NOT the same question as `isHeld`, and that is why it is its own predicate. A
+ * `gave_up` run is SETTLED — it belongs in the history list, it is drawn as an
+ * ending, the review pass and the gate are done with it — and at the same time
+ * `resumeRun` accepts it and its card offers Resume, because its Claude Code
+ * session is intact and its work is on disk. Folding it into `isHeld` would
+ * flip `isSettled` and with it every reader of "is this run over".
+ *
+ * What this answers is the RETENTION question: may the box delete this record,
+ * and its evidence folder, without being asked? For a run the owner is expected
+ * to resume, no — the trim that makes room for a new run would take the session
+ * with it, which is the bug `isHeld` was given its own comment about for paused
+ * runs and drafts. The owner's own Clear history reads it too, for the reason
+ * written there: a run that holds a resumable session is not "finished".
+ */
+export function holdsResumableSession(status: CodingRunStatus): boolean {
+  return isHeld(status) || isGaveUp(status);
 }
