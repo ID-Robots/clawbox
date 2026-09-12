@@ -5,6 +5,7 @@ import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
+import CodingAgentRulesCard from "./CodingAgentRulesCard";
 import HelpTip from "./HelpTip";
 import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
@@ -96,6 +97,12 @@ export interface AgentStatus {
    *  switches — a server that predates the field is a box already driving the
    *  screen, so the fallback below is `?? true`. */
   realBrowser?: boolean;
+  // The owner's standing permission rules are deliberately NOT here, though the
+  // status payload carries them: CodingAgentRulesCard reads and writes its own
+  // route. This panel serialises its setting writes through one chain so two
+  // answers cannot land out of order, and a list with its own add and remove
+  // does not belong in that chain — declaring the fields it never reads would
+  // only suggest it did.
 }
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
@@ -803,6 +810,12 @@ export default function CodingAgentSettingsPanel({
 
         {errorIn("settings")}
       </div>
+
+      {/* What the owner has allowed a run BEYOND the defaults. Its own card and
+          its own route: the list is mostly filled from the other end — "Allow
+          next time" on a refused action, on the run's own page — and this is
+          where it is read whole and taken back. */}
+      <CodingAgentRulesCard />
 
       {/* GitHub. gh keeps the token and lends it to git; ClawBox never
           handles it. Shown only when gh is on the box at all. */}

@@ -241,6 +241,11 @@ describe("POST /setup-api/coding-agent/reset", () => {
       // and a reset that left an explicit false behind would send the owner
       // through the wizard's browser step and then ignore what they chose.
       "coding_agent_real_browser",
+      // The owner's standing permission rules are consent too: each one is a
+      // folder every later run may open, so "start over" takes them all back
+      // rather than leaving a run started after the wizard with permissions
+      // granted before it.
+      "coding_agent_allow_rules",
       "coding_agent_setup_complete",
       "coding_agent_enabled",
     ]);

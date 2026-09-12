@@ -80,6 +80,10 @@ const BRAND_ONLY = new Set([
   // A filesystem path shown as a placeholder. Translating it would invent a
   // folder that does not exist on the box.
   "/home/clawbox/Projects",
+  // A Claude Code permission rule shown as an input placeholder. It is the
+  // literal text the owner would type — the tool name and the `//` path
+  // pattern are the CLI's own syntax — so a translated rule is not a rule.
+  "Read(//home/clawbox/Projects/notes/**)",
 ]);
 
 function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {

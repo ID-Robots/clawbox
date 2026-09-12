@@ -16,6 +16,7 @@ import { startHarnessTest } from "@/lib/coding-agent-harness-test";
 import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import CodingRunTimeline from "./CodingRunTimeline";
+import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
@@ -28,6 +29,7 @@ import CodingRunTeamMembers from "./CodingRunTeamMembers";
 import {
   OPEN_CODING_RUN_EVENT,
   dispatchOpenApp,
+  notifyCodingAgentChanged,
   notifyCodingRunStarted,
   onCodingAgentChanged,
   onStandaloneAppPage,
@@ -88,6 +90,10 @@ interface Run {
   permissionDenials: number;
   /** What was refused, in the owner's words. */
   deniedActions?: string[];
+  /** The same refusals, structured: the text, the rule that would allow it
+   *  and — when there is none — why. Absent on a record written before the
+   *  field existed, which is why `deniedActions` is still read. */
+  denials?: RunDenial[];
   progress: string[];
   /** When each progress line happened, one for one with `progress`; absent on a record from before the field. */
   progressAt?: number[];
@@ -2268,18 +2274,16 @@ export default function CodingAgentApp() {
                 <StatTile label={t("codingAgent.statModels")} value={run.modelsUsed?.length ? run.modelsUsed.join(" + ") : "—"} />
               </div>
 
-              {/* What was refused, spelled out. */}
-              {(run.deniedActions?.length ?? 0) > 0 && (
-                <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-3" data-testid="coding-agent-denied">
-                  <p className="text-[11px] font-medium text-amber-400">{t("codingAgent.deniedTitle")}</p>
-                  <ul className="mt-1 space-y-0.5">
-                    {run.deniedActions?.map((d, i) => (
-                      <li key={i} className="text-[11px] font-mono text-[var(--text-muted)] break-all">{d}</li>
-                    ))}
-                  </ul>
-                  <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">{t("codingAgent.deniedHelp")}</p>
-                </div>
-              )}
+              {/* What was refused, spelled out — and, where this box can
+                  answer it, an "Allow next time" beside it. */}
+              <CodingRunDenials
+                runId={run.id}
+                denials={run.denials}
+                deniedActions={run.deniedActions}
+                resumable={run.status === "paused"}
+                onAllowed={() => notifyCodingAgentChanged()}
+                onResume={() => void runAction(run.id, "resume", t("codingAgent.resumeFailed"))}
+              />
 
                 </aside>
               </div>

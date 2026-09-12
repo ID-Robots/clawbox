@@ -106,6 +106,13 @@ function stubFetch(
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     if (url.startsWith("/setup-api/coding-agent/status")) return json(payload());
+    // The panel embeds CodingAgentRulesCard, which reads its own route. Left
+    // unstubbed the card renders its "could not read the rules" alert, which
+    // is a real message from a real child — so the stub answers for the device
+    // here rather than the assertions being narrowed around it.
+    if (url.startsWith("/setup-api/coding-agent/permissions")) {
+      return json({ allowRules: [], maxAllowRules: 32 });
+    }
     if (url.startsWith("/setup-api/coding-agent/git")) {
       if (opts.gitThrows) throw new TypeError("Failed to fetch");
       if (opts.gitStatus && opts.gitStatus !== 200) return json({ error: "gh fell over" }, opts.gitStatus);
