@@ -3795,6 +3795,25 @@ async function realDirectory(abs: string): Promise<string> {
  * accepted under the rules in the header. Returns the real (symlink-resolved)
  * absolute path, which is also what is recorded on the run.
  */
+/**
+ * The project IDENTITY a secret and a Vercel link are both scoped by, for a
+ * caller that has a `{ projectId | directory }` the way the routes do.
+ *
+ * Exported rather than re-derived in the routes, because there must be exactly
+ * one answer to "which project is this": a route that worked it out its own way
+ * would attach a Vercel link to a scope the secret store does not resolve, and
+ * the token would then be found for the run and not for the box, or the other
+ * way round. Goes through `resolveWorkingDirectory` first, so it can never name
+ * a project a run could not reach.
+ *
+ * Null means "not a project" — a folder outside the owner's project folder —
+ * and a link cannot be attached to one.
+ */
+export async function resolveProjectScope(input: { projectId?: string | null; directory?: string | null }): Promise<string | null> {
+  const resolved = await resolveWorkingDirectory(input);
+  return projectScopeFor({ projectId: resolved.projectId, directory: resolved.directory });
+}
+
 export async function resolveWorkingDirectory(input: {
   projectId?: string | null;
   directory?: string | null;
