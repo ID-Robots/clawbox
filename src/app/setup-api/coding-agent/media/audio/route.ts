@@ -2,7 +2,8 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { speechTextFor, SPEECH_MAX_CHARS } from "@/lib/speech-text";
 import { speakReply, withSpeechQueue } from "@/lib/voice-speak";
-import { mediaError, releaseMediaTarget, resolveMediaTarget, writeMediaFile } from "@/lib/coding-agent-media";
+import { mediaError, meterFor, releaseMediaTarget, resolveMediaTarget, writeMediaFile } from "@/lib/coding-agent-media";
+import { noteAllowanceRefusal } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -92,7 +93,7 @@ export async function POST(request: Request) {
     // seconds late is still the clip it asked for. A queue that is already
     // several deep answers 429 `busy`, which the tool relays as "try later".
     const spoken = await withSpeechQueue(() => speakReply(text));
-    if (!spoken.ok) return relay(spoken);
+    if (!spoken.ok) return relay(spoken, target.runId);
 
     const audio = Buffer.from(await spoken.arrayBuffer());
     if (audio.byteLength < MIN_AUDIO_BYTES) {
@@ -135,9 +136,19 @@ export async function POST(request: Request) {
  * route's own headers, and so a body that is not JSON (which would mean the
  * chain changed shape) still becomes something the caller can read.
  */
-async function relay(refusal: Response): Promise<Response> {
+async function relay(refusal: Response, runId: string): Promise<Response> {
   const body = await refusal.json().catch(() => null) as Record<string, unknown> | null;
   if (body && typeof body.error === "string") {
+    // The chain's own vocabulary, not this route's: a box whose voice is a
+    // metered cloud engine answers `allowance`, and that refusal ends the run
+    // exactly the way a spent picture allowance does. Recorded against the
+    // run so the pause that follows can say which meter is out, rather than
+    // reaching the owner as a bare "Paused". Every other refusal here — no
+    // voice, busy, the memory guard — is about this moment and explains no
+    // pause, so it is relayed and nothing more.
+    if (body.code === "allowance") {
+      noteAllowanceRefusal(runId, meterFor("audio"), { resetsAt: null, message: body.error });
+    }
     return NextResponse.json(body, { status: refusal.status, headers: { "Cache-Control": "no-store" } });
   }
   return mediaError("The box could not speak that.", "write_failed", refusal.status || 502);

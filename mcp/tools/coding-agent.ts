@@ -27,7 +27,8 @@ import { zInt, zOptText, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
 // derives from, so this payload cannot fall behind the server's record.
-import type { CodingRunStatus } from "../../src/lib/coding-agent-status";
+import type { CodingPauseReason, CodingRunStatus } from "../../src/lib/coding-agent-status";
+import { PAUSE_METER_NOUN, pauseResetClock } from "../../src/lib/coding-agent-status";
 import { taskTitle } from "../../src/lib/task-title";
 
 const MAX_TASK_CHARS = 4_000;
@@ -143,6 +144,8 @@ interface RunPayload {
   resumable: boolean;
   /** Set when the DEVICE's harness failed, not the task. Absent on an older record. */
   failureKind?: "harness_not_ready" | null;
+  /** Why a paused run is paused. Absent on a record written before it was kept. */
+  pauseReason?: CodingPauseReason | null;
   progress: string[];
   /** The run's own TodoWrite plan; absent on a record from before it was kept. */
   todos?: { content?: unknown; status?: unknown; activeForm?: unknown }[];
@@ -227,6 +230,29 @@ function describeRun(run: RunPayload, tail: number): string {
     );
   } else if (run.status === "completed") {
     parts.push("Finished. Relay the summary to the user; if it was a code project, call code_project_build to install the result on the desktop.");
+  } else if (run.status === "paused") {
+    // A pause is not a failure and not a finish, and until the record said
+    // WHY, this branch did not exist at all: a run blocked because the box's
+    // daily picture allowance was spent read exactly like a run the owner
+    // paused on purpose, so the only advice available was the wrong one for
+    // one of them. Resuming a run that is out of allowance buys the same
+    // refusal, which is why the reset time is the operative fact here.
+    const reason = run.pauseReason;
+    if (reason && reason.kind === "allowance") {
+      const clock = pauseResetClock(reason.resetsAt);
+      parts.push(
+        `Paused because this box's ${PAUSE_METER_NOUN[reason.meter]} is used up`
+        + `${clock ? `, which comes back at ${clock} UTC` : ""}.`
+        + " Its work is kept and its session is intact. Tell the user what ran out and when it returns,"
+        + " and that Resume in the Coding Agent app carries on from where it stopped — resuming it before then"
+        + " only buys the same refusal. Do not start a fresh run for the same task.",
+      );
+    } else {
+      parts.push(
+        "Paused with its work and its session intact. The owner resumes it with Resume in the Coding Agent app;"
+        + " do not start a fresh run for the same task.",
+      );
+    }
   } else if (run.status === "failed" && run.failureKind === "harness_not_ready") {
     // The device, not the task. Said first so the two advice branches below
     // cannot claim this one: "start a fresh run" is the worst possible answer

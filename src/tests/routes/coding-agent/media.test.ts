@@ -26,12 +26,17 @@ const activeRunMedia = vi.hoisted(() => vi.fn());
 const noteRunMedia = vi.hoisted(() => vi.fn());
 const reserveRunMedia = vi.hoisted(() => vi.fn());
 const releaseRunMedia = vi.hoisted(() => vi.fn());
+// What a refusal these routes relay tells the REST of the box. A spent
+// allowance ends the RUN rather than the call, and the pause that follows is
+// only explicable to the owner because it was recorded here.
+const noteAllowanceRefusal = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   activeRunMedia,
   noteRunMedia,
   reserveRunMedia,
   releaseRunMedia,
+  noteAllowanceRefusal,
 }));
 
 const generateClawaiImageBytes = vi.hoisted(() => vi.fn());
@@ -40,7 +45,12 @@ class FakeImageError extends Error {
     super(message);
   }
 }
-vi.mock("@/lib/harness/clawai-images", () => ({
+// Spread rather than replaced: the generator and its error class are faked
+// because this file is about who may write where, but WHEN the picture
+// allowance comes back is the module's own claim, and a second copy of that
+// answer here could drift from the sentence customers actually read.
+vi.mock("@/lib/harness/clawai-images", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/harness/clawai-images")>()),
   generateClawaiImageBytes,
   ClawaiImageError: FakeImageError,
 }));
@@ -139,6 +149,7 @@ beforeEach(async () => {
   noteRunMedia.mockReset();
   reserveRunMedia.mockReset();
   releaseRunMedia.mockReset();
+  noteAllowanceRefusal.mockReset();
   generateClawaiImageBytes.mockReset().mockResolvedValue({ bytes: PNG, extension: "png" });
   speakReply.mockReset().mockResolvedValue(
     new Response(new Uint8Array(WAV), { headers: { "Content-Type": "audio/wav", "X-ClawBox-Voice-Engine": "local" } }),
@@ -199,7 +210,9 @@ describe("where it may write", () => {
     const json = await res.json();
     expect(json.path).toBe(path.join(fs.realpathSync(workingDir), "assets", "hero.png"));
     expect(fs.existsSync(json.path)).toBe(true);
-    expect(noteRunMedia).toHaveBeenCalledWith(RUN_ID, json.path);
+    // The METER travels with the file: one that has just delivered cannot
+    // still be the reason a later pause is blamed on a spent allowance.
+    expect(noteRunMedia).toHaveBeenCalledWith(RUN_ID, json.path, "images");
     // Nothing is left behind by the temp-and-rename write.
     expect(fs.readdirSync(path.join(workingDir, "assets"))).toEqual(["hero.png"]);
   });
@@ -261,11 +274,57 @@ describe("what the far side answers", () => {
     expect(fs.existsSync(path.join(workingDir, "hero.png"))).toBe(false);
   });
 
+  it("records a spent allowance against the run, so the pause that follows can say why", async () => {
+    // The refusal is the last anyone hears of it: the tool tells the model
+    // not to retry, the run is asked to pause, and by the time the owner
+    // looks there is a `paused` record and nothing else. This route is the
+    // only place that knows both WHICH run asked and WHAT it was told.
+    generateClawaiImageBytes.mockRejectedValue(new FakeImageError(429, "You have used up today's ClawBox AI pictures."));
+    await postImage(body({ path: "hero.png", prompt: "x" }, "image"));
+    expect(noteAllowanceRefusal).toHaveBeenCalledWith(RUN_ID, "images", {
+      // The day rolls at midnight UTC, which is what the module's own
+      // customer-facing sentence promises.
+      resetsAt: expect.stringMatching(/T00:00:00\.000Z$/),
+      message: "You have used up today's ClawBox AI pictures.",
+    });
+  });
+
   it("relays an unlinked box as 503 without writing anything", async () => {
     generateClawaiImageBytes.mockRejectedValue(new FakeImageError(503, "This ClawBox is not linked to ClawBox AI yet."));
     const res = await postImage(body({ path: "hero.png", prompt: "x" }, "image"));
     expect(res.status).toBe(503);
     expect((await res.json()).code).toBe("not_linked");
+    // Not an allowance: re-linking the box fixes it, and a pause blamed on a
+    // quota would send the owner to wait for a reset that is not the problem.
+    expect(noteAllowanceRefusal).not.toHaveBeenCalled();
+  });
+
+  it("leaves every other refusal unattributed, so an ordinary pause stays ordinary", async () => {
+    // A busy queue, a timeout and a bad request are all about this MOMENT.
+    // None of them ends the run, so none of them may explain a later pause.
+    for (const [status, message] of [[504, "took too long"], [400, "could not draw that"], [502, "upstream failed"]] as const) {
+      noteAllowanceRefusal.mockReset();
+      generateClawaiImageBytes.mockRejectedValue(new FakeImageError(status, message));
+      await postImage(body({ path: `hero-${status}.png`, prompt: "x" }, "image"));
+      expect(noteAllowanceRefusal, String(status)).not.toHaveBeenCalled();
+    }
+  });
+
+  it("records the box's voice running out the same way, under its own meter", async () => {
+    // Not reachable on an OpenClaw box, whose voice is local and free. A
+    // Hermes box speaks through a metered cloud engine, and its refusal is
+    // the same event for the run: it stops, and the owner is owed the reason.
+    speakReply.mockResolvedValue(
+      Response.json({ error: "The cloud voice's monthly characters are used up.", code: "allowance" }, { status: 429 }),
+    );
+    const res = await postAudio(body({ path: "intro.wav", text: "Hello" }, "audio"));
+    expect(res.status).toBe(429);
+    expect(noteAllowanceRefusal).toHaveBeenCalledWith(RUN_ID, "speech", {
+      // The engines say nothing about when; the card then says "resume once
+      // it is back" rather than inventing an hour.
+      resetsAt: null,
+      message: "The cloud voice's monthly characters are used up.",
+    });
   });
 
   it("relays the voice's own refusal, code and numbers intact", async () => {

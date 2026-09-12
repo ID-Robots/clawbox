@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
-import { isHeld, isLive, isSettled, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { isHeld, isLive, isSettled, pauseResetClock, type CodingPauseMeter, type CodingPauseReason, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { isPrPending, type PrState } from "@/lib/coding-pr-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
@@ -129,6 +129,9 @@ interface Run {
    *  the server an app serves itself on, most often. Never true of a run
    *  that was stopped or failed: those have their group ended for them. */
   leftover?: boolean;
+  /** WHY a paused run is paused. Absent on a record written before it was
+   *  kept, which reads the same as an ordinary pause: nothing to explain. */
+  pauseReason?: CodingPauseReason | null;
 }
 
 /**
@@ -373,6 +376,19 @@ const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | 
   running: { route: "pause", label: "codingAgent.pause", failed: "codingAgent.pauseFailed", className: "border-white/10 text-[var(--text-primary)] hover:bg-white/5" },
   paused: { route: "resume", label: "codingAgent.resume", failed: "codingAgent.resumeFailed", className: "border-sky-300/40 text-sky-300 hover:bg-sky-300/10" },
   draft: { route: "start", label: "codingAgent.startDraft", failed: "codingAgent.startFailed", className: "border-violet-300/40 text-violet-300 hover:bg-violet-300/10" },
+};
+
+/**
+ * The sentence for each spent meter, keyed by the meter the record names.
+ *
+ * A table rather than a key built by hand from the meter string: the
+ * catalogue parity test can only see keys that are written down, and a
+ * `codingAgent.pausedAllowance${meter}` assembled at runtime would be
+ * invisible to it — untranslated in nine languages, and nothing would say so.
+ */
+const PAUSE_METER_KEY: Record<CodingPauseMeter, string> = {
+  images: "codingAgent.pausedAllowanceImages",
+  speech: "codingAgent.pausedAllowanceSpeech",
 };
 
 export default function CodingAgentApp() {
@@ -1958,6 +1974,29 @@ export default function CodingAgentApp() {
                     >
                       {t("codingAgent.killLeftover")}
                     </button>
+                  </div>
+                )}
+                {/* WHY it is paused, when the answer is not "somebody asked".
+                    A run refused because one of this box's allowances is spent
+                    settles exactly like an owner's pause, and read the generic
+                    "Paused — resume to continue" the owner's only move was to
+                    press Resume and buy the same refusal. The Resume control
+                    stays exactly where it was, directly below: the allowance
+                    does come back, and this says when. */}
+                {run.status === "paused" && run.pauseReason?.kind === "allowance" && (
+                  <div className="mt-3 rounded-xl bg-amber-500/[0.05] border border-amber-500/30 px-4 py-2.5 flex items-start gap-2" data-testid="coding-agent-pause-reason">
+                    <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 16 }} aria-hidden="true">hourglass_top</span>
+                    <p className="text-[11px] text-[var(--text-secondary)] break-words">
+                      {t(PAUSE_METER_KEY[run.pauseReason.meter])}
+                      {" "}
+                      {(() => {
+                        const clock = pauseResetClock(run.pauseReason.resetsAt);
+                        // No reset time means the far side never said when —
+                        // so the card says "when it is back" rather than
+                        // inventing an hour the owner would plan around.
+                        return clock ? t("codingAgent.pausedAllowanceResets", { time: clock }) : t("codingAgent.pausedAllowanceResetsUnknown");
+                      })()}
+                    </p>
                   </div>
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-run-actions">

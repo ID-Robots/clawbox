@@ -394,6 +394,15 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.leftoverRunning": "Something this run started is still running.",
   "codingAgent.killLeftover": "End it",
   "codingAgent.killLeftoverFailed": "Could not end what the run left running.",
+
+  // WHY a run is paused, when it was not the owner who paused it. One
+  // sentence per meter this box can run out of, plus the reset time — because
+  // the only move the card offers, Resume, buys the same refusal until the
+  // allowance is actually back.
+  "codingAgent.pausedAllowanceImages": "Paused: the daily image allowance is used up.",
+  "codingAgent.pausedAllowanceSpeech": "Paused: the speech allowance is used up.",
+  "codingAgent.pausedAllowanceResets": "It resets at {time} UTC.",
+  "codingAgent.pausedAllowanceResetsUnknown": "Resume it once the allowance is back.",
   "codingAgent.prOpening": "Opening PR",
   "codingAgent.prWaiting": "Checks {done}/{total}",
   "codingAgent.prMerged": "Merged",

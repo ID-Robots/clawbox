@@ -76,6 +76,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     retries: 0,
     resumable: false,
     failureKind: null,
+    pauseReason: null,
     progress: [], progressAt: [],
     todos: [],
     exitCode: 0,
