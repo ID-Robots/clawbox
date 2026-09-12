@@ -23,7 +23,7 @@
 import { apiGet, apiPost } from "../lib/api";
 import { ApiError, redact, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
-import { zInt, zOptText, zText } from "../lib/schema";
+import { zEnumOf, zInt, zOptText, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
 // derives from, so this payload cannot fall behind the server's record.
@@ -33,6 +33,16 @@ import { PAUSE_METER_NOUN, pauseResetClock } from "../../src/lib/coding-agent-st
 // tool cannot describe a state the server never writes.
 import { foldReviewChecks, type ReviewLoop } from "../../src/lib/coding-review-state";
 import { taskTitle } from "../../src/lib/task-title";
+// Pure TypeScript, like the status union above: the providers and the models
+// each one offers, so a combination the device would refuse is refused HERE
+// rather than after a round trip — and cannot drift from what the route
+// accepts, because both call the same resolver.
+import {
+  ANTHROPIC_MODELS,
+  CODING_PROVIDERS,
+  DEFAULT_CODING_PROVIDER,
+  resolveRunProvider,
+} from "../../src/lib/coding-provider";
 
 const MAX_TASK_CHARS = 4_000;
 const MAX_WAIT_SECONDS = 120;
@@ -67,7 +77,10 @@ const RUN_RULES: ErrorRule[] = [
     status: 409,
     match: /"kind":\s*"not_ready"/,
     code: "CONFLICT",
-    message: "The coding harness on this ClawBox is not ready: Claude Code or ClawBox AI is missing.",
+    // Says both halves, because with two providers "Claude Code or ClawBox AI
+    // is missing" is wrong whenever the run was to be paid from the owner's
+    // own Anthropic account. The app named in `next` lists which it is.
+    message: "The coding harness on this ClawBox is not ready: Claude Code, or the account the run would be paid from, is not connected.",
     next: "Do not retry. Tell the user to open the Coding Agent app on the ClawBox, which lists what is missing.",
   },
   {
@@ -133,6 +146,10 @@ interface RunPayload {
   completedAt: number | null;
   sessionId: string | null;
   model: string | null;
+  /** Which account paid. Absent on a record written before the selector. */
+  provider?: string | null;
+  /** The model the run was STARTED with — not `model`, which is what answered. */
+  requestedModel?: string | null;
   summary: string | null;
   error: string | null;
   numTurns: number;
@@ -235,7 +252,11 @@ function describeRun(run: RunPayload, tail: number): string {
   parts.push(`Task: ${firstLine(run.task)}`);
   parts.push(`Folder: ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}`);
   const facts = [
-    run.model ? `model ${run.model}` : null,
+    // Which account paid is said whenever it is not the box's own plan: the
+    // owner asked for that run to go somewhere else and is entitled to see it
+    // in the report, and "model claude-opus-5" alone does not say whose bill.
+    run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${run.provider} account` : null,
+    run.model ? `model ${run.model}` : (run.requestedModel ? `model ${run.requestedModel}` : null),
     `${run.numTurns} turns`,
     run.thinkingTokens ? `${run.thinkingTokens} reasoning tokens` : null,
     `${run.commandsRun} commands`,
@@ -346,10 +367,19 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
       resume_run_id: zOptText(40, "A finished run's id, e.g. \"run-k3x9q2ab\", to continue that session with this task."),
+      provider: zEnumOf(
+        CODING_PROVIDERS,
+        `Which account pays for this run. Omit to use the owner's default. "clawbox-ai" is the box's own plan; "anthropic" is the owner's own Anthropic access, and only works when they have connected it (coding_agent_status says so).`,
+      ).optional(),
+      model: zEnumOf(
+        ANTHROPIC_MODELS,
+        `Which model, for provider "anthropic" only. Omit for the default. ClawBox AI chooses its own model from the box's plan, so naming one with that provider is refused.`,
+      ).optional(),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
+      provider?: string; model?: string;
     }) => {
       // No client-side "needs a place to work" guard: the route itself falls
       // back to the owner's stored default folder when neither a project nor
@@ -357,10 +387,31 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // when no default is stored it answers 400 with its own sentence, which
       // the catch below carries through. Duplicating the check here is how
       // the tool ended up refusing runs the device would happily place.
+      // The pair is checked here as well as at the route, by the same
+      // resolver: the enum above cannot express "a model belongs to one
+      // provider and not the other", and a model named for ClawBox AI would
+      // otherwise travel to the device only to come back as a 400 the model
+      // then has to be told how to read. The owner's stored default is not
+      // known to this process, so an unnamed provider is resolved against the
+      // shipped default purely to check the MODEL — what actually gets used is
+      // the owner's, decided on the device.
+      const pair = resolveRunProvider(provider, model, DEFAULT_CODING_PROVIDER);
+      if (!pair.ok) {
+        throw new ToolError(
+          "BAD_ARGUMENT",
+          pair.error,
+          "Fix the provider/model pair and call again, or omit both to use the owner's default.",
+        );
+      }
       const body: Record<string, unknown> = { task };
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
       if (resume_run_id) body.resumeRunId = resume_run_id;
+      // Only what the caller actually named travels: sending the resolved
+      // default would override the owner's stored choice with this process's
+      // idea of it, and silently move a run to another account.
+      if (provider) body.provider = provider;
+      if (model) body.model = model;
       let res: { started?: boolean; run?: RunPayload };
       try {
         res = await apiPost<{ started?: boolean; run?: RunPayload }>(

@@ -76,6 +76,32 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.harnessRetry": "Try again",
   "codingAgent.harnessRetrying": "Checking…",
   "codingAgent.harnessRetryFailed": "The ClawBox could not be asked to try the harness again.",
+  // WHICH ACCOUNT PAYS for a run: the box's own ClawBox AI plan, or the
+  // owner's Anthropic access. The two provider names are product names and
+  // stay as they are in every locale; everything around them is translated.
+  "codingAgent.providerLabel": "Runs on",
+  "codingAgent.provider.clawbox-ai": "ClawBox AI",
+  "codingAgent.provider.anthropic": "Anthropic",
+  "codingAgent.providerHintClawbox": "Runs are paid for by this ClawBox's own plan, and the plan chooses the model.",
+  "codingAgent.providerHintAnthropic": "Runs are paid for by your own Anthropic account, using Claude's models.",
+  "codingAgent.providerNotConnected": "Your Anthropic account is not connected yet, so runs cannot start. Add a key below, or sign in with `claude` in the Terminal app.",
+  "codingAgent.providerFailed": "Could not change which account runs are paid for by.",
+  "codingAgent.anthropicTitle": "Anthropic account",
+  "codingAgent.anthropicOff": "not connected",
+  "codingAgent.anthropicViaKey": "connected with an API key",
+  "codingAgent.anthropicViaLogin": "signed in with Claude Code",
+  "codingAgent.anthropicHint": "Your own Anthropic access, for runs set to Anthropic. Paste an API key, or sign in by running `claude` in the Terminal app. The key is kept on this ClawBox and is never shown again.",
+  "codingAgent.anthropicKeyLabel": "Anthropic API key",
+  "codingAgent.anthropicKeyPlaceholder": "sk-ant-…",
+  "codingAgent.anthropicSave": "Save",
+  "codingAgent.anthropicSaving": "Saving…",
+  "codingAgent.anthropicSaveFailed": "Could not save the Anthropic API key.",
+  "codingAgent.anthropicSavedUnchecked": "Saved. This ClawBox could not reach Anthropic to check the key, so it has not been tested yet.",
+  "codingAgent.anthropicRemove": "Remove key",
+  "codingAgent.anthropicRemoveConfirm": "Remove — tap again",
+  "codingAgent.anthropicRemoveFailed": "Could not remove the Anthropic API key.",
+  "codingAgent.anthropicLoginNote": "This comes from the Claude Code sign-in on this ClawBox, not from a key saved here — sign out with `claude` in the Terminal app to end it.",
+  "codingAgent.runProvider": "paid for by {provider}",
 
   // Real Claude Code settings: --effort, and whether the Task tool is in
   // --tools at all. "Ultracode" is the CLI's own name for its xhigh-plus-

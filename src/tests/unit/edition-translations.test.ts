@@ -76,6 +76,12 @@ const BRAND_ONLY = new Set([
   "Pro", "Max", "Free", "ClawBox AI", "Hermes CLI", "macOS", "Windows", "Linux",
   "Linux/macOS", "SKILL.md", "Disk", "Memory",
   "Claude Code", "claude-ds",
+  // The company whose account pays for an `anthropic` coding run. A company
+  // name, like every other entry here.
+  "Anthropic",
+  // The literal prefix of an Anthropic API key, shown as an input
+  // placeholder. Translating it would invent a key shape that does not exist.
+  "sk-ant-\u2026",
   // Claude Code's own name for its xhigh-plus-workflows mode (`--effort
   // ultracode`); the label matches what the terminal prints.
   "Ultracode",

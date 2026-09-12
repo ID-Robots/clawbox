@@ -578,6 +578,19 @@ A different thing from the coding family above. Instead of editing files
 itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
 Code running on the box's own ClawBox AI plan (`scripts/claude-ds`) — which
 works in the background inside one folder and reports back with a summary.
+
+`coding_agent_run` takes an optional `provider` (`clawbox-ai` | `anthropic`)
+and, for `anthropic` only, a `model`. Omitted, they mean the owner's stored
+default (Settings → Coding Agent), which this process does not know — so an
+omitted provider is NOT sent, and only a value the caller actually named
+travels. The pair is checked here before the request goes out, by the same
+resolver the route validates with (`src/lib/coding-provider.ts`): naming a
+model for `clawbox-ai` is refused, because the box's plan chooses its own and
+a run that silently answered on a different model is the failure the selector
+exists to prevent. `anthropic` works only where the owner has connected their
+own Anthropic access; `coding_agent_status` and the Coding Agent app say
+whether they have, and a run against an unconnected account is 409 /
+do-not-retry, never something to try again.
 The run lives in the web server (`src/lib/coding-agent.ts`,
 `/setup-api/coding-agent/*`), not in this process: OpenClaw reaps the MCP
 after ten idle minutes and a run routinely outlives that. Run ids therefore
@@ -587,8 +600,9 @@ running forever.
 
 **Registered only when `GET /setup-api/coding-agent/status` answers
 `enabled && ready` at startup** (`mcp/lib/context.ts`): the owner's switch in
-the Coding Agent desktop app is on AND Claude Code, the wrapper and a
-ClawBox AI token are all present. Same gate as `email_list`, for the same
+the Coding Agent desktop app is on AND Claude Code, the wrapper and the
+credential of the owner's DEFAULT provider (the ClawBox AI token, or their own
+Anthropic access) are all present. Same gate as `email_list`, for the same
 circuit-breaker reason — but not the same timing: this one is asked at startup
 and never again, so a switch flipped under a running server reaches the agent
 when that server is next spawned. The run route enforces the switch again — 409, which

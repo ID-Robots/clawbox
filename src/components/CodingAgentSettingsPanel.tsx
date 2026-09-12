@@ -6,6 +6,7 @@ import { notifyCodingAgentChanged } from "@/lib/ui-events";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentRulesCard from "./CodingAgentRulesCard";
+import CodingAgentAnthropicCard from "./CodingAgentAnthropicCard";
 import HelpTip from "./HelpTip";
 import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
@@ -37,6 +38,11 @@ export interface Readiness {
   wrapperInstalled: boolean;
   claudeInstalled: boolean;
   clawaiConnected: boolean;
+  /** Has the owner's own Anthropic access — a saved key, or a `claude` login
+   *  they made in the Terminal app? Optional: an older server does not answer
+   *  with it, and the picker below must not call a box unconnected on that
+   *  alone. */
+  anthropicConnected?: boolean;
   /** setpriv, which strips the web server's network capabilities off a run.
    *  Not given a row of its own: it is present on every ClawBox, and when it
    *  is not, `problems` says so in the owner's words. */
@@ -51,6 +57,9 @@ export interface Readiness {
 }
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max" | "ultracode";
+
+/** Which account pays for a run — src/lib/coding-provider.ts. */
+export type CodingProviderId = "clawbox-ai" | "anthropic";
 
 export interface GitHubState {
   installed: boolean;
@@ -92,6 +101,11 @@ export interface AgentStatus {
   defaultDirectory: string | null;
   effort: Effort;
   effortLevels: Effort[];
+  /** The owner's default account for a run nobody names one for. Optional:
+   *  a server that predates the selector answers with neither field, and the
+   *  picker is simply not drawn there. */
+  provider?: CodingProviderId;
+  providers?: CodingProviderId[];
   subagents: boolean;
   maxTurns: number;
   minMaxTurns: number;
@@ -630,6 +644,49 @@ export default function CodingAgentSettingsPanel({
           {errorIn("dir")}
         </div>
 
+        {/* WHICH ACCOUNT PAYS. Drawn only by a server that answers with the
+            list, so an older box shows nothing rather than a picker with one
+            option in it. Switching to a provider that is not connected is
+            allowed on purpose — the owner may pick it and then paste the key
+            below — so this says what is missing instead of refusing, and the
+            run route is what actually holds the line. */}
+        {(status?.providers?.length ?? 0) > 1 && (
+          <div className="mt-4">
+            <label className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.providerLabel")}
+            </label>
+            <div className={`${SEGMENTED_TRACK} mt-1.5`} data-testid="coding-agent-provider">
+              {(status?.providers ?? []).map((id) => {
+                const active = status?.provider === id;
+                return (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => void saveSetting({ provider: id }, "provider", t("codingAgent.providerFailed"))}
+                    disabled={saving}
+                    aria-pressed={active}
+                    data-testid={`coding-agent-provider-${id}`}
+                    className={active ? SEGMENT_ON : SEGMENT_OFF}
+                  >
+                    {t(`codingAgent.provider.${id}`)}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+              {t(status?.provider === "anthropic" ? "codingAgent.providerHintAnthropic" : "codingAgent.providerHintClawbox")}
+            </p>
+            {/* An EXPLICIT false only: a server that predates the field sends
+                nothing, and a box whose Anthropic access is perfectly fine
+                must not be told it is missing by a `!undefined`. */}
+            {status?.provider === "anthropic" && status?.readiness?.anthropicConnected === false && (
+              <p className="mt-1.5 text-[11px] text-amber-400" data-testid="coding-agent-provider-unconnected">
+                {t("codingAgent.providerNotConnected")}
+              </p>
+            )}
+          </div>
+        )}
+
         {/* How hard a run thinks — Claude Code's own --effort. */}
         <div className="mt-4">
           <label className="text-xs font-medium text-[var(--text-secondary)]">
@@ -900,6 +957,15 @@ export default function CodingAgentSettingsPanel({
           next time" on a refused action, on the run's own page — and this is
           where it is read whole and taken back. */}
       <CodingAgentRulesCard />
+
+      {/* The owner's own Anthropic account — the credential half of the
+          picker above. Drawn on any server that knows the selector at all,
+          whichever provider is currently chosen: connecting it is what a box
+          has to do BEFORE switching, so hiding it behind the switch would
+          leave the owner nothing to press. */}
+      {(status?.providers?.length ?? 0) > 1 && (
+        <CodingAgentAnthropicCard onChanged={() => void loadStatus()} />
+      )}
 
       {/* GitHub. gh keeps the token and lends it to git; ClawBox never
           handles it. Shown only when gh is on the box at all. */}
