@@ -302,6 +302,22 @@ describe("dedupe", () => {
     expect(gh.calls).toHaveLength(1);
   });
 
+  it("files a record that carries no issueNumber at all, rather than commenting on nothing", async () => {
+    // The store normalises a missing field to null; this pins the consequence
+    // the normalisation exists for — `undefined !== null` sent the reporter to
+    // `gh issue comment undefined`.
+    const inc = await anIncident();
+    const path = `${process.env.CLAWBOX_ROOT}/data/incidents.json`;
+    const raw = JSON.parse(fs.readFileSync(path, "utf-8")) as { incidents: Record<string, unknown>[] };
+    delete raw.incidents[0].issueNumber;
+    fs.writeFileSync(path, JSON.stringify(raw), { mode: 0o600 });
+
+    const gh = fakeGh([NO_MATCH, ok("https://github.com/ID-Robots/clawbox/issues/5")]);
+    const out = await report.reportIncident(inc.id, { gh: gh.run, githubConnected: connected, mode: async () => "auto" });
+    expect(out).toMatchObject({ ok: true, action: "created", issueNumber: 5 });
+    expect(gh.calls.map((c) => c[1])).toEqual(["list", "create"]);
+  });
+
   it("does not search again for an incident it already knows the number of", async () => {
     const inc = await anIncident();
     store.markReported(inc.id, 33, { charge: false });
@@ -373,6 +389,11 @@ describe("the allowance holds across DIFFERENT faults reported at once", () => {
     };
     const outcomes = incidents.map((inc) =>
       report.reportIncident(inc.id, { gh: slow, githubConnected: connected, mode: async () => "auto", now: () => day }));
+    // Let every report get past the mode, the GitHub probe and the dedupe
+    // search FIRST. Released straight away, `held` resolves before any create
+    // parks, and the test would pass on the order they started in rather than
+    // on the reservation — which is the whole property under test.
+    for (let i = 0; i < 20; i++) await Promise.resolve();
     release();
     const settled = await Promise.all(outcomes);
     expect(settled.filter((o) => o.ok)).toHaveLength(report.MAX_ISSUES_PER_DAY);

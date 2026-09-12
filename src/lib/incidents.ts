@@ -165,6 +165,11 @@ export function utcDay(now = Date.now()): string {
  * route throw a TypeError instead of filing. The store is what guarantees the
  * record's shape to everything downstream, so this is where it is guaranteed.
  */
+/** Absent, explicitly null, or of the named type. */
+function isOptional(value: unknown, type: "string" | "number"): boolean {
+  return value === undefined || value === null || typeof value === type;
+}
+
 function isStringRecord(value: unknown): value is Record<string, string> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   return Object.entries(value).every(([k, v]) => typeof k === "string" && typeof v === "string");
@@ -178,8 +183,14 @@ function isIncident(value: unknown): value is Incident {
     && typeof v.fingerprint === "string"
     && isIncidentSource(v.source)
     && typeof v.message === "string"
-    && (v.stack === null || v.stack === undefined || typeof v.stack === "string")
+    && isOptional(v.stack, "string")
     && (v.context === undefined || isStringRecord(v.context))
+    // The three fields that record what became of this incident. A wrong TYPE
+    // is refused here; a MISSING one is filled in by `readFile` — see below for
+    // why the difference matters more than it looks.
+    && isOptional(v.issueNumber, "number")
+    && isOptional(v.reportedAt, "number")
+    && isOptional(v.lastCommentDay, "string")
     && typeof v.firstSeen === "number"
     && typeof v.lastSeen === "number"
     && typeof v.count === "number"
@@ -192,11 +203,23 @@ function readFile(): IncidentFile {
     const parsed: unknown = JSON.parse(fs.readFileSync(incidentsPath(), "utf-8"));
     if (typeof parsed !== "object" || parsed === null) return { ...EMPTY, incidents: [] };
     const v = parsed as Partial<IncidentFile>;
-    // `context` is optional in the guard (a record written before the field
-    // existed is still a valid incident) and REQUIRED by every reader, so it is
-    // filled in here rather than guarded against at each use.
+    // EVERY optional field is filled in, not only the two that were obviously
+    // optional. The guard lets a record omit them (one written before the field
+    // existed is still a valid incident) and every reader is typed as though it
+    // cannot — and `undefined !== null` is TRUE, so a record with no
+    // `issueNumber` read as "already filed" and sent the reporter down the
+    // comment path with `gh issue comment undefined`. This map is what makes
+    // the docblock's promise — that the store guarantees the record's shape —
+    // true rather than aspirational.
     const incidents = (Array.isArray(v.incidents) ? v.incidents.filter(isIncident) : [])
-      .map((i) => ({ ...i, stack: i.stack ?? null, context: i.context ?? {} }));
+      .map((i) => ({
+        ...i,
+        stack: i.stack ?? null,
+        context: i.context ?? {},
+        issueNumber: i.issueNumber ?? null,
+        reportedAt: i.reportedAt ?? null,
+        lastCommentDay: i.lastCommentDay ?? null,
+      }));
     const filed = v.filed && typeof v.filed.day === "string" && typeof v.filed.count === "number"
       ? { day: v.filed.day, count: v.filed.count }
       : { day: "", count: 0 };

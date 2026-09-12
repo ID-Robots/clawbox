@@ -262,6 +262,34 @@ describe("a record read back off disk", () => {
     expect(store.listIncidents()).toEqual([]);
   });
 
+  /**
+   * The one that bites rather than merely offends the type: every reader is
+   * typed `number | null` and tests `!== null`, and `undefined !== null` is
+   * TRUE — so a record with no `issueNumber` read as "already filed" and sent
+   * the reporter down the comment path with `gh issue comment undefined`.
+   */
+  it("reads a missing issueNumber, reportedAt or lastCommentDay as null, never undefined", () => {
+    const partial: Record<string, unknown> = { ...BASE };
+    delete partial.issueNumber;
+    delete partial.lastCommentDay;
+    writeRaw(partial);
+    const [read] = store.listIncidents();
+    expect(read.issueNumber).toBeNull();
+    expect(read.reportedAt).toBeNull();
+    expect(read.lastCommentDay).toBeNull();
+    // …and it is therefore still waiting, not quietly counted as filed.
+    expect(store.pendingIncidents().map((i) => i.id)).toEqual(["inc-x"]);
+  });
+
+  it.each([
+    ["issueNumber", "912"],
+    ["reportedAt", "yesterday"],
+    ["lastCommentDay", 20260912],
+  ])("is refused when %s is the wrong type", (field, value) => {
+    writeRaw({ ...BASE, [field]: value });
+    expect(store.listIncidents()).toEqual([]);
+  });
+
   it("is kept, with an empty context, when the field predates it", () => {
     const noContext: Record<string, unknown> = { ...BASE };
     delete noContext.context;
