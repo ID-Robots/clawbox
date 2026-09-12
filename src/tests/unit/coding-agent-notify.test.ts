@@ -95,6 +95,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     streamOffset: 0,
     leftover: false,
     commitError: null,
+    worktree: null,
     deliverable: null,
     deliverableCheck: null,
     attempts: [],

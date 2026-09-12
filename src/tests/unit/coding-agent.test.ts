@@ -769,10 +769,15 @@ describe("a run", () => {
       const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
       await vi.waitFor(() => { expect(lib.getRun(done.id)?.commit).toBeTruthy(); }, { timeout: 10_000 });
       const run = lib.getRun(done.id)!;
-      expect(run.commit).toBe(g("rev-parse", "--short", "HEAD"));
+      // The run works in a copy of the project now, so its own commit is the
+      // tip of its own branch — and the settle merges that branch home, which
+      // is how the project's history comes to hold it.
+      expect(run.worktree?.branch).toBe(`clawbox/${run.id}`);
+      expect(run.commit).toBe(g("rev-parse", "--short", run.worktree!.branch));
       expect(run.commitError).toBeNull();
       expect(run.progress.join("\n")).toMatch(/Committed by the run itself as /);
-      expect(g("log", "--oneline")).toMatch(/the run commits/);
+      await vi.waitFor(() => { expect(g("log", "--oneline")).toMatch(/the run commits/); }, { timeout: 10_000 });
+      expect(lib.getRun(done.id)?.worktree?.removed).toBe(true);
     });
 
     it("does nothing while the owner's review switch is off", async () => {

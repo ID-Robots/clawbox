@@ -6,7 +6,8 @@
  *
  * The obvious design is to tell the agent to do it. That fails three ways on
  * this box, all measured: a run polling CI spends one of its 150 turns per
- * poll; it holds the single run slot (MAX_CONCURRENT_RUNS) for as long as CI
+ * poll; it holds one of the box's few run slots (coding_agent_max_parallel_runs)
+ * for as long as CI
  * takes; and the idle killer ends a run that sits quiet in a long `gh` wait.
  * The aftermath of a run already happens out here — finishRun() settles the
  * record and THEN commits the work and may start the review pass — so a PR

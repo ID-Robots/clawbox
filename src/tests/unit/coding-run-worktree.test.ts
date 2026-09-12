@@ -147,10 +147,20 @@ describe("a run's worktree", () => {
     git(made.path, "commit", "-q", "-m", "half the work");
     await removeRunWorktree(dir, made.path);
     expect(fs.existsSync(made.path)).toBe(false);
-    expect(await restoreRunWorktree(dir, made.path, made.branch)).toBe(true);
+    expect(await restoreRunWorktree(dir, made.path, made.branch, made.base)).toBe(true);
     expect(fs.existsSync(path.join(made.path, "half.js"))).toBe(true);
     // Already there is still "usable".
-    expect(await restoreRunWorktree(dir, made.path, made.branch)).toBe(true);
+    expect(await restoreRunWorktree(dir, made.path, made.branch, made.base)).toBe(true);
+  });
+
+  it("forks the branch again when a settle removed an empty one, so a resume is still possible", async () => {
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-emptyone", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    await removeRunWorktree(dir, made.path);
+    await deleteRunBranch(dir, made.branch);
+    expect(await branchExists(dir, made.branch)).toBe(false);
+    expect(await restoreRunWorktree(dir, made.path, made.branch, made.base)).toBe(true);
+    expect(git(made.path, "rev-parse", "--abbrev-ref", "HEAD")).toBe(made.branch);
   });
 
   it("lists only the box's own worktrees, never the owner's", async () => {

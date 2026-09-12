@@ -155,6 +155,15 @@ import {
   type PrState,
 } from "@/lib/coding-pr";
 import {
+  addRunWorktree,
+  commitsAhead,
+  deleteRunBranch,
+  mergeRunBranch,
+  removeRunWorktree,
+  restoreRunWorktree,
+  sweepRunWorktrees,
+} from "@/lib/coding-run-worktree";
+import {
   buildReviewFeedback,
   clampReviewRounds,
   decideReviewRound,
@@ -387,6 +396,37 @@ export const CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY = "coding_agent_review_rounds
 export const CODING_AGENT_AUTO_MERGE_CONFIG_KEY = "coding_agent_auto_merge";
 
 /**
+ * How many coding runs may be going at once.
+ *
+ * The box allowed exactly ONE until runs got worktrees, and the two were the
+ * same fact: every run worked in the project folder itself, so a second one
+ * would have edited the first's half-written files and each settle's
+ * `git add -A` would have committed the other's. With a worktree per run
+ * (src/lib/coding-run-worktree.ts) that is no longer true, and the limit
+ * becomes what it should always have been — a question about the BOX's
+ * memory rather than about the filesystem.
+ *
+ * Two by default, and at most four: measured on this Orin (2026-09-05) a
+ * `claude -p` run with its MCP server is ~270 MB resident two minutes in and
+ * grows with its context, and the box is also carrying the web server, the
+ * gateway and the desktop's Chromium. A team keeps its OWN rule
+ * (MAX_TEAM_WORKERS and the memory guard): its workers share a goal and a
+ * board, and the orchestrator waits rather than failing.
+ */
+export const CODING_AGENT_MAX_PARALLEL_CONFIG_KEY = "coding_agent_max_parallel_runs";
+export const DEFAULT_MAX_PARALLEL_RUNS = 2;
+export const MIN_MAX_PARALLEL_RUNS = 1;
+export const MAX_MAX_PARALLEL_RUNS = 4;
+
+/** How many runs at once this box allows, from the raw config value. */
+export function maxParallelRunsFrom(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_PARALLEL_RUNS;
+  const rounded = Math.round(raw);
+  if (rounded < MIN_MAX_PARALLEL_RUNS || rounded > MAX_MAX_PARALLEL_RUNS) return DEFAULT_MAX_PARALLEL_RUNS;
+  return rounded;
+}
+
+/**
  * How many ATTEMPTS at its deliverable a run gets, the original included.
  *
  * Only ever spent by a run that HAS a deliverable (src/lib/coding-deliverable.ts):
@@ -515,9 +555,6 @@ export const MAX_AUDIO_PER_RUN = 40;
 export const MIN_TOKEN_LIMIT = 10_000;
 export const MAX_TASK_CHARS = 4_000;
 export const MAX_DIRECTORY_CHARS = 512;
-/** Runs at once. A Jetson has one coding agent's worth of memory to spare,
- *  and two runs in one folder would edit each other's files. */
-export const MAX_CONCURRENT_RUNS = 1;
 
 /**
  * A coding TEAM may have several of its runs going at once — its workers in
@@ -1283,6 +1320,20 @@ export interface CodingRun {
   /** Why the run's work could not be committed at settle — null when it was, or when there was nothing to commit. A team acts on it: a worker whose commit failed has no branch to merge. */
   commitError: string | null;
   /**
+   * The run's own copy of the project — a git worktree and a branch of its own
+   * (src/lib/coding-run-worktree.ts) — or null when it works in the project
+   * folder itself.
+   *
+   * `directory` is the WORKTREE while this is set; `worktree.project` is the
+   * folder the worktree belongs to, and `projectDirectoryOf()` is the one
+   * reader of that distinction, so nothing has to know which of the two a run
+   * has. Null is the old behaviour exactly: a folder that is not a repository,
+   * one that is not its repository's root, a code project inside ClawBox's own
+   * checkout, a team's worker (it has a worktree the TEAM made), and every
+   * record written before this field existed.
+   */
+  worktree: RunWorktree | null;
+  /**
    * What this run has to LEAVE BEHIND before the box calls it finished.
    *
    * `status: "completed"` used to mean one thing only: Claude Code emitted a
@@ -1322,6 +1373,28 @@ export interface CodingRun {
    * not change the promise that run was started under.
    */
   completionAttempts: number;
+}
+
+/**
+ * A run's own copy of the project: where it is, what branch it is on, and
+ * where it came from.
+ *
+ * `project` is the folder the worktree belongs to — the thing every surface
+ * means by "the project this run is in" — and it is recorded rather than
+ * derived, because the worktree path is only two segments away from it today
+ * and a record must not depend on that staying true.
+ */
+export interface RunWorktree {
+  /** Absolute path of the working tree — the same string as `CodingRun.directory`. */
+  path: string;
+  /** The branch checked out there. */
+  branch: string;
+  /** The branch it was forked from, and the one a settle merges it back into. */
+  base: string;
+  /** The project folder the worktree belongs to. */
+  project: string;
+  /** True once the settle (or the owner) has taken the files away; the branch may still be there. */
+  removed: boolean;
 }
 
 /** Which media a run may ask this box for — read once, at its start. */
@@ -1479,6 +1552,11 @@ export interface CodingAgentStatus {
   maxReviewRounds: number;
   /** May the box merge a pull request its review loop cleared? */
   autoMerge: boolean;
+  /** How many coding runs may be going at once — see the config key. */
+  maxParallelRuns: number;
+  /** The range the app offers, so it does not have to guess the bounds. */
+  minMaxParallelRuns: number;
+  maxMaxParallelRuns: number;
   /** Attempts a run with a deliverable gets at it, its own first turn included. */
   completionAttempts: number;
   /** The range the app offers, so it does not have to guess the bounds. */
@@ -1804,6 +1882,24 @@ export async function setReviewRounds(rounds: unknown): Promise<number> {
   const saved = clampReviewRounds(rounds);
   await configSet(CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY, saved);
   return saved;
+}
+
+/** How many runs at once this box allows. Absent means the default. */
+export async function getMaxParallelRuns(): Promise<number> {
+  return maxParallelRunsFrom(await configGet(CODING_AGENT_MAX_PARALLEL_CONFIG_KEY));
+}
+
+export async function setMaxParallelRuns(runs: unknown): Promise<number> {
+  if (typeof runs !== "number" || !Number.isInteger(runs)) {
+    throw new CodingAgentError("invalid", "The number of runs at once must be a whole number.");
+  }
+  if (runs < MIN_MAX_PARALLEL_RUNS || runs > MAX_MAX_PARALLEL_RUNS) {
+    // Refused rather than clamped, like the review rounds and the attempts: a
+    // caller that asked for eight meant something this box does not offer.
+    throw new CodingAgentError("invalid", `The number of runs at once must be between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`);
+  }
+  await configSet(CODING_AGENT_MAX_PARALLEL_CONFIG_KEY, runs);
+  return runs;
 }
 
 /** The owner's merge switch. Absent means OFF — see the config key. */
@@ -2265,9 +2361,10 @@ export async function listProjects(): Promise<{ directory: string | null; projec
     for (const run of loadRuns()) {
       if (workedIn.size >= MAX_PROJECT_FOLDERS) break;
       if (typeof run.directory !== "string") continue;
+      const worked = projectDirectoryOf(run);
       for (const base of new Set([folders.base, realBase])) {
-        if (!run.directory.startsWith(base + path.sep)) continue;
-        const first = path.relative(base, run.directory).split(path.sep)[0];
+        if (!worked.startsWith(base + path.sep)) continue;
+        const first = path.relative(base, worked).split(path.sep)[0];
         if (first && !first.startsWith(".")) workedIn.add(first);
       }
     }
@@ -2326,9 +2423,12 @@ async function describeProject({ base, folder, kind, fromRun }: ProjectCandidate
   ]);
   // loadRuns() is newest first, so the first match is the latest run. A run
   // given a project id recorded the id as well as the folder.
-  const run = loadRuns().find((r) =>
-    r.directory === real || r.directory === directory || (kind === "codeProject" && r.projectId === folder),
-  ) ?? null;
+  const run = loadRuns().find((r) => {
+    // The project the run belongs to — its own copy of it, for a run with a
+    // worktree, is two segments deeper and would match nothing here.
+    const worked = projectDirectoryOf(r);
+    return worked === real || worked === directory || (kind === "codeProject" && r.projectId === folder);
+  }) ?? null;
   return {
     real,
     project: {
@@ -2759,6 +2859,11 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     completionAttempts: completionAttemptsFrom(config[CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY]),
     minCompletionAttempts: MIN_COMPLETION_ATTEMPTS,
     maxCompletionAttempts: MAX_COMPLETION_ATTEMPTS,
+    // Absent means the default here too: a box that predates the setting runs
+    // two at once, which is what shipping it on means.
+    maxParallelRuns: maxParallelRunsFrom(config[CODING_AGENT_MAX_PARALLEL_CONFIG_KEY]),
+    minMaxParallelRuns: MIN_MAX_PARALLEL_RUNS,
+    maxMaxParallelRuns: MAX_MAX_PARALLEL_RUNS,
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
@@ -3006,6 +3111,11 @@ function normalizeRun(raw: CodingRun): CodingRun {
     })(),
     leftover: raw.leftover === true,
     commitError: typeof raw.commitError === "string" ? raw.commitError : null,
+    // Only a worktree this code could have written: the path reaches
+    // `git worktree remove` and `rm`, so a hand-edited record with half a
+    // worktree on it is no worktree at all and the run is read as one working
+    // in its folder — which is what every record written before this is.
+    worktree: parseRunWorktree((raw as { worktree?: unknown }).worktree),
     // Only a deliverable this code could have written counts; anything else on
     // a hand-edited record is no deliverable at all, the way parsePauseReason
     // treats a reason it does not recognise. A record that loses its
@@ -3016,6 +3126,36 @@ function normalizeRun(raw: CodingRun): CodingRun {
     attempts: parseAttempts((raw as { attempts?: unknown }).attempts),
     completionAttempts: completionAttemptsFrom((raw as { completionAttempts?: unknown }).completionAttempts),
   };
+}
+
+/**
+ * A worktree record off disk, or null.
+ *
+ * Every field must be there and be a string: the path is handed to
+ * `git worktree remove` and the branch to `git branch -D`, so a half-written
+ * record is not repaired into a usable one — it is read as "this run has no
+ * worktree", which is the behaviour of every record written before the field.
+ */
+function parseRunWorktree(raw: unknown): RunWorktree | null {
+  if (!raw || typeof raw !== "object") return null;
+  const w = raw as Partial<RunWorktree>;
+  if (typeof w.path !== "string" || !path.isAbsolute(w.path)) return null;
+  if (typeof w.branch !== "string" || !w.branch) return null;
+  if (typeof w.base !== "string" || !w.base) return null;
+  if (typeof w.project !== "string" || !path.isAbsolute(w.project)) return null;
+  return { path: w.path, branch: w.branch, base: w.base, project: w.project, removed: w.removed === true };
+}
+
+/**
+ * The PROJECT a run belongs to — the folder the owner knows, not the copy the
+ * run works in.
+ *
+ * One reader for the whole codebase, because `run.directory` answered that
+ * question everywhere until a run could have a worktree, and a surface that
+ * kept asking it would file every run under a folder named after the run.
+ */
+export function projectDirectoryOf(run: Pick<CodingRun, "directory" | "worktree">): string {
+  return run.worktree?.project ?? run.directory;
 }
 
 function normalizeMedia(raw: unknown): RunMedia {
@@ -5690,7 +5830,11 @@ async function noteOwnCommit(run: CodingRun): Promise<void> {
  * picture is cosmetic where a run that waited on one is not.
  */
 async function drawProjectIcon(run: CodingRun): Promise<{ icon: string; favicon: boolean }> {
-  const folder = run.projectId ?? path.basename(run.directory);
+  // The PROJECT's folder name, never the worktree's — a worktree is named
+  // after the run, and the icon is one per project. The picture itself is
+  // still drawn into `run.directory`, so the run can link to a favicon that
+  // is actually beside the pages it writes.
+  const folder = run.projectId ?? path.basename(projectDirectoryOf(run));
   const name = (await projectNameOf(run.directory, folder)) ?? folder;
   return ensureProjectIcon({
     id: folder,
@@ -5722,6 +5866,11 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
   // for the `pr` deliverable the answer is only knowable once the step above
   // has had its go at opening one.
   await enforceDeliverable(run, ended, review);
+  // After ALL of it: the review pass, another go at the deliverable and the
+  // review loop all work in this very tree, and `settleRunWorktree` steps
+  // aside while any of them is live. Whichever record settles last is the one
+  // that finds the tree idle and decides what becomes of it.
+  await settleRunWorktree(run);
 }
 
 /**
@@ -5751,12 +5900,18 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
  */
 async function registerProjectApp(run: CodingRun): Promise<void> {
   if (run.reviewOf || run.reviewLoopOf || run.readOnly || run.team) return;
-  const id = path.basename(run.directory);
+  // The manifest is read where the run WROTE it (its own copy of the project)
+  // and the app is registered against the PROJECT folder, which is the one
+  // that is still there next week — and the one `listenerOwnedBy` asks about,
+  // which a server started inside the worktree still passes, the worktree
+  // being inside it.
+  const project = projectDirectoryOf(run);
+  const id = path.basename(project);
   if (!APP_ID_RE.test(id)) return;
   try {
     const manifest = await readClawboxManifest(run.directory);
     if (!manifest?.port) return;
-    const outcome = await registerServerApp({ id, directory: run.directory, manifest });
+    const outcome = await registerServerApp({ id, directory: project, manifest });
     pushProgress(run, outcome.ok
       ? RUNNER_STEP.onDesktop(manifest.name, id, manifest.port)
       : RUNNER_STEP.notOnDesktop(manifest.port, `${outcome.detail.charAt(0).toLowerCase()}${outcome.detail.slice(1)}`));
@@ -7538,6 +7693,229 @@ function spawnRun(
   }
 }
 
+// ─── A run's own copy of the project ─────────────────────────────────────────
+
+/** The ClawBox checkout: never forked, never branched, by a run. DATA_DIR is <clawbox>/data. */
+function protectedCheckout(): string {
+  return path.dirname(DATA_DIR);
+}
+
+/**
+ * Give this run a working tree of its own, and move it in.
+ *
+ * Called before the record is inserted, so the record that reaches disk names
+ * the folder the run will actually work in — nothing ever sees a run whose
+ * `directory` is the project while its process is in the worktree.
+ *
+ * A refusal is NOT a failure: three of the four reasons are folders that
+ * deliberately keep the old in-place behaviour (see coding-run-worktree.ts),
+ * and even the fourth — git could not do it — leaves a perfectly good run
+ * working in its project folder, which is what every run did until now. Only
+ * that fourth is said on the record, because it is the only one the owner
+ * could act on.
+ */
+async function attachRunWorktree(run: CodingRun, projectDir: string): Promise<void> {
+  // Never throws: a run that could not be given a copy of the project is a
+  // run working in the project folder, which is what every run did until now
+  // — not a run that fails to start.
+  const made = await addRunWorktree({ projectDir, runId: run.id, protectedRoot: protectedCheckout() })
+    .catch((err: unknown) => ({ ok: false as const, reason: "failed" as const, detail: err instanceof Error ? err.message : String(err) }));
+  if (!made.ok) {
+    if (made.reason === "failed") pushProgress(run, RUNNER_STEP.worktreeKept(`it could not be made — ${made.detail}`));
+    return;
+  }
+  run.worktree = { path: made.path, branch: made.branch, base: made.base, project: projectDir, removed: false };
+  run.directory = made.path;
+  pushProgress(run, RUNNER_STEP.worktree(made.branch, made.base));
+}
+
+/**
+ * The worktree a resumed run carries forward, put back on disk if a settle
+ * took it away.
+ *
+ * Answers the record the NEW run should carry, which is the same worktree
+ * with `removed` recomputed. A restore that fails answers the record
+ * unchanged rather than throwing: `realDirectory` is the next thing the
+ * caller does, and its refusal ("the folder this run worked in is gone") is
+ * the sentence the owner needs — not a git error out of a repair they never
+ * asked for.
+ */
+async function reopenWorktree(previous: CodingRun): Promise<RunWorktree | null> {
+  const wt = previous.worktree;
+  if (!wt) return null;
+  const back = await restoreRunWorktree(wt.project, wt.path, wt.branch, wt.base).catch(() => false);
+  return { ...wt, removed: !back };
+}
+
+/** Every live run working in this exact folder — the question "is anybody still in there?". */
+function liveRunsIn(directory: string): CodingRun[] {
+  return loadRuns().filter((r) => isLive(r.status) && r.directory === directory);
+}
+
+/**
+ * What becomes of the run's worktree now that the chain it belongs to is over.
+ *
+ * THE RULE (the owner's): the tree goes only when the branch is merged or the
+ * run left nothing on it. Anything else is work nobody has looked at, and the
+ * tree stays with the card offering to remove it.
+ *
+ * In order:
+ *   - somebody is still working in it (the automatic review pass, another go
+ *     at the deliverable, the owner's own Resume) — leave it alone;
+ *   - the branch holds nothing — remove the tree AND the branch, which is
+ *     the common ending for a run that investigated and changed nothing;
+ *   - a pull request owns the branch — keep the tree, because the review loop
+ *     hands the harness more turns in it and a merge would take the commits
+ *     away from the pull request they are open as;
+ *   - otherwise merge it home into the project's base branch and remove the
+ *     tree. A merge the project cannot take (it moved, it is dirty, it
+ *     conflicts) keeps the tree and says why.
+ *
+ * Never throws: this is the settle path, and a run whose tree could not be
+ * tidied is still a run that finished.
+ */
+async function settleRunWorktree(run: CodingRun): Promise<void> {
+  const wt = run.worktree;
+  if (!wt || wt.removed) return;
+  try {
+    if (liveRunsIn(wt.path).length > 0) return;
+    if (!fs.existsSync(wt.path)) {
+      wt.removed = true;
+      persist(true);
+      return;
+    }
+    const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
+    if (ahead === null) {
+      // No answer is not permission to delete: keep it and say so.
+      pushProgress(run, RUNNER_STEP.worktreeKept("git could not say what is on its branch"));
+      persist(true);
+      return;
+    }
+    if (ahead === 0) {
+      await removeRunWorktree(wt.project, wt.path);
+      // An empty branch is not history; a branch per run that changed nothing
+      // would be the box leaving litter in the owner's repository.
+      await deleteRunBranch(wt.project, wt.branch);
+      wt.removed = true;
+      pushProgress(run, RUNNER_STEP.worktreeRemoved);
+      persist(true);
+      return;
+    }
+    if (run.pr && run.pr.phase !== "failed") {
+      pushProgress(run, RUNNER_STEP.worktreeKept(`${wt.branch} is open as a pull request`));
+      persist(true);
+      return;
+    }
+    const merged = await mergeRunBranch({
+      projectDir: wt.project,
+      branch: wt.branch,
+      base: wt.base,
+      message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
+    });
+    if (!merged.ok) {
+      pushProgress(run, RUNNER_STEP.worktreeKept(merged.detail));
+      persist(true);
+      return;
+    }
+    await removeRunWorktree(wt.project, wt.path);
+    wt.removed = true;
+    pushProgress(run, RUNNER_STEP.worktreeMerged(wt.base));
+    persist(true);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} worktree settle:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * The owner's Remove worktree button: take the files away whatever is on the
+ * branch.
+ *
+ * Deliberately keeps the BRANCH. The button exists for a tree the settle
+ * refused to remove, which by definition holds commits nothing else has —
+ * removing the files is reclaiming disk, and deleting the commits with them
+ * would be a different, unrecoverable act behind the same word.
+ */
+export async function removeRunWorktreeFor(id: string): Promise<CodingRun> {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  const wt = run.worktree;
+  if (!wt) throw new CodingAgentError("invalid", "That run worked in the project folder itself, so there is no copy to remove.");
+  if (isLive(run.status) || liveRunsIn(wt.path).length > 0) {
+    throw new CodingAgentError("busy", "A run is still working in that copy of the project. Stop it first.");
+  }
+  if (!wt.removed) {
+    try {
+      await removeRunWorktree(wt.project, wt.path);
+    } catch (err) {
+      throw new CodingAgentError("invalid", `Could not remove the run's copy of the project: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  wt.removed = true;
+  pushProgress(run, RUNNER_STEP.worktreeKept(`the owner removed the files; ${wt.branch} still has its commits`));
+  persist(true);
+  return cloneRun(run);
+}
+
+/** How often the box looks for worktrees nothing needs any more. */
+export const WORKTREE_SWEEP_INTERVAL_MS = 7 * 24 * 60 * 60_000;
+export const WORKTREE_SWEEP_AT_KEY = "coding_agent_worktree_swept_at";
+
+/**
+ * The weekly sweep: worktrees older than a fortnight whose branch is merged
+ * or gone, across every project a known run has one in.
+ *
+ * WHY IT IS NEEDED at all, when the settle already tidies up: a run whose
+ * merge conflicted, a box that restarted mid-settle, a project the owner
+ * rebased by hand — each leaves a tree the settle never got to. Fourteen days
+ * of no-one-touched-it plus a merged-or-gone branch is the point at which the
+ * files are certainly recoverable from git.
+ *
+ * At most weekly (`WORKTREE_SWEEP_AT_KEY` in the config store), because the
+ * web server restarts far more often than that and a sweep per boot would be
+ * a `git worktree list` per project on every one. Never throws, and never
+ * touches a tree a live run is in.
+ */
+export async function sweepCodingWorktrees(options: { force?: boolean } = {}): Promise<number> {
+  try {
+    if (!options.force) {
+      const last = await configGet(WORKTREE_SWEEP_AT_KEY);
+      if (typeof last === "number" && Date.now() - last < WORKTREE_SWEEP_INTERVAL_MS) return 0;
+    }
+    const runs = loadRuns();
+    const projects = new Set<string>();
+    for (const run of runs) {
+      if (run.worktree) projects.add(run.worktree.project);
+    }
+    if (projects.size === 0) {
+      await configSet(WORKTREE_SWEEP_AT_KEY, Date.now());
+      return 0;
+    }
+    const inUse = new Set(runs.filter((r) => isLive(r.status)).map((r) => r.directory));
+    let removed = 0;
+    for (const project of projects) {
+      try {
+        const outcome = await sweepRunWorktrees(project, { inUse });
+        removed += outcome.removed.length;
+        // A record whose tree the sweep took must not go on claiming one, or
+        // a resume would try to work in a folder that is not there.
+        for (const gone of outcome.removed) {
+          for (const run of runs) {
+            if (run.worktree && run.worktree.path === gone) run.worktree.removed = true;
+          }
+        }
+      } catch (err) {
+        console.warn(`[coding-agent] worktree sweep of ${project} failed:`, err instanceof Error ? err.message : err);
+      }
+    }
+    if (removed > 0) persist(true);
+    await configSet(WORKTREE_SWEEP_AT_KEY, Date.now());
+    return removed;
+  } catch (err) {
+    console.error("[coding-agent] worktree sweep:", err instanceof Error ? err.message : err);
+    return 0;
+  }
+}
+
 // ─── Public operations ───────────────────────────────────────────────────────
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
@@ -7553,6 +7931,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
    * would continue somebody else's conversation on a stranger's bill.
    */
   let inherited: { provider: CodingProvider; model: string | null } | null = null;
+  /**
+   * The worktree a resumed run carries forward. It belongs to the CHAIN, not
+   * to one record: the automatic review pass and a review-loop turn are fresh
+   * records resuming the same session in the same tree, and whichever of them
+   * settles last is the one that has to decide what becomes of it.
+   */
+  let inheritedWorktree: RunWorktree | null = null;
 
   const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
   const previous = resumeRunId ? loadRuns().find((r) => r.id === resumeRunId) ?? null : null;
@@ -7574,8 +7959,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (previous.status === "running") throw new CodingAgentError("busy", "That run is still in progress; wait for it to finish before resuming it.");
     if (!previous.sessionId) throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
     // The session lives in the wrapper's state dir keyed by the folder it ran
-    // in, so a resume always happens where the original run happened.
+    // in, so a resume always happens where the original run happened — which
+    // for a run with a worktree is the worktree. A settle removes the worktree
+    // of a run that left nothing on its branch, so it is put back from that
+    // branch first; the tree is the only thing that was removed.
+    inheritedWorktree = await reopenWorktree(previous);
     directory = await realDirectory(previous.directory);
+    assertDirectoryFree(directory);
     projectId = previous.projectId;
     // A session poisoned by an authentication or transport failure REPLAYS
     // that failure on every resume — Claude Code persists it in the session,
@@ -7597,6 +7987,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     inherited = { provider: previous.provider, model: previous.requestedModel };
   } else {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
+    assertDirectoryFree(directory);
   }
 
   // Read once, here: a run keeps the settings it started with even if the
@@ -7622,6 +8013,18 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
   else if (resumeRunId) pushProgress(run, RUNNER_STEP.startingFresh(resumeRunId));
 
+  // THE RUN'S OWN COPY OF THE PROJECT, before anything else touches the
+  // folder. A resume carries the previous run's forward — same tree, same
+  // branch, same session — and a team's worker already has one the team made.
+  // A read-only run (the team's planner) reads the project itself: it writes
+  // nothing, so there is nothing to isolate, and a worktree would only hide
+  // the folder it was asked to look at.
+  if (resumeRunId) {
+    run.worktree = inheritedWorktree;
+  } else if (!run.team && !run.readOnly) {
+    await attachRunWorktree(run, directory);
+  }
+
   // The run's own branch, made BEFORE any work happens.
   //
   // This is the only simple moment for it: commitRunWork commits to whatever
@@ -7637,53 +8040,76 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // from, and a second branch under it would take the fixes away from that
   // pull request.
   if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && (await getAutoPr())) {
-    const branched = await startRunBranch({
-      directory: run.directory,
-      runId: run.id,
-      // DATA_DIR is <clawbox>/data, so its parent is the checkout a run must
-      // never branch — see startRunBranch.
-      protectedRoot: path.dirname(DATA_DIR),
-    });
-    if (!branched.ok && branched.reason === "no_repository") {
-      // Not a failure of the flow — there is no repository for a branch to
-      // live in yet. The settle makes one and commits into it
-      // (commitRunWork); a pull request needs a remote the owner adds later
-      // through Back up. Stamping this "failed" with git's raw fatal put a
-      // red line at the top of every fresh-folder run in bench cycle 1.
-      run.pr = null;
-      pushProgress(run, RUNNER_STEP.noRepository);
-    } else if (branched.ok) {
+    if (run.worktree) {
+      // The worktree IS the branch: `git worktree add -b clawbox/<runId>` has
+      // already forked it, off the project's own branch, and the run is
+      // standing in it. Calling startRunBranch here would `checkout -b` a
+      // SECOND branch of the same name — in the worktree, where it would
+      // fail, or in the project checkout, which is precisely the move that
+      // cannot happen once two runs share a repository.
+      const { branch, base } = run.worktree;
       run.pr = {
         phase: "opening",
         number: null,
         url: null,
-        branch: branched.branch,
-        base: branched.base,
+        branch,
+        base,
         checks: emptyChecks(),
         detail: null,
         startedAt: Date.now(),
         endedAt: null,
-        // No verdict yet; the one that counts is written when the pull
-        // request opens, which is the only way into "waiting".
         reviewOk: true,
       };
-      pushProgress(run, RUNNER_STEP.workingOnBranch(branched.branch, branched.base));
+      pushProgress(run, RUNNER_STEP.workingOnBranch(branch, base));
     } else {
-      // Not fatal: the work is worth doing on whatever branch this is. The
-      // owner is told why there will be no pull request.
-      run.pr = {
-        phase: "failed",
-        number: null,
-        url: null,
-        branch: null,
-        base: null,
-        checks: emptyChecks(),
-        detail: branched.detail,
-        startedAt: Date.now(),
-        endedAt: Date.now(),
-        reviewOk: false,
-      };
-      pushProgress(run, RUNNER_STEP.noPullRequest(branched.detail));
+      const branched = await startRunBranch({
+        directory: run.directory,
+        runId: run.id,
+        // DATA_DIR is <clawbox>/data, so its parent is the checkout a run must
+        // never branch — see startRunBranch.
+        protectedRoot: path.dirname(DATA_DIR),
+      });
+      if (!branched.ok && branched.reason === "no_repository") {
+        // Not a failure of the flow — there is no repository for a branch to
+        // live in yet. The settle makes one and commits into it
+        // (commitRunWork); a pull request needs a remote the owner adds later
+        // through Back up. Stamping this "failed" with git's raw fatal put a
+        // red line at the top of every fresh-folder run in bench cycle 1.
+        run.pr = null;
+        pushProgress(run, RUNNER_STEP.noRepository);
+      } else if (branched.ok) {
+        run.pr = {
+          phase: "opening",
+          number: null,
+          url: null,
+          branch: branched.branch,
+          base: branched.base,
+          checks: emptyChecks(),
+          detail: null,
+          startedAt: Date.now(),
+          endedAt: null,
+          // No verdict yet; the one that counts is written when the pull
+          // request opens, which is the only way into "waiting".
+          reviewOk: true,
+        };
+        pushProgress(run, RUNNER_STEP.workingOnBranch(branched.branch, branched.base));
+      } else {
+        // Not fatal: the work is worth doing on whatever branch this is. The
+        // owner is told why there will be no pull request.
+        run.pr = {
+          phase: "failed",
+          number: null,
+          url: null,
+          branch: null,
+          base: null,
+          checks: emptyChecks(),
+          detail: branched.detail,
+          startedAt: Date.now(),
+          endedAt: Date.now(),
+          reviewOk: false,
+        };
+        pushProgress(run, RUNNER_STEP.noPullRequest(branched.detail));
+      }
     }
   }
 
@@ -7880,6 +8306,9 @@ function newRunRecord(fields: {
     streamOffset: 0,
     leftover: false,
     commitError: null,
+    // Attached by `attachRunWorktree` once the record has an id to name it
+    // with, and only for a run that is allowed one.
+    worktree: null,
     // What it has to leave behind, and the bar frozen with it. The first
     // attempt's entry is opened by the caller, once it knows whether the
     // auto-PR switch gave this run an implied deliverable too — which is not
@@ -8083,11 +8512,17 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   // ENOENT" — blaming a binary that is present, on a record that had already
   // been flipped to running. Checked here, before that flip, the way a draft
   // start checks it.
+  // A run with a copy of its own may have had it removed at settle (it left
+  // nothing on its branch) or by the weekly sweep. The BRANCH survived both,
+  // so the tree is made again from it and the resume carries on in the folder
+  // the session was opened in — which is what `--resume` needs.
+  if (run.worktree) run.worktree = await reopenWorktree(run);
   try {
     run.directory = await realDirectory(run.directory);
   } catch {
     throw new CodingAgentError("not_found", `The folder this run worked in is gone (${run.directory}), so it cannot be resumed. Start a new run instead.`);
   }
+  assertDirectoryFree(run.directory, run.id);
   // The one place a run's permission rules are RE-READ rather than kept.
   //
   // Everything else about a run is frozen on its record precisely so the tools
@@ -8207,6 +8642,11 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   const tools = await requireSpawnTools();
   // The folder must still be there — it was only checked when drafted.
   run.directory = await realDirectory(run.directory);
+  assertDirectoryFree(run.directory, run.id);
+  // The copy of the project is made at START and not when the draft was
+  // written: a draft may sit for days, and a worktree made for one that is
+  // never started would be a branch and a folder nobody asked for.
+  if (!run.team && !run.readOnly && !run.worktree) await attachRunWorktree(run, run.directory);
   // Settings are read at START: a run keeps what it starts with.
   //
   // The provider and its model are deliberately NOT among them. They are the
@@ -8298,8 +8738,34 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     return;
   }
   const active = loadRuns().filter((r) => isLive(r.status));
-  if (active.length >= MAX_CONCURRENT_RUNS) {
-    throw new CodingAgentError("busy", `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`);
+  const limit = await getMaxParallelRuns();
+  if (active.length >= limit) {
+    throw new CodingAgentError(
+      "busy",
+      limit === 1
+        ? `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`
+        : `This ClawBox is already running ${active.length} coding runs at once, which is all it allows. Wait for one to finish, stop one, or raise the limit in the Coding Agent settings.`,
+    );
+  }
+}
+
+/**
+ * Refuse a second run in the SAME working folder.
+ *
+ * The concurrency limit above is about the box's memory; this is the rule it
+ * used to imply. A run that got a worktree has a folder nobody else is in, so
+ * this never fires for it — it fires for the folders that keep the old
+ * in-place behaviour (a plain folder with no git history, a code project
+ * inside ClawBox's own checkout), where two runs really would edit each
+ * other's half-written files and each settle would commit the other's.
+ */
+function assertDirectoryFree(directory: string, exceptRunId?: string): void {
+  const busy = loadRuns().find((r) => isLive(r.status) && r.id !== exceptRunId && r.directory === directory);
+  if (busy) {
+    throw new CodingAgentError(
+      "busy",
+      `Another coding run (${busy.id}) is already working in that folder. Wait for it or stop it first.`,
+    );
   }
 }
 
@@ -8355,6 +8821,10 @@ function spawnOrSettle(
     // Nothing settles this run through finishRun either, so the tab a previous
     // attempt of the same record opened is closed here.
     cleanupRunResources(run, null);
+    // …and neither does the aftermath run, which is where a run's copy of the
+    // project is normally decided. A run that never started left nothing on
+    // its branch, so this removes both.
+    trackSettleWork(settleRunWorktree(run));
     // The branch made for its pull request is already on the record. Nothing
     // settles the run through finishRun on this path, so the pull request is
     // ended here too, or it stays "opening" — pending — for good.

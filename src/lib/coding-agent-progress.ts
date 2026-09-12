@@ -55,6 +55,10 @@ export type ProgressLabelKey =
   | "reattached"
   | "startingFresh"
   | "noRepository"
+  | "worktree"
+  | "worktreeMerged"
+  | "worktreeRemoved"
+  | "worktreeKept"
   | "workingOnBranch"
   | "noPullRequest"
   | "committed"
@@ -220,6 +224,12 @@ export const RUNNER_STEP = {
   reviewRound: (round: number, max: number) => `Review round ${round} of ${max} handed to the coding agent`,
   startingFresh: (id: string) => `Starting fresh: ${id} did not fail in a way a resume can fix`,
   workingOnBranch: (branch: string, base: string) => `Working on ${branch}, for a pull request into ${base}`,
+  /** The run has a working tree of its own — which is what lets another run work in this project at the same time. */
+  worktree: (branch: string, base: string) => `Working in its own copy of the project on ${branch}, forked from ${base}`,
+  worktreeMerged: (base: string) => `Merged into ${base} and the run's copy of the project removed`,
+  worktreeRemoved: "The run's copy of the project was removed; it left nothing on its branch",
+  /** Why the copy is still on disk: unmerged work, a conflict, a pull request that owns the branch. */
+  worktreeKept: (reason: string) => `The run's copy of the project was kept: ${reason}`,
   noPullRequest: (reason: string) => `No pull request: ${reason}`,
   committed: (sha: string, newRepository: boolean) => `Committed as ${sha}${newRepository ? " (new repository)" : ""}`,
   committedByRun: (sha: string) => `Committed by the run itself as ${sha}`,
@@ -315,6 +325,10 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^The web server restarted; this run kept going and was picked back up$/, labelKey: "reattached", icon: "link" },
   { re: /^Starting fresh: (\S+) did not fail in a way a resume can fix$/, labelKey: "startingFresh", icon: "restart_alt", params: (m) => ({ id: m[1] }) },
   { re: /^Not a git repository yet: .*$/, labelKey: "noRepository", icon: "folder_off" },
+  { re: /^Working in its own copy of the project on (.+), forked from (.+)$/, labelKey: "worktree", icon: "account_tree", params: (m) => ({ branch: m[1], base: m[2] }) },
+  { re: /^Merged into (.+) and the run's copy of the project removed$/, labelKey: "worktreeMerged", icon: "merge", params: (m) => ({ base: m[1] }) },
+  { re: /^The run's copy of the project was removed; it left nothing on its branch$/, labelKey: "worktreeRemoved", icon: "delete_sweep" },
+  { re: /^The run's copy of the project was kept: (.+)$/, labelKey: "worktreeKept", icon: "inventory_2", params: (m) => ({ reason: m[1] }) },
   { re: /^Working on (.+), for a pull request into (.+)$/, labelKey: "workingOnBranch", icon: "call_split", params: (m) => ({ branch: m[1], base: m[2] }) },
   { re: /^No pull request: (.+)$/, labelKey: "noPullRequest", icon: "block", params: (m) => ({ reason: m[1] }) },
   { re: /^Committed as (\S+) \(new repository\)$/, labelKey: "committedNewRepository", icon: "commit", params: (m) => ({ sha: m[1] }) },

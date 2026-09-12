@@ -35,6 +35,15 @@ vi.mock("child_process", async (importOriginal) => ({
   spawn: spawnMock,
 }));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
+// A run's own copy of the project is `git`, and `git` here is the same mocked
+// `spawn` this suite arms to fail — so the failure meant for the HARNESS would
+// be eaten by the first git call instead, and the run under test would spawn
+// happily. The worktree answers "not a repository", which is what the temp
+// tree actually is.
+vi.mock("@/lib/coding-run-worktree", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-run-worktree")>()),
+  addRunWorktree: vi.fn(async () => ({ ok: false as const, reason: "no_repository" as const, detail: "Not a git repository yet." })),
+}));
 // Every run draws its project an icon through an upstream ClawBox AI call.
 // Nothing here asserts it, and left real it is one more thing racing the real
 // `git` below for a loaded runner's attention.

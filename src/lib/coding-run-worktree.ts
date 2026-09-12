@@ -45,6 +45,18 @@ import { runBranchName } from "./coding-pr-state";
 const ok = (r: ChildResult) => r.code === 0;
 const out = (r: ChildResult) => r.stdout.trim();
 
+/**
+ * Who the box commits as.
+ *
+ * Needed on every call here that can CREATE a commit — the empty first commit
+ * and the merge home. The environment these calls run in is built from
+ * nothing (see `gitIn`), so git finds no `user.email` and refuses with
+ * "Committer identity unknown": the merge then failed, the worktree was kept
+ * with git's own four-line advice as the reason, and the run's work stayed off
+ * the project's branch. The same identity `commitRunWork` already uses.
+ */
+const AS_BOX = ["-c", "user.name=ClawBox Coding Agent", "-c", "user.email=coding-agent@clawbox.local"];
+
 /** Why a run works in the project folder itself rather than in a worktree of its own. */
 export type NoWorktreeReason = "no_repository" | "not_repository_root" | "protected_checkout" | "failed";
 
@@ -126,7 +138,7 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot }: {
   // does and for the same reason — a fork needs something to fork from.
   const head = await gitIn(dir, ["rev-parse", "--verify", "HEAD"]);
   if (!ok(head)) {
-    const seeded = await gitIn(dir, ["commit", "--allow-empty", "-m", "Initial commit"]);
+    const seeded = await gitIn(dir, [...AS_BOX, "commit", "--allow-empty", "-m", "Initial commit"]);
     if (!ok(seeded)) return { ok: false, reason: "failed", detail: failureDetail(seeded, "Making the first commit") };
   }
   const current = await gitIn(dir, ["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -180,11 +192,20 @@ export function linkSharedNodeModules(projectDir: string, worktreePath: string):
  * Put a worktree back where its record says it was — the resume path.
  *
  * A settle removes the worktree of a run that left nothing behind, and
- * `resumeRun` refuses a run whose folder is gone. The branch is still there,
- * so the tree can be made again from it and the resume carries on. `true`
- * when the path is usable afterwards, whether it was there already or not.
+ * `resumeRun` refuses a run whose folder is gone. Two endings to restore
+ * from, and both have to work:
+ *
+ *   - the branch is still there (the settle merged it home, or the owner
+ *     pressed Remove worktree over unmerged work): check it out again;
+ *   - the branch is gone, because the run left NOTHING on it and an empty
+ *     `clawbox/<runId>` branch per run would be litter in the owner's
+ *     repository. Fork it again from `base` — which is exactly what the
+ *     original was, a fork of base with no commits on it.
+ *
+ * `true` when the path is usable afterwards, whether it was there already or
+ * not.
  */
-export function restoreRunWorktree(projectDir: string, worktreePath: string, branch: string): Promise<boolean> {
+export function restoreRunWorktree(projectDir: string, worktreePath: string, branch: string, base: string): Promise<boolean> {
   return withDirLock(projectDir, async () => {
     try {
       if (fs.statSync(worktreePath).isDirectory()) return true;
@@ -196,10 +217,61 @@ export function restoreRunWorktree(projectDir: string, worktreePath: string, bra
     // add is refused with "already registered".
     await gitIn(dir, ["worktree", "prune"]);
     fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-    const added = await gitIn(dir, ["worktree", "add", worktreePath, branch]);
+    const known = ok(await gitIn(dir, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]));
+    const added = known
+      ? await gitIn(dir, ["worktree", "add", worktreePath, branch])
+      : await gitIn(dir, ["worktree", "add", "-b", branch, worktreePath, base]);
     if (!ok(added)) return false;
     linkSharedNodeModules(dir, worktreePath);
     return true;
+  });
+}
+
+/**
+ * Bring a run's branch home into the project's own base branch.
+ *
+ * WHY AT ALL. Before worktrees, a run's commits landed in the project folder
+ * and the owner saw its work there. A worktree that merely accumulated
+ * branches would make every run's work invisible in the folder it was asked
+ * to work in, which is a worse device, not a safer one. So the settle merges
+ * it back — and does it CONSERVATIVELY, because the project checkout belongs
+ * to the owner and not to the box:
+ *
+ *   - only when the checkout is on the branch the run forked from. It may
+ *     have been moved since, and merging into whatever happens to be checked
+ *     out now is a guess;
+ *   - only when the checkout is clean. The team's merge commits what it finds
+ *     lying there first; that is right for a tree only the team uses and
+ *     wrong for the owner's own folder, where uncommitted work is theirs;
+ *   - a conflict is ABORTED and named, never resolved by guess. The worktree
+ *     then stays, which is what the card's Remove worktree is for.
+ */
+export function mergeRunBranch(input: {
+  projectDir: string;
+  branch: string;
+  base: string;
+  message: string;
+}): Promise<{ ok: true; merged: boolean } | { ok: false; reason: "not_on_base" | "dirty" | "conflict" | "failed"; detail: string }> {
+  return withDirLock(input.projectDir, async () => {
+    const dir = path.resolve(input.projectDir);
+    const on = await currentBranch(dir);
+    if (on !== input.base) {
+      return { ok: false, reason: "not_on_base", detail: `the project is on ${on}, not on ${input.base}` };
+    }
+    const ahead = await commitsAhead(dir, input.branch, input.base);
+    if (ahead === 0) return { ok: true, merged: false };
+    const dirty = await gitIn(dir, ["status", "--porcelain", "--untracked-files=normal"]);
+    if (!ok(dirty)) return { ok: false, reason: "failed", detail: failureDetail(dirty, "Reading the project before the merge") };
+    if (out(dirty)) return { ok: false, reason: "dirty", detail: "the project folder has uncommitted changes of its own" };
+    const merged = await gitIn(dir, [...AS_BOX, "merge", "--no-ff", "--no-edit", "-m", input.message, input.branch]);
+    if (ok(merged)) return { ok: true, merged: true };
+    const conflict = /CONFLICT|Automatic merge failed/i.test(merged.stdout + merged.stderr);
+    await gitIn(dir, ["merge", "--abort"]);
+    return {
+      ok: false,
+      reason: conflict ? "conflict" : "failed",
+      detail: conflict ? "it conflicts with the project's own changes" : failureDetail(merged, `Merging ${input.branch}`),
+    };
   });
 }
 
