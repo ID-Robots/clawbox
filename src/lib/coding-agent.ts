@@ -1686,6 +1686,26 @@ export class AllowRuleError extends CodingAgentError {
 }
 
 /**
+ * The provider/model pair was not one this box can run on — the same 400 a bad
+ * working folder answers, with a `code` that says WHICH argument was wrong.
+ *
+ * The subclass exists for the same reason `AllowRuleError` does, and is read by
+ * a different caller: the MCP tool maps a 400 to advice for the model that
+ * asked, and with only `kind: "invalid"` to go on it told a caller whose
+ * provider/model pair was refused to pick a different working FOLDER. A run
+ * naming `{ model: "claude-opus-5" }` on a box whose default account has no
+ * model list is exactly that case, and the folder it was told to abandon was
+ * fine.
+ */
+export class ProviderChoiceError extends CodingAgentError {
+  readonly code = "provider" as const;
+  constructor(message: string) {
+    super("invalid", message);
+    this.name = "ProviderChoiceError";
+  }
+}
+
+/**
  * What this box refuses to every run, in the shape the rule validator reads.
  *
  * Read fresh per call: `fileDenyRules()` walks data/ and the checkout, so the
@@ -6360,7 +6380,7 @@ async function readRunSettings(): Promise<RunSettings> {
  * @param settings the owner's stored defaults, already read
  * @param input the start request, whose provider/model are still untrusted
  * @param inherited what a resume carries forward, when the caller named nothing
- * @throws CodingAgentError("invalid") naming what a caller may use instead
+ * @throws ProviderChoiceError naming what a caller may use instead
  */
 async function applyProviderChoice(
   settings: RunSettings,
@@ -6371,7 +6391,7 @@ async function applyProviderChoice(
   // The caller's choice, else the run being resumed, else the owner's default.
   const fallback = !named && inherited ? inherited.provider : settings.provider;
   const resolved = resolveRunProvider(input.provider, input.model, fallback);
-  if (!resolved.ok) throw new CodingAgentError("invalid", resolved.error);
+  if (!resolved.ok) throw new ProviderChoiceError(resolved.error);
   // The SAME "the caller named nothing" test the provider half uses, and for
   // the same reason: a client that always serialises the field sends
   // `"model": null`, which resolveRunProvider reads as unnamed. Tested only

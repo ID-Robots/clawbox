@@ -62,6 +62,27 @@ function routeReason(err: ApiError): string | null {
   }
 }
 
+/**
+ * The refusal `code` beside the route's `kind`, when it sent one.
+ *
+ * A 400 from the run route can be about the working folder OR about the
+ * provider/model pair — both are `kind: "invalid"` — and the two want opposite
+ * advice. Only the provider refusal carries a code (`ProviderChoiceError`), so
+ * an older device, or any other bad argument, reads as null and keeps the
+ * folder advice this has always given.
+ */
+function routeCode(err: ApiError): string | null {
+  try {
+    const body = JSON.parse(err.body) as { code?: unknown };
+    return typeof body.code === "string" && body.code.trim() ? body.code.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+const PROVIDER_CHOICE_NEXT =
+  "The working folder was not the problem: do not change it. Call again with no provider and no model to use the owner's default account, or name a provider with a model it offers.";
+
 const SWITCH_NEXT =
   "Do not retry. Tell the user the coding agent is switched off and that they can turn it on in the Coding Agent app on the ClawBox desktop.";
 
@@ -433,7 +454,17 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         // that. Carry the route's own sentence through; the envelope scrubs
         // paths and secrets out of it on the way.
         if (err instanceof ApiError && err.status === 400) {
-          throw new ToolError("BAD_ARGUMENT", routeReason(err) ?? "The ClawBox refused that working folder.", WORKING_FOLDER_NEXT);
+          // Which argument the device actually refused decides the advice. A
+          // model named without a provider is resolved against the OWNER's
+          // default, which this process cannot read, so the pair can only be
+          // refused at the route — and answering that with "pass a different
+          // project_id" sent the caller to change a folder that was fine.
+          const wrongPair = routeCode(err) === "provider";
+          throw new ToolError(
+            "BAD_ARGUMENT",
+            routeReason(err) ?? "The ClawBox refused that working folder.",
+            wrongPair ? PROVIDER_CHOICE_NEXT : WORKING_FOLDER_NEXT,
+          );
         }
         throw err;
       }

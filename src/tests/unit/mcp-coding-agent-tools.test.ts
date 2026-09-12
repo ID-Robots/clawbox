@@ -197,6 +197,40 @@ describe("coding_agent_run", () => {
     expect(out.error.next).toMatch(/code_project_list/);
   });
 
+  it("does not send a provider/model refusal off to change the working folder", async () => {
+    // A model named with no provider is resolved against the OWNER's default,
+    // which this process cannot read, so the pair can only be refused at the
+    // route — as a 400 with the same `kind: "invalid"` a bad folder answers.
+    // Told to "pass a project_id instead", the caller changed a folder that was
+    // never the problem. The route's `code` is what tells the two apart.
+    apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({
+      error: "ClawBox AI chooses its own model; name a model only with the \"anthropic\" provider.",
+      kind: "invalid",
+      code: "provider",
+    })));
+    const out = await harness().call("coding_agent_run", { task: "x", project_id: "site", model: "claude-opus-5" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/chooses its own model/);
+    expect(out.error.next).toMatch(/working folder was not the problem/i);
+    expect(out.error.next).not.toMatch(/code_project_list|code_project_init/);
+  });
+
+  it("keeps the folder advice for a 400 from a device that sends no code", async () => {
+    // An older ClawBox answers the folder rules with `kind: "invalid"` alone.
+    // Absent a code, the advice must stay exactly what it has always been.
+    apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({
+      error: "That folder holds credentials.",
+      kind: "invalid",
+    })));
+    const out = await harness().call("coding_agent_run", { task: "x", directory: "/home/clawbox/clawbox/data" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.next).toMatch(/code_project_list/);
+    expect(out.error.next).not.toMatch(/working folder was not the problem/i);
+  });
+
   it("does not report a run the device did not start", async () => {
     apiPost.mockResolvedValue({ started: false });
     const out = await harness().call("coding_agent_run", { task: "x", project_id: "site" });

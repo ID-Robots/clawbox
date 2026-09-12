@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { CodingAgentError, MAX_TASK_CHARS, createDraftRun, deleteDraftRun, httpStatusForCodingError } from "@/lib/coding-agent";
+import { CodingAgentError, MAX_TASK_CHARS, ProviderChoiceError, createDraftRun, deleteDraftRun, httpStatusForCodingError } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
 
 export const dynamic = "force-dynamic";
@@ -48,7 +48,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ run }, { status: 201 });
   } catch (err) {
     if (err instanceof CodingAgentError) {
-      return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
+      // The provider/model refusal carries a `code` beside the shared 400, so a
+      // caller can tell "that pair is not on this box" from "that folder is not
+      // allowed" — both are `kind: "invalid"`, and the MCP tool advises on the
+      // wrong argument without it. Anything else answers exactly as before.
+      const code = err instanceof ProviderChoiceError ? { code: err.code } : {};
+      return NextResponse.json({ error: err.message, kind: err.kind, ...code }, { status: httpStatusForCodingError(err.kind) });
     }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not draft the coding run" },
