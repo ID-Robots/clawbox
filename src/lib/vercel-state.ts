@@ -359,3 +359,50 @@ export class VercelLinkError extends Error {
     this.name = "VercelLinkError";
   }
 }
+
+// ── what the agent is handed when a build fails ─────────────────────────────
+
+/**
+ * The follow-up task for a run whose Vercel build broke.
+ *
+ * The sibling of `buildReviewFeedback` in coding-review-state.ts, and pure for
+ * the same reason: what the box says to the harness is a decision, and a
+ * decision belongs where a test can read it without a network or a process.
+ *
+ * WHAT IT DELIBERATELY DOES AND DOES NOT SAY. It quotes the log TAIL and names
+ * the deployment, because that is the evidence. It does NOT tell the run to
+ * deploy, promote, or talk to Vercel itself: the box owns that half, the run
+ * owns the code, and a run given a deploy verb would be a run that could put
+ * its own work in front of a project's users. And it says "do not start over",
+ * because this arrives in the run's OWN session, which still holds everything
+ * it did the first time.
+ */
+export function buildDeployFeedback(input: {
+  projectId: string;
+  branch: string | null;
+  url: string | null;
+  inspectorUrl: string | null;
+  detail: string | null;
+  log: string;
+}): string {
+  const lines = [
+    "The Vercel build of the work you just pushed FAILED.",
+    "",
+    `Vercel project: ${input.projectId}`,
+    ...(input.branch ? [`Branch: ${input.branch}`] : []),
+    ...(input.detail ? [`What Vercel said: ${input.detail}`] : []),
+    ...(input.inspectorUrl ? [`Build page: ${input.inspectorUrl}`] : []),
+    "",
+    "The end of the build log:",
+    "",
+    "```",
+    input.log.trim() || "(Vercel returned no build log for this deployment.)",
+    "```",
+    "",
+    "Fix the cause in this folder, then commit and push to the same branch — that is what makes Vercel build again.",
+    "This is your own session: do not start the task over, and do not redo work that already landed.",
+    "Do not try to deploy, promote or call Vercel yourself; this ClawBox watches the build and will tell its owner how it went.",
+    "If the failure is not something you can fix from this folder (a missing environment variable on Vercel, a paid feature, a wrong project setting), do not guess: say exactly what is missing and finish.",
+  ];
+  return lines.join("\n");
+}

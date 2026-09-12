@@ -190,6 +190,24 @@ import {
 } from "@/lib/coding-deliverable";
 import { checkDeliverable, type DeliverableSandbox } from "@/lib/coding-deliverable-check";
 import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
+import {
+  buildDeployFeedback,
+  decideDeployment,
+  isTransient,
+  isVercelPending,
+  isVercelPhase,
+  listDeployments,
+  matchDeployment,
+  readBuildLog,
+  VERCEL_MAX_WAIT_MS,
+  VERCEL_POLL_INTERVAL_MS,
+  type VercelDeployment,
+  type VercelPhase,
+  type VercelPromotion,
+  type VercelReadyState,
+  type VercelState,
+} from "@/lib/vercel";
+import { readVercelLink, resolveVercelAuth } from "@/lib/vercel-link";
 import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { captureIncident } from "@/lib/incident-report";
 import { ensureProjectIcon } from "@/lib/project-icon";
@@ -1069,6 +1087,32 @@ export interface CodingRun {
    * to the loop instead of trying to open a pull request the run already has.
    */
   reviewLoopOf: string | null;
+  /**
+   * What this run's PUSH became on Vercel, when the owner has attached a Vercel
+   * project to the project this run works in (src/lib/vercel-link.ts).
+   *
+   * A field beside `pr`, for the reason `pr` is a field and not a run status:
+   * it is forward- and backward-compatible, an older build ignores it, and
+   * `normalizeRun` gives a record that predates it `null` — which reads
+   * correctly as "nothing was deployed for this one". Null is also what a run
+   * in an UNLINKED project carries for ever, which is the same fact: the box
+   * never asked Vercel anything about it.
+   *
+   * Written only after the pull-request step has PUSHED the branch, because
+   * that push is what makes Vercel build.
+   */
+  vercel: VercelState | null;
+  /**
+   * Set on a FOLLOW-UP run this box started with a failed Vercel build's log:
+   * the id of the run whose deployment it is fixing.
+   *
+   * The third sibling of `reviewOf` and `reviewLoopOf`, and its own field for
+   * the same reason the second one is: it needs the same three skips (no
+   * branch, no project icon, no second review pass) AND one more — its settle
+   * must go back to the deployment watch rather than try to open a pull request
+   * the run it continues already has.
+   */
+  vercelFixOf: string | null;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
   /**
@@ -1535,6 +1579,9 @@ export interface StartRunInput {
   /** Internal: set only by the review loop, naming the run whose pull request
    *  this turn is fixing. See CodingRun.reviewLoopOf. */
   reviewLoopOf?: string | null;
+  /** Internal: set only by the deployment watch, naming the run whose Vercel
+   *  build this turn is fixing. See CodingRun.vercelFixOf. */
+  vercelFixOf?: string | null;
   /** Internal: set only by a coding team, for its planner and its workers. */
   team?: RunTeam | null;
   /** Internal: a read-only run (the team's planner). */
@@ -2870,6 +2917,60 @@ function normalizePr(raw: unknown): PrState | null {
   };
 }
 
+/** The ready states this code writes; anything else is a record to distrust. */
+const VERCEL_READY_STATES: readonly VercelReadyState[] = ["queued", "building", "ready", "error", "canceled"];
+
+/**
+ * A deployment record off disk, or null.
+ *
+ * `projectId` and `startedAt` are what make it a record at all: without the
+ * first there is nothing to ask Vercel about, and without the second the
+ * grace period and the ceiling have nothing to measure against — a watcher
+ * rebuilt from such a record would wait for ever.
+ */
+function normalizeVercel(raw: unknown): VercelState | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Partial<Record<keyof VercelState, unknown>>;
+  if (!isVercelPhase(v.phase) || typeof v.startedAt !== "number") return null;
+  if (typeof v.projectId !== "string" || !v.projectId) return null;
+  const str = (x: unknown): string | null => (typeof x === "string" && x ? x : null);
+  const promotion = v.promotion;
+  return {
+    phase: v.phase,
+    projectId: v.projectId,
+    teamId: str(v.teamId),
+    deploymentId: str(v.deploymentId),
+    readyState: (VERCEL_READY_STATES as readonly unknown[]).includes(v.readyState)
+      ? (v.readyState as VercelReadyState)
+      : "building",
+    url: str(v.url),
+    inspectorUrl: str(v.inspectorUrl),
+    target: str(v.target),
+    branch: str(v.branch),
+    sha: str(v.sha),
+    startedAt: v.startedAt,
+    endedAt: typeof v.endedAt === "number" ? v.endedAt : null,
+    detail: str(v.detail),
+    fixRunId: str(v.fixRunId),
+    // Not sent is not sent: only `true` written by this code stops a second
+    // hand-off, so a damaged record spends one more run rather than silently
+    // never telling the agent its build broke.
+    feedbackSent: v.feedbackSent === true,
+    promotion: typeof promotion === "object" && promotion !== null
+      && typeof (promotion as VercelPromotion).deploymentId === "string"
+      && typeof (promotion as VercelPromotion).at === "number"
+      ? {
+        deploymentId: (promotion as VercelPromotion).deploymentId,
+        url: str((promotion as VercelPromotion).url),
+        at: (promotion as VercelPromotion).at,
+        // The only actor this code writes. A record claiming another is a
+        // record about a production change nobody on this box made.
+        by: "owner",
+      }
+      : null,
+  };
+}
+
 /** Fill in fields an older on-disk record may lack, so readers never see undefined. */
 function normalizeRun(raw: CodingRun): CodingRun {
   return {
@@ -2976,6 +3077,13 @@ function normalizeRun(raw: CodingRun): CodingRun {
     review: parseReviewLoop((raw as { review?: unknown }).review),
     reviewLoopOf: typeof (raw as { reviewLoopOf?: unknown }).reviewLoopOf === "string"
       ? (raw as { reviewLoopOf: string }).reviewLoopOf
+      : null,
+    // Only a deployment this code could have written counts; anything else on
+    // a hand-edited record is no deployment at all, the way parsePauseReason
+    // treats a reason it does not recognise.
+    vercel: normalizeVercel((raw as { vercel?: unknown }).vercel),
+    vercelFixOf: typeof (raw as { vercelFixOf?: unknown }).vercelFixOf === "string"
+      ? (raw as { vercelFixOf: string }).vercelFixOf
       : null,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     // Only a list that matches the lines one for one is a list of their times;
@@ -5750,7 +5858,7 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
  * re-reads nothing: the run that wrote the manifest did this.
  */
 async function registerProjectApp(run: CodingRun): Promise<void> {
-  if (run.reviewOf || run.reviewLoopOf || run.readOnly || run.team) return;
+  if (run.reviewOf || run.reviewLoopOf || run.vercelFixOf || run.readOnly || run.team) return;
   const id = path.basename(run.directory);
   if (!APP_ID_RE.test(id)) return;
   try {
@@ -5767,7 +5875,7 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
 }
 
 async function commitProjectAssets(run: CodingRun): Promise<void> {
-  if (!run.media.images || run.reviewOf || run.reviewLoopOf) return;
+  if (!run.media.images || run.reviewOf || run.reviewLoopOf || run.vercelFixOf) return;
   try {
     const drawn = await Promise.race([
       drawProjectIcon(run),
@@ -5818,6 +5926,14 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     // loop rather than to this step.
     if (finished.reviewLoopOf !== null) {
       await resumeReviewAfterFix(finished, ended);
+      return;
+    }
+
+    // A deployment-fix turn is the same shape one step further on: the pull
+    // request is open and the branch exists; what this turn owes is a push
+    // that makes Vercel build again.
+    if (finished.vercelFixOf !== null) {
+      await resumeDeployAfterFix(finished, ended);
       return;
     }
 
@@ -5924,6 +6040,13 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     // existed.
     if (maxRounds > 0) watchReviewLoop(origin.id);
     else watchPullRequest(origin.id);
+
+    // A THIRD watcher, and it runs beside either of those rather than instead
+    // of one: GitHub's checks and Vercel's build are different questions about
+    // the same push, and a box whose project is linked wants both answered.
+    // Fire-and-forget, and last, because a Vercel fault must never be able to
+    // stop a pull request that has already been opened.
+    void startDeployWatch(origin.id);
   } catch (err) {
     console.error(`[coding-agent] pull request for ${finished.id} not opened:`, err instanceof Error ? err.message : err);
   }
@@ -6052,6 +6175,10 @@ function liveFixTurnFor(originId: string): boolean {
 }
 
 export function resumePullRequestWatches(): void {
+  // The deployment watches first, and in their own pass: a Vercel watch runs
+  // BESIDE a pull-request or review watch rather than instead of one, so it
+  // must not sit inside a loop body whose branches `continue`.
+  resumeDeployWatches();
   for (const run of loadRuns()) {
     // The review loop first: its phase is pending too, and it owns the pull
     // request when it is there.
@@ -6084,6 +6211,376 @@ export function resumePullRequestWatches(): void {
       settlePr(run, "failed", `The ClawBox web server restarted before the pull request was opened. The work stays on ${run.pr.branch ?? runBranchName(run.id)}.`);
     }
   }
+}
+
+
+// ─── The Vercel deployment of a run's push ───────────────────────────────────
+
+/**
+ * What happens to a run's work on VERCEL, once the owner has attached a Vercel
+ * project to the project the run works in (src/lib/vercel-link.ts).
+ *
+ * WHY IT IS A WATCHER OUT HERE AND NOT SOMETHING THE RUN DOES. The same three
+ * measured reasons ./coding-pr's header gives for the pull-request wait: a run
+ * polling a build spends one of its turns per poll, holds the single run slot
+ * for as long as the build takes, and is ended by the idle killer while it
+ * sits quiet in a wait. And one more that is specific to this: the token is the
+ * OWNER's, and handing a deploy credential to the harness on every run — rather
+ * than only when the owner has ticked injection for it — is the thing the
+ * secret store exists to avoid.
+ *
+ * WHAT ARMS IT. `maybeOpenPullRequest`, right after `openPullRequest` has
+ * PUSHED the branch, because that push is what makes Vercel build. A project
+ * with no link arms nothing and the run's `vercel` stays null for ever, which
+ * is the honest record: the box never asked Vercel anything about it.
+ *
+ * Runs whose deployment is being polled right now, so a restart, a second
+ * settle or a fix turn coming home cannot start two watchers for one push.
+ */
+const deployWatchers = new Set<string>();
+
+/** Record a terminal deployment phase on the run and persist it. */
+function settleDeploy(run: CodingRun, phase: VercelPhase, detail: string | null): void {
+  if (!run.vercel) return;
+  run.vercel = { ...run.vercel, phase, detail, endedAt: Date.now() };
+  if (phase === "ready") pushProgress(run, RUNNER_STEP.deployReady(run.vercel.url ?? run.vercel.projectId));
+  else if (phase === "failed") pushProgress(run, RUNNER_STEP.deployFailed(detail ?? "the build failed"));
+  else if (phase !== "building" && phase !== "looking") {
+    pushProgress(run, RUNNER_STEP.deployStopped(detail ?? phase));
+  }
+  persist(true);
+}
+
+/**
+ * The link and the credential for one run, or null when there is nothing to
+ * watch.
+ *
+ * Resolved on EVERY tick rather than captured when the watch was armed: the
+ * owner can unlink the project or rotate the token while a build runs, and a
+ * watcher holding the old answer would go on polling with a credential its
+ * owner has replaced — or worse, one they deliberately took away.
+ */
+async function deployContextFor(run: CodingRun): Promise<{ scope: string; projectId: string; teamId: string | null; auth: Awaited<ReturnType<typeof resolveVercelAuth>> } | { error: string }> {
+  const scope = await projectScopeFor(run);
+  if (!scope) return { error: "This run is not in a project, so there is no Vercel link for it." };
+  const link = await readVercelLink(scope);
+  if (!link) return { error: "The Vercel link for this project was removed." };
+  try {
+    const auth = await resolveVercelAuth(link, scope);
+    return { scope, projectId: link.projectId, teamId: link.teamId, auth };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "This ClawBox could not read the Vercel token." };
+  }
+}
+
+/**
+ * Arm the watch for a run whose branch has just been pushed.
+ *
+ * Never throws and never refuses loudly: a project with no Vercel link is the
+ * ordinary case, and an owner who has not set this up must not see an error on
+ * their run's page because of a feature they are not using.
+ */
+async function startDeployWatch(runId: string): Promise<void> {
+  try {
+    const run = loadRuns().find((r) => r.id === runId);
+    if (!run || run.vercel) return;
+    const scope = await projectScopeFor(run);
+    if (!scope) return;
+    const link = await readVercelLink(scope);
+    if (!link) return;
+    // Re-read: `projectScopeFor` and the link read are both disk reads, and the
+    // owner may have stopped the run under us.
+    const live = loadRuns().find((r) => r.id === runId);
+    if (!live || live.vercel) return;
+    live.vercel = {
+      phase: "looking",
+      projectId: link.projectId,
+      teamId: link.teamId,
+      deploymentId: null,
+      readyState: "queued",
+      url: null,
+      inspectorUrl: null,
+      target: null,
+      branch: live.pr?.branch ?? runBranchName(live.id),
+      // The commit the pull request was opened on: what names ONE build, and
+      // what `matchDeployment` prefers over the branch.
+      sha: live.commit,
+      startedAt: Date.now(),
+      endedAt: null,
+      detail: null,
+      fixRunId: null,
+      feedbackSent: false,
+      promotion: null,
+    };
+    pushProgress(live, RUNNER_STEP.deployWatching(live.vercel.branch ?? live.id));
+    persist(true);
+    watchDeployment(live.id);
+  } catch (err) {
+    console.error(`[coding-agent] deployment watch for ${runId} not armed:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * Poll Vercel until the deployment for this push decides something.
+ *
+ * A timer in the web server, so — like `watchPullRequest` — it is unref()'d, it
+ * is capped, and it is single-instance per run. Everything it decides on is
+ * read from the RECORD each tick, so a watcher rebuilt after a restart decides
+ * exactly as the first one did.
+ */
+function watchDeployment(runId: string): void {
+  if (deployWatchers.has(runId)) return;
+  deployWatchers.add(runId);
+
+  const schedule = () => {
+    const timer = setTimeout(() => { void tick(); }, VERCEL_POLL_INTERVAL_MS);
+    // Never hold the process open for a build on somebody else's servers.
+    timer.unref?.();
+  };
+
+  const tick = async (): Promise<void> => {
+    const run = loadRuns().find((r) => r.id === runId);
+    if (!run?.vercel || !isVercelPending(run.vercel)) {
+      deployWatchers.delete(runId);
+      return;
+    }
+    const waitedMs = Date.now() - run.vercel.startedAt;
+
+    const context = await deployContextFor(run);
+    if ("error" in context) {
+      // The link or the token is gone. That is not a build that failed — the
+      // box simply cannot look any more — so it is `abandoned` with the reason.
+      settleDeploy(run, "abandoned", context.error);
+      deployWatchers.delete(runId);
+      return;
+    }
+
+    const listed = await listDeployments(context.auth, context.projectId);
+    if (!listed.ok) {
+      // A fault that says nothing about the build is waited through, under the
+      // same ceiling a build that never finishes gets — the lesson
+      // `watchPullRequest` learned: without it, a token that expired or a box
+      // offline for the evening left the record pending for good and polled
+      // again after every restart.
+      if (isTransient(listed.kind) && waitedMs < VERCEL_MAX_WAIT_MS) { schedule(); return; }
+      settleDeploy(run, "abandoned", listed.detail);
+      deployWatchers.delete(runId);
+      return;
+    }
+
+    const match = matchDeployment(listed.deployments, { sha: run.vercel.sha, branch: run.vercel.branch });
+    recordDeployment(run, match);
+
+    const verdict = decideDeployment({ deployment: match, waitedMs });
+    if (verdict.action === "wait") { schedule(); return; }
+    settleDeploy(run, verdict.phase, verdict.detail);
+    deployWatchers.delete(runId);
+    // The one thing that happens after a settle: a FAILED build is handed back
+    // to the session that wrote it. Fire-and-forget, because nothing here waits
+    // on a run starting.
+    if (verdict.phase === "failed") void handOffFailedDeploy(runId);
+  };
+
+  schedule();
+}
+
+/** What the poll just learned about the deployment, onto the record. */
+function recordDeployment(run: CodingRun, found: VercelDeployment | null): void {
+  if (!run.vercel || !found) return;
+  const before = run.vercel;
+  const next: VercelState = {
+    ...before,
+    // `looking` becomes `building` the moment a deployment exists; the terminal
+    // phases are settleDeploy's to write.
+    phase: "building",
+    deploymentId: found.id,
+    readyState: found.readyState,
+    url: found.url ?? before.url,
+    inspectorUrl: found.inspectorUrl ?? before.inspectorUrl,
+    target: found.target ?? before.target,
+    // The branch and the sha are the watch's own question and are never
+    // overwritten by the answer: a deployment matched by branch alone would
+    // otherwise rewrite `sha` to its own, and the next tick would then match
+    // that deployment rather than the commit this run pushed.
+    branch: before.branch,
+    sha: before.sha,
+  };
+  if (next.deploymentId === before.deploymentId && next.readyState === before.readyState
+    && next.url === before.url && next.phase === before.phase) {
+    return;
+  }
+  run.vercel = next;
+  persist(true);
+}
+
+/**
+ * Hand the failed build's log back to the run that wrote it.
+ *
+ * ONCE per push (`feedbackSent`), and deliberately not a loop with rounds like
+ * the review one. A build that fails twice for the same reason is a fact about
+ * the project — a missing environment variable on Vercel, a plan limit, a
+ * setting the harness cannot reach from the folder — and spending run after run
+ * on it would be the box burning the owner's allowance on something it has
+ * already been told it cannot fix. The fix turn's own push re-arms the watch
+ * (`resumeDeployAfterFix`), and a second failure is the owner's, with the whole
+ * log a click away on Vercel.
+ */
+async function handOffFailedDeploy(runId: string): Promise<void> {
+  try {
+    const run = loadRuns().find((r) => r.id === runId);
+    if (!run?.vercel || run.vercel.phase !== "failed" || run.vercel.feedbackSent) return;
+    const deploymentId = run.vercel.deploymentId;
+    if (!deploymentId) return;
+
+    const context = await deployContextFor(run);
+    if ("error" in context) return;
+    const fetched = await readBuildLog(context.auth, deploymentId);
+    const log = fetched.ok ? fetched.log : "";
+
+    // Re-read: the log fetch is a download and can take the better part of a
+    // minute, and the owner may have stopped the run or the box may have
+    // started another one.
+    const live = loadRuns().find((r) => r.id === runId);
+    if (!live?.vercel || live.vercel.phase !== "failed" || live.vercel.feedbackSent) return;
+
+    const task = buildDeployFeedback({
+      projectId: live.vercel.projectId,
+      branch: live.vercel.branch,
+      url: live.vercel.url,
+      inspectorUrl: live.vercel.inspectorUrl,
+      detail: live.vercel.detail,
+      log,
+    });
+    // Marked BEFORE the start, not after: a start that throws must not leave
+    // the flag false, or a restart's resume would hand the same log to the
+    // same session a second time. One attempt is what this promises.
+    live.vercel = { ...live.vercel, feedbackSent: true };
+    persist(true);
+
+    const fix = await startRun({
+      task,
+      resumeRunId: live.id,
+      source: live.source,
+      vercelFixOf: live.id,
+    });
+    const after = loadRuns().find((r) => r.id === runId);
+    if (after?.vercel) {
+      after.vercel = { ...after.vercel, fixRunId: fix.id };
+      pushProgress(after, RUNNER_STEP.deployFeedback(fix.id));
+      persist(true);
+    }
+    console.error(`[coding-agent] ${fix.id} started to fix the Vercel build of ${runId}`);
+  } catch (err) {
+    console.error(`[coding-agent] failed Vercel build of ${runId} not handed back:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * A deployment-fix turn has come home: push what it committed, then watch the
+ * build it causes.
+ *
+ * Called from the settle path instead of the pull-request step, for the reason
+ * `resumeReviewAfterFix` is: this turn has no pull request of its own to open.
+ */
+async function resumeDeployAfterFix(finished: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
+  const originId = finished.vercelFixOf;
+  if (!originId) return;
+  const origin = loadRuns().find((r) => r.id === originId);
+  if (!origin?.vercel) return;
+
+  // A pause is not the end of the turn: it resumes in place and its settle
+  // comes back here, the way a paused run's pull request stays "opening".
+  if (finished.status === "paused") return;
+  if (ended !== null || finished.status !== "completed") {
+    const why = ended !== null
+      ? `The deployment fix was ${ended === "pause" ? "paused" : "stopped"}`
+      : `The deployment fix did not finish (${finished.status})`;
+    settleDeploy(origin, "failed", `${origin.vercel.detail ?? "The Vercel build failed."} ${why}, so the build was not tried again.`);
+    return;
+  }
+
+  // Belt and braces, exactly as the review round does it: the turn is TOLD to
+  // push, and usually does. One that committed and stopped short would leave
+  // the watch re-reading a build that never happened.
+  const branch = origin.vercel.branch;
+  if (branch) {
+    const pushed = await pushBranch(origin.directory, branch);
+    if (!pushed.ok) {
+      console.error(`[coding-agent] ${origin.id} deployment fix push: ${pushed.detail}`);
+      const current = loadRuns().find((r) => r.id === originId);
+      if (current?.vercel) {
+        settleDeploy(current, "abandoned", `The fix could not be pushed, so Vercel has nothing new to build: ${pushed.detail}`);
+      }
+      return;
+    }
+  }
+
+  const current = loadRuns().find((r) => r.id === originId);
+  if (!current?.vercel) return;
+  current.vercel = {
+    ...current.vercel,
+    phase: "looking",
+    // A NEW build: the old deployment's id, URL and verdict describe the one
+    // that failed, and leaving them on the record would show the failed
+    // preview beside a watch that has started over. The commit is the fix
+    // turn's own, which is what the next poll matches on.
+    deploymentId: null,
+    readyState: "queued",
+    url: null,
+    inspectorUrl: null,
+    target: null,
+    sha: finished.commit ?? current.commit,
+    startedAt: Date.now(),
+    endedAt: null,
+    detail: null,
+  };
+  pushProgress(current, RUNNER_STEP.deployWatching(branch ?? current.id));
+  persist(true);
+  watchDeployment(current.id);
+}
+
+/**
+ * Pick up deployments left pending by a restart.
+ *
+ * The sibling of the pull-request half of `resumePullRequestWatches`, and
+ * simpler, because there is no phase here that only a live process could have
+ * been about to write: a pending watch is a pending watch, and re-polling is
+ * exactly what picks it up. A fix turn that SURVIVED the restart in its own
+ * scope is the one case to leave alone — it will come back to
+ * `resumeDeployAfterFix` itself, and a watcher polling beside it would settle
+ * the build the fix is still being written for.
+ */
+function resumeDeployWatches(): void {
+  const list = loadRuns();
+  const liveFixOrigins = new Set<string>();
+  for (const id of live.keys()) {
+    const fixOf = list.find((r) => r.id === id)?.vercelFixOf;
+    if (fixOf) liveFixOrigins.add(fixOf);
+  }
+  for (const run of list) {
+    if (!isVercelPending(run.vercel)) continue;
+    if (liveFixOrigins.has(run.id)) continue;
+    watchDeployment(run.id);
+  }
+}
+
+/**
+ * Record the owner's promotion of a deployment to production.
+ *
+ * The WRITE only: the Vercel call itself is the route's, because this module
+ * must not be the thing that can put a build in front of a project's users —
+ * there is no automatic path to it, and keeping the call out here is what makes
+ * that readable rather than merely true today.
+ *
+ * Answers the run, or null when the record is gone.
+ */
+export function recordDeployPromotion(runId: string, promotion: VercelPromotion): CodingRun | null {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (!run?.vercel) return null;
+  run.vercel = { ...run.vercel, promotion, target: "production" };
+  pushProgress(run, RUNNER_STEP.deployPromoted(promotion.url ?? run.vercel.projectId));
+  persist(true);
+  return run;
 }
 
 /**
@@ -6406,6 +6903,9 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   // checks and by whoever left the comments it just answered. A pass over it
   // would spend a run to review a fix to a review.
   if (finished.reviewLoopOf !== null) return "skipped";
+  // A deployment-fix turn is the same case: its work has already been through
+  // the pass that ran when the run it continues settled.
+  if (finished.vercelFixOf !== null) return "skipped";
   if (finished.readOnly) return "skipped";
   // A team's worker is reviewed by the team's own reviewer, on the merged work.
   if (finished.team) return "skipped";
@@ -6469,7 +6969,7 @@ function deliverableFor(run: CodingRun): Deliverable | null {
  */
 function deliverableGateApplies(run: CodingRun): boolean {
   if (run.status !== "completed") return false;
-  if (run.reviewOf !== null || run.reviewLoopOf !== null) return false;
+  if (run.reviewOf !== null || run.reviewLoopOf !== null || run.vercelFixOf !== null) return false;
   if (run.readOnly || run.team) return false;
   return deliverableFor(run) !== null;
 }
@@ -6604,8 +7104,9 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
   // deliverable is judged on.
   if (review === "started") return;
   // A review-loop turn's settle belongs to the loop, and the run it is fixing
-  // was judged when IT settled.
-  if (finished.reviewLoopOf !== null) return;
+  // was judged when IT settled. A deployment-fix turn is the same: its settle
+  // belongs to the deployment watch.
+  if (finished.reviewLoopOf !== null || finished.vercelFixOf !== null) return;
   // A paused review pass is not the end of the chain either: it resumes in
   // place and comes back here. Judging the deliverable now would judge a folder
   // a live session is still working in.
@@ -6621,7 +7122,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
   // the LAST of them can have changed since `finishRun` held the notice, and
   // that case needs a different answer from "this was never gated".
   if (origin.status !== "completed") return;
-  if (origin.reviewOf !== null || origin.reviewLoopOf !== null) return;
+  if (origin.reviewOf !== null || origin.reviewLoopOf !== null || origin.vercelFixOf !== null) return;
   if (origin.readOnly || origin.team) return;
 
   const deliverable = deliverableFor(origin);
@@ -7613,12 +8114,14 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     deliverable: requireDeliverable(input),
     reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
     reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
+    vercelFixOf: typeof input.vercelFixOf === "string" ? input.vercelFixOf : null,
     team: input.team ?? null,
     readOnly: input.readOnly === true,
     extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
   });
   if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
   else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf));
+  else if (run.vercelFixOf) pushProgress(run, RUNNER_STEP.deployFixTurn(run.vercelFixOf));
   else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
   else if (resumeRunId) pushProgress(run, RUNNER_STEP.startingFresh(resumeRunId));
 
@@ -7636,7 +8139,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // in the same folder, on the branch its own pull request is already open
   // from, and a second branch under it would take the fixes away from that
   // pull request.
-  if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && (await getAutoPr())) {
+  if (!run.reviewOf && !run.reviewLoopOf && !run.vercelFixOf && !run.readOnly && !run.team && (await getAutoPr())) {
     const branched = await startRunBranch({
       directory: run.directory,
       runId: run.id,
@@ -7810,6 +8313,7 @@ function newRunRecord(fields: {
   settings: RunSettings;
   reviewOf?: string | null;
   reviewLoopOf?: string | null;
+  vercelFixOf?: string | null;
   team?: RunTeam | null;
   readOnly?: boolean;
   extraBrief?: string | null;
@@ -7862,6 +8366,8 @@ function newRunRecord(fields: {
     pauseReason: null,
     reviewOf: fields.reviewOf ?? null,
     reviewLoopOf: fields.reviewLoopOf ?? null,
+    vercel: null,
+    vercelFixOf: fields.vercelFixOf ?? null,
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
     extraBrief: fields.extraBrief ?? null,
