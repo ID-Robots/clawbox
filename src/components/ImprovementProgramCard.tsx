@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 
@@ -115,6 +115,7 @@ export default function ImprovementProgramCard() {
   const [reporting, setReporting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const modeRefs = useRef<Partial<Record<Mode, HTMLButtonElement | null>>>({});
 
   const load = useCallback(async () => {
     try {
@@ -184,6 +185,23 @@ export default function ImprovementProgramCard() {
     }
   };
 
+  /**
+   * Arrow keys move the choice, as the radiogroup pattern requires. The move
+   * SELECTS as well as focuses — that is the pattern for a group whose options
+   * carry no further input, and it is what makes the keyboard and the mouse do
+   * the same thing here.
+   */
+  const moveWithArrows = (event: React.KeyboardEvent, current: Mode) => {
+    const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1
+      : event.key === "ArrowUp" || event.key === "ArrowLeft" ? -1
+      : 0;
+    if (step === 0) return;
+    event.preventDefault();
+    const next = MODES[(MODES.indexOf(current) + step + MODES.length) % MODES.length];
+    modeRefs.current[next]?.focus();
+    void choose(next);
+  };
+
   if (loading) return null;
 
   const mode = state?.mode ?? FALLBACK.mode;
@@ -199,9 +217,12 @@ export default function ImprovementProgramCard() {
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">
           volunteer_activism
         </span>
-        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+        {/* A heading, not the `<label>` the sibling settings cards use: a label
+            that names no control is announced with no target, and this card is
+            the one an owner has to be able to read before consenting. */}
+        <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest m-0">
           {t("improvement.title")}
-        </label>
+        </h3>
       </div>
 
       <p className="text-[11px] text-[var(--text-muted)] leading-relaxed mb-4">{t("improvement.intro")}</p>
@@ -236,16 +257,23 @@ export default function ImprovementProgramCard() {
       <p className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
         {t("improvement.modeTitle")}
       </p>
+      {/* A real radiogroup, not three buttons wearing the role: only the chosen
+          one is a tab stop and the arrows move between them, which is what a
+          keyboard user is entitled to expect once `role="radio"` is claimed. */}
       <div role="radiogroup" aria-label={t("improvement.modeTitle")} className="space-y-2">
         {MODES.map((m) => (
           <button
             key={m}
             type="button"
             role="radio"
+            ref={(el) => { modeRefs.current[m] = el; }}
             aria-checked={mode === m}
             aria-busy={busy === m}
             disabled={busy !== null}
+            // Roving: the group is ONE tab stop, and it is the current choice.
+            tabIndex={mode === m ? 0 : -1}
             data-testid={`improvement-mode-${m}`}
+            onKeyDown={(e) => moveWithArrows(e, m)}
             onClick={() => void choose(m)}
             className={`w-full text-left rounded-xl border p-3 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
               mode === m

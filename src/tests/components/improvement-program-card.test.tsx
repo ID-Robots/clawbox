@@ -88,10 +88,19 @@ describe("what the card tells the owner before they choose", () => {
     }
   });
 
-  it("promises that the removal happens on the device", async () => {
+  it("promises on screen that the removal happens on the device", async () => {
     render(<ImprovementProgramCard />);
     await screen.findByTestId("improvement-program-card");
+    // The catalogue string AND the rendered node: the promise has to be the
+    // one an owner reads, not merely one the table happens to hold.
     expect(t("improvement.never3")).toMatch(/removed on the device/);
+    expect(screen.getByText(t("improvement.never3"))).toBeTruthy();
+  });
+
+  it("names the card with a heading rather than a label that names no control", async () => {
+    render(<ImprovementProgramCard />);
+    await screen.findByTestId("improvement-program-card");
+    expect(screen.getByRole("heading", { name: t("improvement.title") })).toBeTruthy();
   });
 
   it("names the repository the reports go to", async () => {
@@ -132,6 +141,36 @@ describe("the mode", () => {
     fireEvent.click(screen.getByTestId("improvement-mode-ask"));
     expect(await screen.findByText("Only from this ClawBox's own pages.")).toBeTruthy();
     expect(screen.getByTestId("improvement-mode-off").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("is one tab stop, on the current choice", async () => {
+    render(<ImprovementProgramCard />);
+    await screen.findByTestId("improvement-program-card");
+    expect(screen.getByTestId("improvement-mode-off").getAttribute("tabindex")).toBe("0");
+    for (const m of ["ask", "auto"]) {
+      expect(screen.getByTestId(`improvement-mode-${m}`).getAttribute("tabindex"), m).toBe("-1");
+    }
+  });
+
+  it.each([
+    ["ArrowDown", "ask"],
+    ["ArrowRight", "ask"],
+    ["ArrowUp", "auto"],
+    ["ArrowLeft", "auto"],
+  ])("moves the choice with %s and wraps round", async (key, expected) => {
+    mockFetch([() => json(state()), () => json(state({ mode: expected }))]);
+    render(<ImprovementProgramCard />);
+    await screen.findByTestId("improvement-program-card");
+    fireEvent.keyDown(screen.getByTestId("improvement-mode-off"), { key });
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1].body).toEqual({ mode: expected });
+  });
+
+  it("leaves other keys to the browser", async () => {
+    render(<ImprovementProgramCard />);
+    await screen.findByTestId("improvement-program-card");
+    fireEvent.keyDown(screen.getByTestId("improvement-mode-off"), { key: "a" });
+    await waitFor(() => expect(calls).toHaveLength(1));
   });
 
   it("does not post the mode that is already set", async () => {

@@ -134,6 +134,39 @@ describe("recordIncident", () => {
   });
 });
 
+describe("concurrent captures", () => {
+  /**
+   * `readFile()` and `writeFile()` are synchronous, so everything between them
+   * is one load-modify-store. An `await` inside it — the version read used to
+   * sit there — is a window in which another capture's write is lost.
+   */
+  it("keeps every distinct fault when several are captured at once", async () => {
+    await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        store.recordIncident({ source: "clawbox", message: `concurrent fault ${"n".repeat(i)}` })),
+    );
+    expect(store.listIncidents()).toHaveLength(12);
+  });
+
+  it("keeps every occurrence of ONE fault when several are captured at once", async () => {
+    await Promise.all(
+      Array.from({ length: 12 }, () => store.recordIncident({ source: "clawbox", message: "one repeating fault" })),
+    );
+    const all = store.listIncidents();
+    expect(all).toHaveLength(1);
+    expect(all[0].count).toBe(12);
+  });
+
+  it("does not lose a report mark to a capture that started before it", async () => {
+    const inc = (await store.recordIncident({ source: "update", message: "one" }))!;
+    const capture = store.recordIncident({ source: "clawbox", message: "another fault entirely" });
+    store.markReported(inc.id, 42);
+    await capture;
+    expect(store.getIncident(inc.id)?.issueNumber).toBe(42);
+    expect(store.listIncidents()).toHaveLength(2);
+  });
+});
+
 describe("the cap", () => {
   it("keeps MAX_INCIDENTS and drops the unreported oldest first", async () => {
     const t0 = 1_800_000_000_000;

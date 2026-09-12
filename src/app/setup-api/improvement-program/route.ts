@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { githubStatus } from "@/lib/coding-github";
-import { MAX_ISSUES_PER_DAY } from "@/lib/incident-report";
+import { MAX_ISSUES_PER_DAY, REPORT_REPO } from "@/lib/incident-report";
 import {
   getImprovementMode,
   isImprovementMode,
@@ -71,7 +71,9 @@ export async function GET() {
   const github = await githubStatus().catch(() => null);
   return NextResponse.json({
     mode,
-    repo: "ID-Robots/clawbox",
+    // The reporter's own constant, never a second literal: the card renders
+    // this as the destination, and a copy would drift from where reports go.
+    repo: REPORT_REPO,
     pending: incidents.filter((i) => i.issueNumber === null).length,
     reported: incidents.filter((i) => i.issueNumber !== null).length,
     total: incidents.length,

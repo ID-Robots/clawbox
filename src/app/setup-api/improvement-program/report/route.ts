@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { reportIncident, type ReportRefusal } from "@/lib/incident-report";
 import { INCIDENT_ID_RE } from "@/lib/incidents";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -18,6 +19,16 @@ export const dynamic = "force-dynamic";
  * widen anything: it can only do the thing the owner already allowed, and
  * `src/lib/incident-report.ts` applies the same mode, GitHub, dedupe and
  * rate-limit rules whichever surface arrives.
+ *
+ * IT IS STILL OUR PAGE ONLY. Dropping the owner gate is not the same as
+ * dropping the ORIGIN gate, and conflating them was a hole: the owner's browser
+ * attaches the session cookie to a POST any other site fires at the box, so a
+ * cross-site page could publish an incident to a public issue tracker without
+ * the per-incident consent this route's whole design rests on. `isSameOriginRequest`
+ * refuses that and leaves the agent alone by construction — a caller with
+ * neither `Origin` nor `Sec-Fetch-Site` (the MCP server, curl) is allowed
+ * through to whatever its own credential earns it, which is the guard's
+ * documented contract.
  *
  * Nothing in the request decides WHAT is sent: the id names a record whose text
  * was sanitized when it was captured, and the body template is fixed. A caller
@@ -37,6 +48,12 @@ const STATUS: Record<ReportRefusal, number> = {
 };
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { ok: false, error: "Reports can only be sent from this ClawBox's own pages.", code: "cross_origin" },
+      { status: 403 },
+    );
+  }
   let body: unknown;
   try {
     body = await request.json();

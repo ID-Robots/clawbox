@@ -46,6 +46,7 @@ beforeEach(async () => {
   vi.resetModules();
   store = await import("@/lib/incidents");
   report = await import("@/lib/incident-report");
+  report._resetAutoReportThrottleForTests();
 });
 
 afterEach(() => {
@@ -87,6 +88,107 @@ describe("the mode gate", () => {
 
   it("autoReportIfEnabled tolerates nothing to report", async () => {
     await expect(report.autoReportIfEnabled(null)).resolves.toBeUndefined();
+  });
+});
+
+describe("the automatic path does not stampede", () => {
+  /**
+   * `recordIncident` hands the EXISTING record back for a fault it has seen
+   * before — that is what dedupe is — so a box in a crash loop used to start
+   * one `gh issue list` per capture, including while the first was still in
+   * flight and long after the daily allowance was spent.
+   */
+  it("attempts one fingerprint once per throttle window", async () => {
+    const inc = await anIncident();
+    const t0 = Date.parse("2026-09-12T08:00:00Z");
+    const gh = fakeGh([NO_MATCH, ok("https://github.com/ID-Robots/clawbox/issues/1")]);
+    const deps = { gh: gh.run, githubConnected: connected, mode: async () => "auto" as const, now: () => t0 };
+    await report.autoReportIfEnabled(inc, deps);
+    expect(gh.calls).toHaveLength(2);
+
+    for (let i = 0; i < 20; i++) await report.autoReportIfEnabled(inc, deps);
+    expect(gh.calls, "no gh call for a fault inside the throttle window").toHaveLength(2);
+
+    await report.autoReportIfEnabled(inc, { ...deps, now: () => t0 + report.AUTO_REPORT_THROTTLE_MS + 1 });
+    expect(gh.calls.length).toBeGreaterThan(2);
+  });
+
+  it("single-flights: a second capture while the first report is in flight does nothing", async () => {
+    const inc = await anIncident();
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    const gh = fakeGh([NO_MATCH, ok("https://github.com/ID-Robots/clawbox/issues/1")]);
+    const slow = async (args: string[]) => { await held; return gh.run(args); };
+    const deps = { gh: slow, githubConnected: connected, mode: async () => "auto" as const };
+
+    const first = report.autoReportIfEnabled(inc, deps);
+    await report.autoReportIfEnabled(inc, deps);
+    await report.autoReportIfEnabled(inc, deps);
+    release();
+    await first;
+    expect(gh.calls).toHaveLength(2);
+  });
+
+  it("does not spend the window on a box that is only on ask", async () => {
+    const inc = await anIncident();
+    const t0 = Date.parse("2026-09-12T08:00:00Z");
+    const askDeps = { gh: fakeGh([]).run, githubConnected: connected, mode: async () => "ask" as const, now: () => t0 };
+    await report.autoReportIfEnabled(inc, askDeps);
+    // The owner switches to auto a minute later: the report must still go.
+    const gh = fakeGh([NO_MATCH, ok("https://github.com/ID-Robots/clawbox/issues/9")]);
+    await report.autoReportIfEnabled(inc, {
+      gh: gh.run, githubConnected: connected, mode: async () => "auto", now: () => t0 + 60_000,
+    });
+    expect(gh.calls).toHaveLength(2);
+  });
+
+  it("throttles by FINGERPRINT, so a different fault is never held back", async () => {
+    const t0 = Date.parse("2026-09-12T08:00:00Z");
+    const a = await anIncident("the first distinct fault");
+    const b = await anIncident("a completely different fault");
+    for (const [i, inc] of [a, b].entries()) {
+      const gh = fakeGh([NO_MATCH, ok(`https://github.com/ID-Robots/clawbox/issues/${i + 1}`)]);
+      await report.autoReportIfEnabled(inc, {
+        gh: gh.run, githubConnected: connected, mode: async () => "auto", now: () => t0,
+      });
+      expect(gh.calls, inc.message).toHaveLength(2);
+    }
+  });
+});
+
+describe("a stray cbip: token in the text", () => {
+  /**
+   * The dedupe search is `cbip:<fingerprint> in:body`, so a SECOND marker in a
+   * body makes this issue answer a search for a different fault — the later
+   * incident comments here instead of getting its own report. An error message
+   * can carry one by accident, and by design if the text can be influenced.
+   */
+  it("is broken so it cannot answer another fault's search", async () => {
+    const other = "0123456789abcdef";
+    const inc = await anIncident(`upstream said cbip:${other} which is not ours`);
+    const body = report.issueBodyFor(inc);
+    expect(body).toContain(report.markerFor(inc.fingerprint));
+    expect(body).not.toContain(`cbip:${other}`);
+    // Still readable to a person — the token is broken, not deleted.
+    expect(body).toContain(other);
+  });
+
+  it("leaves this incident's own marker intact", async () => {
+    const inc = await anIncident();
+    const body = report.issueBodyFor(inc);
+    expect(body.match(/cbip:[0-9a-f]{16}/g)).toEqual([`cbip:${inc.fingerprint}`]);
+  });
+
+  it("covers the stack and the context, not only the message", async () => {
+    const inc = (await store.recordIncident({
+      source: "clawbox",
+      message: "a fault",
+      stack: "Error: x\n    at run (cbip:aaaaaaaaaaaaaaaa)",
+      context: { note: "cbip:bbbbbbbbbbbbbbbb" },
+    }))!;
+    const body = report.issueBodyFor(inc);
+    expect(body).not.toContain("cbip:aaaaaaaaaaaaaaaa");
+    expect(body).not.toContain("cbip:bbbbbbbbbbbbbbbb");
   });
 });
 

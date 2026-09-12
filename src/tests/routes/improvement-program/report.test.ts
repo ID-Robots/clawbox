@@ -20,10 +20,10 @@ vi.mock("@/lib/incident-report", async (importOriginal) => ({
 
 let route: typeof import("@/app/setup-api/improvement-program/report/route");
 
-function request(body: unknown, raw?: string): Request {
+function request(body: unknown, raw?: string, headers: Record<string, string> = {}): Request {
   return new Request("http://clawbox.local/setup-api/improvement-program/report", {
     method: "POST",
-    headers: { "content-type": "application/json", host: "clawbox.local" },
+    headers: { "content-type": "application/json", host: "clawbox.local", ...headers },
     body: raw ?? JSON.stringify(body),
   });
 }
@@ -35,6 +35,40 @@ beforeEach(async () => {
 });
 
 afterEach(() => vi.clearAllMocks());
+
+describe("where a report may be asked for", () => {
+  /**
+   * Dropping the OWNER gate is not the same as dropping the ORIGIN gate, and
+   * conflating them was a hole: the owner's browser attaches its session cookie
+   * to a POST any other site fires at the box, so a cross-site page could
+   * publish an incident to a PUBLIC tracker without the per-incident consent
+   * this route's whole design rests on.
+   */
+  it.each([
+    ["another site's page", { origin: "http://evil.example" }],
+    ["a sandboxed frame's opaque origin", { origin: "null" }],
+    ["a browser that says cross-site", { "sec-fetch-site": "cross-site" }],
+    ["a sibling host", { "sec-fetch-site": "same-site" }],
+  ])("refuses %s before anything is parsed", async (_name, headers) => {
+    const res = await route.POST(request({ id: "inc-abc" }, undefined, headers));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("cross_origin");
+    expect(reportIncident).not.toHaveBeenCalled();
+  });
+
+  it("allows this box's own page", async () => {
+    reportIncident.mockResolvedValue({ ok: true, action: "created", issueNumber: 1 });
+    const res = await route.POST(request({ id: "inc-abc" }, undefined, { origin: "http://clawbox.local" }));
+    expect(res.status).toBe(200);
+  });
+
+  it("allows the agent, which sends neither header — that is what ask mode IS", async () => {
+    reportIncident.mockResolvedValue({ ok: true, action: "created", issueNumber: 1 });
+    const res = await route.POST(request({ id: "inc-abc" }));
+    expect(res.status).toBe(200);
+    expect(reportIncident).toHaveBeenCalledWith("inc-abc");
+  });
+});
 
 describe("a report that goes out", () => {
   it("answers the issue it became", async () => {

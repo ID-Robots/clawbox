@@ -245,9 +245,23 @@ async function configSecrets(): Promise<string[]> {
   }
 }
 
-/** The versions an issue carries. Read lazily and never allowed to throw: a
- *  version we cannot name is "unknown", which is still a report. */
+/**
+ * The versions an issue carries. Never allowed to throw: a version we cannot
+ * name is "unknown", which is still a report.
+ *
+ * MEMOISED for the process lifetime, and that is not only about the two file
+ * reads. `recordIncident` must not `await` between its `readFile()` and its
+ * `writeFile()` — both are synchronous, so an await between them is a
+ * lost-update window in which a concurrent capture, `markReported` or
+ * `markCommented` writes state this one then overwrites. The read is hoisted
+ * above the load-modify-store below and cached here so the hoist costs nothing
+ * on the common path. An update replaces package.json and restarts the web
+ * server, so a cached value cannot outlive the release it names.
+ */
+let versionsCache: { appVersion: string; coreVersion: string | null } | null = null;
+
 async function versions(): Promise<{ appVersion: string; coreVersion: string | null }> {
+  if (versionsCache) return versionsCache;
   let appVersion = process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
   try {
     // The checkout's package.json, like updater.ts's own version read: it is
@@ -266,7 +280,8 @@ async function versions(): Promise<{ appVersion: string; coreVersion: string | n
   } catch {
     coreVersion = null;
   }
-  return { appVersion, coreVersion };
+  versionsCache = { appVersion, coreVersion };
+  return versionsCache;
 }
 
 export interface RecordIncidentInput {
@@ -328,6 +343,11 @@ export async function recordIncident(input: RecordIncidentInput): Promise<Incide
     const context = sanitizeContext(input.context, options);
     const fingerprint = fingerprintOf(input.source, message, stack);
 
+    // BEFORE the read. Everything from `readFile()` to `writeFile()` below is
+    // one synchronous load-modify-store, and an `await` inside it is a window
+    // in which another capture's write is lost.
+    const { appVersion, coreVersion } = await versions();
+
     const file = readFile();
     const existing = file.incidents.find((i) => i.fingerprint === fingerprint);
     if (existing) {
@@ -342,7 +362,6 @@ export async function recordIncident(input: RecordIncidentInput): Promise<Incide
       return existing;
     }
 
-    const { appVersion, coreVersion } = await versions();
     const incident: Incident = {
       id: nextId(now),
       fingerprint,
@@ -448,4 +467,5 @@ export function _resetIncidentsForTests(): void {
     // nothing to forget
   }
   idCounter = 0;
+  versionsCache = null;
 }

@@ -81,6 +81,24 @@ export function markerFor(fingerprint: string): string {
   return `<!-- cbip:${fingerprint} -->`;
 }
 
+/**
+ * Break any OTHER `cbip:` token in text that goes into an issue body.
+ *
+ * The dedupe search is `cbip:<fingerprint> in:body`, so a second marker
+ * anywhere in the body makes this issue answer a search for a DIFFERENT fault —
+ * the later incident would then comment here instead of getting its own report.
+ * A sanitized error message can carry one by accident, and by design if somebody
+ * can influence the text an error path prints.
+ *
+ * Only the token is broken, and only outside the one marker this module writes
+ * itself: a zero-width space after the colon leaves the text readable to a
+ * person and stops it matching. `markerFor` is emitted after this runs, so the
+ * real marker is untouched.
+ */
+export function neutralizeMarkers(text: string): string {
+  return text.replace(/cbip:/gi, "cbip\u200b:");
+}
+
 /** `gh` with the same minimal environment coding-github.ts uses: HOME for the
  *  credential, no prompts, no colour. */
 function gh(args: string[]): Promise<ChildResult> {
@@ -118,7 +136,10 @@ export function issueTitleFor(incident: Incident): string {
  */
 export function issueBodyFor(incident: Incident): string {
   const seen = (ms: number) => new Date(ms).toISOString().replace(/\.\d+Z$/, "Z");
-  const context = Object.entries(incident.context);
+  // Every interpolated field, not just the message: the stack and the context
+  // are text from the same subsystem and reach the same body.
+  const safe = neutralizeMarkers;
+  const context = Object.entries(incident.context).map(([k, v]) => [safe(k), safe(v)] as const);
   return [
     markerFor(incident.fingerprint),
     "",
@@ -136,9 +157,9 @@ export function issueBodyFor(incident: Incident): string {
     "### Message",
     "",
     "```",
-    incident.message,
+    safe(incident.message),
     "```",
-    ...(incident.stack ? ["", "### Stack", "", "```", incident.stack, "```"] : []),
+    ...(incident.stack ? ["", "### Stack", "", "```", safe(incident.stack), "```"] : []),
     ...(context.length
       ? ["", "### Context", "", ...context.map(([k, v]) => `- \`${k}\`: ${v}`)]
       : []),
@@ -305,23 +326,62 @@ export async function reportIncident(id: string, deps: ReportDeps = {}): Promise
 }
 
 /**
+ * How long the AUTOMATIC path leaves one fingerprint alone after trying it.
+ *
+ * The manual paths — the owner's button, the agent's tool — are human-paced and
+ * are not throttled here. The automatic one is not: a box in a crash loop
+ * captures the same fault over and over, and `recordIncident` hands the
+ * EXISTING record back each time (that is what dedupe is), so without this
+ * every capture would start its own `gh issue list` — including while the
+ * first one is still running, and long after the daily allowance is spent.
+ */
+export const AUTO_REPORT_THROTTLE_MS = 10 * 60_000;
+
+/** Last automatic attempt per fingerprint, and the ones in flight right now.
+ *  In memory like the runs store: one device, one web-server process. */
+const autoAttemptedAt = new Map<string, number>();
+const autoInFlight = new Set<string>();
+
+/**
  * The `auto` mode's hook: file straight away, and say nothing anybody has to
  * read. Never throws — it is called from the same failure paths `recordIncident`
  * is, and an auto-reporter that can fail a run would be a defect worse than the
  * one it reports.
+ *
+ * Single-flighted and throttled BY FINGERPRINT rather than by incident id: the
+ * id is stable across occurrences, but the fingerprint is what "the same fault"
+ * means everywhere else in this module, and keying both on it keeps one answer
+ * to that question.
  */
 export async function autoReportIfEnabled(incident: Incident | null, deps: ReportDeps = {}): Promise<void> {
   if (!incident) return;
+  const key = incident.fingerprint;
+  if (autoInFlight.has(key)) return;
+  const now = deps.now ? deps.now() : Date.now();
+  const last = autoAttemptedAt.get(key);
+  if (last !== undefined && now - last < AUTO_REPORT_THROTTLE_MS) return;
+  autoInFlight.add(key);
   try {
     const mode = await (deps.mode ?? getImprovementMode)();
     if (mode !== "auto") return;
+    // Stamped only once the mode has said yes, so a box that is merely on
+    // `ask` does not spend its throttle window on attempts it never made.
+    autoAttemptedAt.set(key, now);
     const outcome = await reportIncident(incident.id, deps);
     if (!outcome.ok && outcome.code !== "rate_limited" && outcome.code !== "no_github") {
       console.error(`[improvement-program] ${incident.id} not reported (${outcome.code})`);
     }
   } catch {
     // An error reporter must not become a source of errors.
+  } finally {
+    autoInFlight.delete(key);
   }
+}
+
+/** Test seam: forget the automatic path's throttle. Never called on a box. */
+export function _resetAutoReportThrottleForTests(): void {
+  autoAttemptedAt.clear();
+  autoInFlight.clear();
 }
 
 /**
