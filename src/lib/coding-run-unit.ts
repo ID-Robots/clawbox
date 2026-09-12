@@ -51,10 +51,20 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const SYSTEMD_TIMEOUT_MS = 5_000;
 /** How long the `--scope true` probe is given, bus round trip included. */
 const PROBE_TIMEOUT_MS = 8_000;
-/** How long a probe answer is reused. Long enough to cost nothing on a status
- *  poll, short enough that a box whose user manager has just come up is not
- *  told "no" for the rest of the web server's life. */
-const PROBE_TTL_MS = 60_000;
+/**
+ * How long a probe answer is reused, and why the two differ.
+ *
+ * A YES is cached for much longer because it does not go stale — a box whose
+ * user manager is up does not stop being able to make a scope — and because the
+ * probe is the one thing here that costs something visible: it creates a real
+ * transient unit, so systemd writes a journal line for every probe, and the
+ * Coding Agent app polls readiness for as long as its window is open.
+ *
+ * A NO is cached briefly, so a box that has just been given `enable-linger` is
+ * not told "no" for the rest of the web server's life.
+ */
+const PROBE_TTL_OK_MS = 600_000;
+const PROBE_TTL_FAIL_MS = 60_000;
 
 /**
  * A scope unit name, or null when the token is not something this module will
@@ -188,7 +198,9 @@ let probeInFlight: Promise<SystemdRunProbe> | null = null;
  */
 export async function probeSystemdRun(): Promise<SystemdRunProbe> {
   const now = Date.now();
-  if (probeCache && now - probeCache.at < PROBE_TTL_MS) return probeCache.value;
+  if (probeCache && now - probeCache.at < (probeCache.value.available ? PROBE_TTL_OK_MS : PROBE_TTL_FAIL_MS)) {
+    return probeCache.value;
+  }
   if (probeInFlight) return probeInFlight;
   probeInFlight = (async (): Promise<SystemdRunProbe> => {
     const binary = await findSystemdTool("systemd-run");
