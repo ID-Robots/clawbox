@@ -161,6 +161,22 @@ import {
   type ReviewLoop,
   type ReviewSnapshot,
 } from "@/lib/coding-review";
+import {
+  completionAttemptsFrom,
+  completionNudge,
+  gaveUpReason,
+  MAX_COMPLETION_ATTEMPTS,
+  MAX_MISSING_CHARS,
+  MIN_COMPLETION_ATTEMPTS,
+  parseAttempts,
+  parseDeliverable,
+  parseDeliverableVerdict,
+  readDeliverableInput,
+  type Deliverable,
+  type DeliverableVerdict,
+  type RunAttempt,
+} from "@/lib/coding-deliverable";
+import { checkDeliverable, type DeliverableSandbox } from "@/lib/coding-deliverable-check";
 import { commitRunWork, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
 import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { captureIncident } from "@/lib/incident-report";
@@ -346,6 +362,20 @@ export const CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY = "coding_agent_review_rounds
  */
 export const CODING_AGENT_AUTO_MERGE_CONFIG_KEY = "coding_agent_auto_merge";
 
+/**
+ * How many ATTEMPTS at its deliverable a run gets, the original included.
+ *
+ * Only ever spent by a run that HAS a deliverable (src/lib/coding-deliverable.ts):
+ * one the caller named, or the pull request the auto-PR switch already implies.
+ * A run with neither settles exactly as it always did, so this setting costs a
+ * box that does not use deliverables nothing at all.
+ *
+ * Three by default, and the count includes the run's own first turn — so the
+ * default buys two resumes. One is a real setting and means "check it, tell me,
+ * spend nothing more".
+ */
+export const CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY = "coding_agent_completion_attempts";
+
 export const CODING_AGENT_SETUP_CONFIG_KEY = "coding_agent_setup_complete";
 
 /**
@@ -425,6 +455,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
   CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY,
   CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
+  CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY,
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
@@ -1150,6 +1181,46 @@ export interface CodingRun {
   leftover: boolean;
   /** Why the run's work could not be committed at settle — null when it was, or when there was nothing to commit. A team acts on it: a worker whose commit failed has no branch to merge. */
   commitError: string | null;
+  /**
+   * What this run has to LEAVE BEHIND before the box calls it finished.
+   *
+   * `status: "completed"` used to mean one thing only: Claude Code emitted a
+   * success result event. A harness that investigated, concluded the task was
+   * beyond it and wrote a paragraph saying so emits exactly that — so the card
+   * said "Finished" over a folder with nothing in it. A deliverable is the
+   * owner's (or the caller's) answer to "what would prove this run worked",
+   * and while one is set, `completed` means the check passed.
+   *
+   * Null on a run nobody named one for AND on a box with auto-PR off, which is
+   * the unchanged path: a run with no deliverable settles exactly as it always
+   * has. Frozen at the start like `effort`, `maxTurns` and `media` — the bar a
+   * run is held to must not move under it. See src/lib/coding-deliverable.ts.
+   */
+  deliverable: Deliverable | null;
+  /**
+   * The last verdict on that deliverable: was it there, and if not what was
+   * missing. Null before the first check, and on a run with no deliverable.
+   *
+   * Kept beside the attempt list rather than folded into it, because this is
+   * the CURRENT state of the question — what the card draws — while `attempts`
+   * is its history.
+   */
+  deliverableCheck: DeliverableVerdict | null;
+  /**
+   * Every attempt at the deliverable, the run's own first turn included.
+   *
+   * An entry is OPENED when a turn is spawned for this record and CLOSED when
+   * the deliverable is judged, so a list of three entries is three harness
+   * turns at one task and the reasons each of the first two did not settle it.
+   * Empty on a run with no deliverable.
+   */
+  attempts: RunAttempt[];
+  /**
+   * The attempt ceiling this run started with, frozen for the reason every
+   * other run setting is: the owner changing the number while a run works must
+   * not change the promise that run was started under.
+   */
+  completionAttempts: number;
 }
 
 /** Which media a run may ask this box for — read once, at its start. */
@@ -1294,6 +1365,11 @@ export interface CodingAgentStatus {
   maxReviewRounds: number;
   /** May the box merge a pull request its review loop cleared? */
   autoMerge: boolean;
+  /** Attempts a run with a deliverable gets at it, its own first turn included. */
+  completionAttempts: number;
+  /** The range the app offers, so it does not have to guess the bounds. */
+  minCompletionAttempts: number;
+  maxCompletionAttempts: number;
   /** May a run draw pictures, and may the box draw the project's icon? */
   generateImages: boolean;
   /** May a run have this box speak a clip into its project? */
@@ -1352,6 +1428,19 @@ export interface StartRunInput {
   provider?: unknown;
   /** Which model, for a provider that lets one be named. Validated together with `provider`. */
   model?: unknown;
+  /**
+   * What this run has to leave behind before the box calls it finished, as the
+   * CALLER sent it — unvalidated. `startRun` reads it through
+   * `readDeliverableInput` and throws `invalid` with the reason when it cannot,
+   * so a caller learns what this box accepts rather than having its deliverable
+   * silently dropped.
+   *
+   * `source` is what decides whether a `command` deliverable is allowed: the
+   * owner holds a browser session, the agent holds the MCP bearer, and a
+   * command the box runs on the agent's word would be execution the agent does
+   * not otherwise have. See readDeliverableInput.
+   */
+  deliverable?: unknown;
 }
 
 /** A run's place in a coding team. */
@@ -1611,6 +1700,26 @@ export async function setAutoMerge(on: unknown): Promise<boolean> {
   }
   await configSet(CODING_AGENT_AUTO_MERGE_CONFIG_KEY, on);
   return on;
+}
+
+/** How many attempts at its deliverable a run gets. Absent means the default. */
+export async function getCompletionAttempts(): Promise<number> {
+  return completionAttemptsFrom(await configGet(CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY));
+}
+
+export async function setCompletionAttempts(attempts: unknown): Promise<number> {
+  // Whole numbers only, and the range refused rather than clamped — the rule
+  // `setReviewRounds` follows, for its reason: a caller that asked for 20
+  // attempts meant something this box does not offer, and quietly saving 6
+  // answers a question it did not ask.
+  if (typeof attempts !== "number" || !Number.isInteger(attempts)) {
+    throw new CodingAgentError("invalid", "The number of attempts must be a whole number.");
+  }
+  if (attempts < MIN_COMPLETION_ATTEMPTS || attempts > MAX_COMPLETION_ATTEMPTS) {
+    throw new CodingAgentError("invalid", `The number of attempts must be between ${MIN_COMPLETION_ATTEMPTS} and ${MAX_COMPLETION_ATTEMPTS}.`);
+  }
+  await configSet(CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY, attempts);
+  return attempts;
 }
 
 /** The two media switches. ON when absent — see their config keys. */
@@ -2523,6 +2632,11 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     minReviewRounds: MIN_REVIEW_ROUNDS,
     maxReviewRounds: MAX_REVIEW_ROUNDS,
     autoMerge: config[CODING_AGENT_AUTO_MERGE_CONFIG_KEY] === true,
+    // Absent means the default, like the review rounds above: a box that
+    // predates the setting still gives a run with a deliverable its three goes.
+    completionAttempts: completionAttemptsFrom(config[CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY]),
+    minCompletionAttempts: MIN_COMPLETION_ATTEMPTS,
+    maxCompletionAttempts: MAX_COMPLETION_ATTEMPTS,
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
@@ -2750,6 +2864,15 @@ function normalizeRun(raw: CodingRun): CodingRun {
     pgid: typeof raw.pgid === "number" && raw.pgid > 0 ? raw.pgid : null,
     leftover: raw.leftover === true,
     commitError: typeof raw.commitError === "string" ? raw.commitError : null,
+    // Only a deliverable this code could have written counts; anything else on
+    // a hand-edited record is no deliverable at all, the way parsePauseReason
+    // treats a reason it does not recognise. A record that loses its
+    // deliverable this way settles the old way, which is the safe direction:
+    // it cannot make a run give up on a bar nothing here can word.
+    deliverable: parseDeliverable((raw as { deliverable?: unknown }).deliverable),
+    deliverableCheck: parseDeliverableVerdict((raw as { deliverableCheck?: unknown }).deliverableCheck),
+    attempts: parseAttempts((raw as { attempts?: unknown }).attempts),
+    completionAttempts: completionAttemptsFrom((raw as { completionAttempts?: unknown }).completionAttempts),
   };
 }
 
@@ -5002,6 +5125,10 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
   // Reached after the owner's Stop too — not to open anything then, but so the
   // pull request that was being prepared is settled rather than left pending.
   await maybeOpenPullRequest(run, ended, review);
+  // LAST, because it is the step that decides whether "completed" stands — and
+  // for the `pr` deliverable the answer is only knowable once the step above
+  // has had its go at opening one.
+  await enforceDeliverable(run, ended, review);
 }
 
 /**
@@ -5693,6 +5820,300 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   }
 }
 
+
+// ─── Durable completion: a run is done when the deliverable exists ───────────
+
+/**
+ * The bar THIS run is held to, explicit or implied.
+ *
+ * The implied half is the auto-PR switch: a box with it on has already said the
+ * point of a run is a pull request, so there is nothing else for a deliverable
+ * to be and nothing for the owner to type. It is implied only where a pull
+ * request was actually POSSIBLE, though — `pr === null` is a folder that is not
+ * a repository yet, and `pr.phase === "failed"` is the box recording that its
+ * own pull-request flow could not run (no remote, `gh` not logged in, the push
+ * refused). Nudging the harness for a pull request the DEVICE cannot open would
+ * spend every attempt on the one thing the harness cannot fix, so the implied
+ * deliverable steps aside there. An EXPLICIT `{ kind: "pr" }` is honoured as
+ * the caller stated it, because that is an instruction rather than an inference.
+ */
+function deliverableFor(run: CodingRun): Deliverable | null {
+  if (run.deliverable) return run.deliverable;
+  if (run.pr && run.pr.phase !== "failed") return { kind: "pr" };
+  return null;
+}
+
+/**
+ * Will the deliverable gate decide this run's ending, rather than the status
+ * the harness just reported?
+ *
+ * ONE predicate, because two readers have to agree on it exactly: `finishRun`
+ * holds the finish notice back when it is true (a notice saying "finished" over
+ * a run about to go back in would be the lie this feature exists to remove),
+ * and `enforceDeliverable` is what then sends that notice. A disagreement
+ * between them is a run nobody is ever told about.
+ *
+ * `completed` only: every other ending is the harness's or the owner's, and a
+ * deliverable has no opinion about a run that failed or was stopped. A review
+ * pass, a review-loop turn, a read-only planner and a team's run are all
+ * excluded for the reasons `maybeStartReviewPass` excludes them — none of them
+ * is the run that owes the deliverable.
+ */
+function deliverableGateApplies(run: CodingRun): boolean {
+  if (run.status !== "completed") return false;
+  if (run.reviewOf !== null || run.reviewLoopOf !== null) return false;
+  if (run.readOnly || run.team) return false;
+  return deliverableFor(run) !== null;
+}
+
+/** Open an attempt entry, for a run that has a deliverable to clear. */
+function openAttempt(run: CodingRun): void {
+  if (deliverableFor(run) === null) return;
+  // Never two open at once: a record whose previous attempt was left open by a
+  // restart must not grow a second one, or the count that decides "no more
+  // attempts" would be the count of interruptions.
+  if (run.attempts.some((a) => a.endedAt === null)) return;
+  if (run.attempts.length >= MAX_COMPLETION_ATTEMPTS) return;
+  run.attempts.push({ startedAt: Date.now(), endedAt: null, reason: null });
+}
+
+/**
+ * Close the open attempt with what was still missing (null when it was there).
+ *
+ * A judgement with no open entry to close still gets recorded — a record from
+ * before the field, or one whose attempt a restart closed — because the count
+ * of attempts is what decides whether to try again, and a judgement that
+ * vanished would let a run be nudged for ever.
+ */
+function closeAttempt(run: CodingRun, missing: string | null): void {
+  const reason = missing ? missing.slice(0, MAX_MISSING_CHARS) : null;
+  for (let i = run.attempts.length - 1; i >= 0; i -= 1) {
+    if (run.attempts[i].endedAt !== null) continue;
+    run.attempts[i].endedAt = Date.now();
+    run.attempts[i].reason = reason;
+    return;
+  }
+  if (run.attempts.length >= MAX_COMPLETION_ATTEMPTS) return;
+  run.attempts.push({ startedAt: run.startedAt, endedAt: Date.now(), reason });
+}
+
+/**
+ * The sandbox a deliverable COMMAND runs in: the harness's own.
+ *
+ * Null when `setpriv` cannot be found, which is the same condition that refuses
+ * a run outright — the checker then reports the command as unrunnable rather
+ * than running it with the web server's ambient network capabilities.
+ */
+async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | null> {
+  const setprivPath = await findExecutableOnPath(CAPABILITY_DROP_COMMAND);
+  if (!setprivPath) return null;
+  return {
+    bin: setprivPath,
+    args: CAPABILITY_DROP_ARGS,
+    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id) }),
+  };
+}
+
+/**
+ * Put the pull request step back to pending for a run that is going back to
+ * work, when no pull request was ever opened.
+ *
+ * `maybeOpenPullRequest` only opens one from `phase: "opening"`, so a record
+ * settled as "blocked" — which is what "Nothing was committed, so there is no
+ * pull request to open" writes — would never get another go: the next attempt
+ * would commit the work and no pull request would follow it, leaving the one
+ * deliverable that can then never be met. Only a pull request that was never
+ * OPENED is reopened this way; a real one has a number and IS the thing being
+ * checked for.
+ */
+function reopenPullRequestStep(run: CodingRun): void {
+  if (run.pr && run.pr.phase === "blocked" && run.pr.number === null) {
+    run.pr = { ...run.pr, phase: "opening", detail: null, endedAt: null };
+  }
+}
+
+/** The finish notice, once the gate has decided what this run actually is. */
+function announceGatedRun(run: CodingRun): void {
+  void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
+    console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
+  });
+}
+
+/**
+ * Did the run leave the deliverable behind — and if not, what now?
+ *
+ * The last step of the settle chain, and the one that makes `completed` mean
+ * something. Before it, a harness that spent twenty turns, concluded the task
+ * was beyond it and wrote a courteous paragraph settled exactly like one that
+ * built the thing: both emit a success result event, and nothing on the box had
+ * looked at the folder.
+ *
+ * Three endings, and the ATTEMPT is the middle one: the deliverable is there
+ * (`completed` stands), it is not and there are attempts left (the same record
+ * goes back in, same session, with a nudge naming what is missing), or it is
+ * not and there are none (`gave_up`, with the missing thing as the reason and
+ * Resume as the way on).
+ *
+ * Never throws: it runs inside the settle chain, and a thrown error here would
+ * leave a record whose notice was held back by `finishRun` and never sent.
+ */
+async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" | null, review: ReviewPassOutcome): Promise<void> {
+  // The chain is not over. A review pass is running in this run's own session,
+  // and its settle comes back here — the same deferral `maybeOpenPullRequest`
+  // makes, for the same reason: the review's commits are part of what the
+  // deliverable is judged on.
+  if (review === "started") return;
+  // A review-loop turn's settle belongs to the loop, and the run it is fixing
+  // was judged when IT settled.
+  if (finished.reviewLoopOf !== null) return;
+  // A paused review pass is not the end of the chain either: it resumes in
+  // place and comes back here. Judging the deliverable now would judge a folder
+  // a live session is still working in.
+  if (finished.reviewOf !== null && finished.status === "paused") return;
+
+  // The run that owes the deliverable: this one, or — when this is its review
+  // pass — the one it reviewed. Re-read from the list, because the review run's
+  // own settle is a different object.
+  const originId = finished.reviewOf ?? finished.id;
+  const origin = loadRuns().find((r) => r.id === originId);
+  if (!origin) return;
+  if (!deliverableGateApplies(origin)) return;
+  const deliverable = deliverableFor(origin);
+  if (!deliverable) return;
+
+  try {
+    // The owner's own gesture ends this, not the deliverable. Judging it now
+    // would answer a question they have already closed, and `gave_up` over a
+    // Stop would read as the box blaming the harness for obeying.
+    if (ended !== null) {
+      closeAttempt(origin, null);
+      persist(true);
+      announceGatedRun(origin);
+      return;
+    }
+
+    const verdict = await checkDeliverable(
+      { directory: origin.directory, pr: origin.pr },
+      deliverable,
+      deliverable.kind === "command" ? await deliverableSandbox(origin) : null,
+    );
+    origin.deliverableCheck = verdict;
+    closeAttempt(origin, verdict.ok ? null : verdict.missing);
+
+    if (verdict.ok) {
+      pushProgress(origin, RUNNER_STEP.deliverableMet);
+      persist(true);
+      announceGatedRun(origin);
+      return;
+    }
+
+    pushProgress(origin, RUNNER_STEP.deliverableMissing(verdict.missing ?? ""));
+    const made = origin.attempts.length;
+    if (made >= origin.completionAttempts) {
+      giveUp(origin, verdict.missing ?? "", made);
+      return;
+    }
+    await startCompletionAttempt(origin, deliverable, verdict.missing ?? "", made + 1);
+  } catch (err) {
+    // The check itself broke. NOT a pass: that is the whole point of the
+    // feature. The run is recorded as not having got there, with what went
+    // wrong as the reason, and the owner is told — which is strictly better
+    // than a tick over an unanswered question.
+    const reason = `The deliverable could not be checked: ${err instanceof Error ? err.message : String(err)}`;
+    console.error(`[coding-agent] ${origin.id} deliverable check failed:`, err instanceof Error ? err.message : err);
+    origin.deliverableCheck = { ok: false, missing: reason.slice(0, MAX_MISSING_CHARS), checkedAt: Date.now() };
+    closeAttempt(origin, reason);
+    giveUp(origin, reason, origin.attempts.length);
+  }
+}
+
+/**
+ * The honest ending for a run that worked, said it was done, and did not leave
+ * the deliverable behind.
+ *
+ * `resumable` is set, and that is the point of the status: the session is
+ * intact — the harness finished normally, so nothing is poisoned in it the way
+ * an authentication failure poisons one — and Resume carries on in it with
+ * everything already done still on disk. `completedAt` is kept if it is
+ * already there, so the elapsed clock still measures the work rather than the
+ * gate's own moment.
+ */
+function giveUp(run: CodingRun, missing: string, attempts: number): void {
+  run.status = "gave_up";
+  run.error = gaveUpReason(missing, attempts).slice(0, MAX_ERROR_CHARS);
+  run.resumable = true;
+  run.completedAt = run.completedAt ?? Date.now();
+  pushProgress(run, RUNNER_STEP.finished(run.status));
+  persist(true);
+  console.error(`[coding-agent] ${run.id} gave up after ${attempts} attempt(s) at its deliverable`);
+  announceGatedRun(run);
+}
+
+/**
+ * One more go at the deliverable: the SAME record, the SAME session, a nudge
+ * naming what is missing.
+ *
+ * In place rather than as a fresh run, which is what the brief's "resume with
+ * context" means and what the record needs: `attempts`, the deliverable and the
+ * verdict all belong to one run, and the owner asked one question. Mechanically
+ * it is `resumeRunOnce`'s spawn — `--resume` on the run's own session id with
+ * the continuation on stdin — so the transcript of the attempt that just ended
+ * is still in front of the harness, which is why the nudge can say "do not
+ * start over" and be obeyed.
+ */
+async function startCompletionAttempt(
+  run: CodingRun,
+  deliverable: Deliverable,
+  missing: string,
+  attempt: number,
+): Promise<void> {
+  let setprivPath: string;
+  try {
+    // The same gates a start passes — the owner's switch, readiness, the
+    // one-run-at-a-time slot — because this IS a start, and the owner may have
+    // switched the agent off while the run worked.
+    await assertCanSpawn(null);
+    setprivPath = await requireSetpriv();
+    run.directory = await realDirectory(run.directory);
+  } catch (err) {
+    // Another attempt cannot be made now. The ending is still the honest one:
+    // the deliverable is not there. The reason says both halves, so the owner
+    // is not left wondering why the attempts stopped short.
+    const why = err instanceof Error ? err.message : String(err);
+    giveUp(run, `${missing} Another attempt could not be started: ${why}`, run.attempts.length);
+    return;
+  }
+
+  reopenPullRequestStep(run);
+  run.status = "running";
+  run.completedAt = null;
+  run.exitCode = null;
+  run.error = null;
+  run.pauseReason = null;
+  // Judged again when this attempt settles; until then there is no verdict
+  // about a run that is still working.
+  run.leftover = false;
+  run.lastActivityAt = Date.now();
+  openAttempt(run);
+  pushProgress(run, RUNNER_STEP.anotherAttempt(attempt, run.completionAttempts));
+  persist(true);
+  console.error(`[coding-agent] ${run.id} attempt ${attempt} of ${run.completionAttempts} at its deliverable`);
+  startProjectIcon(run);
+  try {
+    spawnOrSettle(
+      run,
+      run.sessionId,
+      setprivPath,
+      { effort: run.effort, maxTurns: run.maxTurns },
+      completionNudge(deliverable, missing, { n: attempt, of: run.completionAttempts }),
+    );
+  } catch {
+    // spawnOrSettle has already settled the record as failed and said why; it
+    // rethrows for the benefit of a route's caller, and there is none here.
+    // Swallowed rather than logged again for that reason.
+  }
+}
+
 /**
  * What the CLI prints when `--effort ultracode` cannot be honoured — the two
  * messages the installed binary carries for it (dynamic workflows disabled;
@@ -6020,9 +6441,17 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     await reviewAndShip(run, state.endRequested);
   })());
   // A pause is the owner's own gesture — no finish notice for it.
-  if (run.status !== "paused") void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
-    console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
-  });
+  //
+  // And neither is a run whose deliverable has not been looked at yet: "Coding
+  // agent finished run-x" is exactly the claim this feature exists to stop
+  // making on the harness's word alone, and the run may be back at work
+  // seconds later. `enforceDeliverable` sends it once it knows what the run
+  // actually is — the two read the same predicate so no run falls between them.
+  if (run.status !== "paused" && !deliverableGateApplies(run)) {
+    void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
+      console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
+    });
+  }
 }
 
 function installExitHook(): void {
@@ -6250,6 +6679,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     source: input.source,
     status: "running",
     settings,
+    deliverable: requireDeliverable(input),
     reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
     reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
     team: input.team ?? null,
@@ -6326,12 +6756,33 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     }
   }
 
+  // After the branch, because the auto-PR switch is what gives a run with no
+  // named deliverable an implied one, and `run.pr` is only set above. An
+  // attempt entry exists exactly for a run that HAS a bar to clear, so a run
+  // without one never grows the list.
+  openAttempt(run);
+
   insertRun(loadRuns(), run);
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
   startProjectIcon(run);
   spawnOrSettle(run, resumeSessionId, setprivPath, settings);
   return cloneRun(run);
+}
+
+/**
+ * The caller's deliverable, validated, or a thrown `invalid` saying why not.
+ *
+ * Thrown rather than dropped: a caller that named a deliverable the box cannot
+ * accept must learn that now, while it can fix the request — a run started with
+ * the deliverable quietly ignored would settle as `completed` on the old rule
+ * and the caller would have no way to know its bar was never applied.
+ */
+function requireDeliverable(input: StartRunInput): Deliverable | null {
+  const read = readDeliverableInput(input.deliverable, input.source === "owner");
+  if (read === null) return null;
+  if (!read.ok) throw new CodingAgentError("invalid", read.error);
+  return read.deliverable;
 }
 
 /** The settings a run is spawned with, and the ceiling the device enforces itself. */
@@ -6348,13 +6799,16 @@ interface RunSettings {
   /** The owner's review-pass switch, read with the rest and frozen on the
    *  record (CodingRun.reviewPass): the brief and the pass decide from it. */
   reviewPass: boolean;
+  /** Attempts at the deliverable, frozen on the record for the same reason. */
+  completionAttempts: number;
   /** The owner's permission rules, frozen on the record for the same reason. */
   allowRules: string[];
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
+  const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, completionAttempts, allowRules] = await Promise.all([
     getCodingProvider(), getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
+    getCompletionAttempts(),
     // With the device's own context: these rules are about to be frozen on the
     // record and handed to the CLI, which is exactly where a rule that has gone
     // inert must not travel.
@@ -6369,6 +6823,7 @@ async function readRunSettings(): Promise<RunSettings> {
     generateImages,
     generateAudio,
     reviewPass,
+    completionAttempts,
     allowRules,
   };
 }
@@ -6424,6 +6879,7 @@ function newRunRecord(fields: {
   team?: RunTeam | null;
   readOnly?: boolean;
   extraBrief?: string | null;
+  deliverable?: Deliverable | null;
 }): CodingRun {
   const now = Date.now();
   return {
@@ -6485,6 +6941,14 @@ function newRunRecord(fields: {
     pgid: null,
     leftover: false,
     commitError: null,
+    // What it has to leave behind, and the bar frozen with it. The first
+    // attempt's entry is opened by the caller, once it knows whether the
+    // auto-PR switch gave this run an implied deliverable too — which is not
+    // known here, because the branch is made after the record exists.
+    deliverable: fields.deliverable ?? null,
+    deliverableCheck: null,
+    attempts: [],
+    completionAttempts: fields.settings.completionAttempts,
   };
 }
 
@@ -6656,8 +7120,13 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
-  if (run.status !== "paused") {
-    throw new CodingAgentError("invalid", "Only a paused run can be resumed in place. Start a new run instead.");
+  // A run that GAVE UP is resumable in place for the same reason a paused one
+  // is: its session is intact (the harness finished normally — what it produced
+  // was simply not the deliverable), its work is on disk, and carrying on in
+  // that session is the one thing that helps. It is the only other status this
+  // accepts, and the card's Resume button on a `gave_up` run is this call.
+  if (run.status !== "paused" && run.status !== "gave_up") {
+    throw new CodingAgentError("invalid", "Only a paused run, or one that gave up, can be resumed in place. Start a new run instead.");
   }
   // The account the session was OPENED on — a resume cannot move to another
   // one, so if that credential is gone the resume is refused rather than
@@ -6688,6 +7157,10 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   // lie. Narrowing works the same way: a rule removed before the resume is gone
   // from the resumed run too.
   run.allowRules = await getAllowRules(allowRuleContext());
+  // Read BEFORE the flip below, which is what makes this a resume: the
+  // continuation text and the pull-request step both depend on which of the two
+  // resumable endings this run is coming back from.
+  const gaveUp = run.status === "gave_up";
   // The pause gap is not working time: shift the start forward by it, so the
   // elapsed clock and the ETA speak of effort, not of the night in between.
   if (run.completedAt !== null) run.startedAt += Math.max(0, Date.now() - run.completedAt);
@@ -6699,15 +7172,32 @@ async function resumeRunOnce(id: string): Promise<CodingRun> {
   // on a running record and, worse, survive into the run's next settle.
   run.pauseReason = null;
   run.lastActivityAt = Date.now();
+  // The owner's own go at the deliverable, on the record like every other. It
+  // is NOT counted against the cap before it is made — the cap bounds what the
+  // BOX spends unasked, and a Resume the owner pressed is their decision, not
+  // the box's budget. The gate judges it when it settles, exactly as it judged
+  // the attempts before it.
+  // A run that gave up with no pull request ever opened gets the step back, so
+  // the owner's Resume can actually reach the deliverable it is resumed for.
+  if (gaveUp) reopenPullRequestStep(run);
+  openAttempt(run);
   pushProgress(run, RUNNER_STEP.resumedByOwner);
   persist(true);
-  console.error(`[coding-agent] ${run.id} resumed from pause`);
+  console.error(`[coding-agent] ${run.id} resumed from ${gaveUp ? "giving up" : "pause"}`);
   startProjectIcon(run);
   // The session already holds the task; replaying it verbatim would read as
-  // "start over". Say what actually happened instead.
-  const continuation = run.sessionId
-    ? `You were paused by the owner and are now resumed in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`
-    : undefined;
+  // "start over". Say what actually happened instead — and for a run that gave
+  // up, what it is being resumed FOR: the owner pressed Resume on a page whose
+  // one red sentence is the missing deliverable, so arriving back in the session
+  // with "you were paused" would be the box losing the thread of its own
+  // question.
+  const missing = gaveUp ? run.deliverableCheck?.missing?.trim() : null;
+  const deliverable = gaveUp ? deliverableFor(run) : null;
+  const continuation = !run.sessionId
+    ? undefined
+    : missing && deliverable
+      ? `${completionNudge(deliverable, missing, null)}\n\nThe owner resumed this run themselves. Your evidence folder is ${artifactsDir(run.id)}.`
+      : `You were ${gaveUp ? "stopped short and have been resumed by the owner" : "paused by the owner and are now resumed"} in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`;
   spawnOrSettle(run, run.sessionId, setprivPath, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
   return cloneRun(run);
 }
@@ -6734,7 +7224,17 @@ export async function createDraftRun(input: StartRunInput): Promise<CodingRun> {
   // model are something the CALLER may have named here, and re-reading would
   // throw that choice away without saying so.
   const settings = await applyProviderChoice(await readRunSettings(), input, null);
-  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "draft", settings });
+  const run = newRunRecord({
+    task,
+    directory,
+    projectId,
+    source: input.source,
+    status: "draft",
+    settings,
+    // Validated when the draft is MADE, so a deliverable the box will not
+    // accept is refused at the keystroke rather than at the start hours later.
+    deliverable: requireDeliverable(input),
+  });
   pushProgress(run, RUNNER_STEP.drafted);
   insertRun(loadRuns(), run);
   persist(true);
@@ -6771,9 +7271,12 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   run.maxTurns = settings.maxTurns;
   run.tokenLimit = settings.tokenLimit;
   run.media = { images: settings.generateImages, audio: settings.generateAudio };
+  run.completionAttempts = settings.completionAttempts;
   run.status = "running";
   run.startedAt = Date.now();
   run.lastActivityAt = Date.now();
+  // The bar the draft was created with, now that it is actually starting.
+  openAttempt(run);
   pushProgress(run, RUNNER_STEP.startedFromDraft);
   persist(true);
   console.error(`[coding-agent] ${run.id} started from draft by ${run.source} in ${run.directory}`);

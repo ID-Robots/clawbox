@@ -18,7 +18,7 @@
  * to one and not the other used to compile, and the mismatch was found at
  * the restart that dropped the record.
  */
-export const RUN_STATUSES = ["running", "completed", "failed", "stopped", "paused", "draft"] as const;
+export const RUN_STATUSES = ["running", "completed", "failed", "stopped", "paused", "draft", "gave_up"] as const;
 
 export type CodingRunStatus = (typeof RUN_STATUSES)[number];
 
@@ -149,6 +149,23 @@ export function pauseResetClock(resetsAt: string | null): string | null {
   if (Number.isNaN(at)) return null;
   const d = new Date(at);
   return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * A run that WORKED, reported itself finished, and did not leave the
+ * deliverable behind — after every attempt this box gives it.
+ *
+ * Its own ending rather than `failed`, because the two need different things
+ * said and offer different next steps. `failed` means the harness could not
+ * finish: it hit a ceiling, the provider refused, the process died, and `error`
+ * carries a device fault the owner may have to fix. `gave_up` means the harness
+ * finished and what it produced is not what was asked for — the session is
+ * intact, the work so far is on disk, and the one thing that helps is Resume.
+ * Folded into `failed` it read as a broken box, and the Resume that would have
+ * fixed it was offered nowhere (see CodingRun.deliverable).
+ */
+export function isGaveUp(status: CodingRunStatus): boolean {
+  return status === "gave_up";
 }
 
 /** A process exists for this run right now. */
