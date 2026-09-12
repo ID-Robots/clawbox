@@ -244,6 +244,16 @@ function declared(stripped: string, key: "testTimeout" | "hookTimeout"): number 
 const MIN_TIMEOUT_MS = 15_000;
 
 /**
+ * The floor for the `ChatPopup` family below, which is higher than
+ * `MIN_TIMEOUT_MS` because the cost there is not one series of subprocesses but
+ * a jsdom mount of the app's heaviest component repeated per case. Every file
+ * in it declares 30 s, and the rule enforces the number its own comment names —
+ * with the shared 15 s floor a suite could have declared 15 s and passed a check
+ * that claims to be about 30.
+ */
+const CHAT_POPUP_TIMEOUT_MS = 30_000;
+
+/**
  * Files that flake for a reason other than a subprocess, named from the CI runs
  * above rather than detected: long `findBy*` waits against a jsdom tree, and a
  * fake-timer probe fan-out whose module imports dominate under load. A pattern
@@ -509,8 +519,8 @@ describe("test-timeout hygiene", () => {
       .filter((f) => f.code.includes("<ChatPopup"))
       .filter(
         (f) =>
-          (declared(f.code, "testTimeout") ?? 0) < MIN_TIMEOUT_MS
-          || (declared(f.code, "hookTimeout") ?? 0) < MIN_TIMEOUT_MS,
+          (declared(f.code, "testTimeout") ?? 0) < CHAT_POPUP_TIMEOUT_MS
+          || (declared(f.code, "hookTimeout") ?? 0) < CHAT_POPUP_TIMEOUT_MS,
       )
       .map((f) => f.rel);
 
